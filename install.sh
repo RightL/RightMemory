@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# install.sh — set up the rightmem memory system on a new machine.
+# install.sh — set up the RightMemory system on a new machine.
 #
 # Usage:
 #   ./install.sh <memory-root> <skills-target>
 #
 # Arguments:
 #   <memory-root>    Where MEMORY.md and dream_logs/ will live.
-#                    e.g. ~/.rightmem  or  ~/Documents/memory
+#                    e.g. ~/.rightmemory  or  ~/Documents/memory
 #
 #   <skills-target>  Where the three skill folders will be installed.
 #                    Common locations:
@@ -16,7 +16,7 @@
 #                      Other agents: see your agent's skill loading docs.
 #
 # Example:
-#   ./install.sh ~/.rightmem ~/.claude/skills
+#   ./install.sh ~/.rightmemory ~/.claude/skills
 
 set -euo pipefail
 
@@ -34,7 +34,7 @@ SKILLS_TARGET="$(cd "$SKILLS_TARGET" && pwd)"
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-echo "Installing rightmem memory system"
+echo "Installing RightMemory"
 echo "  MEMORY_ROOT  = $MEMORY_ROOT"
 echo "  SKILLS_ROOT  = $SKILLS_TARGET"
 echo
@@ -74,5 +74,5 @@ echo "  1. Open $MEMORY_ROOT/MEMORY.md and replace the example domain with your 
 echo "  2. Trigger any memory-relevant message in your AI agent — orchestrator picks it up."
 echo "  3. When you want consolidation, ask your agent to invoke the memory-dreamer skill."
 echo
-echo "Re-run this script any time you pull updates from the rightmem repo;"
+echo "Re-run this script any time you pull updates from the RightMemory repo;"
 echo "your existing MEMORY.md and dream_logs/ are preserved."

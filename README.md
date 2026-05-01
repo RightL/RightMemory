@@ -1,4 +1,4 @@
-# rightmem
+# RightMemory
 
 A tree + graph hybrid memory system for AI coding agents.
 
@@ -57,12 +57,12 @@ The orchestrator and curator together implement the everyday loop. The dreamer i
 ## Install
 
 ```bash
-git clone https://github.com/<you>/rightmem.git
-cd rightmem
+git clone https://github.com/RightL/RightMemory.git
+cd RightMemory
 ./install.sh <memory-root> <skills-target>
 ```
 
-- `<memory-root>` — where `MEMORY.md` and `dream_logs/` will live (e.g. `~/.rightmem`).
+- `<memory-root>` — where `MEMORY.md` and `dream_logs/` will live (e.g. `~/.rightmemory`).
 - `<skills-target>` — where the three skill folders are installed. Common locations:
   - Claude Code (user): `~/.claude/skills`
   - Claude Code (project): `<project>/.claude/skills`
@@ -105,7 +105,7 @@ After install:
 This repo:
 
 ```
-rightmem/
+RightMemory/
 ├── README.md
 ├── install.sh
 ├── MEMORY.example.md
@@ -115,10 +115,10 @@ rightmem/
     └── memory-dreamer/SKILL.md
 ```
 
-After install (with `MEMORY_ROOT=~/.rightmem`, `SKILLS_TARGET=~/.claude/skills`):
+After install (with `MEMORY_ROOT=~/.rightmemory`, `SKILLS_TARGET=~/.claude/skills`):
 
 ```
-~/.rightmem/
+~/.rightmemory/
 ├── .git/
 ├── MEMORY.md
 └── dream_logs/
