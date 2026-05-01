@@ -1,0 +1,19 @@
+---
+name: memory-orchestrator
+description: "Use on every user message that might rely on {{MEMORY_ROOT}}/MEMORY.md to decide whether to retrieve from or schedule an update to that memory file via one dedicated curator subagent — the main agent must never read or write the file itself."
+---
+
+Understand the core intent of this skill; do not follow it rigidly, and stay flexible based on the actual context.
+
+- The main agent must not access `{{MEMORY_ROOT}}/MEMORY.md` (or any file derived from it) by any means — no reading it, no editing it, no writing to it, no running commands that view or modify it. All access to that file goes through one curator subagent.
+- Spawn the curator subagent **exactly once per session**, the first time memory work is needed. For every subsequent retrieval or update in the same session, send a new message to that same long-lived subagent — never spawn a fresh subagent for memory work again in this session.
+- The dispatch prompt sent to the curator subagent should (a) point it at `{{SKILLS_ROOT}}/memory-curator/SKILL.md` and tell it to follow that skill, (b) include the user's message verbatim and unedited when the task is retrieval, (c) include a concrete change brief when the task is an update.
+- After each user message, judge whether the message could benefit from memory. Triggers worth checking (examples only, not a template; do not follow rigidly, stay flexible to context): named projects, libraries, paths, machines, people, prior decisions, "where is…", "what did we say about…", references to past conversations, status / dependency questions.
+- If yes, send a retrieval request to the curator subagent and wait for its reply. Use the returned node lines as context; quote them verbatim when relying on them — do not paraphrase node ids, descriptions, or edges.
+- If the curator reports "no strong match", proceed without memory; do not retry the same query.
+- Skip retrieval when the message is clearly self-contained (generic coding question, environment / config tweak unrelated to project memory, a typo fix, etc.) (examples only, not a template; do not follow rigidly, stay flexible to context).
+- After completing work, judge whether memory should change. Triggers worth checking (examples only, not a template; do not follow rigidly, stay flexible to context): a new project / library / file / machine appears, a durable user preference or correction surfaces, status / decision / dependency / external-reference moves, a recorded fact is now wrong.
+- For updates, send a message to the same curator subagent with a concrete brief: which node id (or section) is affected, the proposed new node line(s) with edges, what to add / remove / rename, and the reason. Do not pre-write the diff yourself — let the curator translate intent into the schema.
+- If the user explicitly says to ignore, not use, or not touch memory for this turn, skip both retrieval and update.
+- Memory is an aid, not authority. Verify any concrete claim from memory (paths, function names, repo state) against the live working tree before acting on it; if memory and reality disagree, send the curator an update brief.
+- Do not surface the dispatch mechanics to the user in the final answer; surface only the substantive content the memory contributed.
