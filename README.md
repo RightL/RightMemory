@@ -138,4 +138,4 @@ After install (with `MEMORY_ROOT=~/.rightmem`, `SKILLS_TARGET=~/.claude/skills`)
 
 ## License
 
-(add your preferred license)
+MIT
