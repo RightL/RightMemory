@@ -1,0 +1,67 @@
+# RightMemory Schema
+
+## Addressable Lines
+
+Each memory entry is either an addressable heading or a node.
+
+Addressable headings use:
+
+```md
+### Human Title {#heading-id} → [edge1, edge2, ...]
+```
+
+Plain tree headings without graph edges may omit the anchor and edge list.
+
+Nodes use:
+
+```md
+- `<node-id>` <free-form description> → [edge1, edge2, ...]
+```
+
+- `heading-id` and `node-id` share one namespace; do not reuse an id between a heading and a node.
+- Edges may connect heading to heading, heading to node, node to heading, or node to node.
+- Node lines with no edges write `→ []`; heading lines with no edges may omit `→ []`.
+
+## Edge Types
+
+- `dep:` A depends on B.
+- `emb:` A embeds a copy of B.
+- `bak:` A is a backup or snapshot of B. One-way.
+- `agg:` A aggregates B's outputs.
+- `ver:` A verifies or tests B.
+- `ext:` A extends or enhances B.
+- `up:` A is upstream of B. One-way.
+- `rel:` general relation; use only when no specific type fits.
+- `loc:` A is located inside B.
+- `run:` A runs or launches through B.
+- `cfg:` A uses B as configuration.
+- `out:` A outputs B. One-way.
+- `in:` A consumes B as input. One-way.
+- `doc:` A documents B.
+- `todo:` A is a todo or blocker for B.
+
+Edges are bidirectional by default except `bak:`, `up:`, `out:`, and `in:`.
+
+## Heading Rules
+
+- `#`, `##`, and `###` are normal tree layers and may contain memory content.
+- `#`, `##`, and `###` may have `{#short-slug}` anchors and edges when the whole subtree is a graph target.
+- `#### Human Title {#short-slug}` is title-only and points to sibling detail file `MEMORY_<short-slug>.md`.
+- Do not write body content under a `####` pointer in the current file.
+- Create `####` pointers only under an existing or newly created `###` topic; do not jump directly from `#` or `##` to `####`.
+- Detail files use the same schema recursively.
+
+## Placement Rules
+
+- Tree nesting expresses reading context and containment; do not add child-to-containing-heading edges merely to say a node belongs under a heading.
+- Use heading edges when a relation applies to the whole subtree.
+- Use node edges when a relation applies only to one fact.
+- Put new nodes in the closest existing `##` or `###` group of the matching `#` domain.
+- When a topic has multiple closely related facts, prefer a meaningful anchored `##` or `###` heading over a fake hub node.
+- Create new nodes only for genuinely new entities, outputs, configs, tasks, docs, or durable facts; otherwise update existing nodes/headings.
+
+## File Set
+
+- The memory file set is `MEMORY.md` plus optional sibling `MEMORY_*.md` detail files.
+- `MEMORY.md` is the root memory file, but it remains normal memory and may contain real nodes.
+- Do not edit `# User Pending Task and Thoughts`; that section is user-edited only.

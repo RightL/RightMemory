@@ -5,16 +5,18 @@ A tree + graph hybrid memory system for AI coding agents.
 Memory starts in a root markdown file (`MEMORY.md`) and may expand into sibling detail files (`MEMORY_<slug>.md`). Each memory file is organized as:
 
 - A **tree** of headings (`#` → `##` → `###`) for human-readable navigation by domain, project, theme.
+- Optional `{#slug}` anchors on `#`, `##`, and `###` headings when a whole subtree should be a graph target.
 - Title-only `#### Topic {#slug}` pointers for deeper children stored in `MEMORY_<slug>.md`.
-- A **graph** of typed edges between nodes (`dep:`, `emb:`, `agg:`, `ver:`, `ext:`, `rel:`, ...) for agents traversing across siblings, parents, and unrelated branches.
+- A **graph** of typed edges between anchored headings and nodes (`dep:`, `emb:`, `agg:`, `ver:`, `ext:`, `rel:`, ...) for agents traversing across siblings, parents, and unrelated branches.
 
-Every node has the shape:
+Addressable headings and nodes have these shapes:
 
 ```
+### Human Title {#heading-id} → [edge1, edge2, ...]
 - `<node-id>` <description> → [edge1, edge2, ...]
 ```
 
-The headings tell you where to **read**; `####` pointers tell you where deeper detail lives; the edges tell you where to **walk**.
+The headings tell you where to **read**; `####` pointers tell you where deeper detail lives; the edges tell you where to **walk**. Tree nesting already expresses containment, so child nodes should not point back to their containing heading just to say they belong there.
 
 ## Why
 
@@ -75,7 +77,8 @@ The script:
 1. Creates `<memory-root>/MEMORY.md` from `MEMORY.example.md` (skipped if a `MEMORY.md` already exists).
 2. Creates `<memory-root>/dream_logs/`.
 3. Initializes a git repo in `<memory-root>` (the dreamer needs git for revertability).
-4. Substitutes `{{MEMORY_ROOT}}` and `{{SKILLS_ROOT}}` placeholders in the three skill files and writes them to `<skills-target>`.
+4. Installs the shared schema file to `<skills-target>/rightmemory-schema.md`.
+5. Substitutes `{{MEMORY_ROOT}}` and `{{SKILLS_ROOT}}` placeholders in the three skill files and writes them to `<skills-target>`.
 
 Re-run the script any time you want to refresh the skills (e.g. after pulling updates from this repo). Your existing `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/` are preserved.
 
@@ -86,10 +89,12 @@ Re-run the script any time you want to refresh the skills (e.g. after pulling up
 After install:
 
 1. **Edit your memory file.** Open `<memory-root>/MEMORY.md`. The example domain (`# Sample Project Graph`) shows the format. Replace it with your own real domains.
-2. **The schema preamble is the spec.** The section at the top of `MEMORY.md` (`# Memory File Set — Schema and Maintenance Rules`) is the authoritative source of truth. Both the curator and the dreamer re-read it on every load and treat it as the law if anything in the skills disagrees. Edit it freely if you want different conventions — the agents will follow.
-3. **Use `####` only for external child pointers.** Write normal memory under `#`, `##`, and `###`. Use `#### Topic {#slug}` only when detail should move into `<memory-root>/MEMORY_<slug>.md`; do not write body content under the `####` heading.
-4. **Daily loop runs automatically.** In agents that load skills by description match, the orchestrator skill triggers per user message; the curator handles retrievals and edits in the background.
-5. **Trigger a dream cycle when you want consolidation.** Ask your agent to invoke the `memory-dreamer` skill. Each cycle:
+2. **The schema file is the spec.** The authoritative source of truth is `<skills-target>/rightmemory-schema.md`, installed from `skills/rightmemory-schema.md`. `MEMORY.md` should contain memory content only, not a schema preamble.
+3. **Use heading anchors for subtree-level graph targets.** `#`, `##`, and `###` headings may have `{#slug}` anchors and `→ [...]` edges. Heading slugs and node ids share one namespace.
+4. **Do not use edges for containment.** If a node is under `### ShellCVT Method B {#lpcvt-method-b}`, it already belongs to that topic. Add edges only for cross-links, dependencies, verification, documents, backups, inputs/outputs, or other relations not implied by the tree.
+5. **Use `####` only for external child pointers.** Write normal memory under `#`, `##`, and `###`. Use `#### Topic {#slug}` only below a `###` topic when detail should move into `<memory-root>/MEMORY_<slug>.md`; do not write body content under the `####` heading.
+6. **Daily loop runs automatically.** In agents that load skills by description match, the orchestrator skill triggers per user message; the curator handles retrievals and edits in the background.
+7. **Trigger a dream cycle when you want consolidation.** Ask your agent to invoke the `memory-dreamer` skill. Each cycle:
    - Applies unbounded mechanical fixes (missing reverse edges, dead pointers, obvious edge-type upgrades).
    - Applies up to ~5 judgment-driven restructures (merges, splits, `####` detail-file promotions, graveyard moves).
    - Writes a dream report to `<memory-root>/dream_logs/YYYY-MM-DD.md`.
@@ -97,9 +102,9 @@ After install:
 
 ## Customization
 
-- **Edge types.** Add new types to the table in `MEMORY.md`. Always include a real example in the `Example` column — the curator and dreamer pick edge types by precedent, so unused types drift fastest.
-- **Domains.** Add new top-level `# domain` sections in `MEMORY.md`. The curator places new nodes inside the closest existing `##` or `###` group of the matching `#` domain.
-- **Detail files.** Add `#### Topic {#short-slug}` under a normal section when detail grows too large for the current file. The pointed file is `<memory-root>/MEMORY_<short-slug>.md`.
+- **Edge types.** Add new types to `skills/rightmemory-schema.md`. Keep the semantics concrete because the curator and dreamer choose edge types from that schema.
+- **Domains and headings.** Add new top-level `# domain` sections in `MEMORY.md`. Add `{#short-slug}` to `#`, `##`, or `###` headings when another edge should point to the whole subtree, or when the heading itself needs outgoing edges.
+- **Detail files.** Add `#### Topic {#short-slug}` under a `###` topic when detail grows too large for the current file. The pointed file is `<memory-root>/MEMORY_<short-slug>.md`.
 - **Aging.** There are no inline timestamps; the dreamer reads git history to identify long-untouched nodes. If you want different aging behavior (per-class TTLs, last-verified tags, archival policies), edit the `memory-dreamer` skill — the simple history-based scheme is intended as a starting point you iterate on.
 - **What the orchestrator considers "memory-worthy".** Edit the trigger bullet in `memory-orchestrator/SKILL.md` to suit your workflow.
 
@@ -113,6 +118,7 @@ RightMemory/
 ├── install.sh
 ├── MEMORY.example.md
 └── skills/
+    ├── rightmemory-schema.md
     ├── memory-orchestrator/SKILL.md
     ├── memory-curator/SKILL.md
     └── memory-dreamer/SKILL.md
@@ -128,6 +134,7 @@ After install (with `MEMORY_ROOT=~/.rightmemory`, `SKILLS_TARGET=~/.claude/skill
 └── dream_logs/
 
 ~/.claude/skills/
+├── rightmemory-schema.md
 ├── memory-orchestrator/SKILL.md
 ├── memory-curator/SKILL.md
 └── memory-dreamer/SKILL.md

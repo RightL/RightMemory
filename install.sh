@@ -56,7 +56,11 @@ else
   echo "  [new]     git init in $MEMORY_ROOT"
 fi
 
-# 3. Install skills with path substitution
+# 3. Install shared schema and skills with path substitution
+schema_dst="$SKILLS_TARGET/rightmemory-schema.md"
+cp "$REPO_ROOT/skills/rightmemory-schema.md" "$schema_dst"
+echo "  [install] $schema_dst"
+
 for skill in memory-orchestrator memory-curator memory-dreamer; do
   src="$REPO_ROOT/skills/$skill/SKILL.md"
   dst_dir="$SKILLS_TARGET/$skill"
