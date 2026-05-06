@@ -5,7 +5,7 @@
 #   ./install.sh <memory-root> <skills-target>
 #
 # Arguments:
-#   <memory-root>    Where MEMORY.md and dream_logs/ will live.
+#   <memory-root>    Where MEMORY.md, MEMORY_*.md, and dream_logs/ will live.
 #                    e.g. ~/.rightmemory  or  ~/Documents/memory
 #
 #   <skills-target>  Where the three skill folders will be installed.
@@ -75,4 +75,4 @@ echo "  2. Trigger any memory-relevant message in your AI agent — orchestrator
 echo "  3. When you want consolidation, ask your agent to invoke the memory-dreamer skill."
 echo
 echo "Re-run this script any time you pull updates from the RightMemory repo;"
-echo "your existing MEMORY.md and dream_logs/ are preserved."
+echo "your existing MEMORY.md, MEMORY_*.md, and dream_logs/ are preserved."

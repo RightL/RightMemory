@@ -1,15 +1,15 @@
 ---
 name: memory-orchestrator
-description: "Use on every user message that might rely on {{MEMORY_ROOT}}/MEMORY.md to decide whether to retrieve from or schedule an update to that memory file via one dedicated curator subagent — the main agent must never read or write the file itself."
+description: "Use on every user message that might rely on {{MEMORY_ROOT}}/MEMORY.md or sibling MEMORY_*.md files to decide whether to retrieve from or schedule an update via one dedicated curator subagent — the main agent must never read or write memory files itself."
 ---
 
 Understand the core intent of this skill; do not follow it rigidly, and stay flexible based on the actual context.
 
-- The main agent must not access `{{MEMORY_ROOT}}/MEMORY.md` (or any file derived from it) by any means — no reading it, no editing it, no writing to it, no running commands that view or modify it. All access to that file goes through one curator subagent.
+- The main agent must not access any `{{MEMORY_ROOT}}/MEMORY*.md` file by any means — no reading it, no editing it, no writing to it, no running commands that view or modify it. All access to the memory file set goes through one curator subagent.
 - Spawn the curator subagent **exactly once per session**, the first time memory work is needed. For every subsequent retrieval or update in the same session, send a new message to that same long-lived subagent — never spawn a fresh subagent for memory work again in this session.
 - The dispatch prompt sent to the curator subagent should (a) point it at `{{SKILLS_ROOT}}/memory-curator/SKILL.md` and tell it to follow that skill, (b) include the user's message verbatim and unedited when the task is retrieval, (c) include a concrete change brief when the task is an update.
 - After each user message, judge whether the message could benefit from memory. Triggers worth checking (examples only, not a template; do not follow rigidly, stay flexible to context): named projects, libraries, paths, machines, people, prior decisions, "where is…", "what did we say about…", references to past conversations, status / dependency questions.
-- If yes, send a retrieval request to the curator subagent and wait for its reply. Use the returned node lines as context; quote them verbatim when relying on them — do not paraphrase node ids, descriptions, or edges.
+- If yes, send a retrieval request to the curator subagent and wait for its reply. Let the curator choose which `MEMORY*.md` files are relevant. Use the returned node lines as context; quote them verbatim when relying on them — do not paraphrase node ids, descriptions, or edges.
 - If the curator reports "no strong match", proceed without memory; do not retry the same query.
 - Skip retrieval when the message is clearly self-contained (generic coding question, environment / config tweak unrelated to project memory, a typo fix, etc.) (examples only, not a template; do not follow rigidly, stay flexible to context).
 - After completing work, judge whether memory should change. Triggers worth checking (examples only, not a template; do not follow rigidly, stay flexible to context): a new project / library / file / machine appears, a durable user preference or correction surfaces, status / decision / dependency / external-reference moves, a recorded fact is now wrong.
