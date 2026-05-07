@@ -58,7 +58,7 @@ Edges are bidirectional by default except `bak:`, `up:`, `out:`, and `in:`.
 - Use node edges when a relation applies only to one fact.
 - Put new nodes in the closest existing `##` or `###` group of the matching `#` domain.
 - When a topic has multiple closely related facts, prefer a meaningful anchored `##` or `###` heading over a fake hub node.
-- Create new nodes only for genuinely new entities, outputs, configs, tasks, docs, or durable facts; otherwise update existing nodes/headings.
+- Place information where it keeps the tree/graph clear: update, add, split, merge, or move headings and nodes as needed. Avoid duplicate, fake-hub, or overloaded structure.
 
 ## File Set
 

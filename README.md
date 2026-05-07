@@ -91,7 +91,7 @@ After install:
 1. **Edit your memory file.** Open `<memory-root>/MEMORY.md`. The example domain (`# Sample Project Graph`) shows the format. Replace it with your own real domains.
 2. **The schema file is the spec.** The authoritative source of truth is `<skills-target>/rightmemory-schema.md`, installed from `skills/rightmemory-schema.md`. `MEMORY.md` should contain memory content only, not a schema preamble.
 3. **Use heading anchors for subtree-level graph targets.** `#`, `##`, and `###` headings may have `{#slug}` anchors and `→ [...]` edges. Heading slugs and node ids share one namespace.
-4. **Do not use edges for containment.** If a node is under `### ShellCVT Method B {#lpcvt-method-b}`, it already belongs to that topic. Add edges only for cross-links, dependencies, verification, documents, backups, inputs/outputs, or other relations not implied by the tree.
+4. **Do not use edges for containment.** If a node is under `### Web Server Config {#web-server-cfg}`, it already belongs to that topic. Add edges only for cross-links, dependencies, verification, documents, backups, inputs/outputs, or other relations not implied by the tree.
 5. **Use `####` only for external child pointers.** Write normal memory under `#`, `##`, and `###`. Use `#### Topic {#slug}` only below a `###` topic when detail should move into `<memory-root>/MEMORY_<slug>.md`; do not write body content under the `####` heading.
 6. **Daily loop runs automatically.** In agents that load skills by description match, the orchestrator skill triggers per user message; the curator handles retrievals and edits in the background.
 7. **Trigger a dream cycle when you want consolidation.** Ask your agent to invoke the `memory-dreamer` skill. Each cycle:

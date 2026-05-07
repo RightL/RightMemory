@@ -14,6 +14,10 @@
 
 Child nodes should not point to their containing heading merely to say they belong there, because Markdown nesting already encodes that context. Edges are reserved for cross-links and semantic relations that are not obvious from position, which keeps reverse-edge maintenance from drowning useful graph signal.
 
+### Structural clarity over node count
+
+Curator edits optimize for a readable heading tree and coherent graph nodes instead of minimizing new nodes. Updating an existing node is appropriate when the same fact is being refined, but adding, splitting, merging, or moving headings and nodes is preferred when it prevents overloaded records or makes the memory structure clearer.
+
 ### Detail file naming
 
 Detail files use short explicit slugs from `#### Topic {#slug}` and map to `MEMORY_<slug>.md`. This keeps filenames stable and short while preserving the visible Tree+graph model in the Markdown content; filenames are storage details, not graph nodes.
