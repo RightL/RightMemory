@@ -12,6 +12,8 @@ Addressable headings use:
 
 Plain tree headings without graph edges may omit the anchor and edge list.
 
+Addressable `#`, `##`, and `###` headings may have body paragraphs directly under the heading. Those paragraphs describe the heading node itself. Use a heading body when text explains the whole heading concept; use child nodes when text should stand as its own memory under that concept.
+
 Nodes use:
 
 ```md
@@ -56,6 +58,7 @@ Edges are bidirectional by default except `bak:`, `up:`, `out:`, and `in:`.
 - Tree nesting expresses reading context and containment; do not add child-to-containing-heading edges merely to say a node belongs under a heading.
 - Use heading edges when a relation applies to the whole subtree.
 - Use node edges when a relation applies only to one fact.
+- Do not create a child node merely to summarize an addressable heading. Prefer a heading body for whole-heading description.
 - Put new nodes in the closest existing `##` or `###` group of the matching `#` domain.
 - When a topic has multiple closely related facts, prefer a meaningful anchored `##` or `###` heading over a fake hub node.
 - Place information where it keeps the tree/graph clear: update, add, split, merge, or move headings and nodes as needed. Avoid duplicate, fake-hub, or overloaded structure.

@@ -10,6 +10,8 @@
 
 `#`, `##`, and `###` headings may carry `{#slug}` anchors and graph edges because some relations apply to an entire subtree, not one fact node. Heading slugs and node ids share one namespace so edges can target either form without fake hub nodes or duplicate identifiers.
 
+Addressable headings may carry their own body paragraph because some durable context describes the whole heading concept rather than a child fact. This avoids fake child nodes whose only job is to summarize a section while keeping standalone facts as normal node lines.
+
 ### Containment is tree structure
 
 Child nodes should not point to their containing heading merely to say they belong there, because Markdown nesting already encodes that context. Edges are reserved for cross-links and semantic relations that are not obvious from position, which keeps reverse-edge maintenance from drowning useful graph signal.
