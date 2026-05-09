@@ -28,21 +28,21 @@ Nodes use:
 
 - `dep:` A depends on B.
 - `emb:` A embeds a copy of B.
-- `bak:` A is a backup or snapshot of B. One-way.
+- `bak:` A is a backup or snapshot of B.
 - `agg:` A aggregates B's outputs.
 - `ver:` A verifies or tests B.
 - `ext:` A extends or enhances B.
-- `up:` A is upstream of B. One-way.
+- `up:` A is upstream of B.
 - `rel:` general relation; use only when no specific type fits.
 - `loc:` A is located inside B.
 - `run:` A runs or launches through B.
 - `cfg:` A uses B as configuration.
-- `out:` A outputs B. One-way.
-- `in:` A consumes B as input. One-way.
+- `out:` A outputs B.
+- `in:` A consumes B as input.
 - `doc:` A documents B.
 - `todo:` A is a todo or blocker for B.
 
-Edges are bidirectional by default except `bak:`, `up:`, `out:`, and `in:`.
+Written edges may be one-way or reciprocal [stored on both records so either side visibly points to the other]. The agent should choose based on whether the reverse edge improves future retrieval or understanding without making the relationship misleading.
 
 ## Heading Rules
 

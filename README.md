@@ -95,7 +95,7 @@ After install:
 5. **Use `####` only for external child pointers.** Write normal memory under `#`, `##`, and `###`. Use `#### Topic {#slug}` only below a `###` topic when detail should move into `<memory-root>/MEMORY_<slug>.md`; do not write body content under the `####` heading.
 6. **Daily loop runs automatically.** In agents that load skills by description match, the orchestrator skill triggers per user message; the curator handles retrievals and edits in the background.
 7. **Trigger a dream cycle when you want consolidation.** Ask your agent to invoke the `memory-dreamer` skill. Each cycle:
-   - Applies unbounded mechanical fixes (missing reverse edges, dead pointers, obvious edge-type upgrades).
+   - Applies unbounded mechanical fixes (dead pointers, duplicate edges, obvious edge-type upgrades).
    - Applies up to ~5 judgment-driven restructures (merges, splits, `####` detail-file promotions, graveyard moves).
    - Writes a dream report to `<memory-root>/dream_logs/YYYY-MM-DD.md`.
    - Commits touched `MEMORY*.md` files and the report. Bad dream? `git revert` in `<memory-root>`.
