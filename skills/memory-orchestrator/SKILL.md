@@ -12,7 +12,8 @@ Understand the core intent of this skill; do not follow it rigidly, and stay fle
 - When retrieval is needed, send a request to the curator subagent and **wait for its reply before acting** on that memory. The curator skips items already returned in this session; ask explicitly if you need something again. Use the returned addressable lines as context; quote them verbatim when relying on them — do not paraphrase heading ids, node ids, descriptions, or edges.
 - If the curator reports "no strong match", proceed without memory; do not retry the same query.
 - Skip retrieval when the message is clearly self-contained and answerable from the conversation alone.
-- After completing work, judge whether any durable fact or preference changed. If nothing durable changed, skip the update.
+- After completing work, judge whether this turn produced durable context that should change how a future agent acts, decides, retrieves context, or avoids repeating a mistake. If not, skip the update.
+- Memory-worthy context is not limited to completed work. It may include user preferences, workflow preferences, environment/tooling constraints, repeated agent failure patterns and their fixes, project facts, decisions, or blockers. These categories are reminders only: they are neither required nor sufficient; apply the future-use test above in each case.
 - For updates, send a brief to the same curator subagent and **proceed without waiting** for its reply (fire-and-forget): information type, affected heading / node / section, what changed, relations, and reason. Do not pre-write the diff — let the curator choose structure.
 - When an update has multiple related facts, explicitly ask the curator to decide structure before editing. Remind it that tree containment does not need child-to-containing-heading edges.
 - If the user explicitly says to ignore, not use, or not touch memory for this turn, skip both retrieval and update.

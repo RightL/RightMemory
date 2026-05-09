@@ -28,4 +28,17 @@
 
 
 
+# Cross-Session Agent Behavior — Example Domain {#sample-agent-behavior}
+
+## User and Workflow Preferences {#sample-user-workflow-preferences}
+
+Store cross-project behavior memory here when it should change how future agents work. The body gives the section purpose; child nodes capture specific preferences or constraints.
+
+- `pref-principle-first` The user prefers principle-first instructions over long category lists; examples are interpretation aids, neither required nor sufficient, and the governing decision test controls each case. → []
+- `pref-env-check` Future agents should check durable memory and local project context for the intended runtime environment before installing dependencies or guessing a Python environment. → []
+
+---
+
+
+
 # User Pending Task and Thoughts (user-edited only — AI agents must not modify this section)
