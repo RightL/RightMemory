@@ -11,8 +11,7 @@ MEMORY_ROOT_ENV = "RIGHTMEMORY_ROOT"
 MEMORY_ROOT = Path(os.environ.get(MEMORY_ROOT_ENV, "~/.rightmemory")).expanduser()
 CONFIG_PATH = MEMORY_ROOT / "rightmemory.toml"
 ROLES = {"curator", "dreamer"}
-DEFAULT_MAX_STEPS = 20
-DEFAULT_MAX_TOOL_RETRIES = 2
+DEFAULT_MAX_TOOL_RETRIES = 10
 
 
 @dataclass(frozen=True)
@@ -23,7 +22,6 @@ class RuntimeConfig:
     api_key: str | None = None
     model_kwargs: dict[str, Any] = field(default_factory=dict)
     memory_root: Path = MEMORY_ROOT
-    max_steps: int = DEFAULT_MAX_STEPS
     max_tool_retries: int = DEFAULT_MAX_TOOL_RETRIES
 
 
@@ -65,7 +63,6 @@ def load_config(role: str) -> RuntimeConfig:
         api_key=api_key,
         model_kwargs=model_kwargs,
         memory_root=MEMORY_ROOT,
-        max_steps=DEFAULT_MAX_STEPS,
         max_tool_retries=DEFAULT_MAX_TOOL_RETRIES,
     )
 
