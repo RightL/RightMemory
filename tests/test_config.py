@@ -1,6 +1,7 @@
 import tempfile
 import types
 import json
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -315,6 +316,12 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("rightmemory-schema.md", prompt)
         self.assertNotIn("{{MEMORY_ROOT}}", prompt)
         self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+
+    def test_prompt_assets_are_included_in_wheel(self):
+        pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+        force_include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+        self.assertEqual(force_include["skills"], "rightmemory/skills")
 
 
 if __name__ == "__main__":

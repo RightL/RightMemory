@@ -17,3 +17,6 @@ rightmemory = "rightmemory.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rightmemory"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "rightmemory/skills"

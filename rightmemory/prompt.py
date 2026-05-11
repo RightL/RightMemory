@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from importlib import resources
 from pathlib import Path
 
 
 def build_instructions(memory_root: Path, role: str) -> str:
     repo_root = _repo_root()
     skills_root = repo_root / "skills"
-    schema = _read_repo_file("skills/rightmemory-schema.md")
+    schema = _read_prompt_file("skills/rightmemory-schema.md")
     if role == "curator":
         skill_path = "skills/memory-curator/SKILL.md"
     elif role == "dreamer":
@@ -14,7 +15,7 @@ def build_instructions(memory_root: Path, role: str) -> str:
     else:
         raise ValueError("role must be one of: curator, dreamer")
     role_guidance = _standalone_role_guidance(
-        _read_repo_file(skill_path),
+        _read_prompt_file(skill_path),
         memory_root=memory_root,
         skills_root=skills_root,
     )
@@ -68,11 +69,17 @@ def _standalone_role_guidance(text: str, memory_root: Path, skills_root: Path) -
     )
 
 
-def _read_repo_file(relative_path: str) -> str:
-    path = _repo_root() / relative_path
-    if not path.exists():
-        raise FileNotFoundError(f"required prompt file not found: {path}")
-    return path.read_text(encoding="utf-8")
+def _read_prompt_file(relative_path: str) -> str:
+    packaged = resources.files("rightmemory").joinpath(relative_path)
+    try:
+        return packaged.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        pass
+
+    source_tree = _repo_root() / relative_path
+    if source_tree.exists():
+        return source_tree.read_text(encoding="utf-8")
+    raise FileNotFoundError(f"required prompt file not found: {packaged} or {source_tree}")
 
 
 def _repo_root() -> Path:
