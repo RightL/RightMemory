@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+import fcntl
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+@dataclass(frozen=True)
+class SessionPaths:
+    runtime_root: Path
+    history: Path
+    lock: Path
+
+
+class MessageSessionStore:
+    def __init__(self, memory_root: Path, role: str):
+        self.root = memory_root / ".runtime" / "sessions" / role
+
+    def paths(self, session_id: str) -> SessionPaths:
+        safe_id = _safe_session_id(session_id)
+        runtime_root = self.root.parent.parent
+        return SessionPaths(
+            runtime_root=runtime_root,
+            history=self.root / f"{safe_id}.json",
+            lock=self.root / f"{safe_id}.lock",
+        )
+
+    def locked(self, session_id: str) -> LockedMessageSession:
+        return LockedMessageSession(self.paths(session_id))
+
+
+class LockedMessageSession:
+    def __init__(self, paths: SessionPaths):
+        self.paths = paths
+        self._lock_handle: Any | None = None
+
+    def __enter__(self) -> LockedMessageSession:
+        _ensure_runtime_gitignore(self.paths.runtime_root)
+        self.paths.lock.parent.mkdir(parents=True, exist_ok=True)
+        self._lock_handle = self.paths.lock.open("a+", encoding="utf-8")
+        fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if self._lock_handle is None:
+            return
+        try:
+            fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._lock_handle.close()
+            self._lock_handle = None
+
+    def load_json(self) -> bytes | None:
+        if not self.paths.history.exists():
+            return None
+        data = self.paths.history.read_bytes()
+        if not data:
+            raise ValueError(f"session history is empty: {self.paths.history}")
+        return data
+
+    def save_json(self, data: bytes) -> None:
+        if not data:
+            raise ValueError("session history must not be empty")
+        self.paths.history.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.paths.history.with_name(f".{self.paths.history.name}.{os.getpid()}.tmp")
+        with tmp_path.open("wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, self.paths.history)
+        _fsync_directory(self.paths.history.parent)
+
+
+def _safe_session_id(session_id: str) -> str:
+    value = session_id.strip()
+    if not value:
+        raise ValueError("session id must not be empty")
+    if value in {".", ".."}:
+        raise ValueError("session id must not be a relative path segment")
+    if any(character in value for character in "/\\"):
+        raise ValueError("session id must not contain path separators")
+    return value
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _ensure_runtime_gitignore(runtime_root: Path) -> None:
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    gitignore = runtime_root / ".gitignore"
+    if gitignore.exists():
+        return
+    tmp_path = runtime_root / f".gitignore.{os.getpid()}.tmp"
+    content = b"*\n"
+    with tmp_path.open("wb") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.replace(tmp_path, gitignore)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    _fsync_directory(runtime_root)

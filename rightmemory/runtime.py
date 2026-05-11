@@ -1,0 +1,188 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from functools import wraps
+from typing import Any
+
+from .config import RuntimeConfig
+from .prompt import build_instructions
+from .session import MessageSessionStore
+from .tools import MemoryTools
+
+
+SUPPORTED_MODEL_SETTINGS = {
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "timeout",
+    "parallel_tool_calls",
+    "thinking",
+    "seed",
+    "presence_penalty",
+    "frequency_penalty",
+    "logit_bias",
+    "stop_sequences",
+    "extra_headers",
+    "extra_body",
+}
+RECOVERABLE_TOOL_ERRORS = (ValueError, FileNotFoundError)
+
+
+class RightMemoryRuntime:
+    def __init__(self, config: RuntimeConfig):
+        self.config = config
+        self.tools = MemoryTools(config.memory_root)
+        self.sessions = MessageSessionStore(config.memory_root, config.role)
+        self._message_history: list[Any] = []
+        self.agent = self._build_agent()
+
+    def run_turn(self, message: str) -> str:
+        if not message.strip():
+            raise ValueError("message must not be empty")
+        result = self.agent.run_sync(
+            message,
+            message_history=self._message_history or None,
+            model_settings=self._model_settings(),
+        )
+        all_messages = getattr(result, "all_messages", None)
+        if callable(all_messages):
+            self._message_history = list(all_messages())
+        output = getattr(result, "output", None)
+        return str(output if output is not None else result)
+
+    def run_session_turn(self, session_id: str, message: str) -> str:
+        if not message.strip():
+            raise ValueError("message must not be empty")
+        with self.sessions.locked(session_id) as session:
+            history_json = session.load_json()
+            history = self._load_message_history(history_json) if history_json is not None else None
+            result = self.agent.run_sync(
+                message,
+                message_history=history,
+                model_settings=self._model_settings(),
+            )
+            session.save_json(self._dump_message_history(result))
+        output = getattr(result, "output", None)
+        return str(output if output is not None else result)
+
+    def _build_agent(self):
+        try:
+            from pydantic_ai import Agent
+        except ImportError as exc:
+            raise RuntimeError("install standalone dependencies with: pip install -e .") from exc
+
+        return Agent(
+            model=build_model(self.config),
+            instructions=build_instructions(self.config.memory_root, self.config.role),
+            tools=[
+                _retryable_tool(self.tools.list_files),
+                _retryable_tool(self.tools.read_file),
+                _retryable_tool(self.tools.read_around),
+                _retryable_tool(self.tools.search_files),
+                _retryable_tool(self.tools.outline_file),
+                _retryable_tool(self.tools.apply_patch),
+                _retryable_tool(self.tools.git_status),
+                _retryable_tool(self.tools.git_diff),
+                _retryable_tool(self.tools.git_add),
+                _retryable_tool(self.tools.git_commit),
+                _retryable_tool(self.tools.validate_memory),
+            ],
+            retries=self.config.max_tool_retries,
+        )
+
+    def _model_settings(self) -> dict[str, Any] | None:
+        if not self.config.model_kwargs:
+            return None
+        unsupported = sorted(set(self.config.model_kwargs) - _supported_model_settings())
+        if unsupported:
+            joined = ", ".join(unsupported)
+            raise ValueError(f"unsupported Pydantic AI model setting(s) in [model.kwargs]: {joined}")
+        return dict(self.config.model_kwargs)
+
+    def cleanup(self) -> None:
+        cleanup = getattr(self.agent, "cleanup", None)
+        if callable(cleanup):
+            cleanup()
+
+    def _load_message_history(self, data: bytes) -> list[Any]:
+        try:
+            from pydantic_ai.messages import ModelMessagesTypeAdapter
+        except ImportError as exc:
+            raise RuntimeError("install standalone dependencies with: pip install -e .") from exc
+        return list(ModelMessagesTypeAdapter.validate_json(data))
+
+    def _dump_message_history(self, result: Any) -> bytes:
+        all_messages_json = getattr(result, "all_messages_json", None)
+        if not callable(all_messages_json):
+            raise RuntimeError("Pydantic AI result does not expose all_messages_json()")
+        return bytes(all_messages_json())
+
+
+def build_model(config: RuntimeConfig):
+    if config.model_id.startswith("anthropic/"):
+        return _build_anthropic_model(config)
+    return _build_openai_compatible_model(config)
+
+
+def _build_openai_compatible_model(config: RuntimeConfig):
+    try:
+        from pydantic_ai.models.openai import OpenAIChatModel
+        from pydantic_ai.providers.openai import OpenAIProvider
+    except ImportError as exc:
+        raise RuntimeError("install standalone dependencies with: pip install -e .") from exc
+
+    provider_kwargs: dict[str, str] = {}
+    if config.api_base is not None:
+        provider_kwargs["base_url"] = config.api_base
+    if config.api_key is not None:
+        provider_kwargs["api_key"] = config.api_key
+    provider = OpenAIProvider(**provider_kwargs)
+    model_name = _openai_model_name(config.model_id)
+    return OpenAIChatModel(model_name, provider=provider)
+
+
+def _build_anthropic_model(config: RuntimeConfig):
+    try:
+        from pydantic_ai.models.anthropic import AnthropicModel
+        from pydantic_ai.providers.anthropic import AnthropicProvider
+    except ImportError as exc:
+        raise RuntimeError("install standalone dependencies with: pip install -e .") from exc
+
+    provider_kwargs: dict[str, str] = {}
+    if config.api_base is not None:
+        provider_kwargs["base_url"] = config.api_base
+    if config.api_key is not None:
+        provider_kwargs["api_key"] = config.api_key
+    provider = AnthropicProvider(**provider_kwargs)
+    model_name = config.model_id.removeprefix("anthropic/")
+    return AnthropicModel(model_name, provider=provider)
+
+
+def _openai_model_name(model_id: str) -> str:
+    if model_id.startswith("hosted_vllm/"):
+        return model_id.removeprefix("hosted_vllm/")
+    if model_id.startswith("openai/"):
+        return model_id.removeprefix("openai/")
+    return model_id
+
+
+def _supported_model_settings() -> set[str]:
+    try:
+        from pydantic_ai.settings import ModelSettings
+    except ImportError:
+        return SUPPORTED_MODEL_SETTINGS
+    annotations = getattr(ModelSettings, "__annotations__", {})
+    return set(annotations) or SUPPORTED_MODEL_SETTINGS
+
+
+def _retryable_tool(tool: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(tool)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return tool(*args, **kwargs)
+        except RECOVERABLE_TOOL_ERRORS as exc:
+            from pydantic_ai import ModelRetry
+
+            raise ModelRetry(str(exc)) from exc
+
+    return wrapper

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rightmemory"
+version = "0.1.0"
+description = "Standalone RightMemory chat runtime."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic-ai>=1.0.0",
+]
+
+[project.scripts]
+rightmemory = "rightmemory.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rightmemory"]

@@ -1,1 +1,11 @@
 worktree/
+.venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+debug_out/
+.env
+.env.*
+*.local.toml
+rightmemory.toml
