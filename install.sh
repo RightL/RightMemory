@@ -2,7 +2,7 @@
 # install.sh — set up the RightMemory system on a new machine.
 #
 # Usage:
-#   ./install.sh [--mode subagent|standalone] [--rightmemory-cmd CMD] <memory-root> <skills-target>
+#   ./install.sh [--mode subagent|standalone] <memory-root> <skills-target>
 #
 # Arguments:
 #   <memory-root>    Where MEMORY.md, MEMORY_*.md, and dream_logs/ will live.
@@ -21,13 +21,13 @@
 #
 # Example:
 #   ./install.sh ~/.rightmemory ~/.claude/skills
-#   ./install.sh --mode standalone --rightmemory-cmd ~/.local/bin/rightmemory ~/.rightmemory ~/.codex/skills
+#   ./install.sh --mode standalone ~/.rightmemory ~/.codex/skills
 
 set -euo pipefail
 
 usage() {
   cat >&2 <<EOF
-Usage: $0 [--mode subagent|standalone] [--rightmemory-cmd CMD] <memory-root> <skills-target>
+Usage: $0 [--mode subagent|standalone] <memory-root> <skills-target>
 
 Arguments:
   <memory-root>    Where MEMORY.md, MEMORY_*.md, and dream_logs/ will live.
@@ -38,14 +38,12 @@ Modes:
   standalone  Install only a memory-orchestrator skill that calls the standalone CLI.
 
 Options:
-  --mode MODE              subagent (default) or standalone.
-  --rightmemory-cmd CMD    Command used by the standalone orchestrator skill (default: rightmemory).
-  -h, --help               Show this help.
+  --mode MODE    subagent (default) or standalone.
+  -h, --help     Show this help.
 EOF
 }
 
 MODE="subagent"
-RIGHTMEMORY_CMD="rightmemory"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -60,19 +58,6 @@ while [ "$#" -gt 0 ]; do
       ;;
     --mode=*)
       MODE="${1#--mode=}"
-      shift
-      ;;
-    --rightmemory-cmd)
-      if [ "$#" -lt 2 ]; then
-        echo "Missing value for --rightmemory-cmd" >&2
-        usage
-        exit 1
-      fi
-      RIGHTMEMORY_CMD="$2"
-      shift 2
-      ;;
-    --rightmemory-cmd=*)
-      RIGHTMEMORY_CMD="${1#--rightmemory-cmd=}"
       shift
       ;;
     -h|--help)
@@ -117,13 +102,20 @@ MEMORY_ROOT="$(cd "$MEMORY_ROOT" && pwd)"
 SKILLS_TARGET="$(cd "$SKILLS_TARGET" && pwd)"
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+RIGHTMEMORY_HOME="$DATA_HOME/rightmemory"
+RIGHTMEMORY_VENV="$RIGHTMEMORY_HOME/venv"
+RIGHTMEMORY_BIN_DIR="$HOME/.local/bin"
+RIGHTMEMORY_BIN="$RIGHTMEMORY_BIN_DIR/rightmemory"
 
 echo "Installing RightMemory"
 echo "  MODE         = $MODE"
 echo "  MEMORY_ROOT  = $MEMORY_ROOT"
 echo "  SKILLS_ROOT  = $SKILLS_TARGET"
 if [ "$MODE" = "standalone" ]; then
-  echo "  CLI_COMMAND  = $RIGHTMEMORY_CMD"
+  echo "  RUNTIME_HOME = $RIGHTMEMORY_HOME"
+  echo "  RUNTIME_VENV = $RIGHTMEMORY_VENV"
+  echo "  CLI_COMMAND  = rightmemory"
 fi
 echo
 
@@ -133,7 +125,6 @@ escape_sed_replacement() {
 
 MEMORY_ROOT_SED="$(escape_sed_replacement "$MEMORY_ROOT")"
 SKILLS_TARGET_SED="$(escape_sed_replacement "$SKILLS_TARGET")"
-RIGHTMEMORY_CMD_SED="$(escape_sed_replacement "$RIGHTMEMORY_CMD")"
 
 install_skill() {
   src="$1"
@@ -143,9 +134,57 @@ install_skill() {
   mkdir -p "$dst_dir"
   sed -e "s|{{MEMORY_ROOT}}|$MEMORY_ROOT_SED|g" \
       -e "s|{{SKILLS_ROOT}}|$SKILLS_TARGET_SED|g" \
-      -e "s|{{RIGHTMEMORY_CMD}}|$RIGHTMEMORY_CMD_SED|g" \
       "$src" > "$dst"
   echo "  [install] $dst"
+}
+
+remove_skill_dir() {
+  skill_name="$1"
+  skill_dir="$SKILLS_TARGET/$skill_name"
+  skill_file="$skill_dir/SKILL.md"
+
+  if [ ! -e "$skill_dir" ]; then
+    return
+  fi
+
+  if [ ! -f "$skill_file" ]; then
+    echo "  [skip]    $skill_dir has no SKILL.md; left untouched"
+    return
+  fi
+
+  if grep -Eq "^name:[[:space:]]*$skill_name[[:space:]]*$" "$skill_file"; then
+    rm -rf "$skill_dir"
+    echo "  [remove]  $skill_dir"
+  else
+    echo "  [skip]    $skill_dir does not identify as $skill_name; left untouched"
+  fi
+}
+
+install_standalone_runtime_layout() {
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "Missing required command: uv" >&2
+    echo "Install uv first: https://docs.astral.sh/uv/getting-started/installation/" >&2
+    exit 1
+  fi
+
+  mkdir -p "$RIGHTMEMORY_HOME" "$RIGHTMEMORY_BIN_DIR"
+  if [ ! -d "$RIGHTMEMORY_VENV" ]; then
+    uv venv "$RIGHTMEMORY_VENV"
+    echo "  [new]     $RIGHTMEMORY_VENV"
+  else
+    echo "  [keep]    $RIGHTMEMORY_VENV already exists"
+  fi
+
+  uv pip install --python "$RIGHTMEMORY_VENV/bin/python" "$REPO_ROOT"
+  echo "  [install] rightmemory package into $RIGHTMEMORY_VENV"
+
+  cat > "$RIGHTMEMORY_BIN" <<EOF
+#!/usr/bin/env sh
+export RIGHTMEMORY_ROOT="$MEMORY_ROOT"
+exec "$RIGHTMEMORY_VENV/bin/python" -m rightmemory.cli "\$@"
+EOF
+  chmod 755 "$RIGHTMEMORY_BIN"
+  echo "  [install] $RIGHTMEMORY_BIN"
 }
 
 # 1. Initial MEMORY.md (do not overwrite existing user data)
@@ -175,12 +214,11 @@ if [ "$MODE" = "subagent" ]; then
     install_skill "$REPO_ROOT/skills/$skill/SKILL.md" "$skill"
   done
 else
+  install_standalone_runtime_layout
   install_skill "$REPO_ROOT/skills/memory-orchestrator-standalone/SKILL.md" "memory-orchestrator"
-  echo "  [skip]    memory-curator and memory-dreamer skills; standalone mode uses RIGHTMEMORY_ROOT=$MEMORY_ROOT $RIGHTMEMORY_CMD"
-  if [ -e "$SKILLS_TARGET/memory-curator" ] || [ -e "$SKILLS_TARGET/memory-dreamer" ]; then
-    echo "  [note]    Existing memory-curator or memory-dreamer skill folders were left untouched."
-    echo "            Disable or remove them in your agent if you want standalone-only behavior."
-  fi
+  remove_skill_dir "memory-curator"
+  remove_skill_dir "memory-dreamer"
+  echo "  [skip]    subagent skills; standalone mode uses rightmemory"
 fi
 
 echo
@@ -190,11 +228,8 @@ if [ "$MODE" = "subagent" ]; then
   echo "  2. Trigger any memory-relevant message in your AI agent — orchestrator picks it up."
   echo "  3. When you want consolidation, ask your agent to invoke the memory-dreamer skill."
 else
-  echo "  2. Install and configure the standalone CLI if needed:"
-  echo "     uv --cache-dir .uv-cache venv .venv"
-  echo "     uv --cache-dir .uv-cache pip install -e . --python .venv/bin/python"
-  echo "     Write role model config to $MEMORY_ROOT/rightmemory.toml."
-  echo "  3. Trigger any memory-relevant message in your AI agent — the installed orchestrator calls $RIGHTMEMORY_CMD with RIGHTMEMORY_ROOT=$MEMORY_ROOT."
+  echo "  2. Write role model config to $MEMORY_ROOT/rightmemory.toml."
+  echo "  3. Trigger any memory-relevant message in your AI agent — the installed orchestrator calls rightmemory."
 fi
 echo
 echo "Re-run this script any time you pull updates from the RightMemory repo;"

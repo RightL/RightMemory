@@ -65,7 +65,6 @@ def _standalone_role_guidance(text: str, memory_root: Path, skills_root: Path) -
     return (
         text.replace("{{MEMORY_ROOT}}", str(memory_root))
         .replace("{{SKILLS_ROOT}}", str(skills_root))
-        .replace("{{RIGHTMEMORY_CMD}}", "rightmemory")
     )
 
 

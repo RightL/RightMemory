@@ -72,7 +72,7 @@ cd RightMemory
   - Codex: `~/.codex/skills`
   - Other agents: see your agent's skill loading docs.
 - `--mode subagent` — default. Installs `memory-orchestrator`, `memory-curator`, and `memory-dreamer` skills for agents with subagent support.
-- `--mode standalone` — installs a `memory-orchestrator` skill that calls the standalone `rightmemory` CLI instead of spawning curator or dreamer subagents. Use `--rightmemory-cmd <command>` when the executable is not simply `rightmemory`.
+- `--mode standalone` — installs a `memory-orchestrator` skill that calls the standalone `rightmemory` CLI instead of spawning curator or dreamer subagents.
 
 The script:
 
@@ -81,6 +81,7 @@ The script:
 3. Initializes a git repo in `<memory-root>` (the dreamer needs git for revertability).
 4. Installs the shared schema file to `<skills-target>/rightmemory-schema.md`.
 5. Substitutes template placeholders and writes mode-appropriate skills to `<skills-target>`.
+6. In standalone mode, uses `uv` to create the managed runtime venv under `${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`, installs this repo into it, installs a `~/.local/bin/rightmemory` wrapper bound to `<memory-root>`, and removes old `memory-curator` / `memory-dreamer` skill folders from `<skills-target>` when they identify as those skills.
 
 Re-run the script any time you want to refresh the skills (e.g. after pulling updates from this repo). Your existing `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/` are preserved.
 
@@ -107,10 +108,10 @@ After install:
 RightMemory also ships an independent chat runtime that does not depend on Codex or Claude Code subagents:
 
 ```bash
-./install.sh --mode standalone --rightmemory-cmd rightmemory ~/.rightmemory ~/.codex/skills
+./install.sh --mode standalone ~/.rightmemory ~/.codex/skills
 ```
 
-Standalone install mode writes a `memory-orchestrator` skill that calls `rightmemory curator` and `rightmemory dreamer` with `RIGHTMEMORY_ROOT=<memory-root>` instead of spawning subagents. If you previously installed subagent mode into the same skill target, disable or remove the old `memory-curator` and `memory-dreamer` folders so your host agent does not load both workflows.
+Standalone install mode uses `uv` to install the runtime into a user-local venv, writes a `memory-orchestrator` skill that calls `rightmemory curator` and `rightmemory dreamer` instead of spawning subagents, and removes old `memory-curator` / `memory-dreamer` skill folders from the same skill target. The installed `rightmemory` wrapper is bound to `<memory-root>`.
 
 ```bash
 rightmemory curator --session <agent-session-id> "find memory about the standalone mode"
