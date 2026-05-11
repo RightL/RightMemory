@@ -6,7 +6,7 @@ description: "Use on every user message that might rely on {{MEMORY_ROOT}}/MEMOR
 Understand the core intent of this skill; do not follow it rigidly, and stay flexible based on the actual context.
 
 - This is standalone mode. Do not spawn memory-curator or memory-dreamer subagents, and do not invoke the memory-curator or memory-dreamer skills directly.
-- The main agent must not access any `{{MEMORY_ROOT}}/MEMORY*.md` file by any means — no reading it, no editing it, no writing to it, no running commands that view or modify it. All access to the memory file set goes through the standalone `rightmemory` command.
+- The main agent must not access any `{{MEMORY_ROOT}}/MEMORY*.md` file by any means — no reading it, no editing it, no writing to it, no running commands that view or modify it. All access to the memory file set goes through the installed standalone `rightmemory` command; do not replace it with repo-local Python or environment-specific launchers.
 - Pick one stable session id for this agent conversation and reuse it for every curator call. Use a separate stable dreamer session id only when the user explicitly asks for consolidation.
 - For retrieval, call `rightmemory curator --session <stable-session-id> "<memory need>"`. Describe the memory needed based on the user's intent instead of blindly forwarding the user's message verbatim.
 - Do not retrieve on every turn. Only retrieve when the user message clearly depends on prior shared context that is not available in the current conversation itself. If in doubt, skip retrieval.
