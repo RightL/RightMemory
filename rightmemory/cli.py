@@ -5,6 +5,7 @@ import json
 import sys
 from typing import Any
 
+from .async_update import AsyncUpdateStore, format_state
 from .config import load_config
 from .runtime import RightMemoryRuntime
 
@@ -24,8 +25,24 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     config = load_config(args.role)
+    if remaining and remaining[0] == "submit":
+        submit_args = _submit_parser(args.role).parse_args(remaining[1:])
+        return _submit(config.memory_root, args.role, submit_args.session, submit_args.message)
+    if remaining and remaining[0] == "pull":
+        pull_args = _pull_parser(args.role).parse_args(remaining[1:])
+        return _pull(config.memory_root, args.role, pull_args.session)
+
     runtime = RightMemoryRuntime(config)
     try:
+        if remaining and remaining[0] == "_submitted-worker":
+            worker_args = _submit_parser(args.role).parse_args(remaining[1:])
+            return _submitted_worker(
+                runtime,
+                config.memory_root,
+                args.role,
+                worker_args.session,
+                worker_args.message,
+            )
         if not remaining or remaining[0] == "chat":
             chat_args = _chat_parser(args.role).parse_args(remaining[1:] if remaining else [])
             return _chat(runtime, chat_args.session)
@@ -56,6 +73,19 @@ def _turn_parser(role: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=f"rightmemory {role}")
     parser.add_argument("--session", required=True, help="persist Pydantic AI message history under this session id")
     parser.add_argument("message", nargs=argparse.REMAINDER)
+    return parser
+
+
+def _submit_parser(role: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=f"rightmemory {role} submit")
+    parser.add_argument("--session", required=True, help="persist Pydantic AI message history under this session id")
+    parser.add_argument("message", nargs=argparse.REMAINDER)
+    return parser
+
+
+def _pull_parser(role: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=f"rightmemory {role} pull")
+    parser.add_argument("--session", required=True, help="read the latest async update state for this session id")
     return parser
 
 
@@ -102,6 +132,41 @@ def _session_turn(runtime: RightMemoryRuntime, session_id: str, message_parts: l
     if not message:
         raise ValueError("message must not be empty")
     print(runtime.run_session_turn(session_id, message))
+    return 0
+
+
+def _submit(memory_root, role: str, session_id: str, message_parts: list[str]) -> int:
+    message = " ".join(message_parts).strip()
+    if not message:
+        raise ValueError("message must not be empty")
+    state = AsyncUpdateStore(memory_root, role).submit(session_id, message)
+    print(format_state(state))
+    return 0
+
+
+def _pull(memory_root, role: str, session_id: str) -> int:
+    state = AsyncUpdateStore(memory_root, role).read(session_id)
+    print(format_state(state))
+    return 0
+
+
+def _submitted_worker(
+    runtime: RightMemoryRuntime,
+    memory_root,
+    role: str,
+    session_id: str,
+    message_parts: list[str],
+) -> int:
+    store = AsyncUpdateStore(memory_root, role)
+    message = " ".join(message_parts).strip()
+    if not message:
+        raise ValueError("message must not be empty")
+    try:
+        result = runtime.run_session_turn(session_id, message)
+    except Exception as exc:
+        store.fail(session_id, str(exc))
+        return 1
+    store.finish(session_id, result)
     return 0
 
 
