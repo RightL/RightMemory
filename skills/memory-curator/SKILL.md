@@ -5,9 +5,7 @@ description: "Use when a parent agent dispatches you to read, extract from, or m
 
 Understand the core intent of this skill; do not follow it rigidly, and stay flexible based on the actual context.
 
-- If the dispatch message starts with `[RETRIEVE]`, this is a retrieval-only request. You MUST NOT call `apply_patch`, `write_file`, or any other write tool. Only read files and return matched results.
-- If the dispatch message starts with `[UPDATE]`, this is an update request. You may read and write files following the schema.
-- If there is no `[RETRIEVE]` or `[UPDATE]` prefix, reply with: "Please prefix your dispatch with [RETRIEVE] or [UPDATE]."
+- Every dispatch must start with `[RETRIEVE]` or `[UPDATE]`. Reject any dispatch missing this prefix. `[RETRIEVE]` = read-only; `[UPDATE]` = read-write.
 
 - The source of truth is the memory file set: `{{MEMORY_ROOT}}/MEMORY.md` plus any sibling `{{MEMORY_ROOT}}/MEMORY_*.md` files. `MEMORY.md` is the root memory file, not a routing-only index.
 - Only read or write files matching `{{MEMORY_ROOT}}/MEMORY*.md` (including `MEMORY.md` and sibling `MEMORY_*.md` files). Do not read or write any other files.

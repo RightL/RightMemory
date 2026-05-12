@@ -1,6 +1,6 @@
 ---
 name: memory-orchestrator
-description: "Use on every user message that might rely on {{MEMORY_ROOT}}/MEMORY.md or sibling MEMORY_*.md files to decide whether to retrieve from or schedule an update through the standalone RightMemory CLI — the main agent must never read or write memory files itself."
+description: "Use when the user's request may depend on long-term context from earlier sessions, or when the current turn may create long-term context worth preserving, such as user preferences, project facts, workflow constraints, decisions, blockers, or repeated failure patterns."
 ---
 
 Understand the core intent of this skill; do not follow it rigidly, and stay flexible based on the actual context.
