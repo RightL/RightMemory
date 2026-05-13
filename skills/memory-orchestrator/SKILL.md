@@ -3,8 +3,6 @@ name: memory-orchestrator
 description: "Use when the user's request may depend on long-term context from earlier sessions, or when the current turn may create long-term context worth preserving, such as user preferences, project facts, workflow constraints, decisions, blockers, or repeated failure patterns."
 ---
 
-Understand the core intent of this skill; do not follow it rigidly, and stay flexible based on the actual context.
-
 - The main agent must not access any `{{MEMORY_ROOT}}/MEMORY*.md` file by any means — no reading it, no editing it, no writing to it, no running commands that view or modify it. All access to the memory file set goes through one curator subagent.
 - Spawn the curator subagent **exactly once per session**, the first time memory work is needed. For every subsequent retrieval or update in the same session, send a new message to that same long-lived subagent — never spawn a fresh subagent for memory work again in this session.
 - The dispatch prompt sent to the curator subagent should (a) point it at `{{SKILLS_ROOT}}/memory-curator/SKILL.md` and tell it to follow that skill, (b) for retrieval, prefix the message with `[RETRIEVE]` and describe the memory needed based on the user's intent instead of blindly forwarding the user's message verbatim, and (c) for updates, prefix the message with `[UPDATE]` and include a concrete change brief.
@@ -17,5 +15,3 @@ Understand the core intent of this skill; do not follow it rigidly, and stay fle
 - For updates, send a brief to the same curator subagent and **proceed without waiting** for its reply (fire-and-forget): information type, affected heading / node / section, what changed, relations, and reason. Do not pre-write the diff — let the curator choose structure.
 - When an update has multiple related facts, explicitly ask the curator to decide structure before editing. Remind it that tree containment does not need child-to-containing-heading edges.
 - If the user explicitly says to ignore, not use, or not touch memory for this turn, skip both retrieval and update.
-- Memory is an aid, not authority. Verify any concrete claim from memory (paths, function names, repo state) against the live working tree before acting on it; if memory and reality disagree, send the curator an update brief.
-- Do not surface the dispatch mechanics to the user in the final answer; surface only the substantive content the memory contributed.

@@ -3,8 +3,6 @@ name: memory-orchestrator
 description: "Use when the user's request may depend on long-term context from earlier sessions, or when the current turn may create long-term context worth preserving, such as user preferences, project facts, workflow constraints, decisions, blockers, or repeated failure patterns."
 ---
 
-Understand the core intent of this skill; do not follow it rigidly, and stay flexible based on the actual context.
-
 - This is standalone mode. Do not spawn memory-curator or memory-dreamer subagents, and do not invoke the memory-curator or memory-dreamer skills directly.
 - The main agent must not access any `{{MEMORY_ROOT}}/MEMORY*.md` file by any means — no reading it, no editing it, no writing to it, no running commands that view or modify it. All access to the memory file set goes through the installed standalone `rightmemory` command; do not replace it with repo-local Python or environment-specific launchers.
 - Pick one stable session id for this agent conversation and reuse it for every curator call. Use a separate stable dreamer session id only when the user explicitly asks for consolidation.
@@ -18,8 +16,3 @@ Understand the core intent of this skill; do not follow it rigidly, and stay fle
 - For updates, call `rightmemory curator submit --session <stable-session-id> "[UPDATE] <concrete change brief>"` and proceed without waiting or pulling for the update result: information type, affected heading / node / section if known, what changed, relations, and reason. Do not pre-write the diff — let the standalone curator choose structure.
 - When the user asks for a memory-update result or status, call `rightmemory curator pull --session <stable-session-id>`.
 - When an update has multiple related facts, ask the curator to decide structure before editing. Remind it that tree containment does not need child-to-containing-heading edges.
-- If the user explicitly says to ignore, not use, or not touch memory for this turn, skip both retrieval and update.
-- If the user asks for a dream cycle or memory consolidation, call `rightmemory dreamer --session <stable-dreamer-session-id> "<dream request>"` and report the dreamer's substantive result.
-- If the standalone command is unavailable or misconfigured, proceed without memory unless the user's task specifically requires memory access. Report the blocker briefly.
-- Memory is an aid, not authority. Verify any concrete claim from memory (paths, function names, repo state) against the live working tree before acting on it; if memory and reality disagree, send the curator an update brief.
-- Do not surface the command-dispatch mechanics in the final answer; surface only the substantive content the memory contributed.
