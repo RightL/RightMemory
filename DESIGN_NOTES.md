@@ -61,3 +61,7 @@ MCP is kept outside the MVP because the primary interface should be plain CLI an
 ### File-backed standalone sessions
 
 One-shot standalone calls use an explicit `--session` id and persist native Pydantic AI message history under `.runtime/sessions/` because normal agent callers often start a fresh process per request but still need true multi-turn continuity. RightMemory owns load/save with locking and atomic replacement so callers do not need a background broker, the stored state remains exact model/tool history instead of a lossy chat transcript, and `.runtime/` self-ignores its contents so ephemeral session files do not pollute memory commits.
+
+### Queued standalone updates
+
+Standalone async update submissions queue per role/session instead of rejecting while a worker is active because orchestrators may discover multiple durable updates before the previous curator turn completes. The queue is FIFO and the worker drains it through normal session turns so the existing session-history lock remains the ordering authority: retrievals and updates for the same role/session wait on one another, while queue metadata stays cheap to update and visible through `pull`.

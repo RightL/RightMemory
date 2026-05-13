@@ -3,14 +3,24 @@ name: memory-orchestrator
 description: "Use when the user's request may depend on long-term context from earlier sessions, or when the current turn may create long-term context worth preserving, such as user preferences, project facts, workflow constraints, decisions, blockers, or repeated failure patterns."
 ---
 
+# Memory Orchestrator
+
+## Access Rules
+
 - The main agent must not access any `{{MEMORY_ROOT}}/MEMORY*.md` file by any means — no reading it, no editing it, no writing to it, no running commands that view or modify it. All access to the memory file set goes through one curator subagent.
 - Spawn the curator subagent **exactly once per session**, the first time memory work is needed. For every subsequent retrieval or update in the same session, send a new message to that same long-lived subagent — never spawn a fresh subagent for memory work again in this session.
 - The dispatch prompt sent to the curator subagent should (a) point it at `{{SKILLS_ROOT}}/memory-curator/SKILL.md` and tell it to follow that skill, (b) for retrieval, prefix the message with `[RETRIEVE]` and describe the memory needed based on the user's intent instead of blindly forwarding the user's message verbatim, and (c) for updates, prefix the message with `[UPDATE]` and include a concrete change brief.
+
+## Retrieval
+
 - Do not retrieve on every turn. Only retrieve when the user message clearly depends on prior shared context that is not available in the current conversation itself. If in doubt, skip retrieval for ordinary task facts.
 - For user/workflow/behavior context, use a lower bar: if prior memory could reasonably change how the agent acts now, do one targeted retrieval. Preferences, communication expectations, tool/environment constraints, process rules, and repeated failure patterns are recognition cues only; they are neither required nor sufficient.
 - When retrieval is needed, send a request to the curator subagent and **wait at least 3 minutes for its reply before acting** on that memory. The curator skips items already returned in this session; ask explicitly if you need something again. Use the returned addressable lines as context; quote them verbatim when relying on them — do not paraphrase heading ids, node ids, descriptions, or edges.
 - If the curator reports "no strong match", proceed without memory; do not retry the same query.
 - Skip retrieval when the message is clearly self-contained and answerable from the conversation alone.
+
+## Updates
+
 - After completing work, judge whether this turn produced durable context that should change how a future agent acts, decides, retrieves context, or avoids repeating a mistake. If not, skip the update.
 - If a user/workflow/behavior update may be durable but is uncertain, propose one concise candidate update to the user instead of silently skipping it.
 - If the possible update comes from a small iterative adjustment that may still be revised, wait until the next user response. If that response continues to a new topic, accepts the adjustment, or does not reject or materially change it, submit the settled memory update before handling the new request.

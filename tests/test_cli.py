@@ -115,6 +115,74 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(roles, ["curator"])
         self.assertIn("status: running", stdout.getvalue())
         self.assertIn("session: agent-1", stdout.getvalue())
+        self.assertIn("current_id: 1", stdout.getvalue())
+        self.assertIn("queued: 0", stdout.getvalue())
+
+    def test_main_queues_async_update_while_worker_is_running(self):
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+
+            def fake_load_config(role):
+                return type("Config", (), {"memory_root": memory_root})()
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.async_update.subprocess.Popen") as popen,
+                patch("rightmemory.async_update._process_exists", return_value=True),
+                patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
+                patch("sys.stdout", stdout),
+            ):
+                popen.return_value.pid = 123
+                first = main(["curator", "submit", "--session", "agent-1", "first"])
+                second = main(["curator", "submit", "--session", "agent-1", "second"])
+                pull = main(["curator", "pull", "--session", "agent-1"])
+
+        self.assertEqual(first, 0)
+        self.assertEqual(second, 0)
+        self.assertEqual(pull, 0)
+        self.assertEqual(popen.call_count, 1)
+        output = stdout.getvalue()
+        self.assertIn("status: running", output)
+        self.assertIn("current_id: 1", output)
+        self.assertIn("queued: 1", output)
+        self.assertIn("queued_ids: 2", output)
+
+    def test_pull_marks_dead_worker_failed_and_keeps_queued_updates(self):
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+
+            def fake_load_config(role):
+                return type("Config", (), {"memory_root": memory_root})()
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.async_update.subprocess.Popen") as popen,
+                patch("rightmemory.async_update._process_exists", return_value=True),
+                patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
+                patch("sys.stdout", io.StringIO()),
+            ):
+                popen.return_value.pid = 123
+                self.assertEqual(main(["curator", "submit", "--session", "agent-1", "first"]), 0)
+                self.assertEqual(main(["curator", "submit", "--session", "agent-1", "second"]), 0)
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.async_update._process_exists", return_value=False),
+                patch("sys.stdout", stdout),
+            ):
+                pull = main(["curator", "pull", "--session", "agent-1"])
+
+        self.assertEqual(pull, 0)
+        output = stdout.getvalue()
+        self.assertIn("status: failed", output)
+        self.assertIn("current_id: 1", output)
+        self.assertIn("queued: 1", output)
+        self.assertIn("queued_ids: 2", output)
+        self.assertIn("error: worker process exited before writing result: pid 123", output)
 
     def test_main_pulls_async_update_state(self):
         stdout = io.StringIO()
@@ -131,18 +199,36 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("status: idle", stdout.getvalue())
 
-    def test_submitted_worker_records_success(self):
+    def test_submitted_worker_processes_queue_in_order(self):
+        calls = []
+
+        class RecordingRuntime(FakeRuntime):
+            def run_session_turn(self, session_id: str, message: str) -> str:
+                calls.append((session_id, message))
+                return f"session {session_id}: {message}"
+
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
             def fake_load_config(role):
                 return type("Config", (), {"memory_root": memory_root})()
 
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.async_update.subprocess.Popen") as popen,
+                patch("rightmemory.async_update._process_exists", return_value=True),
+                patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
+                patch("sys.stdout", io.StringIO()),
+            ):
+                popen.return_value.pid = 123
+                self.assertEqual(main(["curator", "submit", "--session", "agent-1", "first"]), 0)
+                self.assertEqual(main(["curator", "submit", "--session", "agent-1", "second"]), 0)
+
             with patch("rightmemory.cli.load_config", fake_load_config), patch(
                 "rightmemory.cli.RightMemoryRuntime",
-                FakeRuntime,
+                RecordingRuntime,
             ):
-                result = main(["curator", "_submitted-worker", "--session", "agent-1", "hello"])
+                result = main(["curator", "_submitted-worker", "--session", "agent-1"])
 
             stdout = io.StringIO()
             with patch("rightmemory.cli.load_config", fake_load_config), patch("sys.stdout", stdout):
@@ -150,8 +236,10 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(pull_result, 0)
+        self.assertEqual(calls, [("agent-1", "first"), ("agent-1", "second")])
         self.assertIn("status: succeeded", stdout.getvalue())
-        self.assertIn("result: session agent-1: hello", stdout.getvalue())
+        self.assertIn("queued: 0", stdout.getvalue())
+        self.assertIn("result: session agent-1: second", stdout.getvalue())
 
 
 if __name__ == "__main__":

@@ -157,16 +157,12 @@ def _submitted_worker(
     session_id: str,
     message_parts: list[str],
 ) -> int:
+    if message_parts:
+        raise ValueError("_submitted-worker does not accept message arguments")
     store = AsyncUpdateStore(memory_root, role)
-    message = " ".join(message_parts).strip()
-    if not message:
-        raise ValueError("message must not be empty")
-    try:
-        result = runtime.run_session_turn(session_id, message)
-    except Exception as exc:
-        store.fail(session_id, str(exc))
+    state = store.run_queued(session_id, lambda message: runtime.run_session_turn(session_id, message))
+    if state.status == "failed":
         return 1
-    store.finish(session_id, result)
     return 0
 
 
