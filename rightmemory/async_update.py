@@ -212,7 +212,7 @@ class AsyncUpdateStore:
         if not state_path.exists():
             return AsyncUpdateState(status="idle", session_id=session_id, role=self.role)
         data = json.loads(state_path.read_text(encoding="utf-8"))
-        return _state_from_json(data, fallback_session_id=session_id, fallback_role=self.role)
+        return _state_from_json(data)
 
     def _lock_path(self, session_id: str) -> Path:
         safe_id = _safe_session_id(session_id)
@@ -244,7 +244,7 @@ class AsyncUpdateStore:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _state_from_json(data: dict[str, object], *, fallback_session_id: str, fallback_role: str) -> AsyncUpdateState:
+def _state_from_json(data: dict[str, object]) -> AsyncUpdateState:
     current = _job_from_json(data.get("current"))
     queued = [_job for item in data.get("queued", []) if (_job := _job_from_json(item)) is not None]
     next_id = data.get("next_id")
@@ -254,9 +254,9 @@ def _state_from_json(data: dict[str, object], *, fallback_session_id: str, fallb
             known_ids.append(current.id)
         next_id = max(known_ids, default=0) + 1
     return AsyncUpdateState(
-        status=str(data.get("status", "idle")),
-        session_id=str(data.get("session_id", fallback_session_id)),
-        role=str(data.get("role", fallback_role)),
+        status=_required_state_str(data, "status"),
+        session_id=_required_state_str(data, "session_id"),
+        role=_required_state_str(data, "role"),
         started_at=_optional_str(data.get("started_at")),
         finished_at=_optional_str(data.get("finished_at")),
         pid=data.get("pid") if isinstance(data.get("pid"), int) else None,
@@ -277,6 +277,13 @@ def _job_from_json(data: object) -> AsyncUpdateJob | None:
     if not isinstance(job_id, int) or not isinstance(message, str) or not isinstance(submitted_at, str):
         return None
     return AsyncUpdateJob(id=job_id, message=message, submitted_at=submitted_at)
+
+
+def _required_state_str(data: dict[str, object], key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"async update state must contain string field: {key}")
+    return value
 
 
 def _optional_str(value: object) -> str | None:

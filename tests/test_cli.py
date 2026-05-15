@@ -46,7 +46,7 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(lines[0], {"type": "assistant", "message": "handled: hello"})
         self.assertEqual(lines[1]["type"], "error")
 
-    def test_main_loads_curator_role(self):
+    def test_main_loads_retrieve_role(self):
         roles = []
 
         def fake_load_config(role):
@@ -54,10 +54,10 @@ class JsonRequestTests(unittest.TestCase):
             return object()
 
         with patch("rightmemory.cli.load_config", fake_load_config), patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime):
-            result = main(["curator", "daemon", "--stdio-json"])
+            result = main(["retrieve", "daemon", "--stdio-json"])
 
         self.assertEqual(result, 0)
-        self.assertEqual(roles, ["curator"])
+        self.assertEqual(roles, ["retrieve"])
 
     def test_main_loads_dreamer_role(self):
         roles = []
@@ -72,6 +72,13 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(roles, ["dreamer"])
 
+    def test_main_rejects_old_curator_role(self):
+        with patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                main(["curator", "--session", "agent-1", "hello"])
+
+        self.assertEqual(caught.exception.code, 2)
+
     def test_main_runs_one_shot_session_turn(self):
         roles = []
         stdout = io.StringIO()
@@ -85,10 +92,10 @@ class JsonRequestTests(unittest.TestCase):
             patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
             patch("sys.stdout", stdout),
         ):
-            result = main(["curator", "--session", "agent-1", "hello", "there"])
+            result = main(["retrieve", "--session", "agent-1", "hello", "there"])
 
         self.assertEqual(result, 0)
-        self.assertEqual(roles, ["curator"])
+        self.assertEqual(roles, ["retrieve"])
         self.assertEqual(stdout.getvalue().strip(), "session agent-1: hello there")
 
     def test_main_submits_async_update_without_building_runtime(self):
@@ -109,14 +116,32 @@ class JsonRequestTests(unittest.TestCase):
                 patch("sys.stdout", stdout),
             ):
                 popen.return_value.pid = 123
-                result = main(["curator", "submit", "--session", "agent-1", "remember", "this"])
+                result = main(["update", "submit", "--session", "agent-1", "remember", "this"])
 
         self.assertEqual(result, 0)
-        self.assertEqual(roles, ["curator"])
+        self.assertEqual(roles, ["update"])
         self.assertIn("status: running", stdout.getvalue())
         self.assertIn("session: agent-1", stdout.getvalue())
         self.assertIn("current_id: 1", stdout.getvalue())
         self.assertIn("queued: 0", stdout.getvalue())
+
+    def test_submit_is_only_supported_for_update_role(self):
+        with patch("rightmemory.cli.load_config", return_value=object()):
+            with self.assertRaises(ValueError):
+                main(["retrieve", "submit", "--session", "agent-1", "remember", "this"])
+
+    def test_subcommand_help_does_not_load_config(self):
+        stdout = io.StringIO()
+
+        with (
+            patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
+            patch("sys.stdout", stdout),
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                main(["update", "submit", "--help"])
+
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("rightmemory update submit", stdout.getvalue())
 
     def test_main_queues_async_update_while_worker_is_running(self):
         stdout = io.StringIO()
@@ -135,9 +160,9 @@ class JsonRequestTests(unittest.TestCase):
                 patch("sys.stdout", stdout),
             ):
                 popen.return_value.pid = 123
-                first = main(["curator", "submit", "--session", "agent-1", "first"])
-                second = main(["curator", "submit", "--session", "agent-1", "second"])
-                pull = main(["curator", "pull", "--session", "agent-1"])
+                first = main(["update", "submit", "--session", "agent-1", "first"])
+                second = main(["update", "submit", "--session", "agent-1", "second"])
+                pull = main(["update", "pull", "--session", "agent-1"])
 
         self.assertEqual(first, 0)
         self.assertEqual(second, 0)
@@ -166,15 +191,15 @@ class JsonRequestTests(unittest.TestCase):
                 patch("sys.stdout", io.StringIO()),
             ):
                 popen.return_value.pid = 123
-                self.assertEqual(main(["curator", "submit", "--session", "agent-1", "first"]), 0)
-                self.assertEqual(main(["curator", "submit", "--session", "agent-1", "second"]), 0)
+                self.assertEqual(main(["update", "submit", "--session", "agent-1", "first"]), 0)
+                self.assertEqual(main(["update", "submit", "--session", "agent-1", "second"]), 0)
 
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.async_update._process_exists", return_value=False),
                 patch("sys.stdout", stdout),
             ):
-                pull = main(["curator", "pull", "--session", "agent-1"])
+                pull = main(["update", "pull", "--session", "agent-1"])
 
         self.assertEqual(pull, 0)
         output = stdout.getvalue()
@@ -194,7 +219,7 @@ class JsonRequestTests(unittest.TestCase):
                 return type("Config", (), {"memory_root": memory_root})()
 
             with patch("rightmemory.cli.load_config", fake_load_config), patch("sys.stdout", stdout):
-                result = main(["curator", "pull", "--session", "agent-1"])
+                result = main(["update", "pull", "--session", "agent-1"])
 
         self.assertEqual(result, 0)
         self.assertIn("status: idle", stdout.getvalue())
@@ -221,18 +246,18 @@ class JsonRequestTests(unittest.TestCase):
                 patch("sys.stdout", io.StringIO()),
             ):
                 popen.return_value.pid = 123
-                self.assertEqual(main(["curator", "submit", "--session", "agent-1", "first"]), 0)
-                self.assertEqual(main(["curator", "submit", "--session", "agent-1", "second"]), 0)
+                self.assertEqual(main(["update", "submit", "--session", "agent-1", "first"]), 0)
+                self.assertEqual(main(["update", "submit", "--session", "agent-1", "second"]), 0)
 
             with patch("rightmemory.cli.load_config", fake_load_config), patch(
                 "rightmemory.cli.RightMemoryRuntime",
                 RecordingRuntime,
             ):
-                result = main(["curator", "_submitted-worker", "--session", "agent-1"])
+                result = main(["update", "_submitted-worker", "--session", "agent-1"])
 
             stdout = io.StringIO()
             with patch("rightmemory.cli.load_config", fake_load_config), patch("sys.stdout", stdout):
-                pull_result = main(["curator", "pull", "--session", "agent-1"])
+                pull_result = main(["update", "pull", "--session", "agent-1"])
 
         self.assertEqual(result, 0)
         self.assertEqual(pull_result, 0)

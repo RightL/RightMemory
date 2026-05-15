@@ -10,7 +10,7 @@ import tomllib
 MEMORY_ROOT_ENV = "RIGHTMEMORY_ROOT"
 MEMORY_ROOT = Path(os.environ.get(MEMORY_ROOT_ENV, "~/.rightmemory")).expanduser()
 CONFIG_PATH = MEMORY_ROOT / "rightmemory.toml"
-ROLES = {"curator", "dreamer"}
+ROLES = {"retrieve", "update", "dreamer"}
 DEFAULT_MAX_TOOL_RETRIES = 10
 
 
@@ -35,7 +35,7 @@ def load_config(role: str) -> RuntimeConfig:
     if not MEMORY_ROOT.exists():
         raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
 
-    _reject_unknown_keys(data, {"curator", "dreamer"}, "top-level")
+    _reject_unknown_keys(data, ROLES, "top-level")
     role_section = data.get(role)
     if not isinstance(role_section, dict):
         raise ValueError(f"{CONFIG_PATH} must contain a [{role}.model] table")

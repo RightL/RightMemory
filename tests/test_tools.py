@@ -141,7 +141,7 @@ class MemoryToolsTests(unittest.TestCase):
         dream_logs = self.root / "dream_logs"
         dream_logs.mkdir()
         (dream_logs / "2026-05-08.md").write_text("# Dream\n", encoding="utf-8")
-        (self.root / "rightmemory.toml").write_text("[curator]\n", encoding="utf-8")
+        (self.root / "rightmemory.toml").write_text("[update]\n", encoding="utf-8")
 
         result = self.tools.git_add(["MEMORY.md", "MEMORY_detail.md", "dream_logs/2026-05-08.md"])
 
@@ -159,7 +159,7 @@ class MemoryToolsTests(unittest.TestCase):
         self._git("init")
         self._git("config", "user.email", "test@example.com")
         self._git("config", "user.name", "Test User")
-        (self.root / "rightmemory.toml").write_text("[curator]\n", encoding="utf-8")
+        (self.root / "rightmemory.toml").write_text("[update]\n", encoding="utf-8")
         self._git("add", "rightmemory.toml")
 
         with self.assertRaises(ValueError):

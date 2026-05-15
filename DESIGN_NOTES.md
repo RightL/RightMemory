@@ -30,17 +30,17 @@ Schema rules live in `skills/rightmemory-schema.md` instead of at the top of eve
 
 The curator makes a baseline commit only before its first write when the memory repo is already dirty, because pre-existing memory edits should not be mixed with curator-created routine changes. Routine curator writes remain uncommitted so users can batch or review them, while dreamer remains the commit-oriented consolidation path.
 
-### Standalone role processes
+### Standalone command roles
 
-The independent mode uses explicit `curator` and `dreamer` process roles because those skills carry different authority, commit behavior, and safety rules. The caller chooses the role at startup so the runtime never mixes both prompts in one model context; the configured memory root remains the only runtime root because that is the memory store and the intended ownership boundary.
+The independent mode uses explicit `retrieve`, `update`, and `dreamer` command roles because retrieval should be fast and read-only, updates should be more careful and write-capable, and dreamer remains a separate consolidation authority. The caller chooses the role at startup so the runtime can load the right prompt, tools, session history, and model config without asking one model context to infer behavior from `[RETRIEVE]` or `[UPDATE]` tags; the configured memory root remains the only runtime root because that is the memory store and the intended ownership boundary.
 
 ### Standalone install mode
 
-The installer keeps subagent and standalone agent wiring separate because the host agent should see one memory workflow at a time. Subagent mode installs orchestrator, curator, and dreamer skills; standalone mode installs only an orchestrator skill that calls the CLI, leaving curator and dreamer behavior inside the standalone runtime so duplicate skill triggers do not compete with command-based memory access.
+The installer keeps subagent and standalone agent wiring separate because the host agent should see one memory workflow at a time. Subagent mode installs orchestrator, curator, and dreamer skills; standalone mode installs only an orchestrator skill that calls the CLI, leaving retrieve, update, and dreamer behavior inside the standalone runtime so duplicate skill triggers do not compete with command-based memory access.
 
 ### Standalone model config
 
-Standalone mode keeps the existing role-local model config shape while mapping it onto Pydantic AI because curator and dreamer may need different providers, but callers should not have to rewrite `rightmemory.toml` when switching runtime libraries. `anthropic/...` remains the explicit Anthropic selector; other model ids are treated as OpenAI-compatible so local gateways and hosted vLLM endpoints stay simple.
+Standalone mode uses explicit `[retrieve.model]`, `[update.model]`, and `[dreamer.model]` tables because retrieve, update, and dreamer may need different providers or model sizes. Old `[curator.model]` config is rejected instead of silently mapped because the split changed authority boundaries as well as names, and requiring migration makes stale read-write configuration visible. `anthropic/...` remains the explicit Anthropic selector; other model ids are treated as OpenAI-compatible so local gateways and hosted vLLM endpoints stay simple.
 
 ### Standalone tool boundary
 
@@ -48,7 +48,7 @@ Standalone mode exposes narrow filesystem and git tools instead of arbitrary Pyt
 
 ### Standalone commit boundary
 
-Standalone commit tools may stage and commit only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md` because curator and dreamer roles need to preserve memory edits and dream reports without gaining arbitrary repository-write authority. Unrelated untracked files remain visible through status but outside the stage/commit allowlist so model-driven commits do not sweep up local config, backups, or test artifacts.
+Standalone commit tools may stage and commit only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md` because update and dreamer roles need to preserve memory edits and dream reports without gaining arbitrary repository-write authority. The retrieve role does not receive write or git tools at all, so retrieval remains a lower-authority fast path. Unrelated untracked files remain visible through status but outside the stage/commit allowlist so model-driven commits do not sweep up local config, backups, or test artifacts.
 
 ### Standalone tool retry behavior
 
@@ -64,4 +64,4 @@ One-shot standalone calls use an explicit `--session` id and persist native Pyda
 
 ### Queued standalone updates
 
-Standalone async update submissions queue per role/session instead of rejecting while a worker is active because orchestrators may discover multiple durable updates before the previous curator turn completes. The queue is FIFO and the worker drains it through normal session turns so the existing session-history lock remains the ordering authority: retrievals and updates for the same role/session wait on one another, while queue metadata stays cheap to update and visible through `pull`.
+Standalone async update submissions queue per update-session instead of rejecting while a worker is active because orchestrators may discover multiple durable updates before the previous update turn completes. Async state files require their own `session_id` and `role` fields instead of inferring them from the read path, because queued work is operational state and a malformed or pre-split file should fail visibly rather than being treated as current update state. The queue is FIFO and the worker drains it through normal update session turns so the existing session-history lock remains the ordering authority for writes, while retrieval uses its own session role and can be tuned independently for latency.

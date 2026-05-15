@@ -74,21 +74,29 @@ class RightMemoryRuntime:
         return Agent(
             model=build_model(self.config),
             instructions=build_instructions(self.config.memory_root, self.config.role),
-            tools=[
-                _retryable_tool(self.tools.list_files),
-                _retryable_tool(self.tools.read_file),
-                _retryable_tool(self.tools.read_around),
-                _retryable_tool(self.tools.search_files),
-                _retryable_tool(self.tools.outline_file),
-                _retryable_tool(self.tools.apply_patch),
-                _retryable_tool(self.tools.git_status),
-                _retryable_tool(self.tools.git_diff),
-                _retryable_tool(self.tools.git_add),
-                _retryable_tool(self.tools.git_commit),
-                _retryable_tool(self.tools.validate_memory),
-            ],
+            tools=self._agent_tools(),
             retries=self.config.max_tool_retries,
         )
+
+    def _agent_tools(self) -> list[Callable[..., Any]]:
+        read_tools = [
+            _retryable_tool(self.tools.list_files),
+            _retryable_tool(self.tools.read_file),
+            _retryable_tool(self.tools.read_around),
+            _retryable_tool(self.tools.search_files),
+            _retryable_tool(self.tools.outline_file),
+            _retryable_tool(self.tools.validate_memory),
+        ]
+        if self.config.role == "retrieve":
+            return read_tools
+        return [
+            *read_tools,
+            _retryable_tool(self.tools.apply_patch),
+            _retryable_tool(self.tools.git_status),
+            _retryable_tool(self.tools.git_diff),
+            _retryable_tool(self.tools.git_add),
+            _retryable_tool(self.tools.git_commit),
+        ]
 
     def _model_settings(self) -> dict[str, Any] | None:
         if not self.config.model_kwargs:

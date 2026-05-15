@@ -13,7 +13,7 @@ from .runtime import RightMemoryRuntime
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="rightmemory")
-    parser.add_argument("role", choices=("curator", "dreamer"), help="RightMemory runtime role")
+    parser.add_argument("role", choices=("retrieve", "update", "dreamer"), help="RightMemory runtime role")
     if not argv or argv[0] in {"-h", "--help"}:
         parser.parse_args(argv)
         return 0
@@ -22,6 +22,27 @@ def main(argv: list[str] | None = None) -> int:
     remaining = argv[1:]
     if remaining == ["-h"] or remaining == ["--help"]:
         _turn_parser(args.role).parse_args(remaining)
+        return 0
+
+    if remaining and remaining[0] == "submit":
+        if args.role != "update":
+            raise ValueError("submit is only supported for the update role")
+        if _is_help_request(remaining[1:]):
+            _submit_parser(args.role).parse_args(remaining[1:])
+            return 0
+    if remaining and remaining[0] == "pull":
+        if args.role != "update":
+            raise ValueError("pull is only supported for the update role")
+        if _is_help_request(remaining[1:]):
+            _pull_parser(args.role).parse_args(remaining[1:])
+            return 0
+    if remaining and remaining[0] == "_submitted-worker" and args.role != "update":
+        raise ValueError("_submitted-worker is only supported for the update role")
+    if remaining and remaining[0] == "chat" and _is_help_request(remaining[1:]):
+        _chat_parser(args.role).parse_args(remaining[1:])
+        return 0
+    if remaining and remaining[0] == "daemon" and _is_help_request(remaining[1:]):
+        _daemon_parser(args.role).parse_args(remaining[1:])
         return 0
 
     config = load_config(args.role)
@@ -55,6 +76,10 @@ def main(argv: list[str] | None = None) -> int:
         return _session_turn(runtime, turn_args.session, turn_args.message)
     finally:
         runtime.cleanup()
+
+
+def _is_help_request(args: list[str]) -> bool:
+    return args == ["-h"] or args == ["--help"]
 
 
 def _chat_parser(role: str) -> argparse.ArgumentParser:

@@ -111,19 +111,23 @@ RightMemory also ships an independent chat runtime that does not depend on Codex
 ./install.sh --mode standalone ~/.rightmemory ~/.codex/skills
 ```
 
-Standalone install mode uses `uv` to install the runtime into a user-local venv, writes a `memory-orchestrator` skill that calls `rightmemory curator` and `rightmemory dreamer` instead of spawning subagents, and removes old `memory-curator` / `memory-dreamer` skill folders from the same skill target. The installed `rightmemory` wrapper is bound to `<memory-root>`.
+Standalone install mode uses `uv` to install the runtime into a user-local venv, writes a `memory-orchestrator` skill that calls `rightmemory retrieve`, `rightmemory update`, and `rightmemory dreamer` instead of spawning subagents, and removes old `memory-curator` / `memory-dreamer` skill folders from the same skill target. The installed `rightmemory` wrapper is bound to `<memory-root>`.
 
 ```bash
-rightmemory curator --session <agent-session-id> "find memory about the standalone mode"
+rightmemory retrieve --session <agent-session-id> "find memory about the standalone mode"
+rightmemory update submit --session <agent-session-id> "remember that MCP should stay optional"
+rightmemory update pull --session <agent-session-id>
 rightmemory dreamer --session <agent-session-id> "run a dream cycle"
-rightmemory curator chat
+rightmemory retrieve chat
+rightmemory update chat
 rightmemory dreamer chat
 ```
 
 For machine callers:
 
 ```bash
-rightmemory curator daemon --stdio-json
+rightmemory retrieve daemon --stdio-json
+rightmemory update daemon --stdio-json
 rightmemory dreamer daemon --stdio-json
 ```
 
@@ -137,24 +141,29 @@ The daemon reads JSON lines from stdin and writes JSON lines to stdout:
 Standalone mode is intentionally small:
 
 - It uses `pydantic_ai.Agent` as a chat-like agent loop.
-- The model works through sandboxed tools for file listing, search, outline, context reads, Codex-style patches, git inspection, and memory validation.
+- Retrieve uses sandboxed read-only tools for file listing, search, outline, context reads, and memory validation; update and dreamer also get Codex-style patches and narrow git tools.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different location.
-- Curator and dreamer are separate runtime roles selected by the command line.
+- Retrieve, update, and dreamer are separate runtime roles selected by the command line.
 - Role-specific model settings are read from `<memory-root>/rightmemory.toml`.
 - One-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`, so normal agent callers can make separate process calls without losing multi-turn context; `.runtime/` is self-ignored so session state does not dirty memory commits.
 - Async `submit` calls for the same `--session` are queued FIFO when a worker is already running, and `pull` reports the current job id plus queued count / ids.
 - Multi-turn daemon context is preserved with Pydantic AI message history.
 - MCP support is not part of the MVP; it can be added later as an adapter over the same daemon.
 
-OpenAI-compatible curator config:
+OpenAI-compatible retrieve/update config:
 
 ```toml
-[curator.model]
-model_id = "hosted_vllm//models/example-chat-model"
+[retrieve.model]
+model_id = "hosted_vllm//models/example-fast-model"
 api_base = "http://127.0.0.1:8000/v1"
 api_key = "<token>"
 
-[curator.model.kwargs]
+[update.model]
+model_id = "hosted_vllm//models/example-accurate-model"
+api_base = "http://127.0.0.1:8000/v1"
+api_key = "<token>"
+
+[update.model.kwargs]
 extra_body = { chat_template_kwargs = { thinking = true, preserve_thinking = true } }
 ```
 
@@ -169,12 +178,14 @@ api_key = "<token>"
 
 `model_id` is required for the role being started. `anthropic/...` model ids use `AnthropicModel`; other model ids use `OpenAIChatModel` with `OpenAIProvider`, so OpenAI-compatible local gateways can keep using `api_base` and `api_key`. `[<role>.model.kwargs]` is forwarded as Pydantic AI model settings; unsupported keys fail fast instead of being silently ignored. RightMemory does not inject environment variables from config and does not set generation parameters such as `temperature` or `max_tokens` by default.
 
+Configs must use `[retrieve.model]`, `[update.model]`, and `[dreamer.model]`; old `[curator.model]` configs are rejected so stale read-write settings are migrated deliberately.
+
 Run it from this repository during development:
 
 ```bash
 uv --cache-dir .uv-cache venv .venv
 uv --cache-dir .uv-cache pip install -e . --python .venv/bin/python
-rightmemory curator chat
+rightmemory retrieve chat
 ```
 
 The MVP keeps the boundary simple: it exposes only sandboxed tools rooted at the configured memory root and instructs the agent not to access paths outside that directory. It does not yet provide an OS-level jail.
