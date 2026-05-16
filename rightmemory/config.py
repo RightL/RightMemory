@@ -25,6 +25,7 @@ class RuntimeConfig:
     model_kwargs: dict[str, Any] = field(default_factory=dict)
     memory_root: Path = MEMORY_ROOT
     max_tool_retries: int = DEFAULT_MAX_TOOL_RETRIES
+    debug_trace: bool = False
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,7 @@ def load_config(role: str) -> RuntimeConfig:
     if not MEMORY_ROOT.exists():
         raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
 
-    _reject_unknown_keys(data, {*ROLES, "review"}, "top-level")
+    _reject_unknown_keys(data, {*ROLES, "review", "debug"}, "top-level")
     role_section = data.get(role)
     if not isinstance(role_section, dict):
         raise ValueError(f"{CONFIG_PATH} must contain a [{role}.model] table")
@@ -77,6 +78,7 @@ def load_config(role: str) -> RuntimeConfig:
         model_kwargs=model_kwargs,
         memory_root=MEMORY_ROOT,
         max_tool_retries=DEFAULT_MAX_TOOL_RETRIES,
+        debug_trace=_debug_trace(data.get("debug", {})),
     )
 
 
@@ -86,7 +88,7 @@ def load_review_config() -> ReviewConfig:
     if not MEMORY_ROOT.exists():
         raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
 
-    _reject_unknown_keys(data, {*ROLES, "review"}, "top-level")
+    _reject_unknown_keys(data, {*ROLES, "review", "debug"}, "top-level")
     section = data.get("review", {})
     if section is None:
         section = {}
@@ -147,6 +149,18 @@ def _model_kwargs(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("[model.kwargs] must be a TOML table")
     return dict(value)
+
+
+def _debug_trace(value: object) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, dict):
+        raise ValueError("[debug] must be a TOML table")
+    _reject_unknown_keys(value, {"trace"}, "[debug]")
+    trace = value.get("trace", False)
+    if not isinstance(trace, bool):
+        raise ValueError("[debug].trace must be a boolean")
+    return trace
 
 
 def _role(value: str) -> str:

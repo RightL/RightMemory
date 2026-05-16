@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from functools import wraps
 from typing import Any
 
 from .config import RuntimeConfig
+from .debug import DebugTrace
 from .prompt import build_instructions
 from .session import MemoryWriteLock, MessageSessionStore
 from .tools import MemoryTools
@@ -35,6 +36,7 @@ class RightMemoryRuntime:
         self.tools = MemoryTools(config.memory_root)
         self.sessions = MessageSessionStore(config.memory_root, config.role)
         self._message_history: list[Any] = []
+        self._active_trace: DebugTrace | None = None
         self.agent = self._build_agent()
 
     def run_turn(self, message: str) -> str:
@@ -55,16 +57,34 @@ class RightMemoryRuntime:
     def run_session_turn(self, session_id: str, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
-        with self._memory_write_lock():
-            with self.sessions.locked(session_id) as session:
-                history_json = session.load_json()
-                history = self._load_message_history(history_json) if history_json is not None else None
-                result = self.agent.run_sync(
-                    message,
-                    message_history=history,
-                    model_settings=self._model_settings(),
-                )
-                session.save_json(self._dump_message_history(result))
+        with self._debug_trace(session_id) as trace:
+            self._trace(
+                "run_started",
+                message=message,
+                model_id=self.config.model_id,
+                api_base=self.config.api_base,
+            )
+            try:
+                with self._memory_write_lock():
+                    with self.sessions.locked(session_id) as session:
+                        history_json = session.load_json()
+                        history = self._load_message_history(history_json) if history_json is not None else None
+                        self._trace("history_loaded", message_count=len(history or []))
+                        self._trace("model_started")
+                        result = self.agent.run_sync(
+                            message,
+                            message_history=history,
+                            model_settings=self._model_settings(),
+                        )
+                        output = getattr(result, "output", None)
+                        self._trace("model_finished", output=str(output if output is not None else result))
+                        session.save_json(self._dump_message_history(result))
+                        self._trace("history_saved", path=str(session.paths.history))
+            except Exception as exc:
+                self._trace("run_failed", error_type=type(exc).__name__, error=str(exc))
+                raise
+            output = getattr(result, "output", None)
+            self._trace("run_finished", output=str(output if output is not None else result))
         output = getattr(result, "output", None)
         return str(output if output is not None else result)
 
@@ -88,23 +108,43 @@ class RightMemoryRuntime:
 
     def _agent_tools(self) -> list[Callable[..., Any]]:
         read_tools = [
-            _retryable_tool(self.tools.list_files),
-            _retryable_tool(self.tools.read_file),
-            _retryable_tool(self.tools.read_around),
-            _retryable_tool(self.tools.search_files),
-            _retryable_tool(self.tools.outline_file),
-            _retryable_tool(self.tools.validate_memory),
+            self._agent_tool(self.tools.list_files),
+            self._agent_tool(self.tools.read_file),
+            self._agent_tool(self.tools.read_around),
+            self._agent_tool(self.tools.search_files),
+            self._agent_tool(self.tools.outline_file),
+            self._agent_tool(self.tools.validate_memory),
         ]
         if self.config.role == "retrieve":
             return read_tools
         return [
             *read_tools,
-            _retryable_tool(self.tools.apply_patch),
-            _retryable_tool(self.tools.git_status),
-            _retryable_tool(self.tools.git_diff),
-            _retryable_tool(self.tools.git_add),
-            _retryable_tool(self.tools.git_commit),
+            self._agent_tool(self.tools.apply_patch),
+            self._agent_tool(self.tools.git_status),
+            self._agent_tool(self.tools.git_diff),
+            self._agent_tool(self.tools.git_add),
+            self._agent_tool(self.tools.git_commit),
         ]
+
+    def _agent_tool(self, tool: Callable[..., Any]) -> Callable[..., Any]:
+        wrapped = _retryable_tool(tool)
+        if self.config.debug_trace:
+            wrapped = self._traceable_tool(wrapped)
+        return wrapped
+
+    def _traceable_tool(self, tool: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(tool)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            self._trace("tool_started", tool=tool.__name__)
+            try:
+                result = tool(*args, **kwargs)
+            except Exception as exc:
+                self._trace("tool_failed", tool=tool.__name__, error_type=type(exc).__name__, error=str(exc))
+                raise
+            self._trace("tool_finished", tool=tool.__name__, result=_short_trace_value(result))
+            return result
+
+        return wrapper
 
     def _model_settings(self) -> dict[str, Any] | None:
         if not self.config.model_kwargs:
@@ -119,6 +159,23 @@ class RightMemoryRuntime:
         cleanup = getattr(self.agent, "cleanup", None)
         if callable(cleanup):
             cleanup()
+
+    @contextmanager
+    def _debug_trace(self, session_id: str):
+        if not self.config.debug_trace:
+            yield None
+            return
+        previous = self._active_trace
+        trace = DebugTrace(self.config.memory_root, self.config.role, session_id)
+        self._active_trace = trace
+        try:
+            yield trace
+        finally:
+            self._active_trace = previous
+
+    def _trace(self, event: str, **fields: Any) -> None:
+        if self._active_trace is not None:
+            self._active_trace.append(event, **fields)
 
     def _load_message_history(self, data: bytes) -> list[Any]:
         try:
@@ -202,3 +259,10 @@ def _retryable_tool(tool: Callable[..., Any]) -> Callable[..., Any]:
             raise ModelRetry(str(exc)) from exc
 
     return wrapper
+
+
+def _short_trace_value(value: Any) -> str:
+    text = str(value)
+    if len(text) > 1000:
+        return text[:1000] + "...[truncated]"
+    return text

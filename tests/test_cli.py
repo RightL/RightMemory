@@ -121,6 +121,71 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(roles, ["reviewer"])
         self.assertEqual(stdout.getvalue().strip(), "reviewed: 1")
 
+    def test_review_watch_runs_scans_until_interrupted(self):
+        roles = []
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        class FakeScanner:
+            def __init__(self, config, run_reviewer):
+                self.config = config
+                self.run_reviewer = run_reviewer
+
+            def scan_once(self):
+                return type("Result", (), {"format": lambda self: "reviewed: 1"})()
+
+        def fake_load_config(role):
+            roles.append(role)
+            return object()
+
+        with (
+            patch("rightmemory.cli.load_config", fake_load_config),
+            patch("rightmemory.cli.load_review_config", return_value=object()),
+            patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+            patch("rightmemory.cli.ReviewScanner", FakeScanner),
+            patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt),
+            patch("sys.stdout", stdout),
+            patch("sys.stderr", stderr),
+        ):
+            result = main(["review", "watch", "--interval", "5"])
+
+        self.assertEqual(result, 130)
+        self.assertEqual(roles, ["reviewer"])
+        self.assertIn("rightmemory review scan", stdout.getvalue())
+        self.assertIn("reviewed: 1", stdout.getvalue())
+        self.assertIn("rightmemory review watch stopped", stderr.getvalue())
+
+    def test_review_watch_default_interval_is_two_hours(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        class FakeScanner:
+            def __init__(self, config, run_reviewer):
+                self.config = config
+                self.run_reviewer = run_reviewer
+
+            def scan_once(self):
+                return type("Result", (), {"format": lambda self: "reviewed: 1"})()
+
+        with (
+            patch("rightmemory.cli.load_config", return_value=object()),
+            patch("rightmemory.cli.load_review_config", return_value=object()),
+            patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+            patch("rightmemory.cli.ReviewScanner", FakeScanner),
+            patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+            patch("sys.stdout", stdout),
+            patch("sys.stderr", stderr),
+        ):
+            result = main(["review", "watch"])
+
+        self.assertEqual(result, 130)
+        sleep.assert_called_once_with(7200)
+
+    def test_review_watch_rejects_non_positive_interval(self):
+        with patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")):
+            with self.assertRaises(ValueError):
+                main(["review", "watch", "--interval", "0"])
+
     def test_review_normalize_prints_normalized_session_without_loading_config(self):
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as tempdir:

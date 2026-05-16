@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,8 @@ from .async_update import AsyncUpdateStore, format_state
 from .config import ROLES, load_config, load_review_config
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
+
+DEFAULT_REVIEW_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -126,6 +130,14 @@ def _review_main(argv: list[str]) -> int:
     scan = subparsers.add_parser("scan", help="scan configured transcript sources")
     scan.add_argument("--once", action="store_true", help="run one scan pass and exit")
     scan.add_argument("--since-days", type=int, help="only review transcript files modified within this many days")
+    watch = subparsers.add_parser("watch", help="keep scanning configured transcript sources")
+    watch.add_argument(
+        "--interval",
+        type=int,
+        default=DEFAULT_REVIEW_WATCH_INTERVAL_SECONDS,
+        help="seconds to sleep between completed scan passes",
+    )
+    watch.add_argument("--since-days", type=int, help="only review transcript files modified within this many days")
     normalize = subparsers.add_parser("normalize", help="print normalized transcript JSON without running reviewer")
     normalize.add_argument("--source", choices=("codex", "claude"), required=True, help="transcript provider format")
     normalize.add_argument("--path", required=True, help="path to one provider transcript file")
@@ -138,20 +150,40 @@ def _review_main(argv: list[str]) -> int:
     if args.command == "scan":
         if not args.once:
             raise ValueError("review scan currently requires --once")
-        reviewer_config = load_config("reviewer")
-        review_config = load_review_config()
-        if args.since_days is not None:
-            if args.since_days < 1:
-                raise ValueError("--since-days must be a positive integer")
-            review_config = replace(review_config, since_days=args.since_days)
-        runtime = RightMemoryRuntime(reviewer_config)
-        try:
-            scanner = ReviewScanner(review_config, runtime.run_session_turn)
-            print(scanner.scan_once().format())
-            return 0
-        finally:
-            runtime.cleanup()
+        print(_run_review_scan(args.since_days).format())
+        return 0
+    if args.command == "watch":
+        return _review_watch(args.interval, args.since_days)
     raise ValueError(f"unknown review command: {args.command}")
+
+
+def _run_review_scan(since_days: int | None = None):
+    reviewer_config = load_config("reviewer")
+    review_config = load_review_config()
+    if since_days is not None:
+        if since_days < 1:
+            raise ValueError("--since-days must be a positive integer")
+        review_config = replace(review_config, since_days=since_days)
+    runtime = RightMemoryRuntime(reviewer_config)
+    try:
+        scanner = ReviewScanner(review_config, runtime.run_session_turn)
+        return scanner.scan_once()
+    finally:
+        runtime.cleanup()
+
+
+def _review_watch(interval: int, since_days: int | None = None) -> int:
+    if interval < 1:
+        raise ValueError("--interval must be a positive integer")
+    try:
+        while True:
+            timestamp = datetime.now(UTC).isoformat()
+            print(f"[{timestamp}] rightmemory review scan", flush=True)
+            print(_run_review_scan(since_days).format(), flush=True)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("rightmemory review watch stopped", file=sys.stderr)
+        return 130
 
 
 def _review_normalize(source: str, path: str, already_reviewed_turns: int) -> int:

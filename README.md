@@ -198,6 +198,7 @@ Standalone mode is intentionally small:
 - Retrieve, update, dreamer, and reviewer are separate runtime roles selected by command line or scanner.
 - Role-specific model settings are read from `<memory-root>/rightmemory.toml`.
 - One-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`, so normal agent callers can make separate process calls without losing multi-turn context; `.runtime/` is self-ignored so session state does not dirty memory commits.
+- Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - The installer creates a root `.gitignore` allowlist so git status only surfaces `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; existing user `.gitignore` files are preserved.
 - Async `update submit` calls for the same `--session` accumulate as pending candidates. The worker waits one hour from the latest submit, then sends the pending candidates to the update role as one batch; `pull` reports phase, pending candidates, current batch, and timing.
 - Multi-turn daemon context is preserved with Pydantic AI message history.
@@ -238,9 +239,26 @@ api_key = "<token>"
 
 Configs must use `[retrieve.model]`, `[update.model]`, `[dreamer.model]`, and optionally `[reviewer.model]`; old `[curator.model]` configs are rejected so stale read-write settings are migrated deliberately.
 
+To debug in-flight standalone calls, enable append-only trace logs:
+
+```toml
+[debug]
+trace = true
+```
+
+Trace files include run, history-save, and tool events. They may include prompts, model outputs, and tool results, so leave tracing off unless you need live debugging.
+
 ### Automatic Transcript Review
 
-RightMemory can scan idle provider chat sessions and run the standalone `reviewer` role. The preferred automation model is an external scheduler, such as cron or launchd, calling one bounded scan at a time:
+RightMemory can scan idle provider chat sessions and run the standalone `reviewer` role. For a long-running local process, use `watch`:
+
+```bash
+rightmemory review watch
+```
+
+`watch` runs one full scan immediately, processes all eligible sessions found in that pass, then sleeps before checking again. The default interval is two hours; override it with `--interval <seconds>`.
+
+For cron, launchd, or other supervisors, call one bounded scan at a time:
 
 ```bash
 rightmemory review scan --once

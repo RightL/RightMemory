@@ -147,6 +147,42 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.model_id, "openai/reviewer")
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_debug_trace_config(self):
+        config_path = self._write_config(
+            """
+            [retrieve.model]
+            model_id = "openai/fast"
+
+            [debug]
+            trace = true
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_config("retrieve")
+
+        self.assertTrue(config.debug_trace)
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_rejects_unknown_debug_key(self):
+        config_path = self._write_config(
+            """
+            [retrieve.model]
+            model_id = "openai/fast"
+
+            [debug]
+            trace = true
+            format = "jsonl"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_config("retrieve")
+
+        self.assertIn("unsupported [debug] config key(s): format", str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_review_config_sources(self):
         config_path = self._write_config(
             """
@@ -276,6 +312,71 @@ class RuntimeTests(unittest.TestCase):
         gitignore_path = Path(self.tempdir.name) / ".runtime" / ".gitignore"
         self.assertEqual(gitignore_path.read_text(encoding="utf-8"), "*\n")
 
+    def test_debug_trace_writes_session_events_without_changing_history(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            debug_trace=True,
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_session_turn("agent-session", "remember one")
+
+        self.assertEqual(result, "reply 1")
+        history_path = Path(self.tempdir.name) / ".runtime" / "sessions" / "retrieve" / "agent-session.json"
+        self.assertEqual(json.loads(history_path.read_text(encoding="utf-8")), ["message 1"])
+        trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "retrieve" / "agent-session.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["run_started", "history_loaded", "model_started", "model_finished", "history_saved", "run_finished"],
+        )
+        self.assertEqual(events[0]["message"], "remember one")
+        self.assertEqual(events[0]["model_id"], "openai/test")
+        self.assertEqual(events[3]["output"], "reply 1")
+
+    def test_debug_trace_records_tool_events(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            debug_trace=True,
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+            with runtime._debug_trace("agent-session"):
+                runtime.agent.kwargs["tools"][0]("*.md")
+
+        trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "retrieve" / "agent-session.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([event["event"] for event in events], ["tool_started", "tool_finished"])
+        self.assertEqual(events[0]["tool"], "list_files")
+
+    def test_debug_trace_records_failures_before_history_save(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            debug_trace=True,
+        )
+        fake_modules = self._fake_pydantic_modules()
+        fake_modules["pydantic_ai"].Agent = self._failing_agent()
+
+        with patch.dict("sys.modules", fake_modules):
+            runtime = RightMemoryRuntime(config)
+            with self.assertRaises(RuntimeError):
+                runtime.run_session_turn("agent-session", "remember one")
+
+        history_path = Path(self.tempdir.name) / ".runtime" / "sessions" / "retrieve" / "agent-session.json"
+        self.assertFalse(history_path.exists())
+        trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "retrieve" / "agent-session.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(events[-1]["event"], "run_failed")
+        self.assertEqual(events[-1]["error_type"], "RuntimeError")
+
     def test_run_session_turn_rejects_path_session_id(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
 
@@ -381,6 +482,16 @@ class RuntimeTests(unittest.TestCase):
             "pydantic_ai.models.anthropic": types.SimpleNamespace(AnthropicModel=FakeModel),
             "pydantic_ai.providers.anthropic": types.SimpleNamespace(AnthropicProvider=FakeProvider),
         }
+
+    def _failing_agent(self):
+        class FailingAgent:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def run_sync(self, message, message_history=None, model_settings=None):
+                raise RuntimeError("model failed")
+
+        return FailingAgent
 
 
 class PromptTests(unittest.TestCase):
