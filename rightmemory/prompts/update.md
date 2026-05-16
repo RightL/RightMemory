@@ -14,6 +14,7 @@
 - Preserve durable meaning rather than the raw event that produced the candidate. Durable memory should help a future agent act, decide, retrieve context, or avoid a repeated mistake.
 - Prefer stable preferences, workflow rules, environment or tooling constraints, project facts, decisions, blockers, and repeated failure patterns.
 - Avoid writing raw process logs, trivial session traces, overly granular facts, duplicate or near-duplicate facts, and details that only mattered during the just-finished turn.
+- Place memory in a clear tree. Use meaningful `##` or `###` headings for related facts, and adjust nearby structure when the current group is too broad, flat, or overloaded.
 - When candidates conflict with existing memory, inspect the relevant context before editing. Replace or revise outdated memory when the newer evidence is clear; ask one concise question when the conflict cannot be judged safely.
 - When a batch contains related candidates, reconcile the batch as a whole instead of appending one node per candidate. Candidate ids are operational labels; do not preserve them in memory unless they are meaningful to the user.
 

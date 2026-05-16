@@ -107,6 +107,8 @@ RIGHTMEMORY_HOME="$DATA_HOME/rightmemory"
 RIGHTMEMORY_VENV="$RIGHTMEMORY_HOME/venv"
 RIGHTMEMORY_BIN_DIR="$HOME/.local/bin"
 RIGHTMEMORY_BIN="$RIGHTMEMORY_BIN_DIR/rightmemory"
+EXAMPLE_START_MARKER="rightmemory:example:start"
+EXAMPLE_END_MARKER="rightmemory:example:end"
 
 echo "Installing RightMemory"
 echo "  MODE         = $MODE"
@@ -173,6 +175,99 @@ remove_skill_dir() {
   fi
 }
 
+example_block_file() {
+  dst="$1"
+  awk -v end="$EXAMPLE_END_MARKER" '
+    { print }
+    index($0, end) { found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$REPO_ROOT/MEMORY.example.md" > "$dst"
+}
+
+refresh_marked_example() {
+  memory_file="$1"
+  block_file="$2"
+  tmp="${memory_file}.tmp"
+  awk -v start="$EXAMPLE_START_MARKER" -v end="$EXAMPLE_END_MARKER" -v block="$block_file" '
+    function emit_block(line) {
+      while ((getline line < block) > 0) print line
+      close(block)
+    }
+    !skipping && index($0, start) { emit_block(); skipping = 1; changed = 1; next }
+    skipping && index($0, end) { skipping = 0; next }
+    !skipping { print }
+    END { if (!changed || skipping) exit 1 }
+  ' "$memory_file" > "$tmp"
+  mv "$tmp" "$memory_file"
+}
+
+migrate_known_example() {
+  memory_file="$1"
+  block_file="$2"
+  tmp="${memory_file}.tmp"
+  first_line="$(sed -n '1p' "$memory_file")"
+
+  if [ "$first_line" = "# Starter Knowledge Base {#starter-knowledge-base}" ]; then
+    awk -v block="$block_file" '
+      function emit_block(line) {
+        while ((getline line < block) > 0) print line
+        close(block)
+      }
+      NR == 1 { emit_block(); skipping = 1; changed = 1; next }
+      skipping && $0 == "---" { skipping = 0; next }
+      !skipping { print }
+      END { if (!changed || skipping) exit 1 }
+    ' "$memory_file" > "$tmp"
+    mv "$tmp" "$memory_file"
+    return 0
+  fi
+
+  if grep -q "^# Sample Project Graph .*{#sample-project-graph}" "$memory_file"; then
+    awk -v block="$block_file" '
+      function emit_block(line) {
+        while ((getline line < block) > 0) print line
+        close(block)
+      }
+      !changed && /^# Sample Project Graph .*{#sample-project-graph}/ { emit_block(); skipping = 1; changed = 1; next }
+      skipping && /^# Cross-Session Agent Behavior/ { skipping = 0 }
+      !skipping { print }
+      END { if (!changed || skipping) exit 1 }
+    ' "$memory_file" > "$tmp"
+    mv "$tmp" "$memory_file"
+    return 0
+  fi
+
+  rm -f "$tmp"
+  return 1
+}
+
+install_or_refresh_memory() {
+  memory_file="$MEMORY_ROOT/MEMORY.md"
+  block_file="$(mktemp "${TMPDIR:-/tmp}/rightmemory-example-block.XXXXXX")"
+  example_block_file "$block_file"
+
+  if [ ! -f "$memory_file" ]; then
+    cp "$REPO_ROOT/MEMORY.example.md" "$memory_file"
+    echo "  [new]     $memory_file  (from MEMORY.example.md)"
+    rm -f "$block_file"
+    return
+  fi
+
+  if grep -q "$EXAMPLE_START_MARKER" "$memory_file" && grep -q "$EXAMPLE_END_MARKER" "$memory_file"; then
+    refresh_marked_example "$memory_file" "$block_file"
+    echo "  [refresh] $memory_file  (managed example block)"
+    rm -f "$block_file"
+    return
+  fi
+
+  if migrate_known_example "$memory_file" "$block_file"; then
+    echo "  [refresh] $memory_file  (migrated known example block)"
+  else
+    echo "  [keep]    $memory_file already exists; no managed example block found"
+  fi
+  rm -f "$block_file"
+}
+
 install_standalone_runtime_layout() {
   if ! command -v uv >/dev/null 2>&1; then
     echo "Missing required command: uv" >&2
@@ -200,14 +295,9 @@ EOF
   echo "  [install] $RIGHTMEMORY_BIN"
 }
 
-# 1. Initial MEMORY.md (do not overwrite existing user data)
+# 1. MEMORY.md seed / managed example refresh
 mkdir -p "$MEMORY_ROOT/dream_logs"
-if [ -f "$MEMORY_ROOT/MEMORY.md" ]; then
-  echo "  [keep]    $MEMORY_ROOT/MEMORY.md already exists"
-else
-  cp "$REPO_ROOT/MEMORY.example.md" "$MEMORY_ROOT/MEMORY.md"
-  echo "  [new]     $MEMORY_ROOT/MEMORY.md  (from MEMORY.example.md)"
-fi
+install_or_refresh_memory
 
 # 2. Init git repo for memory tracking (the dreamer/reviewer need git for revertability)
 if [ -d "$MEMORY_ROOT/.git" ]; then

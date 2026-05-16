@@ -95,7 +95,8 @@ def _tool_guidance(role: str) -> str:
         "those operations as textual replacements.\n"
         "- Commit tools may stage and commit only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; ignore "
         "unrelated untracked files unless the caller explicitly asks about them.\n"
-        "- Prefer small, reviewable edits over broad rewrites."
+        "- Choose the edit shape that makes memory clearer; create, move, split, merge, or rewrite structure "
+        "when that improves the tree or graph."
     )
 
 

@@ -1,4 +1,4 @@
-> This starter template is copied to `MEMORY.md` on first install. Add real user/project memory before the first example heading. Do not treat sample nodes as user facts. Once real memory before this template section exceeds 50 lines, the dreamer may remove this entire example/template section from the installed `MEMORY.md`.
+> This starter template is managed by RightMemory install. Add real user/project memory before this template block. Do not treat sample nodes as user facts. Once real memory before this template section exceeds 50 lines, the dreamer may remove this entire example/template section from the installed `MEMORY.md`. <!-- rightmemory:example:start -->
 
 # Sample Project Graph — Example Domain {#sample-project-graph}
 
@@ -47,5 +47,7 @@ Store cross-project behavior memory here when it should change how future agents
 - `pref-env-check` Future agents should check durable memory and local project context for the intended runtime environment before installing dependencies or guessing a Python environment. → []
 
 ---
+
+<!-- rightmemory:example:end -->
 
 # User Pending Task and Thoughts (user-edited only — AI agents must not modify this section)

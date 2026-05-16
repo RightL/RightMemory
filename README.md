@@ -28,7 +28,7 @@ For Codex standalone mode:
 ./install.sh --mode standalone ~/.rightmemory ~/.codex/skills
 ```
 
-After install, open `~/.rightmemory/MEMORY.md` and replace the sample domains with your own. Re-run the installer after pulling updates; existing `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/` are preserved.
+After install, open `~/.rightmemory/MEMORY.md` and add your own memory before the managed example block. Re-run the installer after pulling updates; existing real memory is preserved, and the managed example block refreshes when present.
 
 ## Memory Model
 
@@ -154,7 +154,7 @@ Standalone mode requires `uv` and installs the runtime under `${XDG_DATA_HOME:-$
 
 ## Everyday Use
 
-1. Edit `MEMORY.md` after install and replace the sample domains with your own.
+1. Edit `MEMORY.md` after install and add your own memory before the managed example block.
 2. Let the installed orchestrator decide when a user request needs memory retrieval.
 3. Let the curator or update role write durable updates after work that should affect future sessions.
 4. Ask for a dream cycle when you want cleanup, consolidation, or stale-memory review.

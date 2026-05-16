@@ -26,6 +26,7 @@ Use the whole session for context, but only turns where `i > already_reviewed_tu
 - Candidate memory when the session contains a useful signal that may guide future agents but is not yet confirmed enough to treat as settled memory.
 
 Preserve the durable meaning, not the event narrative. Prefer compact behavior or fact nodes over session summaries.
+Place memory in a clear tree. Use meaningful `##` or `###` headings for related facts, and adjust nearby structure when the current group is too broad, flat, or overloaded.
 
 ## Implicit And Candidate Memory
 
