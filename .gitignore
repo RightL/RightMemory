@@ -9,3 +9,4 @@ debug_out/
 .env.*
 *.local.toml
 rightmemory.toml
+AGENTS.md

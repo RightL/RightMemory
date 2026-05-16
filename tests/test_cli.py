@@ -121,9 +121,11 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(roles, ["update"])
         self.assertIn("status: running", stdout.getvalue())
+        self.assertIn("phase: waiting", stdout.getvalue())
         self.assertIn("session: agent-1", stdout.getvalue())
-        self.assertIn("current_id: 1", stdout.getvalue())
-        self.assertIn("queued: 0", stdout.getvalue())
+        self.assertIn("current_batch: 0", stdout.getvalue())
+        self.assertIn("pending: 1", stdout.getvalue())
+        self.assertIn("pending_ids: 1", stdout.getvalue())
 
     def test_submit_is_only_supported_for_update_role(self):
         with patch("rightmemory.cli.load_config", return_value=object()):
@@ -143,7 +145,7 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 0)
         self.assertIn("rightmemory update submit", stdout.getvalue())
 
-    def test_main_queues_async_update_while_worker_is_running(self):
+    def test_main_accumulates_pending_update_while_worker_is_waiting(self):
         stdout = io.StringIO()
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -170,11 +172,12 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(popen.call_count, 1)
         output = stdout.getvalue()
         self.assertIn("status: running", output)
-        self.assertIn("current_id: 1", output)
-        self.assertIn("queued: 1", output)
-        self.assertIn("queued_ids: 2", output)
+        self.assertIn("phase: waiting", output)
+        self.assertIn("current_batch: 0", output)
+        self.assertIn("pending: 2", output)
+        self.assertIn("pending_ids: 1, 2", output)
 
-    def test_pull_marks_dead_worker_failed_and_keeps_queued_updates(self):
+    def test_pull_marks_dead_worker_failed_and_keeps_pending_updates(self):
         stdout = io.StringIO()
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -204,9 +207,9 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(pull, 0)
         output = stdout.getvalue()
         self.assertIn("status: failed", output)
-        self.assertIn("current_id: 1", output)
-        self.assertIn("queued: 1", output)
-        self.assertIn("queued_ids: 2", output)
+        self.assertIn("current_batch: 0", output)
+        self.assertIn("pending: 2", output)
+        self.assertIn("pending_ids: 1, 2", output)
         self.assertIn("error: worker process exited before writing result: pid 123", output)
 
     def test_main_pulls_async_update_state(self):
@@ -224,7 +227,7 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("status: idle", stdout.getvalue())
 
-    def test_submitted_worker_processes_queue_in_order(self):
+    def test_submitted_worker_processes_pending_updates_as_one_batch(self):
         calls = []
 
         class RecordingRuntime(FakeRuntime):
@@ -241,6 +244,7 @@ class JsonRequestTests(unittest.TestCase):
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.async_update.subprocess.Popen") as popen,
+                patch("rightmemory.async_update.UPDATE_DEBOUNCE_SECONDS", 0),
                 patch("rightmemory.async_update._process_exists", return_value=True),
                 patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
                 patch("sys.stdout", io.StringIO()),
@@ -261,10 +265,14 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(pull_result, 0)
-        self.assertEqual(calls, [("agent-1", "first"), ("agent-1", "second")])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "agent-1")
+        self.assertIn("Process the following submitted memory update candidates as one batch.", calls[0][1])
+        self.assertIn("first", calls[0][1])
+        self.assertIn("second", calls[0][1])
         self.assertIn("status: succeeded", stdout.getvalue())
-        self.assertIn("queued: 0", stdout.getvalue())
-        self.assertIn("result: session agent-1: second", stdout.getvalue())
+        self.assertIn("pending: 0", stdout.getvalue())
+        self.assertIn("result: session agent-1: Process the following", stdout.getvalue())
 
 
 if __name__ == "__main__":

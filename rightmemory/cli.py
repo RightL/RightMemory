@@ -185,7 +185,7 @@ def _submitted_worker(
     if message_parts:
         raise ValueError("_submitted-worker does not accept message arguments")
     store = AsyncUpdateStore(memory_root, role)
-    state = store.run_queued(session_id, lambda message: runtime.run_session_turn(session_id, message))
+    state = store.run_pending_batches(session_id, lambda message: runtime.run_session_turn(session_id, message))
     if state.status == "failed":
         return 1
     return 0

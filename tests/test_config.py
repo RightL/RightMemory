@@ -324,47 +324,51 @@ class RuntimeTests(unittest.TestCase):
 
 
 class PromptTests(unittest.TestCase):
-    def test_retrieve_prompt_has_curator_skill_and_retrieve_command_behavior(self):
+    def test_retrieve_prompt_has_standalone_role_prompt_and_retrieve_command_behavior(self):
         prompt = build_instructions(Path("/home/example/.rightmemory"), "retrieve")
 
         self.assertIn("The only allowed root directory is /home/example/.rightmemory", prompt)
         self.assertIn("rightmemory retrieve", prompt)
         self.assertIn("read-only retrieval request", prompt)
+        self.assertIn("Standalone Retrieve Role", prompt)
         self.assertNotIn("Every dispatch must start", prompt)
         self.assertNotIn("[RETRIEVE]", prompt)
         self.assertNotIn("[UPDATE]", prompt)
         self.assertIn("RightMemory Schema", prompt)
         self.assertIn("embedded schema above", prompt)
-        self.assertIn("memory-curator", prompt)
+        self.assertNotIn("memory-curator", prompt)
         self.assertNotIn("memory-dreamer", prompt)
         self.assertNotIn("rightmemory-schema.md", prompt)
         self.assertNotIn("{{MEMORY_ROOT}}", prompt)
         self.assertNotIn("{{SKILLS_ROOT}}", prompt)
 
-    def test_update_prompt_has_curator_skill_and_update_command_behavior(self):
+    def test_update_prompt_has_standalone_role_prompt_and_update_command_behavior(self):
         prompt = build_instructions(Path("/home/example/.rightmemory"), "update")
 
         self.assertIn("The only allowed root directory is /home/example/.rightmemory", prompt)
         self.assertIn("rightmemory update", prompt)
         self.assertIn("read-write memory update request", prompt)
+        self.assertIn("Standalone Update Role", prompt)
+        self.assertIn("candidate memory", prompt)
+        self.assertIn("raw process logs", prompt)
         self.assertNotIn("Every dispatch must start", prompt)
         self.assertNotIn("[RETRIEVE]", prompt)
         self.assertNotIn("[UPDATE]", prompt)
         self.assertIn("RightMemory Schema", prompt)
         self.assertIn("embedded schema above", prompt)
-        self.assertIn("memory-curator", prompt)
+        self.assertNotIn("memory-curator", prompt)
         self.assertNotIn("memory-dreamer", prompt)
         self.assertNotIn("rightmemory-schema.md", prompt)
         self.assertNotIn("{{MEMORY_ROOT}}", prompt)
         self.assertNotIn("{{SKILLS_ROOT}}", prompt)
 
-    def test_dreamer_prompt_has_only_dreamer_skill(self):
+    def test_dreamer_prompt_has_standalone_role_prompt(self):
         prompt = build_instructions(Path("/home/example/.rightmemory"), "dreamer")
 
         self.assertIn("The only allowed root directory is /home/example/.rightmemory", prompt)
         self.assertIn("RightMemory Schema", prompt)
         self.assertIn("embedded schema above", prompt)
-        self.assertIn("memory-dreamer", prompt)
+        self.assertIn("Standalone Dreamer Role", prompt)
         self.assertNotIn("memory-curator", prompt)
         self.assertNotIn("rightmemory-schema.md", prompt)
         self.assertNotIn("{{MEMORY_ROOT}}", prompt)
@@ -375,6 +379,7 @@ class PromptTests(unittest.TestCase):
 
         force_include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
         self.assertEqual(force_include["skills"], "rightmemory/skills")
+        self.assertEqual(force_include["rightmemory/prompts"], "rightmemory/prompts")
 
 
 if __name__ == "__main__":

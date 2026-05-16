@@ -146,7 +146,7 @@ Standalone mode is intentionally small:
 - Retrieve, update, and dreamer are separate runtime roles selected by the command line.
 - Role-specific model settings are read from `<memory-root>/rightmemory.toml`.
 - One-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`, so normal agent callers can make separate process calls without losing multi-turn context; `.runtime/` is self-ignored so session state does not dirty memory commits.
-- Async `submit` calls for the same `--session` are queued FIFO when a worker is already running, and `pull` reports the current job id plus queued count / ids.
+- Async `update submit` calls for the same `--session` accumulate as pending candidates. The worker waits one hour from the latest submit, then sends the pending candidates to the update role as one batch; `pull` reports phase, pending candidates, current batch, and timing.
 - Multi-turn daemon context is preserved with Pydantic AI message history.
 - MCP support is not part of the MVP; it can be added later as an adapter over the same daemon.
 
