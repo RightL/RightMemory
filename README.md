@@ -117,7 +117,7 @@ memory-orchestrator
 - `memory-curator` owns retrieval and incremental edits.
 - `memory-dreamer` runs explicit consolidation cycles and commits the result.
 
-The main agent should not read or edit `MEMORY*.md` directly. This keeps one clear owner for memory writes and prevents half-edits or competing updates.
+The main agent should not read or edit `MEMORY*.md` directly. Memory access goes through the installed orchestrator, subagent roles, or standalone runtime roles, which keeps ownership clear and prevents half-edits or competing updates.
 
 ## Prompt Sources
 
@@ -316,7 +316,8 @@ RightMemory/
     ├── memory-orchestrator/SKILL.md
     ├── memory-orchestrator-standalone/SKILL.md
     ├── memory-curator/SKILL.md
-    └── memory-dreamer/SKILL.md
+    ├── memory-dreamer/SKILL.md
+    └── provider-transcript-normalizer/SKILL.md
 ```
 
 After install:
@@ -340,7 +341,7 @@ Subagent installs also include `memory-curator/` and `memory-dreamer/` in the sk
 - The tree gives agents hierarchical context; the graph gives agents cross-branch traversal.
 - Human readability is useful, but agent retrieval is the primary design center.
 - `MEMORY.md` remains real memory, not a routing-only index.
-- The curator owns memory edits so the main agent does not race itself or leave partial writes.
+- Dedicated memory roles own memory edits so the main agent does not race itself or leave partial writes.
 - Dreaming is explicit because structural cleanup is opinionated.
 - Git provides history and revertability without adding inline timestamps to every node.
 

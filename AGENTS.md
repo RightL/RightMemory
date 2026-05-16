@@ -4,15 +4,15 @@
 - RightMemory is a tree + graph hybrid memory system designed primarily for AI agents. Human readability matters, but it is not the main design center.
 - Core standalone code lives in `rightmemory/`: config loading, runtime orchestration, tools, transcript review, async update batching, and provider transcript adapters.
 - Canonical role prompts live in `rightmemory/prompts/`. Edit role behavior there first; installed subagent skills are wrappers around the same canonical prompts.
-- `skills/rightmemory-schema.md` is the schema source for memory files. `MEMORY.example.md` is only the install seed.
-- `install.sh` installs either standalone mode or subagent mode and preserves existing user memory files.
+- `skills/rightmemory-schema.md` is the schema source for memory files. `MEMORY.example.md` is the installer seed and the source for the managed example block that can be refreshed on reinstall.
+- `install.sh` installs either standalone mode or subagent mode, preserves existing user memory files, and refreshes the managed example block when present.
 
 ## Development Commands
 - Run the test suite with `python -m unittest discover -s tests`.
 - For syntax-only checks, use `python -m compileall -q rightmemory tests`.
 - Use `./install.sh [--mode subagent|standalone] <memory-root> <skills-target>` when verifying install behavior.
 - `uv` is available through the existing conda environment: `conda run -n rightmemory uv --version`. Use `conda run -n rightmemory ./install.sh ...` when the installer needs `uv`.
-- Useful review commands are `rightmemory review scan --once` and `rightmemory review normalize --source <codex|claude> --path <file>`.
+- Useful review commands are `rightmemory review scan --once`, `rightmemory review watch`, and `rightmemory review normalize --source <codex|claude> --path <file>`.
 
 ## Maintaining This File
 - Treat this file as operational instructions for coding agents, not as a design document. Keep durable design explanation in `README.md` or `DESIGN_NOTES.md`.
@@ -27,7 +27,7 @@
 - A memory root contains `MEMORY.md`, optional sibling `MEMORY_*.md` detail files, `dream_logs/`, `rightmemory.toml`, and `.runtime/`.
 - The installer creates a memory-root `.gitignore` allowlist so git status normally shows only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`.
 - Runtime/session/review state belongs under `.runtime/` and should not be committed.
-- Reviewer scans process one normalized provider session at a time; they use the whole session for context and extract only from the new suffix after the saved cursor.
+- Reviewer scans process one normalized provider session at a time. `scan --once` attempts one eligible session and exits; `watch` repeats one-session scans until no eligible work remains. Review prompts use the whole session for context and extract only from the new suffix after the saved cursor.
 - The default review window is 30 days via `[review].since_days`; keep that default unless the user explicitly changes the backlog policy.
 
 ## Git And Safety
