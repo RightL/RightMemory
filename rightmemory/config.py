@@ -10,7 +10,7 @@ import tomllib
 MEMORY_ROOT_ENV = "RIGHTMEMORY_ROOT"
 MEMORY_ROOT = Path(os.environ.get(MEMORY_ROOT_ENV, "~/.rightmemory")).expanduser()
 CONFIG_PATH = MEMORY_ROOT / "rightmemory.toml"
-ROLES = {"curator", "dreamer", "reviewer"}
+ROLES = {"dreamer", "retrieve", "reviewer", "update"}
 DEFAULT_MAX_TOOL_RETRIES = 10
 DEFAULT_REVIEW_IDLE_SECONDS = 3600
 
@@ -41,10 +41,7 @@ class ReviewConfig:
 
 def load_config(role: str) -> RuntimeConfig:
     role = _role(role)
-    data: dict[str, object] = {}
-    if CONFIG_PATH.exists():
-        with CONFIG_PATH.open("rb") as handle:
-            data = tomllib.load(handle)
+    data = _load_raw_config()
 
     if not MEMORY_ROOT.exists():
         raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
@@ -110,18 +107,18 @@ def load_review_config() -> ReviewConfig:
     return ReviewConfig(memory_root=MEMORY_ROOT, idle_seconds=idle_seconds, sources=sources)
 
 
-def _reject_unknown_keys(data: dict[str, object], allowed: set[str], context: str) -> None:
-    unknown = set(data) - allowed
-    if unknown:
-        joined = ", ".join(sorted(unknown))
-        raise ValueError(f"unsupported {context} config key(s): {joined}")
-
-
 def _load_raw_config() -> dict[str, object]:
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open("rb") as handle:
             return tomllib.load(handle)
     return {}
+
+
+def _reject_unknown_keys(data: dict[str, object], allowed: set[str], context: str) -> None:
+    unknown = set(data) - allowed
+    if unknown:
+        joined = ", ".join(sorted(unknown))
+        raise ValueError(f"unsupported {context} config key(s): {joined}")
 
 
 def _required_string(data: dict[str, object], key: str) -> str:

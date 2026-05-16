@@ -21,3 +21,4 @@ packages = ["rightmemory"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "rightmemory/skills"
+"rightmemory/prompts" = "rightmemory/prompts"

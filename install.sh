@@ -131,10 +131,23 @@ install_skill() {
   skill_name="$2"
   dst_dir="$SKILLS_TARGET/$skill_name"
   dst="$dst_dir/SKILL.md"
+  tmp="${dst}.tmp"
   mkdir -p "$dst_dir"
   sed -e "s|{{MEMORY_ROOT}}|$MEMORY_ROOT_SED|g" \
       -e "s|{{SKILLS_ROOT}}|$SKILLS_TARGET_SED|g" \
-      "$src" > "$dst"
+      "$src" > "$tmp"
+  awk -v repo_root="$REPO_ROOT" '
+    function emit(path, line) {
+      while ((getline line < path) > 0) print line
+      close(path)
+    }
+    $0 == "{{ROLE_PROMPT_RETRIEVE}}" { emit(repo_root "/rightmemory/prompts/retrieve.md"); next }
+    $0 == "{{ROLE_PROMPT_UPDATE}}" { emit(repo_root "/rightmemory/prompts/update.md"); next }
+    $0 == "{{ROLE_PROMPT_DREAMER}}" { emit(repo_root "/rightmemory/prompts/dreamer.md"); next }
+    $0 == "{{ROLE_PROMPT_REVIEWER}}" { emit(repo_root "/rightmemory/prompts/reviewer.md"); next }
+    { print }
+  ' "$tmp" > "$dst"
+  rm -f "$tmp"
   echo "  [install] $dst"
 }
 

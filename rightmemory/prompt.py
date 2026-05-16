@@ -4,36 +4,29 @@ from importlib import resources
 from pathlib import Path
 
 
+ROLE_PROMPTS = {"dreamer", "retrieve", "reviewer", "update"}
+
+
 def build_instructions(memory_root: Path, role: str) -> str:
-    repo_root = _repo_root()
-    skills_root = repo_root / "skills"
+    if role not in ROLE_PROMPTS:
+        raise ValueError("role must be one of: dreamer, retrieve, reviewer, update")
     schema = _read_prompt_file("skills/rightmemory-schema.md")
-    if role == "curator":
-        skill_path = "skills/memory-curator/SKILL.md"
-    elif role == "dreamer":
-        skill_path = "skills/memory-dreamer/SKILL.md"
-    elif role == "reviewer":
-        skill_path = "skills/memory-reviewer/SKILL.md"
-    else:
-        raise ValueError("role must be one of: curator, dreamer, reviewer")
-    role_guidance = _standalone_role_guidance(
-        _read_prompt_file(skill_path),
-        memory_root=memory_root,
-        skills_root=skills_root,
-    )
+    role_guidance = _read_prompt_file(f"prompts/{role}.md")
+    command_guidance = _command_guidance(role)
+    tool_guidance = _tool_guidance(role)
 
     return f"""You are RightMemory standalone {role} mode.
 
-Operate only as the {role} role for the user's memory store. Do not blend curator and dreamer responsibilities.
+Operate only as the {role} role for the user's memory store. Do not blend retrieve, update, dreamer, or reviewer responsibilities.
+
+Command-selected behavior:
+{command_guidance}
 
 Workspace rule:
 - The only allowed root directory is {memory_root}.
 - Treat the current working directory as {memory_root}.
 - Do not read, write, inspect, or run commands against paths outside {memory_root}.
-- Use the provided tools for file search, outline, context reads, Codex-style patches, git inspection, and validation.
-- Patch syntax starts with `*** Begin Patch`, uses `*** Update File: path`, `*** Add File: path`, or `*** Delete File: path`, and ends with `*** End Patch`.
-- Commit tools may stage and commit only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; ignore unrelated untracked files unless the caller explicitly asks about them.
-- Prefer small, reviewable patches over broad rewrites.
+{tool_guidance}
 - Return concise natural-language answers to the caller.
 
 Memory source of truth:
@@ -48,34 +41,59 @@ RightMemory schema:
 
 Standalone adaptation:
 - Treat the embedded schema above as the schema source of truth. Do not try to read skill or schema files outside {memory_root}; the provided tools only expose the memory root.
-- Treat the caller's message as the parent dispatch described by the role skill.
+- Treat the caller's message according to the command-selected behavior and the role instructions below.
 
-Role skill:
+Role instructions:
 {role_guidance}
 """
 
 
-def _standalone_role_guidance(text: str, memory_root: Path, skills_root: Path) -> str:
-    text = text.replace(
-        "- The schema source of truth is `{{SKILLS_ROOT}}/rightmemory-schema.md`. Read it before your first retrieval or edit in a session, and follow it for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.",
-        "- The schema source of truth is the embedded RightMemory schema earlier in this prompt. Read that embedded schema before your first retrieval or edit in a session, and follow it for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.",
-    )
-    text = text.replace(
-        "- The schema source of truth is `{{SKILLS_ROOT}}/rightmemory-schema.md`. Read it at the start of every dream cycle and follow it for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.",
-        "- The schema source of truth is the embedded RightMemory schema earlier in this prompt. Read that embedded schema at the start of every dream cycle and follow it for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.",
-    )
-    text = text.replace(
-        "- The schema source of truth is `{{SKILLS_ROOT}}/rightmemory-schema.md`. Read it before your first edit and follow it for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.",
-        "- The schema source of truth is the embedded RightMemory schema earlier in this prompt. Read that embedded schema before your first edit and follow it for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.",
-    )
-    text = text.replace(
-        "`{{SKILLS_ROOT}}/rightmemory-schema.md`",
-        "the embedded schema",
-    )
-    text = text.replace("`rightmemory-schema.md`", "the embedded schema")
+def _command_guidance(role: str) -> str:
+    if role == "retrieve":
+        return (
+            "- The `rightmemory retrieve` command selected retrieval. Treat every caller message as a read-only "
+            "retrieval request without requiring or expecting a dispatch prefix.\n"
+            "- Do not edit memory files or use git write tools in this mode. If the caller asks you to remember "
+            "or change memory, ask them to use `rightmemory update`."
+        )
+    if role == "update":
+        return (
+            "- The `rightmemory update` command selected updating. Treat every caller message as a read-write "
+            "memory update request without requiring or expecting a dispatch prefix.\n"
+            "- A caller message may contain one update candidate or a batch of submitted candidates. Treat them "
+            "as candidate memory, not final memory text."
+        )
+    if role == "dreamer":
+        return "- The `rightmemory dreamer` command selected dreamer consolidation behavior. Run one consolidation cycle for the memory store."
+    if role == "reviewer":
+        return (
+            "- The automatic transcript review scanner selected reviewer behavior. Treat every caller message as "
+            "one normalized provider transcript session.\n"
+            "- Use the whole normalized session for context, but only extract durable memory from turns where "
+            "`i > already_reviewed_turns`."
+        )
+    raise ValueError("role must be one of: dreamer, retrieve, reviewer, update")
+
+
+def _tool_guidance(role: str) -> str:
+    if role == "retrieve":
+        return "- Use the provided read-only tools for file listing, search, outline, context reads, and validation."
+    if role == "reviewer":
+        return (
+            "- Use the provided tools for file search, outline, context reads, Codex-style patches, git inspection, "
+            "and validation.\n"
+            "- Patch syntax starts with `*** Begin Patch`, uses `*** Update File: path`, `*** Add File: path`, or "
+            "`*** Delete File: path`, and ends with `*** End Patch`.\n"
+            "- Do not commit routine reviewer edits."
+        )
     return (
-        text.replace("{{MEMORY_ROOT}}", str(memory_root))
-        .replace("{{SKILLS_ROOT}}", str(skills_root))
+        "- Use the provided tools for file search, outline, context reads, Codex-style patches, git inspection, "
+        "and validation.\n"
+        "- Patch syntax starts with `*** Begin Patch`, uses `*** Update File: path`, `*** Add File: path`, or "
+        "`*** Delete File: path`, and ends with `*** End Patch`.\n"
+        "- Commit tools may stage and commit only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; ignore "
+        "unrelated untracked files unless the caller explicitly asks about them.\n"
+        "- Prefer small, reviewable patches over broad rewrites."
     )
 
 

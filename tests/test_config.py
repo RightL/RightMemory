@@ -16,7 +16,7 @@ class ConfigTests(unittest.TestCase):
     def test_minimal_openai_compatible_config(self):
         config_path = self._write_config(
             """
-            [curator.model]
+            [retrieve.model]
             model_id = "hosted_vllm//models/example-chat-model"
             api_base = "http://127.0.0.1:8000/v1"
             api_key = "token"
@@ -24,9 +24,9 @@ class ConfigTests(unittest.TestCase):
         )
 
         with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            config = load_config("curator")
+            config = load_config("retrieve")
 
-        self.assertEqual(config.role, "curator")
+        self.assertEqual(config.role, "retrieve")
         self.assertEqual(config.model_id, "hosted_vllm//models/example-chat-model")
         self.assertEqual(config.api_base, "http://127.0.0.1:8000/v1")
         self.assertEqual(config.api_key, "token")
@@ -55,16 +55,16 @@ class ConfigTests(unittest.TestCase):
     def test_nested_model_kwargs(self):
         config_path = self._write_config(
             """
-            [curator.model]
+            [update.model]
             model_id = "hosted_vllm//models/example-chat-model"
 
-            [curator.model.kwargs]
+            [update.model.kwargs]
             extra_body = { chat_template_kwargs = { thinking = true, preserve_thinking = true } }
             """
         )
 
         with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            config = load_config("curator")
+            config = load_config("update")
 
         self.assertEqual(
             config.model_kwargs,
@@ -75,14 +75,14 @@ class ConfigTests(unittest.TestCase):
     def test_missing_model_id(self):
         config_path = self._write_config(
             """
-            [curator.model]
+            [retrieve.model]
             api_base = "http://127.0.0.1:8000/v1"
             """
         )
 
         with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
             with self.assertRaises(ValueError):
-                load_config("curator")
+                load_config("retrieve")
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_rejects_global_model_config(self):
@@ -95,23 +95,41 @@ class ConfigTests(unittest.TestCase):
 
         with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
             with self.assertRaises(ValueError):
-                load_config("curator")
+                load_config("retrieve")
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_rejects_runtime_section(self):
         config_path = self._write_config(
             """
-            [curator.model]
+            [retrieve.model]
             model_id = "anthropic/claude-test"
 
             [runtime]
-            mode = "curator"
+            mode = "retrieve"
             """
         )
 
         with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
             with self.assertRaises(ValueError):
-                load_config("curator")
+                load_config("retrieve")
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_rejects_legacy_curator_section(self):
+        config_path = self._write_config(
+            """
+            [curator.model]
+            model_id = "openai/legacy"
+
+            [retrieve.model]
+            model_id = "openai/fast"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_config("retrieve")
+
+        self.assertIn("unsupported top-level config key(s): curator", str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_reviewer_config(self):
@@ -164,7 +182,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_builds_openai_compatible_model(self):
         config = RuntimeConfig(
-            role="curator",
+            role="retrieve",
             model_id="hosted_vllm//models/example-chat-model",
             api_base="http://127.0.0.1:8000/v1",
             api_key="token",
@@ -195,7 +213,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_run_turn_preserves_message_history(self):
         config = RuntimeConfig(
-            role="curator",
+            role="retrieve",
             model_id="openai/test",
             model_kwargs={"extra_body": {"chat_template_kwargs": {"thinking": True}}},
         )
@@ -215,7 +233,7 @@ class RuntimeTests(unittest.TestCase):
         )
 
     def test_run_session_turn_preserves_message_history_on_disk(self):
-        config = RuntimeConfig(role="curator", model_id="openai/test", memory_root=Path(self.tempdir.name))
+        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             first_runtime = RightMemoryRuntime(config)
@@ -229,13 +247,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(second, "reply 1")
         self.assertIsNone(first_runtime.agent.calls[0]["message_history"])
         self.assertEqual(second_runtime.agent.calls[0]["message_history"], ["message 1"])
-        history_path = Path(self.tempdir.name) / ".runtime" / "sessions" / "curator" / "agent-session.json"
+        history_path = Path(self.tempdir.name) / ".runtime" / "sessions" / "retrieve" / "agent-session.json"
         self.assertEqual(json.loads(history_path.read_text(encoding="utf-8")), ["message 1"])
         gitignore_path = Path(self.tempdir.name) / ".runtime" / ".gitignore"
         self.assertEqual(gitignore_path.read_text(encoding="utf-8"), "*\n")
 
     def test_run_session_turn_rejects_path_session_id(self):
-        config = RuntimeConfig(role="curator", model_id="openai/test", memory_root=Path(self.tempdir.name))
+        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
@@ -244,7 +262,7 @@ class RuntimeTests(unittest.TestCase):
             runtime.run_session_turn("../bad", "hello")
 
     def test_rejects_unsupported_model_kwargs(self):
-        config = RuntimeConfig(role="curator", model_id="openai/test", model_kwargs={"api_version": "2026-01-01"})
+        config = RuntimeConfig(role="retrieve", model_id="openai/test", model_kwargs={"api_version": "2026-01-01"})
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
@@ -253,7 +271,7 @@ class RuntimeTests(unittest.TestCase):
             runtime.run_turn("hello")
 
     def test_tools_raise_model_retry_for_recoverable_errors(self):
-        config = RuntimeConfig(role="curator", model_id="openai/test")
+        config = RuntimeConfig(role="retrieve", model_id="openai/test")
         fake_modules = self._fake_pydantic_modules()
 
         with patch.dict("sys.modules", fake_modules):
@@ -266,7 +284,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("glob pattern must not contain '..'", str(caught.exception))
 
     def test_runtime_exposes_commit_tools(self):
-        config = RuntimeConfig(role="curator", model_id="openai/test")
+        config = RuntimeConfig(role="update", model_id="openai/test")
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
@@ -274,6 +292,19 @@ class RuntimeTests(unittest.TestCase):
         tool_names = {tool.__name__ for tool in runtime.agent.kwargs["tools"]}
         self.assertIn("git_add", tool_names)
         self.assertIn("git_commit", tool_names)
+        self.assertIn("apply_patch", tool_names)
+
+    def test_retrieve_runtime_is_read_only(self):
+        config = RuntimeConfig(role="retrieve", model_id="openai/test")
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+        tool_names = {tool.__name__ for tool in runtime.agent.kwargs["tools"]}
+        self.assertIn("search_files", tool_names)
+        self.assertNotIn("apply_patch", tool_names)
+        self.assertNotIn("git_add", tool_names)
+        self.assertNotIn("git_commit", tool_names)
 
     def _fake_pydantic_modules(self):
         class FakeModelRetry(Exception):
@@ -329,37 +360,64 @@ class RuntimeTests(unittest.TestCase):
 
 
 class PromptTests(unittest.TestCase):
-    def test_curator_prompt_has_only_curator_skill(self):
-        prompt = build_instructions(Path("/home/example/.rightmemory"), "curator")
+    def test_retrieve_prompt_has_role_prompt_and_retrieve_command_behavior(self):
+        prompt = build_instructions(Path("/home/example/.rightmemory"), "retrieve")
 
         self.assertIn("The only allowed root directory is /home/example/.rightmemory", prompt)
+        self.assertIn("rightmemory retrieve", prompt)
+        self.assertIn("read-only retrieval request", prompt)
+        self.assertIn("Retrieve Role", prompt)
+        self.assertNotIn("Every dispatch must start", prompt)
+        self.assertNotIn("[RETRIEVE]", prompt)
+        self.assertNotIn("[UPDATE]", prompt)
         self.assertIn("RightMemory Schema", prompt)
         self.assertIn("embedded schema above", prompt)
-        self.assertIn("memory-curator", prompt)
+        self.assertNotIn("memory-curator", prompt)
         self.assertNotIn("memory-dreamer", prompt)
         self.assertNotIn("rightmemory-schema.md", prompt)
         self.assertNotIn("{{MEMORY_ROOT}}", prompt)
         self.assertNotIn("{{SKILLS_ROOT}}", prompt)
 
-    def test_dreamer_prompt_has_only_dreamer_skill(self):
+    def test_update_prompt_has_role_prompt_and_update_command_behavior(self):
+        prompt = build_instructions(Path("/home/example/.rightmemory"), "update")
+
+        self.assertIn("The only allowed root directory is /home/example/.rightmemory", prompt)
+        self.assertIn("rightmemory update", prompt)
+        self.assertIn("read-write memory update request", prompt)
+        self.assertIn("Update Role", prompt)
+        self.assertIn("candidate memory", prompt)
+        self.assertIn("raw process logs", prompt)
+        self.assertNotIn("Every dispatch must start", prompt)
+        self.assertNotIn("[RETRIEVE]", prompt)
+        self.assertNotIn("[UPDATE]", prompt)
+        self.assertIn("RightMemory Schema", prompt)
+        self.assertIn("embedded schema above", prompt)
+        self.assertNotIn("memory-curator", prompt)
+        self.assertNotIn("memory-dreamer", prompt)
+        self.assertNotIn("rightmemory-schema.md", prompt)
+        self.assertNotIn("{{MEMORY_ROOT}}", prompt)
+        self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+
+    def test_dreamer_prompt_has_role_prompt(self):
         prompt = build_instructions(Path("/home/example/.rightmemory"), "dreamer")
 
         self.assertIn("The only allowed root directory is /home/example/.rightmemory", prompt)
         self.assertIn("RightMemory Schema", prompt)
         self.assertIn("embedded schema above", prompt)
-        self.assertIn("memory-dreamer", prompt)
+        self.assertIn("Dreamer Role", prompt)
         self.assertNotIn("memory-curator", prompt)
         self.assertNotIn("rightmemory-schema.md", prompt)
         self.assertNotIn("{{MEMORY_ROOT}}", prompt)
         self.assertNotIn("{{SKILLS_ROOT}}", prompt)
 
-    def test_reviewer_prompt_has_only_reviewer_skill(self):
+    def test_reviewer_prompt_has_role_prompt(self):
         prompt = build_instructions(Path("/home/example/.rightmemory"), "reviewer")
 
         self.assertIn("The only allowed root directory is /home/example/.rightmemory", prompt)
         self.assertIn("RightMemory Schema", prompt)
         self.assertIn("embedded schema above", prompt)
-        self.assertIn("memory-reviewer", prompt)
+        self.assertIn("Reviewer Role", prompt)
+        self.assertIn("already_reviewed_turns", prompt)
         self.assertNotIn("memory-curator", prompt)
         self.assertNotIn("memory-dreamer", prompt)
         self.assertNotIn("rightmemory-schema.md", prompt)
@@ -371,6 +429,7 @@ class PromptTests(unittest.TestCase):
 
         force_include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
         self.assertEqual(force_include["skills"], "rightmemory/skills")
+        self.assertEqual(force_include["rightmemory/prompts"], "rightmemory/prompts")
 
 
 if __name__ == "__main__":

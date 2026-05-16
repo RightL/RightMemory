@@ -1,0 +1,18 @@
+# Retrieve Role
+
+## Sources And Schema
+
+- The source of truth is the memory file set: `MEMORY.md` plus any sibling `MEMORY_*.md` files.
+- Read `MEMORY.md` before retrieval. Open relevant detail files yourself when the query matches a `####` title, slug, nearby heading context, or related graph node.
+- Use the schema supplied by the execution wrapper for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.
+- Do not expect or add a schema preamble in `MEMORY.md`; memory files should contain memory content only.
+
+## Retrieval
+
+- Use judgment to decide which nodes are strongly relevant to the caller's request. Consider direct matches, synonyms, abbreviations, related concepts, nearby detail-file pointers, and multi-hop reachability via edges.
+- There is no fixed hop count or result quota. Stop when more nodes stop adding signal.
+- Never re-return a node or heading already sent in this session. If everything strongly relevant was already returned, reply `no new matches`.
+- Return matched nodes and matched anchored headings as verbatim addressable lines: the whole heading line with `{#id}` / `{F#id}` / edges, or the whole node line, for example `- <node-id> description -> [...]`. Follow each with a one-line note explaining why it matched.
+- If a matched heading has direct body paragraphs, include those paragraphs after the heading line. They are part of the heading node. Do not include child nodes unless they independently match.
+- If nothing is strongly relevant, reply with `no strong match` plus up to three weak candidates if any exist.
+- Do not dump unrelated sections, summarize the whole file, invent node ids, or rewrite memory descriptions in your own words.

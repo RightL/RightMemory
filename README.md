@@ -11,7 +11,8 @@ RightMemory keeps durable project and workflow context in Markdown files structu
 - Addressable heading anchors and node ids for agent retrieval.
 - Typed edges such as `dep:`, `cfg:`, `ver:`, `doc:`, and `todo:` for graph traversal across the tree.
 - Agent skills for retrieval, updates, and periodic consolidation.
-- A standalone CLI mode for agents that cannot spawn subagents.
+- A standalone CLI runtime for agents that cannot spawn subagents.
+- Optional automatic transcript review for idle Codex and Claude sessions.
 
 ## Quick Start
 
@@ -38,12 +39,12 @@ Each memory file is ordinary Markdown with a small schema.
 
 ## Project Alpha {#project-alpha}
 
-### Runtime {F#alpha-runtime} → [cfg:alpha-config]
+### Runtime {F#alpha-runtime} -> [cfg:alpha-config]
 
 Runtime facts that apply to the whole project.
 
-- `alpha-python-env` Uses Python 3.11 in `.venv` for local development. → [cfg:alpha-runtime]
-- `alpha-test-command` Run the backend tests with `pytest tests/backend`. → [ver:alpha-python-env]
+- `alpha-python-env` Uses Python 3.11 in `.venv` for local development. -> [cfg:alpha-runtime]
+- `alpha-test-command` Run the backend tests with `pytest tests/backend`. -> [ver:alpha-python-env]
 ```
 
 The tree tells agents where to read in local context. Anchors and node ids tell agents what can be referenced. Edges tell agents where to walk across otherwise separate branches.
@@ -63,18 +64,16 @@ Use `{F#slug}` instead of `{#slug}` when a heading is backed by a sibling detail
 Nodes are durable facts under a heading:
 
 ```md
-- `<node-id>` <description> → [edge1, edge2, ...]
+- `<node-id>` <description> -> [edge1, edge2, ...]
 ```
 
-Heading ids and node ids share one namespace. A node with no edges still writes `→ []`; a heading with no edges may omit the edge list.
+Heading ids and node ids share one namespace. A node with no edges still writes `-> []`; a heading with no edges may omit the edge list.
 
 ### Detail Files
 
 Any `#`, `##`, or `###` heading can use its slug as a detail-file target by writing `{F#slug}`. For example, `{F#alpha-runtime}` maps to `MEMORY_alpha-runtime.md`.
 
 Move child content into a detail file when a heading becomes too dense, especially past about 15 direct node lines. Count only direct node lines, not child headings or `####` pointers. After moving content out, keep only the `F#` heading line and any heading body paragraphs in the parent file.
-
-`####` headings name deeper child topics below a `###` topic and use `{F#slug}` because their content lives in sibling detail files.
 
 ### Edges
 
@@ -120,13 +119,26 @@ memory-orchestrator
 
 The main agent should not read or edit `MEMORY*.md` directly. This keeps one clear owner for memory writes and prevents half-edits or competing updates.
 
+## Prompt Sources
+
+RightMemory keeps role behavior in one canonical prompt set under `rightmemory/prompts/`:
+
+```text
+rightmemory/prompts/retrieve.md
+rightmemory/prompts/update.md
+rightmemory/prompts/dreamer.md
+rightmemory/prompts/reviewer.md
+```
+
+Standalone mode reads these files at runtime. Subagent mode installs thin skill wrappers and renders the same role prompts into those wrappers during `install.sh`. Runtime-specific wrappers define access boundaries and dispatch style; role behavior should be edited in the canonical prompt files.
+
 ## Install Modes
 
 RightMemory has two install modes.
 
 | Mode | Use When | What Gets Installed |
 | --- | --- | --- |
-| `subagent` | Your agent can spawn subagents, such as Claude Code-style workflows. | `memory-orchestrator`, `memory-curator`, and `memory-dreamer` skills. |
+| `subagent` | Your agent can spawn subagents, such as Claude Code-style workflows. | `memory-orchestrator`, generated `memory-curator`, and generated `memory-dreamer` skills. |
 | `standalone` | Your agent needs a command-line runtime instead of subagents. | A `memory-orchestrator` skill plus the `rightmemory` CLI. |
 
 The installer arguments are:
@@ -144,26 +156,30 @@ Standalone mode requires `uv` and installs the runtime under `${XDG_DATA_HOME:-$
 
 1. Edit `MEMORY.md` after install and replace the sample domains with your own.
 2. Let the installed orchestrator decide when a user request needs memory retrieval.
-3. Let the curator write durable updates after work that should affect future sessions.
+3. Let the curator or update role write durable updates after work that should affect future sessions.
 4. Ask for a dream cycle when you want cleanup, consolidation, or stale-memory review.
 
 Dream cycles write reports to `dream_logs/YYYY-MM-DD.md` and commit touched memory files. If a consolidation is wrong, use normal git tools in the memory root to inspect or revert it.
 
 ## Standalone Runtime
 
-Standalone mode exposes two roles:
+Standalone install mode uses `uv` to install the runtime into a user-local venv, writes a `memory-orchestrator` skill that calls `rightmemory retrieve`, `rightmemory update`, and `rightmemory dreamer` instead of spawning subagents, and removes old `memory-curator` / `memory-dreamer` skill folders from the same skill target. The installed `rightmemory` wrapper is bound to `<memory-root>`.
 
 ```bash
-rightmemory curator --session <agent-session-id> "find memory about local test setup"
+rightmemory retrieve --session <agent-session-id> "find memory about the standalone mode"
+rightmemory update submit --session <agent-session-id> "remember that MCP should stay optional"
+rightmemory update pull --session <agent-session-id>
 rightmemory dreamer --session <agent-session-id> "run a dream cycle"
-rightmemory curator chat
+rightmemory retrieve chat
+rightmemory update chat
 rightmemory dreamer chat
 ```
 
 For machine callers:
 
 ```bash
-rightmemory curator daemon --stdio-json
+rightmemory retrieve daemon --stdio-json
+rightmemory update daemon --stdio-json
 rightmemory dreamer daemon --stdio-json
 ```
 
@@ -174,73 +190,84 @@ The daemon reads JSON lines from stdin and writes JSON lines to stdout:
 {"message":"remember that MCP should stay optional"}
 ```
 
-Role-specific model settings live in `<memory-root>/rightmemory.toml`.
+Standalone mode is intentionally small:
+
+- It uses `pydantic_ai.Agent` as a chat-like agent loop.
+- Retrieve uses sandboxed read-only tools for file listing, search, outline, context reads, and memory validation; update, dreamer, and reviewer also get Codex-style patches and narrow git tools.
+- `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different location.
+- Retrieve, update, dreamer, and reviewer are separate runtime roles selected by command line or scanner.
+- Role-specific model settings are read from `<memory-root>/rightmemory.toml`.
+- One-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`, so normal agent callers can make separate process calls without losing multi-turn context; `.runtime/` is self-ignored so session state does not dirty memory commits.
+- Async `update submit` calls for the same `--session` accumulate as pending candidates. The worker waits one hour from the latest submit, then sends the pending candidates to the update role as one batch; `pull` reports phase, pending candidates, current batch, and timing.
+- Multi-turn daemon context is preserved with Pydantic AI message history.
+- MCP support is not part of the MVP; it can be added later as an adapter over the same daemon.
+
+OpenAI-compatible retrieve/update config:
 
 ```toml
-[curator.model]
-model_id = "hosted_vllm//models/example-chat-model"
+[retrieve.model]
+model_id = "hosted_vllm//models/example-fast-model"
 api_base = "http://127.0.0.1:8000/v1"
 api_key = "<token>"
 
-[curator.model.kwargs]
+[update.model]
+model_id = "hosted_vllm//models/example-accurate-model"
+api_base = "http://127.0.0.1:8000/v1"
+api_key = "<token>"
+
+[update.model.kwargs]
 extra_body = { chat_template_kwargs = { thinking = true, preserve_thinking = true } }
 ```
+
+Anthropic-compatible dreamer/reviewer config:
 
 ```toml
 [dreamer.model]
 model_id = "anthropic/example-dreamer-model"
 api_base = "https://api.example.com/anthropic"
 api_key = "<token>"
+
+[reviewer.model]
+model_id = "anthropic/example-reviewer-model"
+api_base = "https://api.example.com/anthropic"
+api_key = "<token>"
 ```
 
 `model_id` is required for the role being started. `anthropic/...` model ids use `AnthropicModel`; other model ids use `OpenAIChatModel` with `OpenAIProvider`, so OpenAI-compatible local gateways can use `api_base` and `api_key`. `[<role>.model.kwargs]` is forwarded as Pydantic AI model settings and unsupported keys fail fast.
 
-Standalone mode stores session history under `<memory-root>/.runtime/sessions/<role>/`. The runtime self-ignores `.runtime/` so session state does not dirty memory commits.
+Configs must use `[retrieve.model]`, `[update.model]`, `[dreamer.model]`, and optionally `[reviewer.model]`; old `[curator.model]` configs are rejected so stale read-write settings are migrated deliberately.
 
 ### Automatic Transcript Review
 
-RightMemory can scan idle provider chat sessions and run the `reviewer` role:
+RightMemory can scan idle provider chat sessions and run the standalone `reviewer` role:
 
 ```bash
 rightmemory review scan --once
 ```
 
-Add a reviewer model and source presets to `<memory-root>/rightmemory.toml`:
+Add source presets to `<memory-root>/rightmemory.toml`:
 
 ```toml
-[reviewer.model]
-model_id = "anthropic/example-reviewer-model"
-api_base = "https://api.example.com/anthropic"
-api_key = "<token>"
-
 [review]
 idle_seconds = 3600
 
 [[review.sources]]
 kind = "claude"
 path = "~/.claude/projects"
-```
 
-Codex history uses:
-
-```toml
 [[review.sources]]
 kind = "codex"
 path = "~/.codex/sessions"
 ```
 
-If `[review.sources]` is omitted, RightMemory checks the default Codex and
-Claude locations. Review state is stored under
-`<memory-root>/.runtime/review/state.json`.
+If `[[review.sources]]` is omitted, RightMemory checks the default Codex and Claude locations. Review state is stored under `<memory-root>/.runtime/review/state.json` and records the last reviewed turn count for each transcript. When a session resumes later, the reviewer receives the whole normalized session for context but extracts only from the new suffix.
 
-## Development
-
-Run from this repository:
+Run it from this repository during development:
 
 ```bash
 uv --cache-dir .uv-cache venv .venv
 uv --cache-dir .uv-cache pip install -e . --python .venv/bin/python
-rightmemory curator chat
+rightmemory retrieve chat
 ```
 
 The standalone runtime exposes sandboxed tools rooted at the configured memory root. It does not provide an OS-level jail.
@@ -255,6 +282,7 @@ RightMemory/
 ├── install.sh
 ├── MEMORY.example.md
 ├── rightmemory/
+│   └── prompts/
 └── skills/
     ├── rightmemory-schema.md
     ├── memory-orchestrator/SKILL.md
