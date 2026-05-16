@@ -105,6 +105,38 @@ class ReviewScannerTests(unittest.TestCase):
         only_state = next(iter(state.sessions.values()))
         self.assertEqual(only_state.last_reviewed_turn, 2)
 
+    def test_scan_reviews_one_eligible_session_per_call(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            first = source / "01-first.jsonl"
+            second = source / "02-second.jsonl"
+            self._write_codex(first, turns=[("first", "a1")])
+            self._write_codex(second, turns=[("second", "a2")])
+            self._set_mtime(first, 1_000)
+            self._set_mtime(second, 1_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                lambda session_id, message: calls.append(message) or "ok",
+            )
+
+            first_result = scanner.scan_once(now=10_000)
+            second_result = scanner.scan_once(now=10_000)
+            state = ReviewStateStore(root).load()
+
+        self.assertEqual(first_result.reviewed, 1)
+        self.assertEqual(second_result.reviewed, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('"user": "first"', calls[0])
+        self.assertIn('"user": "second"', calls[1])
+        self.assertEqual(len(state.sessions), 2)
+
     def test_scan_uses_whole_session_but_marks_already_reviewed_turns(self):
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:
@@ -131,7 +163,7 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertIn('"user": "u1"', calls[1])
         self.assertIn('"user": "u2"', calls[1])
 
-    def test_scan_retries_once_then_continues_after_reviewer_failure(self):
+    def test_scan_retries_once_then_stops_after_reviewer_failure(self):
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -164,9 +196,9 @@ class ReviewScannerTests(unittest.TestCase):
 
         self.assertEqual(result.failed, 1)
         self.assertEqual(result.retried, 1)
-        self.assertEqual(result.reviewed, 1)
-        self.assertEqual(len(calls), 3)
-        self.assertEqual(len(state.sessions), 1)
+        self.assertEqual(result.reviewed, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(state.sessions), 0)
 
     def test_scan_skips_sessions_older_than_since_days(self):
         calls = []

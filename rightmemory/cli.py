@@ -128,14 +128,14 @@ def _review_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory review")
     subparsers = parser.add_subparsers(dest="command", required=True)
     scan = subparsers.add_parser("scan", help="scan configured transcript sources")
-    scan.add_argument("--once", action="store_true", help="run one scan pass and exit")
+    scan.add_argument("--once", action="store_true", help="review one eligible session and exit")
     scan.add_argument("--since-days", type=int, help="only review transcript files modified within this many days")
     watch = subparsers.add_parser("watch", help="keep scanning configured transcript sources")
     watch.add_argument(
         "--interval",
         type=int,
         default=DEFAULT_REVIEW_WATCH_INTERVAL_SECONDS,
-        help="seconds to sleep between completed scan passes",
+        help="seconds to sleep when no eligible work is found",
     )
     watch.add_argument("--since-days", type=int, help="only review transcript files modified within this many days")
     normalize = subparsers.add_parser("normalize", help="print normalized transcript JSON without running reviewer")
@@ -179,7 +179,10 @@ def _review_watch(interval: int, since_days: int | None = None) -> int:
         while True:
             timestamp = datetime.now(UTC).isoformat()
             print(f"[{timestamp}] rightmemory review scan", flush=True)
-            print(_run_review_scan(since_days).format(), flush=True)
+            result = _run_review_scan(since_days)
+            print(result.format(), flush=True)
+            if result.reviewed > 0 or result.failed > 0:
+                continue
             time.sleep(interval)
     except KeyboardInterrupt:
         print("rightmemory review watch stopped", file=sys.stderr)

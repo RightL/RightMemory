@@ -153,7 +153,7 @@ class ReviewScanner:
 
                 payload = normalized.with_review_cursor(last_reviewed_turn)
                 if not self._review_with_retry(payload, counts):
-                    continue
+                    return ReviewScanResult(**counts)
 
                 sessions[transcript.key] = ReviewSessionState(
                     session_id=normalized.session_id,
@@ -166,6 +166,7 @@ class ReviewScanner:
                 )
                 self.state_store.save(ReviewState(sessions=sessions))
                 counts["reviewed"] += 1
+                return ReviewScanResult(**counts)
 
         return ReviewScanResult(**counts)
 

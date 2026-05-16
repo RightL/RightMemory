@@ -256,13 +256,15 @@ RightMemory can scan idle provider chat sessions and run the standalone `reviewe
 rightmemory review watch
 ```
 
-`watch` runs one full scan immediately, processes all eligible sessions found in that pass, then sleeps before checking again. The default interval is two hours; override it with `--interval <seconds>`.
+`watch` starts immediately and runs one-session scans until no eligible work remains, then sleeps before checking again. A reviewed or failed session triggers another immediate scan, so backlog and recovery attempts are not delayed by the interval. The default interval is two hours; override it with `--interval <seconds>`.
 
 For cron, launchd, or other supervisors, call one bounded scan at a time:
 
 ```bash
 rightmemory review scan --once
 ```
+
+Each `scan --once` command reviews at most one eligible session and then exits.
 
 For debugging an adapter without calling a model:
 
