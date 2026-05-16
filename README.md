@@ -197,6 +197,42 @@ api_key = "<token>"
 
 Standalone mode stores session history under `<memory-root>/.runtime/sessions/<role>/`. The runtime self-ignores `.runtime/` so session state does not dirty memory commits.
 
+### Automatic Transcript Review
+
+RightMemory can scan idle provider chat sessions and run the `reviewer` role:
+
+```bash
+rightmemory review scan --once
+```
+
+Add a reviewer model and source presets to `<memory-root>/rightmemory.toml`:
+
+```toml
+[reviewer.model]
+model_id = "anthropic/example-reviewer-model"
+api_base = "https://api.example.com/anthropic"
+api_key = "<token>"
+
+[review]
+idle_seconds = 3600
+
+[[review.sources]]
+kind = "claude"
+path = "~/.claude/projects"
+```
+
+Codex history uses:
+
+```toml
+[[review.sources]]
+kind = "codex"
+path = "~/.codex/sessions"
+```
+
+If `[review.sources]` is omitted, RightMemory checks the default Codex and
+Claude locations. Review state is stored under
+`<memory-root>/.runtime/review/state.json`.
+
 ## Development
 
 Run from this repository:

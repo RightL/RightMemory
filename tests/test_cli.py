@@ -72,6 +72,48 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(roles, ["dreamer"])
 
+    def test_main_loads_reviewer_role(self):
+        roles = []
+
+        def fake_load_config(role):
+            roles.append(role)
+            return object()
+
+        with patch("rightmemory.cli.load_config", fake_load_config), patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime):
+            result = main(["reviewer", "daemon", "--stdio-json"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(roles, ["reviewer"])
+
+    def test_review_scan_once_runs_scanner(self):
+        roles = []
+        stdout = io.StringIO()
+
+        class FakeScanner:
+            def __init__(self, config, run_reviewer):
+                self.config = config
+                self.run_reviewer = run_reviewer
+
+            def scan_once(self):
+                return type("Result", (), {"format": lambda self: "reviewed: 1"})()
+
+        def fake_load_config(role):
+            roles.append(role)
+            return object()
+
+        with (
+            patch("rightmemory.cli.load_config", fake_load_config),
+            patch("rightmemory.cli.load_review_config", return_value=object()),
+            patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+            patch("rightmemory.cli.ReviewScanner", FakeScanner),
+            patch("sys.stdout", stdout),
+        ):
+            result = main(["review", "scan", "--once"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(roles, ["reviewer"])
+        self.assertEqual(stdout.getvalue().strip(), "reviewed: 1")
+
     def test_main_runs_one_shot_session_turn(self):
         roles = []
         stdout = io.StringIO()

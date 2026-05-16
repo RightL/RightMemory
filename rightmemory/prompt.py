@@ -12,8 +12,10 @@ def build_instructions(memory_root: Path, role: str) -> str:
         skill_path = "skills/memory-curator/SKILL.md"
     elif role == "dreamer":
         skill_path = "skills/memory-dreamer/SKILL.md"
+    elif role == "reviewer":
+        skill_path = "skills/memory-reviewer/SKILL.md"
     else:
-        raise ValueError("role must be one of: curator, dreamer")
+        raise ValueError("role must be one of: curator, dreamer, reviewer")
     role_guidance = _standalone_role_guidance(
         _read_prompt_file(skill_path),
         memory_root=memory_root,
@@ -61,6 +63,14 @@ def _standalone_role_guidance(text: str, memory_root: Path, skills_root: Path) -
     text = text.replace(
         "- The schema source of truth is `{{SKILLS_ROOT}}/rightmemory-schema.md`. Read it at the start of every dream cycle and follow it for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.",
         "- The schema source of truth is the embedded RightMemory schema earlier in this prompt. Read that embedded schema at the start of every dream cycle and follow it for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.",
+    )
+    text = text.replace(
+        "- The schema source of truth is `{{SKILLS_ROOT}}/rightmemory-schema.md`. Read it before your first edit and follow it for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.",
+        "- The schema source of truth is the embedded RightMemory schema earlier in this prompt. Read that embedded schema before your first edit and follow it for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.",
+    )
+    text = text.replace(
+        "`{{SKILLS_ROOT}}/rightmemory-schema.md`",
+        "the embedded schema",
     )
     text = text.replace("`rightmemory-schema.md`", "the embedded schema")
     return (

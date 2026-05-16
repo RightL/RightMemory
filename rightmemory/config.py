@@ -10,8 +10,9 @@ import tomllib
 MEMORY_ROOT_ENV = "RIGHTMEMORY_ROOT"
 MEMORY_ROOT = Path(os.environ.get(MEMORY_ROOT_ENV, "~/.rightmemory")).expanduser()
 CONFIG_PATH = MEMORY_ROOT / "rightmemory.toml"
-ROLES = {"curator", "dreamer"}
+ROLES = {"curator", "dreamer", "reviewer"}
 DEFAULT_MAX_TOOL_RETRIES = 10
+DEFAULT_REVIEW_IDLE_SECONDS = 3600
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,19 @@ class RuntimeConfig:
     max_tool_retries: int = DEFAULT_MAX_TOOL_RETRIES
 
 
+@dataclass(frozen=True)
+class ReviewSourceConfig:
+    kind: str
+    path: Path
+
+
+@dataclass(frozen=True)
+class ReviewConfig:
+    memory_root: Path = MEMORY_ROOT
+    idle_seconds: int = DEFAULT_REVIEW_IDLE_SECONDS
+    sources: list[ReviewSourceConfig] = field(default_factory=list)
+
+
 def load_config(role: str) -> RuntimeConfig:
     role = _role(role)
     data: dict[str, object] = {}
@@ -35,7 +49,7 @@ def load_config(role: str) -> RuntimeConfig:
     if not MEMORY_ROOT.exists():
         raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
 
-    _reject_unknown_keys(data, {"curator", "dreamer"}, "top-level")
+    _reject_unknown_keys(data, {*ROLES, "review"}, "top-level")
     role_section = data.get(role)
     if not isinstance(role_section, dict):
         raise ValueError(f"{CONFIG_PATH} must contain a [{role}.model] table")
@@ -67,11 +81,47 @@ def load_config(role: str) -> RuntimeConfig:
     )
 
 
+def load_review_config() -> ReviewConfig:
+    data = _load_raw_config()
+
+    if not MEMORY_ROOT.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
+
+    _reject_unknown_keys(data, {*ROLES, "review"}, "top-level")
+    section = data.get("review", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError("[review] must be a TOML table")
+    _reject_unknown_keys(section, {"idle_seconds", "sources"}, "[review]")
+
+    idle_seconds = section.get("idle_seconds", DEFAULT_REVIEW_IDLE_SECONDS)
+    if not isinstance(idle_seconds, int) or idle_seconds < 1:
+        raise ValueError("[review].idle_seconds must be a positive integer")
+
+    raw_sources = section.get("sources")
+    if raw_sources is None:
+        sources = _default_review_sources()
+    else:
+        if not isinstance(raw_sources, list):
+            raise ValueError("[[review.sources]] must be an array of tables")
+        sources = [_review_source(item) for item in raw_sources]
+
+    return ReviewConfig(memory_root=MEMORY_ROOT, idle_seconds=idle_seconds, sources=sources)
+
+
 def _reject_unknown_keys(data: dict[str, object], allowed: set[str], context: str) -> None:
     unknown = set(data) - allowed
     if unknown:
         joined = ", ".join(sorted(unknown))
         raise ValueError(f"unsupported {context} config key(s): {joined}")
+
+
+def _load_raw_config() -> dict[str, object]:
+    if CONFIG_PATH.exists():
+        with CONFIG_PATH.open("rb") as handle:
+            return tomllib.load(handle)
+    return {}
 
 
 def _required_string(data: dict[str, object], key: str) -> str:
@@ -102,3 +152,22 @@ def _role(value: str) -> str:
         joined = ", ".join(sorted(ROLES))
         raise ValueError(f"role must be one of: {joined}")
     return role
+
+
+def _review_source(data: object) -> ReviewSourceConfig:
+    if not isinstance(data, dict):
+        raise ValueError("[[review.sources]] entries must be TOML tables")
+    _reject_unknown_keys(data, {"kind", "path"}, "[[review.sources]]")
+    kind = _required_string(data, "kind").lower()
+    if kind not in {"codex", "claude"}:
+        raise ValueError("[[review.sources]].kind must be one of: codex, claude")
+    path = _required_string(data, "path")
+    return ReviewSourceConfig(kind=kind, path=Path(path).expanduser())
+
+
+def _default_review_sources() -> list[ReviewSourceConfig]:
+    home = Path.home()
+    return [
+        ReviewSourceConfig(kind="codex", path=home / ".codex" / "sessions"),
+        ReviewSourceConfig(kind="claude", path=home / ".claude" / "projects"),
+    ]

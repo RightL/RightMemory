@@ -6,14 +6,18 @@ import sys
 from typing import Any
 
 from .async_update import AsyncUpdateStore, format_state
-from .config import load_config
+from .config import ROLES, load_config, load_review_config
+from .review import ReviewScanner
 from .runtime import RightMemoryRuntime
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "review":
+        return _review_main(argv[1:])
+
     parser = argparse.ArgumentParser(prog="rightmemory")
-    parser.add_argument("role", choices=("curator", "dreamer"), help="RightMemory runtime role")
+    parser.add_argument("role", choices=tuple(sorted(ROLES)), help="RightMemory runtime role")
     if not argv or argv[0] in {"-h", "--help"}:
         parser.parse_args(argv)
         return 0
@@ -87,6 +91,28 @@ def _pull_parser(role: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=f"rightmemory {role} pull")
     parser.add_argument("--session", required=True, help="read the latest async update state for this session id")
     return parser
+
+
+def _review_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="rightmemory review")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    scan = subparsers.add_parser("scan", help="scan configured transcript sources")
+    scan.add_argument("--once", action="store_true", help="run one scan pass and exit")
+    args = parser.parse_args(argv)
+
+    if args.command == "scan":
+        if not args.once:
+            raise ValueError("review scan currently requires --once")
+        reviewer_config = load_config("reviewer")
+        review_config = load_review_config()
+        runtime = RightMemoryRuntime(reviewer_config)
+        try:
+            scanner = ReviewScanner(review_config, runtime.run_session_turn)
+            print(scanner.scan_once().format())
+            return 0
+        finally:
+            runtime.cleanup()
+    raise ValueError(f"unknown review command: {args.command}")
 
 
 def _chat(runtime: RightMemoryRuntime, session_id: str | None = None) -> int:

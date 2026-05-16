@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rightmemory.config import RuntimeConfig, load_config
+from rightmemory.config import RuntimeConfig, load_config, load_review_config
 from rightmemory.prompt import build_instructions
 from rightmemory.runtime import RightMemoryRuntime, build_model
 
@@ -112,6 +112,42 @@ class ConfigTests(unittest.TestCase):
         with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
             with self.assertRaises(ValueError):
                 load_config("curator")
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_reviewer_config(self):
+        config_path = self._write_config(
+            """
+            [reviewer.model]
+            model_id = "openai/reviewer"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_config("reviewer")
+
+        self.assertEqual(config.role, "reviewer")
+        self.assertEqual(config.model_id, "openai/reviewer")
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_review_config_sources(self):
+        config_path = self._write_config(
+            """
+            [review]
+            idle_seconds = 7200
+
+            [[review.sources]]
+            kind = "codex"
+            path = "~/codex-history"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_review_config()
+
+        self.assertEqual(config.idle_seconds, 7200)
+        self.assertEqual(len(config.sources), 1)
+        self.assertEqual(config.sources[0].kind, "codex")
+        self.assertEqual(config.sources[0].path, Path("~/codex-history").expanduser())
 
     def _write_config(self, content: str) -> Path:
         handle = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
@@ -313,6 +349,19 @@ class PromptTests(unittest.TestCase):
         self.assertIn("embedded schema above", prompt)
         self.assertIn("memory-dreamer", prompt)
         self.assertNotIn("memory-curator", prompt)
+        self.assertNotIn("rightmemory-schema.md", prompt)
+        self.assertNotIn("{{MEMORY_ROOT}}", prompt)
+        self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+
+    def test_reviewer_prompt_has_only_reviewer_skill(self):
+        prompt = build_instructions(Path("/home/example/.rightmemory"), "reviewer")
+
+        self.assertIn("The only allowed root directory is /home/example/.rightmemory", prompt)
+        self.assertIn("RightMemory Schema", prompt)
+        self.assertIn("embedded schema above", prompt)
+        self.assertIn("memory-reviewer", prompt)
+        self.assertNotIn("memory-curator", prompt)
+        self.assertNotIn("memory-dreamer", prompt)
         self.assertNotIn("rightmemory-schema.md", prompt)
         self.assertNotIn("{{MEMORY_ROOT}}", prompt)
         self.assertNotIn("{{SKILLS_ROOT}}", prompt)
