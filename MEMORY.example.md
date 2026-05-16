@@ -1,34 +1,41 @@
+> This starter template is copied to `MEMORY.md` on first install. Add real user/project memory before the first example heading. Do not treat sample nodes as user facts. Once real memory before this template section exceeds 50 lines, the dreamer may remove this entire example/template section from the installed `MEMORY.md`.
+
 # Sample Project Graph — Example Domain {#sample-project-graph}
 
 > Replace this whole `#` section with your own domains. The memory schema lives in the installed RightMemory skills, not in this file.
 
-## Example Application {#sample-app}
+## Example Application {#sample-app} → [rel:sample-infra]
 
-### Projects {#sample-projects} → [rel:sample-infra]
+This example domain shows a product memory with graph-addressable headings, compact fact nodes, and detail-file pointers for topics that are too large for the root file.
 
-This group tracks the example application's deployable units and shared code.
+### Deployable Units {#sample-deployable-units} → [rel:sample-release-runbook]
 
-- `proj-web` web-app — example frontend, TypeScript + Vite, calls `proj-api` for data → [dep:lib-utils, agg:proj-deploy]
-- `proj-api` api-server — example backend service, Python + FastAPI → [dep:lib-utils, dep:db-postgres, agg:proj-deploy]
-- `proj-deploy` deploy-bundle — production deployment package combining frontend and backend artifacts → [agg:proj-web, agg:proj-api]
+This group tracks the example application's deployable services and shared code.
 
-#### Deployment Details {#sample-deploy}
+- `proj-web` web-app — example frontend, TypeScript + Vite, calls `proj-api` for data. → [dep:lib-utils, agg:proj-deploy]
+- `proj-api` api-server — example backend service, Python + FastAPI, reads from `db-postgres`. → [dep:lib-utils, dep:db-postgres, agg:proj-deploy]
+- `lib-utils` shared-utils — small utility library reused by both frontend and backend. → [rel:proj-web, rel:proj-api]
+- `proj-deploy` deploy-bundle — production deployment package combining frontend and backend artifacts. → [agg:proj-web, agg:proj-api]
 
-### Libraries {#sample-libs}
+### Release Runbook {F#sample-release-runbook} → [dep:sample-deployable-units]
 
-- `lib-utils` shared-utils — small utility library reused by both frontend and backend → [rel:proj-web, rel:proj-api]
+Release checklist, rollout steps, rollback notes, and environment-specific commands live in `MEMORY_sample-release-runbook.md`; the root keeps this short summary so agents can discover the topic without loading the long runbook.
 
-#### Utility Internals {#sample-utils}
+### Interface Contracts {#sample-interface-contracts}
 
-## Example Infrastructure {#sample-infra} → [rel:sample-projects]
+- `api-public-contract` Public API responses use stable snake_case JSON keys so generated clients do not churn across releases. → [dep:proj-api, rel:proj-web]
+- `auth-session-contract` Browser sessions are stored as signed HTTP-only cookies and refreshed through the API service. → [dep:proj-api, rel:proj-web]
 
-### Databases {#sample-databases}
+## Example Infrastructure {#sample-infra} → [rel:sample-app]
 
-- `db-postgres` postgres-db — PostgreSQL database used by the API → [rel:proj-api]
+### Database Stack {#sample-database-stack}
+
+- `db-postgres` postgres-db — PostgreSQL database used by the API service. → [rel:proj-api]
+- `db-backup-job` backup-job — nightly logical backup for `db-postgres`, verified by restore drills before major releases. → [bak:db-postgres, ver:sample-backup-drill]
+
+#### Backup Drill Notes {F#sample-backup-drill}
 
 ---
-
-
 
 # Cross-Session Agent Behavior — Example Domain {#sample-agent-behavior}
 
@@ -40,7 +47,5 @@ Store cross-project behavior memory here when it should change how future agents
 - `pref-env-check` Future agents should check durable memory and local project context for the intended runtime environment before installing dependencies or guessing a Python environment. → []
 
 ---
-
-
 
 # User Pending Task and Thoughts (user-edited only — AI agents must not modify this section)

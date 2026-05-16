@@ -203,6 +203,23 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertIn("validation passed", result)
 
+    def test_validate_memory_accepts_file_backed_heading_marker(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Domain {#domain}\n\n"
+            "## Runtime {F#runtime} → [rel:domain]\n"
+            "- `runtime-python` Uses Python 3.11. → [cfg:runtime]\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_runtime.md").write_text(
+            "# Runtime Details\n\n"
+            "- `runtime-install` Install dependencies with uv. → [rel:runtime-python]\n",
+            encoding="utf-8",
+        )
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("validation passed", result)
+
     def test_validate_memory_catches_self_and_duplicate_edges(self):
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"

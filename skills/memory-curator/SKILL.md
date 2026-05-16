@@ -21,10 +21,10 @@ Understand the core intent of this skill; do not follow it rigidly, and stay fle
 
 ## Retrieval
 
-- For retrieval, use your own judgment to decide which nodes are strongly relevant to the parent's question, and return those. Consider direct matches as well as synonyms, abbreviations, related concepts, nearby `####` pointer titles/slugs, and multi-hop reachability via edges. There is no fixed hop count or result quota — stop when more nodes stop adding signal.
+- For retrieval, use your own judgment to decide which nodes are strongly relevant to the parent's question, and return those. Consider direct matches as well as synonyms, abbreviations, related concepts, nearby detail-heading titles/slugs, and multi-hop reachability via edges. There is no fixed hop count or result quota — stop when more nodes stop adding signal.
 - Never re-return a node or heading already sent in this session. If everything strongly relevant was already returned, reply "no new matches".
-- Open relevant detail files yourself when the query matches a `####` title, slug, nearby `#`/`##`/`###` context, or related graph node. Usually inspect only the most relevant 1-3 detail files; do not bulk-read every `MEMORY_*.md` file unless the task genuinely requires global consolidation or an explicit reload.
-- Return matched nodes and matched anchored headings as **verbatim addressable lines** (the whole heading line with `{#id}` / `→ [...]`, or the whole `- \`<id>\` … → [...]` node line), each followed by a 1-line note on why it matched. Group by relevance, strongest first.
+- Open relevant detail files yourself when the query matches an anchored heading title, slug, nearby tree context, `####` pointer, or related graph node. Usually inspect only the most relevant 1-3 detail files; do not bulk-read every `MEMORY_*.md` file unless the task genuinely requires global consolidation or an explicit reload.
+- Return matched nodes and matched anchored headings as **verbatim addressable lines** (the whole heading line with `{#id}` or `{F#id}` / `→ [...]`, or the whole `- \`<id>\` … → [...]` node line), each followed by a 1-line note on why it matched. Group by relevance, strongest first.
 - If a matched heading has direct body paragraphs, include those paragraphs after the heading line. They are part of the heading node. Do not include child nodes unless they independently match.
 - If nothing is strongly relevant, reply with "no strong match" plus up to 3 weak candidates if any exist; do not invent node ids or edges that are not in the file.
 - Do not dump unrelated sections, do not summarize the whole file, and do not rewrite node descriptions in your own words.

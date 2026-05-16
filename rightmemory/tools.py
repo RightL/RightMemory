@@ -29,7 +29,7 @@ KNOWN_EDGE_TYPES = {
 }
 COMMIT_MESSAGE_LINE_LIMIT = 120
 
-ANCHOR_RE = re.compile(r"^(#{1,4})\s+.*?\{#([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
+ANCHOR_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
 HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$")
 NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*→\s*\[(.*?)\])?\s*$")
 EDGE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*([A-Za-z0-9_.-]+)\s*$")

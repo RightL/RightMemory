@@ -8,11 +8,12 @@ Addressable headings use:
 
 ```md
 ### Human Title {#heading-id} → [edge1, edge2, ...]
+### File-Backed Title {F#heading-id} → [edge1, edge2, ...]
 ```
 
 Plain tree headings without graph edges may omit the anchor and edge list.
 
-Addressable `#`, `##`, and `###` headings may have body paragraphs directly under the heading. Those paragraphs describe the heading node itself. Use a heading body when text explains the whole heading concept; use child nodes when text should stand as its own memory under that concept.
+Addressable `#`, `##`, and `###` headings may have body paragraphs directly under the heading. Those paragraphs describe the heading node itself, even when the heading also has a sibling detail file. Use a heading body when text explains the whole heading concept; use child nodes when text should stand as its own memory under that concept.
 
 Nodes use:
 
@@ -21,6 +22,7 @@ Nodes use:
 ```
 
 - `heading-id` and `node-id` share one namespace; do not reuse an id between a heading and a node.
+- `F#` marks a heading as file-backed; the graph id is still `heading-id`, so edges target `type:heading-id`, not `type:F#heading-id`.
 - Edges may connect heading to heading, heading to node, node to heading, or node to node.
 - Node lines with no edges write `→ []`; heading lines with no edges may omit `→ []`.
 
@@ -48,13 +50,17 @@ Written edges may be one-way or reciprocal [stored on both records so either sid
 
 - `#`, `##`, and `###` are normal tree layers and may contain memory content.
 - `#`, `##`, and `###` may have `{#short-slug}` anchors and edges when the whole subtree is a graph target.
-- `#### Human Title {#short-slug}` is title-only and points to sibling detail file `MEMORY_<short-slug>.md`.
-- Do not write body content under a `####` pointer in the current file.
+- A file-backed `#`, `##`, or `###` heading uses `{F#short-slug}` and maps to sibling detail file `MEMORY_<short-slug>.md`.
+- When a heading's child content moves into its detail file, keep only the heading line and any heading body paragraphs in the current file. Do not leave child node lines or child headings under that heading in the current file.
+- `#### Human Title {F#short-slug}` is the deepest heading level allowed in a memory file and points to sibling detail file `MEMORY_<short-slug>.md`.
+- Do not write body paragraphs, child node lines, or child headings under a `####` pointer in the current file.
 - Create `####` pointers only under an existing or newly created `###` topic; do not jump directly from `#` or `##` to `####`.
 - Detail files use the same schema recursively.
 
 ## Placement Rules
 
+- Use detail files to keep large headings readable. As a guide, consider moving child content into a detail file when a `#`, `##`, or `###` heading has more than about 15 direct node lines, then mark the parent heading with `F#`.
+- Count only direct node lines shaped like ``- `<node-id>` ...``; do not count child headings or `####` pointers.
 - Tree nesting expresses reading context and containment; do not add child-to-containing-heading edges merely to say a node belongs under a heading.
 - Use heading edges when a relation applies to the whole subtree.
 - Use node edges when a relation applies only to one fact.
