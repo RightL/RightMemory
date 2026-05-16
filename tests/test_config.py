@@ -152,6 +152,7 @@ class ConfigTests(unittest.TestCase):
             """
             [review]
             idle_seconds = 7200
+            since_days = 14
 
             [[review.sources]]
             kind = "codex"
@@ -163,6 +164,7 @@ class ConfigTests(unittest.TestCase):
             config = load_review_config()
 
         self.assertEqual(config.idle_seconds, 7200)
+        self.assertEqual(config.since_days, 14)
         self.assertEqual(len(config.sources), 1)
         self.assertEqual(config.sources[0].kind, "codex")
         self.assertEqual(config.sources[0].path, Path("~/codex-history").expanduser())
@@ -231,6 +233,24 @@ class RuntimeTests(unittest.TestCase):
             runtime.agent.calls[0]["model_settings"],
             {"extra_body": {"chat_template_kwargs": {"thinking": True}}},
         )
+
+    def test_write_role_creates_memory_lock(self):
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name))
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+            runtime.run_session_turn("agent-session", "remember one")
+
+        self.assertTrue((Path(self.tempdir.name) / ".runtime" / "memory.lock").exists())
+
+    def test_retrieve_role_does_not_create_memory_lock(self):
+        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+            runtime.run_session_turn("agent-session", "find one")
+
+        self.assertFalse((Path(self.tempdir.name) / ".runtime" / "memory.lock").exists())
 
     def test_run_session_turn_preserves_message_history_on_disk(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
@@ -418,6 +438,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("embedded schema above", prompt)
         self.assertIn("Reviewer Role", prompt)
         self.assertIn("already_reviewed_turns", prompt)
+        self.assertIn("commit them", prompt)
         self.assertNotIn("memory-curator", prompt)
         self.assertNotIn("memory-dreamer", prompt)
         self.assertNotIn("rightmemory-schema.md", prompt)

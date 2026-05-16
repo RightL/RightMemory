@@ -158,6 +158,57 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertEqual(result.failed, 1)
         self.assertEqual(state.sessions, {})
 
+    def test_scan_skips_sessions_older_than_since_days(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            transcript = source / "old.jsonl"
+            self._write_codex(transcript, turns=[("u1", "a1")])
+            now = 40 * 24 * 60 * 60
+            self._set_mtime(transcript, 1_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    since_days=30,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                lambda session_id, message: calls.append(message) or "ok",
+            )
+
+            result = scanner.scan_once(now=now)
+
+        self.assertEqual(result.skipped_old, 1)
+        self.assertEqual(calls, [])
+
+    def test_scan_resets_cursor_when_reviewed_prefix_changes(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            transcript = source / "session.jsonl"
+            self._write_codex(transcript, turns=[("u1", "a1"), ("u2", "a2")])
+            self._set_mtime(transcript, 1_000)
+            config = ReviewConfig(
+                memory_root=root,
+                idle_seconds=3600,
+                sources=[ReviewSourceConfig(kind="codex", path=source)],
+            )
+            scanner = ReviewScanner(config, lambda session_id, message: calls.append(message) or "ok")
+            scanner.scan_once(now=10_000)
+
+            self._write_codex(transcript, turns=[("u1", "changed"), ("u2", "a2"), ("u3", "a3")])
+            self._set_mtime(transcript, 20_000)
+            result = scanner.scan_once(now=30_000)
+
+        self.assertEqual(result.reset_changed, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('"already_reviewed_turns": 0', calls[1])
+        self.assertIn('"assistant": "changed"', calls[1])
+
     def test_scan_skips_active_session(self):
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:

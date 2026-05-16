@@ -78,14 +78,6 @@ def _command_guidance(role: str) -> str:
 def _tool_guidance(role: str) -> str:
     if role == "retrieve":
         return "- Use the provided read-only tools for file listing, search, outline, context reads, and validation."
-    if role == "reviewer":
-        return (
-            "- Use the provided tools for file search, outline, context reads, Codex-style patches, git inspection, "
-            "and validation.\n"
-            "- Patch syntax starts with `*** Begin Patch`, uses `*** Update File: path`, `*** Add File: path`, or "
-            "`*** Delete File: path`, and ends with `*** End Patch`.\n"
-            "- Do not commit routine reviewer edits."
-        )
     return (
         "- Use the provided tools for file search, outline, context reads, Codex-style patches, git inspection, "
         "and validation.\n"

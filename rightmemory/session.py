@@ -31,6 +31,28 @@ class MessageSessionStore:
         return LockedMessageSession(self.paths(session_id))
 
 
+class MemoryWriteLock:
+    def __init__(self, memory_root: Path):
+        self.runtime_root = memory_root / ".runtime"
+        self.lock_path = self.runtime_root / "memory.lock"
+        self._lock_handle: Any | None = None
+
+    def __enter__(self) -> MemoryWriteLock:
+        _ensure_runtime_gitignore(self.runtime_root)
+        self._lock_handle = self.lock_path.open("a+", encoding="utf-8")
+        fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if self._lock_handle is None:
+            return
+        try:
+            fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._lock_handle.close()
+            self._lock_handle = None
+
+
 class LockedMessageSession:
     def __init__(self, paths: SessionPaths):
         self.paths = paths

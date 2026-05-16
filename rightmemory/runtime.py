@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from functools import wraps
 from typing import Any
 
 from .config import RuntimeConfig
 from .prompt import build_instructions
-from .session import MessageSessionStore
+from .session import MemoryWriteLock, MessageSessionStore
 from .tools import MemoryTools
 
 
@@ -39,31 +40,38 @@ class RightMemoryRuntime:
     def run_turn(self, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
-        result = self.agent.run_sync(
-            message,
-            message_history=self._message_history or None,
-            model_settings=self._model_settings(),
-        )
-        all_messages = getattr(result, "all_messages", None)
-        if callable(all_messages):
-            self._message_history = list(all_messages())
+        with self._memory_write_lock():
+            result = self.agent.run_sync(
+                message,
+                message_history=self._message_history or None,
+                model_settings=self._model_settings(),
+            )
+            all_messages = getattr(result, "all_messages", None)
+            if callable(all_messages):
+                self._message_history = list(all_messages())
         output = getattr(result, "output", None)
         return str(output if output is not None else result)
 
     def run_session_turn(self, session_id: str, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
-        with self.sessions.locked(session_id) as session:
-            history_json = session.load_json()
-            history = self._load_message_history(history_json) if history_json is not None else None
-            result = self.agent.run_sync(
-                message,
-                message_history=history,
-                model_settings=self._model_settings(),
-            )
-            session.save_json(self._dump_message_history(result))
+        with self._memory_write_lock():
+            with self.sessions.locked(session_id) as session:
+                history_json = session.load_json()
+                history = self._load_message_history(history_json) if history_json is not None else None
+                result = self.agent.run_sync(
+                    message,
+                    message_history=history,
+                    model_settings=self._model_settings(),
+                )
+                session.save_json(self._dump_message_history(result))
         output = getattr(result, "output", None)
         return str(output if output is not None else result)
+
+    def _memory_write_lock(self):
+        if self.config.role == "retrieve":
+            return nullcontext()
+        return MemoryWriteLock(self.config.memory_root)
 
     def _build_agent(self):
         try:

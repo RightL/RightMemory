@@ -239,10 +239,16 @@ Configs must use `[retrieve.model]`, `[update.model]`, `[dreamer.model]`, and op
 
 ### Automatic Transcript Review
 
-RightMemory can scan idle provider chat sessions and run the standalone `reviewer` role:
+RightMemory can scan idle provider chat sessions and run the standalone `reviewer` role. The preferred automation model is an external scheduler, such as cron or launchd, calling one bounded scan at a time:
 
 ```bash
 rightmemory review scan --once
+```
+
+For debugging an adapter without calling a model:
+
+```bash
+rightmemory review normalize --source claude --path ~/.claude/projects/<project>/<session>.jsonl
 ```
 
 Add source presets to `<memory-root>/rightmemory.toml`:
@@ -250,6 +256,7 @@ Add source presets to `<memory-root>/rightmemory.toml`:
 ```toml
 [review]
 idle_seconds = 3600
+since_days = 30
 
 [[review.sources]]
 kind = "claude"
@@ -260,7 +267,7 @@ kind = "codex"
 path = "~/.codex/sessions"
 ```
 
-If `[[review.sources]]` is omitted, RightMemory checks the default Codex and Claude locations. Review state is stored under `<memory-root>/.runtime/review/state.json` and records the last reviewed turn count for each transcript. When a session resumes later, the reviewer receives the whole normalized session for context but extracts only from the new suffix.
+If `[[review.sources]]` is omitted, RightMemory checks the default Codex and Claude locations. By default it only considers transcript files modified in the last 30 days. Review state is stored under `<memory-root>/.runtime/review/state.json` and records the last reviewed turn count and a hash of the reviewed prefix for each transcript. When a session resumes later, the reviewer receives the whole normalized session for context but extracts only from the new suffix. If a transcript prefix changes, RightMemory resets that session cursor and reviews it from the beginning.
 
 Run it from this repository during development:
 

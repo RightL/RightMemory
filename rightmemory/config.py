@@ -13,6 +13,7 @@ CONFIG_PATH = MEMORY_ROOT / "rightmemory.toml"
 ROLES = {"dreamer", "retrieve", "reviewer", "update"}
 DEFAULT_MAX_TOOL_RETRIES = 10
 DEFAULT_REVIEW_IDLE_SECONDS = 3600
+DEFAULT_REVIEW_SINCE_DAYS = 30
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class ReviewSourceConfig:
 class ReviewConfig:
     memory_root: Path = MEMORY_ROOT
     idle_seconds: int = DEFAULT_REVIEW_IDLE_SECONDS
+    since_days: int = DEFAULT_REVIEW_SINCE_DAYS
     sources: list[ReviewSourceConfig] = field(default_factory=list)
 
 
@@ -90,11 +92,15 @@ def load_review_config() -> ReviewConfig:
         section = {}
     if not isinstance(section, dict):
         raise ValueError("[review] must be a TOML table")
-    _reject_unknown_keys(section, {"idle_seconds", "sources"}, "[review]")
+    _reject_unknown_keys(section, {"idle_seconds", "since_days", "sources"}, "[review]")
 
     idle_seconds = section.get("idle_seconds", DEFAULT_REVIEW_IDLE_SECONDS)
     if not isinstance(idle_seconds, int) or idle_seconds < 1:
         raise ValueError("[review].idle_seconds must be a positive integer")
+
+    since_days = section.get("since_days", DEFAULT_REVIEW_SINCE_DAYS)
+    if not isinstance(since_days, int) or since_days < 1:
+        raise ValueError("[review].since_days must be a positive integer")
 
     raw_sources = section.get("sources")
     if raw_sources is None:
@@ -104,7 +110,7 @@ def load_review_config() -> ReviewConfig:
             raise ValueError("[[review.sources]] must be an array of tables")
         sources = [_review_source(item) for item in raw_sources]
 
-    return ReviewConfig(memory_root=MEMORY_ROOT, idle_seconds=idle_seconds, sources=sources)
+    return ReviewConfig(memory_root=MEMORY_ROOT, idle_seconds=idle_seconds, since_days=since_days, sources=sources)
 
 
 def _load_raw_config() -> dict[str, object]:

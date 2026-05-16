@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -13,12 +14,15 @@ from .session import _ensure_runtime_gitignore, _fsync_directory
 from .transcripts import claude, codex
 from .transcripts.model import NormalizedSession, TranscriptFile
 
+SECONDS_PER_DAY = 24 * 60 * 60
+
 
 @dataclass(frozen=True)
 class ReviewSessionState:
     session_id: str
     source: str
     last_reviewed_turn: int = 0
+    reviewed_turns_hash: str | None = None
     last_seen_mtime: float | None = None
     last_seen_size: int | None = None
     last_reviewed_at: str | None = None
@@ -33,16 +37,20 @@ class ReviewState:
 class ReviewScanResult:
     reviewed: int = 0
     skipped_idle: int = 0
+    skipped_old: int = 0
     skipped_unchanged: int = 0
     skipped_empty: int = 0
+    reset_changed: int = 0
     failed: int = 0
 
     def format(self) -> str:
         return (
             f"reviewed: {self.reviewed}\n"
             f"skipped_idle: {self.skipped_idle}\n"
+            f"skipped_old: {self.skipped_old}\n"
             f"skipped_unchanged: {self.skipped_unchanged}\n"
             f"skipped_empty: {self.skipped_empty}\n"
+            f"reset_changed: {self.reset_changed}\n"
             f"failed: {self.failed}"
         )
 
@@ -63,6 +71,7 @@ class ReviewStateStore:
                     session_id=str(value.get("session_id", "")),
                     source=str(value.get("source", "")),
                     last_reviewed_turn=_int(value.get("last_reviewed_turn")),
+                    reviewed_turns_hash=_str_or_none(value.get("reviewed_turns_hash")),
                     last_seen_mtime=_float(value.get("last_seen_mtime")),
                     last_seen_size=_int_or_none(value.get("last_seen_size")),
                     last_reviewed_at=_str_or_none(value.get("last_reviewed_at")),
@@ -100,8 +109,10 @@ class ReviewScanner:
         counts = {
             "reviewed": 0,
             "skipped_idle": 0,
+            "skipped_old": 0,
             "skipped_unchanged": 0,
             "skipped_empty": 0,
+            "reset_changed": 0,
             "failed": 0,
         }
 
@@ -111,6 +122,9 @@ class ReviewScanner:
                     stat = transcript.path.stat()
                 except OSError:
                     counts["skipped_empty"] += 1
+                    continue
+                if now - stat.st_mtime > self.config.since_days * SECONDS_PER_DAY:
+                    counts["skipped_old"] += 1
                     continue
                 if now - stat.st_mtime < self.config.idle_seconds:
                     counts["skipped_idle"] += 1
@@ -123,6 +137,12 @@ class ReviewScanner:
 
                 prior = sessions.get(transcript.key)
                 last_reviewed_turn = prior.last_reviewed_turn if prior else 0
+                if prior and prior.reviewed_turns_hash and last_reviewed_turn > 0:
+                    reviewed_prefix_hash = _turns_hash(normalized, last_reviewed_turn)
+                    if len(normalized.turns) < last_reviewed_turn or reviewed_prefix_hash != prior.reviewed_turns_hash:
+                        last_reviewed_turn = 0
+                        counts["reset_changed"] += 1
+
                 if len(normalized.turns) <= last_reviewed_turn:
                     counts["skipped_unchanged"] += 1
                     continue
@@ -138,6 +158,7 @@ class ReviewScanner:
                     session_id=normalized.session_id,
                     source=normalized.source,
                     last_reviewed_turn=len(normalized.turns),
+                    reviewed_turns_hash=_turns_hash(normalized, len(normalized.turns)),
                     last_seen_mtime=stat.st_mtime,
                     last_seen_size=stat.st_size,
                     last_reviewed_at=datetime.now(UTC).isoformat(),
@@ -146,6 +167,14 @@ class ReviewScanner:
                 counts["reviewed"] += 1
 
         return ReviewScanResult(**counts)
+
+
+def normalize_transcript(source: str, path: Path, already_reviewed_turns: int = 0) -> NormalizedSession | None:
+    transcript = TranscriptFile(source, path)
+    normalized = _parse(transcript)
+    if normalized is None:
+        return None
+    return normalized.with_review_cursor(already_reviewed_turns)
 
 
 def _discover(source: ReviewSourceConfig) -> list[TranscriptFile]:
@@ -178,6 +207,15 @@ def _review_message(session: NormalizedSession) -> str:
         "Normalized session JSON:\n"
         + json.dumps(session.to_payload(), ensure_ascii=False, indent=2)
     )
+
+
+def _turns_hash(session: NormalizedSession, count: int) -> str:
+    payload = [
+        {"i": turn.i, "user": turn.user, "assistant": turn.assistant}
+        for turn in session.turns[:count]
+    ]
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _int(value: object) -> int:

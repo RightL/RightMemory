@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from .async_update import AsyncUpdateStore, format_state
 from .config import ROLES, load_config, load_review_config
-from .review import ReviewScanner
+from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 
 
@@ -123,13 +125,25 @@ def _review_main(argv: list[str]) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     scan = subparsers.add_parser("scan", help="scan configured transcript sources")
     scan.add_argument("--once", action="store_true", help="run one scan pass and exit")
+    scan.add_argument("--since-days", type=int, help="only review transcript files modified within this many days")
+    normalize = subparsers.add_parser("normalize", help="print normalized transcript JSON without running reviewer")
+    normalize.add_argument("--source", choices=("codex", "claude"), required=True, help="transcript provider format")
+    normalize.add_argument("--path", required=True, help="path to one provider transcript file")
+    normalize.add_argument("--already-reviewed-turns", type=int, default=0, help="cursor to include in normalized JSON")
     args = parser.parse_args(argv)
+
+    if args.command == "normalize":
+        return _review_normalize(args.source, args.path, args.already_reviewed_turns)
 
     if args.command == "scan":
         if not args.once:
             raise ValueError("review scan currently requires --once")
         reviewer_config = load_config("reviewer")
         review_config = load_review_config()
+        if args.since_days is not None:
+            if args.since_days < 1:
+                raise ValueError("--since-days must be a positive integer")
+            review_config = replace(review_config, since_days=args.since_days)
         runtime = RightMemoryRuntime(reviewer_config)
         try:
             scanner = ReviewScanner(review_config, runtime.run_session_turn)
@@ -138,6 +152,16 @@ def _review_main(argv: list[str]) -> int:
         finally:
             runtime.cleanup()
     raise ValueError(f"unknown review command: {args.command}")
+
+
+def _review_normalize(source: str, path: str, already_reviewed_turns: int) -> int:
+    if already_reviewed_turns < 0:
+        raise ValueError("--already-reviewed-turns must be >= 0")
+    normalized = normalize_transcript(source, Path(path).expanduser(), already_reviewed_turns)
+    if normalized is None:
+        raise ValueError("no completed turns found in transcript")
+    print(json.dumps(normalized.to_payload(), ensure_ascii=False, indent=2))
+    return 0
 
 
 def _chat(runtime: RightMemoryRuntime, session_id: str | None = None) -> int:

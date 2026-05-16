@@ -121,6 +121,31 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(roles, ["reviewer"])
         self.assertEqual(stdout.getvalue().strip(), "reviewed: 1")
 
+    def test_review_normalize_prints_normalized_session_without_loading_config(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "session.jsonl"
+            rows = [
+                {"type": "session_meta", "timestamp": "t0", "payload": {"id": "s1", "cwd": "/repo"}},
+                {"type": "event_msg", "timestamp": "t1", "payload": {"type": "user_message", "message": "hello"}},
+                {"type": "event_msg", "timestamp": "t2", "payload": {"type": "agent_message", "message": "hi"}},
+                {"type": "event_msg", "timestamp": "t3", "payload": {"type": "task_complete"}},
+            ]
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+            with (
+                patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["review", "normalize", "--source", "codex", "--path", str(path), "--already-reviewed-turns", "1"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(result, 0)
+        self.assertEqual(payload["source"], "codex")
+        self.assertEqual(payload["session_id"], "s1")
+        self.assertEqual(payload["already_reviewed_turns"], 1)
+        self.assertEqual(payload["turns"][0]["user"], "hello")
+
     def test_main_runs_one_shot_session_turn(self):
         roles = []
         stdout = io.StringIO()
