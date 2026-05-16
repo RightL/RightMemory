@@ -77,15 +77,25 @@ def _command_guidance(role: str) -> str:
 
 def _tool_guidance(role: str) -> str:
     if role == "retrieve":
-        return "- Use the provided read-only tools for file listing, search, outline, context reads, and validation."
+        return (
+            "- Use the provided read-only tools for `read`, `grep`, `glob`, restricted `read_command`, outline, "
+            "and validation.\n"
+            "- `read_command` accepts common read-only shell forms such as `cat path`, `sed -n 'X,Yp' path`, "
+            "`rg pattern`, `rg --files`, `git status --short`, and `git diff`. It does not run a general shell."
+        )
     return (
-        "- Use the provided tools for file search, outline, context reads, Codex-style patches, git inspection, "
-        "and validation.\n"
-        "- Patch syntax starts with `*** Begin Patch`, uses `*** Update File: path`, `*** Add File: path`, or "
-        "`*** Delete File: path`, and ends with `*** End Patch`.\n"
+        "- Use the provided tools for `read`, `grep`, `glob`, restricted `read_command`, outline, exact file "
+        "edits, file creation, file deletion, file renames, git inspection, and validation.\n"
+        "- `read_command` accepts common read-only shell forms such as `cat path`, `sed -n 'X,Yp' path`, "
+        "`rg pattern`, `rg --files`, `git status --short`, and `git diff`. It does not run a general shell.\n"
+        "- For edits to existing file content, use `edit_file(path, old_string, new_string, replace_all=false)`. "
+        "Read the target file first with `read`, `cat`, or `sed -n`, copy `old_string` from the current file text, "
+        "and make it large enough to identify the intended occurrence.\n"
+        "- Use `create_file`, `delete_file`, and `rename_file` for file lifecycle changes instead of encoding "
+        "those operations as textual replacements.\n"
         "- Commit tools may stage and commit only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; ignore "
         "unrelated untracked files unless the caller explicitly asks about them.\n"
-        "- Prefer small, reviewable patches over broad rewrites."
+        "- Prefer small, reviewable edits over broad rewrites."
     )
 
 

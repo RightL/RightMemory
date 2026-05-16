@@ -108,10 +108,10 @@ class RightMemoryRuntime:
 
     def _agent_tools(self) -> list[Callable[..., Any]]:
         read_tools = [
-            self._agent_tool(self.tools.list_files),
-            self._agent_tool(self.tools.read_file),
-            self._agent_tool(self.tools.read_around),
-            self._agent_tool(self.tools.search_files),
+            self._agent_tool(self.tools.glob),
+            self._agent_tool(self.tools.grep),
+            self._agent_tool(self.tools.read),
+            self._agent_tool(self.tools.read_command),
             self._agent_tool(self.tools.outline_file),
             self._agent_tool(self.tools.validate_memory),
         ]
@@ -119,7 +119,10 @@ class RightMemoryRuntime:
             return read_tools
         return [
             *read_tools,
-            self._agent_tool(self.tools.apply_patch),
+            self._agent_tool(self.tools.edit_file),
+            self._agent_tool(self.tools.create_file),
+            self._agent_tool(self.tools.delete_file),
+            self._agent_tool(self.tools.rename_file),
             self._agent_tool(self.tools.git_status),
             self._agent_tool(self.tools.git_diff),
             self._agent_tool(self.tools.git_add),

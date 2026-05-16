@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
+from difflib import SequenceMatcher
+from hashlib import sha256
 from pathlib import Path
 
 
 FULL_READ_LINE_LIMIT = 200
+READ_TOOL_LINE_LIMIT = 2000
+COMMAND_OUTPUT_CHAR_LIMIT = 30000
 MAX_LIST_FILES = 500
 MAX_SEARCH_MATCHES = 200
 MAX_OUTLINE_ITEMS = 500
@@ -28,6 +33,9 @@ KNOWN_EDGE_TYPES = {
     "todo",
 }
 COMMIT_MESSAGE_LINE_LIMIT = 120
+MAX_CLOSE_MATCHES = 3
+MAX_EDIT_MATCH_LINES = 8
+MAX_MATCH_PREVIEW_CHARS = 180
 
 ANCHOR_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
 HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$")
@@ -35,12 +43,6 @@ NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*→\s*\[(.*?)\])?\s*$")
 EDGE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*([A-Za-z0-9_.-]+)\s*$")
 MEMORY_DETAIL_FILE_RE = re.compile(r"^MEMORY_[A-Za-z0-9_.-]+\.md$")
 DREAM_LOG_FILE_RE = re.compile(r"^dream_logs/[A-Za-z0-9_.-]+\.md$")
-PATCH_BEGIN = "*** Begin Patch"
-PATCH_END = "*** End Patch"
-ADD_FILE_PREFIX = "*** Add File: "
-UPDATE_FILE_PREFIX = "*** Update File: "
-DELETE_FILE_PREFIX = "*** Delete File: "
-PATCH_OPERATION_PREFIXES = (ADD_FILE_PREFIX, UPDATE_FILE_PREFIX, DELETE_FILE_PREFIX)
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,7 @@ class MemoryId:
 class MemoryTools:
     def __init__(self, memory_root: Path):
         self.memory_root = memory_root.resolve()
+        self._read_signatures: dict[Path, str] = {}
 
     def list_files(self, pattern: str = "MEMORY*.md") -> list[str]:
         """List files under the RightMemory root that match a glob pattern."""
@@ -68,6 +71,39 @@ class MemoryTools:
         if len(paths) > MAX_LIST_FILES:
             raise ValueError(f"pattern matched more than {MAX_LIST_FILES} files; use a narrower pattern")
         return paths
+
+    def glob(self, pattern: str = "MEMORY*.md", path: str = ".") -> list[str]:
+        """Find files under the RightMemory root by glob pattern."""
+        pattern = pattern.strip() or "**/*"
+        base = self._resolve_path(path)
+        if not base.is_dir():
+            raise ValueError(f"glob path is not a directory: {path}")
+        raw_pattern = Path(pattern)
+        if raw_pattern.is_absolute() or ".." in raw_pattern.parts:
+            raise ValueError("glob pattern must be relative and must not contain '..'")
+        files = [
+            item
+            for item in base.glob(pattern)
+            if item.is_file() and self._is_under_root(item)
+        ]
+        files.sort(key=lambda item: (-item.stat().st_mtime, item.relative_to(self.memory_root).as_posix()))
+        if len(files) > MAX_LIST_FILES:
+            raise ValueError(f"pattern matched more than {MAX_LIST_FILES} files; use a narrower pattern")
+        return [item.relative_to(self.memory_root).as_posix() for item in files]
+
+    def read(self, path: str, offset: int = 1, limit: int = READ_TOOL_LINE_LIMIT) -> str:
+        """Read a line-numbered file range under the RightMemory root."""
+        resolved = self._resolve_path(path)
+        lines = self._read_lines(resolved, path)
+        self._validate_positive("offset", offset)
+        self._validate_positive("limit", limit)
+        end = min(len(lines), offset + limit - 1)
+        if offset > len(lines):
+            return f"[empty: offset {offset} exceeds file length {len(lines)}]"
+        output = self._format_lines(lines, offset, end)
+        if end < len(lines):
+            output += f"\n[truncated: showing lines {offset}-{end} of {len(lines)}; use offset/limit for more]"
+        return output
 
     def read_file(
         self,
@@ -151,6 +187,71 @@ class MemoryTools:
             return "no matches"
         return "\n\n".join(blocks)
 
+    def grep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str = "MEMORY*.md",
+        context_lines: int = 0,
+        max_matches: int = 50,
+        case_sensitive: bool = True,
+    ) -> str:
+        """Search file contents with a Python regex and return file:line matches."""
+        if not pattern:
+            raise ValueError("pattern must not be empty")
+        if context_lines < 0:
+            raise ValueError("context_lines must be >= 0")
+        self._validate_positive("max_matches", max_matches)
+        max_matches = min(max_matches, MAX_SEARCH_MATCHES)
+        flags = 0 if case_sensitive else re.IGNORECASE
+        try:
+            regex = re.compile(pattern, flags)
+        except re.error as exc:
+            raise ValueError(f"invalid regex pattern: {exc}") from exc
+
+        blocks: list[str] = []
+        for relative_path in self._grep_paths(path, glob):
+            resolved = self._resolve_path(relative_path)
+            lines = self._read_lines(resolved, relative_path, mark_read=False)
+            for index, line in enumerate(lines, start=1):
+                if not regex.search(line):
+                    continue
+                if context_lines:
+                    start = max(1, index - context_lines)
+                    end = min(len(lines), index + context_lines)
+                    blocks.append(f"{relative_path}:{index} match\n" + self._format_lines(lines, start, end))
+                else:
+                    blocks.append(f"{relative_path}:{index}: {line}")
+                if len(blocks) >= max_matches:
+                    return "\n\n".join(blocks) + f"\n[truncated: reached max_matches={max_matches}]"
+        if not blocks:
+            return "no matches"
+        return "\n\n".join(blocks)
+
+    def read_command(self, command: str) -> str:
+        """Run a restricted read-only shell-like command under the RightMemory root."""
+        command = command.strip()
+        if not command:
+            raise ValueError("command must not be empty")
+        self._reject_shell_syntax(command)
+        try:
+            args = shlex.split(command)
+        except ValueError as exc:
+            raise ValueError(f"invalid command syntax: {exc}") from exc
+        if not args:
+            raise ValueError("command must not be empty")
+
+        executable = args[0]
+        if executable == "cat":
+            return self._read_command_cat(args)
+        if executable == "sed":
+            return self._read_command_sed(args)
+        if executable == "rg":
+            return self._read_command_rg(args)
+        if executable == "git":
+            return self._read_command_git(args)
+        raise ValueError("unsupported read command; use cat, sed -n, rg, rg --files, git status --short, or git diff")
+
     def outline_file(self, path: str, max_items: int = MAX_OUTLINE_ITEMS) -> str:
         """Return Markdown headings with line numbers for one file under the RightMemory root."""
         resolved = self._resolve_path(path)
@@ -171,23 +272,73 @@ class MemoryTools:
             return "no headings"
         return "\n".join(items)
 
-    def apply_patch(self, patch: str) -> str:
-        """Apply a Codex-style patch to files under the RightMemory root.
+    def edit_file(self, path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+        """Replace exact text in a file under the RightMemory root."""
+        if not old_string:
+            raise ValueError("old_string must not be empty")
+        resolved = self._resolve_path(path)
+        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        if not resolved.is_file():
+            raise FileNotFoundError(f"file not found: {relative_path}")
 
-        Format:
-        *** Begin Patch
-        *** Update File: path
-        @@
-         context line
-        -old line
-        +new line
-        *** End Patch
-        """
-        if not patch.strip():
-            raise ValueError("patch must not be empty")
-        touched = self._apply_codex_patch(patch)
-        files = ", ".join(sorted(touched)) if touched else "no file paths detected"
-        return f"applied patch: {files}"
+        text = self._read_text(resolved)
+        self._ensure_recent_read(resolved, relative_path, text)
+        needle, replacement, count, normalized_newlines = self._replacement_inputs(text, old_string, new_string)
+        if count == 0:
+            raise ValueError(self._missing_old_string_message(relative_path, text, old_string))
+        if old_string == new_string:
+            return f"no changes: old_string and new_string are identical in {relative_path}"
+        if count > 1 and not replace_all:
+            lines = ", ".join(str(line) for line in self._occurrence_line_numbers(text, needle))
+            raise ValueError(
+                f"old_string matched {count} times in {relative_path} at line(s) {lines}; "
+                "provide a larger unique old_string or set replace_all=true"
+            )
+
+        updated = text.replace(needle, replacement, -1 if replace_all else 1)
+        self._write_text(resolved, updated)
+        self._mark_read_text(resolved, updated)
+        occurrence_word = "occurrences" if (replace_all and count != 1) else "occurrence"
+        suffix = " after normalizing line endings" if normalized_newlines else ""
+        return f"edited {relative_path}: replaced {count if replace_all else 1} {occurrence_word}{suffix}"
+
+    def create_file(self, path: str, content: str = "") -> str:
+        """Create a new file under the RightMemory root."""
+        resolved = self._resolve_path(path)
+        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        if resolved.exists():
+            raise ValueError(f"file already exists: {relative_path}")
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        self._write_text(resolved, content)
+        self._mark_read_text(resolved, content)
+        return f"created {relative_path}"
+
+    def delete_file(self, path: str) -> str:
+        """Delete a file under the RightMemory root."""
+        resolved = self._resolve_path(path)
+        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        if not resolved.is_file():
+            raise FileNotFoundError(f"file not found: {relative_path}")
+        resolved.unlink()
+        self._read_signatures.pop(resolved, None)
+        return f"deleted {relative_path}"
+
+    def rename_file(self, old_path: str, new_path: str) -> str:
+        """Rename a file under the RightMemory root without overwriting an existing file."""
+        source = self._resolve_path(old_path)
+        destination = self._resolve_path(new_path)
+        source_relative = source.relative_to(self.memory_root).as_posix()
+        destination_relative = destination.relative_to(self.memory_root).as_posix()
+        if not source.is_file():
+            raise FileNotFoundError(f"file not found: {source_relative}")
+        if destination.exists():
+            raise ValueError(f"destination already exists: {destination_relative}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source.rename(destination)
+        signature = self._read_signatures.pop(source, None)
+        if signature is not None:
+            self._read_signatures[destination] = signature
+        return f"renamed {source_relative} to {destination_relative}"
 
     def git_status(self) -> str:
         """Return short git status for the RightMemory root."""
@@ -276,10 +427,134 @@ class MemoryTools:
         ]
         return sorted(set(files))
 
-    def _read_lines(self, resolved: Path, original_path: str) -> list[str]:
+    def _read_lines(self, resolved: Path, original_path: str, mark_read: bool = True) -> list[str]:
         if not resolved.is_file():
             raise FileNotFoundError(f"file not found: {original_path}")
-        return resolved.read_text(encoding="utf-8").splitlines()
+        text = self._read_text(resolved)
+        if mark_read:
+            self._mark_read_text(resolved, text)
+        return text.splitlines()
+
+    def _read_text(self, path: Path) -> str:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            return handle.read()
+
+    def _write_text(self, path: Path, text: str) -> None:
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+
+    def _grep_paths(self, path: str | None, glob_pattern: str) -> list[str]:
+        if path is None:
+            return self.list_files(glob_pattern)
+        resolved = self._resolve_path(path)
+        if resolved.is_file():
+            return [resolved.relative_to(self.memory_root).as_posix()]
+        if resolved.is_dir():
+            relative_base = resolved.relative_to(self.memory_root).as_posix()
+            if relative_base == ".":
+                return self.list_files(glob_pattern)
+            return self.glob(glob_pattern, relative_base)
+        raise FileNotFoundError(f"path not found: {path}")
+
+    def _reject_shell_syntax(self, command: str) -> None:
+        forbidden = ["|", ">", "<", ";", "&&", "||", "$(", "`", "\n"]
+        for token in forbidden:
+            if token in command:
+                raise ValueError("read_command does not support shell operators, pipes, redirects, or substitutions")
+
+    def _read_command_cat(self, args: list[str]) -> str:
+        if len(args) != 2:
+            raise ValueError("cat command must read exactly one file")
+        return self._read_raw_file(args[1])
+
+    def _read_command_sed(self, args: list[str]) -> str:
+        if len(args) != 4 or args[1] != "-n":
+            raise ValueError("supported sed form is: sed -n 'START,ENDp' path")
+        match = re.fullmatch(r"(\d+)(?:,(\d+))?p", args[2])
+        if match is None:
+            raise ValueError("supported sed range is 'START,ENDp' or 'LINEp'")
+        start = int(match.group(1))
+        end = int(match.group(2) or match.group(1))
+        if end < start:
+            raise ValueError("sed end line must be >= start line")
+        return self._read_raw_file(args[3], start, end)
+
+    def _read_command_rg(self, args: list[str]) -> str:
+        self._validate_read_command_paths(args[1:])
+        if "--files" not in args and "--with-filename" not in args and "--no-filename" not in args:
+            args = [args[0], "--with-filename", *args[1:]]
+        process = subprocess.run(
+            args,
+            cwd=self.memory_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if process.returncode not in {0, 1}:
+            detail = process.stderr.strip() or process.stdout.strip()
+            raise RuntimeError(f"rg command failed: {detail}")
+        output = process.stdout.strip()
+        return self._cap_command_output(output) if output else "no matches"
+
+    def _read_command_git(self, args: list[str]) -> str:
+        if args == ["git", "status", "--short"]:
+            return self.git_status()
+        if len(args) >= 2 and args[1] == "diff":
+            self._validate_git_diff_command(args)
+            return self._run_git(args)
+        raise ValueError("supported git read commands are: git status --short, git diff")
+
+    def _read_raw_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
+        resolved = self._resolve_path(path)
+        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        if not resolved.is_file():
+            raise FileNotFoundError(f"file not found: {relative_path}")
+        text = self._read_text(resolved)
+        self._mark_read_text(resolved, text)
+        if start_line is None:
+            return self._cap_command_output(text)
+        self._validate_positive("start_line", start_line)
+        self._validate_positive("end_line", end_line or start_line)
+        lines = text.splitlines(keepends=True)
+        selected = "".join(lines[start_line - 1 : end_line])
+        return self._cap_command_output(selected)
+
+    def _cap_command_output(self, output: str) -> str:
+        if len(output) <= COMMAND_OUTPUT_CHAR_LIMIT:
+            return output
+        return (
+            output[:COMMAND_OUTPUT_CHAR_LIMIT]
+            + f"\n[truncated: output exceeded {COMMAND_OUTPUT_CHAR_LIMIT} characters]"
+        )
+
+    def _validate_read_command_paths(self, args: list[str]) -> None:
+        option_takes_value = {"-g", "--glob", "--type", "-t"}
+        skip_next = False
+        for token in args:
+            if skip_next:
+                skip_next = False
+                continue
+            if token in option_takes_value:
+                skip_next = True
+                continue
+            if token.startswith("-"):
+                continue
+            if token.startswith("~"):
+                raise ValueError("read command paths must stay under the RightMemory root")
+            raw = Path(token)
+            if raw.is_absolute() or ".." in raw.parts:
+                resolved = self._resolve_path(token)
+                if not self._is_under_root(resolved):
+                    raise ValueError("read command paths must stay under the RightMemory root")
+
+    def _validate_git_diff_command(self, args: list[str]) -> None:
+        if len(args) == 2:
+            return
+        if len(args) < 4 or args[2] != "--":
+            raise ValueError("supported git diff form is: git diff or git diff -- <paths>")
+        separator = 2
+        for path in args[separator + 1 :]:
+            self._resolve_path(path)
 
     def _format_lines(self, lines: list[str], start: int, end: int) -> str:
         selected = lines[start - 1 : end]
@@ -353,156 +628,94 @@ class MemoryTools:
             return None
         return process.stdout
 
-    def _apply_codex_patch(self, patch: str) -> set[str]:
-        lines = patch.splitlines()
-        if not lines or lines[0] != PATCH_BEGIN:
-            raise ValueError(f"patch must start with `{PATCH_BEGIN}`")
-        if lines[-1] != PATCH_END:
-            raise ValueError(f"patch must end with `{PATCH_END}`")
+    def _replacement_inputs(self, text: str, old_string: str, new_string: str) -> tuple[str, str, int, bool]:
+        count = text.count(old_string)
+        if count:
+            return old_string, new_string, count, False
 
-        touched: set[str] = set()
-        backups: dict[Path, str | None] = {}
-        index = 1
-        try:
-            while index < len(lines) - 1:
-                line = lines[index]
-                if line.startswith(ADD_FILE_PREFIX):
-                    relative_path, index = self._apply_add_file(
-                        line.removeprefix(ADD_FILE_PREFIX), lines, index + 1, backups
-                    )
-                elif line.startswith(UPDATE_FILE_PREFIX):
-                    relative_path, index = self._apply_update_file(
-                        line.removeprefix(UPDATE_FILE_PREFIX), lines, index + 1, backups
-                    )
-                elif line.startswith(DELETE_FILE_PREFIX):
-                    relative_path = self._apply_delete_file(line.removeprefix(DELETE_FILE_PREFIX), backups)
-                    index += 1
-                else:
-                    raise ValueError(f"unknown patch operation: {line}")
-                touched.add(relative_path)
-        except Exception:
-            self._restore_backups(backups)
-            raise
-        return touched
+        newline_old, newline_new = self._line_ending_variant(text, old_string, new_string)
+        if newline_old == old_string:
+            return old_string, new_string, 0, False
+        return newline_old, newline_new, text.count(newline_old), True
 
-    def _apply_add_file(
-        self,
-        path: str,
-        lines: list[str],
-        index: int,
-        backups: dict[Path, str | None],
-    ) -> tuple[str, int]:
-        resolved = self._resolve_path(path)
-        relative_path = resolved.relative_to(self.memory_root).as_posix()
-        if resolved.exists():
-            raise ValueError(f"file already exists: {relative_path}")
+    def _line_ending_variant(self, text: str, old_string: str, new_string: str) -> tuple[str, str]:
+        if "\r\n" in text and "\r\n" not in old_string and "\n" in old_string:
+            return self._to_crlf(old_string), self._to_crlf(new_string)
+        if "\r\n" not in text and "\r\n" in old_string:
+            return self._to_lf(old_string), self._to_lf(new_string)
+        return old_string, new_string
 
-        content: list[str] = []
-        while index < len(lines) - 1 and not self._is_patch_operation(lines[index]):
-            line = lines[index]
-            if not line.startswith("+"):
-                raise ValueError(f"add file lines must start with `+`: {line}")
-            content.append(line[1:])
-            index += 1
+    def _to_crlf(self, value: str) -> str:
+        return self._to_lf(value).replace("\n", "\r\n")
 
-        self._snapshot(resolved, backups)
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        self._write_lines(resolved, content)
-        return relative_path, index
+    def _to_lf(self, value: str) -> str:
+        return value.replace("\r\n", "\n").replace("\r", "\n")
 
-    def _apply_update_file(
-        self,
-        path: str,
-        lines: list[str],
-        index: int,
-        backups: dict[Path, str | None],
-    ) -> tuple[str, int]:
-        resolved = self._resolve_path(path)
-        relative_path = resolved.relative_to(self.memory_root).as_posix()
-        current = self._read_lines(resolved, path)
-        hunks: list[list[tuple[str, str]]] = []
-        current_hunk: list[tuple[str, str]] = []
+    def _ensure_recent_read(self, resolved: Path, relative_path: str, text: str) -> None:
+        signature = self._read_signatures.get(resolved)
+        if signature is None:
+            raise ValueError(f"read {relative_path} with read, cat, or sed -n before editing it")
+        if signature != self._text_signature(text):
+            raise ValueError(f"{relative_path} changed since the last read; read it again before editing")
 
-        while index < len(lines) - 1 and not self._is_patch_operation(lines[index]):
-            line = lines[index]
-            if line.startswith("@@"):
-                if current_hunk:
-                    hunks.append(current_hunk)
-                    current_hunk = []
-            elif line.startswith((" ", "-", "+")):
-                current_hunk.append((line[0], line[1:]))
-            else:
-                raise ValueError(f"update lines must start with space, `-`, `+`, or `@@`: {line}")
-            index += 1
+    def _mark_read_text(self, resolved: Path, text: str) -> None:
+        self._read_signatures[resolved] = self._text_signature(text)
 
-        if current_hunk:
-            hunks.append(current_hunk)
-        if not hunks:
-            raise ValueError(f"update patch has no hunks: {relative_path}")
+    def _text_signature(self, text: str) -> str:
+        return sha256(text.encode("utf-8")).hexdigest()
 
-        updated = self._apply_update_hunks(current, hunks, relative_path)
-        self._snapshot(resolved, backups)
-        self._write_lines(resolved, updated)
-        return relative_path, index
+    def _missing_old_string_message(self, relative_path: str, text: str, old_string: str) -> str:
+        matches = self._closest_matches(text, old_string)
+        if not matches:
+            return f"old_string not found in {relative_path}; file is empty"
+        details = "\n".join(
+            f"- line {line_number}, similarity {score:.2f}: {self._preview(candidate)}"
+            for line_number, score, candidate in matches
+        )
+        return f"old_string not found in {relative_path}; closest inspected text:\n{details}"
 
-    def _apply_delete_file(self, path: str, backups: dict[Path, str | None]) -> str:
-        resolved = self._resolve_path(path)
-        relative_path = resolved.relative_to(self.memory_root).as_posix()
-        if not resolved.is_file():
-            raise FileNotFoundError(f"file not found: {relative_path}")
-        self._snapshot(resolved, backups)
-        resolved.unlink()
-        return relative_path
+    def _closest_matches(self, text: str, old_string: str) -> list[tuple[int, float, str]]:
+        lines = text.splitlines()
+        if not lines:
+            return []
+        target_line_count = max(1, min(MAX_EDIT_MATCH_LINES, len(old_string.splitlines()) or 1))
+        window_sizes = sorted(
+            {
+                max(1, target_line_count - 1),
+                target_line_count,
+                min(len(lines), target_line_count + 1),
+            }
+        )
+        ranked: list[tuple[int, float, str]] = []
+        seen: set[str] = set()
+        for window_size in window_sizes:
+            for start in range(0, len(lines) - window_size + 1):
+                candidate = "\n".join(lines[start : start + window_size])
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                score = SequenceMatcher(None, old_string, candidate).ratio()
+                ranked.append((start + 1, score, candidate))
+        ranked.sort(key=lambda item: item[1], reverse=True)
+        return ranked[:MAX_CLOSE_MATCHES]
 
-    def _apply_update_hunks(
-        self,
-        current: list[str],
-        hunks: list[list[tuple[str, str]]],
-        relative_path: str,
-    ) -> list[str]:
-        cursor = 0
-        for hunk in hunks:
-            old_chunk = [text for operation, text in hunk if operation in {" ", "-"}]
-            new_chunk = [text for operation, text in hunk if operation in {" ", "+"}]
-            if not old_chunk:
-                current[cursor:cursor] = new_chunk
-                cursor += len(new_chunk)
-                continue
+    def _preview(self, value: str) -> str:
+        preview = value.replace("\n", "\\n")
+        if len(preview) > MAX_MATCH_PREVIEW_CHARS:
+            return preview[: MAX_MATCH_PREVIEW_CHARS - 3] + "..."
+        return preview
 
-            start = self._find_subsequence(current, old_chunk, cursor)
-            if start is None:
-                raise ValueError(f"patch context not found in {relative_path}: {old_chunk[0]}")
-            current[start : start + len(old_chunk)] = new_chunk
-            cursor = start + len(new_chunk)
-        return current
-
-    def _find_subsequence(self, lines: list[str], target: list[str], start_index: int) -> int | None:
-        for index in range(start_index, len(lines) - len(target) + 1):
-            if lines[index : index + len(target)] == target:
-                return index
-        return None
-
-    def _write_lines(self, path: Path, lines: list[str]) -> None:
-        text = "\n".join(lines)
-        if text:
-            text += "\n"
-        path.write_text(text, encoding="utf-8")
-
-    def _snapshot(self, path: Path, backups: dict[Path, str | None]) -> None:
-        if path in backups:
-            return
-        backups[path] = path.read_text(encoding="utf-8") if path.exists() else None
-
-    def _restore_backups(self, backups: dict[Path, str | None]) -> None:
-        for path, original in backups.items():
-            if original is None:
-                if path.exists():
-                    path.unlink()
-            else:
-                path.write_text(original, encoding="utf-8")
-
-    def _is_patch_operation(self, line: str) -> bool:
-        return line.startswith(PATCH_OPERATION_PREFIXES)
+    def _occurrence_line_numbers(self, text: str, needle: str, limit: int = 5) -> list[int]:
+        line_numbers: list[int] = []
+        offset = 0
+        step = max(1, len(needle))
+        while len(line_numbers) < limit:
+            index = text.find(needle, offset)
+            if index == -1:
+                break
+            line_numbers.append(text.count("\n", 0, index) + 1)
+            offset = index + step
+        return line_numbers
 
     def _allowed_commit_path(self, path: str) -> str:
         resolved = self._resolve_path(path)

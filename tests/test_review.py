@@ -131,17 +131,24 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertIn('"user": "u1"', calls[1])
         self.assertIn('"user": "u2"', calls[1])
 
-    def test_scan_leaves_state_unchanged_on_reviewer_failure(self):
+    def test_scan_retries_once_then_continues_after_reviewer_failure(self):
+        calls = []
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             source = root / "codex"
             source.mkdir()
-            transcript = source / "session.jsonl"
-            self._write_codex(transcript, turns=[("u1", "a1")])
-            self._set_mtime(transcript, 1_000)
+            failed_transcript = source / "01-fail.jsonl"
+            reviewed_transcript = source / "02-review.jsonl"
+            self._write_codex(failed_transcript, turns=[("fail", "a1")])
+            self._write_codex(reviewed_transcript, turns=[("review", "a2")])
+            self._set_mtime(failed_transcript, 1_000)
+            self._set_mtime(reviewed_transcript, 1_000)
 
             def fail(session_id: str, message: str) -> str:
-                raise RuntimeError("review failed")
+                calls.append(message)
+                if '"user": "fail"' in message:
+                    raise RuntimeError("review failed")
+                return "ok"
 
             scanner = ReviewScanner(
                 ReviewConfig(
@@ -156,7 +163,10 @@ class ReviewScannerTests(unittest.TestCase):
             state = ReviewStateStore(root).load()
 
         self.assertEqual(result.failed, 1)
-        self.assertEqual(state.sessions, {})
+        self.assertEqual(result.retried, 1)
+        self.assertEqual(result.reviewed, 1)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(state.sessions), 1)
 
     def test_scan_skips_sessions_older_than_since_days(self):
         calls = []

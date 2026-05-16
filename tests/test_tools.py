@@ -1,4 +1,5 @@
 import subprocess
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,6 +61,61 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("3: - `alpha` stores model config", result)
         self.assertIn("4: - `beta` stores runtime notes", result)
 
+    def test_claude_shaped_read_grep_and_glob_tools(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Domain {#domain}\n\n"
+            "- `alpha` stores model config → [rel:beta]\n"
+            "- `beta` stores runtime notes → [rel:alpha]\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_extra.md").write_text("- `gamma` unrelated\n", encoding="utf-8")
+
+        self.assertEqual(set(self.tools.glob("MEMORY*.md")), {"MEMORY.md", "MEMORY_extra.md"})
+        self.assertEqual(
+            self.tools.read("MEMORY.md", offset=3, limit=2),
+            "3: - `alpha` stores model config → [rel:beta]\n4: - `beta` stores runtime notes → [rel:alpha]",
+        )
+
+        result = self.tools.grep(r"runtime\s+notes", context_lines=1)
+
+        self.assertIn("MEMORY.md:4 match", result)
+        self.assertIn("3: - `alpha` stores model config", result)
+
+    def test_read_command_cat_and_sed_satisfy_edit_read_gate(self):
+        memory = self.root / "MEMORY.md"
+        memory.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+
+        self.assertEqual(self.tools.read_command("sed -n '2,3p' MEMORY.md"), "beta\ngamma\n")
+        result = self.tools.edit_file("MEMORY.md", "beta\ngamma\n", "BETA\ngamma\n")
+
+        self.assertEqual(result, "edited MEMORY.md: replaced 1 occurrence")
+        self.assertEqual(memory.read_text(encoding="utf-8"), "alpha\nBETA\ngamma\n")
+
+        self.assertEqual(self.tools.read_command("cat MEMORY.md"), "alpha\nBETA\ngamma\n")
+
+    def test_read_command_rejects_shell_operators(self):
+        (self.root / "MEMORY.md").write_text("alpha\n", encoding="utf-8")
+
+        with self.assertRaises(ValueError) as caught:
+            self.tools.read_command("cat MEMORY.md > copy.md")
+
+        self.assertIn("does not support shell operators", str(caught.exception))
+
+    def test_read_command_restricts_git_diff_forms(self):
+        self._git("init")
+        (self.root / "MEMORY.md").write_text("alpha\n", encoding="utf-8")
+
+        with self.assertRaises(ValueError) as caught:
+            self.tools.read_command("git diff --output diff.txt")
+
+        self.assertIn("supported git diff form", str(caught.exception))
+
+    @unittest.skipIf(shutil.which("rg") is None, "rg is not installed")
+    def test_read_command_runs_ripgrep_read_only(self):
+        (self.root / "MEMORY.md").write_text("alpha\nbeta\n", encoding="utf-8")
+
+        self.assertEqual(self.tools.read_command("rg beta MEMORY.md"), "MEMORY.md:beta")
+
     def test_outline_file_returns_heading_map(self):
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
@@ -73,64 +129,84 @@ class MemoryToolsTests(unittest.TestCase):
             "1: # Domain {#domain}\n3:   ## Project {#project} → [rel:domain]\n5:     ### Topic",
         )
 
-    def test_apply_patch_changes_requested_region(self):
+    def test_edit_file_changes_requested_region(self):
         memory = self.root / "MEMORY.md"
         memory.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
-        patch = """*** Begin Patch
-*** Update File: MEMORY.md
-@@
- alpha
--beta
-+BETA
- gamma
-*** End Patch"""
+        self.tools.read_file("MEMORY.md")
 
-        result = self.tools.apply_patch(patch)
+        result = self.tools.edit_file("MEMORY.md", "alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n")
 
-        self.assertEqual(result, "applied patch: MEMORY.md")
+        self.assertEqual(result, "edited MEMORY.md: replaced 1 occurrence")
         self.assertEqual(memory.read_text(encoding="utf-8"), "alpha\nBETA\ngamma\n")
 
-    def test_apply_patch_adds_and_deletes_files(self):
-        add_patch = """*** Begin Patch
-*** Add File: MEMORY_extra.md
-+# Extra
-+
-+- `extra` note
-*** End Patch"""
-
-        add_result = self.tools.apply_patch(add_patch)
-
-        self.assertEqual(add_result, "applied patch: MEMORY_extra.md")
-        self.assertEqual((self.root / "MEMORY_extra.md").read_text(encoding="utf-8"), "# Extra\n\n- `extra` note\n")
-
-        delete_patch = """*** Begin Patch
-*** Delete File: MEMORY_extra.md
-*** End Patch"""
-
-        delete_result = self.tools.apply_patch(delete_patch)
-
-        self.assertEqual(delete_result, "applied patch: MEMORY_extra.md")
-        self.assertFalse((self.root / "MEMORY_extra.md").exists())
-
-    def test_apply_patch_rolls_back_on_later_failure(self):
+    def test_edit_file_requires_recent_read(self):
         memory = self.root / "MEMORY.md"
         memory.write_text("alpha\nbeta\n", encoding="utf-8")
-        patch = """*** Begin Patch
-*** Update File: MEMORY.md
-@@
- alpha
--beta
-+BETA
-*** Update File: MISSING.md
-@@
- missing
-+new
-*** End Patch"""
 
-        with self.assertRaises(FileNotFoundError):
-            self.tools.apply_patch(patch)
+        with self.assertRaises(ValueError) as caught:
+            self.tools.edit_file("MEMORY.md", "beta", "BETA")
 
-        self.assertEqual(memory.read_text(encoding="utf-8"), "alpha\nbeta\n")
+        self.assertIn("read MEMORY.md", str(caught.exception))
+
+    def test_edit_file_rejects_ambiguous_old_string(self):
+        memory = self.root / "MEMORY.md"
+        memory.write_text("alpha\nbeta\nalpha\nbeta\n", encoding="utf-8")
+        self.tools.read_file("MEMORY.md")
+
+        with self.assertRaises(ValueError) as caught:
+            self.tools.edit_file("MEMORY.md", "alpha\nbeta\n", "ALPHA\nBETA\n")
+
+        self.assertIn("old_string matched 2 times", str(caught.exception))
+        self.assertIn("line(s) 1, 3", str(caught.exception))
+
+    def test_edit_file_replace_all_changes_multiple_matches(self):
+        memory = self.root / "MEMORY.md"
+        memory.write_text("alpha\nbeta\nalpha\nbeta\n", encoding="utf-8")
+        self.tools.read_file("MEMORY.md")
+
+        result = self.tools.edit_file("MEMORY.md", "beta", "BETA", replace_all=True)
+
+        self.assertEqual(result, "edited MEMORY.md: replaced 2 occurrences")
+        self.assertEqual(memory.read_text(encoding="utf-8"), "alpha\nBETA\nalpha\nBETA\n")
+
+    def test_edit_file_reports_closest_match(self):
+        memory = self.root / "MEMORY.md"
+        memory.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+        self.tools.read_file("MEMORY.md")
+
+        with self.assertRaises(ValueError) as caught:
+            self.tools.edit_file("MEMORY.md", "alpha\nBETTA\ngamma\n", "alpha\nBETA\ngamma\n")
+
+        self.assertIn("old_string not found in MEMORY.md", str(caught.exception))
+        self.assertIn("closest inspected text", str(caught.exception))
+        self.assertIn("line 1", str(caught.exception))
+
+    def test_edit_file_normalizes_line_endings(self):
+        memory = self.root / "MEMORY.md"
+        memory.write_text("alpha\r\nbeta\r\n", encoding="utf-8")
+        self.tools.read_file("MEMORY.md")
+
+        result = self.tools.edit_file("MEMORY.md", "alpha\nbeta\n", "alpha\nBETA\n")
+
+        self.assertEqual(result, "edited MEMORY.md: replaced 1 occurrence after normalizing line endings")
+        self.assertEqual(memory.read_bytes(), b"alpha\r\nBETA\r\n")
+
+    def test_create_delete_and_rename_file(self):
+        create_result = self.tools.create_file("MEMORY_extra.md", "# Extra\n\n- `extra` note\n")
+
+        self.assertEqual(create_result, "created MEMORY_extra.md")
+        self.assertEqual((self.root / "MEMORY_extra.md").read_text(encoding="utf-8"), "# Extra\n\n- `extra` note\n")
+
+        rename_result = self.tools.rename_file("MEMORY_extra.md", "MEMORY_renamed.md")
+
+        self.assertEqual(rename_result, "renamed MEMORY_extra.md to MEMORY_renamed.md")
+        self.assertFalse((self.root / "MEMORY_extra.md").exists())
+        self.assertTrue((self.root / "MEMORY_renamed.md").exists())
+
+        delete_result = self.tools.delete_file("MEMORY_renamed.md")
+
+        self.assertEqual(delete_result, "deleted MEMORY_renamed.md")
+        self.assertFalse((self.root / "MEMORY_renamed.md").exists())
 
     def test_git_add_accepts_memory_files_and_dream_logs(self):
         self._git("init")

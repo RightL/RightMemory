@@ -15,6 +15,7 @@ from .transcripts import claude, codex
 from .transcripts.model import NormalizedSession, TranscriptFile
 
 SECONDS_PER_DAY = 24 * 60 * 60
+REVIEW_MAX_RETRIES = 1
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class ReviewScanResult:
     skipped_unchanged: int = 0
     skipped_empty: int = 0
     reset_changed: int = 0
+    retried: int = 0
     failed: int = 0
 
     def format(self) -> str:
@@ -51,6 +53,7 @@ class ReviewScanResult:
             f"skipped_unchanged: {self.skipped_unchanged}\n"
             f"skipped_empty: {self.skipped_empty}\n"
             f"reset_changed: {self.reset_changed}\n"
+            f"retried: {self.retried}\n"
             f"failed: {self.failed}"
         )
 
@@ -113,6 +116,7 @@ class ReviewScanner:
             "skipped_unchanged": 0,
             "skipped_empty": 0,
             "reset_changed": 0,
+            "retried": 0,
             "failed": 0,
         }
 
@@ -148,10 +152,7 @@ class ReviewScanner:
                     continue
 
                 payload = normalized.with_review_cursor(last_reviewed_turn)
-                try:
-                    self.run_reviewer(_review_session_id(payload), _review_message(payload))
-                except Exception:
-                    counts["failed"] += 1
+                if not self._review_with_retry(payload, counts):
                     continue
 
                 sessions[transcript.key] = ReviewSessionState(
@@ -167,6 +168,21 @@ class ReviewScanner:
                 counts["reviewed"] += 1
 
         return ReviewScanResult(**counts)
+
+    def _review_with_retry(self, payload: NormalizedSession, counts: dict[str, int]) -> bool:
+        session_id = _review_session_id(payload)
+        message = _review_message(payload)
+        for attempt in range(REVIEW_MAX_RETRIES + 1):
+            try:
+                self.run_reviewer(session_id, message)
+                return True
+            except Exception:
+                if attempt < REVIEW_MAX_RETRIES:
+                    counts["retried"] += 1
+                    continue
+                counts["failed"] += 1
+                return False
+        return False
 
 
 def normalize_transcript(source: str, path: Path, already_reviewed_turns: int = 0) -> NormalizedSession | None:

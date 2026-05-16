@@ -353,7 +353,7 @@ class RuntimeTests(unittest.TestCase):
         trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "retrieve" / "agent-session.jsonl"
         events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([event["event"] for event in events], ["tool_started", "tool_finished"])
-        self.assertEqual(events[0]["tool"], "list_files")
+        self.assertEqual(events[0]["tool"], "glob")
 
     def test_debug_trace_records_failures_before_history_save(self):
         config = RuntimeConfig(
@@ -404,9 +404,9 @@ class RuntimeTests(unittest.TestCase):
             tools = {tool.__name__: tool for tool in runtime.agent.kwargs["tools"]}
 
             with self.assertRaises(fake_modules["pydantic_ai"].ModelRetry) as caught:
-                tools["list_files"]("../*.md")
+                tools["glob"]("../*.md")
 
-        self.assertIn("glob pattern must not contain '..'", str(caught.exception))
+        self.assertIn("glob pattern must be relative", str(caught.exception))
 
     def test_runtime_exposes_commit_tools(self):
         config = RuntimeConfig(role="update", model_id="openai/test")
@@ -415,9 +415,17 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
 
         tool_names = {tool.__name__ for tool in runtime.agent.kwargs["tools"]}
+        self.assertIn("read", tool_names)
+        self.assertIn("grep", tool_names)
+        self.assertIn("glob", tool_names)
+        self.assertIn("read_command", tool_names)
+        self.assertIn("edit_file", tool_names)
+        self.assertIn("create_file", tool_names)
+        self.assertIn("delete_file", tool_names)
+        self.assertIn("rename_file", tool_names)
         self.assertIn("git_add", tool_names)
         self.assertIn("git_commit", tool_names)
-        self.assertIn("apply_patch", tool_names)
+        self.assertNotIn("apply_patch", tool_names)
 
     def test_retrieve_runtime_is_read_only(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test")
@@ -426,7 +434,15 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
 
         tool_names = {tool.__name__ for tool in runtime.agent.kwargs["tools"]}
-        self.assertIn("search_files", tool_names)
+        self.assertIn("read", tool_names)
+        self.assertIn("grep", tool_names)
+        self.assertIn("glob", tool_names)
+        self.assertIn("read_command", tool_names)
+        self.assertNotIn("search_files", tool_names)
+        self.assertNotIn("edit_file", tool_names)
+        self.assertNotIn("create_file", tool_names)
+        self.assertNotIn("delete_file", tool_names)
+        self.assertNotIn("rename_file", tool_names)
         self.assertNotIn("apply_patch", tool_names)
         self.assertNotIn("git_add", tool_names)
         self.assertNotIn("git_commit", tool_names)
@@ -501,6 +517,8 @@ class PromptTests(unittest.TestCase):
         self.assertIn("The only allowed root directory is /home/example/.rightmemory", prompt)
         self.assertIn("rightmemory retrieve", prompt)
         self.assertIn("read-only retrieval request", prompt)
+        self.assertIn("read_command", prompt)
+        self.assertIn("sed -n", prompt)
         self.assertIn("Retrieve Role", prompt)
         self.assertNotIn("Every dispatch must start", prompt)
         self.assertNotIn("[RETRIEVE]", prompt)
@@ -522,6 +540,10 @@ class PromptTests(unittest.TestCase):
         self.assertIn("Update Role", prompt)
         self.assertIn("candidate memory", prompt)
         self.assertIn("raw process logs", prompt)
+        self.assertIn("edit_file(path, old_string, new_string", prompt)
+        self.assertIn("create_file", prompt)
+        self.assertIn("read_command", prompt)
+        self.assertNotIn("Codex-style patches", prompt)
         self.assertNotIn("Every dispatch must start", prompt)
         self.assertNotIn("[RETRIEVE]", prompt)
         self.assertNotIn("[UPDATE]", prompt)

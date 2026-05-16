@@ -193,7 +193,7 @@ The daemon reads JSON lines from stdin and writes JSON lines to stdout:
 Standalone mode is intentionally small:
 
 - It uses `pydantic_ai.Agent` as a chat-like agent loop.
-- Retrieve uses sandboxed read-only tools for file listing, search, outline, context reads, and memory validation; update, dreamer, and reviewer also get Codex-style patches and narrow git tools.
+- Retrieve uses Claude-shaped read-only tools (`read`, `grep`, `glob`) plus a restricted `read_command` for familiar forms such as `cat`, `sed -n`, `rg`, and read-only `git`; update, dreamer, and reviewer also get exact `edit_file` replacements, file lifecycle tools, and narrow git tools.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different location.
 - Retrieve, update, dreamer, and reviewer are separate runtime roles selected by command line or scanner.
 - Role-specific model settings are read from `<memory-root>/rightmemory.toml`.
