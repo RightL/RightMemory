@@ -67,8 +67,8 @@ def _command_guidance(role: str) -> str:
         return "- The `rightmemory dreamer` command selected dreamer consolidation behavior. Run one consolidation cycle for the memory store."
     if role == "reviewer":
         return (
-            "- The automatic transcript review scanner selected reviewer behavior. Treat every caller message as "
-            "one normalized provider transcript session.\n"
+            "- The automatic transcript review scanner selected reviewer behavior. Treat the normalized session "
+            "JSON in the caller message as the review input.\n"
             "- Use the whole normalized session for context, but only extract durable memory from turns where "
             "`i > already_reviewed_turns`."
         )
