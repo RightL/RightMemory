@@ -38,6 +38,7 @@ class MemoryWriteLock:
         self._lock_handle: Any | None = None
 
     def __enter__(self) -> MemoryWriteLock:
+        _ensure_memory_gitignore(self.runtime_root.parent)
         _ensure_runtime_gitignore(self.runtime_root)
         self._lock_handle = self.lock_path.open("a+", encoding="utf-8")
         fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
@@ -114,13 +115,23 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _ensure_memory_gitignore(memory_root: Path) -> None:
+    _write_gitignore_if_missing(
+        memory_root,
+        b"*\n!MEMORY.md\n!MEMORY_*.md\n!dream_logs/\n!dream_logs/*.md\n",
+    )
+
+
 def _ensure_runtime_gitignore(runtime_root: Path) -> None:
-    runtime_root.mkdir(parents=True, exist_ok=True)
-    gitignore = runtime_root / ".gitignore"
+    _write_gitignore_if_missing(runtime_root, b"*\n")
+
+
+def _write_gitignore_if_missing(directory: Path, content: bytes) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    gitignore = directory / ".gitignore"
     if gitignore.exists():
         return
-    tmp_path = runtime_root / f".gitignore.{os.getpid()}.tmp"
-    content = b"*\n"
+    tmp_path = directory / f".gitignore.{os.getpid()}.tmp"
     with tmp_path.open("wb") as handle:
         handle.write(content)
         handle.flush()
@@ -130,4 +141,4 @@ def _ensure_runtime_gitignore(runtime_root: Path) -> None:
     except OSError:
         tmp_path.unlink(missing_ok=True)
         raise
-    _fsync_directory(runtime_root)
+    _fsync_directory(directory)

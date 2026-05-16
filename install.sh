@@ -209,12 +209,26 @@ else
   echo "  [new]     $MEMORY_ROOT/MEMORY.md  (from MEMORY.example.md)"
 fi
 
-# 2. Init git repo for memory tracking (the dreamer needs git for revertability)
+# 2. Init git repo for memory tracking (the dreamer/reviewer need git for revertability)
 if [ -d "$MEMORY_ROOT/.git" ]; then
   echo "  [keep]    $MEMORY_ROOT is already a git repo"
 else
   (cd "$MEMORY_ROOT" && git init -q)
   echo "  [new]     git init in $MEMORY_ROOT"
+fi
+
+# Keep git status focused on memory artifacts. Existing user .gitignore files are preserved.
+if [ -f "$MEMORY_ROOT/.gitignore" ]; then
+  echo "  [keep]    $MEMORY_ROOT/.gitignore already exists"
+else
+  cat > "$MEMORY_ROOT/.gitignore" <<'EOF'
+*
+!MEMORY.md
+!MEMORY_*.md
+!dream_logs/
+!dream_logs/*.md
+EOF
+  echo "  [new]     $MEMORY_ROOT/.gitignore  (memory allowlist)"
 fi
 
 # 3. Install shared schema and mode-specific skills with path substitution

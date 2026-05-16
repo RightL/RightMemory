@@ -234,7 +234,7 @@ class RuntimeTests(unittest.TestCase):
             {"extra_body": {"chat_template_kwargs": {"thinking": True}}},
         )
 
-    def test_write_role_creates_memory_lock(self):
+    def test_write_role_creates_memory_lock_and_gitignore(self):
         config = RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name))
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
@@ -242,6 +242,10 @@ class RuntimeTests(unittest.TestCase):
             runtime.run_session_turn("agent-session", "remember one")
 
         self.assertTrue((Path(self.tempdir.name) / ".runtime" / "memory.lock").exists())
+        self.assertEqual(
+            (Path(self.tempdir.name) / ".gitignore").read_text(encoding="utf-8"),
+            "*\n!MEMORY.md\n!MEMORY_*.md\n!dream_logs/\n!dream_logs/*.md\n",
+        )
 
     def test_retrieve_role_does_not_create_memory_lock(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
