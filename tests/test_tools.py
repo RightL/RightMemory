@@ -248,6 +248,18 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.tools.git_add(["skill_artifacts/loose.md"])
 
+    def test_git_add_rejects_skill_artifact_directory_before_git_mutation(self):
+        self._git("init")
+        artifact = self.root / "skill_artifacts" / "skill-creator" / "references" / "authoring.md"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("# Skill authoring\n", encoding="utf-8")
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "cannot stage directory path"):
+            self.tools.git_add(["skill_artifacts/skill-creator/references"])
+
+        self.assertEqual(self.tools.git_status(), status_before)
+
     def test_git_commit_rejects_non_memory_staged_files(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")
@@ -371,6 +383,29 @@ class MemoryToolsTests(unittest.TestCase):
         artifact.parent.mkdir(parents=True)
         artifact.write_text("# New staged artifact\n", encoding="utf-8")
         self._git("add", "skill_artifacts/skill-creator/references/authoring.md")
+
+        result = self.tools.git_discard(["skill_artifacts/skill-creator/references/authoring.md"])
+
+        self.assertEqual(result, "discarded: skill_artifacts/skill-creator/references/authoring.md")
+        self.assertFalse(artifact.exists())
+        self.assertEqual(self.tools.git_status(), "")
+
+    def test_git_discard_removes_staged_added_skill_artifact_with_unstaged_edits(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        self._git("add", "MEMORY.md")
+        self._git("commit", "-m", "initial memory")
+        artifact = self.root / "skill_artifacts" / "skill-creator" / "references" / "authoring.md"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("# New staged artifact\n", encoding="utf-8")
+        self._git("add", "skill_artifacts/skill-creator/references/authoring.md")
+        artifact.write_text("# Edited staged artifact\n", encoding="utf-8")
+        self.assertEqual(
+            self.tools.git_status(),
+            "AM skill_artifacts/skill-creator/references/authoring.md",
+        )
 
         result = self.tools.git_discard(["skill_artifacts/skill-creator/references/authoring.md"])
 
