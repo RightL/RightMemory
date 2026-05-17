@@ -122,6 +122,7 @@ RIGHTMEMORY_BIN_DIR="$HOME/.local/bin"
 RIGHTMEMORY_BIN="$RIGHTMEMORY_BIN_DIR/rightmemory"
 EXAMPLE_START_MARKER="rightmemory:example:start"
 EXAMPLE_END_MARKER="rightmemory:example:end"
+INSTALL_STAMP="$MEMORY_ROOT/.runtime/install.stamp"
 
 echo "Installing RightMemory"
 echo "  MODE         = $MODE"
@@ -374,6 +375,18 @@ else
   warn_if_rightmemory_not_on_path
 fi
 
+mkdir -p "$MEMORY_ROOT/.runtime"
+if [ ! -f "$MEMORY_ROOT/.runtime/.gitignore" ]; then
+  printf '*\n' > "$MEMORY_ROOT/.runtime/.gitignore"
+fi
+{
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+  printf 'mode=%s\n' "$MODE"
+  printf 'repo=%s\n' "$REPO_ROOT"
+} > "$INSTALL_STAMP"
+echo "  [refresh] $INSTALL_STAMP"
+echo "             running watch processes refresh after their current cycle or sleep check"
+
 echo
 echo "Done. Next steps:"
 echo "  1. Open $MEMORY_ROOT/MEMORY.md and replace the example domain with your own."
@@ -383,6 +396,7 @@ if [ "$MODE" = "subagent" ]; then
 else
   echo "  2. Write role model config to $MEMORY_ROOT/rightmemory.toml."
   echo "  3. Trigger any memory-relevant message in your AI agent — the installed orchestrator calls rightmemory."
+  echo "  4. Optional background review and dreams: rightmemory watch start"
 fi
 echo
 echo "Re-run this script any time you pull updates from the RightMemory repo;"

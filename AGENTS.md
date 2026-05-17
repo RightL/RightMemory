@@ -13,6 +13,7 @@
 - Use `./install.sh [--mode subagent|standalone] <memory-root> <skills-target>` when verifying install behavior.
 - `uv` is available through the existing conda environment: `conda run -n rightmemory uv --version`. Use `conda run -n rightmemory ./install.sh ...` when the installer needs `uv`.
 - Useful review commands are `rightmemory review scan --once`, `rightmemory review watch`, and `rightmemory review normalize --source <codex|claude> --path <file>`.
+- Use `rightmemory watch start|status|stop|restart` to manage standalone background review and dreamer watchers. Use `rightmemory dreamer watch` directly only when debugging the lower-level dream loop.
 
 ## Maintaining This File
 - Treat this file as operational instructions for coding agents, not as a design document. Keep durable design explanation in `README.md` or `DESIGN_NOTES.md`.
@@ -27,6 +28,7 @@
 - A memory root contains `MEMORY.md`, optional sibling `MEMORY_*.md` detail files, `dream_logs/`, `rightmemory.toml`, and `.runtime/`.
 - The installer creates a memory-root `.gitignore` allowlist so git status normally shows only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`.
 - Runtime/session/review state belongs under `.runtime/` and should not be committed.
+- Scheduled watcher locks, install refresh stamps, and dreamer watch state also belong under `.runtime/`.
 - Reviewer scans process one normalized provider session at a time. `scan --once` attempts one eligible session and exits; `watch` repeats one-session scans until no eligible work remains. Review state is session-level: once a provider session has been reviewed, later changes or resumed turns with the same source/session id are skipped unless the review state is cleared.
 - The default review window is 3 days via `[review].since_days`; keep that default unless the user explicitly changes the backlog policy.
 

@@ -171,6 +171,9 @@ rightmemory retrieve --session <agent-session-id> "find memory about the standal
 rightmemory update submit --session <agent-session-id> "remember that MCP should stay optional"
 rightmemory update pull --session <agent-session-id>
 rightmemory dreamer --session <agent-session-id> "run a dream cycle"
+rightmemory watch start
+rightmemory watch status
+rightmemory watch stop
 rightmemory retrieve chat
 rightmemory update chat
 rightmemory dreamer chat
@@ -251,13 +254,24 @@ Trace files include run, history-save, and tool events. They may include prompts
 
 ### Automatic Transcript Review
 
-RightMemory can scan idle provider chat sessions and run the standalone `reviewer` role. For a long-running local process, use `watch`:
+RightMemory can scan idle provider chat sessions and run the standalone `reviewer` role. The normal background controls are:
+
+```bash
+rightmemory watch start
+rightmemory watch status
+rightmemory watch stop
+rightmemory watch restart
+```
+
+By default these commands manage both review and dreamer watchers. Pass `review` or `dreamer` when you want one role: `rightmemory watch start review`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.
+
+The lower-level review loop is still available:
 
 ```bash
 rightmemory review watch
 ```
 
-`watch` starts immediately and runs one-session scans until no eligible work remains, then sleeps before checking again. A reviewed or failed session triggers another immediate scan, so backlog and recovery attempts are not delayed by the interval. The default interval is two hours; override it with `--interval <seconds>`.
+It starts immediately and runs one-session scans until no eligible work remains, then sleeps before checking again. A reviewed or failed session triggers another immediate scan, so backlog and recovery attempts are not delayed by the interval. The default interval is two hours; override it with `--interval <seconds>`.
 
 For cron, launchd, or other supervisors, call one bounded scan at a time:
 
@@ -290,6 +304,20 @@ path = "~/.codex/sessions"
 ```
 
 If `[[review.sources]]` is omitted, RightMemory checks the default Codex and Claude locations. By default it considers transcript files modified in the last 3 days. Review state is stored under `<memory-root>/.runtime/review/state.json` and records reviewed provider sessions by source and session id. A session is reviewed as one whole unit; if the same provider session later changes or resumes, scanner state treats it as already reviewed unless you clear the corresponding review state.
+
+### Scheduled Dream Cycles
+
+Standalone dreamer can run periodic consolidation from the same manager:
+
+```bash
+rightmemory watch start dreamer
+```
+
+The underlying `rightmemory dreamer watch` process runs a dream cycle when no prior scheduled run is recorded, then records its last attempt under `<memory-root>/.runtime/dreamer/watch-state.json`. After that, the default interval is 3 days; override it with `rightmemory dreamer watch --interval <seconds>` when running the lower-level loop directly.
+
+Review and dreamer watchers hold per-role watch locks under `.runtime/watch/`, so a duplicate watcher exits instead of creating a competing background loop. The write phase still uses the shared memory write lock, so review, update, and dreamer roles do not edit memory files at the same time.
+
+`rightmemory watch stop` sends a graceful terminate signal. A sleeping watcher exits within a few seconds; a watcher doing model work finishes the current cycle first. When `install.sh` finishes, it updates `<memory-root>/.runtime/install.stamp`. Watchers check that stamp between runs and while sleeping; if it changes, they re-exec themselves with the same arguments.
 
 Run it from this repository during development:
 

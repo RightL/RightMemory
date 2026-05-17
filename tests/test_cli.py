@@ -2,6 +2,7 @@ import io
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -150,18 +151,20 @@ class JsonRequestTests(unittest.TestCase):
 
         def fake_load_config(role):
             roles.append(role)
-            return object()
+            return type("Config", (), {"memory_root": memory_root})()
 
-        with (
-            patch("rightmemory.cli.load_config", fake_load_config),
-            patch("rightmemory.cli.load_review_config", return_value=object()),
-            patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
-            patch("rightmemory.cli.ReviewScanner", FakeScanner),
-            patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt),
-            patch("sys.stdout", stdout),
-            patch("sys.stderr", stderr),
-        ):
-            result = main(["review", "watch", "--interval", "5"])
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_review_config", return_value=object()),
+                patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+                patch("rightmemory.cli.ReviewScanner", FakeScanner),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt),
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["review", "watch", "--interval", "5"])
 
         self.assertEqual(result, 130)
         self.assertEqual(roles, ["reviewer", "reviewer"])
@@ -186,16 +189,18 @@ class JsonRequestTests(unittest.TestCase):
             def scan_once(self):
                 return results.pop(0)
 
-        with (
-            patch("rightmemory.cli.load_config", return_value=object()),
-            patch("rightmemory.cli.load_review_config", return_value=object()),
-            patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
-            patch("rightmemory.cli.ReviewScanner", FakeScanner),
-            patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
-            patch("sys.stdout", stdout),
-            patch("sys.stderr", stderr),
-        ):
-            result = main(["review", "watch", "--interval", "5"])
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = type("Config", (), {"memory_root": Path(tempdir)})()
+            with (
+                patch("rightmemory.cli.load_config", return_value=config),
+                patch("rightmemory.cli.load_review_config", return_value=object()),
+                patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+                patch("rightmemory.cli.ReviewScanner", FakeScanner),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["review", "watch", "--interval", "5"])
 
         self.assertEqual(result, 130)
         sleep.assert_called_once_with(5)
@@ -214,16 +219,19 @@ class JsonRequestTests(unittest.TestCase):
             def scan_once(self):
                 return FakeReviewResult("reviewed: 0", reviewed=0)
 
-        with (
-            patch("rightmemory.cli.load_config", return_value=object()),
-            patch("rightmemory.cli.load_review_config", return_value=object()),
-            patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
-            patch("rightmemory.cli.ReviewScanner", FakeScanner),
-            patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
-            patch("sys.stdout", stdout),
-            patch("sys.stderr", stderr),
-        ):
-            result = main(["review", "watch"])
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = type("Config", (), {"memory_root": Path(tempdir)})()
+            with (
+                patch("rightmemory.cli.load_config", return_value=config),
+                patch("rightmemory.cli.load_review_config", return_value=object()),
+                patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+                patch("rightmemory.cli.ReviewScanner", FakeScanner),
+                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["review", "watch"])
 
         self.assertEqual(result, 130)
         sleep.assert_called_once_with(7200)
@@ -232,6 +240,147 @@ class JsonRequestTests(unittest.TestCase):
         with patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")):
             with self.assertRaises(ValueError):
                 main(["review", "watch", "--interval", "0"])
+
+    def test_watch_start_starts_review_and_dreamer_managed_processes(self):
+        stdout = io.StringIO()
+
+        class FakeProcess:
+            def __init__(self, pid):
+                self.pid = pid
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            roles = []
+
+            def fake_load_config(role):
+                roles.append(role)
+                return type("Config", (), {"memory_root": memory_root})()
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.watch.subprocess.Popen", side_effect=[FakeProcess(101), FakeProcess(102)]) as popen,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["watch", "start"])
+
+            review_pid = (memory_root / ".runtime" / "watch" / "review.pid").read_text(encoding="utf-8")
+            dreamer_pid = (memory_root / ".runtime" / "watch" / "dreamer.pid").read_text(encoding="utf-8")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(roles, ["reviewer", "dreamer"])
+        self.assertEqual(popen.call_count, 2)
+        self.assertEqual(review_pid, "101\n")
+        self.assertEqual(dreamer_pid, "102\n")
+        self.assertIn("review: running pid 101", stdout.getvalue())
+        self.assertIn("dreamer: running pid 102", stdout.getvalue())
+
+    def test_watch_status_reports_stopped_without_config(self):
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            with (
+                patch("rightmemory.cli.MEMORY_ROOT", Path(tempdir)),
+                patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["watch", "status"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("review: stopped", stdout.getvalue())
+        self.assertIn("dreamer: stopped", stdout.getvalue())
+
+    def test_watch_stop_sends_graceful_term_and_removes_pid(self):
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            pid_path = memory_root / ".runtime" / "watch" / "dreamer.pid"
+            pid_path.parent.mkdir(parents=True)
+            pid_path.write_text("123\n", encoding="utf-8")
+            with (
+                patch("rightmemory.cli.MEMORY_ROOT", memory_root),
+                patch("rightmemory.watch._is_managed_watch_process", side_effect=[True, False]),
+                patch("rightmemory.watch.os.kill") as kill,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["watch", "stop", "dreamer"])
+            pid_exists = pid_path.exists()
+
+        self.assertEqual(result, 0)
+        kill.assert_called_once()
+        self.assertFalse(pid_exists)
+        self.assertIn("dreamer: stopped pid 123", stdout.getvalue())
+
+    def test_dreamer_watch_runs_cycle_and_defaults_to_three_days(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        calls = []
+
+        class RecordingRuntime(FakeRuntime):
+            def run_session_turn(self, session_id: str, message: str) -> str:
+                calls.append((session_id, message))
+                return super().run_session_turn(session_id, message)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = type("Config", (), {"memory_root": Path(tempdir)})()
+            with (
+                patch("rightmemory.cli.load_config", return_value=config),
+                patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
+                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["dreamer", "watch"])
+
+            state_path = Path(tempdir) / ".runtime" / "dreamer" / "watch-state.json"
+            state_exists = state_path.exists()
+
+        self.assertEqual(result, 130)
+        self.assertEqual(calls, [("dreamer-watch", "Run a scheduled dream cycle.")])
+        sleep.assert_called_once_with(259200)
+        self.assertIn("rightmemory dreamer cycle", stdout.getvalue())
+        self.assertIn("session dreamer-watch: Run a scheduled dream cycle.", stdout.getvalue())
+        self.assertIn("rightmemory dreamer watch stopped", stderr.getvalue())
+        self.assertTrue(state_exists)
+
+    def test_dreamer_watch_waits_when_recent_cycle_was_recorded(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            state_path = memory_root / ".runtime" / "dreamer" / "watch-state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps({"last_run_at": datetime.now(timezone.utc).isoformat(), "last_status": "succeeded"}),
+                encoding="utf-8",
+            )
+            config = type("Config", (), {"memory_root": memory_root})()
+            with (
+                patch("rightmemory.cli.load_config", return_value=config),
+                patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("dreamer should wait")),
+                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["dreamer", "watch", "--interval", "60"])
+
+        self.assertEqual(result, 130)
+        self.assertGreaterEqual(sleep.call_args.args[0], 59)
+        self.assertNotIn("rightmemory dreamer cycle", stdout.getvalue())
+        self.assertIn("rightmemory dreamer watch stopped", stderr.getvalue())
+
+    def test_dreamer_watch_rejects_non_positive_interval(self):
+        with patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")):
+            with self.assertRaises(ValueError):
+                main(["dreamer", "watch", "--interval", "0"])
+
+    def test_watch_is_only_supported_for_dreamer_role(self):
+        with patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")):
+            with self.assertRaises(ValueError):
+                main(["retrieve", "watch"])
 
     def test_review_normalize_prints_normalized_session_without_loading_config(self):
         stdout = io.StringIO()
