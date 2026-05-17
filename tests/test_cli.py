@@ -421,22 +421,86 @@ class JsonRequestTests(unittest.TestCase):
                 main(["sync", "watch", "--interval", "0"])
 
     def test_sync_watch_sleeps_until_interrupted(self):
+        stdout = io.StringIO()
         stderr = io.StringIO()
 
         with tempfile.TemporaryDirectory() as tempdir:
-            sync_config = type("SyncConfig", (), {"memory_root": Path(tempdir), "enabled": True})()
+            sync_config = type("SyncConfig", (), {"memory_root": Path(tempdir), "enabled": True, "stale_pull_after_hours": 24})()
+            result_obj = type("Result", (), {"status": "synced", "message": "local memory is current", "files": []})()
             with (
                 patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
                 patch("rightmemory.cli.load_sync_config", return_value=sync_config),
+                patch("rightmemory.cli.SyncManager") as manager_class,
                 patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
                 patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+                patch("sys.stdout", stdout),
                 patch("sys.stderr", stderr),
             ):
+                manager_class.return_value.background_pull.return_value = result_obj
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)
         sleep.assert_called_once_with(60)
         self.assertIn("rightmemory sync watch stopped", stderr.getvalue())
+
+    def test_sync_watch_clean_pull_does_not_load_runtime(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = type("SyncConfig", (), {"memory_root": Path(tempdir), "enabled": True, "stale_pull_after_hours": 24})()
+            result_obj = type("Result", (), {"status": "synced", "message": "local memory is current", "files": []})()
+
+            with (
+                patch("rightmemory.cli.load_sync_config", return_value=config),
+                patch("rightmemory.cli.SyncManager") as manager_class,
+                patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
+                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt),
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                manager_class.return_value.background_pull.return_value = result_obj
+                result = main(["sync", "watch", "--interval", "60"])
+
+        self.assertEqual(result, 130)
+        self.assertIn("rightmemory sync check", stdout.getvalue())
+        self.assertIn("local memory is current", stdout.getvalue())
+
+    def test_sync_watch_conflict_invokes_sync_reconciler(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        calls = []
+
+        class RecordingRuntime(FakeRuntime):
+            def run_session_turn(self, session_id: str, message: str) -> str:
+                calls.append((session_id, message))
+                return "resolved"
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            sync_config = type("SyncConfig", (), {"memory_root": memory_root, "enabled": True, "stale_pull_after_hours": 24})()
+            reconciler_config = type("Config", (), {"memory_root": memory_root})()
+            result_obj = type("Result", (), {"status": "conflict", "message": "conflict", "files": ["MEMORY.md"]})()
+
+            with (
+                patch("rightmemory.cli.load_sync_config", return_value=sync_config),
+                patch("rightmemory.cli.load_config", return_value=reconciler_config) as load_config,
+                patch("rightmemory.cli.SyncManager") as manager_class,
+                patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
+                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt),
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                manager_class.return_value.background_pull.return_value = result_obj
+                manager_class.return_value.conflict_message.return_value = "resolve MEMORY.md"
+                result = main(["sync", "watch", "--interval", "60"])
+
+        self.assertEqual(result, 130)
+        load_config.assert_called_with("sync-reconciler")
+        self.assertEqual(calls, [("sync-watch", "resolve MEMORY.md")])
+        self.assertIn("resolved", stdout.getvalue())
 
     def test_watch_stop_sends_graceful_term_and_removes_pid(self):
         stdout = io.StringIO()

@@ -17,6 +17,7 @@ from .async_update import AsyncUpdateStore, format_state
 from .config import MEMORY_ROOT, ROLES, load_config, load_review_config, load_sync_config
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
+from .sync import SyncManager
 from .watch import (
     MANAGED_WATCH_TARGETS,
     InstallStamp,
@@ -35,6 +36,7 @@ DEFAULT_SYNC_WATCH_INTERVAL_SECONDS = 60 * 60
 WATCH_REFRESH_POLL_SECONDS = 5
 DREAMER_WATCH_SESSION_ID = "dreamer-watch"
 DREAMER_WATCH_MESSAGE = "Run a scheduled dream cycle."
+SYNC_WATCH_SESSION_ID = "sync-watch"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -455,6 +457,14 @@ def _sync_watch(interval: int) -> int:
         with _watch_stop_signal("sync") as stop, WatchLock(sync_config.memory_root, "sync"):
             while not stop.requested:
                 _reexec_if_install_changed(refresh, stop)
+                timestamp = datetime.now(UTC).isoformat()
+                print(f"[{timestamp}] rightmemory sync check", flush=True)
+                manager = SyncManager(sync_config)
+                result = manager.background_pull()
+                print(result.message, flush=True)
+                if result.status == "conflict":
+                    _run_sync_reconciler(manager, result)
+                _reexec_if_install_changed(refresh, stop)
                 if not _sleep_with_refresh_check(interval, refresh, stop):
                     break
         print("rightmemory sync watch stopped", file=sys.stderr)
@@ -462,6 +472,15 @@ def _sync_watch(interval: int) -> int:
     except KeyboardInterrupt:
         print("rightmemory sync watch stopped", file=sys.stderr)
         return 130
+
+
+def _run_sync_reconciler(manager: SyncManager, result: Any) -> None:
+    reconciler_config = load_config("sync-reconciler")
+    runtime = RightMemoryRuntime(reconciler_config)
+    try:
+        print(runtime.run_session_turn(SYNC_WATCH_SESSION_ID, manager.conflict_message(result)), flush=True)
+    finally:
+        runtime.cleanup()
 
 
 def _sleep_with_refresh_check(seconds: int, refresh: InstallStamp, stop: _WatchStopToken | None = None) -> bool:
