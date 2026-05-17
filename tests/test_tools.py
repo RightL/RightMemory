@@ -312,6 +312,34 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertEqual(artifact.read_text(encoding="utf-8"), "# Skill authoring\n")
         self.assertEqual(self.tools.git_status(), "")
 
+    def test_git_discard_reverts_staged_and_unstaged_changes(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        memory = self.root / "MEMORY.md"
+        memory.write_text("# Domain\n", encoding="utf-8")
+        artifact = self.root / "skill_artifacts" / "skill-creator" / "references" / "authoring.md"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("# Skill authoring\n", encoding="utf-8")
+        self._git("add", "MEMORY.md", "skill_artifacts/skill-creator/references/authoring.md")
+        self._git("commit", "-m", "initial memory")
+
+        memory.write_text("# Staged broken\n", encoding="utf-8")
+        artifact.write_text("# Staged broken\n", encoding="utf-8")
+        self._git("add", "MEMORY.md", "skill_artifacts/skill-creator/references/authoring.md")
+        memory.write_text("# Unstaged broken\n", encoding="utf-8")
+        artifact.write_text("# Unstaged broken\n", encoding="utf-8")
+
+        result = self.tools.git_discard([
+            "MEMORY.md",
+            "skill_artifacts/skill-creator/references/authoring.md",
+        ])
+
+        self.assertEqual(result, "discarded: MEMORY.md, skill_artifacts/skill-creator/references/authoring.md")
+        self.assertEqual(memory.read_text(encoding="utf-8"), "# Domain\n")
+        self.assertEqual(artifact.read_text(encoding="utf-8"), "# Skill authoring\n")
+        self.assertEqual(self.tools.git_status(), "")
+
     def test_git_discard_rejects_non_memory_paths(self):
         self._git("init")
         (self.root / "rightmemory.toml").write_text("[review]\n", encoding="utf-8")

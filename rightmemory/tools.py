@@ -392,7 +392,7 @@ class MemoryTools:
         if not paths:
             raise ValueError("paths must not be empty")
         relative_paths = [self._allowed_commit_path(path) for path in paths]
-        self._run_git(["git", "checkout", "--", *relative_paths])
+        self._run_git(["git", "checkout", "HEAD", "--", *relative_paths])
         return "discarded: " + ", ".join(relative_paths)
 
     def validate_memory(self) -> str:
