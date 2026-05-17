@@ -478,8 +478,24 @@ class RuntimeTests(unittest.TestCase):
         manager_class.assert_not_called()
 
     def test_write_roles_receive_sync_push_tool_when_sync_enabled(self):
+        for role in ("dreamer", "reviewer", "sync-reconciler", "update"):
+            with self.subTest(role=role):
+                config = RuntimeConfig(
+                    role=role,
+                    model_id="openai/test",
+                    memory_root=Path(self.tempdir.name),
+                    sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
+                )
+
+                with patch.dict("sys.modules", self._fake_pydantic_modules()):
+                    runtime = RightMemoryRuntime(config)
+
+                tool_names = [tool.__name__ for tool in runtime.agent.tools]
+                self.assertIn("sync_push", tool_names)
+
+    def test_retrieve_does_not_receive_sync_push_tool_when_sync_enabled(self):
         config = RuntimeConfig(
-            role="update",
+            role="retrieve",
             model_id="openai/test",
             memory_root=Path(self.tempdir.name),
             sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
@@ -489,7 +505,23 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
 
         tool_names = [tool.__name__ for tool in runtime.agent.tools]
-        self.assertIn("sync_push", tool_names)
+        self.assertNotIn("sync_push", tool_names)
+
+    def test_write_roles_do_not_receive_sync_push_tool_when_sync_disabled(self):
+        for role in ("dreamer", "reviewer", "sync-reconciler", "update"):
+            with self.subTest(role=role):
+                config = RuntimeConfig(
+                    role=role,
+                    model_id="openai/test",
+                    memory_root=Path(self.tempdir.name),
+                    sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=False),
+                )
+
+                with patch.dict("sys.modules", self._fake_pydantic_modules()):
+                    runtime = RightMemoryRuntime(config)
+
+                tool_names = [tool.__name__ for tool in runtime.agent.tools]
+                self.assertNotIn("sync_push", tool_names)
 
     def test_sync_prompt_guidance_says_preflight_is_current(self):
         instructions = build_instructions(Path("/memory"), "update")
@@ -497,6 +529,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("Runtime sync context", instructions)
         self.assertIn("already performed sync preflight", instructions)
         self.assertIn("avoid repeating preflight discovery", instructions)
+        self.assertIn("call `sync_push` after the commit", instructions)
+        self.assertIn("resolve the conflicted memory files", instructions)
+        self.assertIn("call `sync_push` again", instructions)
+
+        retrieve_instructions = build_instructions(Path("/memory"), "retrieve")
+        self.assertIn("local memory", retrieve_instructions)
+        self.assertIn("does not perform sync preflight by default", retrieve_instructions)
 
     def test_run_session_turn_preserves_message_history_on_disk(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
