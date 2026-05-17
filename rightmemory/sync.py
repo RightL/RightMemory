@@ -12,6 +12,7 @@ from .session import _ensure_runtime_gitignore, _fsync_directory
 
 
 MEMORY_SYNC_PATHS = ("MEMORY.md", "MEMORY_*.md", "dream_logs/*.md")
+GIT_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -53,7 +54,7 @@ class SyncManager:
 
         dirty = self._dirty_memory_files()
         if dirty:
-            return SyncResult("dirty", "local memory has uncommitted changes", dirty)
+            return self._record_failure(SyncResult("dirty", "local memory has uncommitted changes", dirty))
 
         fetch = self._git("fetch")
         if fetch.returncode != 0:
@@ -88,12 +89,19 @@ class SyncManager:
         upstream = self._upstream()
         if upstream is None:
             return self._record_failure(SyncResult("unconfigured", "sync unconfigured"))
+        push_target = self._push_target(upstream)
+        if push_target is None:
+            return self._record_failure(SyncResult("unconfigured", "sync upstream is not pushable"))
 
         conflicted = self._conflicted_memory_files()
         if conflicted:
             return self._record_failure(SyncResult("conflict", "memory sync conflict", conflicted))
 
-        push = self._git("push")
+        dirty = self._dirty_memory_files()
+        if dirty:
+            return self._record_failure(SyncResult("dirty", "local memory has uncommitted changes", dirty))
+
+        push = self._push(push_target)
         if push.returncode == 0:
             return self._record_success("push", SyncResult("pushed", "local memory pushed"))
 
@@ -108,7 +116,7 @@ class SyncManager:
                 return self._record_failure(SyncResult("conflict", "memory sync conflict", conflicted))
             return self._record_failure(SyncResult("error", "sync failed: merge failed"))
 
-        retry = self._git("push")
+        retry = self._push(push_target)
         if retry.returncode == 0:
             return self._record_success("push", SyncResult("pushed", "local memory merged and pushed"))
         return self._record_failure(SyncResult("error", "sync failed: git push failed"))
@@ -154,6 +162,18 @@ class SyncManager:
         except ValueError:
             return None
 
+    def _push_target(self, upstream: str) -> tuple[str, str] | None:
+        if "/" not in upstream:
+            return None
+        remote, branch = upstream.split("/", 1)
+        if not remote or not branch:
+            return None
+        return remote, branch
+
+    def _push(self, target: tuple[str, str]) -> subprocess.CompletedProcess[str]:
+        remote, branch = target
+        return self._git("push", remote, f"HEAD:{branch}")
+
     def _dirty_memory_files(self) -> list[str]:
         result = self._git("status", "--porcelain", "--", *MEMORY_SYNC_PATHS)
         if result.returncode != 0:
@@ -184,6 +204,7 @@ class SyncManager:
         state[f"last_successful_{operation}_at"] = now
         state["last_status"] = result.status
         state["last_message"] = result.message
+        state["last_files"] = result.files
         state.pop("last_failure_at", None)
         state.pop("last_failure_status", None)
         state.pop("last_failure_message", None)
@@ -193,6 +214,9 @@ class SyncManager:
 
     def _record_failure(self, result: SyncResult) -> SyncResult:
         state = self._read_state()
+        state["last_status"] = result.status
+        state["last_message"] = result.message
+        state["last_files"] = result.files
         state["last_failure_at"] = datetime.now(UTC).isoformat()
         state["last_failure_status"] = result.status
         state["last_failure_message"] = result.message
@@ -222,16 +246,29 @@ class SyncManager:
         _fsync_directory(self.state_path.parent)
 
     def _git(self, *args: str) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GIT_ASKPASS"] = "true"
         try:
             return subprocess.run(
                 ["git", *args],
                 cwd=self.memory_root,
                 text=True,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=env,
+                timeout=GIT_TIMEOUT_SECONDS,
             )
         except FileNotFoundError as exc:
             return subprocess.CompletedProcess(["git", *args], 1, "", str(exc))
+        except subprocess.TimeoutExpired as exc:
+            stdout = _timeout_output(exc.stdout)
+            stderr = _timeout_output(exc.stderr)
+            message = f"git command timed out after {GIT_TIMEOUT_SECONDS} seconds"
+            if stderr:
+                message = f"{stderr}\n{message}"
+            return subprocess.CompletedProcess(["git", *args], 124, stdout, message)
 
 
 def _porcelain_paths(output: str) -> list[str]:
@@ -245,3 +282,11 @@ def _porcelain_paths(output: str) -> list[str]:
         if path:
             files.add(path)
     return sorted(files)
+
+
+def _timeout_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value

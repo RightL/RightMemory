@@ -4,9 +4,10 @@ import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from rightmemory.config import SyncConfig
-from rightmemory.sync import SyncManager
+from rightmemory.sync import GIT_TIMEOUT_SECONDS, SyncManager
 
 
 class SyncManagerTests(unittest.TestCase):
@@ -87,6 +88,44 @@ class SyncManagerTests(unittest.TestCase):
         self.assertEqual(result.files, ["MEMORY.md"])
         self.assertIn("<<<<<<<", (self.device / "MEMORY.md").read_text(encoding="utf-8"))
 
+    def test_push_reports_dirty_memory_without_pushing(self):
+        (self.device / "MEMORY.md").write_text(
+            "# Domain\n\n- `one` first → []\n- `two` committed local → []\n",
+            encoding="utf-8",
+        )
+        self._git(self.device, "add", "MEMORY.md")
+        self._git(self.device, "commit", "-m", "local memory")
+        (self.device / "MEMORY.md").write_text(
+            "# Domain\n\n- `one` first → []\n- `two` committed local → []\n- `three` dirty local → []\n",
+            encoding="utf-8",
+        )
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).push()
+
+        self.assertEqual(result.status, "dirty")
+        self.assertEqual(result.files, ["MEMORY.md"])
+        self._git(self.other, "fetch", "origin")
+        remote_memory = self._git(self.other, "show", "origin/main:MEMORY.md")
+        self.assertNotIn("committed local", remote_memory)
+        self.assertNotIn("dirty local", remote_memory)
+
+    def test_push_uses_upstream_even_when_local_branch_name_differs(self):
+        self._git(self.device, "checkout", "-B", "memory-device", "origin/main")
+        self._git(self.device, "branch", "--set-upstream-to", "origin/main")
+        (self.device / "MEMORY.md").write_text(
+            "# Domain\n\n- `one` first → []\n- `two` local branch diff → []\n",
+            encoding="utf-8",
+        )
+        self._git(self.device, "add", "MEMORY.md")
+        self._git(self.device, "commit", "-m", "local branch memory")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).push()
+
+        self.assertEqual(result.status, "pushed")
+        self._git(self.other, "fetch", "origin")
+        remote_memory = self._git(self.other, "show", "origin/main:MEMORY.md")
+        self.assertIn("local branch diff", remote_memory)
+
     def test_state_records_successful_pull(self):
         manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True))
         result = manager.preflight()
@@ -97,6 +136,30 @@ class SyncManagerTests(unittest.TestCase):
         self.assertIn("last_successful_pull_at", state)
         parsed = datetime.fromisoformat(state["last_successful_pull_at"])
         self.assertEqual(parsed.tzinfo, UTC)
+
+    def test_preflight_dirty_records_state(self):
+        (self.device / "MEMORY.md").write_text("# Domain\n\n- `one` local dirty → []\n", encoding="utf-8")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+        state = json.loads((self.device / ".runtime" / "sync" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(result.status, "dirty")
+        self.assertEqual(state["last_status"], "dirty")
+        self.assertEqual(state["last_files"], ["MEMORY.md"])
+
+    def test_git_runs_noninteractive_with_timeout(self):
+        manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True))
+        completed = subprocess.CompletedProcess(["git", "status"], 0, "", "")
+
+        with patch("rightmemory.sync.subprocess.run", return_value=completed) as run:
+            result = manager._git("status")
+
+        self.assertIs(result, completed)
+        kwargs = run.call_args.kwargs
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(kwargs["env"]["GIT_ASKPASS"], "true")
+        self.assertEqual(kwargs["timeout"], GIT_TIMEOUT_SECONDS)
 
     def test_background_pull_skips_fresh_state(self):
         manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True, stale_pull_after_hours=24))
