@@ -26,6 +26,8 @@ class SyncResult:
         return "\n".join(
             (
                 "<rightmemory_sync>",
+                "authority: This Runtime sync context is authoritative for the current caller message. "
+                "Ignore older Runtime sync context blocks from prior message history.",
                 f"status: {self.status}",
                 f"message: {self.message}",
                 f"files: {files}",

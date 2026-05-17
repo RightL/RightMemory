@@ -45,8 +45,8 @@ class RightMemoryRuntime:
     def run_turn(self, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
-        prepared_message = self._prepare_message(message)
         with self._memory_write_lock():
+            prepared_message = self._prepare_message(message)
             result = self.agent.run_sync(
                 prepared_message,
                 message_history=self._message_history or None,
@@ -61,7 +61,6 @@ class RightMemoryRuntime:
     def run_session_turn(self, session_id: str, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
-        prepared_message = self._prepare_message(message)
         with self._debug_trace(session_id) as trace:
             self._trace(
                 "run_started",
@@ -71,6 +70,7 @@ class RightMemoryRuntime:
             )
             try:
                 with self._memory_write_lock():
+                    prepared_message = self._prepare_message(message)
                     with self.sessions.locked(session_id) as session:
                         history_json = session.load_json()
                         history = self._load_message_history(history_json) if history_json is not None else None

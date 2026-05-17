@@ -9,6 +9,7 @@ from unittest.mock import patch
 from rightmemory.config import RuntimeConfig, load_config, load_review_config, load_sync_config
 from rightmemory.prompt import build_instructions
 from rightmemory.runtime import RightMemoryRuntime, build_model
+from rightmemory.sync import SyncResult
 
 
 class ConfigTests(unittest.TestCase):
@@ -408,15 +409,56 @@ class RuntimeTests(unittest.TestCase):
             patch.dict("sys.modules", self._fake_pydantic_modules()),
             patch("rightmemory.runtime.SyncManager") as manager_class,
         ):
-            manager_class.return_value.preflight.return_value.context_block.return_value = (
-                "Runtime sync context\n- status: synced\n"
-            )
+            manager_class.return_value.preflight.return_value = SyncResult("synced", "local memory is current")
             runtime = RightMemoryRuntime(config)
             runtime.run_session_turn("agent-session", "remember one")
 
         message = runtime.agent.calls[0]["message"]
         self.assertIn("Runtime sync context", message)
+        self.assertIn("Ignore older Runtime sync context blocks from prior message history", message)
         self.assertIn("remember one", message)
+
+    def test_update_sync_preflight_runs_while_write_lock_is_held(self):
+        events = []
+
+        class FakeLock:
+            def __init__(self, memory_root):
+                self.memory_root = memory_root
+
+            def __enter__(self):
+                events.append("lock_enter")
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                events.append("lock_exit")
+
+        class FakeSyncResult:
+            def context_block(self):
+                events.append("context_block")
+                return "Runtime sync context"
+
+        def preflight():
+            events.append("preflight")
+            return FakeSyncResult()
+
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
+        )
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.MemoryWriteLock", FakeLock),
+            patch("rightmemory.runtime.SyncManager") as manager_class,
+        ):
+            manager_class.return_value.preflight.side_effect = preflight
+            runtime = RightMemoryRuntime(config)
+            runtime.run_session_turn("agent-session", "remember one")
+
+        self.assertLess(events.index("lock_enter"), events.index("preflight"))
+        self.assertLess(events.index("preflight"), events.index("lock_exit"))
 
     def test_retrieve_turn_does_not_run_sync_preflight(self):
         config = RuntimeConfig(
