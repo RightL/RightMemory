@@ -31,6 +31,7 @@ from .watch import (
 
 DEFAULT_REVIEW_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 DEFAULT_DREAMER_WATCH_INTERVAL_SECONDS = 3 * 24 * 60 * 60
+DEFAULT_SYNC_WATCH_INTERVAL_SECONDS = 60 * 60
 WATCH_REFRESH_POLL_SECONDS = 5
 DREAMER_WATCH_SESSION_ID = "dreamer-watch"
 DREAMER_WATCH_MESSAGE = "Run a scheduled dream cycle."
@@ -42,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
         return _watch_manager_main(argv[1:])
     if argv and argv[0] == "review":
         return _review_main(argv[1:])
+    if argv and argv[0] == "sync":
+        return _sync_main(argv[1:])
 
     parser = argparse.ArgumentParser(prog="rightmemory")
     parser.add_argument("role", choices=tuple(sorted(ROLES)), help="RightMemory runtime role")
@@ -325,6 +328,23 @@ def _review_main(argv: list[str]) -> int:
     raise ValueError(f"unknown review command: {args.command}")
 
 
+def _sync_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="rightmemory sync")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    watch = subparsers.add_parser("watch", help="keep local memory sync state alive")
+    watch.add_argument(
+        "--interval",
+        type=int,
+        default=DEFAULT_SYNC_WATCH_INTERVAL_SECONDS,
+        help="seconds between sync watch checks",
+    )
+    args = parser.parse_args(argv)
+
+    if args.command == "watch":
+        return _sync_watch(args.interval)
+    raise ValueError(f"unknown sync command: {args.command}")
+
+
 def _run_review_scan(since_days: int | None = None):
     reviewer_config = load_config("reviewer")
     return _run_review_scan_with_config(reviewer_config, since_days)
@@ -419,6 +439,27 @@ def _dreamer_watch(interval: int, session_id: str) -> int:
         return 0
     except KeyboardInterrupt:
         print("rightmemory dreamer watch stopped", file=sys.stderr)
+        return 130
+
+
+def _sync_watch(interval: int) -> int:
+    if interval < 1:
+        raise ValueError("--interval must be a positive integer")
+    sync_config = load_sync_config()
+    if not sync_config.enabled:
+        print("rightmemory sync watch disabled", file=sys.stderr)
+        return 0
+    refresh = InstallStamp(sync_config.memory_root)
+    try:
+        with _watch_stop_signal("sync") as stop, WatchLock(sync_config.memory_root, "sync"):
+            while not stop.requested:
+                _reexec_if_install_changed(refresh, stop)
+                if not _sleep_with_refresh_check(interval, refresh, stop):
+                    break
+        print("rightmemory sync watch stopped", file=sys.stderr)
+        return 0
+    except KeyboardInterrupt:
+        print("rightmemory sync watch stopped", file=sys.stderr)
         return 130
 
 

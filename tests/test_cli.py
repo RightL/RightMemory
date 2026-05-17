@@ -354,6 +354,43 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("dreamer: stopped", stdout.getvalue())
         self.assertIn("sync: stopped", stdout.getvalue())
 
+    def test_sync_watch_help_does_not_load_config(self):
+        stdout = io.StringIO()
+
+        with (
+            patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
+            patch("rightmemory.cli.load_sync_config", side_effect=AssertionError("sync config should not load")),
+            patch("sys.stdout", stdout),
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                main(["sync", "watch", "--help"])
+
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("rightmemory sync watch", stdout.getvalue())
+
+    def test_sync_watch_rejects_non_positive_interval(self):
+        with patch("rightmemory.cli.load_sync_config", side_effect=AssertionError("sync config should not load")):
+            with self.assertRaises(ValueError):
+                main(["sync", "watch", "--interval", "0"])
+
+    def test_sync_watch_sleeps_until_interrupted(self):
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            sync_config = type("SyncConfig", (), {"memory_root": Path(tempdir), "enabled": True})()
+            with (
+                patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
+                patch("rightmemory.cli.load_sync_config", return_value=sync_config),
+                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["sync", "watch", "--interval", "60"])
+
+        self.assertEqual(result, 130)
+        sleep.assert_called_once_with(60)
+        self.assertIn("rightmemory sync watch stopped", stderr.getvalue())
+
     def test_watch_stop_sends_graceful_term_and_removes_pid(self):
         stdout = io.StringIO()
 
