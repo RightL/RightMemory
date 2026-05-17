@@ -54,7 +54,7 @@ Standalone commit tools may stage and commit only `MEMORY.md`, `MEMORY_*.md`, an
 
 Global memory sync remains local-first: every device keeps a complete memory root, and Git provides distributed transport between those roots. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
 
-Runtime code owns the deterministic sync work before asking a model to reason. Fetching, merging, freshness checks, state recording, and push retry after a remote race are mechanical Git operations, so they happen before role prompts enter the loop and are summarized as compact Runtime sync context for write-capable roles. Retrieval keeps the fast local path by default.
+Runtime code owns deterministic sync mechanics at the point where each one belongs in the workflow. Before model work, preflight fetches, merges available upstream changes, checks freshness, records state, and summarizes the result as compact Runtime sync context for write-capable roles. After a role commits memory changes, `sync_push` publishes that committed state and handles the merge-and-retry path when the remote moved meanwhile. Retrieval keeps the fast local path by default.
 
 Memory roles handle semantic conflict resolution because Markdown memory conflicts require durability and schema judgment, not just Git mechanics. The reconciled result may need to preserve facts from both sides, repair graph references, validate the file set, commit the resolved state, and push again. `sync-reconciler` stays separate from dreamer because scheduled sync conflict repair is a narrow maintenance responsibility, while dreamer owns broader consolidation and restructuring.
 

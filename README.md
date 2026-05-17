@@ -331,7 +331,7 @@ enabled = true
 stale_pull_after_hours = 24
 ```
 
-When sync is enabled, write-capable roles run deterministic Git preflight before model work. The runtime checks the upstream, fetches and merges when it can, records sync state under `.runtime/`, and gives the role a compact Runtime sync context describing the current status and affected files. After the role commits memory changes, it can call `sync_push` to publish committed memory changes and retry after a remote race. Retrieval stays local by default for speed.
+When sync is enabled, write-capable roles run deterministic Git preflight before model work. The runtime checks the upstream, fetches and merges when it can, records sync state under `.runtime/`, and gives the role a compact Runtime sync context describing the current status and affected files. After editing, those roles commit durable memory changes and call `sync_push` so the committed state is published; if the remote moved meanwhile, `sync_push` handles the merge-and-retry path or reports a conflict for the role to resolve. Retrieval stays local by default for speed.
 
 Managed watch includes a `sync` target. `rightmemory watch start` starts it when sync is enabled, and `rightmemory watch start sync` runs that target by itself. The sync watcher pulls when the last successful pull is older than `stale_pull_after_hours`; clean pulls and fresh checks stay deterministic and do not call a model.
 
