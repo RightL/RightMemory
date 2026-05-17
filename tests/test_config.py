@@ -669,6 +669,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("delete_file", tool_names)
         self.assertIn("rename_file", tool_names)
         self.assertIn("git_add", tool_names)
+        self.assertIn("git_discard", tool_names)
         self.assertIn("git_commit", tool_names)
         self.assertNotIn("apply_patch", tool_names)
 
@@ -690,6 +691,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("rename_file", tool_names)
         self.assertNotIn("apply_patch", tool_names)
         self.assertNotIn("git_add", tool_names)
+        self.assertNotIn("git_discard", tool_names)
         self.assertNotIn("git_commit", tool_names)
 
     def _fake_pydantic_modules(self):

@@ -298,6 +298,16 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "commit subject must not contain NUL bytes"):
             self.tools.git_commit("memory: add\x00domain")
 
+    def test_git_commit_rejects_nul_in_body(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        self.tools.git_add(["MEMORY.md"])
+
+        with self.assertRaisesRegex(ValueError, "commit body must not contain NUL bytes"):
+            self.tools.git_commit("memory: add domain", body="body\x00text")
+
     def test_git_discard_reverts_allowed_tracked_changes(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")
@@ -367,6 +377,20 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertEqual(result, "discarded: skill_artifacts/skill-creator/references/authoring.md")
         self.assertFalse(artifact.exists())
         self.assertEqual(self.tools.git_status(), "")
+
+    def test_git_discard_rejects_unstaged_untracked_skill_artifact(self):
+        self._git("init")
+        artifact = self.root / "skill_artifacts" / "skill-creator" / "references" / "authoring.md"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("# Untracked artifact\n", encoding="utf-8")
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "cannot discard untracked path"):
+            self.tools.git_discard(["skill_artifacts/skill-creator/references/authoring.md"])
+
+        self.assertTrue(artifact.exists())
+        self.assertEqual(artifact.read_text(encoding="utf-8"), "# Untracked artifact\n")
+        self.assertEqual(self.tools.git_status(), status_before)
 
     def test_git_discard_rejects_directory_path_before_git_mutation(self):
         self._git("init")

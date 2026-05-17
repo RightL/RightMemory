@@ -407,6 +407,11 @@ class MemoryTools:
                 head_path_types.get(path),
                 index_path_kinds.get(path),
             )
+            if head_path_types.get(path) is None and index_path_kinds.get(path) is None:
+                raise ValueError(
+                    "cannot discard untracked path with git_discard; "
+                    f"use delete_file for plain untracked cleanup: {path}"
+                )
 
         if has_head:
             tracked_paths = [
@@ -420,7 +425,7 @@ class MemoryTools:
             tracked_paths = []
 
         for path in relative_paths:
-            if path not in tracked_paths:
+            if path not in tracked_paths and index_path_kinds.get(path) is not None:
                 self._unlink_worktree_file(path)
         return "discarded: " + ", ".join(relative_paths)
 
