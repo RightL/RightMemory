@@ -118,7 +118,13 @@ def _fsync_directory(path: Path) -> None:
 def _ensure_memory_gitignore(memory_root: Path) -> None:
     _write_gitignore_if_missing(
         memory_root,
-        b"*\n!MEMORY.md\n!MEMORY_*.md\n!dream_logs/\n!dream_logs/*.md\n",
+        b"*\n"
+        b"!MEMORY.md\n"
+        b"!MEMORY_*.md\n"
+        b"!dream_logs/\n"
+        b"!dream_logs/*.md\n"
+        b"!skill_artifacts/\n"
+        b"!skill_artifacts/**\n",
     )
 
 

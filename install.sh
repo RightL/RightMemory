@@ -348,6 +348,8 @@ else
 !MEMORY_*.md
 !dream_logs/
 !dream_logs/*.md
+!skill_artifacts/
+!skill_artifacts/**
 EOF
   echo "  [new]     $MEMORY_ROOT/.gitignore  (memory allowlist)"
 fi

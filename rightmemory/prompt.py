@@ -118,7 +118,8 @@ def _tool_guidance(role: str) -> str:
         )
     return (
         "- Use the provided tools for `read`, `grep`, `glob`, restricted `read_command`, outline, exact file "
-        "edits, file creation, file deletion, file renames, git inspection, and validation.\n"
+        "edits, file creation, file deletion, file renames, git inspection, git discard for reviewer-owned "
+        "dirty tracked files, and validation.\n"
         "- `read_command` accepts common read-only shell forms such as `cat path`, `sed -n 'X,Yp' path`, "
         "`rg pattern`, `rg --files`, `git status --short`, and `git diff`. It does not run a general shell.\n"
         "- For edits to existing file content, use `edit_file(path, old_string, new_string, replace_all=false)`. "
@@ -126,8 +127,11 @@ def _tool_guidance(role: str) -> str:
         "and make it large enough to identify the intended occurrence.\n"
         "- Use `create_file`, `delete_file`, and `rename_file` for file lifecycle changes instead of encoding "
         "those operations as textual replacements.\n"
-        "- Commit tools may stage and commit only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; ignore "
-        "unrelated untracked files unless the caller explicitly asks about them.\n"
+        "- Commit tools may stage and commit `MEMORY.md`, `MEMORY_*.md`, `dream_logs/*.md`, and "
+        "`skill_artifacts/<slug>/...`; keep unrelated untracked files out of memory commits unless the caller "
+        "explicitly asks about them.\n"
+        "- `git_discard(paths)` is destructive. Use it for invalid, partial, or unsafe reviewer-owned "
+        "memory or skill artifact changes after inspecting the diff.\n"
         "- Choose the edit shape that makes memory clearer; create, move, split, merge, or rewrite structure "
         "when that improves the tree or graph."
     )

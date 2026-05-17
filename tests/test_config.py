@@ -385,7 +385,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue((Path(self.tempdir.name) / ".runtime" / "memory.lock").exists())
         self.assertEqual(
             (Path(self.tempdir.name) / ".gitignore").read_text(encoding="utf-8"),
-            "*\n!MEMORY.md\n!MEMORY_*.md\n!dream_logs/\n!dream_logs/*.md\n",
+            "*\n"
+            "!MEMORY.md\n"
+            "!MEMORY_*.md\n"
+            "!dream_logs/\n"
+            "!dream_logs/*.md\n"
+            "!skill_artifacts/\n"
+            "!skill_artifacts/**\n",
         )
 
     def test_retrieve_role_does_not_create_memory_lock(self):

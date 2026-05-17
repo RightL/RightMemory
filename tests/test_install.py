@@ -20,11 +20,14 @@ class InstallScriptTests(unittest.TestCase):
             self._install(memory_root, skills_target)
 
             memory = (memory_root / "MEMORY.md").read_text(encoding="utf-8")
+            gitignore = (memory_root / ".gitignore").read_text(encoding="utf-8")
             install_stamp_exists = (memory_root / ".runtime" / "install.stamp").exists()
 
         self.assertIn(EXAMPLE_START, memory)
         self.assertIn(EXAMPLE_END, memory)
         self.assertIn("# User Pending Task and Thoughts", memory)
+        self.assertIn("!skill_artifacts/\n", gitignore)
+        self.assertIn("!skill_artifacts/**\n", gitignore)
         self.assertTrue(install_stamp_exists)
 
     def test_rerun_refreshes_marked_example_and_preserves_user_memory(self):
