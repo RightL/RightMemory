@@ -174,6 +174,38 @@ class SyncManagerTests(unittest.TestCase):
 
         self.assertEqual(result.status, "fresh")
 
+    def test_background_pull_reports_conflict_even_when_pull_state_fresh(self):
+        (self.other / "MEMORY.md").write_text("# Domain\n\n- `one` remote → []\n", encoding="utf-8")
+        self._git(self.other, "add", "MEMORY.md")
+        self._git(self.other, "commit", "-m", "remote edit")
+        self._git(self.other, "push")
+
+        (self.device / "MEMORY.md").write_text("# Domain\n\n- `one` local → []\n", encoding="utf-8")
+        self._git(self.device, "add", "MEMORY.md")
+        self._git(self.device, "commit", "-m", "local edit")
+        self._git(self.device, "fetch", "origin")
+        merge = subprocess.run(
+            ["git", "merge", "--no-edit", "origin/main"],
+            cwd=self.device,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(merge.returncode, 0, merge.stdout + merge.stderr)
+
+        state_path = self.device / ".runtime" / "sync" / "state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text(
+            json.dumps({"last_successful_pull_at": datetime.now(UTC).isoformat()}),
+            encoding="utf-8",
+        )
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True, stale_pull_after_hours=24)).background_pull()
+
+        self.assertEqual(result.status, "conflict")
+        self.assertEqual(result.files, ["MEMORY.md"])
+        self.assertIn("<<<<<<<", (self.device / "MEMORY.md").read_text(encoding="utf-8"))
+
     def test_background_pull_runs_when_stale(self):
         manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True, stale_pull_after_hours=24))
         state_path = self.device / ".runtime" / "sync" / "state.json"

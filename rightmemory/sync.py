@@ -125,6 +125,10 @@ class SyncManager:
 
     def background_pull(self) -> SyncResult:
         if self.config.enabled:
+            conflicted = self._conflicted_memory_files()
+            if conflicted:
+                return self._record_failure(SyncResult("conflict", "memory sync conflict", conflicted))
+
             last_pull = self._last_successful_pull_at()
             stale_after = timedelta(hours=self.config.stale_pull_after_hours)
             if last_pull is not None and datetime.now(UTC) - last_pull < stale_after:

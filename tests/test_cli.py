@@ -471,11 +471,15 @@ class JsonRequestTests(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
         calls = []
+        cleanup_calls = []
 
         class RecordingRuntime(FakeRuntime):
             def run_session_turn(self, session_id: str, message: str) -> str:
                 calls.append((session_id, message))
                 return "resolved"
+
+            def cleanup(self):
+                cleanup_calls.append("cleanup")
 
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
@@ -493,6 +497,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("sys.stdout", stdout),
                 patch("sys.stderr", stderr),
             ):
+                manager_class.return_value.memory_root = memory_root
                 manager_class.return_value.background_pull.return_value = result_obj
                 manager_class.return_value.conflict_message.return_value = "resolve MEMORY.md"
                 result = main(["sync", "watch", "--interval", "60"])
@@ -500,7 +505,76 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 130)
         load_config.assert_called_with("sync-reconciler")
         self.assertEqual(calls, [("sync-watch", "resolve MEMORY.md")])
+        self.assertEqual(cleanup_calls, ["cleanup"])
         self.assertIn("resolved", stdout.getvalue())
+
+    def test_sync_watch_reconciler_failure_logs_and_sleeps(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        cleanup_calls = []
+
+        class FailingRuntime(FakeRuntime):
+            def run_session_turn(self, session_id: str, message: str) -> str:
+                raise RuntimeError("boom")
+
+            def cleanup(self):
+                cleanup_calls.append("cleanup")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            sync_config = type("SyncConfig", (), {"memory_root": memory_root, "enabled": True, "stale_pull_after_hours": 24})()
+            reconciler_config = type("Config", (), {"memory_root": memory_root})()
+            result_obj = type("Result", (), {"status": "conflict", "message": "conflict", "files": ["MEMORY.md"]})()
+
+            with (
+                patch("rightmemory.cli.load_sync_config", return_value=sync_config),
+                patch("rightmemory.cli.load_config", return_value=reconciler_config),
+                patch("rightmemory.cli.SyncManager") as manager_class,
+                patch("rightmemory.cli.RightMemoryRuntime", FailingRuntime),
+                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                manager_class.return_value.memory_root = memory_root
+                manager_class.return_value.background_pull.return_value = result_obj
+                manager_class.return_value.conflict_message.return_value = "resolve MEMORY.md"
+                result = main(["sync", "watch", "--interval", "60"])
+
+        self.assertEqual(result, 130)
+        sleep.assert_called_once_with(60)
+        self.assertEqual(cleanup_calls, ["cleanup"])
+        self.assertIn("rightmemory sync reconciler failed: RuntimeError: boom", stderr.getvalue())
+
+    def test_sync_watch_reconciler_root_mismatch_logs_and_sleeps(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir) / "memory"
+            other_root = Path(tempdir) / "other"
+            sync_config = type("SyncConfig", (), {"memory_root": memory_root, "enabled": True, "stale_pull_after_hours": 24})()
+            reconciler_config = type("Config", (), {"memory_root": other_root})()
+            result_obj = type("Result", (), {"status": "conflict", "message": "conflict", "files": ["MEMORY.md"]})()
+
+            with (
+                patch("rightmemory.cli.load_sync_config", return_value=sync_config),
+                patch("rightmemory.cli.load_config", return_value=reconciler_config),
+                patch("rightmemory.cli.SyncManager") as manager_class,
+                patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
+                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                manager_class.return_value.memory_root = memory_root
+                manager_class.return_value.background_pull.return_value = result_obj
+                manager_class.return_value.conflict_message.return_value = "resolve MEMORY.md"
+                result = main(["sync", "watch", "--interval", "60"])
+
+        self.assertEqual(result, 130)
+        sleep.assert_called_once_with(60)
+        self.assertIn("sync-reconciler memory root mismatch", stderr.getvalue())
 
     def test_watch_stop_sends_graceful_term_and_removes_pid(self):
         stdout = io.StringIO()

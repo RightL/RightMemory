@@ -463,7 +463,14 @@ def _sync_watch(interval: int) -> int:
                 result = manager.background_pull()
                 print(result.message, flush=True)
                 if result.status == "conflict":
-                    _run_sync_reconciler(manager, result)
+                    try:
+                        _run_sync_reconciler(manager, result)
+                    except Exception as exc:
+                        print(
+                            f"rightmemory sync reconciler failed: {type(exc).__name__}: {exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                 _reexec_if_install_changed(refresh, stop)
                 if not _sleep_with_refresh_check(interval, refresh, stop):
                     break
@@ -476,6 +483,12 @@ def _sync_watch(interval: int) -> int:
 
 def _run_sync_reconciler(manager: SyncManager, result: Any) -> None:
     reconciler_config = load_config("sync-reconciler")
+    reconciler_root = Path(reconciler_config.memory_root)
+    if reconciler_root != manager.memory_root:
+        raise ValueError(
+            "sync-reconciler memory root mismatch: "
+            f"sync watch uses {manager.memory_root}, sync-reconciler uses {reconciler_root}"
+        )
     runtime = RightMemoryRuntime(reconciler_config)
     try:
         print(runtime.run_session_turn(SYNC_WATCH_SESSION_ID, manager.conflict_message(result)), flush=True)
