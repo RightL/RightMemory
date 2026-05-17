@@ -19,13 +19,13 @@ RightMemory keeps durable project and workflow context in Markdown files structu
 ```bash
 git clone https://github.com/RightL/RightMemory.git
 cd RightMemory
-./install.sh ~/.rightmemory ~/.claude/skills
+./install.sh
 ```
 
-For Codex standalone mode:
+The default install uses standalone mode, creates `~/.rightmemory`, and installs the orchestrator skill into both `~/.codex/skills` and `~/.claude/skills`. For a custom memory root or skill target:
 
 ```bash
-./install.sh --mode standalone ~/.rightmemory ~/.codex/skills
+./install.sh ~/.rightmemory ~/.codex/skills
 ```
 
 After install, open `~/.rightmemory/MEMORY.md` and add your own memory before the managed example block. Re-run the installer after pulling updates; existing real memory is preserved, and the managed example block refreshes when present.
@@ -134,7 +134,7 @@ Standalone mode reads these files at runtime. Subagent mode installs thin skill 
 
 ## Install Modes
 
-RightMemory has two install modes.
+RightMemory has two install modes. The default is `standalone`.
 
 | Mode | Use When | What Gets Installed |
 | --- | --- | --- |
@@ -144,13 +144,14 @@ RightMemory has two install modes.
 The installer arguments are:
 
 ```bash
-./install.sh [--mode subagent|standalone] <memory-root> <skills-target>
+./install.sh [--mode subagent|standalone] [<memory-root> <skills-target>]
 ```
 
 - `<memory-root>` is where `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/` live.
 - `<skills-target>` is where your agent loads skills from, such as `~/.claude/skills` or `~/.codex/skills`.
+- With no path arguments, the installer uses `~/.rightmemory` and installs skills into both `~/.codex/skills` and `~/.claude/skills`.
 
-Standalone mode requires `uv` and installs the runtime under `${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`. It also writes a `~/.local/bin/rightmemory` wrapper bound to your chosen memory root.
+Standalone mode requires `uv` and installs the runtime under `${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`. It also writes a `~/.local/bin/rightmemory` wrapper bound to your chosen memory root. If `~/.local/bin` is not on `PATH`, the installer prints shell-profile guidance after install.
 
 ## Everyday Use
 

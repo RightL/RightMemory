@@ -2,7 +2,7 @@
 # install.sh — set up the RightMemory system on a new machine.
 #
 # Usage:
-#   ./install.sh [--mode subagent|standalone] <memory-root> <skills-target>
+#   ./install.sh [--mode subagent|standalone] [<memory-root> <skills-target>]
 #
 # Arguments:
 #   <memory-root>    Where MEMORY.md, MEMORY_*.md, and dream_logs/ will live.
@@ -15,35 +15,42 @@
 #                      Codex:                  ~/.codex/skills
 #                      Other agents: see your agent's skill loading docs.
 #
+# If no paths are provided, use:
+#   memory root:    ~/.rightmemory
+#   skill targets:  ~/.codex/skills and ~/.claude/skills
+#
 # Modes:
-#   subagent    Install orchestrator, curator, and dreamer skills for agents with subagents.
 #   standalone Install an orchestrator skill that calls the standalone rightmemory CLI.
+#   subagent    Install orchestrator, curator, and dreamer skills for agents with subagents.
 #
 # Example:
-#   ./install.sh ~/.rightmemory ~/.claude/skills
-#   ./install.sh --mode standalone ~/.rightmemory ~/.codex/skills
+#   ./install.sh
+#   ./install.sh ~/.rightmemory ~/.codex/skills
+#   ./install.sh --mode subagent ~/.rightmemory ~/.claude/skills
 
 set -euo pipefail
 
 usage() {
   cat >&2 <<EOF
-Usage: $0 [--mode subagent|standalone] <memory-root> <skills-target>
+Usage: $0 [--mode subagent|standalone] [<memory-root> <skills-target>]
 
 Arguments:
   <memory-root>    Where MEMORY.md, MEMORY_*.md, and dream_logs/ will live.
   <skills-target>  Where RightMemory skill folders will be installed.
+                   If omitted, defaults to ~/.rightmemory plus both
+                   ~/.codex/skills and ~/.claude/skills.
 
 Modes:
-  subagent     Install memory-orchestrator, memory-curator, and memory-dreamer skills.
   standalone  Install only a memory-orchestrator skill that calls the standalone CLI.
+  subagent     Install memory-orchestrator, memory-curator, and memory-dreamer skills.
 
 Options:
-  --mode MODE    subagent (default) or standalone.
+  --mode MODE    standalone (default) or subagent.
   -h, --help     Show this help.
 EOF
 }
 
-MODE="subagent"
+MODE="standalone"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -79,7 +86,13 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ "$#" -ne 2 ]; then
+if [ "$#" -eq 0 ]; then
+  MEMORY_ROOT="$HOME/.rightmemory"
+  SKILLS_TARGETS=("$HOME/.codex/skills" "$HOME/.claude/skills")
+elif [ "$#" -eq 2 ]; then
+  MEMORY_ROOT="$1"
+  SKILLS_TARGETS=("$2")
+else
   usage
   exit 1
 fi
@@ -94,12 +107,12 @@ case "$MODE" in
     ;;
 esac
 
-MEMORY_ROOT="$1"
-SKILLS_TARGET="$2"
-
-mkdir -p "$MEMORY_ROOT" "$SKILLS_TARGET"
+mkdir -p "$MEMORY_ROOT"
 MEMORY_ROOT="$(cd "$MEMORY_ROOT" && pwd)"
-SKILLS_TARGET="$(cd "$SKILLS_TARGET" && pwd)"
+for index in "${!SKILLS_TARGETS[@]}"; do
+  mkdir -p "${SKILLS_TARGETS[$index]}"
+  SKILLS_TARGETS[$index]="$(cd "${SKILLS_TARGETS[$index]}" && pwd)"
+done
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -113,7 +126,7 @@ EXAMPLE_END_MARKER="rightmemory:example:end"
 echo "Installing RightMemory"
 echo "  MODE         = $MODE"
 echo "  MEMORY_ROOT  = $MEMORY_ROOT"
-echo "  SKILLS_ROOT  = $SKILLS_TARGET"
+echo "  SKILLS_ROOTS = ${SKILLS_TARGETS[*]}"
 if [ "$MODE" = "standalone" ]; then
   echo "  RUNTIME_HOME = $RIGHTMEMORY_HOME"
   echo "  RUNTIME_VENV = $RIGHTMEMORY_VENV"
@@ -126,17 +139,18 @@ escape_sed_replacement() {
 }
 
 MEMORY_ROOT_SED="$(escape_sed_replacement "$MEMORY_ROOT")"
-SKILLS_TARGET_SED="$(escape_sed_replacement "$SKILLS_TARGET")"
 
 install_skill() {
   src="$1"
   skill_name="$2"
-  dst_dir="$SKILLS_TARGET/$skill_name"
+  skills_target="$3"
+  skills_target_sed="$(escape_sed_replacement "$skills_target")"
+  dst_dir="$skills_target/$skill_name"
   dst="$dst_dir/SKILL.md"
   tmp="${dst}.tmp"
   mkdir -p "$dst_dir"
   sed -e "s|{{MEMORY_ROOT}}|$MEMORY_ROOT_SED|g" \
-      -e "s|{{SKILLS_ROOT}}|$SKILLS_TARGET_SED|g" \
+      -e "s|{{SKILLS_ROOT}}|$skills_target_sed|g" \
       "$src" > "$tmp"
   awk -v repo_root="$REPO_ROOT" '
     function emit(path, line) {
@@ -155,7 +169,8 @@ install_skill() {
 
 remove_skill_dir() {
   skill_name="$1"
-  skill_dir="$SKILLS_TARGET/$skill_name"
+  skills_target="$2"
+  skill_dir="$skills_target/$skill_name"
   skill_file="$skill_dir/SKILL.md"
 
   if [ ! -e "$skill_dir" ]; then
@@ -295,6 +310,21 @@ EOF
   echo "  [install] $RIGHTMEMORY_BIN"
 }
 
+warn_if_rightmemory_not_on_path() {
+  if command -v rightmemory >/dev/null 2>&1; then
+    return
+  fi
+
+  cat <<EOF
+  [notice]  rightmemory is installed at $RIGHTMEMORY_BIN, but ~/.local/bin is not on PATH for this shell.
+            Add it to your shell profile, then restart the agent or terminal:
+
+              export PATH="\$HOME/.local/bin:\$PATH"
+
+            For zsh, a common place is ~/.zshrc. For bash, use ~/.bashrc or ~/.bash_profile.
+EOF
+}
+
 # 1. MEMORY.md seed / managed example refresh
 mkdir -p "$MEMORY_ROOT/dream_logs"
 install_or_refresh_memory
@@ -321,21 +351,27 @@ EOF
   echo "  [new]     $MEMORY_ROOT/.gitignore  (memory allowlist)"
 fi
 
-# 3. Install shared schema and mode-specific skills with path substitution
-schema_dst="$SKILLS_TARGET/rightmemory-schema.md"
-cp "$REPO_ROOT/skills/rightmemory-schema.md" "$schema_dst"
-echo "  [install] $schema_dst"
-
 if [ "$MODE" = "subagent" ]; then
-  for skill in memory-orchestrator memory-curator memory-dreamer; do
-    install_skill "$REPO_ROOT/skills/$skill/SKILL.md" "$skill"
+  for skills_target in "${SKILLS_TARGETS[@]}"; do
+    schema_dst="$skills_target/rightmemory-schema.md"
+    cp "$REPO_ROOT/skills/rightmemory-schema.md" "$schema_dst"
+    echo "  [install] $schema_dst"
+    for skill in memory-orchestrator memory-curator memory-dreamer; do
+      install_skill "$REPO_ROOT/skills/$skill/SKILL.md" "$skill" "$skills_target"
+    done
   done
 else
   install_standalone_runtime_layout
-  install_skill "$REPO_ROOT/skills/memory-orchestrator-standalone/SKILL.md" "memory-orchestrator"
-  remove_skill_dir "memory-curator"
-  remove_skill_dir "memory-dreamer"
+  for skills_target in "${SKILLS_TARGETS[@]}"; do
+    schema_dst="$skills_target/rightmemory-schema.md"
+    cp "$REPO_ROOT/skills/rightmemory-schema.md" "$schema_dst"
+    echo "  [install] $schema_dst"
+    install_skill "$REPO_ROOT/skills/memory-orchestrator-standalone/SKILL.md" "memory-orchestrator" "$skills_target"
+    remove_skill_dir "memory-curator" "$skills_target"
+    remove_skill_dir "memory-dreamer" "$skills_target"
+  done
   echo "  [skip]    subagent skills; standalone mode uses rightmemory"
+  warn_if_rightmemory_not_on_path
 fi
 
 echo

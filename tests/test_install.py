@@ -1,6 +1,7 @@
 import subprocess
 import tempfile
 import unittest
+import os
 from pathlib import Path
 
 
@@ -75,9 +76,52 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("# Real Memory {#real-memory}", migrated)
         self.assertIn("- `real-node` keep me. -> []", migrated)
 
+    def test_default_install_uses_standalone_and_default_skill_targets(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_uv = fake_bin / "uv"
+            fake_uv.write_text(
+                "#!/usr/bin/env sh\n"
+                "if [ \"$1\" = \"venv\" ]; then\n"
+                "  mkdir -p \"$2/bin\"\n"
+                "  printf '#!/usr/bin/env sh\\n' > \"$2/bin/python\"\n"
+                "  chmod 755 \"$2/bin/python\"\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_uv.chmod(0o755)
+            env = {
+                **os.environ,
+                "HOME": str(root / "home"),
+                "XDG_DATA_HOME": str(root / "data"),
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+            }
+
+            result = subprocess.run(
+                ["bash", "install.sh"],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+
+            home = root / "home"
+            self.assertTrue((home / ".rightmemory" / "MEMORY.md").exists())
+            self.assertTrue((home / ".codex" / "skills" / "memory-orchestrator" / "SKILL.md").exists())
+            self.assertTrue((home / ".claude" / "skills" / "memory-orchestrator" / "SKILL.md").exists())
+            self.assertFalse((home / ".codex" / "skills" / "memory-curator").exists())
+            self.assertFalse((home / ".claude" / "skills" / "memory-dreamer").exists())
+            self.assertIn("MODE         = standalone", result.stdout)
+            self.assertIn("rightmemory is installed", result.stdout)
+
     def _install(self, memory_root: Path, skills_target: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", "install.sh", str(memory_root), str(skills_target)],
+            ["bash", "install.sh", "--mode", "subagent", str(memory_root), str(skills_target)],
             cwd=REPO_ROOT,
             text=True,
             stdout=subprocess.PIPE,
