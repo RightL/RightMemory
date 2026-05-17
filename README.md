@@ -205,7 +205,7 @@ Standalone mode is intentionally small:
 - Role-specific model settings are read from `<memory-root>/rightmemory.toml`.
 - One-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`, so normal agent callers can make separate process calls without losing multi-turn context; `.runtime/` is self-ignored so session state does not dirty memory commits.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
-- The installer creates a root `.gitignore` allowlist so git status surfaces `MEMORY.md`, `MEMORY_*.md`, `dream_logs/*.md`, and `skill_artifacts/<slug>/...`; existing user `.gitignore` files are preserved.
+- The installer creates a root `.gitignore` allowlist so git status surfaces `MEMORY.md`, `MEMORY_*.md`, `dream_logs/*.md`, and files under `skill_artifacts/`; existing user `.gitignore` files are preserved. Commit tooling treats reusable support material as slug-scoped artifacts under `skill_artifacts/<slug>/...`.
 - Async `update submit` calls for the same `--session` accumulate as pending candidates. The worker waits one hour from the latest submit, then sends the pending candidates to the update role as one batch; `pull` reports phase, pending candidates, current batch, and timing.
 - Multi-turn daemon context is preserved with Pydantic AI message history.
 - MCP support is not part of the MVP; it can be added later as an adapter over the same daemon.
@@ -375,17 +375,28 @@ RightMemory/
     └── provider-transcript-normalizer/SKILL.md
 ```
 
-After install:
+After install, the memory root starts with:
 
 ```text
 ~/.rightmemory/
 ├── .git/
 ├── MEMORY.md
 ├── MEMORY_<slug>.md
-├── dream_logs/
+└── dream_logs/
+```
+
+When reviewer support artifacts exist, they live beside the memory files:
+
+```text
+~/.rightmemory/
 └── skill_artifacts/
     └── <slug>/
+        └── ...
+```
 
+The skills target receives the orchestrator wrapper:
+
+```text
 ~/.codex/skills/
 ├── rightmemory-schema.md
 └── memory-orchestrator/SKILL.md
