@@ -170,6 +170,7 @@ def _watch_manager_main(argv: list[str]) -> int:
 
 
 def _watch_start(target: str) -> int:
+    failed = False
     for name in _watch_targets(target):
         try:
             if name == "sync":
@@ -184,9 +185,9 @@ def _watch_start(target: str) -> int:
             status = start_managed_watch(memory_root, name, sys.executable)
             print(_format_watch_status(status))
         except Exception as exc:
+            failed = True
             print(f"{name}: error: {type(exc).__name__}: {exc}", file=sys.stderr)
-            return 1
-    return 0
+    return 1 if failed else 0
 
 
 def _watch_stop(target: str, timeout: int) -> int:

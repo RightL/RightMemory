@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.cli import _daemon_stdio_json, _handle_json_request, main
+from rightmemory.watch import MANAGED_WATCH_TARGETS, WATCH_COMMANDS
 
 
 class FakeRuntime:
@@ -337,6 +338,52 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(popen.call_count, 2)
         self.assertIn("sync: disabled", stdout.getvalue())
+
+    def test_watch_start_reports_failure_after_attempting_later_targets(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        class FakeProcess:
+            def __init__(self, pid):
+                self.pid = pid
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            roles = []
+
+            def fake_load_config(role):
+                roles.append(role)
+                if role == "reviewer":
+                    raise RuntimeError("review unavailable")
+                return type("Config", (), {"memory_root": memory_root})()
+
+            def fake_load_sync_config():
+                return type("SyncConfig", (), {"memory_root": memory_root, "enabled": True})()
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
+                patch("rightmemory.watch.subprocess.Popen", side_effect=[FakeProcess(201), FakeProcess(202)]) as popen,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["watch", "start"])
+
+            dreamer_pid = (memory_root / ".runtime" / "watch" / "dreamer.pid").read_text(encoding="utf-8")
+            sync_pid = (memory_root / ".runtime" / "watch" / "sync.pid").read_text(encoding="utf-8")
+
+        self.assertEqual(result, 1)
+        self.assertEqual(roles, ["reviewer", "dreamer"])
+        self.assertEqual(popen.call_count, 2)
+        self.assertEqual(dreamer_pid, "201\n")
+        self.assertEqual(sync_pid, "202\n")
+        self.assertIn("review: error: RuntimeError: review unavailable", stderr.getvalue())
+        self.assertIn("dreamer: running pid 201", stdout.getvalue())
+        self.assertIn("sync: running pid 202", stdout.getvalue())
+
+    def test_sync_is_a_managed_watch_target(self):
+        self.assertIn("sync", MANAGED_WATCH_TARGETS)
+        self.assertEqual(WATCH_COMMANDS["sync"], ("sync", "watch"))
 
     def test_watch_status_reports_stopped_without_config(self):
         stdout = io.StringIO()
