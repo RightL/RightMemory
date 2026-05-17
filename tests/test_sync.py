@@ -88,6 +88,37 @@ class SyncManagerTests(unittest.TestCase):
         self.assertEqual(result.files, ["MEMORY.md"])
         self.assertIn("<<<<<<<", (self.device / "MEMORY.md").read_text(encoding="utf-8"))
 
+    def test_conflict_can_be_resolved_committed_and_pushed(self):
+        (self.other / "MEMORY.md").write_text("# Domain\n\n- `one` remote durable fact → []\n", encoding="utf-8")
+        self._git(self.other, "add", "MEMORY.md")
+        self._git(self.other, "commit", "-m", "remote edit")
+        self._git(self.other, "push")
+
+        (self.device / "MEMORY.md").write_text("# Domain\n\n- `one` local durable fact → []\n", encoding="utf-8")
+        self._git(self.device, "add", "MEMORY.md")
+        self._git(self.device, "commit", "-m", "local edit")
+
+        manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True))
+        conflict = manager.push()
+        self.assertEqual(conflict.status, "conflict")
+
+        (self.device / "MEMORY.md").write_text(
+            "# Domain\n\n"
+            "- `one-remote` remote durable fact → []\n"
+            "- `one-local` local durable fact → []\n",
+            encoding="utf-8",
+        )
+        self._git(self.device, "add", "MEMORY.md")
+        self._git(self.device, "commit", "-m", "memory: resolve sync conflict")
+
+        pushed = manager.push()
+
+        self.assertEqual(pushed.status, "pushed")
+        self._git(self.other, "pull", "--ff-only")
+        text = (self.other / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("one-remote", text)
+        self.assertIn("one-local", text)
+
     def test_push_reports_dirty_memory_without_pushing(self):
         (self.device / "MEMORY.md").write_text(
             "# Domain\n\n- `one` first → []\n- `two` committed local → []\n",
