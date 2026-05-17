@@ -288,6 +288,16 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("memory: review codex transcript s1", log)
         self.assertIn("Distilled skill signal", log)
 
+    def test_git_commit_rejects_nul_in_subject(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        self.tools.git_add(["MEMORY.md"])
+
+        with self.assertRaisesRegex(ValueError, "commit subject must not contain NUL bytes"):
+            self.tools.git_commit("memory: add\x00domain")
+
     def test_git_discard_reverts_allowed_tracked_changes(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")
@@ -379,6 +389,24 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertEqual(self.tools.git_status(), status_before)
         self.assertEqual(memory.read_text(encoding="utf-8"), "# Staged broken\n")
+
+    def test_git_discard_rejects_deleted_head_directory_before_git_mutation(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        artifact = self.root / "skill_artifacts" / "skill-creator" / "references" / "authoring.md"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("# Skill authoring\n", encoding="utf-8")
+        self._git("add", "skill_artifacts/skill-creator/references/authoring.md")
+        self._git("commit", "-m", "initial artifact")
+        shutil.rmtree(artifact.parent)
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "cannot discard directory path"):
+            self.tools.git_discard(["skill_artifacts/skill-creator/references"])
+
+        self.assertEqual(self.tools.git_status(), status_before)
+        self.assertFalse(artifact.exists())
 
     def test_git_discard_removes_staged_added_file_without_head(self):
         self._git("init")

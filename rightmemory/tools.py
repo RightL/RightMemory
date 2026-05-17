@@ -392,14 +392,25 @@ class MemoryTools:
         if not paths:
             raise ValueError("paths must not be empty")
         relative_paths = [self._allowed_commit_path(path) for path in paths]
+        has_head = self._git_has_head()
+        head_path_types: dict[str, str | None] = {}
+        if has_head:
+            head_path_types = {
+                path: self._git_path_type_in_head(path) for path in relative_paths
+            }
+        index_path_kinds = {
+            path: self._git_path_kind_in_index(path) for path in relative_paths
+        }
         for path in relative_paths:
-            resolved = self.memory_root / path
-            if resolved.exists() and not (resolved.is_file() or resolved.is_symlink()):
-                raise ValueError(f"cannot discard directory path: {path}")
+            self._reject_discard_directory_path(
+                path,
+                head_path_types.get(path),
+                index_path_kinds.get(path),
+            )
 
-        if self._git_has_head():
+        if has_head:
             tracked_paths = [
-                path for path in relative_paths if self._git_path_exists_in_head(path)
+                path for path in relative_paths if head_path_types.get(path) is not None
             ]
             self._run_git(["git", "reset", "--", *relative_paths])
             if tracked_paths:
@@ -822,6 +833,8 @@ class MemoryTools:
         message = message.strip()
         if not message:
             raise ValueError("commit message must not be empty")
+        if "\x00" in message:
+            raise ValueError("commit subject must not contain NUL bytes")
         lines = message.splitlines()
         if len(lines) != 1:
             raise ValueError("commit subject must be a single line")
@@ -889,15 +902,50 @@ class MemoryTools:
         )
         return process.returncode == 0
 
-    def _git_path_exists_in_head(self, path: str) -> bool:
+    def _git_path_type_in_head(self, path: str) -> str | None:
         process = subprocess.run(
-            ["git", "cat-file", "-e", f"HEAD:{path}"],
+            ["git", "cat-file", "-t", f"HEAD:{path}"],
             cwd=self.memory_root,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        return process.returncode == 0
+        if process.returncode != 0:
+            return None
+        return process.stdout.strip()
+
+    def _git_path_kind_in_index(self, path: str) -> str | None:
+        process = subprocess.run(
+            ["git", "ls-files", "-z", "--", path],
+            cwd=self.memory_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if process.returncode != 0:
+            detail = process.stderr.strip() or process.stdout.strip()
+            raise RuntimeError(f"git command failed: {detail}")
+        entries = [entry for entry in process.stdout.split("\0") if entry]
+        if not entries:
+            return None
+        if any(entry == path for entry in entries):
+            return "file"
+        prefix = path.rstrip("/") + "/"
+        if any(entry.startswith(prefix) for entry in entries):
+            return "tree"
+        return None
+
+    def _reject_discard_directory_path(
+        self,
+        path: str,
+        head_path_type: str | None,
+        index_path_kind: str | None,
+    ) -> None:
+        resolved = self.memory_root / path
+        if resolved.exists() and not (resolved.is_file() or resolved.is_symlink()):
+            raise ValueError(f"cannot discard directory path: {path}")
+        if head_path_type == "tree" or index_path_kind == "tree":
+            raise ValueError(f"cannot discard directory path: {path}")
 
     def _unlink_worktree_file(self, path: str) -> None:
         resolved = self.memory_root / path
