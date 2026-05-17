@@ -11,6 +11,14 @@ EXAMPLE_END = "rightmemory:example:end"
 
 
 class InstallScriptTests(unittest.TestCase):
+    def test_memory_example_includes_skill_creation_guidance(self):
+        memory_example = (REPO_ROOT / "MEMORY.example.md").read_text(encoding="utf-8")
+
+        self.assertIn("Skill Creation Guidance {F#sample-skill-creation-guidance}", memory_example)
+        self.assertIn("skill_artifacts/sample-skill-creation-guidance/", memory_example)
+        self.assertIn("class-level", memory_example)
+        self.assertIn("support material", memory_example)
+
     def test_initial_install_copies_managed_example(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

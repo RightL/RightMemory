@@ -55,6 +55,19 @@ Store cross-project behavior memory here when it should change how future agents
 - `pref-principle-first` The user prefers principle-first instructions over long category lists; examples are interpretation aids, neither required nor sufficient, and the governing decision test controls each case. → []
 - `pref-env-check` Future agents should check durable memory and local project context for the intended runtime environment before installing dependencies or guessing a Python environment. → []
 
+## Memory-Backed Skills {#sample-memory-backed-skills}
+
+Memory-backed skills are reusable procedural knowledge that future agents can naturally retrieve while doing the related work. Keep the root memory compact: describe the class of work, the judgment criteria, and where richer local materials live.
+
+### Skill Creation Guidance {F#sample-skill-creation-guidance}
+
+A fuller sample topic would live in `MEMORY_sample-skill-creation-guidance.md` and describe how to create project-local skills without treating this example as user-specific policy.
+
+- `skill-scope-class-level` Skill guidance should describe a class-level workflow agents will repeat, not one session's incidental choices. → [rel:sample-memory-backed-skills]
+- `skill-degree-freedom` A good skill gives agents enough structure to act consistently while leaving room for project judgment. → [rel:skill-scope-class-level]
+- `skill-support-material` Put support material such as references, scripts, or templates under `skill_artifacts/sample-skill-creation-guidance/` when it reduces prompt bulk or makes repeated checks easier. → [rel:skill-scope-class-level]
+- `skill-validation` Validate a new skill with realistic checks that exercise the intended workflow and reveal whether the guidance is retrievable, concise, and actionable. → [rel:skill-support-material]
+
 ---
 
 <!-- rightmemory:example:end -->
