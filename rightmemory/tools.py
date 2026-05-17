@@ -388,11 +388,25 @@ class MemoryTools:
         return f"committed {commit_hash}: {message}"
 
     def git_discard(self, paths: list[str]) -> str:
-        """Discard tracked changes in selected memory, dream log, or skill artifact files."""
+        """Discard selected memory, dream log, or skill artifact file changes."""
         if not paths:
             raise ValueError("paths must not be empty")
         relative_paths = [self._allowed_commit_path(path) for path in paths]
-        self._run_git(["git", "checkout", "HEAD", "--", *relative_paths])
+
+        if self._git_has_head():
+            tracked_paths = [
+                path for path in relative_paths if self._git_path_exists_in_head(path)
+            ]
+            self._run_git(["git", "reset", "--", *relative_paths])
+            if tracked_paths:
+                self._run_git(["git", "checkout", "--", *tracked_paths])
+        else:
+            self._run_git(["git", "rm", "--cached", "--ignore-unmatch", "--", *relative_paths])
+            tracked_paths = []
+
+        for path in relative_paths:
+            if path not in tracked_paths:
+                self._unlink_worktree_file(path)
         return "discarded: " + ", ".join(relative_paths)
 
     def validate_memory(self) -> str:
@@ -860,6 +874,33 @@ class MemoryTools:
             detail = process.stderr.strip() or process.stdout.strip()
             raise RuntimeError(f"git command failed: {detail}")
         return process.stdout.strip()
+
+    def _git_has_head(self) -> bool:
+        process = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=self.memory_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return process.returncode == 0
+
+    def _git_path_exists_in_head(self, path: str) -> bool:
+        process = subprocess.run(
+            ["git", "cat-file", "-e", f"HEAD:{path}"],
+            cwd=self.memory_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return process.returncode == 0
+
+    def _unlink_worktree_file(self, path: str) -> None:
+        resolved = self.memory_root / path
+        if resolved.is_file() or resolved.is_symlink():
+            resolved.unlink()
+        elif resolved.exists():
+            raise RuntimeError(f"cannot discard directory path: {path}")
 
     def _loc(self, item: MemoryId) -> str:
         return f"{item.file.relative_to(self.memory_root)}:{item.line_number}"
