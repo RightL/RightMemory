@@ -14,6 +14,7 @@ from .tools import MemoryTools
 
 
 SYNC_PREFLIGHT_ROLES = {"dreamer", "reviewer", "update"}
+SYNC_TOOL_ROLES = {"dreamer", "reviewer", "sync-reconciler", "update"}
 SUPPORTED_MODEL_SETTINGS = {
     "max_tokens",
     "temperature",
@@ -104,6 +105,11 @@ class RightMemoryRuntime:
         result = self._sync().preflight()
         return f"{result.context_block()}\nCaller message:\n{message}"
 
+    def sync_push(self) -> str:
+        """Push committed memory changes to the configured Git upstream."""
+        result = self._sync().push()
+        return result.context_block()
+
     def _memory_write_lock(self):
         if self.config.role == "retrieve":
             return nullcontext()
@@ -133,7 +139,7 @@ class RightMemoryRuntime:
         ]
         if self.config.role == "retrieve":
             return read_tools
-        return [
+        write_tools = [
             *read_tools,
             self._agent_tool(self.tools.edit_file),
             self._agent_tool(self.tools.create_file),
@@ -144,6 +150,9 @@ class RightMemoryRuntime:
             self._agent_tool(self.tools.git_add),
             self._agent_tool(self.tools.git_commit),
         ]
+        if self.config.sync.enabled and self.config.role in SYNC_TOOL_ROLES:
+            write_tools.append(self._agent_tool(self.sync_push))
+        return write_tools
 
     def _agent_tool(self, tool: Callable[..., Any]) -> Callable[..., Any]:
         wrapped = _retryable_tool(tool)

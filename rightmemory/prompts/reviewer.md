@@ -66,6 +66,7 @@ Place memory in a clear tree. Use meaningful `##` or `###` headings for related 
 - If an edit would require guessing where to place a fact, skip it instead of asking the user; this is an automatic background review.
 - Before finishing an edit, run a graph sanity pass with `validate_memory`.
 - If you changed memory, stage only touched `MEMORY.md` / `MEMORY_*.md` files and commit them. Use `memory: review <source> transcript <session_id>` when source and session id are known.
+- When runtime sync context is present, call `sync_push` after a successful memory commit.
 
 ## Final Reply
 

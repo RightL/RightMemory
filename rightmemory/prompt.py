@@ -13,6 +13,7 @@ def build_instructions(memory_root: Path, role: str) -> str:
     schema = _read_prompt_file("skills/rightmemory-schema.md")
     role_guidance = _read_prompt_file(f"prompts/{role}.md")
     command_guidance = _command_guidance(role)
+    sync_guidance = _sync_guidance(role)
     tool_guidance = _tool_guidance(role)
 
     return f"""You are RightMemory standalone {role} mode.
@@ -21,6 +22,7 @@ Operate only as the {role} role for the user's memory store. Do not blend retrie
 
 Command-selected behavior:
 {command_guidance}
+{sync_guidance}
 
 Workspace rule:
 - The only allowed root directory is {memory_root}.
@@ -79,6 +81,21 @@ def _command_guidance(role: str) -> str:
             "it, narrowing or marking uncertainty rather than dropping durable information."
         )
     raise ValueError(f"role must be one of: {_role_list()}")
+
+
+def _sync_guidance(role: str) -> str:
+    if role == "retrieve":
+        return "- Retrieval uses local memory and does not perform sync preflight by default."
+    if role in {"dreamer", "reviewer", "sync-reconciler", "update"}:
+        return (
+            "- If the caller message contains a Runtime sync context block, the runtime already performed sync "
+            "preflight for this turn. Treat that block as current at turn start and avoid repeating preflight "
+            "discovery. Use sync tools again after your own edits or after a later tool result changes sync state.\n"
+            "- When sync is enabled and you commit memory changes, call `sync_push` after the commit. If `sync_push` "
+            "reports a conflict, resolve the conflicted memory files in the same role, validate memory, commit the "
+            "resolved state, and call `sync_push` again."
+        )
+    return ""
 
 
 def _tool_guidance(role: str) -> str:

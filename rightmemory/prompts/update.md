@@ -32,7 +32,8 @@
 - Never touch the `# User Pending Task and Thoughts` section.
 - Before your first write in a session, check git status for tracked files only. Ignore untracked files entirely. If there are pre-existing changes only in tracked `MEMORY*.md` and `dream_logs/*.md` files, stage and commit those files before editing, using a commit message based on the actual diff.
 - Keep edits focused on the update, but use the scope needed to keep memory clear. Preserve unrelated lines, ordering, and indentation.
-- Do not commit routine update edits after your own write unless the caller explicitly asks you to commit.
+- In a local update with no runtime sync context, leave routine update edits uncommitted unless the caller asks for a commit.
+- When runtime sync context is present, commit the memory edit and call `sync_push` so the global memory can update.
 - When ambiguity prevents a safe edit, skip that edit and explain the ambiguity in the final reply.
 - Before finishing an edit, run a graph sanity pass: no duplicate ids, self-edges, duplicate edges, dangling edges, or child-to-containing-heading edges that only repeat containment.
 

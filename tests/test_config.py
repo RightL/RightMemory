@@ -477,6 +477,27 @@ class RuntimeTests(unittest.TestCase):
 
         manager_class.assert_not_called()
 
+    def test_write_roles_receive_sync_push_tool_when_sync_enabled(self):
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+        tool_names = [tool.__name__ for tool in runtime.agent.tools]
+        self.assertIn("sync_push", tool_names)
+
+    def test_sync_prompt_guidance_says_preflight_is_current(self):
+        instructions = build_instructions(Path("/memory"), "update")
+
+        self.assertIn("Runtime sync context", instructions)
+        self.assertIn("already performed sync preflight", instructions)
+        self.assertIn("avoid repeating preflight discovery", instructions)
+
     def test_run_session_turn_preserves_message_history_on_disk(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
 
@@ -641,6 +662,7 @@ class RuntimeTests(unittest.TestCase):
                 self.kwargs = kwargs
                 self.calls = []
                 self.model = kwargs["model"]
+                self.tools = kwargs["tools"]
 
             def run_sync(self, message, message_history=None, model_settings=None):
                 self.calls.append(
