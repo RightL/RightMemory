@@ -277,7 +277,7 @@ Add source presets to `<memory-root>/rightmemory.toml`:
 ```toml
 [review]
 idle_seconds = 3600
-since_days = 30
+since_days = 3
 
 [[review.sources]]
 kind = "claude"
@@ -288,7 +288,7 @@ kind = "codex"
 path = "~/.codex/sessions"
 ```
 
-If `[[review.sources]]` is omitted, RightMemory checks the default Codex and Claude locations. By default it only considers transcript files modified in the last 30 days. Review state is stored under `<memory-root>/.runtime/review/state.json` and records the last reviewed turn count and a hash of the reviewed prefix for each transcript. When a session resumes later, the reviewer receives the whole normalized session for context but extracts only from the new suffix. If a transcript prefix changes, RightMemory resets that session cursor and reviews it from the beginning.
+If `[[review.sources]]` is omitted, RightMemory checks the default Codex and Claude locations. By default it considers transcript files modified in the last 3 days. Review state is stored under `<memory-root>/.runtime/review/state.json` and records reviewed provider sessions by source and session id. A session is reviewed as one whole unit; if the same provider session later changes or resumes, scanner state treats it as already reviewed unless you clear the corresponding review state.
 
 Run it from this repository during development:
 

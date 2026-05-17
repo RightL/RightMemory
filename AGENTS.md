@@ -27,8 +27,8 @@
 - A memory root contains `MEMORY.md`, optional sibling `MEMORY_*.md` detail files, `dream_logs/`, `rightmemory.toml`, and `.runtime/`.
 - The installer creates a memory-root `.gitignore` allowlist so git status normally shows only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`.
 - Runtime/session/review state belongs under `.runtime/` and should not be committed.
-- Reviewer scans process one normalized provider session at a time. `scan --once` attempts one eligible session and exits; `watch` repeats one-session scans until no eligible work remains. Review prompts use the whole session for context and extract only from the new suffix after the saved cursor.
-- The default review window is 30 days via `[review].since_days`; keep that default unless the user explicitly changes the backlog policy.
+- Reviewer scans process one normalized provider session at a time. `scan --once` attempts one eligible session and exits; `watch` repeats one-session scans until no eligible work remains. Review state is session-level: once a provider session has been reviewed, later changes or resumed turns with the same source/session id are skipped unless the review state is cleared.
+- The default review window is 3 days via `[review].since_days`; keep that default unless the user explicitly changes the backlog policy.
 
 ## Git And Safety
 - Keep changes scoped. Do not revert or clean up user changes unless explicitly asked.

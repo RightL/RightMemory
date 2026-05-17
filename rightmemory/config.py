@@ -13,7 +13,7 @@ CONFIG_PATH = MEMORY_ROOT / "rightmemory.toml"
 ROLES = {"dreamer", "retrieve", "reviewer", "update"}
 DEFAULT_MAX_TOOL_RETRIES = 10
 DEFAULT_REVIEW_IDLE_SECONDS = 3600
-DEFAULT_REVIEW_SINCE_DAYS = 30
+DEFAULT_REVIEW_SINCE_DAYS = 3
 
 
 @dataclass(frozen=True)
