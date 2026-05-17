@@ -5,7 +5,7 @@ from contextlib import contextmanager, nullcontext
 from functools import wraps
 from typing import Any
 
-from .config import RuntimeConfig
+from .config import RuntimeConfig, load_config
 from .debug import DebugTrace
 from .prompt import build_instructions
 from .session import MemoryWriteLock, MessageSessionStore
@@ -13,8 +13,10 @@ from .sync import SyncManager
 from .tools import MemoryTools
 
 
-SYNC_PREFLIGHT_ROLES = {"dreamer", "reviewer", "update"}
-SYNC_TOOL_ROLES = {"dreamer", "reviewer", "sync-reconciler", "update"}
+SEMANTIC_SYNC_ROLES = {"dreamer", "reviewer", "update"}
+SYNC_TOOL_ROLES = {"sync-reconciler"}
+SYNC_REPAIR_STATUSES = {"conflict", "dirty"}
+SYNC_REPAIR_SESSION_ID = "runtime-sync-repair"
 SUPPORTED_MODEL_SETTINGS = {
     "max_tokens",
     "temperature",
@@ -46,16 +48,18 @@ class RightMemoryRuntime:
     def run_turn(self, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
-        with self._memory_write_lock():
-            prepared_message = self._prepare_message(message)
-            result = self.agent.run_sync(
-                prepared_message,
+        result, post_sync = self._run_locked_turn(
+            lambda: self.agent.run_sync(
+                message,
                 message_history=self._message_history or None,
                 model_settings=self._model_settings(),
             )
-            all_messages = getattr(result, "all_messages", None)
-            if callable(all_messages):
-                self._message_history = list(all_messages())
+        )
+        all_messages = getattr(result, "all_messages", None)
+        if callable(all_messages):
+            self._message_history = list(all_messages())
+        if post_sync is not None:
+            self._run_sync_reconciler(post_sync)
         output = getattr(result, "output", None)
         return str(output if output is not None else result)
 
@@ -70,45 +74,89 @@ class RightMemoryRuntime:
                 api_base=self.config.api_base,
             )
             try:
-                with self._memory_write_lock():
-                    prepared_message = self._prepare_message(message)
-                    with self.sessions.locked(session_id) as session:
-                        history_json = session.load_json()
-                        history = self._load_message_history(history_json) if history_json is not None else None
-                        self._trace("history_loaded", message_count=len(history or []))
-                        self._trace("model_started")
-                        result = self.agent.run_sync(
-                            prepared_message,
-                            message_history=history,
-                            model_settings=self._model_settings(),
-                        )
-                        output = getattr(result, "output", None)
-                        self._trace("model_finished", output=str(output if output is not None else result))
-                        session.save_json(self._dump_message_history(result))
-                        self._trace("history_saved", path=str(session.paths.history))
+                result, post_sync = self._run_locked_turn(lambda: self._run_session_model(session_id, message))
             except Exception as exc:
                 self._trace("run_failed", error_type=type(exc).__name__, error=str(exc))
                 raise
+            if post_sync is not None:
+                self._run_sync_reconciler(post_sync)
             output = getattr(result, "output", None)
             self._trace("run_finished", output=str(output if output is not None else result))
         output = getattr(result, "output", None)
         return str(output if output is not None else result)
+
+    def _run_session_model(self, session_id: str, message: str):
+        with self.sessions.locked(session_id) as session:
+            history_json = session.load_json()
+            history = self._load_message_history(history_json) if history_json is not None else None
+            self._trace("history_loaded", message_count=len(history or []))
+            self._trace("model_started")
+            result = self.agent.run_sync(
+                message,
+                message_history=history,
+                model_settings=self._model_settings(),
+            )
+            output = getattr(result, "output", None)
+            self._trace("model_finished", output=str(output if output is not None else result))
+            session.save_json(self._dump_message_history(result))
+            self._trace("history_saved", path=str(session.paths.history))
+            return result
+
+    def _run_locked_turn(self, run_model: Callable[[], Any]) -> tuple[Any, Any | None]:
+        if self.config.role not in SEMANTIC_SYNC_ROLES or not self.config.sync.enabled:
+            with self._memory_write_lock():
+                return run_model(), None
+
+        repaired = False
+        while True:
+            with self._memory_write_lock():
+                preflight_repair = self._sync_preflight_locked()
+                if preflight_repair is None:
+                    result = run_model()
+                    return result, self._sync_after_semantic_turn()
+            if repaired:
+                raise RuntimeError(
+                    f"sync repair did not clear {preflight_repair.status} state: {preflight_repair.message}"
+                )
+            self._run_sync_reconciler(preflight_repair)
+            repaired = True
 
     def _sync(self) -> SyncManager:
         if self._sync_manager is None:
             self._sync_manager = SyncManager(self.config.sync)
         return self._sync_manager
 
-    def _prepare_message(self, message: str) -> str:
-        if self.config.role not in SYNC_PREFLIGHT_ROLES or not self.config.sync.enabled:
-            return message
+    def _sync_preflight_locked(self):
         result = self._sync().preflight()
-        return f"{result.context_block()}\nCaller message:\n{message}"
+        if result.status in SYNC_REPAIR_STATUSES:
+            return result
+        return None
+
+    def _sync_after_semantic_turn(self):
+        if self.config.role not in SEMANTIC_SYNC_ROLES or not self.config.sync.enabled:
+            return None
+        result = self._sync().push()
+        if result.status in SYNC_REPAIR_STATUSES:
+            return result
+        return None
 
     def sync_push(self) -> str:
         """Push committed memory changes to the configured Git upstream."""
         result = self._sync().push()
         return result.context_block()
+
+    def _run_sync_reconciler(self, result) -> None:
+        reconciler_config = load_config("sync-reconciler")
+        if reconciler_config.memory_root != self.config.memory_root:
+            raise ValueError(
+                "sync-reconciler memory root mismatch: "
+                f"current runtime uses {self.config.memory_root}, sync-reconciler uses {reconciler_config.memory_root}"
+            )
+        runtime = RightMemoryRuntime(reconciler_config)
+        try:
+            runtime.run_session_turn(SYNC_REPAIR_SESSION_ID, self._sync().repair_message(result))
+        finally:
+            runtime.cleanup()
 
     def _memory_write_lock(self):
         if self.config.role == "retrieve":
@@ -147,10 +195,11 @@ class RightMemoryRuntime:
             self._agent_tool(self.tools.rename_file),
             self._agent_tool(self.tools.git_status),
             self._agent_tool(self.tools.git_diff),
-            self._agent_tool(self.tools.git_discard),
             self._agent_tool(self.tools.git_add),
             self._agent_tool(self.tools.git_commit),
         ]
+        if self.config.role == "sync-reconciler":
+            write_tools.append(self._agent_tool(self.tools.git_discard))
         if self.config.sync.enabled and self.config.role in SYNC_TOOL_ROLES:
             write_tools.append(self._agent_tool(self.sync_push))
         return write_tools

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.config import SyncConfig
-from rightmemory.sync import GIT_TIMEOUT_SECONDS, SyncManager
+from rightmemory.sync import GIT_TIMEOUT_SECONDS, SyncManager, SyncResult
 
 
 class SyncManagerTests(unittest.TestCase):
@@ -107,6 +107,19 @@ class SyncManagerTests(unittest.TestCase):
         memory = (self.device / "MEMORY.md").read_text(encoding="utf-8")
         self.assertIn("local dirty", memory)
         self.assertNotIn("remote only", memory)
+
+    def test_preflight_reports_dirty_skill_artifacts(self):
+        artifact = self.device / "skill_artifacts" / "skill-creator" / "reference.md"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("# Reference\n", encoding="utf-8")
+        self._git(self.device, "add", "skill_artifacts/skill-creator/reference.md")
+        self._git(self.device, "commit", "-m", "skill artifact")
+        artifact.write_text("# Dirty reference\n", encoding="utf-8")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+        self.assertEqual(result.status, "dirty")
+        self.assertEqual(result.files, ["skill_artifacts/skill-creator/reference.md"])
 
     def test_push_merges_remote_change_and_reports_conflict(self):
         (self.other / "MEMORY.md").write_text("# Domain\n\n- `one` remote → []\n", encoding="utf-8")
@@ -241,6 +254,20 @@ class SyncManagerTests(unittest.TestCase):
 
         self.assertEqual(result.status, "fresh")
 
+    def test_background_pull_reports_dirty_even_when_pull_state_fresh(self):
+        (self.device / "MEMORY.md").write_text("# Domain\n\n- `one` dirty → []\n", encoding="utf-8")
+        state_path = self.device / ".runtime" / "sync" / "state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text(
+            json.dumps({"last_successful_pull_at": datetime.now(UTC).isoformat()}),
+            encoding="utf-8",
+        )
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True, stale_pull_after_hours=24)).background_pull()
+
+        self.assertEqual(result.status, "dirty")
+        self.assertEqual(result.files, ["MEMORY.md"])
+
     def test_background_pull_reports_conflict_even_when_pull_state_fresh(self):
         (self.other / "MEMORY.md").write_text("# Domain\n\n- `one` remote → []\n", encoding="utf-8")
         self._git(self.other, "add", "MEMORY.md")
@@ -285,6 +312,15 @@ class SyncManagerTests(unittest.TestCase):
         result = manager.background_pull()
 
         self.assertEqual(result.status, "synced")
+
+    def test_repair_message_describes_dirty_and_conflict_states(self):
+        manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True))
+
+        dirty = manager.repair_message(SyncResult("dirty", "dirty memory", ["MEMORY.md"]))
+        conflict = manager.repair_message(SyncResult("conflict", "memory sync conflict", ["MEMORY.md"]))
+
+        self.assertIn("inspect and repair dirty memory state", dirty)
+        self.assertIn("resolve conflict markers", conflict)
 
     def _git(self, cwd: Path, *args: str) -> str:
         process = subprocess.run(

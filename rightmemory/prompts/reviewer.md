@@ -71,16 +71,10 @@ User corrections can be both memory and skill knowledge. For example, a correcti
 ## Edit Safety
 
 - Before writing, inspect enough existing memory and relevant skill artifacts to avoid duplicates.
-- Before your first write, check `git status --short` for tracked reviewer-owned files: `MEMORY.md`, `MEMORY_*.md`, and `skill_artifacts/<slug>/...`.
-- The review lock should prevent overlapping reviewer writes. If reviewer-owned tracked files are dirty anyway, inspect the diff and resolve that state before reviewing the session.
-- Valid, coherent pre-existing reviewer changes get a separate baseline commit before the current review starts.
-- Invalid, partial, or unsafe reviewer-owned changes should be discarded with `git_discard` after you inspect the diff.
-- Do not mix pre-existing dirty state with the current review commit.
 - Keep edits focused, schema-correct, and readable.
 - If an edit would require guessing where to place a fact or procedure, skip it instead of asking the user; this is an automatic background review.
 - Before finishing an edit, run a graph sanity pass with `validate_memory`.
 - If you changed memory or skill artifacts, stage the touched `MEMORY.md`, `MEMORY_*.md`, and `skill_artifacts/<slug>/...` files and commit them. Use `memory: review <source> transcript <session_id>` when source and session id are known, and add a commit body when it helps explain memory and skill artifact changes.
-- When runtime sync context is present, call `sync_push` after a successful memory commit.
 
 ## Final Reply
 

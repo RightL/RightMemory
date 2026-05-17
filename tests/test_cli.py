@@ -530,7 +530,7 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("rightmemory sync check", stdout.getvalue())
         self.assertIn("local memory is current", stdout.getvalue())
 
-    def test_sync_watch_conflict_invokes_sync_reconciler(self):
+    def test_sync_watch_repair_status_invokes_sync_reconciler(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
         calls = []
@@ -561,7 +561,7 @@ class JsonRequestTests(unittest.TestCase):
             memory_root = Path(tempdir)
             sync_config = type("SyncConfig", (), {"memory_root": memory_root, "enabled": True, "stale_pull_after_hours": 24})()
             reconciler_config = type("Config", (), {"memory_root": memory_root})()
-            result_obj = type("Result", (), {"status": "conflict", "message": "conflict", "files": ["MEMORY.md"]})()
+            result_obj = type("Result", (), {"status": "dirty", "message": "dirty", "files": ["MEMORY.md"]})()
 
             def background_pull():
                 events.append("background_pull")
@@ -580,12 +580,12 @@ class JsonRequestTests(unittest.TestCase):
             ):
                 manager_class.return_value.memory_root = memory_root
                 manager_class.return_value.background_pull.side_effect = background_pull
-                manager_class.return_value.conflict_message.return_value = "resolve MEMORY.md"
+                manager_class.return_value.repair_message.return_value = "repair MEMORY.md"
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)
         load_config.assert_called_with("sync-reconciler")
-        self.assertEqual(calls, [("sync-watch", "resolve MEMORY.md")])
+        self.assertEqual(calls, [("sync-watch", "repair MEMORY.md")])
         self.assertEqual(cleanup_calls, ["cleanup"])
         self.assertEqual(events, ["lock_enter", "background_pull", "lock_exit", "reconciler"])
         self.assertIn("resolved", stdout.getvalue())
@@ -620,7 +620,7 @@ class JsonRequestTests(unittest.TestCase):
             ):
                 manager_class.return_value.memory_root = memory_root
                 manager_class.return_value.background_pull.return_value = result_obj
-                manager_class.return_value.conflict_message.return_value = "resolve MEMORY.md"
+                manager_class.return_value.repair_message.return_value = "resolve MEMORY.md"
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)
@@ -651,7 +651,7 @@ class JsonRequestTests(unittest.TestCase):
             ):
                 manager_class.return_value.memory_root = memory_root
                 manager_class.return_value.background_pull.return_value = result_obj
-                manager_class.return_value.conflict_message.return_value = "resolve MEMORY.md"
+                manager_class.return_value.repair_message.return_value = "resolve MEMORY.md"
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)

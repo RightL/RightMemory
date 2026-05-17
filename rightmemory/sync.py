@@ -11,7 +11,7 @@ from .config import SyncConfig
 from .session import _ensure_runtime_gitignore, _fsync_directory
 
 
-MEMORY_SYNC_PATHS = ("MEMORY.md", "MEMORY_*.md", "dream_logs/*.md")
+MEMORY_SYNC_PATHS = ("MEMORY.md", "MEMORY_*.md", "dream_logs/*.md", "skill_artifacts")
 GIT_TIMEOUT_SECONDS = 30
 
 
@@ -129,13 +129,20 @@ class SyncManager:
             if conflicted:
                 return self._record_failure(SyncResult("conflict", "memory sync conflict", conflicted))
 
+            dirty = self._dirty_memory_files()
+            if dirty:
+                return self._record_failure(SyncResult("dirty", "local memory has uncommitted changes", dirty))
+
             last_pull = self._last_successful_pull_at()
             stale_after = timedelta(hours=self.config.stale_pull_after_hours)
             if last_pull is not None and datetime.now(UTC) - last_pull < stale_after:
                 return SyncResult("fresh", "last successful pull is fresh")
         return self.preflight()
 
-    def conflict_message(self, result: SyncResult) -> str:
+    def repair_message(self, result: SyncResult) -> str:
+        if result.status == "dirty":
+            files = ", ".join(result.files) if result.files else "memory files"
+            return f"{result.message}; inspect and repair dirty memory state in {files}"
         if result.status != "conflict":
             return result.message
         files = ", ".join(result.files) if result.files else "memory files"

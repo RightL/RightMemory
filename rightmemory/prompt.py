@@ -76,11 +76,11 @@ def _command_guidance(role: str) -> str:
     if role == "sync-reconciler":
         return (
             "- The sync watcher selected sync reconciliation behavior. Treat the caller message as the current "
-            "sync-conflict context for this turn.\n"
-            "- Resolve RightMemory sync conflicts by reconciling the memory file set, validating it, committing "
-            "the resolved memory state, and calling `sync_push`.\n"
-            "- Resolve conflicts by preserving coherent durable memory from both sides when the evidence supports "
-            "it, narrowing or marking uncertainty rather than dropping durable information."
+            "sync repair context for this turn.\n"
+            "- Repair RightMemory dirty or conflicted sync state by reconciling the memory file set, validating it, "
+            "committing the repaired memory state, and calling `sync_push`.\n"
+            "- Preserve coherent durable memory when the evidence supports it, narrowing or marking uncertainty "
+            "rather than dropping durable information."
         )
     raise ValueError(f"role must be one of: {_role_list()}")
 
@@ -90,21 +90,14 @@ def _sync_guidance(role: str) -> str:
         return "- Retrieval uses local memory and does not perform sync preflight by default."
     if role == "sync-reconciler":
         return (
-            "- The scheduled sync workflow supplies conflict context in the caller message. If the caller message "
+            "- The scheduled sync workflow supplies repair context in the caller message. If the caller message "
             "contains a Runtime sync context block, treat that block as authoritative for this turn.\n"
             "- When sync is enabled and you commit memory changes, call `sync_push` after the commit. If `sync_push` "
-            "reports a conflict, resolve the conflicted memory files in the same role, validate memory, commit the "
-            "resolved state, and call `sync_push` again."
+            "reports dirty state or a conflict, repair the supplied memory files in the same role, validate memory, "
+            "commit the repaired state, and call `sync_push` again."
         )
     if role in {"dreamer", "reviewer", "update"}:
-        return (
-            "- If the caller message contains a Runtime sync context block, the runtime already performed sync "
-            "preflight for this turn. Treat that block as current at turn start and avoid repeating preflight "
-            "discovery. Use sync tools again after your own edits or after a later tool result changes sync state.\n"
-            "- When sync is enabled and you commit memory changes, call `sync_push` after the commit. If `sync_push` "
-            "reports a conflict, resolve the conflicted memory files in the same role, validate memory, commit the "
-            "resolved state, and call `sync_push` again."
-        )
+        return ""
     return ""
 
 
@@ -116,10 +109,9 @@ def _tool_guidance(role: str) -> str:
             "- `read_command` accepts common read-only shell forms such as `cat path`, `sed -n 'X,Yp' path`, "
             "`rg pattern`, `rg --files`, `git status --short`, and `git diff`. It does not run a general shell."
         )
-    return (
+    guidance = (
         "- Use the provided tools for `read`, `grep`, `glob`, restricted `read_command`, outline, exact file "
-        "edits, file creation, file deletion, file renames, git inspection, git discard for reviewer-owned "
-        "dirty tracked files, and validation.\n"
+        "edits, file creation, file deletion, file renames, git inspection, and validation.\n"
         "- `read_command` accepts common read-only shell forms such as `cat path`, `sed -n 'X,Yp' path`, "
         "`rg pattern`, `rg --files`, `git status --short`, and `git diff`. It does not run a general shell.\n"
         "- For edits to existing file content, use `edit_file(path, old_string, new_string, replace_all=false)`. "
@@ -130,11 +122,15 @@ def _tool_guidance(role: str) -> str:
         "- Commit tools may stage and commit `MEMORY.md`, `MEMORY_*.md`, `dream_logs/*.md`, and "
         "`skill_artifacts/<slug>/...`; keep unrelated untracked files out of memory commits unless the caller "
         "explicitly asks about them.\n"
-        "- `git_discard(paths)` is destructive. Use it for invalid, partial, or unsafe reviewer-owned "
-        "memory or skill artifact changes after inspecting the diff.\n"
         "- Choose the edit shape that makes memory clearer; create, move, split, merge, or rewrite structure "
         "when that improves the tree or graph."
     )
+    if role == "sync-reconciler":
+        guidance += (
+            "\n- `git_discard(paths)` is destructive. Use it for invalid, partial, or unsafe memory-owned "
+            "changes after inspecting the diff."
+        )
+    return guidance
 
 
 def _read_prompt_file(relative_path: str) -> str:

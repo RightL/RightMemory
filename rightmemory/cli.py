@@ -472,7 +472,7 @@ def _sync_watch(interval: int) -> int:
                     )
                 else:
                     print(result.message, flush=True)
-                    if result.status == "conflict":
+                    if result.status in {"conflict", "dirty"}:
                         try:
                             _run_sync_reconciler(manager, result)
                         except Exception as exc:
@@ -501,7 +501,7 @@ def _run_sync_reconciler(manager: SyncManager, result: Any) -> None:
         )
     runtime = RightMemoryRuntime(reconciler_config)
     try:
-        print(runtime.run_session_turn(SYNC_WATCH_SESSION_ID, manager.conflict_message(result)), flush=True)
+        print(runtime.run_session_turn(SYNC_WATCH_SESSION_ID, manager.repair_message(result)), flush=True)
     finally:
         runtime.cleanup()
 
