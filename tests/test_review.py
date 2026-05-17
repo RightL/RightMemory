@@ -107,6 +107,32 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertEqual(only_state.session_id, "s1")
         self.assertEqual(only_state.source, "codex")
 
+    def test_review_message_includes_skill_distillation_guidance(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            transcript = source / "session.jsonl"
+            self._write_codex(transcript, turns=[("teach this workflow", "noted")])
+            self._set_mtime(transcript, 1_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                lambda session_id, message: calls.append(message) or "ok",
+            )
+
+            result = scanner.scan_once(now=10_000)
+
+        self.assertEqual(result.reviewed, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("memory-backed skill", calls[0])
+        self.assertIn("skill_artifacts", calls[0])
+        self.assertIn("Normalized session JSON:", calls[0])
+
     def test_scan_reviews_one_eligible_session_per_call(self):
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:

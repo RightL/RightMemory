@@ -193,8 +193,11 @@ def _review_session_id(session: NormalizedSession) -> str:
 def _review_message(session: NormalizedSession) -> str:
     return (
         "Review this normalized provider transcript session.\n\n"
-        "Review the whole session for durable memory. If nothing is worth saving, "
-        "reply exactly: Nothing to save.\n\n"
+        "Review the whole session for durable memory and memory-backed skill knowledge. "
+        "Choose the coherent shape for any durable signal: ordinary memory, refinement of an "
+        "existing memory-backed skill, a new memory-backed skill topic, or purpose-driven support "
+        "files under `skill_artifacts/<slug>/...`. If nothing is worth saving, reply exactly: "
+        "Nothing to save.\n\n"
         "Normalized session JSON:\n"
         + json.dumps(session.to_payload(), ensure_ascii=False, indent=2)
     )
