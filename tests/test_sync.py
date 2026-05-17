@@ -53,12 +53,23 @@ class SyncManagerTests(unittest.TestCase):
         self.assertIn("two", (self.device / "MEMORY.md").read_text(encoding="utf-8"))
 
     def test_preflight_reports_dirty_memory_without_merging(self):
+        (self.other / "MEMORY.md").write_text(
+            "# Domain\n\n- `one` first → []\n- `two` remote only → []\n",
+            encoding="utf-8",
+        )
+        self._git(self.other, "add", "MEMORY.md")
+        self._git(self.other, "commit", "-m", "remote memory")
+        self._git(self.other, "push")
+
         (self.device / "MEMORY.md").write_text("# Domain\n\n- `one` local dirty → []\n", encoding="utf-8")
 
         result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
 
         self.assertEqual(result.status, "dirty")
         self.assertEqual(result.files, ["MEMORY.md"])
+        memory = (self.device / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("local dirty", memory)
+        self.assertNotIn("remote only", memory)
 
     def test_push_merges_remote_change_and_reports_conflict(self):
         (self.other / "MEMORY.md").write_text("# Domain\n\n- `one` remote → []\n", encoding="utf-8")
