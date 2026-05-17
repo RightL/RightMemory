@@ -39,6 +39,42 @@ class SyncManagerTests(unittest.TestCase):
         self.assertEqual(result.status, "disabled")
         self.assertIn("disabled", result.message)
 
+    def test_preflight_rejects_memory_root_nested_in_outer_git_repo(self):
+        outer_remote = self.root / "outer.git"
+        outer = self.root / "outer"
+        peer = self.root / "outer-peer"
+        self._git(self.root, "init", "--bare", str(outer_remote))
+        self._git(self.root, "clone", str(outer_remote), str(outer))
+        self._git(outer, "config", "user.email", "test@example.com")
+        self._git(outer, "config", "user.name", "Test User")
+        nested = outer / "memory"
+        nested.mkdir()
+        (nested / "MEMORY.md").write_text("# Domain\n\n- `one` nested memory → []\n", encoding="utf-8")
+        self._git(outer, "add", "memory/MEMORY.md")
+        self._git(outer, "commit", "-m", "initial outer memory")
+        self._git(outer, "push", "-u", "origin", "HEAD:main")
+        self._git(outer, "branch", "--set-upstream-to", "origin/main")
+        outer_head = self._git(outer, "rev-parse", "HEAD")
+
+        self._git(self.root, "clone", str(outer_remote), str(peer))
+        self._git(peer, "config", "user.email", "test@example.com")
+        self._git(peer, "config", "user.name", "Test User")
+        self._git(peer, "checkout", "-B", "main", "origin/main")
+        self._git(peer, "branch", "--set-upstream-to", "origin/main")
+        (peer / "memory" / "MEMORY.md").write_text(
+            "# Domain\n\n- `one` nested memory → []\n- `two` remote outer change → []\n",
+            encoding="utf-8",
+        )
+        self._git(peer, "add", "memory/MEMORY.md")
+        self._git(peer, "commit", "-m", "remote outer memory")
+        self._git(peer, "push")
+
+        result = SyncManager(SyncConfig(memory_root=nested, enabled=True)).preflight()
+
+        self.assertEqual(result.status, "unconfigured")
+        self.assertEqual(self._git(outer, "rev-parse", "HEAD"), outer_head)
+        self.assertNotIn("remote outer change", (nested / "MEMORY.md").read_text(encoding="utf-8"))
+
     def test_preflight_fast_forwards_clean_repo(self):
         (self.other / "MEMORY.md").write_text(
             "# Domain\n\n- `one` first → []\n- `two` remote → []\n",

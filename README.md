@@ -128,6 +128,7 @@ rightmemory/prompts/retrieve.md
 rightmemory/prompts/update.md
 rightmemory/prompts/dreamer.md
 rightmemory/prompts/reviewer.md
+rightmemory/prompts/sync-reconciler.md
 ```
 
 Standalone mode reads these files at runtime. Subagent mode installs thin skill wrappers and renders the same role prompts into those wrappers during `install.sh`. Runtime-specific wrappers define access boundaries and dispatch style; role behavior should be edited in the canonical prompt files.
@@ -242,6 +243,8 @@ api_key = "<token>"
 `model_id` is required for the role being started. `anthropic/...` model ids use `AnthropicModel`; other model ids use `OpenAIChatModel` with `OpenAIProvider`, so OpenAI-compatible local gateways can use `api_base` and `api_key`. `[<role>.model.kwargs]` is forwarded as Pydantic AI model settings and unsupported keys fail fast.
 
 Configs must use `[retrieve.model]`, `[update.model]`, `[dreamer.model]`, and optionally `[reviewer.model]`; old `[curator.model]` configs are rejected so stale read-write settings are migrated deliberately.
+
+`[sync-reconciler.model]` is needed when the sync watcher should repair scheduled pull conflicts. Without it, the watcher can report a conflict but cannot run the repair role.
 
 To debug in-flight standalone calls, enable append-only trace logs:
 

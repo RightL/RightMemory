@@ -17,6 +17,7 @@ from .async_update import AsyncUpdateStore, format_state
 from .config import MEMORY_ROOT, ROLES, load_config, load_review_config, load_sync_config
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
+from .session import MemoryWriteLock
 from .sync import SyncManager
 from .watch import (
     MANAGED_WATCH_TARGETS,
@@ -460,17 +461,26 @@ def _sync_watch(interval: int) -> int:
                 timestamp = datetime.now(UTC).isoformat()
                 print(f"[{timestamp}] rightmemory sync check", flush=True)
                 manager = SyncManager(sync_config)
-                result = manager.background_pull()
-                print(result.message, flush=True)
-                if result.status == "conflict":
-                    try:
-                        _run_sync_reconciler(manager, result)
-                    except Exception as exc:
-                        print(
-                            f"rightmemory sync reconciler failed: {type(exc).__name__}: {exc}",
-                            file=sys.stderr,
-                            flush=True,
-                        )
+                try:
+                    with MemoryWriteLock(sync_config.memory_root):
+                        result = manager.background_pull()
+                except Exception as exc:
+                    print(
+                        f"rightmemory sync check failed: {type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                else:
+                    print(result.message, flush=True)
+                    if result.status == "conflict":
+                        try:
+                            _run_sync_reconciler(manager, result)
+                        except Exception as exc:
+                            print(
+                                f"rightmemory sync reconciler failed: {type(exc).__name__}: {exc}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
                 _reexec_if_install_changed(refresh, stop)
                 if not _sleep_with_refresh_check(interval, refresh, stop):
                     break

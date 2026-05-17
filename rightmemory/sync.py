@@ -153,8 +153,13 @@ class SyncManager:
     def _is_git_repo(self) -> bool:
         if not self.memory_root.exists():
             return False
-        result = self._git("rev-parse", "--is-inside-work-tree")
-        return result.returncode == 0 and result.stdout.strip() == "true"
+        result = self._git("rev-parse", "--show-toplevel")
+        if result.returncode != 0:
+            return False
+        repo_root = result.stdout.strip()
+        if not repo_root:
+            return False
+        return Path(repo_root).resolve() == self.memory_root.resolve()
 
     def _ahead_behind(self, upstream: str) -> tuple[int, int] | None:
         result = self._git("rev-list", "--left-right", "--count", f"HEAD...{upstream}")
