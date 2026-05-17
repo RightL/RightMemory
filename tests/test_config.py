@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rightmemory.config import RuntimeConfig, load_config, load_review_config
+from rightmemory.config import RuntimeConfig, load_config, load_review_config, load_sync_config
 from rightmemory.prompt import build_instructions
 from rightmemory.runtime import RightMemoryRuntime, build_model
 
@@ -214,6 +214,68 @@ class ConfigTests(unittest.TestCase):
                 config = load_review_config()
 
         self.assertEqual(config.since_days, 3)
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_sync_config_defaults_to_disabled(self):
+        config_path = self._write_config("")
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_sync_config()
+
+        self.assertFalse(config.enabled)
+        self.assertEqual(config.stale_pull_after_hours, 24)
+        self.assertEqual(config.memory_root, Path("/home/example/.rightmemory"))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_sync_config_enabled(self):
+        config_path = self._write_config(
+            """
+            [sync]
+            enabled = true
+            stale_pull_after_hours = 12
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_sync_config()
+
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.stale_pull_after_hours, 12)
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_sync_config_rejects_unknown_key(self):
+        config_path = self._write_config(
+            """
+            [sync]
+            enabled = true
+            remote = "origin"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_sync_config()
+
+        self.assertIn("unsupported [sync] config key(s): remote", str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_load_config_allows_sync_section_and_reconciler_role(self):
+        config_path = self._write_config(
+            """
+            [sync]
+            enabled = true
+
+            [sync-reconciler.model]
+            model_id = "openai/reconciler"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_config("sync-reconciler")
+
+        self.assertEqual(config.role, "sync-reconciler")
+        self.assertEqual(config.model_id, "openai/reconciler")
+        self.assertTrue(config.sync.enabled)
 
     def _write_config(self, content: str) -> Path:
         handle = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)

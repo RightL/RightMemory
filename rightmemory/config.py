@@ -10,22 +10,18 @@ import tomllib
 MEMORY_ROOT_ENV = "RIGHTMEMORY_ROOT"
 MEMORY_ROOT = Path(os.environ.get(MEMORY_ROOT_ENV, "~/.rightmemory")).expanduser()
 CONFIG_PATH = MEMORY_ROOT / "rightmemory.toml"
-ROLES = {"dreamer", "retrieve", "reviewer", "update"}
+ROLES = {"dreamer", "retrieve", "reviewer", "sync-reconciler", "update"}
 DEFAULT_MAX_TOOL_RETRIES = 10
 DEFAULT_REVIEW_IDLE_SECONDS = 3600
 DEFAULT_REVIEW_SINCE_DAYS = 3
+DEFAULT_SYNC_STALE_PULL_HOURS = 24
 
 
 @dataclass(frozen=True)
-class RuntimeConfig:
-    role: str
-    model_id: str
-    api_base: str | None = None
-    api_key: str | None = None
-    model_kwargs: dict[str, Any] = field(default_factory=dict)
+class SyncConfig:
     memory_root: Path = MEMORY_ROOT
-    max_tool_retries: int = DEFAULT_MAX_TOOL_RETRIES
-    debug_trace: bool = False
+    enabled: bool = False
+    stale_pull_after_hours: int = DEFAULT_SYNC_STALE_PULL_HOURS
 
 
 @dataclass(frozen=True)
@@ -42,6 +38,19 @@ class ReviewConfig:
     sources: list[ReviewSourceConfig] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class RuntimeConfig:
+    role: str
+    model_id: str
+    api_base: str | None = None
+    api_key: str | None = None
+    model_kwargs: dict[str, Any] = field(default_factory=dict)
+    memory_root: Path = MEMORY_ROOT
+    max_tool_retries: int = DEFAULT_MAX_TOOL_RETRIES
+    debug_trace: bool = False
+    sync: SyncConfig = field(default_factory=SyncConfig)
+
+
 def load_config(role: str) -> RuntimeConfig:
     role = _role(role)
     data = _load_raw_config()
@@ -49,7 +58,7 @@ def load_config(role: str) -> RuntimeConfig:
     if not MEMORY_ROOT.exists():
         raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
 
-    _reject_unknown_keys(data, {*ROLES, "review", "debug"}, "top-level")
+    _reject_unknown_keys(data, {*ROLES, "review", "debug", "sync"}, "top-level")
     role_section = data.get(role)
     if not isinstance(role_section, dict):
         raise ValueError(f"{CONFIG_PATH} must contain a [{role}.model] table")
@@ -79,6 +88,7 @@ def load_config(role: str) -> RuntimeConfig:
         memory_root=MEMORY_ROOT,
         max_tool_retries=DEFAULT_MAX_TOOL_RETRIES,
         debug_trace=_debug_trace(data.get("debug", {})),
+        sync=_sync_config(data.get("sync", {})),
     )
 
 
@@ -88,7 +98,7 @@ def load_review_config() -> ReviewConfig:
     if not MEMORY_ROOT.exists():
         raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
 
-    _reject_unknown_keys(data, {*ROLES, "review", "debug"}, "top-level")
+    _reject_unknown_keys(data, {*ROLES, "review", "debug", "sync"}, "top-level")
     section = data.get("review", {})
     if section is None:
         section = {}
@@ -113,6 +123,14 @@ def load_review_config() -> ReviewConfig:
         sources = [_review_source(item) for item in raw_sources]
 
     return ReviewConfig(memory_root=MEMORY_ROOT, idle_seconds=idle_seconds, since_days=since_days, sources=sources)
+
+
+def load_sync_config() -> SyncConfig:
+    data = _load_raw_config()
+    if not MEMORY_ROOT.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
+    _reject_unknown_keys(data, {*ROLES, "review", "debug", "sync"}, "top-level")
+    return _sync_config(data.get("sync", {}))
 
 
 def _load_raw_config() -> dict[str, object]:
@@ -161,6 +179,28 @@ def _debug_trace(value: object) -> bool:
     if not isinstance(trace, bool):
         raise ValueError("[debug].trace must be a boolean")
     return trace
+
+
+def _sync_config(section: object) -> SyncConfig:
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError("[sync] must be a TOML table")
+    _reject_unknown_keys(section, {"enabled", "stale_pull_after_hours"}, "[sync]")
+
+    enabled = section.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("[sync].enabled must be a boolean")
+
+    stale_pull_after_hours = section.get("stale_pull_after_hours", DEFAULT_SYNC_STALE_PULL_HOURS)
+    if not isinstance(stale_pull_after_hours, int) or stale_pull_after_hours < 1:
+        raise ValueError("[sync].stale_pull_after_hours must be a positive integer")
+
+    return SyncConfig(
+        memory_root=MEMORY_ROOT,
+        enabled=enabled,
+        stale_pull_after_hours=stale_pull_after_hours,
+    )
 
 
 def _role(value: str) -> str:
