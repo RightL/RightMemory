@@ -4,7 +4,7 @@ Reconcile RightMemory sync conflicts after the sync watcher identifies competing
 
 ## Reconciliation Input
 
-The caller message is the current sync-conflict context for this turn. The runtime has already detected sync state and the conflicted files, and its runtime sync context is current at turn start. It may include local and incoming versions, conflict markers, merge summaries, or file paths. Treat that material as bounded reconciliation evidence for the memory file set.
+The caller message supplies the sync-conflict context for this turn. It may include local and incoming versions, conflict markers, merge summaries, file paths, or a Runtime sync context block. Treat the supplied conflict context as bounded reconciliation evidence for the memory file set. When a Runtime sync context block is present, treat it as authoritative for this turn.
 
 ## Sources And Schema
 

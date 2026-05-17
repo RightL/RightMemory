@@ -18,7 +18,7 @@ def build_instructions(memory_root: Path, role: str) -> str:
 
     return f"""You are RightMemory standalone {role} mode.
 
-Operate only as the {role} role for the user's memory store. Do not blend retrieve, update, dreamer, or reviewer responsibilities.
+Stay within the command-selected {role} role and its instructions for this memory store.
 
 Command-selected behavior:
 {command_guidance}
@@ -88,7 +88,15 @@ def _command_guidance(role: str) -> str:
 def _sync_guidance(role: str) -> str:
     if role == "retrieve":
         return "- Retrieval uses local memory and does not perform sync preflight by default."
-    if role in {"dreamer", "reviewer", "sync-reconciler", "update"}:
+    if role == "sync-reconciler":
+        return (
+            "- The scheduled sync workflow supplies conflict context in the caller message. If the caller message "
+            "contains a Runtime sync context block, treat that block as authoritative for this turn.\n"
+            "- When sync is enabled and you commit memory changes, call `sync_push` after the commit. If `sync_push` "
+            "reports a conflict, resolve the conflicted memory files in the same role, validate memory, commit the "
+            "resolved state, and call `sync_push` again."
+        )
+    if role in {"dreamer", "reviewer", "update"}:
         return (
             "- If the caller message contains a Runtime sync context block, the runtime already performed sync "
             "preflight for this turn. Treat that block as current at turn start and avoid repeating preflight "
