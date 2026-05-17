@@ -30,6 +30,20 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("!skill_artifacts/**\n", gitignore)
         self.assertTrue(install_stamp_exists)
 
+    def test_install_preserves_existing_memory_gitignore(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            custom_gitignore = "# user rules\n*\n!custom.md\n"
+            memory_root.mkdir()
+            (memory_root / ".gitignore").write_text(custom_gitignore, encoding="utf-8")
+
+            self._install(memory_root, skills_target)
+            preserved = (memory_root / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertEqual(preserved, custom_gitignore)
+
     def test_rerun_refreshes_marked_example_and_preserves_user_memory(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

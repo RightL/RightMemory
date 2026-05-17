@@ -787,6 +787,15 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("{{MEMORY_ROOT}}", prompt)
         self.assertNotIn("{{SKILLS_ROOT}}", prompt)
 
+    def test_retrieve_prompt_keeps_write_git_guidance_out(self):
+        prompt = build_instructions(Path("/home/example/.rightmemory"), "retrieve")
+
+        self.assertIn("read-only tools", prompt)
+        self.assertIn("Do not edit memory files or use git write tools in this mode", prompt)
+        self.assertNotIn("git discard for reviewer-owned dirty tracked files", prompt)
+        self.assertNotIn("`git_discard(paths)`", prompt)
+        self.assertNotIn("skill_artifacts/<slug>/...", prompt)
+
     def test_update_prompt_has_role_prompt_and_update_command_behavior(self):
         prompt = build_instructions(Path("/home/example/.rightmemory"), "update")
 
@@ -816,6 +825,14 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("rightmemory-schema.md", prompt)
         self.assertNotIn("{{MEMORY_ROOT}}", prompt)
         self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+
+    def test_write_capable_prompt_includes_skill_artifact_and_discard_guidance(self):
+        prompt = build_instructions(Path("/home/example/.rightmemory"), "update")
+
+        self.assertIn("skill_artifacts/<slug>/...", prompt)
+        self.assertIn("git discard for reviewer-owned dirty tracked files", prompt)
+        self.assertIn("`git_discard(paths)` is destructive", prompt)
+        self.assertIn("after inspecting the diff", prompt)
 
     def test_dreamer_prompt_has_role_prompt(self):
         prompt = build_instructions(Path("/home/example/.rightmemory"), "dreamer")
