@@ -75,8 +75,10 @@ def _command_guidance(role: str) -> str:
         )
     if role == "sync-reconciler":
         return (
-            "- The global memory sync workflow selected sync-reconciler behavior. Treat the caller message as "
-            "RightMemory sync conflicts to reconcile into the memory file set.\n"
+            "- The sync watcher selected sync reconciliation behavior. Treat the caller message as the current "
+            "sync-conflict context for this turn.\n"
+            "- Resolve RightMemory sync conflicts by reconciling the memory file set, validating it, committing "
+            "the resolved memory state, and calling `sync_push`.\n"
             "- Resolve conflicts by preserving coherent durable memory from both sides when the evidence supports "
             "it, narrowing or marking uncertainty rather than dropping durable information."
         )

@@ -860,8 +860,11 @@ class PromptTests(unittest.TestCase):
 
         self.assertIn("The only allowed root directory is /memory", prompt)
         self.assertIn("sync-reconciler", prompt)
+        self.assertIn("sync watcher selected sync reconciliation behavior", prompt)
+        self.assertIn("current sync-conflict context", prompt)
         self.assertIn("RightMemory sync conflicts", prompt)
         self.assertIn("preserve coherent durable memory from both sides", prompt)
+        self.assertIn("Final replies should include resolved files", prompt)
         self.assertIn("Sync Reconciler Role", prompt)
         self.assertIn("RightMemory Schema", prompt)
         self.assertIn("embedded schema above", prompt)
