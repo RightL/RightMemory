@@ -358,6 +358,40 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertFalse(artifact.exists())
         self.assertEqual(self.tools.git_status(), "")
 
+    def test_git_discard_rejects_directory_path_before_git_mutation(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        memory = self.root / "MEMORY.md"
+        memory.write_text("# Domain\n", encoding="utf-8")
+        self._git("add", "MEMORY.md")
+        self._git("commit", "-m", "initial memory")
+        (self.root / "skill_artifacts" / "skill-creator" / "references").mkdir(parents=True)
+        memory.write_text("# Staged broken\n", encoding="utf-8")
+        self._git("add", "MEMORY.md")
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "cannot discard directory path"):
+            self.tools.git_discard([
+                "MEMORY.md",
+                "skill_artifacts/skill-creator/references",
+            ])
+
+        self.assertEqual(self.tools.git_status(), status_before)
+        self.assertEqual(memory.read_text(encoding="utf-8"), "# Staged broken\n")
+
+    def test_git_discard_removes_staged_added_file_without_head(self):
+        self._git("init")
+        memory = self.root / "MEMORY.md"
+        memory.write_text("# Domain\n", encoding="utf-8")
+        self._git("add", "MEMORY.md")
+
+        result = self.tools.git_discard(["MEMORY.md"])
+
+        self.assertEqual(result, "discarded: MEMORY.md")
+        self.assertFalse(memory.exists())
+        self.assertEqual(self.tools.git_status(), "")
+
     def test_git_discard_rejects_non_memory_paths(self):
         self._git("init")
         (self.root / "rightmemory.toml").write_text("[review]\n", encoding="utf-8")

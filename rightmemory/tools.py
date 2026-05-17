@@ -392,6 +392,10 @@ class MemoryTools:
         if not paths:
             raise ValueError("paths must not be empty")
         relative_paths = [self._allowed_commit_path(path) for path in paths]
+        for path in relative_paths:
+            resolved = self.memory_root / path
+            if resolved.exists() and not (resolved.is_file() or resolved.is_symlink()):
+                raise ValueError(f"cannot discard directory path: {path}")
 
         if self._git_has_head():
             tracked_paths = [
