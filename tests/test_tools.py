@@ -260,6 +260,24 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertEqual(self.tools.git_status(), status_before)
 
+    def test_git_add_rejects_deleted_head_directory_before_git_mutation(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        artifact = self.root / "skill_artifacts" / "skill-creator" / "references" / "authoring.md"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("# Skill authoring\n", encoding="utf-8")
+        self._git("add", "skill_artifacts/skill-creator/references/authoring.md")
+        self._git("commit", "-m", "initial artifact")
+        shutil.rmtree(artifact.parent)
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "cannot stage directory path"):
+            self.tools.git_add(["skill_artifacts/skill-creator/references"])
+
+        self.assertEqual(self.tools.git_status(), status_before)
+        self.assertFalse(artifact.exists())
+
     def test_git_commit_rejects_non_memory_staged_files(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")

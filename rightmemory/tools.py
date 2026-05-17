@@ -363,9 +363,16 @@ class MemoryTools:
         if not paths:
             raise ValueError("paths must not be empty")
         relative_paths = []
+        has_head = self._git_has_head()
         for path in paths:
             relative_path = self._allowed_commit_path(path)
-            self._reject_stage_directory_path(relative_path)
+            head_path_type = self._git_path_type_in_head(relative_path) if has_head else None
+            index_path_kind = self._git_path_kind_in_index(relative_path)
+            self._reject_stage_directory_path(
+                relative_path,
+                head_path_type,
+                index_path_kind,
+            )
             relative_paths.append(relative_path)
         self._run_git(["git", "add", "--", *relative_paths])
         return "staged: " + ", ".join(relative_paths)
@@ -965,9 +972,16 @@ class MemoryTools:
         if head_path_type == "tree" or index_path_kind == "tree":
             raise ValueError(f"cannot discard directory path: {path}")
 
-    def _reject_stage_directory_path(self, path: str) -> None:
+    def _reject_stage_directory_path(
+        self,
+        path: str,
+        head_path_type: str | None = None,
+        index_path_kind: str | None = None,
+    ) -> None:
         resolved = self.memory_root / path
         if resolved.exists() and not (resolved.is_file() or resolved.is_symlink()):
+            raise ValueError(f"cannot stage directory path: {path}")
+        if head_path_type == "tree" or index_path_kind == "tree":
             raise ValueError(f"cannot stage directory path: {path}")
 
     def _unlink_worktree_file(self, path: str) -> None:
