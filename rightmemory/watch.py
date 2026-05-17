@@ -17,10 +17,11 @@ from .session import _ensure_runtime_gitignore, _fsync_directory
 
 
 INSTALL_STAMP_FILE = "install.stamp"
-MANAGED_WATCH_TARGETS = ("review", "dreamer")
+MANAGED_WATCH_TARGETS = ("review", "dreamer", "sync")
 WATCH_COMMANDS = {
     "review": ("review", "watch"),
     "dreamer": ("dreamer", "watch"),
+    "sync": ("sync", "watch"),
 }
 
 

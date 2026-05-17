@@ -256,8 +256,12 @@ class JsonRequestTests(unittest.TestCase):
                 roles.append(role)
                 return type("Config", (), {"memory_root": memory_root})()
 
+            def fake_load_sync_config():
+                return type("SyncConfig", (), {"memory_root": memory_root, "enabled": False})()
+
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
                 patch("rightmemory.watch.subprocess.Popen", side_effect=[FakeProcess(101), FakeProcess(102)]) as popen,
                 patch("sys.stdout", stdout),
             ):
@@ -273,6 +277,66 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(dreamer_pid, "102\n")
         self.assertIn("review: running pid 101", stdout.getvalue())
         self.assertIn("dreamer: running pid 102", stdout.getvalue())
+        self.assertIn("sync: disabled", stdout.getvalue())
+
+    def test_watch_start_starts_sync_when_enabled(self):
+        stdout = io.StringIO()
+
+        class FakeProcess:
+            def __init__(self, pid):
+                self.pid = pid
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+
+            def fake_load_config(role):
+                return type("Config", (), {"memory_root": memory_root})()
+
+            def fake_load_sync_config():
+                return type("SyncConfig", (), {"memory_root": memory_root, "enabled": True})()
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
+                patch("rightmemory.watch.subprocess.Popen", side_effect=[FakeProcess(101), FakeProcess(102), FakeProcess(103)]) as popen,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["watch", "start"])
+
+            sync_pid = (memory_root / ".runtime" / "watch" / "sync.pid").read_text(encoding="utf-8")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(popen.call_count, 3)
+        self.assertEqual(sync_pid, "103\n")
+        self.assertIn("sync: running pid 103", stdout.getvalue())
+
+    def test_watch_start_skips_sync_when_disabled(self):
+        stdout = io.StringIO()
+
+        class FakeProcess:
+            def __init__(self, pid):
+                self.pid = pid
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+
+            def fake_load_config(role):
+                return type("Config", (), {"memory_root": memory_root})()
+
+            def fake_load_sync_config():
+                return type("SyncConfig", (), {"memory_root": memory_root, "enabled": False})()
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
+                patch("rightmemory.watch.subprocess.Popen", side_effect=[FakeProcess(101), FakeProcess(102)]) as popen,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["watch", "start"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(popen.call_count, 2)
+        self.assertIn("sync: disabled", stdout.getvalue())
 
     def test_watch_status_reports_stopped_without_config(self):
         stdout = io.StringIO()
@@ -288,6 +352,7 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("review: stopped", stdout.getvalue())
         self.assertIn("dreamer: stopped", stdout.getvalue())
+        self.assertIn("sync: stopped", stdout.getvalue())
 
     def test_watch_stop_sends_graceful_term_and_removes_pid(self):
         stdout = io.StringIO()

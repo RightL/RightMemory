@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .async_update import AsyncUpdateStore, format_state
-from .config import MEMORY_ROOT, ROLES, load_config, load_review_config
+from .config import MEMORY_ROOT, ROLES, load_config, load_review_config, load_sync_config
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 from .watch import (
@@ -167,16 +167,23 @@ def _watch_manager_main(argv: list[str]) -> int:
 
 
 def _watch_start(target: str) -> int:
-    failed = False
     for name in _watch_targets(target):
         try:
-            config = load_config(_watch_role(name))
-            status = start_managed_watch(config.memory_root, name, sys.executable)
-            print(_format_start_status(status))
+            if name == "sync":
+                sync_config = load_sync_config()
+                if not sync_config.enabled:
+                    print("sync: disabled")
+                    continue
+                memory_root = sync_config.memory_root
+            else:
+                config = load_config(_watch_role(name))
+                memory_root = config.memory_root
+            status = start_managed_watch(memory_root, name, sys.executable)
+            print(_format_watch_status(status))
         except Exception as exc:
-            failed = True
-            print(f"{name}: failed: {exc}", file=sys.stderr)
-    return 1 if failed else 0
+            print(f"{name}: error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+    return 0
 
 
 def _watch_stop(target: str, timeout: int) -> int:
@@ -214,12 +221,6 @@ def _watch_role(name: str) -> str:
     if name == "dreamer":
         return "dreamer"
     raise ValueError(f"unknown watch target: {name}")
-
-
-def _format_start_status(status: ManagedWatchStatus) -> str:
-    if status.pid is None:
-        return f"{status.name}: {status.state}"
-    return f"{status.name}: running pid {status.pid}, log {status.log_path}"
 
 
 def _format_watch_status(status: ManagedWatchStatus) -> str:
