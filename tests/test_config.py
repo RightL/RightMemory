@@ -587,7 +587,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("promote it to settled memory", prompt)
         self.assertIn("compare assistant responses with existing memory", prompt)
         self.assertIn("Avoid broad guesses", prompt)
-        self.assertIn("already_reviewed_turns", prompt)
+        self.assertIn("Review the session as a whole", prompt)
         self.assertIn("commit them", prompt)
         self.assertIn("Choose the edit shape that makes memory clearer", prompt)
         self.assertIn("Place memory in a clear tree", prompt)

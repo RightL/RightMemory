@@ -25,10 +25,8 @@ Normalize one reviewable session at a time:
   "project": "/path/or/null",
   "started_at": "2026-05-16T05:17:53Z",
   "ended_at": "2026-05-16T06:02:10Z",
-  "already_reviewed_turns": 0,
   "turns": [
     {
-      "i": 1,
       "user": "user-visible message",
       "assistant": "assistant-visible final reply"
     }
@@ -48,7 +46,7 @@ raw refs, streaming deltas, large metadata, or provider-specific event objects.
 4. Add source configuration so RightMemory can scan the provider later without
    the main agent calling it.
 5. Add small fixture transcripts and tests for the adapter.
-6. Verify repeated scans are deterministic and do not duplicate reviewed turns.
+6. Verify repeated scans are deterministic and reviewed sessions are not processed again.
 
 ## Boundaries
 
@@ -64,9 +62,9 @@ raw refs, streaming deltas, large metadata, or provider-specific event objects.
   final assistant reply.
 - Tool results can be huge and noisy; omit them for the first version.
 - Provider formats drift; keep parsing isolated behind provider adapters.
-- A resumed session may already have reviewed turns. Preserve the whole session
-  for context, but carry `already_reviewed_turns` so later review extracts only
-  new durable memory.
+- RightMemory reviews a session once. Keep the normalized payload focused on the
+  whole completed session, and let the scanner state decide whether it has
+  already been processed.
 
 ## Verification
 

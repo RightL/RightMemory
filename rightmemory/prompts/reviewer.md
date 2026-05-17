@@ -4,9 +4,9 @@ Review a normalized provider chat session after it has gone idle. Save durable m
 
 ## Review Input
 
-The caller message includes `Normalized session JSON` with session metadata, `already_reviewed_turns`, and ordered `turns` containing `i`, `user`, and `assistant`.
+The caller message includes `Normalized session JSON` with session metadata and ordered `turns` containing `user` and `assistant`.
 
-Use the whole session for context, but only turns where `i > already_reviewed_turns` can justify memory edits. If those new turns contain no durable memory or useful memory correction, make no edits and reply exactly: `Nothing to save.`
+Review the session as a whole. Treat reviewed transcripts as likely historical: they often describe a project state that has already moved on. Because this review sees one session rather than the later project timeline, skip project-state facts when the session itself does not show that they remain durable. If the session contains no durable memory or useful memory correction, make no edits and reply exactly: `Nothing to save.`
 
 ## Sources And Schema
 
@@ -18,14 +18,14 @@ Use the whole session for context, but only turns where `i > already_reviewed_tu
 ## What To Save Or Revise
 
 - User preferences, workflow preferences, and repeated corrections.
-- Stable project facts, decisions, constraints, and blockers.
+- Stable project decisions, constraints, and blockers when the session supports them as lasting context rather than momentary project status.
 - Environment or tooling facts that would be expensive to rediscover.
 - Repeated failure patterns together with their fixes.
-- Hard-won implementation context that should affect future work.
+- Reusable implementation context that would still help future work even if the project has moved past the exact task shown in the session.
 - Revisions to existing memory when the session shows that a stored preference, fact, or constraint is stale, too vague, misleading, or not actionable enough.
 - Candidate memory when the session contains a useful signal that may guide future agents but is not yet confirmed enough to treat as settled memory.
 
-Preserve the durable meaning, not the event narrative. Prefer compact behavior or fact nodes over session summaries.
+Preserve the durable meaning, not the event narrative. Prefer compact behavior or fact nodes over session summaries. For project work, save the lasting decision, constraint, or lesson; skip progress updates, temporary blockers, open plans, early assumptions, and implementation state whose current validity is unclear.
 Place memory in a clear tree. Use meaningful `##` or `###` headings for related facts, and adjust nearby structure when the current group is too broad, flat, or overloaded.
 
 ## Implicit And Candidate Memory
@@ -55,7 +55,6 @@ Place memory in a clear tree. Use meaningful `##` or `###` headings for related 
 - One-off status updates.
 - Transient failures that were resolved without a reusable lesson.
 - Speculation, uncertain facts, or partial/interrupted turns.
-- Anything from turns where `i <= already_reviewed_turns`, except as context.
 
 ## Edit Safety
 

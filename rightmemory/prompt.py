@@ -69,8 +69,7 @@ def _command_guidance(role: str) -> str:
         return (
             "- The automatic transcript review scanner selected reviewer behavior. Treat the normalized session "
             "JSON in the caller message as the review input.\n"
-            "- Use the whole normalized session for context, but only extract durable memory from turns where "
-            "`i > already_reviewed_turns`."
+            "- Review the whole normalized session for durable memory."
         )
     raise ValueError("role must be one of: dreamer, retrieve, reviewer, update")
 

@@ -29,7 +29,7 @@ class TranscriptParserTests(unittest.TestCase):
         self.assertEqual(session.source, "codex")
         self.assertEqual(session.session_id, "s1")
         self.assertEqual(session.project, "/repo")
-        self.assertEqual([(turn.i, turn.user, turn.assistant) for turn in session.turns], [(1, "hello", "hi")])
+        self.assertEqual([(turn.user, turn.assistant) for turn in session.turns], [("hello", "hi")])
 
     def test_claude_parser_omits_tool_blocks(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -100,10 +100,12 @@ class ReviewScannerTests(unittest.TestCase):
 
         self.assertEqual(result.reviewed, 1)
         self.assertEqual(len(calls), 1)
-        self.assertIn('"already_reviewed_turns": 0', calls[0][1])
+        self.assertNotIn("already_reviewed_turns", calls[0][1])
+        self.assertNotIn('"i"', calls[0][1])
         self.assertIn('"user": "u2"', calls[0][1])
         only_state = next(iter(state.sessions.values()))
-        self.assertEqual(only_state.last_reviewed_turn, 2)
+        self.assertEqual(only_state.session_id, "s1")
+        self.assertEqual(only_state.source, "codex")
 
     def test_scan_reviews_one_eligible_session_per_call(self):
         calls = []
@@ -113,8 +115,8 @@ class ReviewScannerTests(unittest.TestCase):
             source.mkdir()
             first = source / "01-first.jsonl"
             second = source / "02-second.jsonl"
-            self._write_codex(first, turns=[("first", "a1")])
-            self._write_codex(second, turns=[("second", "a2")])
+            self._write_codex(first, turns=[("first", "a1")], session_id="s1")
+            self._write_codex(second, turns=[("second", "a2")], session_id="s2")
             self._set_mtime(first, 1_000)
             self._set_mtime(second, 1_000)
             scanner = ReviewScanner(
@@ -137,7 +139,7 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertIn('"user": "second"', calls[1])
         self.assertEqual(len(state.sessions), 2)
 
-    def test_scan_uses_whole_session_but_marks_already_reviewed_turns(self):
+    def test_scan_skips_reviewed_session_even_when_file_changes(self):
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -156,12 +158,10 @@ class ReviewScannerTests(unittest.TestCase):
 
             self._write_codex(transcript, turns=[("u1", "a1"), ("u2", "a2")])
             self._set_mtime(transcript, 20_000)
-            scanner.scan_once(now=30_000)
+            result = scanner.scan_once(now=30_000)
 
-        self.assertEqual(len(calls), 2)
-        self.assertIn('"already_reviewed_turns": 1', calls[1])
-        self.assertIn('"user": "u1"', calls[1])
-        self.assertIn('"user": "u2"', calls[1])
+        self.assertEqual(result.skipped_reviewed, 1)
+        self.assertEqual(len(calls), 1)
 
     def test_scan_retries_once_then_stops_after_reviewer_failure(self):
         calls = []
@@ -225,31 +225,71 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertEqual(result.skipped_old, 1)
         self.assertEqual(calls, [])
 
-    def test_scan_resets_cursor_when_reviewed_prefix_changes(self):
+    def test_scan_skips_duplicate_session_id_from_different_file(self):
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             source = root / "codex"
             source.mkdir()
-            transcript = source / "session.jsonl"
-            self._write_codex(transcript, turns=[("u1", "a1"), ("u2", "a2")])
-            self._set_mtime(transcript, 1_000)
+            first = source / "01-first.jsonl"
+            second = source / "02-second.jsonl"
+            self._write_codex(first, turns=[("first", "a1")], session_id="s1")
+            self._write_codex(second, turns=[("second", "a2")], session_id="s1")
+            self._set_mtime(first, 1_000)
+            self._set_mtime(second, 1_000)
             config = ReviewConfig(
                 memory_root=root,
                 idle_seconds=3600,
                 sources=[ReviewSourceConfig(kind="codex", path=source)],
             )
             scanner = ReviewScanner(config, lambda session_id, message: calls.append(message) or "ok")
-            scanner.scan_once(now=10_000)
+            first_result = scanner.scan_once(now=10_000)
+            second_result = scanner.scan_once(now=10_000)
 
-            self._write_codex(transcript, turns=[("u1", "changed"), ("u2", "a2"), ("u3", "a3")])
-            self._set_mtime(transcript, 20_000)
-            result = scanner.scan_once(now=30_000)
+        self.assertEqual(first_result.reviewed, 1)
+        self.assertEqual(second_result.skipped_reviewed, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertIn('"user": "first"', calls[0])
 
-        self.assertEqual(result.reset_changed, 1)
-        self.assertEqual(len(calls), 2)
-        self.assertIn('"already_reviewed_turns": 0', calls[1])
-        self.assertIn('"assistant": "changed"', calls[1])
+    def test_scan_skips_session_from_existing_state_entry(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            transcript = source / "session.jsonl"
+            self._write_codex(transcript, turns=[("u1", "a1")], session_id="s1")
+            self._set_mtime(transcript, 1_000)
+            state_path = root / ".runtime" / "review" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "sessions": {
+                            "codex:/old/path/session.jsonl": {
+                                "session_id": "s1",
+                                "source": "codex",
+                                "last_reviewed_at": "2026-05-17T00:00:00+00:00",
+                            }
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                lambda session_id, message: calls.append(message) or "ok",
+            )
+
+            result = scanner.scan_once(now=10_000)
+
+        self.assertEqual(result.skipped_reviewed, 1)
+        self.assertEqual(calls, [])
 
     def test_scan_skips_active_session(self):
         calls = []
@@ -274,8 +314,8 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertEqual(result.skipped_idle, 1)
         self.assertEqual(calls, [])
 
-    def _write_codex(self, path: Path, turns: list[tuple[str, str]]) -> None:
-        rows = [{"type": "session_meta", "timestamp": "t0", "payload": {"id": "s1", "cwd": "/repo"}}]
+    def _write_codex(self, path: Path, turns: list[tuple[str, str]], session_id: str = "s1") -> None:
+        rows = [{"type": "session_meta", "timestamp": "t0", "payload": {"id": session_id, "cwd": "/repo"}}]
         for index, (user, assistant) in enumerate(turns, start=1):
             rows.extend(
                 [

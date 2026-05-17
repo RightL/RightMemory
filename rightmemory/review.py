@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import time
@@ -22,10 +21,6 @@ REVIEW_MAX_RETRIES = 1
 class ReviewSessionState:
     session_id: str
     source: str
-    last_reviewed_turn: int = 0
-    reviewed_turns_hash: str | None = None
-    last_seen_mtime: float | None = None
-    last_seen_size: int | None = None
     last_reviewed_at: str | None = None
 
 
@@ -39,9 +34,8 @@ class ReviewScanResult:
     reviewed: int = 0
     skipped_idle: int = 0
     skipped_old: int = 0
-    skipped_unchanged: int = 0
+    skipped_reviewed: int = 0
     skipped_empty: int = 0
-    reset_changed: int = 0
     retried: int = 0
     failed: int = 0
 
@@ -50,9 +44,8 @@ class ReviewScanResult:
             f"reviewed: {self.reviewed}\n"
             f"skipped_idle: {self.skipped_idle}\n"
             f"skipped_old: {self.skipped_old}\n"
-            f"skipped_unchanged: {self.skipped_unchanged}\n"
+            f"skipped_reviewed: {self.skipped_reviewed}\n"
             f"skipped_empty: {self.skipped_empty}\n"
-            f"reset_changed: {self.reset_changed}\n"
             f"retried: {self.retried}\n"
             f"failed: {self.failed}"
         )
@@ -70,15 +63,13 @@ class ReviewStateStore:
         sessions = {}
         for key, value in data.get("sessions", {}).items():
             if isinstance(value, dict):
-                sessions[key] = ReviewSessionState(
+                session = ReviewSessionState(
                     session_id=str(value.get("session_id", "")),
                     source=str(value.get("source", "")),
-                    last_reviewed_turn=_int(value.get("last_reviewed_turn")),
-                    reviewed_turns_hash=_str_or_none(value.get("reviewed_turns_hash")),
-                    last_seen_mtime=_float(value.get("last_seen_mtime")),
-                    last_seen_size=_int_or_none(value.get("last_seen_size")),
                     last_reviewed_at=_str_or_none(value.get("last_reviewed_at")),
                 )
+                if session.source and session.session_id:
+                    sessions[_state_key(session.source, session.session_id)] = session
         return ReviewState(sessions=sessions)
 
     def save(self, state: ReviewState) -> None:
@@ -113,9 +104,8 @@ class ReviewScanner:
             "reviewed": 0,
             "skipped_idle": 0,
             "skipped_old": 0,
-            "skipped_unchanged": 0,
+            "skipped_reviewed": 0,
             "skipped_empty": 0,
-            "reset_changed": 0,
             "retried": 0,
             "failed": 0,
         }
@@ -139,29 +129,17 @@ class ReviewScanner:
                     counts["skipped_empty"] += 1
                     continue
 
-                prior = sessions.get(transcript.key)
-                last_reviewed_turn = prior.last_reviewed_turn if prior else 0
-                if prior and prior.reviewed_turns_hash and last_reviewed_turn > 0:
-                    reviewed_prefix_hash = _turns_hash(normalized, last_reviewed_turn)
-                    if len(normalized.turns) < last_reviewed_turn or reviewed_prefix_hash != prior.reviewed_turns_hash:
-                        last_reviewed_turn = 0
-                        counts["reset_changed"] += 1
-
-                if len(normalized.turns) <= last_reviewed_turn:
-                    counts["skipped_unchanged"] += 1
+                state_key = _state_key(normalized.source, normalized.session_id)
+                if state_key in sessions:
+                    counts["skipped_reviewed"] += 1
                     continue
 
-                payload = normalized.with_review_cursor(last_reviewed_turn)
-                if not self._review_with_retry(payload, counts):
+                if not self._review_with_retry(normalized, counts):
                     return ReviewScanResult(**counts)
 
-                sessions[transcript.key] = ReviewSessionState(
+                sessions[state_key] = ReviewSessionState(
                     session_id=normalized.session_id,
                     source=normalized.source,
-                    last_reviewed_turn=len(normalized.turns),
-                    reviewed_turns_hash=_turns_hash(normalized, len(normalized.turns)),
-                    last_seen_mtime=stat.st_mtime,
-                    last_seen_size=stat.st_size,
                     last_reviewed_at=datetime.now(UTC).isoformat(),
                 )
                 self.state_store.save(ReviewState(sessions=sessions))
@@ -186,12 +164,9 @@ class ReviewScanner:
         return False
 
 
-def normalize_transcript(source: str, path: Path, already_reviewed_turns: int = 0) -> NormalizedSession | None:
+def normalize_transcript(source: str, path: Path) -> NormalizedSession | None:
     transcript = TranscriptFile(source, path)
-    normalized = _parse(transcript)
-    if normalized is None:
-        return None
-    return normalized.with_review_cursor(already_reviewed_turns)
+    return _parse(transcript)
 
 
 def _discover(source: ReviewSourceConfig) -> list[TranscriptFile]:
@@ -218,35 +193,15 @@ def _review_session_id(session: NormalizedSession) -> str:
 def _review_message(session: NormalizedSession) -> str:
     return (
         "Review this normalized provider transcript session.\n\n"
-        "Use the whole session for context, but only extract durable memory "
-        "from turns where i > already_reviewed_turns. If nothing is worth "
-        "saving, reply exactly: Nothing to save.\n\n"
+        "Review the whole session for durable memory. If nothing is worth saving, "
+        "reply exactly: Nothing to save.\n\n"
         "Normalized session JSON:\n"
         + json.dumps(session.to_payload(), ensure_ascii=False, indent=2)
     )
 
 
-def _turns_hash(session: NormalizedSession, count: int) -> str:
-    payload = [
-        {"i": turn.i, "user": turn.user, "assistant": turn.assistant}
-        for turn in session.turns[:count]
-    ]
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _int(value: object) -> int:
-    return value if isinstance(value, int) else 0
-
-
-def _int_or_none(value: object) -> int | None:
-    return value if isinstance(value, int) else None
-
-
-def _float(value: object) -> float | None:
-    if isinstance(value, int | float):
-        return float(value)
-    return None
+def _state_key(source: str, session_id: str) -> str:
+    return f"{source}:{session_id}"
 
 
 def _str_or_none(value: object) -> str | None:

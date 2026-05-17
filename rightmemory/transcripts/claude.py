@@ -54,8 +54,8 @@ def parse_session(path: Path) -> NormalizedSession | None:
 
     _finish_turn(turns, pending_user, pending_assistant)
     normalized_turns = [
-        NormalizedTurn(i=index, user=user, assistant=assistant)
-        for index, (user, assistant) in enumerate(turns, start=1)
+        NormalizedTurn(user=user, assistant=assistant)
+        for user, assistant in turns
         if user.strip() and assistant.strip()
     ]
     if not normalized_turns:

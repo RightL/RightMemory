@@ -141,11 +141,10 @@ def _review_main(argv: list[str]) -> int:
     normalize = subparsers.add_parser("normalize", help="print normalized transcript JSON without running reviewer")
     normalize.add_argument("--source", choices=("codex", "claude"), required=True, help="transcript provider format")
     normalize.add_argument("--path", required=True, help="path to one provider transcript file")
-    normalize.add_argument("--already-reviewed-turns", type=int, default=0, help="cursor to include in normalized JSON")
     args = parser.parse_args(argv)
 
     if args.command == "normalize":
-        return _review_normalize(args.source, args.path, args.already_reviewed_turns)
+        return _review_normalize(args.source, args.path)
 
     if args.command == "scan":
         if not args.once:
@@ -189,10 +188,8 @@ def _review_watch(interval: int, since_days: int | None = None) -> int:
         return 130
 
 
-def _review_normalize(source: str, path: str, already_reviewed_turns: int) -> int:
-    if already_reviewed_turns < 0:
-        raise ValueError("--already-reviewed-turns must be >= 0")
-    normalized = normalize_transcript(source, Path(path).expanduser(), already_reviewed_turns)
+def _review_normalize(source: str, path: str) -> int:
+    normalized = normalize_transcript(source, Path(path).expanduser())
     if normalized is None:
         raise ValueError("no completed turns found in transcript")
     print(json.dumps(normalized.to_payload(), ensure_ascii=False, indent=2))

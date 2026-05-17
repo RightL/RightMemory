@@ -249,13 +249,14 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
                 patch("sys.stdout", stdout),
             ):
-                result = main(["review", "normalize", "--source", "codex", "--path", str(path), "--already-reviewed-turns", "1"])
+                result = main(["review", "normalize", "--source", "codex", "--path", str(path)])
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(result, 0)
         self.assertEqual(payload["source"], "codex")
         self.assertEqual(payload["session_id"], "s1")
-        self.assertEqual(payload["already_reviewed_turns"], 1)
+        self.assertNotIn("already_reviewed_turns", payload)
+        self.assertNotIn("i", payload["turns"][0])
         self.assertEqual(payload["turns"][0]["user"], "hello")
 
     def test_main_runs_one_shot_session_turn(self):
