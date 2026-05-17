@@ -4,7 +4,7 @@
 
 ### Multi-file memory tree
 
-`MEMORY.md` remains normal memory instead of becoming a routing-only index, because the root file should still carry useful high-level graph nodes and readable context. `#`, `##`, and `###` are normal tree layers; `####` is reserved as a title-only external child pointer so deeper detail can move out without pretending that a broad section is a detail file.
+`MEMORY.md` remains normal memory instead of becoming a routing-only index, because the root file should still carry useful high-level graph nodes and readable context. `#`, `##`, and `###` are normal tree layers; `####` is reserved for file-backed detail pointers under a `###` topic, so deeper detail can move out without pretending that a broad section is a detail file. A `####` pointer may keep short body text that summarizes or explains the detail file, but nodes and child headings belong in the detail file.
 
 ### Addressable headings
 
@@ -20,7 +20,7 @@ Curator edits optimize for a readable heading tree and coherent graph nodes inst
 
 ### Detail file naming
 
-Detail files use short explicit slugs from `#### Topic {#slug}` and map to `MEMORY_<slug>.md`. This keeps filenames stable and short while preserving the visible Tree+graph model in the Markdown content; filenames are storage details, not graph nodes.
+Detail files use short explicit slugs from file-backed headings such as `#### Topic {F#slug}` and map to `MEMORY_<slug>.md`. Graph edges still target `slug`, not `F#slug`. This keeps filenames stable and short while preserving the visible tree + graph model in the Markdown content; filenames are storage details, not graph nodes.
 
 ### Schema ownership
 

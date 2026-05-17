@@ -309,6 +309,67 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("self-edge `rel:one`", result)
         self.assertIn("duplicate edge `rel:two`", result)
 
+    def test_validate_memory_catches_malformed_edge_entries(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Domain {#domain}\n\n"
+            "- `one` first → [rel:two, bad-edge, cfg:]\n"
+            "- `two` second → []\n",
+            encoding="utf-8",
+        )
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("malformed edge `bad-edge`", result)
+        self.assertIn("malformed edge `cfg:`", result)
+
+    def test_validate_memory_catches_heading_depth_and_pointer_shape(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Domain {#domain}\n\n"
+            "## Area\n\n"
+            "#### Wrong Parent {F#wrong-parent}\n\n"
+            "### Topic\n\n"
+            "#### Plain Pointer {#plain-pointer}\n\n"
+            "##### Too Deep {F#too-deep}\n",
+            encoding="utf-8",
+        )
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("#### pointer must be under a ### heading", result)
+        self.assertIn("#### pointer must use `{F#slug}`", result)
+        self.assertIn("heading deeper than ####", result)
+
+    def test_validate_memory_allows_body_under_four_hash_pointer(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Domain {#domain}\n\n"
+            "### Topic\n\n"
+            "#### Detail Pointer {F#detail}\n\n"
+            "This paragraph summarizes the detail file.\n\n"
+            "---\n\n"
+            "### Next Topic\n",
+            encoding="utf-8",
+        )
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("validation passed", result)
+
+    def test_validate_memory_catches_nodes_and_child_headings_under_four_hash_pointer(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Domain {#domain}\n\n"
+            "### Topic\n\n"
+            "#### Detail Pointer {F#detail}\n\n"
+            "Paragraph text is allowed.\n\n"
+            "- `detail-node` child nodes stay in the detail file. → []\n\n"
+            "##### Child Heading\n",
+            encoding="utf-8",
+        )
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("#### pointer cannot contain child node", result)
+        self.assertIn("#### pointer cannot contain child heading", result)
+
     def test_validate_memory_catches_pending_section_changes_from_git(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")

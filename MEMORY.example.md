@@ -6,14 +6,21 @@
 
 ## Example Application {#sample-app} → [rel:sample-infra]
 
-This example domain shows a product memory with graph-addressable headings, compact fact nodes, and detail-file pointers for topics that are too large for the root file.
+This example domain shows a product memory with graph-addressable headings, compact fact nodes, detail-file pointers, and project-scoped preferences that should guide agents only while working on this project.
+
+### Project Working Preferences {#sample-project-working-preferences}
+
+Use project-scoped preferences when the guidance belongs to one project or domain rather than the user's global working style.
+
+- `proj-pref-contract-first` When changing frontend/backend data flow, update the API contract before changing UI call sites. → [rel:api-public-contract, rel:proj-web, rel:proj-api]
+- `proj-pref-release-proof` Release-facing changes should leave a short verification note in the release runbook. → [rel:sample-release-runbook, rel:proj-deploy]
 
 ### Deployable Units {#sample-deployable-units} → [rel:sample-release-runbook]
 
 This group tracks the example application's deployable services and shared code.
 
-- `proj-web` web-app — example frontend, TypeScript + Vite, calls `proj-api` for data. → [dep:lib-utils, agg:proj-deploy]
-- `proj-api` api-server — example backend service, Python + FastAPI, reads from `db-postgres`. → [dep:lib-utils, dep:db-postgres, agg:proj-deploy]
+- `proj-web` web-app — example frontend, TypeScript + Vite, calls `proj-api` for data. → [dep:lib-utils, dep:proj-api, rel:proj-deploy]
+- `proj-api` api-server — example backend service, Python + FastAPI, reads from `db-postgres`. → [dep:lib-utils, dep:db-postgres, rel:proj-deploy]
 - `lib-utils` shared-utils — small utility library reused by both frontend and backend. → [rel:proj-web, rel:proj-api]
 - `proj-deploy` deploy-bundle — production deployment package combining frontend and backend artifacts. → [agg:proj-web, agg:proj-api]
 
@@ -31,9 +38,11 @@ Release checklist, rollout steps, rollback notes, and environment-specific comma
 ### Database Stack {#sample-database-stack}
 
 - `db-postgres` postgres-db — PostgreSQL database used by the API service. → [rel:proj-api]
-- `db-backup-job` backup-job — nightly logical backup for `db-postgres`, verified by restore drills before major releases. → [bak:db-postgres, ver:sample-backup-drill]
+- `db-backup-job` backup-job — nightly logical backup for `db-postgres`, verified by restore drills before major releases. → [bak:db-postgres, rel:sample-backup-drill]
 
 #### Backup Drill Notes {F#sample-backup-drill}
+
+Detailed restore drill notes live in `MEMORY_sample-backup-drill.md`; this pointer is intentionally a `####` child under the database stack, with a body summary but no child nodes or headings in the root file.
 
 ---
 

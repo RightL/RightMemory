@@ -53,7 +53,8 @@ Written edges may be one-way or reciprocal [stored on both records so either sid
 - A file-backed `#`, `##`, or `###` heading uses `{F#short-slug}` and maps to sibling detail file `MEMORY_<short-slug>.md`.
 - When a heading's child content moves into its detail file, keep only the heading line and any heading body paragraphs in the current file. Do not leave child node lines or child headings under that heading in the current file.
 - `#### Human Title {F#short-slug}` is the deepest heading level allowed in a memory file and points to sibling detail file `MEMORY_<short-slug>.md`.
-- Do not write body paragraphs, child node lines, or child headings under a `####` pointer in the current file.
+- A `####` pointer may have body paragraphs directly under it when they summarize the detail file or explain the pointer.
+- Do not write child node lines or child headings under a `####` pointer in the current file.
 - Create `####` pointers only under an existing or newly created `###` topic; do not jump directly from `#` or `##` to `####`.
 - Detail files use the same schema recursively.
 

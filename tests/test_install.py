@@ -37,7 +37,7 @@ class InstallScriptTests(unittest.TestCase):
             memory_path = memory_root / "MEMORY.md"
             memory = memory_path.read_text(encoding="utf-8")
             memory_path.write_text(
-                "# Real Memory {#real-memory}\n\n- `real-node` keep me. -> []\n\n"
+                "# Real Memory {#real-memory}\n\n- `real-node` keep me. → []\n\n"
                 + memory.replace("Example Application", "Stale Example Application"),
                 encoding="utf-8",
             )
@@ -46,7 +46,7 @@ class InstallScriptTests(unittest.TestCase):
             refreshed = memory_path.read_text(encoding="utf-8")
 
         self.assertIn("# Real Memory {#real-memory}", refreshed)
-        self.assertIn("- `real-node` keep me. -> []", refreshed)
+        self.assertIn("- `real-node` keep me. → []", refreshed)
         self.assertIn("Example Application", refreshed)
         self.assertNotIn("Stale Example Application", refreshed)
         self.assertEqual(refreshed.count(EXAMPLE_START), 1)
@@ -63,7 +63,7 @@ class InstallScriptTests(unittest.TestCase):
                 "> Old starter text.\n\n"
                 "---\n\n"
                 "# Real Memory {#real-memory}\n\n"
-                "- `real-node` keep me. -> []\n\n"
+                "- `real-node` keep me. → []\n\n"
                 "---\n\n"
                 "# User Pending Task and Thoughts (user-edited only - AI agents must not modify this section)\n",
                 encoding="utf-8",
@@ -76,7 +76,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("# Sample Project Graph", migrated)
         self.assertNotIn("# Starter Knowledge Base", migrated)
         self.assertIn("# Real Memory {#real-memory}", migrated)
-        self.assertIn("- `real-node` keep me. -> []", migrated)
+        self.assertIn("- `real-node` keep me. → []", migrated)
 
     def test_default_install_uses_standalone_and_default_skill_targets(self):
         with tempfile.TemporaryDirectory() as tempdir:

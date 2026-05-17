@@ -39,12 +39,12 @@ Each memory file is ordinary Markdown with a small schema.
 
 ## Project Alpha {#project-alpha}
 
-### Runtime {F#alpha-runtime} -> [cfg:alpha-config]
+### Runtime {F#alpha-runtime} → [cfg:alpha-config]
 
 Runtime facts that apply to the whole project.
 
-- `alpha-python-env` Uses Python 3.11 in `.venv` for local development. -> [cfg:alpha-runtime]
-- `alpha-test-command` Run the backend tests with `pytest tests/backend`. -> [ver:alpha-python-env]
+- `alpha-python-env` Uses Python 3.11 in `.venv` for local development. → [cfg:alpha-runtime]
+- `alpha-test-command` Run the backend tests with `pytest tests/backend`. → [ver:alpha-python-env]
 ```
 
 The tree tells agents where to read in local context. Anchors and node ids tell agents what can be referenced. Edges tell agents where to walk across otherwise separate branches.
@@ -57,17 +57,17 @@ Addressable `#`, `##`, and `###` headings may also have body paragraphs directly
 
 Use `{F#slug}` instead of `{#slug}` when a heading is backed by a sibling detail file. The file is `MEMORY_<slug>.md`; graph edges still target `slug`, not `F#slug`.
 
-`####` is the deepest heading level allowed in a memory file. A `#### Topic {F#slug}` heading points to `MEMORY_<slug>.md`; do not put body paragraphs, nodes, or child headings underneath it in the current file.
+`####` is the deepest heading level allowed in a memory file. A `#### Topic {F#slug}` heading points to `MEMORY_<slug>.md`; it may have body paragraphs that summarize or explain the detail file, but do not put nodes or child headings underneath it in the current file.
 
 ### Nodes
 
 Nodes are durable facts under a heading:
 
 ```md
-- `<node-id>` <description> -> [edge1, edge2, ...]
+- `<node-id>` <description> → [edge1, edge2, ...]
 ```
 
-Heading ids and node ids share one namespace. A node with no edges still writes `-> []`; a heading with no edges may omit the edge list.
+Heading ids and node ids share one namespace. A node with no edges still writes `→ []`; a heading with no edges may omit the edge list.
 
 ### Detail Files
 

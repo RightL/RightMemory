@@ -38,6 +38,8 @@ MAX_EDIT_MATCH_LINES = 8
 MAX_MATCH_PREVIEW_CHARS = 180
 
 ANCHOR_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
+ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{(F#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
+ANY_HEADING_RE = re.compile(r"^(#+)\s+(.+?)\s*$")
 HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$")
 NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*→\s*\[(.*?)\])?\s*$")
 EDGE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*([A-Za-z0-9_.-]+)\s*$")
@@ -51,6 +53,7 @@ class MemoryId:
     file: Path
     line_number: int
     edges: tuple[tuple[str, str], ...]
+    malformed_edges: tuple[str, ...] = ()
 
 
 class MemoryTools:
@@ -397,6 +400,8 @@ class MemoryTools:
 
         for item in ids.values():
             seen_edges: set[tuple[str, str]] = set()
+            for malformed_edge in item.malformed_edges:
+                errors.append(f"malformed edge `{malformed_edge}` at {self._loc(item)}")
             for edge_type, target in item.edges:
                 edge = (edge_type, target)
                 if edge in seen_edges:
@@ -413,6 +418,7 @@ class MemoryTools:
                 if target_item is None:
                     errors.append(f"dangling edge `{edge_type}:{target}` at {self._loc(item)}")
 
+        errors.extend(self._structure_errors(files))
         errors.extend(self._pending_section_errors(files))
         if errors:
             return "validation failed:\n" + "\n".join(f"- {error}" for error in errors)
@@ -572,27 +578,75 @@ class MemoryTools:
                 continue
             item_id = match.group(2) if line.startswith("#") else match.group(1)
             edge_text = match.group(3) if line.startswith("#") else match.group(2)
+            edges, malformed_edges = self._parse_edges(edge_text or "")
             items.append(
                 MemoryId(
                     id=item_id,
                     file=file_path,
                     line_number=line_number,
-                    edges=tuple(self._parse_edges(edge_text or "")),
+                    edges=tuple(edges),
+                    malformed_edges=tuple(malformed_edges),
                 )
             )
         return items
 
-    def _parse_edges(self, edge_text: str) -> list[tuple[str, str]]:
+    def _parse_edges(self, edge_text: str) -> tuple[list[tuple[str, str]], list[str]]:
         edges: list[tuple[str, str]] = []
+        malformed_edges: list[str] = []
         for raw_edge in edge_text.split(","):
             raw_edge = raw_edge.strip()
             if not raw_edge:
                 continue
             match = EDGE_RE.match(raw_edge)
-            if not match:
+            if match is None:
+                malformed_edges.append(raw_edge)
                 continue
             edges.append((match.group(1), match.group(2)))
-        return edges
+        return edges, malformed_edges
+
+    def _structure_errors(self, files: list[Path]) -> list[str]:
+        errors: list[str] = []
+        for path in files:
+            heading_stack: list[tuple[int, int]] = []
+            active_pointer: tuple[int, int] | None = None
+            relative_path = path.relative_to(self.memory_root)
+            for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                heading_match = ANY_HEADING_RE.match(line)
+                if heading_match is None:
+                    if active_pointer is not None and NODE_RE.match(line):
+                        pointer_line = active_pointer[1]
+                        errors.append(
+                            f"#### pointer cannot contain child node at {relative_path}:{line_number} "
+                            f"(pointer starts at line {pointer_line})"
+                        )
+                    continue
+
+                depth = len(heading_match.group(1))
+                if active_pointer is not None and depth > active_pointer[0]:
+                    pointer_line = active_pointer[1]
+                    errors.append(
+                        f"#### pointer cannot contain child heading at {relative_path}:{line_number} "
+                        f"(pointer starts at line {pointer_line})"
+                    )
+                while heading_stack and heading_stack[-1][0] >= depth:
+                    heading_stack.pop()
+                parent_depth = heading_stack[-1][0] if heading_stack else None
+                if active_pointer is not None and depth <= active_pointer[0]:
+                    active_pointer = None
+
+                if depth > 4:
+                    errors.append(f"heading deeper than #### at {relative_path}:{line_number}")
+                elif depth == 4:
+                    anchor_match = ANCHOR_KIND_RE.match(line)
+                    if anchor_match is None or anchor_match.group(2) != "F#":
+                        errors.append(f"#### pointer must use `{{F#slug}}` at {relative_path}:{line_number}")
+                    if parent_depth != 3:
+                        errors.append(f"#### pointer must be under a ### heading at {relative_path}:{line_number}")
+                    if anchor_match is not None and anchor_match.group(2) == "F#":
+                        active_pointer = (depth, line_number)
+
+                heading_stack.append((depth, line_number))
+        return errors
 
     def _pending_section_errors(self, files: list[Path]) -> list[str]:
         errors: list[str] = []
