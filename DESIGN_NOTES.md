@@ -18,6 +18,10 @@ Child nodes should not point to their containing heading merely to say they belo
 
 Curator edits optimize for a readable heading tree and coherent graph nodes instead of minimizing new nodes. Updating an existing node is appropriate when the same fact is being refined, but adding, splitting, merging, or moving headings and nodes is preferred when it prevents overloaded records or makes the memory structure clearer.
 
+### Memory-backed skills
+
+Memory-backed skills treat reusable procedural knowledge as ordinary RightMemory first. The skill topic can live as a heading, move into a file-backed `MEMORY_<slug>.md` detail file when dense, and keep support material under `skill_artifacts/<slug>/...` when files make the procedure easier to retrieve or apply. The reviewer chooses between ordinary memory edits, skill-topic refinement, support artifacts, a new memory-backed skill, or no edit by asking what future agents will need to retrieve and use.
+
 ### Detail file naming
 
 Detail files use short explicit slugs from file-backed headings such as `#### Topic {F#slug}` and map to `MEMORY_<slug>.md`. Graph edges still target `slug`, not `F#slug`. This keeps filenames stable and short while preserving the visible tree + graph model in the Markdown content; filenames are storage details, not graph nodes.
@@ -48,7 +52,7 @@ Standalone mode exposes narrow filesystem and git tools instead of arbitrary Pyt
 
 ### Standalone commit boundary
 
-Standalone commit tools may stage and commit only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md` because update and dreamer roles need to preserve memory edits and dream reports without gaining arbitrary repository-write authority. The retrieve role does not receive write or git tools at all, so retrieval remains a lower-authority fast path. Unrelated untracked files remain visible through status but outside the stage/commit allowlist so model-driven commits do not sweep up local config, backups, or test artifacts.
+Standalone commit tools may stage and commit `MEMORY.md`, `MEMORY_*.md`, `dream_logs/*.md`, and `skill_artifacts/<slug>/...` because update, dreamer, and reviewer roles preserve memory edits, dream reports, and memory-backed skill support material without gaining arbitrary repository-write authority. The retrieve role does not receive write or git tools at all, so retrieval remains a lower-authority fast path. Unrelated untracked files remain visible through status but outside the stage/commit allowlist so model-driven commits do not sweep up local config, backups, or test artifacts.
 
 ### Global memory sync
 

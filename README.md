@@ -10,6 +10,7 @@ RightMemory keeps durable project and workflow context in Markdown files structu
 - A tree of `#`, `##`, and `###` headings for hierarchical retrieval context.
 - Addressable heading anchors and node ids for agent retrieval.
 - Typed edges such as `dep:`, `cfg:`, `ver:`, `doc:`, and `todo:` for graph traversal across the tree.
+- Memory-backed skill topics for reusable procedural knowledge, with optional support material under `skill_artifacts/<slug>/...`.
 - Agent skills for retrieval, updates, and periodic consolidation.
 - A standalone CLI runtime for agents that cannot spawn subagents.
 - Optional automatic transcript review for idle Codex and Claude sessions.
@@ -148,7 +149,7 @@ The installer arguments are:
 ./install.sh [--mode subagent|standalone] [<memory-root> <skills-target>]
 ```
 
-- `<memory-root>` is where `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/` live.
+- `<memory-root>` is where `MEMORY.md`, `MEMORY_*.md`, `dream_logs/`, and optional `skill_artifacts/<slug>/...` support material live.
 - `<skills-target>` is where your agent loads skills from, such as `~/.claude/skills` or `~/.codex/skills`.
 - With no path arguments, the installer uses `~/.rightmemory` and installs skills into both `~/.codex/skills` and `~/.claude/skills`.
 
@@ -204,7 +205,7 @@ Standalone mode is intentionally small:
 - Role-specific model settings are read from `<memory-root>/rightmemory.toml`.
 - One-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`, so normal agent callers can make separate process calls without losing multi-turn context; `.runtime/` is self-ignored so session state does not dirty memory commits.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
-- The installer creates a root `.gitignore` allowlist so git status only surfaces `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; existing user `.gitignore` files are preserved.
+- The installer creates a root `.gitignore` allowlist so git status surfaces `MEMORY.md`, `MEMORY_*.md`, `dream_logs/*.md`, and `skill_artifacts/<slug>/...`; existing user `.gitignore` files are preserved.
 - Async `update submit` calls for the same `--session` accumulate as pending candidates. The worker waits one hour from the latest submit, then sends the pending candidates to the update role as one batch; `pull` reports phase, pending candidates, current batch, and timing.
 - Multi-turn daemon context is preserved with Pydantic AI message history.
 - MCP support is not part of the MVP; it can be added later as an adapter over the same daemon.
@@ -257,7 +258,11 @@ Trace files include run, history-save, and tool events. They may include prompts
 
 ### Automatic Transcript Review
 
-RightMemory can scan idle provider chat sessions and run the standalone `reviewer` role. The normal background controls are:
+RightMemory can scan idle provider chat sessions and run the standalone `reviewer` role.
+
+The reviewer can distill reusable procedural lessons into memory-backed skill topics. These are normal RightMemory headings or detail files, with optional support material under `skill_artifacts/<slug>/...`; the reviewer does not edit installed Codex or Claude skill folders.
+
+The normal background controls are:
 
 ```bash
 rightmemory watch start
@@ -377,7 +382,9 @@ After install:
 ├── .git/
 ├── MEMORY.md
 ├── MEMORY_<slug>.md
-└── dream_logs/
+├── dream_logs/
+└── skill_artifacts/
+    └── <slug>/
 
 ~/.codex/skills/
 ├── rightmemory-schema.md
