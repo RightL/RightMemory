@@ -12,12 +12,22 @@ EXAMPLE_END = "rightmemory:example:end"
 
 class InstallScriptTests(unittest.TestCase):
     def test_memory_example_includes_skill_creation_guidance(self):
-        memory_example = (REPO_ROOT / "MEMORY.example.md").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
 
-        self.assertIn("Skill Creation Guidance {F#sample-skill-creation-guidance}", memory_example)
-        self.assertIn("skill_artifacts/sample-skill-creation-guidance/", memory_example)
-        self.assertIn("class-level", memory_example)
-        self.assertIn("support material", memory_example)
+            self._install(memory_root, skills_target)
+            memory = (memory_root / "MEMORY.md").read_text(encoding="utf-8")
+
+        block_start = memory.index(EXAMPLE_START)
+        block_end = memory.index(EXAMPLE_END, block_start)
+        managed_example = memory[block_start:block_end]
+
+        self.assertIn("Skill Creation Guidance {F#sample-skill-creation-guidance}", managed_example)
+        self.assertIn("skill_artifacts/sample-skill-creation-guidance/", managed_example)
+        self.assertIn("class-level", managed_example)
+        self.assertIn("support material", managed_example)
 
     def test_initial_install_copies_managed_example(self):
         with tempfile.TemporaryDirectory() as tempdir:
