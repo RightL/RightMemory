@@ -10,7 +10,7 @@ That makes semantic memory roles think about operational sync problems. The clea
 
 Keep routine sync automatic and cheap. Code should perform clean pull and push work directly. The sync AI role should run when Git state needs memory-aware reasoning, such as dirty memory files, pull conflicts, or push conflicts that require reconciliation.
 
-Semantic roles should validate and commit their own memory changes. They should not receive prompt instructions to pull, push, inspect dirty sync state, or repair sync conflicts.
+Semantic roles should validate and commit their own memory changes. They should not receive prompt instructions or tools for pull, push, dirty sync state inspection, or sync conflict repair.
 
 ## Role Boundary
 
@@ -21,7 +21,7 @@ Semantic roles should validate and commit their own memory changes. They should 
 - stage and commit the allowed files they changed;
 - report semantic anomalies they could not safely resolve.
 
-They do not need sync recovery instructions in their role prompts. They should also not be prompted to call `sync_push`. Normal agents do not spontaneously push or pull when prompts do not ask them to.
+They do not need sync recovery instructions in their role prompts, and they should not receive sync recovery tools. Normal agents do not spontaneously push or pull when prompts and tools keep that boundary clear.
 
 `sync-reconciler` owns sync repair:
 
@@ -60,21 +60,22 @@ Remove sync-operation instructions from `update`, `dreamer`, and `reviewer` prom
 - no pull, push, or dirty-state recovery guidance;
 - no reviewer-specific `git_discard` workflow.
 
-Common write-tool guidance should keep the allowed commit boundary, including `skill_artifacts/<slug>/...`, but should not frame `git_discard` as a normal semantic-role task.
+Common write-tool guidance for semantic roles should keep the allowed commit boundary, including `skill_artifacts/<slug>/...`, and should not mention sync recovery tools.
 
 The sync reconciler prompt should be the place that describes dirty-state and conflict repair. It can mention `git_discard` when discarding invalid or partial reviewer-owned or memory-owned changes is part of the supplied sync repair context.
 
 ## Tool Exposure
 
-The simplest implementation can keep `git_discard` available in the write tool set while removing it from semantic role prompts. If tool exposure becomes noisy or risky, a later pass can narrow `git_discard` to `sync-reconciler`, but that is not required for this design.
+Tool exposure should match role responsibility. `update`, `dreamer`, and `reviewer` should receive the tools they need for semantic memory work: read tools, exact file edits, validation, git status and diff for local commit hygiene, `git_add`, and `git_commit`. They should not receive `sync_push` or `git_discard`.
 
-`sync_push` should move out of normal semantic-role instructions. Runtime code can call the sync manager directly after a successful commit, so semantic agents do not need to know about push mechanics.
+`sync-reconciler` should receive the sync repair surface, including `sync_push` and `git_discard`, because that role owns dirty-state and conflict repair. Runtime code can call the sync manager directly after a successful semantic commit, so semantic agents do not need to know about push mechanics.
 
 ## Tests
 
 Focused tests should cover:
 
 - semantic role prompts no longer mention `sync_push`, dirty-state recovery, or pull/push work;
+- semantic roles are not given `sync_push` or `git_discard`;
 - sync reconciler prompt still owns conflict and dirty-state repair;
 - clean preflight and clean post-commit push complete in code without invoking the sync AI role;
 - dirty state before a semantic role prevents that role from starting and routes to sync reconciliation;
