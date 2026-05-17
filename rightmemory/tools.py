@@ -407,6 +407,15 @@ class MemoryTools:
                 head_path_types.get(path),
                 index_path_kinds.get(path),
             )
+            if (
+                head_path_types.get(path) is not None
+                and index_path_kinds.get(path) is None
+                and self._worktree_file_exists(path)
+            ):
+                raise ValueError(
+                    "cannot discard staged deletion with replacement; "
+                    f"preserve or explicitly stage the replacement first: {path}"
+                )
             if head_path_types.get(path) is None and index_path_kinds.get(path) is None:
                 raise ValueError(
                     "cannot discard untracked path with git_discard; "
@@ -421,7 +430,7 @@ class MemoryTools:
             if tracked_paths:
                 self._run_git(["git", "checkout", "--", *tracked_paths])
         else:
-            self._run_git(["git", "rm", "--cached", "--ignore-unmatch", "--", *relative_paths])
+            self._run_git(["git", "rm", "-f", "--cached", "--ignore-unmatch", "--", *relative_paths])
             tracked_paths = []
 
         for path in relative_paths:
@@ -958,6 +967,10 @@ class MemoryTools:
             resolved.unlink()
         elif resolved.exists():
             raise RuntimeError(f"cannot discard directory path: {path}")
+
+    def _worktree_file_exists(self, path: str) -> bool:
+        resolved = self.memory_root / path
+        return resolved.is_file() or resolved.is_symlink()
 
     def _loc(self, item: MemoryId) -> str:
         return f"{item.file.relative_to(self.memory_root)}:{item.line_number}"

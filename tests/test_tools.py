@@ -392,6 +392,27 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertEqual(artifact.read_text(encoding="utf-8"), "# Untracked artifact\n")
         self.assertEqual(self.tools.git_status(), status_before)
 
+    def test_git_discard_rejects_staged_deletion_with_recreated_skill_artifact(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        artifact_path = "skill_artifacts/skill-creator/references/authoring.md"
+        artifact = self.root / artifact_path
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("# Skill authoring\n", encoding="utf-8")
+        self._git("add", artifact_path)
+        self._git("commit", "-m", "initial artifact")
+        self._git("rm", artifact_path)
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("# Replacement artifact\n", encoding="utf-8")
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "cannot discard staged deletion with replacement"):
+            self.tools.git_discard([artifact_path])
+
+        self.assertEqual(self.tools.git_status(), status_before)
+        self.assertEqual(artifact.read_text(encoding="utf-8"), "# Replacement artifact\n")
+
     def test_git_discard_rejects_directory_path_before_git_mutation(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")
@@ -437,6 +458,20 @@ class MemoryToolsTests(unittest.TestCase):
         memory = self.root / "MEMORY.md"
         memory.write_text("# Domain\n", encoding="utf-8")
         self._git("add", "MEMORY.md")
+
+        result = self.tools.git_discard(["MEMORY.md"])
+
+        self.assertEqual(result, "discarded: MEMORY.md")
+        self.assertFalse(memory.exists())
+        self.assertEqual(self.tools.git_status(), "")
+
+    def test_git_discard_removes_staged_added_file_with_unstaged_edits_without_head(self):
+        self._git("init")
+        memory = self.root / "MEMORY.md"
+        memory.write_text("# Domain\n", encoding="utf-8")
+        self._git("add", "MEMORY.md")
+        memory.write_text("# Edited domain\n", encoding="utf-8")
+        self.assertEqual(self.tools.git_status(), "AM MEMORY.md")
 
         result = self.tools.git_discard(["MEMORY.md"])
 
