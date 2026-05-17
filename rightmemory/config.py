@@ -193,7 +193,11 @@ def _sync_config(section: object) -> SyncConfig:
         raise ValueError("[sync].enabled must be a boolean")
 
     stale_pull_after_hours = section.get("stale_pull_after_hours", DEFAULT_SYNC_STALE_PULL_HOURS)
-    if not isinstance(stale_pull_after_hours, int) or stale_pull_after_hours < 1:
+    if (
+        isinstance(stale_pull_after_hours, bool)
+        or not isinstance(stale_pull_after_hours, int)
+        or stale_pull_after_hours < 1
+    ):
         raise ValueError("[sync].stale_pull_after_hours must be a positive integer")
 
     return SyncConfig(

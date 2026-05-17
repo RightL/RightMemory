@@ -243,6 +243,21 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.stale_pull_after_hours, 12)
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_sync_config_rejects_bool_stale_pull_after_hours(self):
+        config_path = self._write_config(
+            """
+            [sync]
+            stale_pull_after_hours = true
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_sync_config()
+
+        self.assertIn("[sync].stale_pull_after_hours must be a positive integer", str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_sync_config_rejects_unknown_key(self):
         config_path = self._write_config(
             """
