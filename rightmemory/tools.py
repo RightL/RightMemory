@@ -45,6 +45,7 @@ NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*→\s*\[(.*?)\])?\s*$")
 EDGE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*([A-Za-z0-9_.-]+)\s*$")
 MEMORY_DETAIL_FILE_RE = re.compile(r"^MEMORY_[A-Za-z0-9_.-]+\.md$")
 DREAM_LOG_FILE_RE = re.compile(r"^dream_logs/[A-Za-z0-9_.-]+\.md$")
+SKILL_ARTIFACT_RE = re.compile(r"^skill_artifacts/[A-Za-z0-9_.-]+/.+")
 
 
 @dataclass(frozen=True)
@@ -358,16 +359,17 @@ class MemoryTools:
         return self._run_git(command)
 
     def git_add(self, paths: list[str]) -> str:
-        """Stage selected memory files or dream logs under the RightMemory root."""
+        """Stage selected memory, dream log, or skill artifact files under the RightMemory root."""
         if not paths:
             raise ValueError("paths must not be empty")
         relative_paths = [self._allowed_commit_path(path) for path in paths]
         self._run_git(["git", "add", "--", *relative_paths])
         return "staged: " + ", ".join(relative_paths)
 
-    def git_commit(self, message: str) -> str:
-        """Commit staged memory files and dream logs under the RightMemory root."""
-        message = self._validate_commit_message(message)
+    def git_commit(self, message: str, body: str | None = None) -> str:
+        """Commit staged memory, dream log, and skill artifact files under the RightMemory root."""
+        message = self._validate_commit_subject(message)
+        body = self._validate_commit_body(body)
         staged = self._run_git(["git", "diff", "--cached", "--name-only", "--"])
         staged_files = [line for line in staged.splitlines() if line]
         if not staged_files:
@@ -375,12 +377,23 @@ class MemoryTools:
         for path in staged_files:
             self._allowed_commit_path(path)
 
-        self._run_git(["git", "commit", "-m", message])
+        command = ["git", "commit", "-m", message]
+        if body is not None:
+            command.extend(["-m", body])
+        self._run_git(command)
         commit_hash = self._run_git(["git", "rev-parse", "--short", "HEAD"])
         status = self.git_status()
         if status:
             return f"committed {commit_hash}: {message}\n{status}"
         return f"committed {commit_hash}: {message}"
+
+    def git_discard(self, paths: list[str]) -> str:
+        """Discard tracked changes in selected memory, dream log, or skill artifact files."""
+        if not paths:
+            raise ValueError("paths must not be empty")
+        relative_paths = [self._allowed_commit_path(path) for path in paths]
+        self._run_git(["git", "checkout", "--", *relative_paths])
+        return "discarded: " + ", ".join(relative_paths)
 
     def validate_memory(self) -> str:
         """Validate RightMemory ids, graph edges, and protected pending-task sections."""
@@ -780,18 +793,33 @@ class MemoryTools:
             return relative_path
         if DREAM_LOG_FILE_RE.fullmatch(relative_path):
             return relative_path
-        raise ValueError(f"can only stage or commit MEMORY.md, MEMORY_*.md, or dream_logs/*.md: {relative_path}")
+        if SKILL_ARTIFACT_RE.fullmatch(relative_path):
+            return relative_path
+        raise ValueError(
+            "can only stage, commit, or discard MEMORY.md, MEMORY_*.md, dream_logs/*.md, "
+            f"or skill_artifacts/<slug>/...: {relative_path}"
+        )
 
-    def _validate_commit_message(self, message: str) -> str:
+    def _validate_commit_subject(self, message: str) -> str:
         message = message.strip()
         if not message:
             raise ValueError("commit message must not be empty")
         lines = message.splitlines()
         if len(lines) != 1:
-            raise ValueError("commit message must be a single line")
+            raise ValueError("commit subject must be a single line")
         if len(message) > COMMIT_MESSAGE_LINE_LIMIT:
-            raise ValueError(f"commit message must be <= {COMMIT_MESSAGE_LINE_LIMIT} characters")
+            raise ValueError(f"commit subject must be <= {COMMIT_MESSAGE_LINE_LIMIT} characters")
         return message
+
+    def _validate_commit_body(self, body: str | None) -> str | None:
+        if body is None:
+            return None
+        body = body.strip()
+        if not body:
+            return None
+        if "\x00" in body:
+            raise ValueError("commit body must not contain NUL bytes")
+        return body
 
     def _normalize_glob_pattern(self, pattern: str) -> str:
         raw_path = Path(pattern)

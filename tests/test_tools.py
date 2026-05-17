@@ -231,6 +231,23 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.tools.git_add(["rightmemory.toml"])
 
+    def test_git_add_accepts_skill_artifacts(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        artifact = self.root / "skill_artifacts" / "skill-creator" / "references" / "authoring.md"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("# Skill authoring\n", encoding="utf-8")
+        (self.root / "skill_artifacts" / "loose.md").parent.mkdir(exist_ok=True)
+        (self.root / "skill_artifacts" / "loose.md").write_text("not slug scoped\n", encoding="utf-8")
+
+        result = self.tools.git_add(["skill_artifacts/skill-creator/references/authoring.md"])
+
+        self.assertEqual(result, "staged: skill_artifacts/skill-creator/references/authoring.md")
+        self.assertIn("A  skill_artifacts/skill-creator/references/authoring.md", self.tools.git_status())
+        with self.assertRaises(ValueError):
+            self.tools.git_add(["skill_artifacts/loose.md"])
+
     def test_git_commit_rejects_non_memory_staged_files(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")
@@ -253,6 +270,54 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("committed", result)
         self.assertIn("memory: add domain", result)
         self.assertEqual(self.tools.git_status(), "")
+
+    def test_git_commit_accepts_optional_body(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        self.tools.git_add(["MEMORY.md"])
+
+        result = self.tools.git_commit(
+            "memory: review codex transcript s1",
+            body="Distilled skill signal: skill authoring guidance belongs in memory-backed skills.",
+        )
+        log = self._git("log", "-1", "--format=%B")
+
+        self.assertIn("committed", result)
+        self.assertIn("memory: review codex transcript s1", log)
+        self.assertIn("Distilled skill signal", log)
+
+    def test_git_discard_reverts_allowed_tracked_changes(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        memory = self.root / "MEMORY.md"
+        memory.write_text("# Domain\n", encoding="utf-8")
+        artifact = self.root / "skill_artifacts" / "skill-creator" / "references" / "authoring.md"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("# Skill authoring\n", encoding="utf-8")
+        self._git("add", "MEMORY.md", "skill_artifacts/skill-creator/references/authoring.md")
+        self._git("commit", "-m", "initial memory")
+        memory.write_text("# Broken\n", encoding="utf-8")
+        artifact.write_text("# Broken\n", encoding="utf-8")
+
+        result = self.tools.git_discard([
+            "MEMORY.md",
+            "skill_artifacts/skill-creator/references/authoring.md",
+        ])
+
+        self.assertEqual(result, "discarded: MEMORY.md, skill_artifacts/skill-creator/references/authoring.md")
+        self.assertEqual(memory.read_text(encoding="utf-8"), "# Domain\n")
+        self.assertEqual(artifact.read_text(encoding="utf-8"), "# Skill authoring\n")
+        self.assertEqual(self.tools.git_status(), "")
+
+    def test_git_discard_rejects_non_memory_paths(self):
+        self._git("init")
+        (self.root / "rightmemory.toml").write_text("[review]\n", encoding="utf-8")
+
+        with self.assertRaises(ValueError):
+            self.tools.git_discard(["rightmemory.toml"])
 
     def test_validate_memory_catches_duplicate_ids_and_dangling_edges(self):
         (self.root / "MEMORY.md").write_text(
@@ -394,3 +459,4 @@ class MemoryToolsTests(unittest.TestCase):
         )
         if process.returncode != 0:
             raise AssertionError(process.stderr)
+        return process.stdout.strip()

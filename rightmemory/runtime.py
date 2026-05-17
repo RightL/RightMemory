@@ -147,6 +147,7 @@ class RightMemoryRuntime:
             self._agent_tool(self.tools.rename_file),
             self._agent_tool(self.tools.git_status),
             self._agent_tool(self.tools.git_diff),
+            self._agent_tool(self.tools.git_discard),
             self._agent_tool(self.tools.git_add),
             self._agent_tool(self.tools.git_commit),
         ]
