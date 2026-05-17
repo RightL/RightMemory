@@ -30,7 +30,7 @@ Place memory in a clear tree. Use meaningful `##` or `###` headings for related 
 
 ## Implicit And Candidate Memory
 
-- Users often express preferences, workflow expectations, and corrections indirectly. They may say what to do next instead of saying "I prefer this in the future."
+- Users often express preferences, workflow expectations, and corrections indirectly. They may just say use worktree instead of saying "I prefer using worktree at some situation in the future."
 - Treat implicit signals as possible memory, not as proof. A single session may be enough to save candidate memory when the signal would be useful later but is not yet proven durable.
 - Mark candidate memory explicitly in the memory text, for example with `Candidate:` at the start of the description. Remove that marker when promoting the memory.
 - If existing candidate memory is supported by the current session, promote it to settled memory.
