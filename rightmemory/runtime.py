@@ -9,9 +9,11 @@ from .config import RuntimeConfig
 from .debug import DebugTrace
 from .prompt import build_instructions
 from .session import MemoryWriteLock, MessageSessionStore
+from .sync import SyncManager
 from .tools import MemoryTools
 
 
+SYNC_PREFLIGHT_ROLES = {"dreamer", "reviewer", "update"}
 SUPPORTED_MODEL_SETTINGS = {
     "max_tokens",
     "temperature",
@@ -37,14 +39,16 @@ class RightMemoryRuntime:
         self.sessions = MessageSessionStore(config.memory_root, config.role)
         self._message_history: list[Any] = []
         self._active_trace: DebugTrace | None = None
+        self._sync_manager: SyncManager | None = None
         self.agent = self._build_agent()
 
     def run_turn(self, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
+        prepared_message = self._prepare_message(message)
         with self._memory_write_lock():
             result = self.agent.run_sync(
-                message,
+                prepared_message,
                 message_history=self._message_history or None,
                 model_settings=self._model_settings(),
             )
@@ -57,6 +61,7 @@ class RightMemoryRuntime:
     def run_session_turn(self, session_id: str, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
+        prepared_message = self._prepare_message(message)
         with self._debug_trace(session_id) as trace:
             self._trace(
                 "run_started",
@@ -72,7 +77,7 @@ class RightMemoryRuntime:
                         self._trace("history_loaded", message_count=len(history or []))
                         self._trace("model_started")
                         result = self.agent.run_sync(
-                            message,
+                            prepared_message,
                             message_history=history,
                             model_settings=self._model_settings(),
                         )
@@ -87,6 +92,17 @@ class RightMemoryRuntime:
             self._trace("run_finished", output=str(output if output is not None else result))
         output = getattr(result, "output", None)
         return str(output if output is not None else result)
+
+    def _sync(self) -> SyncManager:
+        if self._sync_manager is None:
+            self._sync_manager = SyncManager(self.config.sync)
+        return self._sync_manager
+
+    def _prepare_message(self, message: str) -> str:
+        if self.config.role not in SYNC_PREFLIGHT_ROLES or not self.config.sync.enabled:
+            return message
+        result = self._sync().preflight()
+        return f"{result.context_block()}\nCaller message:\n{message}"
 
     def _memory_write_lock(self):
         if self.config.role == "retrieve":

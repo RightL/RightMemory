@@ -396,6 +396,45 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertFalse((Path(self.tempdir.name) / ".runtime" / "memory.lock").exists())
 
+    def test_update_turn_includes_runtime_sync_context(self):
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
+        )
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.SyncManager") as manager_class,
+        ):
+            manager_class.return_value.preflight.return_value.context_block.return_value = (
+                "Runtime sync context\n- status: synced\n"
+            )
+            runtime = RightMemoryRuntime(config)
+            runtime.run_session_turn("agent-session", "remember one")
+
+        message = runtime.agent.calls[0]["message"]
+        self.assertIn("Runtime sync context", message)
+        self.assertIn("remember one", message)
+
+    def test_retrieve_turn_does_not_run_sync_preflight(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
+        )
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.SyncManager") as manager_class,
+        ):
+            runtime = RightMemoryRuntime(config)
+            runtime.run_session_turn("agent-session", "find one")
+
+        manager_class.assert_not_called()
+
     def test_run_session_turn_preserves_message_history_on_disk(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
 
@@ -732,6 +771,12 @@ class PromptTests(unittest.TestCase):
         force_include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
         self.assertEqual(force_include["skills"], "rightmemory/skills")
         self.assertEqual(force_include["rightmemory/prompts"], "rightmemory/prompts")
+
+
+def load_sync_config_for_test(memory_root: Path, enabled: bool):
+    from rightmemory.config import SyncConfig
+
+    return SyncConfig(memory_root=memory_root, enabled=enabled)
 
 
 if __name__ == "__main__":
