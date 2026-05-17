@@ -4,12 +4,12 @@ from importlib import resources
 from pathlib import Path
 
 
-ROLE_PROMPTS = {"dreamer", "retrieve", "reviewer", "update"}
+ROLE_PROMPTS = {"dreamer", "retrieve", "reviewer", "sync-reconciler", "update"}
 
 
 def build_instructions(memory_root: Path, role: str) -> str:
     if role not in ROLE_PROMPTS:
-        raise ValueError("role must be one of: dreamer, retrieve, reviewer, update")
+        raise ValueError(f"role must be one of: {_role_list()}")
     schema = _read_prompt_file("skills/rightmemory-schema.md")
     role_guidance = _read_prompt_file(f"prompts/{role}.md")
     command_guidance = _command_guidance(role)
@@ -71,7 +71,14 @@ def _command_guidance(role: str) -> str:
             "JSON in the caller message as the review input.\n"
             "- Review the whole normalized session for durable memory."
         )
-    raise ValueError("role must be one of: dreamer, retrieve, reviewer, update")
+    if role == "sync-reconciler":
+        return (
+            "- The global memory sync workflow selected sync-reconciler behavior. Treat the caller message as "
+            "RightMemory sync conflicts to reconcile into the memory file set.\n"
+            "- Resolve conflicts by preserving coherent durable memory from both sides when the evidence supports "
+            "it, narrowing or marking uncertainty rather than dropping durable information."
+        )
+    raise ValueError(f"role must be one of: {_role_list()}")
 
 
 def _tool_guidance(role: str) -> str:
@@ -110,6 +117,10 @@ def _read_prompt_file(relative_path: str) -> str:
     if source_tree.exists():
         return source_tree.read_text(encoding="utf-8")
     raise FileNotFoundError(f"required prompt file not found: {packaged} or {source_tree}")
+
+
+def _role_list() -> str:
+    return ", ".join(sorted(ROLE_PROMPTS))
 
 
 def _repo_root() -> Path:

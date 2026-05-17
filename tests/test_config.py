@@ -216,6 +216,23 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.since_days, 3)
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_review_config_allows_sync_section(self):
+        config_path = self._write_config(
+            """
+            [sync]
+            enabled = true
+
+            [review]
+            idle_seconds = 7200
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_review_config()
+
+        self.assertEqual(config.idle_seconds, 7200)
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_sync_config_defaults_to_disabled(self):
         config_path = self._write_config("")
 
@@ -693,6 +710,19 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("memory-curator", prompt)
         self.assertNotIn("memory-dreamer", prompt)
         self.assertNotIn("rightmemory-schema.md", prompt)
+        self.assertNotIn("{{MEMORY_ROOT}}", prompt)
+        self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+
+    def test_sync_reconciler_prompt_has_role_prompt(self):
+        prompt = build_instructions(Path("/memory"), "sync-reconciler")
+
+        self.assertIn("The only allowed root directory is /memory", prompt)
+        self.assertIn("sync-reconciler", prompt)
+        self.assertIn("RightMemory sync conflicts", prompt)
+        self.assertIn("preserve coherent durable memory from both sides", prompt)
+        self.assertIn("Sync Reconciler Role", prompt)
+        self.assertIn("RightMemory Schema", prompt)
+        self.assertIn("embedded schema above", prompt)
         self.assertNotIn("{{MEMORY_ROOT}}", prompt)
         self.assertNotIn("{{SKILLS_ROOT}}", prompt)
 
