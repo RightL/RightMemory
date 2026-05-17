@@ -50,6 +50,14 @@ Standalone mode exposes narrow filesystem and git tools instead of arbitrary Pyt
 
 Standalone commit tools may stage and commit only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md` because update and dreamer roles need to preserve memory edits and dream reports without gaining arbitrary repository-write authority. The retrieve role does not receive write or git tools at all, so retrieval remains a lower-authority fast path. Unrelated untracked files remain visible through status but outside the stage/commit allowlist so model-driven commits do not sweep up local config, backups, or test artifacts.
 
+### Global memory sync
+
+Global memory sync remains local-first: every device keeps a complete memory root, and Git provides distributed transport between those roots. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
+
+Runtime code owns the deterministic sync work before asking a model to reason. Fetching, merging, freshness checks, state recording, and push retry after a remote race are mechanical Git operations, so they happen before role prompts enter the loop and are summarized as compact Runtime sync context for write-capable roles. Retrieval keeps the fast local path by default.
+
+Memory roles handle semantic conflict resolution because Markdown memory conflicts require durability and schema judgment, not just Git mechanics. The reconciled result may need to preserve facts from both sides, repair graph references, validate the file set, commit the resolved state, and push again. `sync-reconciler` stays separate from dreamer because scheduled sync conflict repair is a narrow maintenance responsibility, while dreamer owns broader consolidation and restructuring.
+
 ### Standalone tool retry behavior
 
 Recoverable tool mistakes, such as stale patch context or invalid read ranges, are returned to the model as retry prompts because the model can usually fix them by searching or re-reading current file context. Hard daemon errors are reserved for problems the model cannot reasonably repair inside the same turn, which keeps caller-visible failures focused on runtime or infrastructure issues.

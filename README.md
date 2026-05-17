@@ -263,7 +263,7 @@ rightmemory watch stop
 rightmemory watch restart
 ```
 
-By default these commands manage both review and dreamer watchers. Pass `review` or `dreamer` when you want one role: `rightmemory watch start review`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.
+By default these commands manage review and dreamer watchers, plus sync when `[sync].enabled` is true. Pass a target name when you want one role: `rightmemory watch start review`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.
 
 The lower-level review loop is still available:
 
@@ -318,6 +318,24 @@ The underlying `rightmemory dreamer watch` process runs a dream cycle when no pr
 Review and dreamer watchers hold per-role watch locks under `.runtime/watch/`, so a duplicate watcher exits instead of creating a competing background loop. The write phase still uses the shared memory write lock, so review, update, and dreamer roles do not edit memory files at the same time.
 
 `rightmemory watch stop` sends a graceful terminate signal. A sleeping watcher exits within a few seconds; a watcher doing model work finishes the current cycle first. When `install.sh` finishes, it updates `<memory-root>/.runtime/install.stamp`. Watchers check that stamp between runs and while sleeping; if it changes, they re-exec themselves with the same arguments.
+
+### Automatic Global Sync
+
+RightMemory can keep one memory root shared across devices by using a normal private Git remote. GitHub private repositories are the easiest hosted setup, and any SSH or HTTPS Git remote works once the memory repo has an upstream branch.
+
+Enable sync in `<memory-root>/rightmemory.toml`:
+
+```toml
+[sync]
+enabled = true
+stale_pull_after_hours = 24
+```
+
+When sync is enabled, write-capable roles run deterministic Git preflight before model work. The runtime checks the upstream, fetches and merges when it can, records sync state under `.runtime/`, and gives the role a compact Runtime sync context describing the current status and affected files. After the role commits memory changes, it can call `sync_push` to publish committed memory changes and retry after a remote race. Retrieval stays local by default for speed.
+
+Managed watch includes a `sync` target. `rightmemory watch start` starts it when sync is enabled, and `rightmemory watch start sync` runs that target by itself. The sync watcher pulls when the last successful pull is older than `stale_pull_after_hours`; clean pulls and fresh checks stay deterministic and do not call a model.
+
+If a scheduled pull creates a memory conflict, RightMemory invokes `sync-reconciler` with the conflicted files and current sync state. Active write roles resolve conflicts they encounter during their own write before pushing the resolved memory.
 
 Run it from this repository during development:
 
