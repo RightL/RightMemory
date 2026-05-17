@@ -381,7 +381,7 @@ class MemoryTools:
         """Commit staged memory, dream log, and skill artifact files under the RightMemory root."""
         message = self._validate_commit_subject(message)
         body = self._validate_commit_body(body)
-        staged = self._run_git(["git", "diff", "--cached", "--name-only", "--"])
+        staged = self._run_git(["git", "diff", "--cached", "--name-only", "--no-renames", "--"])
         staged_files = [line for line in staged.splitlines() if line]
         if not staged_files:
             raise ValueError("no staged changes to commit")
@@ -425,7 +425,8 @@ class MemoryTools:
             ):
                 raise ValueError(
                     "cannot discard staged deletion with replacement; "
-                    f"preserve or explicitly stage the replacement first: {path}"
+                    "preserve, move, or copy the replacement elsewhere, "
+                    f"or commit it separately before discarding: {path}"
                 )
             if head_path_types.get(path) is None and index_path_kinds.get(path) is None:
                 raise ValueError(
