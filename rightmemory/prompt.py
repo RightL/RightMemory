@@ -138,6 +138,7 @@ def _tool_guidance(role: str) -> str:
     guidance = (
         "- Use the provided tools for `read`, `grep`, `glob`, restricted `read_command`, outline, exact file "
         "edits, file creation, file deletion, file renames, git inspection, and validation.\n"
+        "- Use `validate_memory` to run a graph and schema sanity pass before finishing memory edits.\n"
         "- `read_command` accepts common read-only shell forms such as `cat path`, `sed -n 'X,Yp' path`, "
         "`rg pattern`, `rg --files`, `git status --short`, and `git diff`. It does not run a general shell.\n"
         "- For edits to existing file content, use `edit_file(path, old_string, new_string, replace_all=false)`. "

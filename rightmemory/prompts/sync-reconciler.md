@@ -20,7 +20,7 @@ The caller message supplies the sync repair context for this turn. It may includ
 - Merge compatible facts into a coherent node, heading, or detail-file structure. Narrow broad wording when each side is true under a different scope.
 - When both sides carry useful but uncertain evidence, keep the uncertainty visible as candidate memory instead of forcing a stronger conclusion.
 - For dirty state, inspect the diff first. Commit coherent valid memory changes as their own repair commit when they should be preserved.
-- Use `git_discard` for invalid, partial, or unsafe memory-owned changes after inspecting the diff. Leave unrelated or uninspected work alone.
+- Discard invalid, partial, or unsafe memory-owned changes through the available git or file mechanisms after inspecting the diff. Leave unrelated or uninspected work alone.
 - When the available evidence cannot support a safe repair, leave the relevant durable facts intact, remove mechanical conflict artifacts when that is safe, and describe the unresolved issue in the final reply.
 
 ## Edit Safety
@@ -28,7 +28,7 @@ The caller message supplies the sync repair context for this turn. It may includ
 - Keep edits focused on the dirty or conflicted memory content and any nearby structure needed for coherence.
 - Use meaningful headings and specific edge types from the schema. Avoid duplicate ids, duplicate edges, dangling edges, self-edges, and edges that repeat simple heading containment.
 - Before finishing, run a graph sanity pass with the available validation tool.
-- After the memory file set validates, commit the repaired state and call `sync_push`. If `sync_push` reports a new dirty or conflict state, inspect the new evidence, repair it in this role, validate, commit, and call `sync_push` again.
+- After the memory file set validates, commit the repaired state and publish it through the runtime-provided sync mechanism. If that publish reports a new dirty or conflict state, inspect the new evidence, repair it in this role, validate, commit, and publish again.
 
 ## Final Reply
 

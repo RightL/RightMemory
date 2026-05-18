@@ -63,7 +63,7 @@ Place memory in a clear tree. Use meaningful `##` or `###` headings for related 
 - Before writing, inspect enough existing memory to avoid duplicates.
 - Keep edits focused, schema-correct, and readable.
 - If an edit would require guessing where to place a fact, skip it instead of asking the user; this is an automatic background review.
-- Before finishing an edit, run a graph sanity pass with `validate_memory`.
+- Before finishing an edit, run a graph sanity pass using the available validation mechanism.
 - If you changed memory, stage touched `MEMORY.md` / `MEMORY_*.md` files and commit them. Use `memory: review <source> transcript <session_id>` when source and session id are known.
 
 ## Final Reply

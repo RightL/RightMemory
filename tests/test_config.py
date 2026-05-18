@@ -969,6 +969,25 @@ class PromptTests(unittest.TestCase):
 
         self.assertIn("role must be one of:", str(caught.exception))
 
+    def test_cli_agent_reviewer_prompt_does_not_expose_standalone_tool_names(self):
+        prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), "reviewer")
+
+        self.assertIn("Reviewer Role", prompt)
+        self.assertIn("graph sanity", prompt)
+        self.assertNotIn("validate_memory", prompt)
+        self.assertNotIn("git_discard", prompt)
+        self.assertNotIn("sync_push", prompt)
+
+    def test_cli_agent_sync_reconciler_prompt_does_not_expose_standalone_tool_names(self):
+        prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), "sync-reconciler")
+
+        self.assertIn("Sync Reconciler Role", prompt)
+        self.assertIn("available validation", prompt)
+        self.assertIn("runtime-provided sync", prompt)
+        self.assertNotIn("validate_memory", prompt)
+        self.assertNotIn("git_discard", prompt)
+        self.assertNotIn("sync_push", prompt)
+
     def test_retrieve_prompt_has_role_prompt_and_retrieve_command_behavior(self):
         prompt = build_instructions(Path("/home/example/.rightmemory"), "retrieve")
 
@@ -1053,6 +1072,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("compare assistant responses with existing memory", prompt)
         self.assertIn("Avoid broad guesses", prompt)
         self.assertIn("Review the session as a whole", prompt)
+        self.assertIn("validate_memory", prompt)
         self.assertIn("commit them", prompt)
         self.assertIn("Choose the edit shape that makes memory clearer", prompt)
         self.assertIn("Place memory in a clear tree", prompt)
