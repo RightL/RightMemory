@@ -132,6 +132,23 @@ The stored mapping should include provider name, provider session id, role,
 RightMemory session id, created/updated timestamps, and enough diagnostic data
 to explain a failed resume.
 
+## Transcript Review Boundary
+
+CLI-agent provider sessions are internal RightMemory work. The automatic
+transcript reviewer should skip them instead of treating them as ordinary Codex
+or Claude sessions.
+
+The executor should record each provider session id it creates under `.runtime/`
+with enough metadata for the review scanner to recognize it later. The scanner
+should consult that registry before selecting a provider transcript for review.
+For Claude Code, the provider id is the deterministic UUID associated with the
+RightMemory role/session pair. For Codex, the provider id is the `thread_id`
+returned by the first `codex exec --json` call.
+
+This prevents internal retrieve, update, dreamer, reviewer, and sync-reconciler
+turns from becoming review inputs, while leaving normal user Codex and Claude
+sessions eligible for transcript review.
+
 ## Prompt Composition
 
 CLI-agent prompts should be thin. Codex and Claude Code already know how to use
@@ -227,6 +244,7 @@ Unit tests should cover deterministic RightMemory behavior:
 - command construction for first and resumed Claude Code calls;
 - JSON output parsing for Codex and Claude Code;
 - provider session mapping persists by role/session;
+- review scanning skips provider sessions recorded as internal CLI-agent work;
 - `retrieve`, `update`, `dreamer`, `reviewer`, and `sync-reconciler` can select
   the CLI-agent executor;
 - standalone Pydantic AI tests keep using the existing executor path;
