@@ -7,6 +7,32 @@ from pathlib import Path
 ROLE_PROMPTS = {"dreamer", "retrieve", "reviewer", "sync-reconciler", "update"}
 
 
+def build_cli_agent_instructions(memory_root: Path, role: str) -> str:
+    if role not in ROLE_PROMPTS:
+        raise ValueError(f"role must be one of: {_role_list()}")
+    schema = _read_prompt_file("skills/rightmemory-schema.md")
+    role_guidance = _read_prompt_file(f"prompts/{role}.md")
+
+    return f"""You are RightMemory {role} mode.
+
+Work in the configured memory root. The configured memory root is {memory_root}.
+
+Memory store:
+- MEMORY.md
+- MEMORY_*.md
+- dream_logs/
+
+Follow the canonical role instructions below. Use the embedded schema as the schema source of truth.
+Return a concise final reply.
+
+RightMemory schema:
+{schema}
+
+Role instructions:
+{role_guidance}
+"""
+
+
 def build_instructions(memory_root: Path, role: str) -> str:
     if role not in ROLE_PROMPTS:
         raise ValueError(f"role must be one of: {_role_list()}")

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.config import AgentCliConfig, RuntimeConfig, load_config, load_review_config, load_sync_config
-from rightmemory.prompt import build_instructions
+from rightmemory.prompt import build_cli_agent_instructions, build_instructions
 from rightmemory.runtime import RightMemoryRuntime, build_model
 from rightmemory.sync import SyncResult
 
@@ -940,6 +940,35 @@ class RuntimeTests(unittest.TestCase):
 
 
 class PromptTests(unittest.TestCase):
+    def test_cli_agent_prompt_is_thin_and_embeds_role_prompt(self):
+        prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), "update")
+
+        self.assertIn("You are RightMemory update mode.", prompt)
+        self.assertIn("configured memory root is /home/example/.rightmemory", prompt)
+        self.assertIn("MEMORY.md", prompt)
+        self.assertIn("MEMORY_*.md", prompt)
+        self.assertIn("dream_logs/", prompt)
+        self.assertIn("Follow the canonical role instructions below.", prompt)
+        self.assertIn("Return a concise final reply.", prompt)
+        self.assertIn("RightMemory Schema", prompt)
+        self.assertIn("Update Role", prompt)
+        self.assertIn("candidate memory", prompt)
+        self.assertNotIn("Command-selected behavior", prompt)
+        self.assertNotIn("Standalone adaptation", prompt)
+        self.assertNotIn("read_command", prompt)
+        self.assertNotIn("edit_file(path, old_string, new_string", prompt)
+        self.assertNotIn("create_file", prompt)
+        self.assertNotIn("Pydantic AI", prompt)
+        self.assertNotIn("provider tool", prompt)
+        self.assertNotIn("{{MEMORY_ROOT}}", prompt)
+        self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+
+    def test_cli_agent_prompt_rejects_unknown_role(self):
+        with self.assertRaises(ValueError) as caught:
+            build_cli_agent_instructions(Path("/home/example/.rightmemory"), "curator")
+
+        self.assertIn("role must be one of:", str(caught.exception))
+
     def test_retrieve_prompt_has_role_prompt_and_retrieve_command_behavior(self):
         prompt = build_instructions(Path("/home/example/.rightmemory"), "retrieve")
 
