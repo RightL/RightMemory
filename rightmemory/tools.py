@@ -361,26 +361,93 @@ class MemoryTools:
         """Stage selected memory files or dream logs under the RightMemory root."""
         if not paths:
             raise ValueError("paths must not be empty")
-        relative_paths = [self._allowed_commit_path(path) for path in paths]
+        relative_paths = []
+        has_head = self._git_has_head()
+        for path in paths:
+            relative_path = self._allowed_commit_path(path)
+            head_path_type = self._git_path_type_in_head(relative_path) if has_head else None
+            index_path_kind = self._git_path_kind_in_index(relative_path)
+            self._reject_stage_directory_path(
+                relative_path,
+                head_path_type,
+                index_path_kind,
+            )
+            relative_paths.append(relative_path)
         self._run_git(["git", "add", "--", *relative_paths])
         return "staged: " + ", ".join(relative_paths)
 
-    def git_commit(self, message: str) -> str:
+    def git_commit(self, message: str, body: str | None = None) -> str:
         """Commit staged memory files and dream logs under the RightMemory root."""
-        message = self._validate_commit_message(message)
-        staged = self._run_git(["git", "diff", "--cached", "--name-only", "--"])
+        message = self._validate_commit_subject(message)
+        body = self._validate_commit_body(body)
+        staged = self._run_git(["git", "diff", "--cached", "--name-only", "--no-renames", "--"])
         staged_files = [line for line in staged.splitlines() if line]
         if not staged_files:
             raise ValueError("no staged changes to commit")
         for path in staged_files:
             self._allowed_commit_path(path)
 
-        self._run_git(["git", "commit", "-m", message])
+        command = ["git", "commit", "-m", message]
+        if body is not None:
+            command.extend(["-m", body])
+        self._run_git(command)
         commit_hash = self._run_git(["git", "rev-parse", "--short", "HEAD"])
         status = self.git_status()
         if status:
             return f"committed {commit_hash}: {message}\n{status}"
         return f"committed {commit_hash}: {message}"
+
+    def git_discard(self, paths: list[str]) -> str:
+        """Discard selected memory file or dream log changes."""
+        if not paths:
+            raise ValueError("paths must not be empty")
+        relative_paths = [self._allowed_commit_path(path) for path in paths]
+        has_head = self._git_has_head()
+        head_path_types: dict[str, str | None] = {}
+        if has_head:
+            head_path_types = {
+                path: self._git_path_type_in_head(path) for path in relative_paths
+            }
+        index_path_kinds = {
+            path: self._git_path_kind_in_index(path) for path in relative_paths
+        }
+        for path in relative_paths:
+            self._reject_discard_directory_path(
+                path,
+                head_path_types.get(path),
+                index_path_kinds.get(path),
+            )
+            if (
+                head_path_types.get(path) is not None
+                and index_path_kinds.get(path) is None
+                and self._worktree_file_exists(path)
+            ):
+                raise ValueError(
+                    "cannot discard staged deletion with replacement; "
+                    "preserve, move, or copy the replacement elsewhere, "
+                    f"or commit it separately before discarding: {path}"
+                )
+            if head_path_types.get(path) is None and index_path_kinds.get(path) is None:
+                raise ValueError(
+                    "cannot discard untracked path with git_discard; "
+                    f"use delete_file for plain untracked cleanup: {path}"
+                )
+
+        if has_head:
+            tracked_paths = [
+                path for path in relative_paths if head_path_types.get(path) is not None
+            ]
+            self._run_git(["git", "reset", "--", *relative_paths])
+            if tracked_paths:
+                self._run_git(["git", "checkout", "--", *tracked_paths])
+        else:
+            self._run_git(["git", "rm", "-f", "--cached", "--ignore-unmatch", "--", *relative_paths])
+            tracked_paths = []
+
+        for path in relative_paths:
+            if path not in tracked_paths and index_path_kinds.get(path) is not None:
+                self._unlink_worktree_file(path)
+        return "discarded: " + ", ".join(relative_paths)
 
     def validate_memory(self) -> str:
         """Validate RightMemory ids, graph edges, and protected pending-task sections."""
@@ -486,6 +553,9 @@ class MemoryTools:
         return self._read_raw_file(args[3], start, end)
 
     def _read_command_rg(self, args: list[str]) -> str:
+        args, explicit_path_count, expanded_path_count = self._expand_rg_path_globs(args)
+        if explicit_path_count and expanded_path_count == 0:
+            return "no matches"
         self._validate_read_command_paths(args[1:])
         if "--files" not in args and "--with-filename" not in args and "--no-filename" not in args:
             args = [args[0], "--with-filename", *args[1:]]
@@ -501,6 +571,86 @@ class MemoryTools:
             raise RuntimeError(f"rg command failed: {detail}")
         output = process.stdout.strip()
         return self._cap_command_output(output) if output else "no matches"
+
+    def _expand_rg_path_globs(self, args: list[str]) -> tuple[list[str], int, int]:
+        path_indices = self._rg_path_token_indices(args)
+        if not path_indices:
+            return args, 0, 0
+
+        expanded: list[str] = []
+        explicit_path_count = 0
+        expanded_path_count = 0
+        for index, token in enumerate(args):
+            if index not in path_indices:
+                expanded.append(token)
+                continue
+            explicit_path_count += 1
+            if not self._has_glob_meta(token):
+                expanded.append(token)
+                expanded_path_count += 1
+                continue
+            matches = self._expand_glob_path_token(token)
+            expanded.extend(matches)
+            expanded_path_count += len(matches)
+        return expanded, explicit_path_count, expanded_path_count
+
+    def _rg_path_token_indices(self, args: list[str]) -> set[int]:
+        option_takes_value = {"-g", "--glob", "--iglob", "--type", "-t", "-e", "--regexp", "-f", "--file"}
+        pattern_options = {"-e", "--regexp", "-f", "--file"}
+        path_indices: set[int] = set()
+        has_pattern = "--files" in args
+        skip_next = False
+        end_options = False
+
+        for index, token in enumerate(args[1:], start=1):
+            if skip_next:
+                skip_next = False
+                continue
+            if not end_options and token == "--":
+                end_options = True
+                continue
+            if not end_options and token in option_takes_value:
+                if token in pattern_options:
+                    has_pattern = True
+                skip_next = True
+                continue
+            if not end_options and self._rg_option_has_attached_value(token):
+                if token.startswith(("-e", "--regexp=", "-f", "--file=")):
+                    has_pattern = True
+                continue
+            if not end_options and token.startswith("-"):
+                continue
+
+            if has_pattern:
+                path_indices.add(index)
+            else:
+                has_pattern = True
+        return path_indices
+
+    def _rg_option_has_attached_value(self, token: str) -> bool:
+        return (
+            token.startswith("--glob=")
+            or token.startswith("--iglob=")
+            or token.startswith("--type=")
+            or token.startswith("--regexp=")
+            or token.startswith("--file=")
+            or (len(token) > 2 and token[:2] in {"-g", "-t", "-e", "-f"})
+        )
+
+    def _has_glob_meta(self, token: str) -> bool:
+        return any(char in token for char in "*?[")
+
+    def _expand_glob_path_token(self, token: str) -> list[str]:
+        pattern = self._normalize_glob_pattern(token)
+        matches = [
+            path.relative_to(self.memory_root).as_posix()
+            for path in self.memory_root.glob(pattern)
+            if (path.is_file() or path.is_dir()) and self._is_under_root(path)
+        ]
+        matches.sort()
+        if len(matches) > MAX_LIST_FILES:
+            raise ValueError(f"pattern matched more than {MAX_LIST_FILES} paths; use a narrower pattern")
+        return matches
 
     def _read_command_git(self, args: list[str]) -> str:
         if args == ["git", "status", "--short"]:
@@ -780,18 +930,30 @@ class MemoryTools:
             return relative_path
         if DREAM_LOG_FILE_RE.fullmatch(relative_path):
             return relative_path
-        raise ValueError(f"can only stage or commit MEMORY.md, MEMORY_*.md, or dream_logs/*.md: {relative_path}")
+        raise ValueError(f"can only stage, commit, or discard MEMORY.md, MEMORY_*.md, or dream_logs/*.md: {relative_path}")
 
-    def _validate_commit_message(self, message: str) -> str:
+    def _validate_commit_subject(self, message: str) -> str:
         message = message.strip()
         if not message:
             raise ValueError("commit message must not be empty")
+        if "\x00" in message:
+            raise ValueError("commit subject must not contain NUL bytes")
         lines = message.splitlines()
         if len(lines) != 1:
-            raise ValueError("commit message must be a single line")
+            raise ValueError("commit subject must be a single line")
         if len(message) > COMMIT_MESSAGE_LINE_LIMIT:
-            raise ValueError(f"commit message must be <= {COMMIT_MESSAGE_LINE_LIMIT} characters")
+            raise ValueError(f"commit subject must be <= {COMMIT_MESSAGE_LINE_LIMIT} characters")
         return message
+
+    def _validate_commit_body(self, body: str | None) -> str | None:
+        if body is None:
+            return None
+        body = body.strip()
+        if not body:
+            return None
+        if "\x00" in body:
+            raise ValueError("commit body must not contain NUL bytes")
+        return body
 
     def _normalize_glob_pattern(self, pattern: str) -> str:
         raw_path = Path(pattern)
@@ -832,6 +994,84 @@ class MemoryTools:
             detail = process.stderr.strip() or process.stdout.strip()
             raise RuntimeError(f"git command failed: {detail}")
         return process.stdout.strip()
+
+    def _git_has_head(self) -> bool:
+        process = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=self.memory_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return process.returncode == 0
+
+    def _git_path_type_in_head(self, path: str) -> str | None:
+        process = subprocess.run(
+            ["git", "cat-file", "-t", f"HEAD:{path}"],
+            cwd=self.memory_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if process.returncode != 0:
+            return None
+        return process.stdout.strip()
+
+    def _git_path_kind_in_index(self, path: str) -> str | None:
+        process = subprocess.run(
+            ["git", "ls-files", "-z", "--", path],
+            cwd=self.memory_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if process.returncode != 0:
+            detail = process.stderr.strip() or process.stdout.strip()
+            raise RuntimeError(f"git command failed: {detail}")
+        entries = [entry for entry in process.stdout.split("\0") if entry]
+        if not entries:
+            return None
+        if any(entry == path for entry in entries):
+            return "file"
+        prefix = path.rstrip("/") + "/"
+        if any(entry.startswith(prefix) for entry in entries):
+            return "tree"
+        return None
+
+    def _reject_discard_directory_path(
+        self,
+        path: str,
+        head_path_type: str | None,
+        index_path_kind: str | None,
+    ) -> None:
+        resolved = self.memory_root / path
+        if resolved.exists() and not (resolved.is_file() or resolved.is_symlink()):
+            raise ValueError(f"cannot discard directory path: {path}")
+        if head_path_type == "tree" or index_path_kind == "tree":
+            raise ValueError(f"cannot discard directory path: {path}")
+
+    def _reject_stage_directory_path(
+        self,
+        path: str,
+        head_path_type: str | None = None,
+        index_path_kind: str | None = None,
+    ) -> None:
+        resolved = self.memory_root / path
+        if resolved.exists() and not (resolved.is_file() or resolved.is_symlink()):
+            raise ValueError(f"cannot stage directory path: {path}")
+        if head_path_type == "tree" or index_path_kind == "tree":
+            raise ValueError(f"cannot stage directory path: {path}")
+
+    def _unlink_worktree_file(self, path: str) -> None:
+        resolved = self.memory_root / path
+        if resolved.is_file() or resolved.is_symlink():
+            resolved.unlink()
+        elif resolved.exists():
+            raise RuntimeError(f"cannot discard directory path: {path}")
+
+    def _worktree_file_exists(self, path: str) -> bool:
+        resolved = self.memory_root / path
+        return resolved.is_file() or resolved.is_symlink()
 
     def _loc(self, item: MemoryId) -> str:
         return f"{item.file.relative_to(self.memory_root)}:{item.line_number}"

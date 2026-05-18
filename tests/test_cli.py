@@ -580,7 +580,7 @@ class JsonRequestTests(unittest.TestCase):
             ):
                 manager_class.return_value.memory_root = memory_root
                 manager_class.return_value.background_pull.side_effect = background_pull
-                manager_class.return_value.conflict_message.return_value = "resolve MEMORY.md"
+                manager_class.return_value.repair_message.return_value = "resolve MEMORY.md"
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)
@@ -620,7 +620,7 @@ class JsonRequestTests(unittest.TestCase):
             ):
                 manager_class.return_value.memory_root = memory_root
                 manager_class.return_value.background_pull.return_value = result_obj
-                manager_class.return_value.conflict_message.return_value = "resolve MEMORY.md"
+                manager_class.return_value.repair_message.return_value = "resolve MEMORY.md"
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)
@@ -651,7 +651,7 @@ class JsonRequestTests(unittest.TestCase):
             ):
                 manager_class.return_value.memory_root = memory_root
                 manager_class.return_value.background_pull.return_value = result_obj
-                manager_class.return_value.conflict_message.return_value = "resolve MEMORY.md"
+                manager_class.return_value.repair_message.return_value = "resolve MEMORY.md"
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)

@@ -48,15 +48,15 @@ Standalone mode exposes narrow filesystem and git tools instead of arbitrary Pyt
 
 ### Standalone commit boundary
 
-Standalone commit tools may stage and commit only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md` because update and dreamer roles need to preserve memory edits and dream reports without gaining arbitrary repository-write authority. The retrieve role does not receive write or git tools at all, so retrieval remains a lower-authority fast path. Unrelated untracked files remain visible through status but outside the stage/commit allowlist so model-driven commits do not sweep up local config, backups, or test artifacts.
+Standalone commit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md` because update and dreamer roles need to preserve memory edits and dream reports without gaining arbitrary repository-write authority. The retrieve role does not receive write or git tools at all, so retrieval remains a lower-authority fast path. Unrelated untracked files remain visible through status but outside the stage/commit allowlist so model-driven commits do not sweep up local config, backups, or test artifacts.
 
 ### Global memory sync
 
 Global memory sync remains local-first: every device keeps a complete memory root, and Git provides distributed transport between those roots. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
 
-Runtime code owns deterministic sync mechanics at the point where each one belongs in the workflow. For `update`, `reviewer`, and `dreamer`, preflight fetches, merges available upstream changes, checks freshness, records state, and summarizes the result as compact Runtime sync context before model work. After those roles commit memory changes, `sync_push` publishes the committed state and handles the merge-and-retry path when the remote moved meanwhile. Retrieval keeps the fast local path by default.
+Runtime code owns deterministic sync mechanics at the point where each one belongs in the workflow. For `update`, `reviewer`, and `dreamer`, preflight fetches, merges available upstream changes, checks freshness, and routes dirty or conflicted memory state to `sync-reconciler` before semantic model work. After those roles commit memory changes, runtime push handling publishes the committed state and routes dirty or conflicted push results to `sync-reconciler`. Retrieval keeps the fast local path by default.
 
-Memory roles handle semantic conflict resolution because Markdown memory conflicts require durability and schema judgment, not just Git mechanics. Active `update`, `reviewer`, and `dreamer` runs resolve conflicts surfaced during their own sync flow. Scheduled sync conflicts go to `sync-reconciler`, which works from watcher-supplied conflict context, validates the file set, commits the resolved state, and calls `sync_push`. `sync-reconciler` stays separate from dreamer because scheduled sync conflict repair is a narrow maintenance responsibility, while dreamer owns broader consolidation and restructuring.
+Memory-aware sync repair stays in `sync-reconciler` because Markdown memory conflicts and dirty memory state require durability and schema judgment, not just Git mechanics. Runtime and scheduled sync flows call that role with bounded repair context, and the role validates the file set, commits the repaired state, and calls `sync_push`. `sync-reconciler` stays separate from dreamer because scheduled sync repair is a narrow maintenance responsibility, while dreamer owns broader consolidation and restructuring.
 
 ### Standalone tool retry behavior
 

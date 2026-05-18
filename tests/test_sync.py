@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.config import SyncConfig
-from rightmemory.sync import GIT_TIMEOUT_SECONDS, SyncManager
+from rightmemory.sync import GIT_TIMEOUT_SECONDS, SyncManager, SyncResult
 
 
 class SyncManagerTests(unittest.TestCase):
@@ -273,6 +273,20 @@ class SyncManagerTests(unittest.TestCase):
         self.assertEqual(result.files, ["MEMORY.md"])
         self.assertIn("<<<<<<<", (self.device / "MEMORY.md").read_text(encoding="utf-8"))
 
+    def test_background_pull_reports_dirty_even_when_pull_state_fresh(self):
+        (self.device / "MEMORY.md").write_text("# Domain\n\n- `one` dirty → []\n", encoding="utf-8")
+        state_path = self.device / ".runtime" / "sync" / "state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text(
+            json.dumps({"last_successful_pull_at": datetime.now(UTC).isoformat()}),
+            encoding="utf-8",
+        )
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True, stale_pull_after_hours=24)).background_pull()
+
+        self.assertEqual(result.status, "dirty")
+        self.assertEqual(result.files, ["MEMORY.md"])
+
     def test_background_pull_runs_when_stale(self):
         manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True, stale_pull_after_hours=24))
         state_path = self.device / ".runtime" / "sync" / "state.json"
@@ -285,6 +299,15 @@ class SyncManagerTests(unittest.TestCase):
         result = manager.background_pull()
 
         self.assertEqual(result.status, "synced")
+
+    def test_repair_message_describes_dirty_and_conflict_states(self):
+        manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True))
+
+        dirty = manager.repair_message(SyncResult("dirty", "dirty memory", ["MEMORY.md"]))
+        conflict = manager.repair_message(SyncResult("conflict", "memory sync conflict", ["MEMORY.md"]))
+
+        self.assertIn("inspect and repair dirty memory state", dirty)
+        self.assertIn("resolve conflict markers", conflict)
 
     def _git(self, cwd: Path, *args: str) -> str:
         process = subprocess.run(

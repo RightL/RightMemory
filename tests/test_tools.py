@@ -116,6 +116,34 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertEqual(self.tools.read_command("rg beta MEMORY.md"), "MEMORY.md:beta")
 
+    @unittest.skipIf(shutil.which("rg") is None, "rg is not installed")
+    def test_read_command_expands_ripgrep_path_globs_without_shell(self):
+        (self.root / "MEMORY.md").write_text("alpha\nbeta\n", encoding="utf-8")
+        (self.root / "MEMORY_extra.md").write_text("beta detail\n", encoding="utf-8")
+        (self.root / "NOTES.md").write_text("beta notes\n", encoding="utf-8")
+
+        self.assertEqual(
+            set(self.tools.read_command("rg beta MEMORY*.md").splitlines()),
+            {"MEMORY.md:beta", "MEMORY_extra.md:beta detail"},
+        )
+
+    @unittest.skipIf(shutil.which("rg") is None, "rg is not installed")
+    def test_read_command_preserves_ripgrep_iglob_filter_values(self):
+        (self.root / "MEMORY.md").write_text("alpha\n", encoding="utf-8")
+        (self.root / "MEMORY_extra.md").write_text("beta\n", encoding="utf-8")
+        (self.root / "NOTES.md").write_text("gamma\n", encoding="utf-8")
+
+        self.assertEqual(
+            set(self.tools.read_command("rg --files --iglob MEMORY*.md").splitlines()),
+            {"MEMORY.md", "MEMORY_extra.md"},
+        )
+
+    @unittest.skipIf(shutil.which("rg") is None, "rg is not installed")
+    def test_read_command_unmatched_ripgrep_path_glob_returns_no_matches(self):
+        (self.root / "MEMORY.md").write_text("beta\n", encoding="utf-8")
+
+        self.assertEqual(self.tools.read_command("rg beta MEMORY_*.md"), "no matches")
+
     def test_outline_file_returns_heading_map(self):
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
@@ -231,6 +259,51 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.tools.git_add(["rightmemory.toml"])
 
+    def test_git_add_rejects_directory_path_before_git_mutation(self):
+        self._git("init")
+        memory_dir = self.root / "MEMORY_tree.md"
+        memory_dir.mkdir()
+        (memory_dir / "child").write_text("# Child\n", encoding="utf-8")
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "cannot stage directory path"):
+            self.tools.git_add(["MEMORY_tree.md"])
+
+        self.assertEqual(self.tools.git_status(), status_before)
+
+    def test_git_add_rejects_deleted_head_directory_before_git_mutation(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        memory_dir = self.root / "MEMORY_tree.md"
+        memory_dir.mkdir()
+        (memory_dir / "child").write_text("# Child\n", encoding="utf-8")
+        self._git("add", "MEMORY_tree.md/child")
+        self._git("commit", "-m", "initial tree")
+        shutil.rmtree(memory_dir)
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "cannot stage directory path"):
+            self.tools.git_add(["MEMORY_tree.md"])
+
+        self.assertEqual(self.tools.git_status(), status_before)
+        self.assertFalse(memory_dir.exists())
+
+    def test_git_add_rejects_index_only_directory_before_git_mutation(self):
+        self._git("init")
+        memory_dir = self.root / "MEMORY_tree.md"
+        memory_dir.mkdir()
+        (memory_dir / "child").write_text("# Child\n", encoding="utf-8")
+        self._git("add", "MEMORY_tree.md/child")
+        shutil.rmtree(memory_dir)
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "cannot stage directory path"):
+            self.tools.git_add(["MEMORY_tree.md"])
+
+        self.assertEqual(self.tools.git_status(), status_before)
+        self.assertFalse(memory_dir.exists())
+
     def test_git_commit_rejects_non_memory_staged_files(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")
@@ -240,6 +313,22 @@ class MemoryToolsTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             self.tools.git_commit("memory: should fail")
+
+    def test_git_commit_rejects_rename_from_disallowed_source(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "rightmemory.toml").write_text("[update]\n", encoding="utf-8")
+        self._git("add", "rightmemory.toml")
+        self._git("commit", "-m", "initial config")
+        self._git("mv", "rightmemory.toml", "MEMORY_renamed.md")
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "rightmemory\\.toml"):
+            self.tools.git_commit("memory: rename config")
+
+        self.assertEqual(self.tools.git_status(), status_before)
+        self.assertEqual(self._git("log", "-1", "--format=%s"), "initial config")
 
     def test_git_commit_commits_staged_memory_files(self):
         self._git("init")
@@ -253,6 +342,222 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("committed", result)
         self.assertIn("memory: add domain", result)
         self.assertEqual(self.tools.git_status(), "")
+
+    def test_git_commit_accepts_optional_body(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        self.tools.git_add(["MEMORY.md"])
+
+        result = self.tools.git_commit(
+            "memory: review codex transcript s1",
+            body="Durable memory updated after transcript review.",
+        )
+        log = self._git("log", "-1", "--format=%B")
+
+        self.assertIn("committed", result)
+        self.assertIn("memory: review codex transcript s1", log)
+        self.assertIn("Durable memory updated", log)
+
+    def test_git_commit_rejects_nul_in_subject(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        self.tools.git_add(["MEMORY.md"])
+
+        with self.assertRaisesRegex(ValueError, "commit subject must not contain NUL bytes"):
+            self.tools.git_commit("memory: add\x00domain")
+
+    def test_git_commit_rejects_nul_in_body(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        self.tools.git_add(["MEMORY.md"])
+
+        with self.assertRaisesRegex(ValueError, "commit body must not contain NUL bytes"):
+            self.tools.git_commit("memory: add domain", body="body\x00text")
+
+    def test_git_discard_reverts_allowed_tracked_changes(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        memory = self.root / "MEMORY.md"
+        memory.write_text("# Domain\n", encoding="utf-8")
+        dream = self.root / "dream_logs" / "2026-05-08.md"
+        dream.parent.mkdir()
+        dream.write_text("# Dream\n", encoding="utf-8")
+        self._git("add", "MEMORY.md", "dream_logs/2026-05-08.md")
+        self._git("commit", "-m", "initial memory")
+        memory.write_text("# Broken\n", encoding="utf-8")
+        dream.write_text("# Broken\n", encoding="utf-8")
+
+        result = self.tools.git_discard(["MEMORY.md", "dream_logs/2026-05-08.md"])
+
+        self.assertEqual(result, "discarded: MEMORY.md, dream_logs/2026-05-08.md")
+        self.assertEqual(memory.read_text(encoding="utf-8"), "# Domain\n")
+        self.assertEqual(dream.read_text(encoding="utf-8"), "# Dream\n")
+        self.assertEqual(self.tools.git_status(), "")
+
+    def test_git_discard_reverts_staged_and_unstaged_changes(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        memory = self.root / "MEMORY.md"
+        memory.write_text("# Domain\n", encoding="utf-8")
+        self._git("add", "MEMORY.md")
+        self._git("commit", "-m", "initial memory")
+
+        memory.write_text("# Staged broken\n", encoding="utf-8")
+        self._git("add", "MEMORY.md")
+        memory.write_text("# Unstaged broken\n", encoding="utf-8")
+
+        result = self.tools.git_discard(["MEMORY.md"])
+
+        self.assertEqual(result, "discarded: MEMORY.md")
+        self.assertEqual(memory.read_text(encoding="utf-8"), "# Domain\n")
+        self.assertEqual(self.tools.git_status(), "")
+
+    def test_git_discard_removes_staged_added_file(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        self._git("add", "MEMORY.md")
+        self._git("commit", "-m", "initial memory")
+        detail = self.root / "MEMORY_detail.md"
+        detail.write_text("# New staged detail\n", encoding="utf-8")
+        self._git("add", "MEMORY_detail.md")
+
+        result = self.tools.git_discard(["MEMORY_detail.md"])
+
+        self.assertEqual(result, "discarded: MEMORY_detail.md")
+        self.assertFalse(detail.exists())
+        self.assertEqual(self.tools.git_status(), "")
+
+    def test_git_discard_removes_staged_added_file_with_unstaged_edits(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        self._git("add", "MEMORY.md")
+        self._git("commit", "-m", "initial memory")
+        detail = self.root / "MEMORY_detail.md"
+        detail.write_text("# New staged detail\n", encoding="utf-8")
+        self._git("add", "MEMORY_detail.md")
+        detail.write_text("# Edited staged detail\n", encoding="utf-8")
+        self.assertEqual(self.tools.git_status(), "AM MEMORY_detail.md")
+
+        result = self.tools.git_discard(["MEMORY_detail.md"])
+
+        self.assertEqual(result, "discarded: MEMORY_detail.md")
+        self.assertFalse(detail.exists())
+        self.assertEqual(self.tools.git_status(), "")
+
+    def test_git_discard_removes_staged_added_file_without_head(self):
+        self._git("init")
+        memory = self.root / "MEMORY.md"
+        memory.write_text("# Domain\n", encoding="utf-8")
+        self._git("add", "MEMORY.md")
+
+        result = self.tools.git_discard(["MEMORY.md"])
+
+        self.assertEqual(result, "discarded: MEMORY.md")
+        self.assertFalse(memory.exists())
+        self.assertEqual(self.tools.git_status(), "")
+
+    def test_git_discard_removes_staged_added_file_with_unstaged_edits_without_head(self):
+        self._git("init")
+        memory = self.root / "MEMORY.md"
+        memory.write_text("# Domain\n", encoding="utf-8")
+        self._git("add", "MEMORY.md")
+        memory.write_text("# Edited domain\n", encoding="utf-8")
+        self.assertEqual(self.tools.git_status(), "AM MEMORY.md")
+
+        result = self.tools.git_discard(["MEMORY.md"])
+
+        self.assertEqual(result, "discarded: MEMORY.md")
+        self.assertFalse(memory.exists())
+        self.assertEqual(self.tools.git_status(), "")
+
+    def test_git_discard_rejects_unstaged_untracked_memory_file(self):
+        self._git("init")
+        detail = self.root / "MEMORY_detail.md"
+        detail.write_text("# Untracked detail\n", encoding="utf-8")
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "cannot discard untracked path"):
+            self.tools.git_discard(["MEMORY_detail.md"])
+
+        self.assertTrue(detail.exists())
+        self.assertEqual(detail.read_text(encoding="utf-8"), "# Untracked detail\n")
+        self.assertEqual(self.tools.git_status(), status_before)
+
+    def test_git_discard_rejects_staged_deletion_with_recreated_memory_file(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        detail = self.root / "MEMORY_detail.md"
+        detail.write_text("# Detail\n", encoding="utf-8")
+        self._git("add", "MEMORY_detail.md")
+        self._git("commit", "-m", "initial detail")
+        self._git("rm", "MEMORY_detail.md")
+        detail.write_text("# Replacement detail\n", encoding="utf-8")
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "cannot discard staged deletion with replacement"):
+            self.tools.git_discard(["MEMORY_detail.md"])
+
+        self.assertEqual(self.tools.git_status(), status_before)
+        self.assertEqual(detail.read_text(encoding="utf-8"), "# Replacement detail\n")
+
+    def test_git_discard_rejects_directory_path_before_git_mutation(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        memory = self.root / "MEMORY.md"
+        memory.write_text("# Domain\n", encoding="utf-8")
+        self._git("add", "MEMORY.md")
+        self._git("commit", "-m", "initial memory")
+        memory_dir = self.root / "MEMORY_tree.md"
+        memory_dir.mkdir()
+        (memory_dir / "child").write_text("# Child\n", encoding="utf-8")
+        memory.write_text("# Staged broken\n", encoding="utf-8")
+        self._git("add", "MEMORY.md")
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "cannot discard directory path"):
+            self.tools.git_discard(["MEMORY.md", "MEMORY_tree.md"])
+
+        self.assertEqual(self.tools.git_status(), status_before)
+        self.assertEqual(memory.read_text(encoding="utf-8"), "# Staged broken\n")
+
+    def test_git_discard_rejects_deleted_head_directory_before_git_mutation(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        memory_dir = self.root / "MEMORY_tree.md"
+        memory_dir.mkdir()
+        (memory_dir / "child").write_text("# Child\n", encoding="utf-8")
+        self._git("add", "MEMORY_tree.md/child")
+        self._git("commit", "-m", "initial tree")
+        shutil.rmtree(memory_dir)
+        status_before = self.tools.git_status()
+
+        with self.assertRaisesRegex(ValueError, "cannot discard directory path"):
+            self.tools.git_discard(["MEMORY_tree.md"])
+
+        self.assertEqual(self.tools.git_status(), status_before)
+        self.assertFalse(memory_dir.exists())
+
+    def test_git_discard_rejects_non_memory_paths(self):
+        self._git("init")
+        (self.root / "rightmemory.toml").write_text("[review]\n", encoding="utf-8")
+
+        with self.assertRaises(ValueError):
+            self.tools.git_discard(["rightmemory.toml"])
 
     def test_validate_memory_catches_duplicate_ids_and_dangling_edges(self):
         (self.root / "MEMORY.md").write_text(
@@ -394,3 +699,4 @@ class MemoryToolsTests(unittest.TestCase):
         )
         if process.returncode != 0:
             raise AssertionError(process.stderr)
+        return process.stdout.strip()

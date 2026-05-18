@@ -374,6 +374,7 @@ class RuntimeTests(unittest.TestCase):
             runtime.agent.calls[0]["model_settings"],
             {"extra_body": {"chat_template_kwargs": {"thinking": True}}},
         )
+        self.assertEqual(runtime.agent.calls[0]["usage_limits"].request_limit, 100)
 
     def test_write_role_creates_memory_lock_and_gitignore(self):
         config = RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name))
@@ -397,7 +398,7 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertFalse((Path(self.tempdir.name) / ".runtime" / "memory.lock").exists())
 
-    def test_update_turn_includes_runtime_sync_context(self):
+    def test_update_turn_runs_sync_preflight_without_exposing_context(self):
         config = RuntimeConfig(
             role="update",
             model_id="openai/test",
@@ -410,13 +411,14 @@ class RuntimeTests(unittest.TestCase):
             patch("rightmemory.runtime.SyncManager") as manager_class,
         ):
             manager_class.return_value.preflight.return_value = SyncResult("synced", "local memory is current")
+            manager_class.return_value.push.return_value = SyncResult("pushed", "local memory pushed")
             runtime = RightMemoryRuntime(config)
             runtime.run_session_turn("agent-session", "remember one")
 
         message = runtime.agent.calls[0]["message"]
-        self.assertIn("Runtime sync context", message)
-        self.assertIn("Ignore older Runtime sync context blocks from prior message history", message)
-        self.assertIn("remember one", message)
+        self.assertEqual(message, "remember one")
+        manager_class.return_value.preflight.assert_called_once()
+        manager_class.return_value.push.assert_called_once()
 
     def test_update_sync_preflight_runs_while_write_lock_is_held(self):
         events = []
@@ -432,14 +434,13 @@ class RuntimeTests(unittest.TestCase):
             def __exit__(self, exc_type, exc, traceback):
                 events.append("lock_exit")
 
-        class FakeSyncResult:
-            def context_block(self):
-                events.append("context_block")
-                return "Runtime sync context"
-
         def preflight():
             events.append("preflight")
-            return FakeSyncResult()
+            return SyncResult("synced", "local memory is current")
+
+        def push():
+            events.append("push")
+            return SyncResult("pushed", "local memory pushed")
 
         config = RuntimeConfig(
             role="update",
@@ -454,11 +455,75 @@ class RuntimeTests(unittest.TestCase):
             patch("rightmemory.runtime.SyncManager") as manager_class,
         ):
             manager_class.return_value.preflight.side_effect = preflight
+            manager_class.return_value.push.side_effect = push
+            runtime = RightMemoryRuntime(config)
+
+            def run_sync(message, message_history=None, model_settings=None, usage_limits=None):
+                events.append("model")
+
+                class FakeResult:
+                    output = "reply"
+
+                    def all_messages_json(self):
+                        return b'["message"]'
+
+                return FakeResult()
+
+            runtime.agent.run_sync = run_sync
+            runtime.run_session_turn("agent-session", "remember one")
+
+        self.assertEqual(events, ["lock_enter", "preflight", "model", "push", "lock_exit"])
+
+    def test_dirty_preflight_runs_sync_reconciler_before_update_agent(self):
+        repairs = []
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
+        )
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.SyncManager") as manager_class,
+            patch.object(RightMemoryRuntime, "_run_sync_reconciler", lambda self, result: repairs.append(result.status)),
+        ):
+            manager_class.return_value.preflight.side_effect = [
+                SyncResult("dirty", "local memory has uncommitted changes", ["MEMORY.md"]),
+                SyncResult("synced", "local memory is current"),
+            ]
+            manager_class.return_value.push.return_value = SyncResult("pushed", "local memory pushed")
             runtime = RightMemoryRuntime(config)
             runtime.run_session_turn("agent-session", "remember one")
 
-        self.assertLess(events.index("lock_enter"), events.index("preflight"))
-        self.assertLess(events.index("preflight"), events.index("lock_exit"))
+        self.assertEqual(repairs, ["dirty"])
+        self.assertEqual(runtime.agent.calls[0]["message"], "remember one")
+
+    def test_dirty_push_runs_sync_reconciler_after_update_agent(self):
+        repairs = []
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
+        )
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.SyncManager") as manager_class,
+            patch.object(RightMemoryRuntime, "_run_sync_reconciler", lambda self, result: repairs.append(result.status)),
+        ):
+            manager_class.return_value.preflight.return_value = SyncResult("synced", "local memory is current")
+            manager_class.return_value.push.return_value = SyncResult(
+                "dirty",
+                "local memory has uncommitted changes",
+                ["MEMORY.md"],
+            )
+            runtime = RightMemoryRuntime(config)
+            runtime.run_session_turn("agent-session", "remember one")
+
+        self.assertEqual(runtime.agent.calls[0]["message"], "remember one")
+        self.assertEqual(repairs, ["dirty"])
 
     def test_retrieve_turn_does_not_run_sync_preflight(self):
         config = RuntimeConfig(
@@ -477,7 +542,7 @@ class RuntimeTests(unittest.TestCase):
 
         manager_class.assert_not_called()
 
-    def test_write_roles_receive_sync_push_tool_when_sync_enabled(self):
+    def test_sync_reconciler_receives_sync_push_tool_when_sync_enabled(self):
         for role in ("dreamer", "reviewer", "sync-reconciler", "update"):
             with self.subTest(role=role):
                 config = RuntimeConfig(
@@ -491,7 +556,10 @@ class RuntimeTests(unittest.TestCase):
                     runtime = RightMemoryRuntime(config)
 
                 tool_names = [tool.__name__ for tool in runtime.agent.tools]
-                self.assertIn("sync_push", tool_names)
+                if role == "sync-reconciler":
+                    self.assertIn("sync_push", tool_names)
+                else:
+                    self.assertNotIn("sync_push", tool_names)
 
     def test_retrieve_does_not_receive_sync_push_tool_when_sync_enabled(self):
         config = RuntimeConfig(
@@ -523,15 +591,13 @@ class RuntimeTests(unittest.TestCase):
                 tool_names = [tool.__name__ for tool in runtime.agent.tools]
                 self.assertNotIn("sync_push", tool_names)
 
-    def test_sync_prompt_guidance_says_preflight_is_current(self):
+    def test_semantic_prompt_guidance_keeps_sync_work_out(self):
         instructions = build_instructions(Path("/memory"), "update")
 
-        self.assertIn("Runtime sync context", instructions)
-        self.assertIn("already performed sync preflight", instructions)
-        self.assertIn("avoid repeating preflight discovery", instructions)
-        self.assertIn("call `sync_push` after the commit", instructions)
-        self.assertIn("resolve the conflicted memory files", instructions)
-        self.assertIn("call `sync_push` again", instructions)
+        self.assertNotIn("Runtime sync context", instructions)
+        self.assertNotIn("already performed sync preflight", instructions)
+        self.assertNotIn("call `sync_push`", instructions)
+        self.assertNotIn("dirty state", instructions)
 
         retrieve_instructions = build_instructions(Path("/memory"), "retrieve")
         self.assertIn("local memory", retrieve_instructions)
@@ -670,7 +736,22 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("rename_file", tool_names)
         self.assertIn("git_add", tool_names)
         self.assertIn("git_commit", tool_names)
+        self.assertNotIn("git_discard", tool_names)
         self.assertNotIn("apply_patch", tool_names)
+
+    def test_sync_reconciler_exposes_sync_repair_tools(self):
+        config = RuntimeConfig(
+            role="sync-reconciler",
+            model_id="openai/test",
+            sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+        tool_names = {tool.__name__ for tool in runtime.agent.kwargs["tools"]}
+        self.assertIn("git_discard", tool_names)
+        self.assertIn("sync_push", tool_names)
 
     def test_retrieve_runtime_is_read_only(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test")
@@ -690,6 +771,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("rename_file", tool_names)
         self.assertNotIn("apply_patch", tool_names)
         self.assertNotIn("git_add", tool_names)
+        self.assertNotIn("git_discard", tool_names)
         self.assertNotIn("git_commit", tool_names)
 
     def _fake_pydantic_modules(self):
@@ -703,9 +785,14 @@ class RuntimeTests(unittest.TestCase):
                 self.model = kwargs["model"]
                 self.tools = kwargs["tools"]
 
-            def run_sync(self, message, message_history=None, model_settings=None):
+            def run_sync(self, message, message_history=None, model_settings=None, usage_limits=None):
                 self.calls.append(
-                    {"message": message, "message_history": message_history, "model_settings": model_settings}
+                    {
+                        "message": message,
+                        "message_history": message_history,
+                        "model_settings": model_settings,
+                        "usage_limits": usage_limits,
+                    }
                 )
                 call_count = len(self.calls)
 
@@ -734,8 +821,16 @@ class RuntimeTests(unittest.TestCase):
             def validate_json(data):
                 return json.loads(data)
 
+        class FakeUsageLimits:
+            def __init__(self, request_limit=None):
+                self.request_limit = request_limit
+
         return {
-            "pydantic_ai": types.SimpleNamespace(Agent=FakeAgent, ModelRetry=FakeModelRetry),
+            "pydantic_ai": types.SimpleNamespace(
+                Agent=FakeAgent,
+                ModelRetry=FakeModelRetry,
+                UsageLimits=FakeUsageLimits,
+            ),
             "pydantic_ai.messages": types.SimpleNamespace(ModelMessagesTypeAdapter=FakeModelMessagesTypeAdapter),
             "pydantic_ai.models": types.SimpleNamespace(),
             "pydantic_ai.models.openai": types.SimpleNamespace(OpenAIChatModel=FakeModel),
@@ -750,7 +845,7 @@ class RuntimeTests(unittest.TestCase):
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
 
-            def run_sync(self, message, message_history=None, model_settings=None):
+            def run_sync(self, message, message_history=None, model_settings=None, usage_limits=None):
                 raise RuntimeError("model failed")
 
         return FailingAgent
@@ -863,16 +958,18 @@ class PromptTests(unittest.TestCase):
         self.assertIn("The only allowed root directory is /memory", prompt)
         self.assertIn("sync-reconciler", prompt)
         self.assertIn("sync watcher selected sync reconciliation behavior", prompt)
-        self.assertIn("current sync-conflict context", prompt)
-        self.assertIn("scheduled sync workflow supplies conflict context", prompt)
+        self.assertIn("current sync repair context", prompt)
+        self.assertIn("scheduled sync workflow supplies repair context", prompt)
         self.assertIn("Runtime sync context block", prompt)
         self.assertNotIn("the runtime already performed sync preflight", prompt)
-        self.assertIn("RightMemory sync conflicts", prompt)
-        self.assertIn("preserve coherent durable memory from both sides", prompt)
+        self.assertIn("dirty memory state", prompt)
+        self.assertIn("push conflicts", prompt)
+        self.assertIn("git_discard", prompt)
+        self.assertIn("Preserve coherent durable memory", prompt)
         self.assertIn("commit", prompt)
         self.assertIn("sync_push", prompt)
         self.assertIn("call `sync_push` again", prompt)
-        self.assertIn("Final replies should include resolved files", prompt)
+        self.assertIn("Final replies should include repaired files", prompt)
         self.assertIn("Sync Reconciler Role", prompt)
         self.assertIn("RightMemory Schema", prompt)
         self.assertIn("embedded schema above", prompt)

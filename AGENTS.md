@@ -16,7 +16,7 @@
 - Use `rightmemory watch start|status|stop|restart` to manage standalone background review and dreamer watchers. Use `rightmemory dreamer watch` directly only when debugging the lower-level dream loop.
 
 ## Maintaining This File
-- Treat this file as operational instructions for coding agents, not as a design document. Keep durable design explanation in `README.md` or `DESIGN_NOTES.md`.
+- Treat this file (./AGENTS.md) as operational instructions for coding agents, not as a design document. Keep durable design explanation in `README.md` or `DESIGN_NOTES.md`.
 - Update this file when setup commands, test commands, install behavior, role boundaries, or git/memory safety rules change.
 - Remove stale commands or environment assumptions as soon as they stop matching the repo; bad instructions are worse than missing instructions.
 - Keep it concise enough to stay useful in Codex project instructions. Prefer scoped nested `AGENTS.md` files if a subdirectory needs special rules.

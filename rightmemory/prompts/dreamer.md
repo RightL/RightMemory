@@ -29,8 +29,7 @@
 
 - Write a dream report to `dream_logs/YYYY-MM-DD.md`. Create `dream_logs/` if it does not exist. If a same-day report exists, append a new section instead of overwriting.
 - Write the report in your own words, covering only what matters: what you did, what requires user attention, and anything noteworthy you observed.
-- Commit changes after editing. Stage and commit only touched `MEMORY*.md` files and the new dream report file; do not commit unrelated files. If the working directory is not yet a git repo, initialize it first.
-- When runtime sync context is present, call `sync_push` after a successful memory commit.
+- Commit changes after editing. Stage touched `MEMORY*.md` files and the new dream report file; do not commit unrelated files. If the working directory is not yet a git repo, initialize it first.
 - Dreaming must be idempotent. If the file is already in good shape, write a short report saying so and skip the commit.
 
 ## Final Reply
