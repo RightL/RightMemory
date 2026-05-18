@@ -167,6 +167,32 @@ class InstallScriptTests(unittest.TestCase):
             self.assertIn("Write role model config", result.stdout)
             self.assertIn("rightmemory is installed", result.stdout)
 
+    def test_install_warns_when_stale_rightmemory_precedes_installed_wrapper(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            env = self._env_with_fake_uv(root)
+            stale_rightmemory = root / "bin" / "rightmemory"
+            stale_rightmemory.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+            stale_rightmemory.chmod(0o755)
+
+            result = subprocess.run(
+                ["bash", "install.sh", "--mode", "cli-agent", str(memory_root), str(skills_target)],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+
+            installed_wrapper = root / "home" / ".local" / "bin" / "rightmemory"
+
+        self.assertIn(f"rightmemory is installed at {installed_wrapper}", result.stdout)
+        self.assertIn(f"PATH currently resolves rightmemory to:\n\n              {stale_rightmemory}", result.stdout)
+        self.assertIn("stale code or use the wrong RIGHTMEMORY_ROOT", result.stdout)
+
     def test_subagent_mode_is_rejected_with_cli_agent_guidance(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

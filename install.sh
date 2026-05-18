@@ -316,11 +316,9 @@ EOF
 }
 
 warn_if_rightmemory_not_on_path() {
-  if command -v rightmemory >/dev/null 2>&1; then
-    return
-  fi
-
-  cat <<EOF
+  resolved_rightmemory="$(command -v rightmemory || true)"
+  if [ -z "$resolved_rightmemory" ]; then
+    cat <<EOF
   [notice]  rightmemory is installed at $RIGHTMEMORY_BIN, but ~/.local/bin is not on PATH for this shell.
             Add it to your shell profile, then restart the agent or terminal:
 
@@ -328,6 +326,22 @@ warn_if_rightmemory_not_on_path() {
 
             For zsh, a common place is ~/.zshrc. For bash, use ~/.bashrc or ~/.bash_profile.
 EOF
+    return
+  fi
+
+  if [ "$resolved_rightmemory" != "$RIGHTMEMORY_BIN" ]; then
+    cat <<EOF
+  [notice]  rightmemory is installed at $RIGHTMEMORY_BIN, but PATH currently resolves rightmemory to:
+
+              $resolved_rightmemory
+
+            Put $RIGHTMEMORY_BIN_DIR earlier on PATH, then restart the agent or terminal:
+
+              export PATH="\$HOME/.local/bin:\$PATH"
+
+            Otherwise the orchestrator may call stale code or use the wrong RIGHTMEMORY_ROOT.
+EOF
+  fi
 }
 
 # 1. MEMORY.md seed / managed example refresh
