@@ -2,6 +2,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from rightmemory.agent_cli import (
+    build_claude_command,
+    build_codex_command,
+    parse_claude_output,
+    parse_codex_output,
+)
+from rightmemory.config import AgentCliConfig
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
 
 
@@ -40,6 +47,159 @@ class ProviderSessionStoreTests(unittest.TestCase):
             result = ProviderSessionStore.is_internal_provider_session(root, "codex", "thread-1")
 
         self.assertFalse(result)
+
+
+class AgentCliCommandTests(unittest.TestCase):
+    def test_build_codex_first_command_uses_memory_root_and_read_only_sandbox(self):
+        config = AgentCliConfig(provider="codex", model="gpt-5")
+
+        command = build_codex_command(Path("/memory/root"), "retrieve", config, "prompt", None)
+
+        self.assertEqual(
+            command,
+            [
+                "codex",
+                "exec",
+                "--json",
+                "--cd",
+                "/memory/root",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                "--model",
+                "gpt-5",
+                "prompt",
+            ],
+        )
+
+    def test_build_codex_first_command_uses_workspace_write_for_write_role(self):
+        command = build_codex_command(
+            Path("/memory/root"),
+            "update",
+            AgentCliConfig(provider="codex"),
+            "prompt",
+            None,
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "codex",
+                "exec",
+                "--json",
+                "--cd",
+                "/memory/root",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "workspace-write",
+                "prompt",
+            ],
+        )
+
+    def test_build_codex_resume_command_uses_provider_session_id(self):
+        config = AgentCliConfig(provider="codex", model="gpt-5")
+
+        command = build_codex_command(Path("/memory/root"), "retrieve", config, "prompt", "thread-1")
+
+        self.assertEqual(
+            command,
+            [
+                "codex",
+                "exec",
+                "resume",
+                "--json",
+                "--skip-git-repo-check",
+                "--model",
+                "gpt-5",
+                "thread-1",
+                "prompt",
+            ],
+        )
+
+    def test_build_claude_first_command_uses_session_id(self):
+        config = AgentCliConfig(provider="claude", model="sonnet")
+
+        command = build_claude_command("retrieve", config, "prompt", "uuid-1", False)
+
+        self.assertEqual(
+            command,
+            [
+                "claude",
+                "-p",
+                "--output-format",
+                "json",
+                "--model",
+                "sonnet",
+                "--session-id",
+                "uuid-1",
+                "prompt",
+            ],
+        )
+
+    def test_build_claude_resume_command_uses_resume(self):
+        command = build_claude_command(
+            "retrieve",
+            AgentCliConfig(provider="claude"),
+            "prompt",
+            "uuid-1",
+            True,
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "claude",
+                "-p",
+                "--output-format",
+                "json",
+                "--resume",
+                "uuid-1",
+                "prompt",
+            ],
+        )
+
+
+class AgentCliParserTests(unittest.TestCase):
+    def test_parse_codex_jsonl_output(self):
+        output = (
+            '{"type":"thread.started","thread_id":"thread-1"}\n'
+            '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n'
+        )
+
+        parsed = parse_codex_output(output)
+
+        self.assertEqual(parsed.provider_session_id, "thread-1")
+        self.assertEqual(parsed.text, "done")
+
+    def test_parse_codex_requires_thread_id(self):
+        with self.assertRaises(RuntimeError) as caught:
+            parse_codex_output('{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n')
+
+        self.assertIn("thread_id", str(caught.exception))
+
+    def test_parse_codex_requires_final_agent_message(self):
+        with self.assertRaises(RuntimeError) as caught:
+            parse_codex_output('{"type":"thread.started","thread_id":"thread-1"}\n')
+
+        self.assertIn("final agent message", str(caught.exception))
+
+    def test_parse_claude_json_output(self):
+        parsed = parse_claude_output('{"type":"result","session_id":"uuid-1","result":"done"}')
+
+        self.assertEqual(parsed.provider_session_id, "uuid-1")
+        self.assertEqual(parsed.text, "done")
+
+    def test_parse_claude_requires_session_id(self):
+        with self.assertRaises(RuntimeError) as caught:
+            parse_claude_output('{"type":"result","result":"done"}')
+
+        self.assertIn("session_id", str(caught.exception))
+
+    def test_parse_claude_requires_result(self):
+        with self.assertRaises(RuntimeError) as caught:
+            parse_claude_output('{"type":"result","session_id":"uuid-1"}')
+
+        self.assertIn("result", str(caught.exception))
 
 
 if __name__ == "__main__":
