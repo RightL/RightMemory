@@ -133,6 +133,9 @@ class SyncManager:
             if dirty:
                 return self._record_failure(SyncResult("dirty", "local memory has uncommitted changes", dirty))
 
+            if self._has_ahead_commits():
+                return self.push()
+
             last_pull = self._last_successful_pull_at()
             stale_after = timedelta(hours=self.config.stale_pull_after_hours)
             if last_pull is not None and datetime.now(UTC) - last_pull < stale_after:
@@ -191,6 +194,16 @@ class SyncManager:
     def _push(self, target: tuple[str, str]) -> subprocess.CompletedProcess[str]:
         remote, branch = target
         return self._git("push", remote, f"HEAD:{branch}")
+
+    def _has_ahead_commits(self) -> bool:
+        upstream = self._upstream()
+        if upstream is None:
+            return False
+        ahead_behind = self._ahead_behind(upstream)
+        if ahead_behind is None:
+            return False
+        ahead, _behind = ahead_behind
+        return ahead > 0
 
     def _dirty_memory_files(self) -> list[str]:
         result = self._git("status", "--porcelain", "--", *MEMORY_SYNC_PATHS)

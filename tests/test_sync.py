@@ -241,6 +241,27 @@ class SyncManagerTests(unittest.TestCase):
 
         self.assertEqual(result.status, "fresh")
 
+    def test_background_pull_pushes_ahead_commits_even_when_pull_state_fresh(self):
+        (self.device / "MEMORY.md").write_text(
+            "# Domain\n\n- `one` first → []\n- `two` local committed → []\n",
+            encoding="utf-8",
+        )
+        self._git(self.device, "add", "MEMORY.md")
+        self._git(self.device, "commit", "-m", "local memory")
+        state_path = self.device / ".runtime" / "sync" / "state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text(
+            json.dumps({"last_successful_pull_at": datetime.now(UTC).isoformat()}),
+            encoding="utf-8",
+        )
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True, stale_pull_after_hours=24)).background_pull()
+
+        self.assertEqual(result.status, "pushed")
+        self._git(self.other, "fetch", "origin")
+        remote_memory = self._git(self.other, "show", "origin/main:MEMORY.md")
+        self.assertIn("local committed", remote_memory)
+
     def test_background_pull_reports_conflict_even_when_pull_state_fresh(self):
         (self.other / "MEMORY.md").write_text("# Domain\n\n- `one` remote → []\n", encoding="utf-8")
         self._git(self.other, "add", "MEMORY.md")
