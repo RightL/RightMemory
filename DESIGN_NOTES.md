@@ -70,10 +70,10 @@ MCP is kept outside the MVP because the primary interface should be plain CLI an
 
 One-shot standalone calls use an explicit `--session` id and persist native Pydantic AI message history under `.runtime/sessions/` because normal agent callers often start a fresh process per request but still need true multi-turn continuity. RightMemory owns load/save with locking and atomic replacement so callers do not need a background broker, the stored state remains exact model/tool history instead of a lossy chat transcript, and `.runtime/` self-ignores its contents so ephemeral session files do not pollute memory commits.
 
-### Batched standalone updates
+### Batched command updates
 
-Standalone update submissions accumulate as candidate briefs for one hour from the latest submit before the update role is invoked, because memory quality is better when small corrections and follow-up clarifications are reconciled together instead of written as separate turn-by-turn facts. The worker remains automatic so callers do not need an explicit flush step, but update state distinguishes pending candidates from the current batch so status output can explain whether the worker is waiting or actively editing. Async state files keep their own `session_id` and `role` fields instead of inferring them from the read path because submitted candidates are operational state and malformed state should fail visibly.
+Update submissions accumulate as candidate briefs for one hour from the latest submit before the update role is invoked, because memory quality is better when small corrections and follow-up clarifications are reconciled together instead of written as separate turn-by-turn facts. The worker remains automatic so callers do not need an explicit flush step, but update state distinguishes pending candidates from the current batch so status output can explain whether the worker is waiting or actively editing. Async state files keep their own `session_id` and `role` fields instead of inferring them from the read path because submitted candidates are operational state and malformed state should fail visibly.
 
-### Standalone role prompts
+### Command role prompts
 
 Retrieve, update, and dreamer prompts live as role-specific Markdown files under the runtime package because the command runtime is the source of role behavior in both install modes. `prompt.py` stays a small composer for schema, workspace, tool, and role prompt fragments, while update-specific candidate triage stays in the update role prompt where prompt policy is easier to review and revise.

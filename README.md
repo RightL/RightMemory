@@ -125,7 +125,7 @@ memory-orchestrator
 
 - `memory-orchestrator` decides when memory is relevant and routes requests.
 - Runtime roles own direct `MEMORY*.md` access.
-- `retrieve` is read-oriented; `update`, `dreamer`, `reviewer`, and `sync-reconciler` can write through the runtime's bounded tools.
+- `retrieve` is read-oriented; write-capable roles perform memory changes through the selected executor. Standalone mode uses RightMemory's bounded tools, while CLI-agent mode delegates to Codex/Claude CLI with role-specific sandbox or permission defaults.
 
 The main agent should avoid reading or editing `MEMORY*.md` directly. Memory access goes through the installed orchestrator and the command roles, which keeps ownership clear and reduces half-edits or competing updates.
 
