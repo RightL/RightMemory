@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from rightmemory.agent_cli import NO_SESSION_RIGHTMEMORY_SESSION_ID
 from rightmemory.config import AgentCliConfig, RuntimeConfig, load_config, load_review_config, load_sync_config
 from rightmemory.prompt import build_cli_agent_instructions, build_instructions
 from rightmemory.runtime import RightMemoryRuntime, build_model
@@ -445,7 +446,49 @@ class RuntimeTests(unittest.TestCase):
         executor_class.assert_called_once_with(Path(self.tempdir.name), "retrieve", AgentCliConfig(provider="codex"))
         executor_class.return_value.run_session_turn.assert_called_once_with("agent-session", "remember one")
 
-    def test_cli_agent_run_turn_uses_executor(self):
+    def test_cli_agent_run_turn_uses_reserved_session_lock(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=Path(self.tempdir.name),
+        )
+        events = []
+
+        class FakeLockedSession:
+            def __enter__(self):
+                events.append("lock_enter")
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                events.append("lock_exit")
+
+        def locked(session_id):
+            events.append(("locked", session_id))
+            return FakeLockedSession()
+
+        def run_session_turn(session_id, message):
+            events.append(("agent", session_id, message))
+            return "cli reply"
+
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            executor_class.return_value.run_session_turn.side_effect = run_session_turn
+            runtime = RightMemoryRuntime(config)
+            runtime.sessions.locked = locked
+            result = runtime.run_turn("remember one")
+
+        self.assertEqual(result, "cli reply")
+        self.assertEqual(
+            events,
+            [
+                ("locked", NO_SESSION_RIGHTMEMORY_SESSION_ID),
+                "lock_enter",
+                ("agent", NO_SESSION_RIGHTMEMORY_SESSION_ID, "remember one"),
+                "lock_exit",
+            ],
+        )
+
+    def test_cli_agent_rejects_reserved_public_session_id(self):
         config = RuntimeConfig(
             role="retrieve",
             runtime_mode="cli-agent",
@@ -453,13 +496,12 @@ class RuntimeTests(unittest.TestCase):
             memory_root=Path(self.tempdir.name),
         )
 
-        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.run_turn.return_value = "cli reply"
+        with patch("rightmemory.runtime.CliAgentExecutor"):
             runtime = RightMemoryRuntime(config)
-            result = runtime.run_turn("remember one")
+            with self.assertRaises(ValueError) as caught:
+                runtime.run_session_turn(NO_SESSION_RIGHTMEMORY_SESSION_ID, "remember one")
 
-        self.assertEqual(result, "cli reply")
-        executor_class.return_value.run_turn.assert_called_once_with("remember one")
+        self.assertIn("reserved", str(caught.exception))
 
     def test_run_turn_preserves_message_history(self):
         config = RuntimeConfig(

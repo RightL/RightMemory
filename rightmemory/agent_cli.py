@@ -15,7 +15,7 @@ from .provider_sessions import ProviderSessionRecord, ProviderSessionStore
 
 READ_ROLES = {"retrieve"}
 WRITE_ROLES = {"dreamer", "reviewer", "sync-reconciler", "update"}
-NO_SESSION_RIGHTMEMORY_SESSION_ID = "chat"
+NO_SESSION_RIGHTMEMORY_SESSION_ID = "__rightmemory_cli_chat__"
 
 
 @dataclass(frozen=True)

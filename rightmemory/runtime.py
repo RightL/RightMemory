@@ -5,7 +5,7 @@ from contextlib import contextmanager, nullcontext
 from functools import wraps
 from typing import Any
 
-from .agent_cli import CliAgentExecutor
+from .agent_cli import CliAgentExecutor, NO_SESSION_RIGHTMEMORY_SESSION_ID
 from .config import RuntimeConfig, load_config
 from .debug import DebugTrace
 from .prompt import build_instructions
@@ -53,7 +53,9 @@ class RightMemoryRuntime:
         if not message.strip():
             raise ValueError("message must not be empty")
         if self.config.runtime_mode == "cli-agent":
-            result, post_sync = self._run_locked_turn(lambda: self.agent.run_turn(message))
+            result, post_sync = self._run_locked_turn(
+                lambda: self._run_session_cli_agent(NO_SESSION_RIGHTMEMORY_SESSION_ID, message)
+            )
             if post_sync is not None:
                 self._run_sync_reconciler(post_sync)
             return str(result)
@@ -76,6 +78,8 @@ class RightMemoryRuntime:
     def run_session_turn(self, session_id: str, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
+        if self.config.runtime_mode == "cli-agent" and session_id == NO_SESSION_RIGHTMEMORY_SESSION_ID:
+            raise ValueError(f"session id is reserved for internal cli-agent chat: {session_id}")
         with self._debug_trace(session_id) as trace:
             self._trace(
                 "run_started",
