@@ -15,6 +15,7 @@ from typing import Any
 
 from .async_update import AsyncUpdateStore, format_state
 from .config import MEMORY_ROOT, ROLES, load_config, load_review_config, load_sync_config
+from .doctor import format_doctor_report, run_agent_cli_doctor
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 from .session import MemoryWriteLock
@@ -48,6 +49,8 @@ def main(argv: list[str] | None = None) -> int:
         return _review_main(argv[1:])
     if argv and argv[0] == "sync":
         return _sync_main(argv[1:])
+    if argv and argv[0] == "doctor":
+        return _doctor_main(argv[1:])
 
     parser = argparse.ArgumentParser(prog="rightmemory")
     parser.add_argument("role", choices=tuple(sorted(ROLES)), help="RightMemory runtime role")
@@ -347,6 +350,19 @@ def _sync_main(argv: list[str]) -> int:
     if args.command == "watch":
         return _sync_watch(args.interval)
     raise ValueError(f"unknown sync command: {args.command}")
+
+
+def _doctor_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="rightmemory doctor")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("agent-cli", help="check Codex/Claude CLI-agent mode setup")
+    args = parser.parse_args(argv)
+
+    if args.command == "agent-cli":
+        checks = run_agent_cli_doctor()
+        print(format_doctor_report(checks))
+        return 0 if all(check.ok for check in checks) else 1
+    raise ValueError(f"unknown doctor command: {args.command}")
 
 
 def _run_review_scan(since_days: int | None = None):

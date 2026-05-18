@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.cli import _daemon_stdio_json, _handle_json_request, main
+from rightmemory.doctor import DoctorCheck
 from rightmemory.watch import MANAGED_WATCH_TARGETS, WATCH_COMMANDS
 
 
@@ -132,6 +133,26 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(roles, ["reviewer"])
         self.assertEqual(stdout.getvalue().strip(), "reviewed: 1")
+
+    def test_doctor_agent_cli_prints_report_and_returns_success(self):
+        stdout = io.StringIO()
+        checks = [DoctorCheck("role configs", True, "ok")]
+
+        with patch("rightmemory.cli.run_agent_cli_doctor", return_value=checks), patch("sys.stdout", stdout):
+            result = main(["doctor", "agent-cli"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(stdout.getvalue().strip(), "[ok] role configs - ok")
+
+    def test_doctor_agent_cli_returns_failure_when_a_check_fails(self):
+        stdout = io.StringIO()
+        checks = [DoctorCheck("role configs", False, "bad")]
+
+        with patch("rightmemory.cli.run_agent_cli_doctor", return_value=checks), patch("sys.stdout", stdout):
+            result = main(["doctor", "agent-cli"])
+
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue().strip(), "[fail] role configs - bad")
 
     def test_review_watch_runs_scans_until_interrupted(self):
         roles = []
