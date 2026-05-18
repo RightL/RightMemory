@@ -428,7 +428,7 @@ class RuntimeTests(unittest.TestCase):
             {"base_url": "https://api.example.com/anthropic", "api_key": "token"},
         )
 
-    def test_cli_agent_runtime_mode_is_rejected_until_executor_is_wired(self):
+    def test_cli_agent_runtime_uses_executor_without_pydantic_agent(self):
         config = RuntimeConfig(
             role="retrieve",
             runtime_mode="cli-agent",
@@ -436,11 +436,30 @@ class RuntimeTests(unittest.TestCase):
             memory_root=Path(self.tempdir.name),
         )
 
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            with self.assertRaises(RuntimeError) as caught:
-                RightMemoryRuntime(config)
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            executor_class.return_value.run_session_turn.return_value = "cli reply"
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_session_turn("agent-session", "remember one")
 
-        self.assertIn("cli-agent runtime is not wired yet", str(caught.exception))
+        self.assertEqual(result, "cli reply")
+        executor_class.assert_called_once_with(Path(self.tempdir.name), "retrieve", AgentCliConfig(provider="codex"))
+        executor_class.return_value.run_session_turn.assert_called_once_with("agent-session", "remember one")
+
+    def test_cli_agent_run_turn_uses_executor(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=Path(self.tempdir.name),
+        )
+
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            executor_class.return_value.run_turn.return_value = "cli reply"
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_turn("remember one")
+
+        self.assertEqual(result, "cli reply")
+        executor_class.return_value.run_turn.assert_called_once_with("remember one")
 
     def test_run_turn_preserves_message_history(self):
         config = RuntimeConfig(
@@ -735,6 +754,27 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(events[0]["message"], "remember one")
         self.assertEqual(events[0]["model_id"], "openai/test")
         self.assertEqual(events[3]["output"], "reply 1")
+
+    def test_cli_agent_debug_trace_uses_cli_model_id(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex", model="gpt-5"),
+            memory_root=Path(self.tempdir.name),
+            debug_trace=True,
+        )
+
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            executor_class.return_value.run_session_turn.return_value = "cli reply"
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_session_turn("agent-session", "remember one")
+
+        self.assertEqual(result, "cli reply")
+        trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "retrieve" / "agent-session.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([event["event"] for event in events], ["run_started", "model_started", "model_finished", "run_finished"])
+        self.assertEqual(events[0]["model_id"], "gpt-5")
+        self.assertEqual(events[2]["output"], "cli reply")
 
     def test_debug_trace_records_tool_events(self):
         config = RuntimeConfig(

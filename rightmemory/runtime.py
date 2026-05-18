@@ -5,6 +5,7 @@ from contextlib import contextmanager, nullcontext
 from functools import wraps
 from typing import Any
 
+from .agent_cli import CliAgentExecutor
 from .config import RuntimeConfig, load_config
 from .debug import DebugTrace
 from .prompt import build_instructions
@@ -38,9 +39,7 @@ MODEL_REQUEST_LIMIT = 100
 
 class RightMemoryRuntime:
     def __init__(self, config: RuntimeConfig):
-        if config.runtime_mode == "cli-agent":
-            raise RuntimeError("cli-agent runtime is not wired yet")
-        if config.runtime_mode != "standalone":
+        if config.runtime_mode not in {"standalone", "cli-agent"}:
             raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
         self.config = config
         self.tools = MemoryTools(config.memory_root)
@@ -48,11 +47,16 @@ class RightMemoryRuntime:
         self._message_history: list[Any] = []
         self._active_trace: DebugTrace | None = None
         self._sync_manager: SyncManager | None = None
-        self.agent = self._build_agent()
+        self.agent = self._build_cli_agent() if config.runtime_mode == "cli-agent" else self._build_agent()
 
     def run_turn(self, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
+        if self.config.runtime_mode == "cli-agent":
+            result, post_sync = self._run_locked_turn(lambda: self.agent.run_turn(message))
+            if post_sync is not None:
+                self._run_sync_reconciler(post_sync)
+            return str(result)
         result, post_sync = self._run_locked_turn(
             lambda: self.agent.run_sync(
                 message,
@@ -76,11 +80,14 @@ class RightMemoryRuntime:
             self._trace(
                 "run_started",
                 message=message,
-                model_id=self.config.model_id,
+                model_id=self._trace_model_id(),
                 api_base=self.config.api_base,
             )
             try:
-                result, post_sync = self._run_locked_turn(lambda: self._run_session_model(session_id, message))
+                if self.config.runtime_mode == "cli-agent":
+                    result, post_sync = self._run_locked_turn(lambda: self._run_session_cli_agent(session_id, message))
+                else:
+                    result, post_sync = self._run_locked_turn(lambda: self._run_session_model(session_id, message))
             except Exception as exc:
                 self._trace("run_failed", error_type=type(exc).__name__, error=str(exc))
                 raise
@@ -107,6 +114,13 @@ class RightMemoryRuntime:
             self._trace("model_finished", output=str(output if output is not None else result))
             session.save_json(self._dump_message_history(result))
             self._trace("history_saved", path=str(session.paths.history))
+            return result
+
+    def _run_session_cli_agent(self, session_id: str, message: str) -> str:
+        with self.sessions.locked(session_id):
+            self._trace("model_started")
+            result = self.agent.run_session_turn(session_id, message)
+            self._trace("model_finished", output=str(result))
             return result
 
     def _run_locked_turn(self, run_model: Callable[[], Any]) -> tuple[Any, Any | None]:
@@ -183,6 +197,11 @@ class RightMemoryRuntime:
             retries=self.config.max_tool_retries,
         )
 
+    def _build_cli_agent(self) -> CliAgentExecutor:
+        if self.config.agent_cli is None:
+            raise RuntimeError("cli-agent runtime requires agent_cli config")
+        return CliAgentExecutor(self.config.memory_root, self.config.role, self.config.agent_cli)
+
     def _agent_tools(self) -> list[Callable[..., Any]]:
         read_tools = [
             self._agent_tool(self.tools.glob),
@@ -252,6 +271,13 @@ class RightMemoryRuntime:
         cleanup = getattr(self.agent, "cleanup", None)
         if callable(cleanup):
             cleanup()
+
+    def _trace_model_id(self) -> str | None:
+        if self.config.model_id is not None:
+            return self.config.model_id
+        if self.config.agent_cli is not None:
+            return self.config.agent_cli.model
+        return None
 
     @contextmanager
     def _debug_trace(self, session_id: str):

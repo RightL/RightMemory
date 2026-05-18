@@ -1,12 +1,16 @@
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rightmemory.agent_cli import (
+    CliAgentExecutor,
     build_claude_command,
     build_codex_command,
     parse_claude_output,
     parse_codex_output,
+    _stable_claude_session_id,
 )
 from rightmemory.config import AgentCliConfig
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
@@ -245,6 +249,85 @@ class AgentCliParserTests(unittest.TestCase):
             parse_claude_output('{"type":"result","session_id":"123e4567-e89b-12d3-a456-426614174000"}')
 
         self.assertIn("result", str(caught.exception))
+
+
+class CliAgentExecutorTests(unittest.TestCase):
+    def test_codex_session_turn_saves_and_resumes_provider_session(self):
+        calls = []
+
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+            calls.append(command)
+            text_out = "first" if len(calls) == 1 else "second"
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"type":"thread.started","thread_id":"thread-1"}\n'
+                    f'{{"type":"item.completed","item":{{"type":"agent_message","text":"{text_out}"}}}}\n'
+                ),
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex", model="gpt-5"))
+
+            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
+                first = executor.run_session_turn("agent-1", "hello")
+                second = executor.run_session_turn("agent-1", "again")
+
+            record = ProviderSessionStore(root, "retrieve").load("agent-1")
+
+        self.assertEqual(first, "first")
+        self.assertEqual(second, "second")
+        self.assertIsNotNone(record)
+        self.assertEqual(record.provider_session_id, "thread-1")
+        self.assertNotIn("resume", calls[0])
+        self.assertEqual(calls[1][-3:], ["resume", "thread-1", calls[1][-1]])
+        self.assertIn("Caller message:\nhello", calls[0][-1])
+        self.assertIn("You are RightMemory retrieve mode.", calls[0][-1])
+
+    def test_claude_first_turn_uses_stable_uuid_then_resumes(self):
+        calls = []
+        expected_session_id = _stable_claude_session_id("update", "agent-1")
+
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+            calls.append(command)
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=f'{{"type":"result","session_id":"{expected_session_id}","result":"done {len(calls)}"}}',
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            executor = CliAgentExecutor(Path(tempdir), "update", AgentCliConfig(provider="claude"))
+
+            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
+                first = executor.run_session_turn("agent-1", "remember")
+                second = executor.run_session_turn("agent-1", "more")
+
+        self.assertEqual(first, "done 1")
+        self.assertEqual(second, "done 2")
+        self.assertIn("--session-id", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--session-id") + 1], expected_session_id)
+        self.assertIn("--resume", calls[1])
+        self.assertEqual(calls[1][calls[1].index("--resume") + 1], expected_session_id)
+
+    def test_cli_failure_includes_stdout_and_stderr(self):
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+            return subprocess.CompletedProcess(command, 7, stdout="partial output", stderr="bad credentials")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            executor = CliAgentExecutor(Path(tempdir), "retrieve", AgentCliConfig(provider="codex"))
+            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
+                with self.assertRaises(RuntimeError) as caught:
+                    executor.run_session_turn("agent-1", "hello")
+
+        message = str(caught.exception)
+        self.assertIn("Codex CLI exited with status 7", message)
+        self.assertIn("stderr: bad credentials", message)
+        self.assertIn("stdout: partial output", message)
 
 
 if __name__ == "__main__":

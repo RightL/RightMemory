@@ -796,6 +796,23 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(roles, ["retrieve"])
         self.assertEqual(stdout.getvalue().strip(), "session agent-1: hello there")
 
+    def test_main_cleans_up_after_one_shot_session_turn(self):
+        cleaned = []
+
+        class CleanupRuntime(FakeRuntime):
+            def cleanup(self):
+                cleaned.append(True)
+
+        with (
+            patch("rightmemory.cli.load_config", return_value=object()),
+            patch("rightmemory.cli.RightMemoryRuntime", CleanupRuntime),
+            patch("sys.stdout", io.StringIO()),
+        ):
+            result = main(["retrieve", "--session", "agent-1", "hello"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(cleaned, [True])
+
     def test_main_submits_async_update_without_building_runtime(self):
         roles = []
         stdout = io.StringIO()
