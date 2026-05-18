@@ -15,6 +15,7 @@ from .provider_sessions import ProviderSessionRecord, ProviderSessionStore
 
 READ_ROLES = {"retrieve"}
 WRITE_ROLES = {"dreamer", "reviewer", "sync-reconciler", "update"}
+NO_SESSION_RIGHTMEMORY_SESSION_ID = "chat"
 
 
 @dataclass(frozen=True)
@@ -30,13 +31,9 @@ class CliAgentExecutor:
         self.role = role
         self.config = config
         self.store = ProviderSessionStore(memory_root, role)
-        self._anonymous_provider_session_id: str | None = None
 
     def run_turn(self, message: str) -> str:
-        provider_session_id = self._anonymous_provider_session_id
-        result = self._run_provider(message, provider_session_id, provider_session_id is not None, "run-turn")
-        self._anonymous_provider_session_id = result.provider_session_id
-        return result.text
+        return self.run_session_turn(NO_SESSION_RIGHTMEMORY_SESSION_ID, message)
 
     def run_session_turn(self, rightmemory_session_id: str, message: str) -> str:
         record = self.store.load(rightmemory_session_id)

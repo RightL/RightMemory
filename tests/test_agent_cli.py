@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from rightmemory.agent_cli import (
     CliAgentExecutor,
+    NO_SESSION_RIGHTMEMORY_SESSION_ID,
     build_claude_command,
     build_codex_command,
     parse_claude_output,
@@ -252,6 +253,62 @@ class AgentCliParserTests(unittest.TestCase):
 
 
 class CliAgentExecutorTests(unittest.TestCase):
+    def test_run_turn_saves_provider_session_record(self):
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"type":"thread.started","thread_id":"thread-chat"}\n'
+                    '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n'
+                ),
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex"))
+
+            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
+                result = executor.run_turn("hello")
+
+            record = ProviderSessionStore(root, "retrieve").load(NO_SESSION_RIGHTMEMORY_SESSION_ID)
+            is_internal = ProviderSessionStore.is_internal_provider_session(root, "codex", "thread-chat")
+
+        self.assertEqual(result, "done")
+        self.assertIsNotNone(record)
+        self.assertEqual(record.provider_session_id, "thread-chat")
+        self.assertEqual(record.rightmemory_session_id, NO_SESSION_RIGHTMEMORY_SESSION_ID)
+        self.assertTrue(is_internal)
+
+    def test_run_turn_resumes_saved_provider_session_in_second_executor(self):
+        calls = []
+
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+            calls.append(command)
+            text_out = "first" if len(calls) == 1 else "second"
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"type":"thread.started","thread_id":"thread-chat"}\n'
+                    f'{{"type":"item.completed","item":{{"type":"agent_message","text":"{text_out}"}}}}\n'
+                ),
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+
+            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
+                first = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex")).run_turn("hello")
+                second = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex")).run_turn("again")
+
+        self.assertEqual(first, "first")
+        self.assertEqual(second, "second")
+        self.assertNotIn("resume", calls[0])
+        self.assertEqual(calls[1][-3:], ["resume", "thread-chat", calls[1][-1]])
+
     def test_codex_session_turn_saves_and_resumes_provider_session(self):
         calls = []
 
