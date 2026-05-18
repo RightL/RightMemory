@@ -14,7 +14,7 @@ from rightmemory.agent_cli import (
     parse_codex_output,
     _stable_claude_session_id,
 )
-from rightmemory.config import AgentCliConfig, RuntimeConfig, SyncConfig
+from rightmemory.config import ROLES, AgentCliConfig, RuntimeConfig, SyncConfig
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
 
 
@@ -401,6 +401,7 @@ class AgentCliDoctorTests(unittest.TestCase):
 
     def test_doctor_runs_checks_against_temporary_memory_root(self):
         runtime_configs = []
+        turn_calls = []
         history = {}
 
         class FakeRuntime:
@@ -409,6 +410,7 @@ class AgentCliDoctorTests(unittest.TestCase):
                 self.config = config
 
             def run_session_turn(self, session_id: str, message: str) -> str:
+                turn_calls.append((self.config.role, self.config.agent_cli.provider, session_id, message))
                 memory_root = self.config.memory_root
                 if "Reply exactly `RM_FIRST_" in message:
                     return _token_after(message, "Reply exactly `")
@@ -465,6 +467,16 @@ class AgentCliDoctorTests(unittest.TestCase):
         self.assertTrue(runtime_configs)
         self.assertTrue(all(config.memory_root.name == "memory" for config in runtime_configs))
         self.assertTrue(all(not config.sync.enabled for config in runtime_configs))
+        first_call_roles = {role for role, provider, session_id, message in turn_calls if "Reply exactly `RM_FIRST_" in message}
+        self.assertEqual(first_call_roles, ROLES)
+        first_call_check = next(check for check in checks if check.name == "first provider call")
+        for role in ROLES:
+            self.assertIn(f"{role}:codex", first_call_check.detail)
+        session_ids = [session_id for role, provider, session_id, message in turn_calls]
+        self.assertTrue(all(session_id.startswith("doctor-") for session_id in session_ids))
+        nonce_parts = {session_id.split("-", 2)[1] for session_id in session_ids}
+        self.assertEqual(len(nonce_parts), 1)
+        self.assertTrue(all(len(nonce) == 32 for nonce in nonce_parts))
 
     def test_doctor_reports_config_failure_without_provider_calls(self):
         def fake_load_config(role: str):
@@ -534,6 +546,112 @@ class AgentCliDoctorTests(unittest.TestCase):
         self.assertEqual(boundary.name, "write boundary")
         self.assertFalse(boundary.ok)
         self.assertIn("outside file was created", boundary.detail)
+
+    def test_doctor_fails_boundary_on_generic_runtime_exception(self):
+        history = {}
+
+        class FakeRuntime:
+            def __init__(self, config):
+                self.config = config
+
+            def run_session_turn(self, session_id: str, message: str) -> str:
+                memory_root = self.config.memory_root
+                if "Reply exactly `RM_FIRST_" in message:
+                    return _token_after(message, "Reply exactly `")
+                if "Remember this doctor token" in message:
+                    token = _token_after(message, "token for the next check: `")
+                    history[(self.config.role, session_id)] = token
+                    return f"READY {token}"
+                if "What doctor token" in message:
+                    return history[(self.config.role, session_id)]
+                if "DOCTOR_RETRIEVE_TOKEN" in message:
+                    return _token_after((memory_root / "MEMORY.md").read_text(encoding="utf-8"), "DOCTOR_RETRIEVE_TOKEN: ")
+                if "Append this exact line" in message:
+                    line = _token_after(message, "Append this exact line to MEMORY.md: `")
+                    with (memory_root / "MEMORY.md").open("a", encoding="utf-8") as handle:
+                        handle.write(f"\n{line}\n")
+                    return "WROTE"
+                if "Run git status" in message:
+                    commit_message = _token_after(message, "commit with message `")
+                    subprocess.run(["git", "add", "MEMORY.md"], cwd=memory_root, check=True, capture_output=True)
+                    subprocess.run(
+                        ["git", "commit", "-m", commit_message],
+                        cwd=memory_root,
+                        check=True,
+                        capture_output=True,
+                    )
+                    return "COMMITTED"
+                if "outside the memory root" in message:
+                    raise RuntimeError("provider crashed before making a tool call")
+                raise AssertionError(f"unexpected doctor prompt: {message}")
+
+            def cleanup(self):
+                pass
+
+        with (
+            patch("rightmemory.doctor.load_config", side_effect=_doctor_config),
+            patch("rightmemory.doctor.shutil.which", return_value="/usr/bin/codex"),
+            patch("rightmemory.doctor.RightMemoryRuntime", FakeRuntime),
+        ):
+            checks = run_agent_cli_doctor()
+
+        boundary = checks[-1]
+        self.assertEqual(boundary.name, "write boundary")
+        self.assertFalse(boundary.ok)
+        self.assertIn("provider crashed", boundary.detail)
+
+    def test_doctor_accepts_boundary_denial_exception_when_sibling_file_is_absent(self):
+        history = {}
+
+        class FakeRuntime:
+            def __init__(self, config):
+                self.config = config
+
+            def run_session_turn(self, session_id: str, message: str) -> str:
+                memory_root = self.config.memory_root
+                if "Reply exactly `RM_FIRST_" in message:
+                    return _token_after(message, "Reply exactly `")
+                if "Remember this doctor token" in message:
+                    token = _token_after(message, "token for the next check: `")
+                    history[(self.config.role, session_id)] = token
+                    return f"READY {token}"
+                if "What doctor token" in message:
+                    return history[(self.config.role, session_id)]
+                if "DOCTOR_RETRIEVE_TOKEN" in message:
+                    return _token_after((memory_root / "MEMORY.md").read_text(encoding="utf-8"), "DOCTOR_RETRIEVE_TOKEN: ")
+                if "Append this exact line" in message:
+                    line = _token_after(message, "Append this exact line to MEMORY.md: `")
+                    with (memory_root / "MEMORY.md").open("a", encoding="utf-8") as handle:
+                        handle.write(f"\n{line}\n")
+                    return "WROTE"
+                if "Run git status" in message:
+                    commit_message = _token_after(message, "commit with message `")
+                    subprocess.run(["git", "add", "MEMORY.md"], cwd=memory_root, check=True, capture_output=True)
+                    subprocess.run(
+                        ["git", "commit", "-m", commit_message],
+                        cwd=memory_root,
+                        check=True,
+                        capture_output=True,
+                    )
+                    return "COMMITTED"
+                if "outside the memory root" in message:
+                    raise RuntimeError("sandbox denied write outside workspace")
+                raise AssertionError(f"unexpected doctor prompt: {message}")
+
+            def cleanup(self):
+                pass
+
+        with (
+            patch("rightmemory.doctor.load_config", side_effect=_doctor_config),
+            patch("rightmemory.doctor.shutil.which", return_value="/usr/bin/codex"),
+            patch("rightmemory.doctor.RightMemoryRuntime", FakeRuntime),
+        ):
+            checks = run_agent_cli_doctor()
+
+        boundary = checks[-1]
+        self.assertEqual(boundary.name, "write boundary")
+        self.assertTrue(boundary.ok)
+        self.assertIn("outside write blocked", boundary.detail)
 
 
 def _doctor_config(role: str) -> RuntimeConfig:

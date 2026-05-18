@@ -25,6 +25,7 @@ def format_doctor_report(checks: list[DoctorCheck]) -> str:
 
 def run_agent_cli_doctor() -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
+    run_nonce = uuid4().hex
     configs = _load_agent_cli_configs(checks)
     if not configs:
         return checks
@@ -48,13 +49,13 @@ def run_agent_cli_doctor() -> list[DoctorCheck]:
         checks.append(DoctorCheck("temporary Git memory repo", True, str(memory_root)))
 
         doctor_configs = {role: _doctor_config(config, memory_root) for role, config in configs.items()}
-        _check_first_provider_calls(checks, doctor_configs, providers)
-        _check_resume_history(checks, doctor_configs, providers)
-        _check_retrieve_reads_memory(checks, doctor_configs["retrieve"], retrieve_token)
+        _check_first_provider_calls(checks, doctor_configs, run_nonce)
+        _check_resume_history(checks, doctor_configs, providers, run_nonce)
+        _check_retrieve_reads_memory(checks, doctor_configs["retrieve"], retrieve_token, run_nonce)
         write_config = _write_config(doctor_configs)
-        _check_write_edits_memory(checks, write_config, memory_root)
-        _check_write_commits_memory(checks, write_config, memory_root)
-        _check_write_boundary(checks, write_config, temp_root)
+        _check_write_edits_memory(checks, write_config, memory_root, run_nonce)
+        _check_write_commits_memory(checks, write_config, memory_root, run_nonce)
+        _check_write_boundary(checks, write_config, temp_root, run_nonce)
     return checks
 
 
@@ -89,30 +90,36 @@ def _doctor_config(config: RuntimeConfig, memory_root: Path) -> RuntimeConfig:
 def _check_first_provider_calls(
     checks: list[DoctorCheck],
     configs: dict[str, RuntimeConfig],
-    providers: list[str],
+    run_nonce: str,
 ) -> None:
     failures = []
-    for provider in providers:
-        config = _config_for_provider(configs, provider)
-        token = f"RM_FIRST_{provider.upper()}_{uuid4().hex}"
+    successes = []
+    for role in sorted(configs):
+        config = configs[role]
+        provider = config.agent_cli.provider if config.agent_cli is not None else "unknown"
+        label = f"{role}:{provider}"
+        token = f"RM_FIRST_{role.upper().replace('-', '_')}_{uuid4().hex}"
         try:
-            output = _runtime_turn(config, f"doctor-first-{provider}", f"Reply exactly `{token}`.")
+            output = _runtime_turn(config, f"doctor-{run_nonce}-first-{role}", f"Reply exactly `{token}`.")
             if token not in output:
-                failures.append(f"{provider}: expected token not found")
+                failures.append(f"{label}: expected token not found")
+            else:
+                successes.append(label)
         except Exception as exc:
-            failures.append(f"{provider}: {_exception_detail(exc)}")
-    _append_check(checks, "first provider call", failures, f"succeeded for {', '.join(providers)}")
+            failures.append(f"{label}: {_exception_detail(exc)}")
+    _append_check(checks, "first provider call", failures, f"succeeded for {', '.join(successes)}")
 
 
 def _check_resume_history(
     checks: list[DoctorCheck],
     configs: dict[str, RuntimeConfig],
     providers: list[str],
+    run_nonce: str,
 ) -> None:
     failures = []
     for provider in providers:
         config = _config_for_provider(configs, provider)
-        session_id = f"doctor-resume-{provider}"
+        session_id = f"doctor-{run_nonce}-resume-{provider}"
         token = f"RM_HISTORY_{provider.upper()}_{uuid4().hex}"
         try:
             _runtime_turn(
@@ -128,11 +135,11 @@ def _check_resume_history(
     _append_check(checks, "resume history", failures, f"succeeded for {', '.join(providers)}")
 
 
-def _check_retrieve_reads_memory(checks: list[DoctorCheck], config: RuntimeConfig, token: str) -> None:
+def _check_retrieve_reads_memory(checks: list[DoctorCheck], config: RuntimeConfig, token: str, run_nonce: str) -> None:
     try:
         output = _runtime_turn(
             config,
-            "doctor-retrieve",
+            f"doctor-{run_nonce}-retrieve",
             "Read MEMORY.md and reply with the value after DOCTOR_RETRIEVE_TOKEN.",
         )
         if token not in output:
@@ -143,13 +150,18 @@ def _check_retrieve_reads_memory(checks: list[DoctorCheck], config: RuntimeConfi
     checks.append(DoctorCheck("retrieve reads memory", True, "temporary token returned"))
 
 
-def _check_write_edits_memory(checks: list[DoctorCheck], config: RuntimeConfig, memory_root: Path) -> None:
+def _check_write_edits_memory(
+    checks: list[DoctorCheck],
+    config: RuntimeConfig,
+    memory_root: Path,
+    run_nonce: str,
+) -> None:
     token = f"RM_WRITE_{uuid4().hex}"
     line = f"DOCTOR_WRITE_TOKEN: {token}"
     try:
         _runtime_turn(
             config,
-            "doctor-write-edit",
+            f"doctor-{run_nonce}-write-edit",
             f"Append this exact line to MEMORY.md: `{line}`. Reply exactly `WROTE {token}` after saving.",
         )
         if line not in (memory_root / "MEMORY.md").read_text(encoding="utf-8"):
@@ -160,13 +172,18 @@ def _check_write_edits_memory(checks: list[DoctorCheck], config: RuntimeConfig, 
     checks.append(DoctorCheck("write role edits memory", True, "MEMORY.md updated"))
 
 
-def _check_write_commits_memory(checks: list[DoctorCheck], config: RuntimeConfig, memory_root: Path) -> None:
+def _check_write_commits_memory(
+    checks: list[DoctorCheck],
+    config: RuntimeConfig,
+    memory_root: Path,
+    run_nonce: str,
+) -> None:
     token = f"RM_COMMIT_{uuid4().hex}"
     message = f"memory: doctor agent-cli {token}"
     try:
         _runtime_turn(
             config,
-            "doctor-write-commit",
+            f"doctor-{run_nonce}-write-commit",
             f"Run git status, stage MEMORY.md, and commit with message `{message}`. Reply exactly `COMMITTED {token}`.",
         )
         subject = _run_git(memory_root, "log", "-1", "--pretty=%s").strip()
@@ -178,7 +195,12 @@ def _check_write_commits_memory(checks: list[DoctorCheck], config: RuntimeConfig
     checks.append(DoctorCheck("write role commits memory", True, message))
 
 
-def _check_write_boundary(checks: list[DoctorCheck], config: RuntimeConfig, temp_root: Path) -> None:
+def _check_write_boundary(
+    checks: list[DoctorCheck],
+    config: RuntimeConfig,
+    temp_root: Path,
+    run_nonce: str,
+) -> None:
     token = f"RM_BOUNDARY_{uuid4().hex}"
     outside_path = temp_root / "outside-memory-root.txt"
     prompt = (
@@ -187,9 +209,12 @@ def _check_write_boundary(checks: list[DoctorCheck], config: RuntimeConfig, temp
         f"If the default boundaries block it, reply exactly `BOUNDARY_BLOCKED {token}`."
     )
     try:
-        _runtime_turn(config, "doctor-write-boundary", prompt)
+        _runtime_turn(config, f"doctor-{run_nonce}-write-boundary", prompt)
     except Exception as exc:
-        if not outside_path.exists():
+        if outside_path.exists():
+            checks.append(DoctorCheck("write boundary", False, _exception_detail(exc)))
+            return
+        if _is_boundary_denial(exc):
             checks.append(DoctorCheck("write boundary", True, f"outside write blocked: {type(exc).__name__}"))
             return
         checks.append(DoctorCheck("write boundary", False, _exception_detail(exc)))
@@ -198,6 +223,26 @@ def _check_write_boundary(checks: list[DoctorCheck], config: RuntimeConfig, temp
         checks.append(DoctorCheck("write boundary", False, f"outside file was created: {outside_path}"))
         return
     checks.append(DoctorCheck("write boundary", True, "sibling path was not created"))
+
+
+def _is_boundary_denial(exc: Exception) -> bool:
+    message = str(exc).lower()
+    denial_phrases = (
+        "boundary",
+        "sandbox",
+        "outside workspace",
+        "outside the workspace",
+        "outside memory root",
+        "outside the memory root",
+        "not permitted",
+        "operation not permitted",
+        "denied write",
+        "write denied",
+        "permission denied",
+        "read-only",
+        "read only",
+    )
+    return any(phrase in message for phrase in denial_phrases)
 
 
 def _runtime_turn(config: RuntimeConfig, session_id: str, message: str) -> str:
