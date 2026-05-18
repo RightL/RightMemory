@@ -2,7 +2,7 @@
 # install.sh — set up the RightMemory system on a new machine.
 #
 # Usage:
-#   ./install.sh [--mode subagent|standalone] [<memory-root> <skills-target>]
+#   ./install.sh [--mode cli-agent|standalone] [<memory-root> <skills-target>]
 #
 # Arguments:
 #   <memory-root>    Where MEMORY.md, MEMORY_*.md, and dream_logs/ will live.
@@ -20,19 +20,19 @@
 #   skill targets:  ~/.codex/skills and ~/.claude/skills
 #
 # Modes:
-#   standalone Install an orchestrator skill that calls the standalone rightmemory CLI.
-#   subagent    Install orchestrator, curator, and dreamer skills for agents with subagents.
+#   cli-agent  Install a command-backed orchestrator skill that calls rightmemory.
+#   standalone Install the same command-backed runtime layout for local standalone use.
 #
 # Example:
 #   ./install.sh
 #   ./install.sh ~/.rightmemory ~/.codex/skills
-#   ./install.sh --mode subagent ~/.rightmemory ~/.claude/skills
+#   ./install.sh --mode cli-agent ~/.rightmemory ~/.claude/skills
 
 set -euo pipefail
 
 usage() {
   cat >&2 <<EOF
-Usage: $0 [--mode subagent|standalone] [<memory-root> <skills-target>]
+Usage: $0 [--mode cli-agent|standalone] [<memory-root> <skills-target>]
 
 Arguments:
   <memory-root>    Where MEMORY.md, MEMORY_*.md, and dream_logs/ will live.
@@ -41,11 +41,11 @@ Arguments:
                    ~/.codex/skills and ~/.claude/skills.
 
 Modes:
-  standalone  Install only a memory-orchestrator skill that calls the standalone CLI.
-  subagent     Install memory-orchestrator, memory-curator, and memory-dreamer skills.
+  cli-agent   Install a memory-orchestrator skill that calls the rightmemory command.
+  standalone  Install the same command-backed runtime layout for local standalone use.
 
 Options:
-  --mode MODE    standalone (default) or subagent.
+  --mode MODE    standalone (default) or cli-agent.
   -h, --help     Show this help.
 EOF
 }
@@ -98,7 +98,12 @@ else
 fi
 
 case "$MODE" in
-  subagent|standalone)
+  cli-agent|standalone)
+    ;;
+  subagent)
+    echo "Unsupported --mode: subagent" >&2
+    echo "Use --mode cli-agent for command-backed agent skill installs." >&2
+    exit 1
     ;;
   *)
     echo "Invalid --mode: $MODE" >&2
@@ -128,11 +133,9 @@ echo "Installing RightMemory"
 echo "  MODE         = $MODE"
 echo "  MEMORY_ROOT  = $MEMORY_ROOT"
 echo "  SKILLS_ROOTS = ${SKILLS_TARGETS[*]}"
-if [ "$MODE" = "standalone" ]; then
-  echo "  RUNTIME_HOME = $RIGHTMEMORY_HOME"
-  echo "  RUNTIME_VENV = $RIGHTMEMORY_VENV"
-  echo "  CLI_COMMAND  = rightmemory"
-fi
+echo "  RUNTIME_HOME = $RIGHTMEMORY_HOME"
+echo "  RUNTIME_VENV = $RIGHTMEMORY_VENV"
+echo "  CLI_COMMAND  = rightmemory"
 echo
 
 escape_sed_replacement() {
@@ -183,11 +186,12 @@ remove_skill_dir() {
     return
   fi
 
-  if grep -Eq "^name:[[:space:]]*$skill_name[[:space:]]*$" "$skill_file"; then
+  if grep -Eq "^name:[[:space:]]*$skill_name[[:space:]]*$" "$skill_file" \
+    && grep -q "subagent execution wrapper for RightMemory" "$skill_file"; then
     rm -rf "$skill_dir"
     echo "  [remove]  $skill_dir"
   else
-    echo "  [skip]    $skill_dir does not identify as $skill_name; left untouched"
+    echo "  [skip]    $skill_dir is not an old RightMemory role skill; left untouched"
   fi
 }
 
@@ -284,7 +288,7 @@ install_or_refresh_memory() {
   rm -f "$block_file"
 }
 
-install_standalone_runtime_layout() {
+install_cli_runtime_layout() {
   if ! command -v uv >/dev/null 2>&1; then
     echo "Missing required command: uv" >&2
     echo "Install uv first: https://docs.astral.sh/uv/getting-started/installation/" >&2
@@ -352,28 +356,17 @@ EOF
   echo "  [new]     $MEMORY_ROOT/.gitignore  (memory allowlist)"
 fi
 
-if [ "$MODE" = "subagent" ]; then
-  for skills_target in "${SKILLS_TARGETS[@]}"; do
-    schema_dst="$skills_target/rightmemory-schema.md"
-    cp "$REPO_ROOT/skills/rightmemory-schema.md" "$schema_dst"
-    echo "  [install] $schema_dst"
-    for skill in memory-orchestrator memory-curator memory-dreamer; do
-      install_skill "$REPO_ROOT/skills/$skill/SKILL.md" "$skill" "$skills_target"
-    done
-  done
-else
-  install_standalone_runtime_layout
-  for skills_target in "${SKILLS_TARGETS[@]}"; do
-    schema_dst="$skills_target/rightmemory-schema.md"
-    cp "$REPO_ROOT/skills/rightmemory-schema.md" "$schema_dst"
-    echo "  [install] $schema_dst"
-    install_skill "$REPO_ROOT/skills/memory-orchestrator-standalone/SKILL.md" "memory-orchestrator" "$skills_target"
-    remove_skill_dir "memory-curator" "$skills_target"
-    remove_skill_dir "memory-dreamer" "$skills_target"
-  done
-  echo "  [skip]    subagent skills; standalone mode uses rightmemory"
-  warn_if_rightmemory_not_on_path
-fi
+install_cli_runtime_layout
+for skills_target in "${SKILLS_TARGETS[@]}"; do
+  schema_dst="$skills_target/rightmemory-schema.md"
+  cp "$REPO_ROOT/skills/rightmemory-schema.md" "$schema_dst"
+  echo "  [install] $schema_dst"
+  install_skill "$REPO_ROOT/skills/memory-orchestrator-cli/SKILL.md" "memory-orchestrator" "$skills_target"
+  remove_skill_dir "memory-curator" "$skills_target"
+  remove_skill_dir "memory-dreamer" "$skills_target"
+done
+echo "  [skip]    generated role skills; $MODE mode uses rightmemory"
+warn_if_rightmemory_not_on_path
 
 mkdir -p "$MEMORY_ROOT/.runtime"
 if [ ! -f "$MEMORY_ROOT/.runtime/.gitignore" ]; then
@@ -390,14 +383,9 @@ echo "             running watch processes refresh after their current cycle or 
 echo
 echo "Done. Next steps:"
 echo "  1. Open $MEMORY_ROOT/MEMORY.md and replace the example domain with your own."
-if [ "$MODE" = "subagent" ]; then
-  echo "  2. Trigger any memory-relevant message in your AI agent — orchestrator picks it up."
-  echo "  3. When you want consolidation, ask your agent to invoke the memory-dreamer skill."
-else
-  echo "  2. Write role model config to $MEMORY_ROOT/rightmemory.toml."
-  echo "  3. Trigger any memory-relevant message in your AI agent — the installed orchestrator calls rightmemory."
-  echo "  4. Optional background review and dreams: rightmemory watch start"
-fi
+echo "  2. Write role model config to $MEMORY_ROOT/rightmemory.toml."
+echo "  3. Trigger any memory-relevant message in your AI agent — the installed orchestrator calls rightmemory."
+echo "  4. Optional background review and dreams: rightmemory watch start"
 echo
 echo "Re-run this script any time you pull updates from the RightMemory repo;"
 echo "your existing MEMORY.md, MEMORY_*.md, and dream_logs/ are preserved."
