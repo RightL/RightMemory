@@ -16,7 +16,7 @@ Child nodes should not point to their containing heading merely to say they belo
 
 ### Structural clarity over node count
 
-Curator edits optimize for a readable heading tree and coherent graph nodes instead of minimizing new nodes. Updating an existing node is appropriate when the same fact is being refined, but adding, splitting, merging, or moving headings and nodes is preferred when it prevents overloaded records or makes the memory structure clearer.
+Memory update edits optimize for a readable heading tree and coherent graph nodes instead of minimizing new nodes. Updating an existing node is appropriate when the same fact is being refined, but adding, splitting, merging, or moving headings and nodes is preferred when it prevents overloaded records or makes the memory structure clearer.
 
 ### Detail file naming
 
@@ -26,25 +26,25 @@ Detail files use short explicit slugs from file-backed headings such as `#### To
 
 Schema rules live in `skills/rightmemory-schema.md` instead of at the top of every `MEMORY.md`, because memory files should stay focused on user memory while prompt/schema changes remain single-source and installable with the skills.
 
-### Curator baseline commits
+### Update baseline commits
 
-The curator makes a baseline commit only before its first write when the memory repo is already dirty, because pre-existing memory edits should not be mixed with curator-created routine changes. Routine curator writes remain uncommitted so users can batch or review them, while dreamer remains the commit-oriented consolidation path.
+The update role makes a baseline commit before its first write when the memory repo is already dirty, because pre-existing memory edits should not be mixed with routine model-created changes. Routine update writes remain uncommitted so users can batch or review them, while dreamer remains the commit-oriented consolidation path.
 
-### Standalone command roles
+### Command-backed roles
 
-The independent mode uses explicit `retrieve`, `update`, and `dreamer` command roles because retrieval should be fast and read-only, updates should be more careful and write-capable, and dreamer remains a separate consolidation authority. The caller chooses the role at startup so the runtime can load the right prompt, tools, session history, and model config without asking one model context to infer behavior from `[RETRIEVE]` or `[UPDATE]` tags; the configured memory root remains the only runtime root because that is the memory store and the intended ownership boundary.
+RightMemory exposes explicit `retrieve`, `update`, and `dreamer` command roles because retrieval should be fast and read-oriented, updates should be more careful and write-capable, and dreamer remains a separate consolidation authority. The caller chooses the role at startup so the runtime can load the right prompt, authority boundary, session history, and executor config without asking one model context to infer behavior from dispatch tags; the configured memory root remains the runtime root because that is the memory store and the intended ownership boundary.
 
-### Standalone install mode
+### Command-backed install modes
 
-The installer keeps subagent and standalone agent wiring separate because the host agent should see one memory workflow at a time. Subagent mode installs orchestrator, curator, and dreamer skills; standalone mode installs only an orchestrator skill that calls the CLI, leaving retrieve, update, and dreamer behavior inside the standalone runtime so duplicate skill triggers do not compete with command-based memory access.
+Both install modes give the host agent the same workflow: a `memory-orchestrator` skill that calls the `rightmemory` command. The difference is the executor behind that command. Standalone mode runs RightMemory's local Pydantic AI agent and bounded memory tools. CLI-agent mode delegates the role turn to Codex CLI or Claude Code CLI while preserving RightMemory's role prompts, session records, memory root, and command surface.
 
-### Standalone model config
+### Executor config
 
-Standalone mode uses explicit `[retrieve.model]`, `[update.model]`, and `[dreamer.model]` tables because retrieve, update, and dreamer may need different providers or model sizes. Old `[curator.model]` config is rejected instead of silently mapped because the split changed authority boundaries as well as names, and requiring migration makes stale read-write configuration visible. `anthropic/...` remains the explicit Anthropic selector; other model ids are treated as OpenAI-compatible so local gateways and hosted vLLM endpoints stay simple.
+Standalone mode uses explicit `[retrieve.model]`, `[update.model]`, and `[dreamer.model]` tables because retrieve, update, and dreamer may need different providers or model sizes. CLI-agent mode uses global `[agent_cli].provider` plus role-local `[<role>.agent_cli]` tables so one memory root can use Codex for some roles and Claude for others. `anthropic/...` remains the explicit Anthropic selector for standalone models; other model ids are treated as OpenAI-compatible so local gateways and hosted vLLM endpoints stay simple.
 
 ### Standalone tool boundary
 
-Standalone mode exposes narrow filesystem and git tools instead of arbitrary Python execution because the memory agent should behave like a coding assistant while keeping the configured memory root as the only ownership boundary. Search, outline, context reads, Codex-style patches, and validation reduce line-number guesswork without opening the door to arbitrary shell control or memory-specific CRUD lock-in.
+Standalone mode exposes narrow filesystem and git tools instead of arbitrary Python execution because the memory agent should behave like a coding assistant while keeping the configured memory root as the ownership boundary. Search, outline, context reads, Codex-style patches, and validation reduce line-number guesswork without opening the door to arbitrary shell control or memory-specific CRUD lock-in.
 
 ### Standalone commit boundary
 
@@ -76,4 +76,4 @@ Standalone update submissions accumulate as candidate briefs for one hour from t
 
 ### Standalone role prompts
 
-Standalone retrieve, update, and dreamer prompts live as role-specific Markdown files under the runtime package instead of being derived from subagent skills in Python, because retrieve and update now have different operating contracts and should not inherit mixed curator behavior through string replacements. `prompt.py` stays a small composer for schema, workspace, tool, and role prompt fragments, while update-specific candidate triage stays in the update role prompt where prompt policy is easier to review and revise.
+Retrieve, update, and dreamer prompts live as role-specific Markdown files under the runtime package because the command runtime is the source of role behavior in both install modes. `prompt.py` stays a small composer for schema, workspace, tool, and role prompt fragments, while update-specific candidate triage stays in the update role prompt where prompt policy is easier to review and revise.
