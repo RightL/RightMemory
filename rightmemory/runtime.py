@@ -33,6 +33,7 @@ SUPPORTED_MODEL_SETTINGS = {
     "extra_body",
 }
 RECOVERABLE_TOOL_ERRORS = (ValueError, FileNotFoundError)
+MODEL_REQUEST_LIMIT = 100
 
 
 class RightMemoryRuntime:
@@ -53,6 +54,7 @@ class RightMemoryRuntime:
                 message,
                 message_history=self._message_history or None,
                 model_settings=self._model_settings(),
+                usage_limits=self._usage_limits(),
             )
         )
         all_messages = getattr(result, "all_messages", None)
@@ -95,6 +97,7 @@ class RightMemoryRuntime:
                 message,
                 message_history=history,
                 model_settings=self._model_settings(),
+                usage_limits=self._usage_limits(),
             )
             output = getattr(result, "output", None)
             self._trace("model_finished", output=str(output if output is not None else result))
@@ -232,6 +235,14 @@ class RightMemoryRuntime:
             joined = ", ".join(unsupported)
             raise ValueError(f"unsupported Pydantic AI model setting(s) in [model.kwargs]: {joined}")
         return dict(self.config.model_kwargs)
+
+    def _usage_limits(self):
+        try:
+            from pydantic_ai import UsageLimits
+        except ImportError as exc:
+            raise RuntimeError("install standalone dependencies with: pip install -e .") from exc
+
+        return UsageLimits(request_limit=MODEL_REQUEST_LIMIT)
 
     def cleanup(self) -> None:
         cleanup = getattr(self.agent, "cleanup", None)

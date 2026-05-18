@@ -116,6 +116,23 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertEqual(self.tools.read_command("rg beta MEMORY.md"), "MEMORY.md:beta")
 
+    @unittest.skipIf(shutil.which("rg") is None, "rg is not installed")
+    def test_read_command_expands_ripgrep_path_globs_without_shell(self):
+        (self.root / "MEMORY.md").write_text("alpha\nbeta\n", encoding="utf-8")
+        (self.root / "MEMORY_extra.md").write_text("beta detail\n", encoding="utf-8")
+        (self.root / "NOTES.md").write_text("beta notes\n", encoding="utf-8")
+
+        self.assertEqual(
+            set(self.tools.read_command("rg beta MEMORY*.md").splitlines()),
+            {"MEMORY.md:beta", "MEMORY_extra.md:beta detail"},
+        )
+
+    @unittest.skipIf(shutil.which("rg") is None, "rg is not installed")
+    def test_read_command_unmatched_ripgrep_path_glob_returns_no_matches(self):
+        (self.root / "MEMORY.md").write_text("beta\n", encoding="utf-8")
+
+        self.assertEqual(self.tools.read_command("rg beta MEMORY_*.md"), "no matches")
+
     def test_outline_file_returns_heading_map(self):
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"

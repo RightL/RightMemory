@@ -554,6 +554,9 @@ class MemoryTools:
         return self._read_raw_file(args[3], start, end)
 
     def _read_command_rg(self, args: list[str]) -> str:
+        args, explicit_path_count, expanded_path_count = self._expand_rg_path_globs(args)
+        if explicit_path_count and expanded_path_count == 0:
+            return "no matches"
         self._validate_read_command_paths(args[1:])
         if "--files" not in args and "--with-filename" not in args and "--no-filename" not in args:
             args = [args[0], "--with-filename", *args[1:]]
@@ -569,6 +572,85 @@ class MemoryTools:
             raise RuntimeError(f"rg command failed: {detail}")
         output = process.stdout.strip()
         return self._cap_command_output(output) if output else "no matches"
+
+    def _expand_rg_path_globs(self, args: list[str]) -> tuple[list[str], int, int]:
+        path_indices = self._rg_path_token_indices(args)
+        if not path_indices:
+            return args, 0, 0
+
+        expanded: list[str] = []
+        explicit_path_count = 0
+        expanded_path_count = 0
+        for index, token in enumerate(args):
+            if index not in path_indices:
+                expanded.append(token)
+                continue
+            explicit_path_count += 1
+            if not self._has_glob_meta(token):
+                expanded.append(token)
+                expanded_path_count += 1
+                continue
+            matches = self._expand_glob_path_token(token)
+            expanded.extend(matches)
+            expanded_path_count += len(matches)
+        return expanded, explicit_path_count, expanded_path_count
+
+    def _rg_path_token_indices(self, args: list[str]) -> set[int]:
+        option_takes_value = {"-g", "--glob", "--type", "-t", "-e", "--regexp", "-f", "--file"}
+        pattern_options = {"-e", "--regexp", "-f", "--file"}
+        path_indices: set[int] = set()
+        has_pattern = "--files" in args
+        skip_next = False
+        end_options = False
+
+        for index, token in enumerate(args[1:], start=1):
+            if skip_next:
+                skip_next = False
+                continue
+            if not end_options and token == "--":
+                end_options = True
+                continue
+            if not end_options and token in option_takes_value:
+                if token in pattern_options:
+                    has_pattern = True
+                skip_next = True
+                continue
+            if not end_options and self._rg_option_has_attached_value(token):
+                if token.startswith(("-e", "--regexp=", "-f", "--file=")):
+                    has_pattern = True
+                continue
+            if not end_options and token.startswith("-"):
+                continue
+
+            if has_pattern:
+                path_indices.add(index)
+            else:
+                has_pattern = True
+        return path_indices
+
+    def _rg_option_has_attached_value(self, token: str) -> bool:
+        return (
+            token.startswith("--glob=")
+            or token.startswith("--type=")
+            or token.startswith("--regexp=")
+            or token.startswith("--file=")
+            or (len(token) > 2 and token[:2] in {"-g", "-t", "-e", "-f"})
+        )
+
+    def _has_glob_meta(self, token: str) -> bool:
+        return any(char in token for char in "*?[")
+
+    def _expand_glob_path_token(self, token: str) -> list[str]:
+        pattern = self._normalize_glob_pattern(token)
+        matches = [
+            path.relative_to(self.memory_root).as_posix()
+            for path in self.memory_root.glob(pattern)
+            if (path.is_file() or path.is_dir()) and self._is_under_root(path)
+        ]
+        matches.sort()
+        if len(matches) > MAX_LIST_FILES:
+            raise ValueError(f"pattern matched more than {MAX_LIST_FILES} paths; use a narrower pattern")
+        return matches
 
     def _read_command_git(self, args: list[str]) -> str:
         if args == ["git", "status", "--short"]:

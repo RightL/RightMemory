@@ -374,6 +374,7 @@ class RuntimeTests(unittest.TestCase):
             runtime.agent.calls[0]["model_settings"],
             {"extra_body": {"chat_template_kwargs": {"thinking": True}}},
         )
+        self.assertEqual(runtime.agent.calls[0]["usage_limits"].request_limit, 100)
 
     def test_write_role_creates_memory_lock_and_gitignore(self):
         config = RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name))
@@ -463,7 +464,7 @@ class RuntimeTests(unittest.TestCase):
             manager_class.return_value.push.side_effect = push
             runtime = RightMemoryRuntime(config)
 
-            def run_sync(message, message_history=None, model_settings=None):
+            def run_sync(message, message_history=None, model_settings=None, usage_limits=None):
                 events.append("model")
 
                 class FakeResult:
@@ -790,9 +791,14 @@ class RuntimeTests(unittest.TestCase):
                 self.model = kwargs["model"]
                 self.tools = kwargs["tools"]
 
-            def run_sync(self, message, message_history=None, model_settings=None):
+            def run_sync(self, message, message_history=None, model_settings=None, usage_limits=None):
                 self.calls.append(
-                    {"message": message, "message_history": message_history, "model_settings": model_settings}
+                    {
+                        "message": message,
+                        "message_history": message_history,
+                        "model_settings": model_settings,
+                        "usage_limits": usage_limits,
+                    }
                 )
                 call_count = len(self.calls)
 
@@ -821,8 +827,16 @@ class RuntimeTests(unittest.TestCase):
             def validate_json(data):
                 return json.loads(data)
 
+        class FakeUsageLimits:
+            def __init__(self, request_limit=None):
+                self.request_limit = request_limit
+
         return {
-            "pydantic_ai": types.SimpleNamespace(Agent=FakeAgent, ModelRetry=FakeModelRetry),
+            "pydantic_ai": types.SimpleNamespace(
+                Agent=FakeAgent,
+                ModelRetry=FakeModelRetry,
+                UsageLimits=FakeUsageLimits,
+            ),
             "pydantic_ai.messages": types.SimpleNamespace(ModelMessagesTypeAdapter=FakeModelMessagesTypeAdapter),
             "pydantic_ai.models": types.SimpleNamespace(),
             "pydantic_ai.models.openai": types.SimpleNamespace(OpenAIChatModel=FakeModel),
@@ -837,7 +851,7 @@ class RuntimeTests(unittest.TestCase):
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
 
-            def run_sync(self, message, message_history=None, model_settings=None):
+            def run_sync(self, message, message_history=None, model_settings=None, usage_limits=None):
                 raise RuntimeError("model failed")
 
         return FailingAgent
