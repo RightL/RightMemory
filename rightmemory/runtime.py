@@ -38,6 +38,10 @@ MODEL_REQUEST_LIMIT = 100
 
 class RightMemoryRuntime:
     def __init__(self, config: RuntimeConfig):
+        if config.runtime_mode == "cli-agent":
+            raise RuntimeError("cli-agent runtime is not wired yet")
+        if config.runtime_mode != "standalone":
+            raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
         self.config = config
         self.tools = MemoryTools(config.memory_root)
         self.sessions = MessageSessionStore(config.memory_root, config.role)
@@ -281,6 +285,8 @@ class RightMemoryRuntime:
 
 
 def build_model(config: RuntimeConfig):
+    if not config.model_id:
+        raise RuntimeError("standalone runtime requires model_id")
     if config.model_id.startswith("anthropic/"):
         return _build_anthropic_model(config)
     return _build_openai_compatible_model(config)

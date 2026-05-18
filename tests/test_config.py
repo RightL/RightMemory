@@ -428,6 +428,20 @@ class RuntimeTests(unittest.TestCase):
             {"base_url": "https://api.example.com/anthropic", "api_key": "token"},
         )
 
+    def test_cli_agent_runtime_mode_is_rejected_until_executor_is_wired(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=Path(self.tempdir.name),
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            with self.assertRaises(RuntimeError) as caught:
+                RightMemoryRuntime(config)
+
+        self.assertIn("cli-agent runtime is not wired yet", str(caught.exception))
+
     def test_run_turn_preserves_message_history(self):
         config = RuntimeConfig(
             role="retrieve",
