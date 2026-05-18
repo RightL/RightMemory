@@ -62,6 +62,8 @@ class InstallScriptTests(unittest.TestCase):
             dreamer_exists = (skills_target / "memory-dreamer").exists()
 
         self.assertIn("MODE         = cli-agent", result.stdout)
+        self.assertIn("Write [agent_cli] and [<role>.agent_cli] provider/model config", result.stdout)
+        self.assertNotIn("Write role model config", result.stdout)
         self.assertIn("mode=cli-agent", install_stamp)
         self.assertIn("installed `rightmemory` command", orchestrator)
         self.assertNotIn("standalone mode", orchestrator)
@@ -162,6 +164,7 @@ class InstallScriptTests(unittest.TestCase):
             self.assertFalse((home / ".codex" / "skills" / "memory-curator").exists())
             self.assertFalse((home / ".claude" / "skills" / "memory-dreamer").exists())
             self.assertIn("MODE         = standalone", result.stdout)
+            self.assertIn("Write role model config", result.stdout)
             self.assertIn("rightmemory is installed", result.stdout)
 
     def test_subagent_mode_is_rejected_with_cli_agent_guidance(self):
