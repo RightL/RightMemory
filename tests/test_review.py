@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from rightmemory.config import ReviewConfig, ReviewSourceConfig
+from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
 from rightmemory.review import ReviewScanner, ReviewStateStore
 from rightmemory.transcripts.codex import parse_session as parse_codex_session
 from rightmemory.transcripts.claude import parse_session as parse_claude_session
@@ -290,6 +291,42 @@ class ReviewScannerTests(unittest.TestCase):
 
         self.assertEqual(result.skipped_reviewed, 1)
         self.assertEqual(calls, [])
+
+    def test_scan_skips_internal_provider_session(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            ProviderSessionStore(root, "retrieve").save(
+                ProviderSessionRecord(
+                    provider="codex",
+                    provider_session_id="s1",
+                    role="retrieve",
+                    rightmemory_session_id="agent-1",
+                    created_at="2026-05-18T00:00:00+00:00",
+                    updated_at="2026-05-18T00:00:00+00:00",
+                )
+            )
+            source = root / "codex"
+            source.mkdir()
+            transcript = source / "session.jsonl"
+            self._write_codex(transcript, turns=[("internal", "work")], session_id="s1")
+            self._set_mtime(transcript, 1_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                lambda session_id, message: calls.append(message) or "ok",
+            )
+
+            result = scanner.scan_once(now=10_000)
+            state = ReviewStateStore(root).load()
+
+        self.assertEqual(result.skipped_internal, 1)
+        self.assertEqual(result.reviewed, 0)
+        self.assertEqual(calls, [])
+        self.assertEqual(state.sessions, {})
 
     def test_scan_skips_active_session(self):
         calls = []

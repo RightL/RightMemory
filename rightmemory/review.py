@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import ReviewConfig, ReviewSourceConfig
+from .provider_sessions import ProviderSessionStore
 from .session import _ensure_runtime_gitignore, _fsync_directory
 from .transcripts import claude, codex
 from .transcripts.model import NormalizedSession, TranscriptFile
@@ -35,6 +36,7 @@ class ReviewScanResult:
     skipped_idle: int = 0
     skipped_old: int = 0
     skipped_reviewed: int = 0
+    skipped_internal: int = 0
     skipped_empty: int = 0
     retried: int = 0
     failed: int = 0
@@ -45,6 +47,7 @@ class ReviewScanResult:
             f"skipped_idle: {self.skipped_idle}\n"
             f"skipped_old: {self.skipped_old}\n"
             f"skipped_reviewed: {self.skipped_reviewed}\n"
+            f"skipped_internal: {self.skipped_internal}\n"
             f"skipped_empty: {self.skipped_empty}\n"
             f"retried: {self.retried}\n"
             f"failed: {self.failed}"
@@ -105,6 +108,7 @@ class ReviewScanner:
             "skipped_idle": 0,
             "skipped_old": 0,
             "skipped_reviewed": 0,
+            "skipped_internal": 0,
             "skipped_empty": 0,
             "retried": 0,
             "failed": 0,
@@ -127,6 +131,14 @@ class ReviewScanner:
                 normalized = _parse(transcript)
                 if normalized is None or not normalized.turns:
                     counts["skipped_empty"] += 1
+                    continue
+
+                if ProviderSessionStore.is_internal_provider_session(
+                    self.config.memory_root,
+                    normalized.source,
+                    normalized.session_id,
+                ):
+                    counts["skipped_internal"] += 1
                     continue
 
                 state_key = _state_key(normalized.source, normalized.session_id)
