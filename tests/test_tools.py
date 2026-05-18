@@ -128,6 +128,17 @@ class MemoryToolsTests(unittest.TestCase):
         )
 
     @unittest.skipIf(shutil.which("rg") is None, "rg is not installed")
+    def test_read_command_preserves_ripgrep_iglob_filter_values(self):
+        (self.root / "MEMORY.md").write_text("alpha\n", encoding="utf-8")
+        (self.root / "MEMORY_extra.md").write_text("beta\n", encoding="utf-8")
+        (self.root / "NOTES.md").write_text("gamma\n", encoding="utf-8")
+
+        self.assertEqual(
+            set(self.tools.read_command("rg --files --iglob MEMORY*.md").splitlines()),
+            {"MEMORY.md", "MEMORY_extra.md"},
+        )
+
+    @unittest.skipIf(shutil.which("rg") is None, "rg is not installed")
     def test_read_command_unmatched_ripgrep_path_glob_returns_no_matches(self):
         (self.root / "MEMORY.md").write_text("beta\n", encoding="utf-8")
 

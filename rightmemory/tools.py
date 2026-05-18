@@ -596,7 +596,7 @@ class MemoryTools:
         return expanded, explicit_path_count, expanded_path_count
 
     def _rg_path_token_indices(self, args: list[str]) -> set[int]:
-        option_takes_value = {"-g", "--glob", "--type", "-t", "-e", "--regexp", "-f", "--file"}
+        option_takes_value = {"-g", "--glob", "--iglob", "--type", "-t", "-e", "--regexp", "-f", "--file"}
         pattern_options = {"-e", "--regexp", "-f", "--file"}
         path_indices: set[int] = set()
         has_pattern = "--files" in args
@@ -631,6 +631,7 @@ class MemoryTools:
     def _rg_option_has_attached_value(self, token: str) -> bool:
         return (
             token.startswith("--glob=")
+            or token.startswith("--iglob=")
             or token.startswith("--type=")
             or token.startswith("--regexp=")
             or token.startswith("--file=")
