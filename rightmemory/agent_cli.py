@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from .config import ROLES, AgentCliConfig
 
@@ -26,12 +27,6 @@ def build_codex_command(
     provider_session_id: str | None,
 ) -> list[str]:
     _validate_role(role)
-    if provider_session_id:
-        command = ["codex", "exec", "resume", "--json", "--skip-git-repo-check"]
-        _append_model(command, config)
-        command.extend([provider_session_id, prompt])
-        return command
-
     command = [
         "codex",
         "exec",
@@ -43,6 +38,9 @@ def build_codex_command(
         _codex_sandbox(role),
     ]
     _append_model(command, config)
+    if provider_session_id:
+        command.extend(["resume", provider_session_id, prompt])
+        return command
     command.append(prompt)
     return command
 
@@ -55,8 +53,10 @@ def build_claude_command(
     resume: bool,
 ) -> list[str]:
     _validate_role(role)
+    _validate_uuid(provider_session_id)
     command = ["claude", "-p", "--output-format", "json"]
     _append_model(command, config)
+    command.extend(["--permission-mode", _claude_permission_mode(role)])
     session_flag = "--resume" if resume else "--session-id"
     command.extend([session_flag, provider_session_id, prompt])
     return command
@@ -107,9 +107,24 @@ def _codex_sandbox(role: str) -> str:
     raise ValueError(f"RightMemory role has no Codex sandbox mapping: {role}")
 
 
+def _claude_permission_mode(role: str) -> str:
+    if role in READ_ROLES:
+        return "plan"
+    if role in WRITE_ROLES:
+        return "auto"
+    raise ValueError(f"RightMemory role has no Claude permission mapping: {role}")
+
+
 def _validate_role(role: str) -> None:
     if role not in ROLES:
         raise ValueError(f"unknown RightMemory role: {role}")
+
+
+def _validate_uuid(value: str) -> None:
+    try:
+        UUID(value)
+    except ValueError as exc:
+        raise ValueError("Claude provider_session_id must be a UUID") from exc
 
 
 def _json_object(content: str, label: str) -> dict[str, Any]:

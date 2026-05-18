@@ -106,11 +106,41 @@ class AgentCliCommandTests(unittest.TestCase):
             [
                 "codex",
                 "exec",
-                "resume",
                 "--json",
+                "--cd",
+                "/memory/root",
                 "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
                 "--model",
                 "gpt-5",
+                "resume",
+                "thread-1",
+                "prompt",
+            ],
+        )
+
+    def test_build_codex_resume_command_uses_workspace_write_for_write_role(self):
+        command = build_codex_command(
+            Path("/memory/root"),
+            "update",
+            AgentCliConfig(provider="codex"),
+            "prompt",
+            "thread-1",
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "codex",
+                "exec",
+                "--json",
+                "--cd",
+                "/memory/root",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "workspace-write",
+                "resume",
                 "thread-1",
                 "prompt",
             ],
@@ -118,8 +148,9 @@ class AgentCliCommandTests(unittest.TestCase):
 
     def test_build_claude_first_command_uses_session_id(self):
         config = AgentCliConfig(provider="claude", model="sonnet")
+        session_id = "123e4567-e89b-12d3-a456-426614174000"
 
-        command = build_claude_command("retrieve", config, "prompt", "uuid-1", False)
+        command = build_claude_command("retrieve", config, "prompt", session_id, False)
 
         self.assertEqual(
             command,
@@ -130,18 +161,22 @@ class AgentCliCommandTests(unittest.TestCase):
                 "json",
                 "--model",
                 "sonnet",
+                "--permission-mode",
+                "plan",
                 "--session-id",
-                "uuid-1",
+                session_id,
                 "prompt",
             ],
         )
 
-    def test_build_claude_resume_command_uses_resume(self):
+    def test_build_claude_resume_command_uses_auto_permission_for_write_role(self):
+        session_id = "123e4567-e89b-12d3-a456-426614174000"
+
         command = build_claude_command(
-            "retrieve",
+            "update",
             AgentCliConfig(provider="claude"),
             "prompt",
-            "uuid-1",
+            session_id,
             True,
         )
 
@@ -152,11 +187,19 @@ class AgentCliCommandTests(unittest.TestCase):
                 "-p",
                 "--output-format",
                 "json",
+                "--permission-mode",
+                "auto",
                 "--resume",
-                "uuid-1",
+                session_id,
                 "prompt",
             ],
         )
+
+    def test_build_claude_command_rejects_non_uuid_session_id(self):
+        with self.assertRaises(ValueError) as caught:
+            build_claude_command("retrieve", AgentCliConfig(provider="claude"), "prompt", "uuid-1", False)
+
+        self.assertIn("UUID", str(caught.exception))
 
 
 class AgentCliParserTests(unittest.TestCase):
@@ -184,9 +227,11 @@ class AgentCliParserTests(unittest.TestCase):
         self.assertIn("final agent message", str(caught.exception))
 
     def test_parse_claude_json_output(self):
-        parsed = parse_claude_output('{"type":"result","session_id":"uuid-1","result":"done"}')
+        parsed = parse_claude_output(
+            '{"type":"result","session_id":"123e4567-e89b-12d3-a456-426614174000","result":"done"}'
+        )
 
-        self.assertEqual(parsed.provider_session_id, "uuid-1")
+        self.assertEqual(parsed.provider_session_id, "123e4567-e89b-12d3-a456-426614174000")
         self.assertEqual(parsed.text, "done")
 
     def test_parse_claude_requires_session_id(self):
@@ -197,7 +242,7 @@ class AgentCliParserTests(unittest.TestCase):
 
     def test_parse_claude_requires_result(self):
         with self.assertRaises(RuntimeError) as caught:
-            parse_claude_output('{"type":"result","session_id":"uuid-1"}')
+            parse_claude_output('{"type":"result","session_id":"123e4567-e89b-12d3-a456-426614174000"}')
 
         self.assertIn("result", str(caught.exception))
 
