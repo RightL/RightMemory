@@ -901,7 +901,6 @@ Create `rightmemory/prompts/sync-reconciler.md`:
 - Preserve both facts when they are compatible but distinct.
 - Keep contradictory facts visible when the conflict cannot be settled from the file context.
 - Maintain heading anchors, node ids, detail-file pointers, and graph edges according to the schema.
-- Preserve the `# User Pending Task and Thoughts` section unchanged except for removing conflict markers around unchanged user text.
 
 ## Validation And Sync
 

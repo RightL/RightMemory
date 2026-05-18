@@ -21,7 +21,6 @@
 ## Conflicts And Boundaries
 
 - Never auto-resolve contradictions. When two nodes disagree about the same entity, keep both and surface the conflict in the dream report for the user to settle.
-- Never touch the `# User Pending Task and Thoughts` section.
 - Schema rules apply unchanged; pick the most specific edge type, falling back to `rel:` only when nothing else fits.
 - Keep or add edges only when they express cross-links or relations not implied by heading position.
 

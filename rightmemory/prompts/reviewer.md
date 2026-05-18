@@ -13,7 +13,6 @@ Review the session as a whole. Reviewed transcripts are usually historical, and 
 - The source of truth is the memory file set: `MEMORY.md` plus any sibling `MEMORY_*.md` files.
 - Use the schema supplied by the execution wrapper for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.
 - Do not expect or add a schema preamble in `MEMORY.md`; memory files should contain memory content only.
-- Do not touch the `# User Pending Task and Thoughts` section.
 
 ## What To Save Or Revise
 

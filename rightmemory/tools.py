@@ -450,7 +450,7 @@ class MemoryTools:
         return "discarded: " + ", ".join(relative_paths)
 
     def validate_memory(self) -> str:
-        """Validate RightMemory ids, graph edges, and protected pending-task sections."""
+        """Validate RightMemory ids, graph edges, and memory file structure."""
         files = self._memory_files()
         ids: dict[str, MemoryId] = {}
         errors: list[str] = []
@@ -486,7 +486,6 @@ class MemoryTools:
                     errors.append(f"dangling edge `{edge_type}:{target}` at {self._loc(item)}")
 
         errors.extend(self._structure_errors(files))
-        errors.extend(self._pending_section_errors(files))
         if errors:
             return "validation failed:\n" + "\n".join(f"- {error}" for error in errors)
         return f"validation passed: {len(ids)} ids across {len(files)} memory files"
@@ -797,40 +796,6 @@ class MemoryTools:
 
                 heading_stack.append((depth, line_number))
         return errors
-
-    def _pending_section_errors(self, files: list[Path]) -> list[str]:
-        errors: list[str] = []
-        for path in files:
-            current = self._pending_section(path.read_text(encoding="utf-8"))
-            if current is None:
-                continue
-            original = self._head_file(path)
-            if original is None:
-                continue
-            original_section = self._pending_section(original)
-            if original_section is not None and current != original_section:
-                errors.append(f"protected pending-task section changed in {path.relative_to(self.memory_root)}")
-        return errors
-
-    def _pending_section(self, text: str) -> str | None:
-        lines = text.splitlines()
-        for index, line in enumerate(lines):
-            if line.startswith("# User Pending Task and Thoughts"):
-                return "\n".join(lines[index:])
-        return None
-
-    def _head_file(self, path: Path) -> str | None:
-        relative = path.relative_to(self.memory_root).as_posix()
-        process = subprocess.run(
-            ["git", "show", f"HEAD:{relative}"],
-            cwd=self.memory_root,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if process.returncode != 0:
-            return None
-        return process.stdout
 
     def _replacement_inputs(self, text: str, old_string: str, new_string: str) -> tuple[str, str, int, bool]:
         count = text.count(old_string)

@@ -58,5 +58,3 @@ Store cross-project behavior memory here when it should change how future agents
 ---
 
 <!-- rightmemory:example:end -->
-
-# User Pending Task and Thoughts (user-edited only — AI agents must not modify this section)

@@ -675,20 +675,6 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("#### pointer cannot contain child node", result)
         self.assertIn("#### pointer cannot contain child heading", result)
 
-    def test_validate_memory_catches_pending_section_changes_from_git(self):
-        self._git("init")
-        self._git("config", "user.email", "test@example.com")
-        self._git("config", "user.name", "Test User")
-        memory = self.root / "MEMORY.md"
-        memory.write_text("# Domain\n\n# User Pending Task and Thoughts\nold\n", encoding="utf-8")
-        self._git("add", "MEMORY.md")
-        self._git("commit", "-m", "initial memory")
-        memory.write_text("# Domain\n\n# User Pending Task and Thoughts\nnew\n", encoding="utf-8")
-
-        result = self.tools.validate_memory()
-
-        self.assertIn("protected pending-task section changed", result)
-
     def _git(self, *args):
         process = subprocess.run(
             ["git", *args],

@@ -29,7 +29,6 @@
 
 ## Edit Safety
 
-- Never touch the `# User Pending Task and Thoughts` section.
 - Keep edits focused on the update, but use the scope needed to keep memory clear. Preserve unrelated lines, ordering, and indentation.
 - If you changed memory, stage and commit the touched allowed files.
 - When ambiguity prevents a safe edit, skip that edit and explain the ambiguity in the final reply.

@@ -74,4 +74,3 @@ Written edges may be one-way or reciprocal [stored on both records so either sid
 
 - The memory file set is `MEMORY.md` plus optional sibling `MEMORY_*.md` detail files.
 - `MEMORY.md` is the root memory file, but it remains normal memory and may contain real nodes.
-- Do not edit `# User Pending Task and Thoughts`; that section is user-edited only.

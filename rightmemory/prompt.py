@@ -36,7 +36,6 @@ Memory source of truth:
 - Optional detail files are named MEMORY_<slug>.md.
 - The dream report directory is dream_logs/.
 - MEMORY.md is normal memory, not a routing-only index.
-- Never touch the "# User Pending Task and Thoughts" section.
 
 RightMemory schema:
 {schema}

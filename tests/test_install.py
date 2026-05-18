@@ -24,7 +24,6 @@ class InstallScriptTests(unittest.TestCase):
 
         self.assertIn(EXAMPLE_START, memory)
         self.assertIn(EXAMPLE_END, memory)
-        self.assertIn("# User Pending Task and Thoughts", memory)
         self.assertTrue(install_stamp_exists)
 
     def test_rerun_refreshes_marked_example_and_preserves_user_memory(self):
@@ -63,9 +62,7 @@ class InstallScriptTests(unittest.TestCase):
                 "> Old starter text.\n\n"
                 "---\n\n"
                 "# Real Memory {#real-memory}\n\n"
-                "- `real-node` keep me. → []\n\n"
-                "---\n\n"
-                "# User Pending Task and Thoughts (user-edited only - AI agents must not modify this section)\n",
+                "- `real-node` keep me. → []\n",
                 encoding="utf-8",
             )
 

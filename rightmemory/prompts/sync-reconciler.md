@@ -12,7 +12,6 @@ The caller message supplies the sync repair context for this turn. It may includ
 - Read each dirty or conflicted file before editing or discarding. Compare both sides with nearby settled memory so the final text fits the existing structure.
 - Use the schema supplied by the execution wrapper for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.
 - Do not expect or add a schema preamble in `MEMORY.md`; memory files should contain memory content only.
-- Preserve the `# User Pending Task and Thoughts` section exactly.
 
 ## Repair Handling
 
