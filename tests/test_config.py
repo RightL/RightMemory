@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rightmemory.config import RuntimeConfig, load_config, load_review_config, load_sync_config
+from rightmemory.config import AgentCliConfig, RuntimeConfig, load_config, load_review_config, load_sync_config
 from rightmemory.prompt import build_instructions
 from rightmemory.runtime import RightMemoryRuntime, build_model
 from rightmemory.sync import SyncResult
@@ -32,6 +32,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.api_base, "http://127.0.0.1:8000/v1")
         self.assertEqual(config.api_key, "token")
         self.assertEqual(config.model_kwargs, {})
+        self.assertEqual(config.runtime_mode, "standalone")
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_anthropic_compatible_config(self):
@@ -51,6 +52,79 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.model_id, "anthropic/example-dreamer-model")
         self.assertEqual(config.api_base, "https://api.example.com/anthropic")
         self.assertEqual(config.api_key, "token")
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_agent_cli_default_provider_with_role_model(self):
+        config_path = self._write_config(
+            """
+            [agent_cli]
+            provider = "codex"
+
+            [retrieve.agent_cli]
+            model = "gpt-5"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_config("retrieve")
+
+        self.assertEqual(config.role, "retrieve")
+        self.assertIsNone(config.model_id)
+        self.assertEqual(config.runtime_mode, "cli-agent")
+        self.assertEqual(config.agent_cli, AgentCliConfig(provider="codex", model="gpt-5"))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_agent_cli_role_provider_override(self):
+        config_path = self._write_config(
+            """
+            [agent_cli]
+            provider = "codex"
+
+            [dreamer.agent_cli]
+            provider = "claude"
+            model = "claude-opus-4"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_config("dreamer")
+
+        self.assertEqual(config.runtime_mode, "cli-agent")
+        self.assertEqual(config.agent_cli, AgentCliConfig(provider="claude", model="claude-opus-4"))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_agent_cli_missing_provider_error(self):
+        config_path = self._write_config(
+            """
+            [retrieve.agent_cli]
+            model = "gpt-5"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_config("retrieve")
+
+        self.assertIn("[agent_cli].provider", str(caught.exception))
+        self.assertIn("[retrieve.agent_cli].provider", str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_agent_cli_rejects_role_model_and_agent_cli(self):
+        config_path = self._write_config(
+            """
+            [retrieve.model]
+            model_id = "openai/fast"
+
+            [retrieve.agent_cli]
+            provider = "codex"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_config("retrieve")
+
+        self.assertIn("[retrieve] must not define both [retrieve.model] and [retrieve.agent_cli]", str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_nested_model_kwargs(self):
