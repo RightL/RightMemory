@@ -90,8 +90,8 @@ class RightMemoryRuntime:
     def run_session_turn(self, session_id: str, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
-        if self.config.runtime_mode == "cli-agent" and session_id == NO_SESSION_RIGHTMEMORY_SESSION_ID:
-            raise ValueError(f"session id is reserved for internal cli-agent chat: {session_id}")
+        if session_id == NO_SESSION_RIGHTMEMORY_SESSION_ID:
+            raise ValueError(f"session id is reserved for internal no-session turns: {session_id}")
         with self._debug_trace(session_id) as trace:
             self._trace(
                 "run_started",
@@ -209,6 +209,8 @@ class RightMemoryRuntime:
         if self.config.role != "retrieve":
             return message, []
         entries = collect_recent_submitted_memory(self.config.memory_root)
+        if not entries:
+            return message, []
         entries = self.recent_submitted_delivery.new_entries(session_id, entries)
         return append_recent_submitted_memory(message, entries), entries
 

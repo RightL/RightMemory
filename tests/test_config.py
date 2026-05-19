@@ -488,20 +488,30 @@ class RuntimeTests(unittest.TestCase):
             ],
         )
 
-    def test_cli_agent_rejects_reserved_public_session_id(self):
-        config = RuntimeConfig(
-            role="retrieve",
-            runtime_mode="cli-agent",
-            agent_cli=AgentCliConfig(provider="codex"),
-            memory_root=Path(self.tempdir.name),
-        )
+    def test_rejects_reserved_public_session_id_for_all_runtime_modes(self):
+        configs = [
+            RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name)),
+            RuntimeConfig(
+                role="retrieve",
+                runtime_mode="cli-agent",
+                agent_cli=AgentCliConfig(provider="codex"),
+                memory_root=Path(self.tempdir.name),
+            ),
+        ]
 
-        with patch("rightmemory.runtime.CliAgentExecutor"):
-            runtime = RightMemoryRuntime(config)
-            with self.assertRaises(ValueError) as caught:
-                runtime.run_session_turn(NO_SESSION_RIGHTMEMORY_SESSION_ID, "remember one")
+        for config in configs:
+            with self.subTest(runtime_mode=config.runtime_mode):
+                context = (
+                    patch("rightmemory.runtime.CliAgentExecutor")
+                    if config.runtime_mode == "cli-agent"
+                    else patch.dict("sys.modules", self._fake_pydantic_modules())
+                )
+                with context:
+                    runtime = RightMemoryRuntime(config)
+                    with self.assertRaises(ValueError) as caught:
+                        runtime.run_session_turn(NO_SESSION_RIGHTMEMORY_SESSION_ID, "remember one")
 
-        self.assertIn("reserved", str(caught.exception))
+                self.assertIn("reserved", str(caught.exception))
 
     def test_run_turn_preserves_message_history(self):
         config = RuntimeConfig(
@@ -676,6 +686,7 @@ class RuntimeTests(unittest.TestCase):
             runtime.run_session_turn("agent-session", "find one")
 
         self.assertFalse((Path(self.tempdir.name) / ".runtime" / "memory.lock").exists())
+        self.assertFalse((Path(self.tempdir.name) / ".runtime" / "recent_submitted").exists())
 
     def test_update_turn_runs_sync_preflight_without_exposing_context(self):
         config = RuntimeConfig(
