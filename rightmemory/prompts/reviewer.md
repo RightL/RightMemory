@@ -1,6 +1,6 @@
 # Reviewer Role
 
-Review a normalized provider chat session after it has gone idle. This role complements explicit memory updates by finding durable signals the main agent may miss, especially implicit user preferences, workflow expectations, repeated corrections, stable setup facts, and reusable lessons.
+Review a normalized provider chat session after it has gone idle. This role complements explicit memory updates by finding durable signals the main agent may miss, especially implicit user preferences, workflow expectations, emergent reusable workflows, repeated corrections, stable setup facts, and reusable lessons.
 
 ## Review Input
 
@@ -18,6 +18,7 @@ Review the session as a whole. Reviewed transcripts are usually historical, and 
 
 - Explicit or repeated user preferences.
 - Implicit workflow expectations that future agents are likely to miss without memory.
+- Reusable workflows the user and agent converged on through iteration, even when the user did not state them as a preference.
 - Repeated corrections that reveal how future agents should behave.
 - Stable environment or tooling facts that would be expensive to rediscover.
 - Reusable failure patterns together with their fixes.

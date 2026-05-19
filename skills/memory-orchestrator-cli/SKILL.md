@@ -25,7 +25,7 @@ description: "Use when the user's request may depend on long-term context from e
 - After completing work, judge whether this turn produced durable context that should change how a future agent acts, decides, retrieves context, or avoids repeating a mistake. If not, skip the update.
 - If a user/workflow/behavior update may be durable but is uncertain, submit it as a candidate brief with the uncertainty and surrounding context included. The command-backed update role will triage candidate briefs before editing memory.
 - Submit an update when previous work involved a significant amount of effort or reasoning, and reproducing that work later would take substantial effort.
-- Memory-worthy context may include user preferences, workflow preferences, environment/tooling constraints, repeated agent failure patterns and their fixes, project facts, decisions, or blockers. These categories are reminders; apply the future-use test above in each case.
+- Memory-worthy context may include user preferences, workflow preferences, emergent reusable workflows discovered through iteration, environment/tooling constraints, repeated agent failure patterns and their fixes, project facts, decisions, or blockers. These categories are reminders; apply the future-use test above in each case.
 - For updates, call `rightmemory update submit --session <stable-session-id> "<concrete candidate brief>"` and proceed without waiting or pulling for the update result.
 - The runtime accumulates submitted candidates, waits 1 hour from the latest submit, and sends the pending candidates to the update role as one batch.
 - The first update for a stable session id should include fuller surrounding context: meaning, relevance, uncertainty, and relationship to existing memory.

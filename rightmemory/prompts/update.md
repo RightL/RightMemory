@@ -11,7 +11,7 @@
 
 - The caller message may contain one candidate or a batch of related candidates. Treat them as candidate memory, not final memory text.
 - Preserve durable meaning rather than the raw event that produced the candidate. Durable memory should help a future agent act, decide, retrieve context, or avoid a repeated mistake.
-- Prefer stable preferences, workflow rules, environment or tooling constraints, project facts, decisions, blockers, and repeated failure patterns.
+- Prefer stable preferences, workflow rules, emergent reusable workflows discovered through iteration, environment or tooling constraints, project facts, decisions, blockers, and repeated failure patterns.
 - Avoid writing raw process logs, trivial session traces, overly granular facts, duplicate or near-duplicate facts, and details that only mattered during the just-finished turn.
 - Before editing, compare each candidate with relevant existing memory. Look for entries that the candidate updates, contradicts, narrows, duplicates, or makes obsolete.
 - Choose the edit shape that leaves memory coherent: merge into an existing entry, replace stale wording, narrow over-broad guidance, delete obsolete memory, or add a compact new fact when no existing entry should change.
