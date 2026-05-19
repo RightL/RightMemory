@@ -10,8 +10,8 @@ RightMemory keeps durable project and workflow context in Markdown files structu
 - A tree of `#`, `##`, and `###` headings for hierarchical retrieval context.
 - Addressable heading anchors and node ids for agent retrieval.
 - Typed edges such as `dep:`, `cfg:`, `ver:`, `doc:`, and `todo:` for graph traversal across the tree.
-- Agent skills for retrieval, updates, and periodic consolidation.
-- A standalone CLI runtime for agents that cannot spawn subagents.
+- A command-backed `memory-orchestrator` skill for retrieval, updates, and periodic consolidation.
+- Two executor modes behind the same `rightmemory` CLI: local standalone runtime or delegated Codex/Claude CLI role execution.
 - Optional automatic transcript review for idle Codex and Claude sessions.
 
 ## Quick Start
@@ -22,10 +22,16 @@ cd RightMemory
 ./install.sh
 ```
 
-The default install uses standalone mode, creates `~/.rightmemory`, and installs the orchestrator skill into both `~/.codex/skills` and `~/.claude/skills`. For a custom memory root or skill target:
+The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs the command-backed orchestrator skill into both `~/.codex/skills` and `~/.claude/skills`. For a custom memory root or skill target:
 
 ```bash
 ./install.sh ~/.rightmemory ~/.codex/skills
+```
+
+For CLI-agent mode, where RightMemory delegates role execution to Codex CLI or Claude Code CLI:
+
+```bash
+./install.sh --mode cli-agent ~/.rightmemory ~/.codex/skills
 ```
 
 After install, open `~/.rightmemory/MEMORY.md` and add your own memory before the managed example block. Re-run the installer after pulling updates; existing real memory is preserved, and the managed example block refreshes when present.
@@ -99,7 +105,7 @@ Tree nesting already expresses containment. Do not add edges from a child node t
 
 ## Agent Roles
 
-RightMemory separates ordinary work from memory ownership.
+RightMemory separates ordinary work from memory ownership. The host agent talks to one installed skill, and that skill calls the `rightmemory` command for role-specific memory work.
 
 ```text
 main agent
@@ -108,16 +114,20 @@ main agent
   v
 memory-orchestrator
   |
-  +--> memory-curator   reads, retrieves, and edits MEMORY*.md
+  +--> rightmemory retrieve         read-only memory search
   |
-  +--> memory-dreamer   consolidates, restructures, writes dream logs, commits
+  +--> rightmemory update           durable memory edits
+  |
+  +--> rightmemory dreamer          consolidation, dream logs, commits
+  |
+  +--> rightmemory review/sync      transcript review and sync repair
 ```
 
 - `memory-orchestrator` decides when memory is relevant and routes requests.
-- `memory-curator` owns retrieval and incremental edits.
-- `memory-dreamer` runs explicit consolidation cycles and commits the result.
+- Runtime roles own direct `MEMORY*.md` access.
+- `retrieve` is read-oriented; write-capable roles perform memory changes through the selected executor. Standalone mode uses RightMemory's bounded tools, while CLI-agent mode delegates to Codex/Claude CLI with role-specific sandbox or permission defaults.
 
-The main agent should not read or edit `MEMORY*.md` directly. Memory access goes through the installed orchestrator, subagent roles, or standalone runtime roles, which keeps ownership clear and prevents half-edits or competing updates.
+The main agent should avoid reading or editing `MEMORY*.md` directly. Memory access goes through the installed orchestrator and the command roles, which keeps ownership clear and reduces half-edits or competing updates.
 
 ## Prompt Sources
 
@@ -131,41 +141,41 @@ rightmemory/prompts/reviewer.md
 rightmemory/prompts/sync-reconciler.md
 ```
 
-Standalone mode reads these files at runtime. Subagent mode installs thin skill wrappers and renders the same role prompts into those wrappers during `install.sh`. Runtime-specific wrappers define access boundaries and dispatch style; role behavior should be edited in the canonical prompt files.
+Both install modes use these files through the `rightmemory` runtime. Standalone mode loads them into the local Pydantic AI agent and tool loop. CLI-agent mode wraps the same role instructions into prompts sent to Codex CLI or Claude Code CLI. The installed `memory-orchestrator` remains a thin command dispatcher, so role behavior should be edited in the canonical prompt files.
 
 ## Install Modes
 
-RightMemory has two install modes. The default is `standalone`.
+RightMemory has two command-backed install modes. The default is `standalone`.
 
 | Mode | Use When | What Gets Installed |
 | --- | --- | --- |
-| `subagent` | Your agent can spawn subagents, such as Claude Code-style workflows. | `memory-orchestrator`, generated `memory-curator`, and generated `memory-dreamer` skills. |
-| `standalone` | Your agent needs a command-line runtime instead of subagents. | A `memory-orchestrator` skill plus the `rightmemory` CLI. |
+| `standalone` | You want RightMemory to run its own local Pydantic AI role agents and memory tools. | The command-backed `memory-orchestrator` skill plus the `rightmemory` CLI. |
+| `cli-agent` | You want RightMemory to delegate each role turn to Codex CLI or Claude Code CLI. | The same command-backed `memory-orchestrator` skill plus the `rightmemory` CLI. |
 
 The installer arguments are:
 
 ```bash
-./install.sh [--mode subagent|standalone] [<memory-root> <skills-target>]
+./install.sh [--mode cli-agent|standalone] [<memory-root> <skills-target>]
 ```
 
 - `<memory-root>` is where `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/` live.
 - `<skills-target>` is where your agent loads skills from, such as `~/.claude/skills` or `~/.codex/skills`.
-- With no path arguments, the installer uses `~/.rightmemory` and installs skills into both `~/.codex/skills` and `~/.claude/skills`.
+- With no path arguments, the installer uses `~/.rightmemory` and installs the orchestrator skill into both `~/.codex/skills` and `~/.claude/skills`.
 
-Standalone mode requires `uv` and installs the runtime under `${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`. It also writes a `~/.local/bin/rightmemory` wrapper bound to your chosen memory root. If `~/.local/bin` is not on `PATH`, the installer prints shell-profile guidance after install.
+Both modes use `uv` to install the runtime under `${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`. The installer writes a `~/.local/bin/rightmemory` wrapper bound to your chosen memory root. If `~/.local/bin` is not on `PATH`, the installer prints shell-profile guidance after install.
 
 ## Everyday Use
 
 1. Edit `MEMORY.md` after install and add your own memory before the managed example block.
 2. Let the installed orchestrator decide when a user request needs memory retrieval.
-3. Let the curator or update role write durable updates after work that should affect future sessions.
+3. Let the update role write durable updates after work that should affect future sessions.
 4. Ask for a dream cycle when you want cleanup, consolidation, or stale-memory review.
 
 Dream cycles write reports to `dream_logs/YYYY-MM-DD.md` and commit touched memory files. If a consolidation is wrong, use normal git tools in the memory root to inspect or revert it.
 
-## Standalone Runtime
+## Command Runtime
 
-Standalone install mode uses `uv` to install the runtime into a user-local venv, writes a `memory-orchestrator` skill that calls `rightmemory retrieve`, `rightmemory update`, and `rightmemory dreamer` instead of spawning subagents, and removes old `memory-curator` / `memory-dreamer` skill folders from the same skill target. The installed `rightmemory` wrapper is bound to `<memory-root>`.
+Both install modes expose the same command surface. The installed `memory-orchestrator` calls `rightmemory retrieve`, `rightmemory update`, and `rightmemory dreamer`; the selected mode determines who executes the role prompt after the command starts.
 
 ```bash
 rightmemory retrieve --session <agent-session-id> "find memory about the standalone mode"
@@ -195,19 +205,62 @@ The daemon reads JSON lines from stdin and writes JSON lines to stdout:
 {"message":"remember that MCP should stay optional"}
 ```
 
-Standalone mode is intentionally small:
+The runtime is intentionally small:
 
-- It uses `pydantic_ai.Agent` as a chat-like agent loop.
-- Retrieve uses Claude-shaped read-only tools (`read`, `grep`, `glob`) plus a restricted `read_command` for familiar forms such as `cat`, `sed -n`, `rg`, and read-only `git`; update, dreamer, and reviewer also get exact `edit_file` replacements, file lifecycle tools, and narrow git tools.
+- Standalone mode uses `pydantic_ai.Agent` as a chat-like agent loop.
+- CLI-agent mode delegates the same role turn to Codex CLI or Claude Code CLI and records the provider session under `<memory-root>/.runtime/agent_cli_sessions/`.
+- In standalone mode, retrieve uses Claude-shaped read-only tools (`read`, `grep`, `glob`) plus a restricted `read_command` for familiar forms such as `cat`, `sed -n`, `rg`, and read-only `git`; update, dreamer, and reviewer also get exact `edit_file` replacements, file lifecycle tools, and narrow git tools.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different location.
 - Retrieve, update, dreamer, and reviewer are separate runtime roles selected by command line or scanner.
-- Role-specific model settings are read from `<memory-root>/rightmemory.toml`.
-- One-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`, so normal agent callers can make separate process calls without losing multi-turn context; `.runtime/` is self-ignored so session state does not dirty memory commits.
+- Role-specific executor settings are read from `<memory-root>/rightmemory.toml`.
+- Standalone one-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`; CLI-agent calls persist provider session mappings under `<memory-root>/.runtime/agent_cli_sessions/<role>/`.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - The installer creates a root `.gitignore` allowlist so git status only surfaces `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; existing user `.gitignore` files are preserved.
 - Async `update submit` calls for the same `--session` accumulate as pending candidates. The worker waits one hour from the latest submit, then sends the pending candidates to the update role as one batch; `pull` reports phase, pending candidates, current batch, and timing.
-- Multi-turn daemon context is preserved with Pydantic AI message history.
-- MCP support is not part of the MVP; it can be added later as an adapter over the same daemon.
+- Standalone daemon context is preserved with Pydantic AI message history.
+- MCP support can be added later as an adapter over the same daemon.
+
+### CLI-Agent Config
+
+CLI-agent mode uses a global provider and per-role model settings. A minimal Codex setup looks like:
+
+```toml
+[agent_cli]
+provider = "codex"
+
+[retrieve.agent_cli]
+model = "gpt-5"
+
+[update.agent_cli]
+model = "gpt-5"
+
+[dreamer.agent_cli]
+model = "gpt-5"
+
+[reviewer.agent_cli]
+model = "gpt-5"
+
+[sync-reconciler.agent_cli]
+model = "gpt-5"
+```
+
+A role can override the provider when a different CLI should execute that role:
+
+```toml
+[agent_cli]
+provider = "codex"
+
+[retrieve.agent_cli]
+model = "gpt-5"
+
+[dreamer.agent_cli]
+provider = "claude"
+model = "sonnet"
+```
+
+Use `rightmemory doctor agent-cli` after configuring CLI-agent mode. It checks that role config resolves to CLI-agent execution, required provider commands are available, and read/write role probes can complete.
+
+### Standalone Config
 
 OpenAI-compatible retrieve/update config:
 
@@ -242,9 +295,9 @@ api_key = "<token>"
 
 `model_id` is required for the role being started. `anthropic/...` model ids use `AnthropicModel`; other model ids use `OpenAIChatModel` with `OpenAIProvider`, so OpenAI-compatible local gateways can use `api_base` and `api_key`. `[<role>.model.kwargs]` is forwarded as Pydantic AI model settings and unsupported keys fail fast.
 
-Configs must use `[retrieve.model]`, `[update.model]`, `[dreamer.model]`, and optionally `[reviewer.model]`; old `[curator.model]` configs are rejected so stale read-write settings are migrated deliberately.
+Standalone configs use `[retrieve.model]`, `[update.model]`, `[dreamer.model]`, and optionally `[reviewer.model]`.
 
-`[sync-reconciler.model]` is needed when the sync watcher should repair scheduled pull conflicts. Without it, the watcher can report a conflict but cannot run the repair role.
+`[sync-reconciler.model]` is needed when the sync watcher should repair scheduled pull conflicts. Without it, the watcher can report a conflict but cannot run the repair role. In CLI-agent mode, use `[sync-reconciler.agent_cli]` instead.
 
 To debug in-flight standalone calls, enable append-only trace logs:
 
@@ -257,7 +310,7 @@ Trace files include run, history-save, and tool events. They may include prompts
 
 ### Automatic Transcript Review
 
-RightMemory can scan idle provider chat sessions and run the standalone `reviewer` role. The normal background controls are:
+RightMemory can scan idle provider chat sessions and run the `reviewer` role. The normal background controls are:
 
 ```bash
 rightmemory watch start
@@ -310,7 +363,7 @@ If `[[review.sources]]` is omitted, RightMemory checks the default Codex and Cla
 
 ### Scheduled Dream Cycles
 
-Standalone dreamer can run periodic consolidation from the same manager:
+Dreamer can run periodic consolidation from the same manager:
 
 ```bash
 rightmemory watch start dreamer
@@ -340,7 +393,7 @@ Managed watch includes a `sync` target. `rightmemory watch start` starts it when
 
 If a scheduled pull finds dirty memory files or creates a memory conflict, RightMemory invokes `sync-reconciler` with the affected files and repair context. The reconciler repairs the memory state from that bounded context, validates it, commits the result, and calls `sync_push`.
 
-Run it from this repository during development:
+Run standalone mode from this repository during development:
 
 ```bash
 uv --cache-dir .uv-cache venv .venv
@@ -363,10 +416,7 @@ RightMemory/
 │   └── prompts/
 └── skills/
     ├── rightmemory-schema.md
-    ├── memory-orchestrator/SKILL.md
-    ├── memory-orchestrator-standalone/SKILL.md
-    ├── memory-curator/SKILL.md
-    ├── memory-dreamer/SKILL.md
+    ├── memory-orchestrator-cli/SKILL.md
     └── provider-transcript-normalizer/SKILL.md
 ```
 
@@ -383,8 +433,6 @@ After install:
 ├── rightmemory-schema.md
 └── memory-orchestrator/SKILL.md
 ```
-
-Subagent installs also include `memory-curator/` and `memory-dreamer/` in the skills target.
 
 ## Design Notes
 

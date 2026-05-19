@@ -6,8 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rightmemory.config import RuntimeConfig, load_config, load_review_config, load_sync_config
-from rightmemory.prompt import build_instructions
+from rightmemory.agent_cli import NO_SESSION_RIGHTMEMORY_SESSION_ID
+from rightmemory.config import AgentCliConfig, RuntimeConfig, load_config, load_review_config, load_sync_config
+from rightmemory.prompt import build_cli_agent_instructions, build_instructions
 from rightmemory.runtime import RightMemoryRuntime, build_model
 from rightmemory.sync import SyncResult
 
@@ -32,6 +33,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.api_base, "http://127.0.0.1:8000/v1")
         self.assertEqual(config.api_key, "token")
         self.assertEqual(config.model_kwargs, {})
+        self.assertEqual(config.runtime_mode, "standalone")
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_anthropic_compatible_config(self):
@@ -51,6 +53,79 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.model_id, "anthropic/example-dreamer-model")
         self.assertEqual(config.api_base, "https://api.example.com/anthropic")
         self.assertEqual(config.api_key, "token")
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_agent_cli_default_provider_with_role_model(self):
+        config_path = self._write_config(
+            """
+            [agent_cli]
+            provider = "codex"
+
+            [retrieve.agent_cli]
+            model = "gpt-5"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_config("retrieve")
+
+        self.assertEqual(config.role, "retrieve")
+        self.assertIsNone(config.model_id)
+        self.assertEqual(config.runtime_mode, "cli-agent")
+        self.assertEqual(config.agent_cli, AgentCliConfig(provider="codex", model="gpt-5"))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_agent_cli_role_provider_override(self):
+        config_path = self._write_config(
+            """
+            [agent_cli]
+            provider = "codex"
+
+            [dreamer.agent_cli]
+            provider = "claude"
+            model = "claude-opus-4"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_config("dreamer")
+
+        self.assertEqual(config.runtime_mode, "cli-agent")
+        self.assertEqual(config.agent_cli, AgentCliConfig(provider="claude", model="claude-opus-4"))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_agent_cli_missing_provider_error(self):
+        config_path = self._write_config(
+            """
+            [retrieve.agent_cli]
+            model = "gpt-5"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_config("retrieve")
+
+        self.assertIn("[agent_cli].provider", str(caught.exception))
+        self.assertIn("[retrieve.agent_cli].provider", str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_agent_cli_rejects_role_model_and_agent_cli(self):
+        config_path = self._write_config(
+            """
+            [retrieve.model]
+            model_id = "openai/fast"
+
+            [retrieve.agent_cli]
+            provider = "codex"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_config("retrieve")
+
+        self.assertIn("[retrieve] must not define both [retrieve.model] and [retrieve.agent_cli]", str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_nested_model_kwargs(self):
@@ -353,6 +428,80 @@ class RuntimeTests(unittest.TestCase):
             model.provider.kwargs,
             {"base_url": "https://api.example.com/anthropic", "api_key": "token"},
         )
+
+    def test_cli_agent_runtime_uses_executor_without_pydantic_agent(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=Path(self.tempdir.name),
+        )
+
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            executor_class.return_value.run_session_turn.return_value = "cli reply"
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_session_turn("agent-session", "remember one")
+
+        self.assertEqual(result, "cli reply")
+        executor_class.assert_called_once_with(Path(self.tempdir.name), "retrieve", AgentCliConfig(provider="codex"))
+        executor_class.return_value.run_session_turn.assert_called_once_with("agent-session", "remember one")
+
+    def test_cli_agent_run_turn_uses_reserved_session_lock(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=Path(self.tempdir.name),
+        )
+        events = []
+
+        class FakeLockedSession:
+            def __enter__(self):
+                events.append("lock_enter")
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                events.append("lock_exit")
+
+        def locked(session_id):
+            events.append(("locked", session_id))
+            return FakeLockedSession()
+
+        def run_session_turn(session_id, message):
+            events.append(("agent", session_id, message))
+            return "cli reply"
+
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            executor_class.return_value.run_session_turn.side_effect = run_session_turn
+            runtime = RightMemoryRuntime(config)
+            runtime.sessions.locked = locked
+            result = runtime.run_turn("remember one")
+
+        self.assertEqual(result, "cli reply")
+        self.assertEqual(
+            events,
+            [
+                ("locked", NO_SESSION_RIGHTMEMORY_SESSION_ID),
+                "lock_enter",
+                ("agent", NO_SESSION_RIGHTMEMORY_SESSION_ID, "remember one"),
+                "lock_exit",
+            ],
+        )
+
+    def test_cli_agent_rejects_reserved_public_session_id(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=Path(self.tempdir.name),
+        )
+
+        with patch("rightmemory.runtime.CliAgentExecutor"):
+            runtime = RightMemoryRuntime(config)
+            with self.assertRaises(ValueError) as caught:
+                runtime.run_session_turn(NO_SESSION_RIGHTMEMORY_SESSION_ID, "remember one")
+
+        self.assertIn("reserved", str(caught.exception))
 
     def test_run_turn_preserves_message_history(self):
         config = RuntimeConfig(
@@ -738,6 +887,27 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(events[0]["model_id"], "openai/test")
         self.assertEqual(events[3]["output"], "reply 1")
 
+    def test_cli_agent_debug_trace_uses_cli_model_id(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex", model="gpt-5"),
+            memory_root=Path(self.tempdir.name),
+            debug_trace=True,
+        )
+
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            executor_class.return_value.run_session_turn.return_value = "cli reply"
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_session_turn("agent-session", "remember one")
+
+        self.assertEqual(result, "cli reply")
+        trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "retrieve" / "agent-session.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([event["event"] for event in events], ["run_started", "model_started", "model_finished", "run_finished"])
+        self.assertEqual(events[0]["model_id"], "gpt-5")
+        self.assertEqual(events[2]["output"], "cli reply")
+
     def test_debug_trace_records_tool_events(self):
         config = RuntimeConfig(
             role="retrieve",
@@ -942,6 +1112,54 @@ class RuntimeTests(unittest.TestCase):
 
 
 class PromptTests(unittest.TestCase):
+    def test_cli_agent_prompt_is_thin_and_embeds_role_prompt(self):
+        prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), "update")
+
+        self.assertIn("You are RightMemory update mode.", prompt)
+        self.assertIn("configured memory root is /home/example/.rightmemory", prompt)
+        self.assertIn("MEMORY.md", prompt)
+        self.assertIn("MEMORY_*.md", prompt)
+        self.assertIn("dream_logs/", prompt)
+        self.assertIn("Follow the canonical role instructions below.", prompt)
+        self.assertIn("Return a concise final reply.", prompt)
+        self.assertIn("RightMemory Schema", prompt)
+        self.assertIn("Update Role", prompt)
+        self.assertIn("candidate memory", prompt)
+        self.assertNotIn("Command-selected behavior", prompt)
+        self.assertNotIn("Standalone adaptation", prompt)
+        self.assertNotIn("read_command", prompt)
+        self.assertNotIn("edit_file(path, old_string, new_string", prompt)
+        self.assertNotIn("create_file", prompt)
+        self.assertNotIn("Pydantic AI", prompt)
+        self.assertNotIn("provider tool", prompt)
+        self.assertNotIn("{{MEMORY_ROOT}}", prompt)
+        self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+
+    def test_cli_agent_prompt_rejects_unknown_role(self):
+        with self.assertRaises(ValueError) as caught:
+            build_cli_agent_instructions(Path("/home/example/.rightmemory"), "curator")
+
+        self.assertIn("role must be one of:", str(caught.exception))
+
+    def test_cli_agent_reviewer_prompt_does_not_expose_standalone_tool_names(self):
+        prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), "reviewer")
+
+        self.assertIn("Reviewer Role", prompt)
+        self.assertIn("graph sanity", prompt)
+        self.assertNotIn("validate_memory", prompt)
+        self.assertNotIn("git_discard", prompt)
+        self.assertNotIn("sync_push", prompt)
+
+    def test_cli_agent_sync_reconciler_prompt_does_not_expose_standalone_tool_names(self):
+        prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), "sync-reconciler")
+
+        self.assertIn("Sync Reconciler Role", prompt)
+        self.assertIn("available validation", prompt)
+        self.assertIn("runtime-provided sync", prompt)
+        self.assertNotIn("validate_memory", prompt)
+        self.assertNotIn("git_discard", prompt)
+        self.assertNotIn("sync_push", prompt)
+
     def test_retrieve_prompt_has_role_prompt_and_retrieve_command_behavior(self):
         prompt = build_instructions(Path("/home/example/.rightmemory"), "retrieve")
 
@@ -1026,6 +1244,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("compare assistant responses with existing memory", prompt)
         self.assertIn("Avoid broad guesses", prompt)
         self.assertIn("Review the session as a whole", prompt)
+        self.assertIn("validate_memory", prompt)
         self.assertIn("commit them", prompt)
         self.assertIn("Choose the edit shape that makes memory clearer", prompt)
         self.assertIn("Place memory in a clear tree", prompt)

@@ -2,18 +2,19 @@
 
 ## Project Shape
 - RightMemory is a tree + graph hybrid memory system designed primarily for AI agents. Human readability matters, but it is not the main design center.
-- Core standalone code lives in `rightmemory/`: config loading, runtime orchestration, tools, transcript review, async update batching, and provider transcript adapters.
-- Canonical role prompts live in `rightmemory/prompts/`. Edit role behavior there first; installed subagent skills are wrappers around the same canonical prompts.
+- Core runtime code lives in `rightmemory/`: config loading, command orchestration, standalone tools, CLI-agent delegation, transcript review, async update batching, and provider transcript adapters.
+- Canonical role prompts live in `rightmemory/prompts/`. Edit role behavior there first; installed skills do not contain generated curator/dreamer role prompts.
 - `skills/rightmemory-schema.md` is the schema source for memory files. `MEMORY.example.md` is the installer seed and the source for the managed example block that can be refreshed on reinstall.
-- `install.sh` installs either standalone mode or subagent mode, preserves existing user memory files, and refreshes the managed example block when present.
+- `install.sh` installs either standalone mode or cli-agent mode, preserves existing user memory files, and refreshes the managed example block when present.
 
 ## Development Commands
 - Run the test suite with `python -m unittest discover -s tests`.
 - For syntax-only checks, use `python -m compileall -q rightmemory tests`.
-- Use `./install.sh [--mode subagent|standalone] <memory-root> <skills-target>` when verifying install behavior.
+- Use `./install.sh [--mode cli-agent|standalone] <memory-root> <skills-target>` when verifying install behavior.
 - `uv` is available through the existing conda environment: `conda run -n rightmemory uv --version`. Use `conda run -n rightmemory ./install.sh ...` when the installer needs `uv`.
 - Useful review commands are `rightmemory review scan --once`, `rightmemory review watch`, and `rightmemory review normalize --source <codex|claude> --path <file>`.
-- Use `rightmemory watch start|status|stop|restart` to manage standalone background review and dreamer watchers. Use `rightmemory dreamer watch` directly only when debugging the lower-level dream loop.
+- Use `rightmemory watch start|status|stop|restart` to manage background review and dreamer watchers. Use `rightmemory dreamer watch` directly only when debugging the lower-level dream loop.
+- Use `rightmemory doctor agent-cli` after configuring cli-agent mode to check provider commands, role config, and basic read/write probes.
 
 ## Maintaining This File
 - Treat this file (./AGENTS.md) as operational instructions for coding agents, not as a design document. Keep durable design explanation in `README.md` or `DESIGN_NOTES.md`.

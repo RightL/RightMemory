@@ -39,9 +39,17 @@ class ReviewConfig:
 
 
 @dataclass(frozen=True)
+class AgentCliConfig:
+    provider: str
+    model: str | None = None
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     role: str
-    model_id: str
+    model_id: str | None = None
+    runtime_mode: str = "standalone"
+    agent_cli: AgentCliConfig | None = None
     api_base: str | None = None
     api_key: str | None = None
     model_kwargs: dict[str, Any] = field(default_factory=dict)
@@ -58,13 +66,22 @@ def load_config(role: str) -> RuntimeConfig:
     if not MEMORY_ROOT.exists():
         raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
 
-    _reject_unknown_keys(data, {*ROLES, "review", "debug", "sync"}, "top-level")
-    role_section = data.get(role)
+    _reject_unknown_keys(data, _top_level_keys(), "top-level")
+    role_section = data.get(role, {})
+    if role_section is None:
+        role_section = {}
     if not isinstance(role_section, dict):
-        raise ValueError(f"{CONFIG_PATH} must contain a [{role}.model] table")
-    _reject_unknown_keys(role_section, {"model"}, f"[{role}]")
+        raise ValueError(f"[{role}] must be a TOML table")
+    _reject_unknown_keys(role_section, {"model", "agent_cli"}, f"[{role}]")
 
-    model_section = role_section.get("model")
+    has_model = "model" in role_section
+    has_agent_cli = "agent_cli" in role_section
+    if has_model and has_agent_cli:
+        raise ValueError(f"[{role}] must not define both [{role}.model] and [{role}.agent_cli]")
+
+    model_section = role_section.get("model") if has_model else None
+    if model_section is None:
+        return _agent_cli_runtime_config(role, data, role_section)
     if not isinstance(model_section, dict):
         raise ValueError(f"{CONFIG_PATH} must contain a [{role}.model] table")
     _reject_unknown_keys(model_section, {"model_id", "api_base", "api_key", "kwargs"}, f"[{role}.model]")
@@ -82,6 +99,7 @@ def load_config(role: str) -> RuntimeConfig:
     return RuntimeConfig(
         role=role,
         model_id=model_id,
+        runtime_mode="standalone",
         api_base=api_base,
         api_key=api_key,
         model_kwargs=model_kwargs,
@@ -98,7 +116,7 @@ def load_review_config() -> ReviewConfig:
     if not MEMORY_ROOT.exists():
         raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
 
-    _reject_unknown_keys(data, {*ROLES, "review", "debug", "sync"}, "top-level")
+    _reject_unknown_keys(data, _top_level_keys(), "top-level")
     section = data.get("review", {})
     if section is None:
         section = {}
@@ -129,7 +147,7 @@ def load_sync_config() -> SyncConfig:
     data = _load_raw_config()
     if not MEMORY_ROOT.exists():
         raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
-    _reject_unknown_keys(data, {*ROLES, "review", "debug", "sync"}, "top-level")
+    _reject_unknown_keys(data, _top_level_keys(), "top-level")
     return _sync_config(data.get("sync", {}))
 
 
@@ -145,6 +163,10 @@ def _reject_unknown_keys(data: dict[str, object], allowed: set[str], context: st
     if unknown:
         joined = ", ".join(sorted(unknown))
         raise ValueError(f"unsupported {context} config key(s): {joined}")
+
+
+def _top_level_keys() -> set[str]:
+    return {*ROLES, "agent_cli", "review", "debug", "sync"}
 
 
 def _required_string(data: dict[str, object], key: str) -> str:
@@ -167,6 +189,49 @@ def _model_kwargs(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("[model.kwargs] must be a TOML table")
     return dict(value)
+
+
+def _agent_cli_runtime_config(role: str, data: dict[str, object], role_section: dict[str, object]) -> RuntimeConfig:
+    global_section = data.get("agent_cli", {})
+    if global_section is None:
+        global_section = {}
+    if not isinstance(global_section, dict):
+        raise ValueError("[agent_cli] must be a TOML table")
+    _reject_unknown_keys(global_section, {"provider"}, "[agent_cli]")
+
+    role_cli = role_section.get("agent_cli", {})
+    if role_cli is None:
+        role_cli = {}
+    if not isinstance(role_cli, dict):
+        raise ValueError(f"[{role}.agent_cli] must be a TOML table")
+    _reject_unknown_keys(role_cli, {"provider", "model"}, f"[{role}.agent_cli]")
+
+    provider = role_cli.get("provider", global_section.get("provider"))
+    if not isinstance(provider, str) or not provider.strip():
+        raise ValueError(f"[agent_cli].provider or [{role}.agent_cli].provider must be a non-empty string")
+    provider = provider.strip()
+    if provider not in {"codex", "claude"}:
+        raise ValueError("agent_cli provider must be one of: claude, codex")
+
+    model = _optional_agent_cli_model(role, role_cli.get("model"))
+    return RuntimeConfig(
+        role=role,
+        model_id=None,
+        runtime_mode="cli-agent",
+        agent_cli=AgentCliConfig(provider=provider, model=model),
+        memory_root=MEMORY_ROOT,
+        max_tool_retries=DEFAULT_MAX_TOOL_RETRIES,
+        debug_trace=_debug_trace(data.get("debug", {})),
+        sync=_sync_config(data.get("sync", {})),
+    )
+
+
+def _optional_agent_cli_model(role: str, value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"[{role}.agent_cli].model must be a non-empty string when set")
+    return value.strip()
 
 
 def _debug_trace(value: object) -> bool:
