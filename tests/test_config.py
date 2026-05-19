@@ -507,6 +507,7 @@ class RuntimeTests(unittest.TestCase):
         config = RuntimeConfig(
             role="retrieve",
             model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
             model_kwargs={"extra_body": {"chat_template_kwargs": {"thinking": True}}},
         )
 
@@ -524,6 +525,117 @@ class RuntimeTests(unittest.TestCase):
             {"extra_body": {"chat_template_kwargs": {"thinking": True}}},
         )
         self.assertEqual(runtime.agent.calls[0]["usage_limits"].request_limit, 100)
+
+    def test_retrieve_turn_appends_recent_submitted_memory_once_per_session(self):
+        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
+        self._write_async_update_state(
+            "update-a",
+            pending=[
+                {
+                    "id": 1,
+                    "message": "remember active submitted detail",
+                    "submitted_at": "2026-05-19T00:00:00+00:00",
+                }
+            ],
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+            first = runtime.run_session_turn("agent-session", "find one")
+            second = runtime.run_session_turn("agent-session", "find two")
+            other_session = runtime.run_session_turn("other-session", "find three")
+
+        self.assertEqual(first, "reply 1")
+        self.assertEqual(second, "reply 2")
+        self.assertEqual(other_session, "reply 3")
+        self.assertIn("Recent submitted memory", runtime.agent.calls[0]["message"])
+        self.assertIn("remember active submitted detail", runtime.agent.calls[0]["message"])
+        self.assertEqual(runtime.agent.calls[1]["message"], "find two")
+        self.assertIn("Recent submitted memory", runtime.agent.calls[2]["message"])
+        self.assertIn("remember active submitted detail", runtime.agent.calls[2]["message"])
+
+    def test_retrieve_turn_records_recent_submitted_delivery_after_success(self):
+        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
+        self._write_async_update_state(
+            "update-a",
+            pending=[
+                {
+                    "id": 1,
+                    "message": "remember successful delivery",
+                    "submitted_at": "2026-05-19T00:00:00+00:00",
+                }
+            ],
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+            runtime.run_session_turn("agent-session", "find one")
+
+        state_path = Path(self.tempdir.name) / ".runtime" / "recent_submitted" / "retrieve" / "agent-session.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["session_id"], "agent-session")
+        self.assertEqual(state["delivered"], ["update-a:1:2026-05-19T00:00:00+00:00"])
+
+    def test_retrieve_turn_does_not_record_recent_submitted_delivery_after_failure(self):
+        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
+        self._write_async_update_state(
+            "update-a",
+            pending=[
+                {
+                    "id": 1,
+                    "message": "remember failed delivery retry",
+                    "submitted_at": "2026-05-19T00:00:00+00:00",
+                }
+            ],
+        )
+        seen_messages = []
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+            def run_sync(message, message_history=None, model_settings=None, usage_limits=None):
+                seen_messages.append(message)
+                raise RuntimeError("model failed")
+
+            runtime.agent.run_sync = run_sync
+            with self.assertRaises(RuntimeError):
+                runtime.run_session_turn("agent-session", "find one")
+
+        state_path = Path(self.tempdir.name) / ".runtime" / "recent_submitted" / "retrieve" / "agent-session.json"
+        self.assertFalse(state_path.exists())
+        self.assertIn("remember failed delivery retry", seen_messages[0])
+
+    def test_cli_agent_retrieve_receives_recent_submitted_memory(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=Path(self.tempdir.name),
+        )
+        self._write_async_update_state(
+            "update-a",
+            pending=[
+                {
+                    "id": 1,
+                    "message": "remember cli submitted detail",
+                    "submitted_at": "2026-05-19T00:00:00+00:00",
+                }
+            ],
+        )
+
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            executor_class.return_value.run_session_turn.return_value = "cli reply"
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_session_turn("agent-session", "find one")
+
+        self.assertEqual(result, "cli reply")
+        executor_class.return_value.run_session_turn.assert_called_once()
+        _, message = executor_class.return_value.run_session_turn.call_args.args
+        self.assertTrue(message.startswith("find one\n\nRecent submitted memory"))
+        self.assertIn("remember cli submitted detail", message)
+        state_path = Path(self.tempdir.name) / ".runtime" / "recent_submitted" / "retrieve" / "agent-session.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["delivered"], ["update-a:1:2026-05-19T00:00:00+00:00"])
 
     def test_write_role_creates_memory_lock_and_gitignore(self):
         config = RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name))
@@ -958,7 +1070,12 @@ class RuntimeTests(unittest.TestCase):
             runtime.run_session_turn("../bad", "hello")
 
     def test_rejects_unsupported_model_kwargs(self):
-        config = RuntimeConfig(role="retrieve", model_id="openai/test", model_kwargs={"api_version": "2026-01-01"})
+        config = RuntimeConfig(
+            role="retrieve",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            model_kwargs={"api_version": "2026-01-01"},
+        )
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
@@ -1109,6 +1226,30 @@ class RuntimeTests(unittest.TestCase):
                 raise RuntimeError("model failed")
 
         return FailingAgent
+
+    def _write_async_update_state(self, session_id, *, pending=None, current_batch=None):
+        state_path = Path(self.tempdir.name) / ".runtime" / "async" / "update" / f"{session_id}.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "status": "running",
+                    "session_id": session_id,
+                    "role": "update",
+                    "phase": "waiting",
+                    "started_at": "2026-05-19T00:00:00+00:00",
+                    "finished_at": None,
+                    "pid": None,
+                    "result": None,
+                    "error": None,
+                    "next_flush_at": "2026-05-19T01:00:00+00:00",
+                    "current_batch": current_batch or [],
+                    "pending": pending or [],
+                    "next_id": 10,
+                }
+            ),
+            encoding="utf-8",
+        )
 
 
 class PromptTests(unittest.TestCase):

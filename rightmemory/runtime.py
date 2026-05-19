@@ -10,6 +10,12 @@ from .agent_cli import CliAgentExecutor, NO_SESSION_RIGHTMEMORY_SESSION_ID
 from .config import RuntimeConfig, load_config
 from .debug import DebugTrace
 from .prompt import build_instructions
+from .recent_submitted import (
+    RecentSubmittedMemoryDeliveryStore,
+    RecentSubmittedMemoryEntry,
+    append_recent_submitted_memory,
+    collect_recent_submitted_memory,
+)
 from .session import MemoryWriteLock, MessageSessionStore
 from .sync import SyncManager
 from .tools import MemoryTools
@@ -47,6 +53,7 @@ class RightMemoryRuntime:
         self.config = config
         self.tools = MemoryTools(config.memory_root)
         self.sessions = MessageSessionStore(config.memory_root, config.role)
+        self.recent_submitted_delivery = RecentSubmittedMemoryDeliveryStore(config.memory_root)
         self._message_history: list[Any] = []
         self._active_trace: DebugTrace | None = None
         self._sync_manager: SyncManager | None = None
@@ -62,15 +69,20 @@ class RightMemoryRuntime:
             if post_sync is not None:
                 self._run_sync_reconciler(post_sync)
             return str(result)
+        prepared_message, recent_submitted_entries = self._prepare_retrieve_message(
+            NO_SESSION_RIGHTMEMORY_SESSION_ID,
+            message,
+        )
         result, post_sync = self._run_locked_turn(
             lambda: self.agent.run_sync(
-                message,
+                prepared_message,
                 message_history=self._message_history or None,
                 model_settings=self._model_settings(),
                 usage_limits=self._usage_limits(),
             )
         )
         self._store_message_history_from_result(result)
+        self._record_recent_submitted_delivery(NO_SESSION_RIGHTMEMORY_SESSION_ID, recent_submitted_entries)
         if post_sync is not None:
             self._run_sync_reconciler(post_sync)
         return self._result_output(result)
@@ -102,12 +114,13 @@ class RightMemoryRuntime:
 
     def _run_session_model(self, session_id: str, message: str):
         with self.sessions.locked(session_id) as session:
+            prepared_message, recent_submitted_entries = self._prepare_retrieve_message(session_id, message)
             history_json = session.load_json()
             history = self._load_message_history(history_json) if history_json is not None else None
             self._trace("history_loaded", message_count=len(history or []))
             self._trace("model_started")
             result = self.agent.run_sync(
-                message,
+                prepared_message,
                 message_history=history,
                 model_settings=self._model_settings(),
                 usage_limits=self._usage_limits(),
@@ -115,13 +128,16 @@ class RightMemoryRuntime:
             self._trace("model_finished", output=self._result_output(result))
             session.save_json(self._dump_message_history(result))
             self._trace("history_saved", path=str(session.paths.history))
+            self._record_recent_submitted_delivery(session_id, recent_submitted_entries)
             return result
 
     def _run_session_cli_agent(self, session_id: str, message: str) -> str:
         with self.sessions.locked(session_id):
+            prepared_message, recent_submitted_entries = self._prepare_retrieve_message(session_id, message)
             self._trace("model_started")
-            result = self.agent.run_session_turn(session_id, message)
+            result = self.agent.run_session_turn(session_id, prepared_message)
             self._trace("model_finished", output=str(result))
+            self._record_recent_submitted_delivery(session_id, recent_submitted_entries)
             return result
 
     def _run_locked_turn(self, run_model: Callable[[], Any]) -> tuple[Any, Any | None]:
@@ -184,6 +200,26 @@ class RightMemoryRuntime:
         if self.config.role == "retrieve":
             return nullcontext()
         return MemoryWriteLock(self.config.memory_root)
+
+    def _prepare_retrieve_message(
+        self,
+        session_id: str,
+        message: str,
+    ) -> tuple[str, list[RecentSubmittedMemoryEntry]]:
+        if self.config.role != "retrieve":
+            return message, []
+        entries = collect_recent_submitted_memory(self.config.memory_root)
+        entries = self.recent_submitted_delivery.new_entries(session_id, entries)
+        return append_recent_submitted_memory(message, entries), entries
+
+    def _record_recent_submitted_delivery(
+        self,
+        session_id: str,
+        entries: list[RecentSubmittedMemoryEntry],
+    ) -> None:
+        if self.config.role != "retrieve":
+            return
+        self.recent_submitted_delivery.record_delivered(session_id, entries)
 
     def _build_agent(self):
         try:
