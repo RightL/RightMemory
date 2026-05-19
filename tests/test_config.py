@@ -533,7 +533,7 @@ class RuntimeTests(unittest.TestCase):
             pending=[
                 {
                     "id": 1,
-                    "message": "remember active submitted detail",
+                    "message": "remember first submitted detail",
                     "submitted_at": "2026-05-19T00:00:00+00:00",
                 }
             ],
@@ -542,6 +542,21 @@ class RuntimeTests(unittest.TestCase):
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
             first = runtime.run_session_turn("agent-session", "find one")
+            self._write_async_update_state(
+                "update-a",
+                pending=[
+                    {
+                        "id": 1,
+                        "message": "remember first submitted detail",
+                        "submitted_at": "2026-05-19T00:00:00+00:00",
+                    },
+                    {
+                        "id": 2,
+                        "message": "remember second submitted detail",
+                        "submitted_at": "2026-05-19T00:01:00+00:00",
+                    },
+                ],
+            )
             second = runtime.run_session_turn("agent-session", "find two")
             other_session = runtime.run_session_turn("other-session", "find three")
 
@@ -549,10 +564,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(second, "reply 2")
         self.assertEqual(other_session, "reply 3")
         self.assertIn("Recent submitted memory", runtime.agent.calls[0]["message"])
-        self.assertIn("remember active submitted detail", runtime.agent.calls[0]["message"])
-        self.assertEqual(runtime.agent.calls[1]["message"], "find two")
+        self.assertIn("remember first submitted detail", runtime.agent.calls[0]["message"])
+        self.assertIn("Recent submitted memory", runtime.agent.calls[1]["message"])
+        self.assertIn("remember second submitted detail", runtime.agent.calls[1]["message"])
+        self.assertNotIn("remember first submitted detail", runtime.agent.calls[1]["message"])
         self.assertIn("Recent submitted memory", runtime.agent.calls[2]["message"])
-        self.assertIn("remember active submitted detail", runtime.agent.calls[2]["message"])
+        self.assertIn("remember first submitted detail", runtime.agent.calls[2]["message"])
+        self.assertIn("remember second submitted detail", runtime.agent.calls[2]["message"])
 
     def test_retrieve_turn_records_recent_submitted_delivery_after_success(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
