@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from functools import wraps
@@ -34,6 +35,8 @@ SUPPORTED_MODEL_SETTINGS = {
 }
 RECOVERABLE_TOOL_ERRORS = (ValueError, FileNotFoundError)
 MODEL_REQUEST_LIMIT = 100
+THINK_START_TAG = "<think>"
+THINK_END_TAG = "</think>"
 
 
 class RightMemoryRuntime:
@@ -57,13 +60,10 @@ class RightMemoryRuntime:
                 usage_limits=self._usage_limits(),
             )
         )
-        all_messages = getattr(result, "all_messages", None)
-        if callable(all_messages):
-            self._message_history = list(all_messages())
+        self._store_message_history_from_result(result)
         if post_sync is not None:
             self._run_sync_reconciler(post_sync)
-        output = getattr(result, "output", None)
-        return str(output if output is not None else result)
+        return self._result_output(result)
 
     def run_session_turn(self, session_id: str, message: str) -> str:
         if not message.strip():
@@ -82,10 +82,8 @@ class RightMemoryRuntime:
                 raise
             if post_sync is not None:
                 self._run_sync_reconciler(post_sync)
-            output = getattr(result, "output", None)
-            self._trace("run_finished", output=str(output if output is not None else result))
-        output = getattr(result, "output", None)
-        return str(output if output is not None else result)
+            self._trace("run_finished", output=self._result_output(result))
+        return self._result_output(result)
 
     def _run_session_model(self, session_id: str, message: str):
         with self.sessions.locked(session_id) as session:
@@ -99,8 +97,7 @@ class RightMemoryRuntime:
                 model_settings=self._model_settings(),
                 usage_limits=self._usage_limits(),
             )
-            output = getattr(result, "output", None)
-            self._trace("model_finished", output=str(output if output is not None else result))
+            self._trace("model_finished", output=self._result_output(result))
             session.save_json(self._dump_message_history(result))
             self._trace("history_saved", path=str(session.paths.history))
             return result
@@ -277,7 +274,28 @@ class RightMemoryRuntime:
         all_messages_json = getattr(result, "all_messages_json", None)
         if not callable(all_messages_json):
             raise RuntimeError("Pydantic AI result does not expose all_messages_json()")
-        return bytes(all_messages_json())
+        return self._sanitize_message_history_json(bytes(all_messages_json()))
+
+    def _store_message_history_from_result(self, result: Any) -> None:
+        all_messages_json = getattr(result, "all_messages_json", None)
+        if callable(all_messages_json):
+            self._message_history = self._load_message_history(self._dump_message_history(result))
+            return
+        all_messages = getattr(result, "all_messages", None)
+        if callable(all_messages):
+            self._message_history = list(all_messages())
+
+    def _result_output(self, result: Any) -> str:
+        output = getattr(result, "output", None)
+        text = str(output if output is not None else result)
+        return _strip_visible_thinking(text)
+
+    def _sanitize_message_history_json(self, data: bytes) -> bytes:
+        try:
+            value = json.loads(data)
+        except json.JSONDecodeError:
+            return data
+        return json.dumps(_sanitize_message_history_value(value), ensure_ascii=False).encode()
 
 
 def build_model(config: RuntimeConfig):
@@ -355,3 +373,35 @@ def _short_trace_value(value: Any) -> str:
     if len(text) > 1000:
         return text[:1000] + "...[truncated]"
     return text
+
+
+def _sanitize_message_history_value(value: Any, *, in_model_response: bool = False) -> Any:
+    if isinstance(value, list):
+        return [_sanitize_message_history_value(item, in_model_response=in_model_response) for item in value]
+    if isinstance(value, dict):
+        child_in_model_response = in_model_response or value.get("kind") == "response"
+        sanitized = {
+            key: _sanitize_message_history_value(item, in_model_response=child_in_model_response)
+            for key, item in value.items()
+        }
+        if (
+            in_model_response
+            and sanitized.get("part_kind") == "text"
+            and isinstance(sanitized.get("content"), str)
+        ):
+            sanitized["content"] = _strip_visible_thinking(sanitized["content"])
+        return sanitized
+    return value
+
+
+def _strip_visible_thinking(text: str) -> str:
+    if THINK_END_TAG in text:
+        text = text.rsplit(THINK_END_TAG, 1)[1]
+    while THINK_START_TAG in text:
+        start = text.find(THINK_START_TAG)
+        end = text.find(THINK_END_TAG, start + len(THINK_START_TAG))
+        if end < 0:
+            text = text[:start]
+            break
+        text = text[:start] + text[end + len(THINK_END_TAG) :]
+    return text.lstrip()
