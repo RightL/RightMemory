@@ -7,6 +7,13 @@
 - Use the schema supplied by the execution wrapper for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.
 - Do not expect or add a schema preamble in `MEMORY.md`; memory files should contain memory content only.
 
+## Recent Submitted Memory
+
+- The runtime may append a `Recent submitted memory` block to the caller message.
+- Entries in that block are memory update submissions that have not been consolidated into `MEMORY.md` yet.
+- Use them as short-term working memory when they are relevant to the retrieval request.
+- When returning one, label it as recent submitted memory instead of inventing graph node ids or treating it as settled memory content.
+
 ## Retrieval
 
 - Use judgment to decide which nodes are strongly relevant to the caller's request. Consider direct matches, synonyms, abbreviations, related concepts, nearby detail-file pointers, and multi-hop reachability via edges.
