@@ -34,7 +34,7 @@ For CLI-agent mode, where RightMemory delegates role execution to Codex CLI or C
 ./install.sh --mode cli-agent ~/.rightmemory ~/.codex/skills
 ```
 
-After install, open `~/.rightmemory/MEMORY.md` and add your own memory before the managed example block. Re-run the installer after pulling updates; existing real memory is preserved, and the managed example block refreshes when present.
+After install, open `~/.rightmemory/MEMORY.md` and add your own memory before the managed example block. Real memory can include project context, durable user context, and cross-session agent behavior guidance. Re-run the installer after pulling updates; existing real memory is preserved, and the managed example block refreshes when present.
 
 ## Memory Model
 
@@ -54,6 +54,8 @@ Runtime facts that apply to the whole project.
 ```
 
 The tree tells agents where to read in local context. Anchors and node ids tell agents what can be referenced. Edges tell agents where to walk across otherwise separate branches.
+
+Common top-level domains include project or work domains, `# User Context`, and `# Cross-Session Agent Behavior`. User context stores durable facts about the user and their direction when those facts help future collaboration. Agent behavior stores guidance about how agents should communicate, choose tools, and avoid repeated mistakes with the user.
 
 ### Headings
 
@@ -166,7 +168,7 @@ Both modes use `uv` to install the runtime under `${XDG_DATA_HOME:-$HOME/.local/
 
 ## Everyday Use
 
-1. Edit `MEMORY.md` after install and add your own memory before the managed example block.
+1. Edit `MEMORY.md` after install and add your own durable memory before the managed example block, including user context or project context that should guide future sessions.
 2. Let the installed orchestrator decide when a user request needs memory retrieval.
 3. Let the update role write durable updates after work that should affect future sessions.
 4. Ask for a dream cycle when you want cleanup, consolidation, or stale-memory review.

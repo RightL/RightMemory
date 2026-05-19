@@ -26,6 +26,14 @@ Nodes use:
 - Edges may connect heading to heading, heading to node, node to heading, or node to node.
 - Node lines with no edges write `→ []`; heading lines with no edges may omit `→ []`.
 
+## Memory Domains
+
+Memory domains are ordinary `#` headings. Use `# User Context` for durable context about the user that helps future agents collaborate, such as relevant background, current focus, longer-term direction, active goals, constraints, or values. Treat these as placement examples, not profile fields to fill.
+
+Use `# Cross-Session Agent Behavior` for guidance about how agents should work with the user, such as communication style, workflow expectations, tool or process preferences, and repeated agent mistakes that future agents can avoid.
+
+When a fact could fit either domain, place it by what the memory should help with. Facts about the user's context or direction belong under user context; instructions about agent behavior belong under agent behavior.
+
 ## Edge Types
 
 - `dep:` A depends on B.

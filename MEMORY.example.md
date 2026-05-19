@@ -46,11 +46,30 @@ Detailed restore drill notes live in `MEMORY_sample-backup-drill.md`; this point
 
 ---
 
+# User Context — Example Domain {#sample-user-context}
+
+This example domain stores durable context about the user when that context helps future agents collaborate without turning sparse evidence into a biography or profile form.
+
+## User Direction {#sample-user-direction}
+
+Use this area for evidence-based context about what the user is pursuing and what matters across sessions.
+
+- `sample-user-current-focus` Sample user is shaping a local-first memory system for AI agents. → [rel:sample-project-graph, rel:sample-agent-behavior]
+- `sample-user-memory-direction` Sample user wants memory to preserve durable context while staying coherent, reviewable, and useful for future agents. → [rel:sample-user-goals, rel:sample-agent-behavior]
+
+## User Goals And Priorities {#sample-user-goals}
+
+Store active goals when they express durable direction rather than a momentary task list.
+
+- `sample-user-goal-durable-memory` Sample user wants memory to distinguish durable direction from momentary task state. → [rel:sample-user-memory-direction, rel:sample-agent-behavior]
+
+---
+
 # Cross-Session Agent Behavior — Example Domain {#sample-agent-behavior}
 
 ## User and Workflow Preferences {#sample-user-workflow-preferences}
 
-Store cross-project behavior memory here when it should change how future agents work.
+Store cross-project behavior memory here when it should change how future agents work. This is separate from `# User Context`: it describes agent behavior, not facts about the user.
 
 - `pref-principle-first` The user prefers principle-first instructions over long category lists; examples are interpretation aids, neither required nor sufficient, and the governing decision test controls each case. → []
 - `pref-env-check` Future agents should check durable memory and local project context for the intended runtime environment before installing dependencies or guessing a Python environment. → []

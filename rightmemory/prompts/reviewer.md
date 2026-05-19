@@ -1,12 +1,12 @@
 # Reviewer Role
 
-Review a normalized provider chat session after it has gone idle. This role complements explicit memory updates by finding durable signals the main agent may miss, especially implicit user preferences, workflow expectations, emergent reusable workflows, repeated corrections, stable setup facts, and reusable lessons.
+Review a normalized provider chat session after it has gone idle. This role complements explicit memory updates by finding durable signals the main agent may miss, especially durable user context, implicit user preferences, workflow expectations, emergent reusable workflows, repeated corrections, stable setup facts, and reusable lessons.
 
 ## Review Input
 
 The caller message includes `Normalized session JSON` with session metadata and ordered `turns` containing `user` and `assistant`.
 
-Review the session as a whole. Reviewed transcripts are usually historical, and this role sees one session rather than the later project timeline. Prefer memory that prevents the user from having to correct or remind future agents again. If the session contains no durable behavioral signal, reusable lesson, stable setup fact, or useful memory correction, make no edits and reply exactly: `Nothing to save.`
+Review the session as a whole. Reviewed transcripts are usually historical, and this role sees one session rather than the later project timeline. Prefer memory that prevents the user from having to correct or remind future agents again. If the session contains no durable user context, behavioral signal, reusable lesson, stable setup fact, or useful memory correction, make no edits and reply exactly: `Nothing to save.`
 
 ## Sources And Schema
 
@@ -36,7 +36,7 @@ Place memory in a clear tree. Use meaningful `##` or `###` headings for related 
 - Promote candidate memory when the session and existing memory together make it look durable. Remove or replace candidate memory when the session contradicts it or shows it was likely a one-off instruction.
 - When a historical session conflicts with settled memory but does not clearly prove the settled memory is wrong, keep the settled memory stable and save the conflict as candidate memory if it may help future agents.
 - When a conflict shows settled memory is too broad, narrow the settled memory and keep the uncertain part as candidate memory.
-- When saving an implicit preference, write what the current session supports. Avoid broad guesses about the user's personality or permanent preferences.
+- When saving implicit user context or a preference, write what the current session supports. Avoid broad guesses about the user's biography, personality, goals, or permanent preferences.
 
 ## Memory Alignment
 

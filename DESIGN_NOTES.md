@@ -26,6 +26,10 @@ Detail files use short explicit slugs from file-backed headings such as `#### To
 
 Schema rules live in `skills/rightmemory-schema.md` instead of at the top of every `MEMORY.md`, because memory files should stay focused on user memory while prompt/schema changes remain single-source and installable with the skills.
 
+### User context and agent behavior domains
+
+`# User Context` is ordinary agent-editable memory for durable context about the user, such as relevant background, current direction, goals, constraints, or values that help future agents collaborate. `# Cross-Session Agent Behavior` stays separate because it describes how agents should behave with the user. This keeps user facts and agent instructions distinct while allowing both to live in the same tree + graph memory model.
+
 ### Update baseline commits
 
 The update role makes a baseline commit before its first write when the memory repo is already dirty, because pre-existing memory edits should not be mixed with routine model-created changes. Routine update writes remain uncommitted so users can batch or review them, while dreamer remains the commit-oriented consolidation path.
