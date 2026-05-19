@@ -1346,6 +1346,8 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("[UPDATE]", prompt)
         self.assertIn("RightMemory Schema", prompt)
         self.assertIn("embedded schema above", prompt)
+        self.assertIn("Recent submitted memory", prompt)
+        self.assertIn("short-term working memory", prompt)
         self.assertNotIn("memory-curator", prompt)
         self.assertNotIn("memory-dreamer", prompt)
         self.assertNotIn("rightmemory-schema.md", prompt)

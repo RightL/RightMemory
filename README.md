@@ -218,7 +218,7 @@ The runtime is intentionally small:
 - Standalone one-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`; CLI-agent calls persist provider session mappings under `<memory-root>/.runtime/agent_cli_sessions/<role>/`.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - The installer creates a root `.gitignore` allowlist so git status only surfaces `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; existing user `.gitignore` files are preserved.
-- Async `update submit` calls for the same `--session` accumulate as pending candidates. The worker waits one hour from the latest submit, then sends the pending candidates to the update role as one batch; `pull` reports phase, pending candidates, current batch, and timing.
+- Async `update submit` calls for the same `--session` accumulate as pending candidates. The worker waits one hour from the latest submit, then sends the pending candidates to the update role as one batch; before consolidation, retrieval receives relevant submissions as `Recent submitted memory` and uses a per-retrieve-session delta so repeated retrieve turns do not keep re-sending the same short-term entries. `pull` reports phase, pending candidates, current batch, and timing.
 - Standalone daemon context is preserved with Pydantic AI message history.
 - MCP support can be added later as an adapter over the same daemon.
 
