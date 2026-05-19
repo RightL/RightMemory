@@ -165,6 +165,19 @@ class RecentSubmittedMemoryCollectionTests(unittest.TestCase):
 
         self.assertIn("recent submitted delivery state must contain string delivered keys", str(caught.exception))
 
+    def test_delivery_store_rejects_non_object_state(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            state_path = root / ".runtime" / "recent_submitted" / "retrieve" / "retrieve-a.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text("[]", encoding="utf-8")
+            store = RecentSubmittedMemoryDeliveryStore(root)
+
+            with self.assertRaises(ValueError) as caught:
+                store.new_entries("retrieve-a", [])
+
+        self.assertIn("recent submitted delivery state must be an object", str(caught.exception))
+
     def test_delivery_store_rejects_session_id_mismatch(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

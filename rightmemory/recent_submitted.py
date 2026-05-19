@@ -81,6 +81,8 @@ class RecentSubmittedMemoryDeliveryStore:
         if not state_path.exists():
             return set()
         data = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("recent submitted delivery state must be an object")
         if data.get("session_id") != retrieve_session_id:
             raise ValueError("recent submitted delivery state session_id mismatch")
         delivered = data.get("delivered")
