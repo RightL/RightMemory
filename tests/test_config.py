@@ -623,6 +623,96 @@ class RuntimeTests(unittest.TestCase):
         gitignore_path = Path(self.tempdir.name) / ".runtime" / ".gitignore"
         self.assertEqual(gitignore_path.read_text(encoding="utf-8"), "*\n")
 
+    def test_strips_visible_thinking_from_output_and_saved_history(self):
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name))
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+            def run_sync(message, message_history=None, model_settings=None, usage_limits=None):
+                class FakeResult:
+                    output = "I should inspect the memory first.</think> final answer"
+
+                    def all_messages_json(self):
+                        return json.dumps(
+                            [
+                                {
+                                    "parts": [
+                                        {
+                                            "part_kind": "text",
+                                            "content": "I should inspect the memory first.</think> final answer",
+                                        }
+                                    ],
+                                    "kind": "response",
+                                }
+                            ]
+                        ).encode()
+
+                return FakeResult()
+
+            runtime.agent.run_sync = run_sync
+            result = runtime.run_session_turn("agent-session", "remember one")
+
+        self.assertEqual(result, "final answer")
+        history_path = Path(self.tempdir.name) / ".runtime" / "sessions" / "update" / "agent-session.json"
+        history = json.loads(history_path.read_text(encoding="utf-8"))
+        self.assertEqual(history[0]["parts"][0]["content"], "final answer")
+
+    def test_sanitizer_preserves_structured_thinking_and_non_response_text(self):
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name))
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+            def run_sync(message, message_history=None, model_settings=None, usage_limits=None):
+                class FakeResult:
+                    output = "<think>hidden but structured elsewhere</think> final answer"
+
+                    def all_messages_json(self):
+                        return json.dumps(
+                            [
+                                {
+                                    "parts": [
+                                        {
+                                            "part_kind": "user-prompt",
+                                            "content": "literal user text </think> keep this",
+                                        }
+                                    ],
+                                    "kind": "request",
+                                },
+                                {
+                                    "parts": [
+                                        {
+                                            "part_kind": "thinking",
+                                            "content": "good structured thinking </think> keep this",
+                                        },
+                                        {
+                                            "part_kind": "tool-return",
+                                            "content": "tool output </think> keep this",
+                                        },
+                                        {
+                                            "part_kind": "text",
+                                            "content": "<think>visible leaked thinking</think> final answer",
+                                        },
+                                    ],
+                                    "kind": "response",
+                                },
+                            ]
+                        ).encode()
+
+                return FakeResult()
+
+            runtime.agent.run_sync = run_sync
+            result = runtime.run_session_turn("agent-session", "remember one")
+
+        self.assertEqual(result, "final answer")
+        history_path = Path(self.tempdir.name) / ".runtime" / "sessions" / "update" / "agent-session.json"
+        history = json.loads(history_path.read_text(encoding="utf-8"))
+        self.assertEqual(history[0]["parts"][0]["content"], "literal user text </think> keep this")
+        self.assertEqual(history[1]["parts"][0]["content"], "good structured thinking </think> keep this")
+        self.assertEqual(history[1]["parts"][1]["content"], "tool output </think> keep this")
+        self.assertEqual(history[1]["parts"][2]["content"], "final answer")
+
     def test_debug_trace_writes_session_events_without_changing_history(self):
         config = RuntimeConfig(
             role="retrieve",
