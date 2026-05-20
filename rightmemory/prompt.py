@@ -94,9 +94,9 @@ def _command_guidance(role: str) -> str:
         return "- The `rightmemory dreamer` command selected dreamer consolidation behavior. Run one consolidation cycle for the memory store."
     if role == "reviewer":
         return (
-            "- The automatic transcript review scanner selected reviewer behavior. Treat the normalized session "
-            "JSON in the caller message as the review input.\n"
-            "- Review the whole normalized session for durable memory."
+            "- The automatic transcript review scanner selected reviewer behavior. Treat the normalized transcript "
+            "batch JSON in the caller message as the review input.\n"
+            "- Review the ordered batch for durable memory."
         )
     if role == "sync-reconciler":
         return (
