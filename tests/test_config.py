@@ -265,6 +265,7 @@ class ConfigTests(unittest.TestCase):
             [review]
             idle_seconds = 7200
             since_days = 14
+            batch_size = 4
 
             [[review.sources]]
             kind = "codex"
@@ -277,6 +278,7 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.idle_seconds, 7200)
         self.assertEqual(config.since_days, 14)
+        self.assertEqual(config.batch_size, 4)
         self.assertEqual(len(config.sources), 1)
         self.assertEqual(config.sources[0].kind, "codex")
         self.assertEqual(config.sources[0].path, Path("~/codex-history").expanduser())
@@ -290,6 +292,22 @@ class ConfigTests(unittest.TestCase):
                 config = load_review_config()
 
         self.assertEqual(config.since_days, 3)
+        self.assertEqual(config.batch_size, 3)
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_review_config_rejects_invalid_batch_size(self):
+        config_path = self._write_config(
+            """
+            [review]
+            batch_size = 0
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_review_config()
+
+        self.assertIn("[review].batch_size must be a positive integer", str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_review_config_allows_sync_section(self):

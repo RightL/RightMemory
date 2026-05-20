@@ -14,6 +14,7 @@ ROLES = {"dreamer", "retrieve", "reviewer", "sync-reconciler", "update"}
 DEFAULT_MAX_TOOL_RETRIES = 10
 DEFAULT_REVIEW_IDLE_SECONDS = 3600
 DEFAULT_REVIEW_SINCE_DAYS = 3
+DEFAULT_REVIEW_BATCH_SIZE = 3
 DEFAULT_SYNC_STALE_PULL_HOURS = 24
 
 
@@ -35,6 +36,7 @@ class ReviewConfig:
     memory_root: Path = MEMORY_ROOT
     idle_seconds: int = DEFAULT_REVIEW_IDLE_SECONDS
     since_days: int = DEFAULT_REVIEW_SINCE_DAYS
+    batch_size: int = DEFAULT_REVIEW_BATCH_SIZE
     sources: list[ReviewSourceConfig] = field(default_factory=list)
 
 
@@ -122,7 +124,7 @@ def load_review_config() -> ReviewConfig:
         section = {}
     if not isinstance(section, dict):
         raise ValueError("[review] must be a TOML table")
-    _reject_unknown_keys(section, {"idle_seconds", "since_days", "sources"}, "[review]")
+    _reject_unknown_keys(section, {"idle_seconds", "since_days", "batch_size", "sources"}, "[review]")
 
     idle_seconds = section.get("idle_seconds", DEFAULT_REVIEW_IDLE_SECONDS)
     if not isinstance(idle_seconds, int) or idle_seconds < 1:
@@ -132,6 +134,10 @@ def load_review_config() -> ReviewConfig:
     if not isinstance(since_days, int) or since_days < 1:
         raise ValueError("[review].since_days must be a positive integer")
 
+    batch_size = section.get("batch_size", DEFAULT_REVIEW_BATCH_SIZE)
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError("[review].batch_size must be a positive integer")
+
     raw_sources = section.get("sources")
     if raw_sources is None:
         sources = _default_review_sources()
@@ -140,7 +146,13 @@ def load_review_config() -> ReviewConfig:
             raise ValueError("[[review.sources]] must be an array of tables")
         sources = [_review_source(item) for item in raw_sources]
 
-    return ReviewConfig(memory_root=MEMORY_ROOT, idle_seconds=idle_seconds, since_days=since_days, sources=sources)
+    return ReviewConfig(
+        memory_root=MEMORY_ROOT,
+        idle_seconds=idle_seconds,
+        since_days=since_days,
+        batch_size=batch_size,
+        sources=sources,
+    )
 
 
 def load_sync_config() -> SyncConfig:
