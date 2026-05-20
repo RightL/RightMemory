@@ -81,3 +81,7 @@ Update submissions accumulate as candidate briefs for one hour from the latest s
 ### Command role prompts
 
 Retrieve, update, and dreamer prompts live as role-specific Markdown files under the runtime package because the command runtime is the source of role behavior in both install modes. `prompt.py` stays a small composer for schema, workspace, tool, and role prompt fragments, while update-specific candidate triage stays in the update role prompt where prompt policy is easier to review and revise.
+
+### Semantic upgrade notes
+
+Semantic upgrade notes let maintainers flag conceptual changes that existing memory may need to absorb after reinstall. The notes live with the runtime package and are tracked per memory root under `.runtime/semantic-upgrades.json`, because they are operational maintenance state rather than user memory. Install reports pending notes but leaves memory untouched; dreamer receives pending notes during consolidation and marks them absorbed after a successful run. Missed notes are supplied chronologically so skipped versions keep their semantic trail, while dreamer follows the later note when newer guidance refines or contradicts earlier guidance.

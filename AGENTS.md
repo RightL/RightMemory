@@ -15,6 +15,7 @@
 - Useful review commands are `rightmemory review scan --once`, `rightmemory review watch`, and `rightmemory review normalize --source <codex|claude> --path <file>`.
 - Use `rightmemory watch start|status|stop|restart` to manage background review and dreamer watchers. Use `rightmemory dreamer watch` directly only when debugging the lower-level dream loop.
 - Use `rightmemory doctor agent-cli` after configuring cli-agent mode to check provider commands, role config, and basic read/write probes.
+- Semantic upgrade notes are Markdown files under `rightmemory/semantic_upgrades/`; validate them with `python -m unittest discover -s tests -p 'test_semantic_upgrades.py'`.
 
 ## Maintaining This File (IMPORTANT!)
 - Treat this file (./AGENTS.md) as operational instructions for coding agents, not as a design document. Keep durable design explanation in `README.md` or `DESIGN_NOTES.md`.
@@ -30,6 +31,7 @@
 - The installer creates a memory-root `.gitignore` allowlist so git status normally shows only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`.
 - Runtime/session/review state belongs under `.runtime/` and should not be committed.
 - Scheduled watcher locks, install refresh stamps, and dreamer watch state also belong under `.runtime/`.
+- Semantic upgrade absorption state belongs under `.runtime/semantic-upgrades.json`. Install may report pending semantic upgrade notes, but dreamer is responsible for applying them during consolidation.
 - Reviewer scans process one time-adjacent batch of eligible provider sessions per bounded scan. `scan --once` attempts one batch and exits; `watch` repeats batch scans until no eligible work remains. Review state remains session-level: once a provider session has been reviewed, later changes or resumed turns with the same source/session id are skipped unless the review state is cleared.
 - The default review window is 3 days via `[review].since_days`; keep that default unless the user explicitly changes the backlog policy.
 
