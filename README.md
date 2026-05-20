@@ -329,7 +329,11 @@ The lower-level review loop is still available:
 rightmemory review watch
 ```
 
-It starts immediately and runs one-session scans until no eligible work remains, then sleeps before checking again. A reviewed or failed session triggers another immediate scan, so backlog and recovery attempts are not delayed by the interval. The default interval is two hours; override it with `--interval <seconds>`.
+It starts immediately and runs one-batch scans until no eligible work remains,
+then sleeps before checking again. A reviewed or failed batch triggers another
+immediate scan, so backlog and recovery attempts are not delayed by the
+interval. The default interval is two hours; override it with
+`--interval <seconds>`.
 
 For cron, launchd, or other supervisors, call one bounded scan at a time:
 
@@ -337,7 +341,8 @@ For cron, launchd, or other supervisors, call one bounded scan at a time:
 rightmemory review scan --once
 ```
 
-Each `scan --once` command reviews at most one eligible session and then exits.
+Each `scan --once` command reviews at most one eligible batch and then exits.
+By default a batch contains up to 3 provider sessions.
 
 For debugging an adapter without calling a model:
 
@@ -351,6 +356,7 @@ Add source presets to `<memory-root>/rightmemory.toml`:
 [review]
 idle_seconds = 3600
 since_days = 3
+batch_size = 3
 
 [[review.sources]]
 kind = "claude"
@@ -361,7 +367,14 @@ kind = "codex"
 path = "~/.codex/sessions"
 ```
 
-If `[[review.sources]]` is omitted, RightMemory checks the default Codex and Claude locations. By default it considers transcript files modified in the last 3 days. Review state is stored under `<memory-root>/.runtime/review/state.json` and records reviewed provider sessions by source and session id. A session is reviewed as one whole unit; if the same provider session later changes or resumes, scanner state treats it as already reviewed unless you clear the corresponding review state.
+If `[[review.sources]]` is omitted, RightMemory checks the default Codex and
+Claude locations. By default it considers transcript files modified in the last
+3 days, then reviews time-adjacent eligible sessions in batches of up to 3.
+Review state is stored under `<memory-root>/.runtime/review/state.json` and
+records reviewed provider sessions by source and session id. A successful batch
+marks every included provider session reviewed; a failed batch marks none. If
+the same provider session later changes or resumes, scanner state treats it as
+already reviewed unless you clear the corresponding review state.
 
 ### Scheduled Dream Cycles
 

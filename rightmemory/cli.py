@@ -307,7 +307,7 @@ def _review_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory review")
     subparsers = parser.add_subparsers(dest="command", required=True)
     scan = subparsers.add_parser("scan", help="scan configured transcript sources")
-    scan.add_argument("--once", action="store_true", help="review one eligible session and exit")
+    scan.add_argument("--once", action="store_true", help="review one eligible batch and exit")
     scan.add_argument("--since-days", type=int, help="only review transcript files modified within this many days")
     watch = subparsers.add_parser("watch", help="keep scanning configured transcript sources")
     watch.add_argument(

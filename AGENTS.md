@@ -30,7 +30,7 @@
 - The installer creates a memory-root `.gitignore` allowlist so git status normally shows only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`.
 - Runtime/session/review state belongs under `.runtime/` and should not be committed.
 - Scheduled watcher locks, install refresh stamps, and dreamer watch state also belong under `.runtime/`.
-- Reviewer scans process one normalized provider session at a time. `scan --once` attempts one eligible session and exits; `watch` repeats one-session scans until no eligible work remains. Review state is session-level: once a provider session has been reviewed, later changes or resumed turns with the same source/session id are skipped unless the review state is cleared.
+- Reviewer scans process one time-adjacent batch of eligible provider sessions per bounded scan. `scan --once` attempts one batch and exits; `watch` repeats batch scans until no eligible work remains. Review state remains session-level: once a provider session has been reviewed, later changes or resumed turns with the same source/session id are skipped unless the review state is cleared.
 - The default review window is 3 days via `[review].since_days`; keep that default unless the user explicitly changes the backlog policy.
 
 ## Upgrade Safety
