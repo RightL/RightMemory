@@ -39,6 +39,7 @@
 - Before changing persisted state or install/watch/config behavior, check upgrade impact.
 - If old state may break, be ignored, or need migration, tell the user and ask before implementing.
 - Do not silently discard or rewrite existing user state.
+- When a schema, example, role prompt, or agent-guidance change affects how existing memory should be organized or interpreted, add or update a semantic upgrade note under `rightmemory/semantic_upgrades/`. The note should tell dreamer what existing memory may need to revisit after reinstall, without adding maintenance text to user memory.
 
 ## Git And Safety
 - Keep changes scoped. Do not revert or clean up user changes unless explicitly asked.
