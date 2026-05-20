@@ -701,7 +701,7 @@ class JsonRequestTests(unittest.TestCase):
         self.assertFalse(pid_exists)
         self.assertIn("dreamer: stopped pid 123", stdout.getvalue())
 
-    def test_dreamer_watch_runs_cycle_and_defaults_to_three_days(self):
+    def test_dreamer_watch_runs_cycle_and_defaults_to_two_days(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
         calls = []
@@ -728,7 +728,7 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 130)
         self.assertEqual(calls, [("dreamer-watch", "Run a scheduled dream cycle.")])
-        sleep.assert_called_once_with(259200)
+        sleep.assert_called_once_with(172800)
         self.assertIn("rightmemory dreamer cycle", stdout.getvalue())
         self.assertIn("session dreamer-watch: Run a scheduled dream cycle.", stdout.getvalue())
         self.assertIn("rightmemory dreamer watch stopped", stderr.getvalue())

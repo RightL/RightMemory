@@ -371,7 +371,7 @@ Dreamer can run periodic consolidation from the same manager:
 rightmemory watch start dreamer
 ```
 
-The underlying `rightmemory dreamer watch` process runs a dream cycle when no prior scheduled run is recorded, then records its last attempt under `<memory-root>/.runtime/dreamer/watch-state.json`. After that, the default interval is 3 days; override it with `rightmemory dreamer watch --interval <seconds>` when running the lower-level loop directly.
+The underlying `rightmemory dreamer watch` process runs a dream cycle when no prior scheduled run is recorded, then records its last attempt under `<memory-root>/.runtime/dreamer/watch-state.json`. After that, the default interval is 2 days; override it with `rightmemory dreamer watch --interval <seconds>` when running the lower-level loop directly.
 
 Review and dreamer watchers hold per-role watch locks under `.runtime/watch/`, so a duplicate watcher exits instead of creating a competing background loop. The write phase still uses the shared memory write lock, so review, update, and dreamer roles do not edit memory files at the same time.
 
