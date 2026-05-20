@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -54,6 +55,13 @@ class ReviewScanResult:
         )
 
 
+@dataclass(frozen=True)
+class ReviewCandidate:
+    transcript: TranscriptFile
+    normalized: NormalizedSession
+    mtime: float
+
+
 class ReviewStateStore:
     def __init__(self, memory_root: Path):
         self.path = memory_root / ".runtime" / "review" / "state.json"
@@ -103,6 +111,7 @@ class ReviewScanner:
         now = time.time() if now is None else now
         state = self.state_store.load()
         sessions = dict(state.sessions)
+        candidates: list[ReviewCandidate] = []
         counts = {
             "reviewed": 0,
             "skipped_idle": 0,
@@ -146,22 +155,54 @@ class ReviewScanner:
                     counts["skipped_reviewed"] += 1
                     continue
 
-                if not self._review_with_retry(normalized, counts):
-                    return ReviewScanResult(**counts)
-
-                sessions[state_key] = ReviewSessionState(
-                    session_id=normalized.session_id,
-                    source=normalized.source,
-                    last_reviewed_at=datetime.now(UTC).isoformat(),
+                candidates.append(
+                    ReviewCandidate(
+                        transcript=transcript,
+                        normalized=normalized,
+                        mtime=stat.st_mtime,
+                    )
                 )
-                self.state_store.save(ReviewState(sessions=sessions))
-                counts["reviewed"] += 1
-                return ReviewScanResult(**counts)
 
+        sorted_candidates = sorted(
+            candidates,
+            key=lambda candidate: (
+                candidate.mtime,
+                candidate.transcript.path.as_posix(),
+                candidate.normalized.source,
+                candidate.normalized.session_id,
+            ),
+        )
+        unique_candidates = []
+        seen_candidate_keys: set[str] = set()
+        for candidate in sorted_candidates:
+            state_key = _state_key(candidate.normalized.source, candidate.normalized.session_id)
+            if state_key in seen_candidate_keys:
+                counts["skipped_reviewed"] += 1
+                continue
+            seen_candidate_keys.add(state_key)
+            unique_candidates.append(candidate)
+
+        batch = unique_candidates[: self.config.batch_size]
+        if not batch:
+            return ReviewScanResult(**counts)
+
+        normalized_batch = [candidate.normalized for candidate in batch]
+        if not self._review_with_retry(normalized_batch, counts):
+            return ReviewScanResult(**counts)
+
+        reviewed_at = datetime.now(UTC).isoformat()
+        for session in normalized_batch:
+            sessions[_state_key(session.source, session.session_id)] = ReviewSessionState(
+                session_id=session.session_id,
+                source=session.source,
+                last_reviewed_at=reviewed_at,
+            )
+        self.state_store.save(ReviewState(sessions=sessions))
+        counts["reviewed"] += len(normalized_batch)
         return ReviewScanResult(**counts)
 
-    def _review_with_retry(self, payload: NormalizedSession, counts: dict[str, int]) -> bool:
-        session_id = _review_session_id(payload)
+    def _review_with_retry(self, payload: list[NormalizedSession], counts: dict[str, int]) -> bool:
+        session_id = _review_batch_id(payload)
         message = _review_message(payload)
         for attempt in range(REVIEW_MAX_RETRIES + 1):
             try:
@@ -197,18 +238,33 @@ def _parse(transcript: TranscriptFile) -> NormalizedSession | None:
     return None
 
 
-def _review_session_id(session: NormalizedSession) -> str:
-    safe = "".join(char if char.isalnum() or char in "._-" else "_" for char in session.session_id)
-    return f"review-{session.source}-{safe}"
+def _review_batch_id(sessions: list[NormalizedSession]) -> str:
+    identifiers = [f"{session.source}-{session.session_id}" for session in sessions]
+    digest = hashlib.sha1("\n".join(identifiers).encode("utf-8")).hexdigest()[:10]
+    joined = "-".join(_safe_batch_id_part(identifier) for identifier in identifiers)
+    if len(joined) > 80:
+        joined = joined[:80].rstrip("._-")
+    if joined:
+        return f"review-batch-{joined}-{digest}"
+    return f"review-batch-{digest}"
 
 
-def _review_message(session: NormalizedSession) -> str:
+def _safe_batch_id_part(value: str) -> str:
+    return "".join(char if char.isalnum() or char in "._-" else "_" for char in value).strip("._-")
+
+
+def _review_message(sessions: list[NormalizedSession]) -> str:
+    batch_id = _review_batch_id(sessions)
+    payload = {
+        "batch_id": batch_id,
+        "sessions": [session.to_payload() for session in sessions],
+    }
     return (
-        "Review this normalized provider transcript session.\n\n"
-        "Review the whole session for durable memory. If nothing is worth saving, "
+        "Review this normalized provider transcript batch.\n\n"
+        "Review the ordered sessions together for durable memory. If nothing is worth saving, "
         "reply exactly: Nothing to save.\n\n"
-        "Normalized session JSON:\n"
-        + json.dumps(session.to_payload(), ensure_ascii=False, indent=2)
+        "Normalized transcript batch JSON:\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
     )
 
 
