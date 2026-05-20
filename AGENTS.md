@@ -16,7 +16,7 @@
 - Use `rightmemory watch start|status|stop|restart` to manage background review and dreamer watchers. Use `rightmemory dreamer watch` directly only when debugging the lower-level dream loop.
 - Use `rightmemory doctor agent-cli` after configuring cli-agent mode to check provider commands, role config, and basic read/write probes.
 
-## Maintaining This File
+## Maintaining This File (IMPORTANT!)
 - Treat this file (./AGENTS.md) as operational instructions for coding agents, not as a design document. Keep durable design explanation in `README.md` or `DESIGN_NOTES.md`.
 - Update this file when setup commands, test commands, install behavior, role boundaries, or git/memory safety rules change.
 - Remove stale commands or environment assumptions as soon as they stop matching the repo; bad instructions are worse than missing instructions.
@@ -32,6 +32,11 @@
 - Scheduled watcher locks, install refresh stamps, and dreamer watch state also belong under `.runtime/`.
 - Reviewer scans process one normalized provider session at a time. `scan --once` attempts one eligible session and exits; `watch` repeats one-session scans until no eligible work remains. Review state is session-level: once a provider session has been reviewed, later changes or resumed turns with the same source/session id are skipped unless the review state is cleared.
 - The default review window is 3 days via `[review].since_days`; keep that default unless the user explicitly changes the backlog policy.
+
+## Upgrade Safety
+- Before changing persisted state or install/watch/config behavior, check upgrade impact.
+- If old state may break, be ignored, or need migration, tell the user and ask before implementing.
+- Do not silently discard or rewrite existing user state.
 
 ## Git And Safety
 - Keep changes scoped. Do not revert or clean up user changes unless explicitly asked.
