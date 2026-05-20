@@ -315,6 +315,10 @@ EOF
   echo "  [install] $RIGHTMEMORY_BIN"
 }
 
+refresh_semantic_upgrades() {
+  "$RIGHTMEMORY_VENV/bin/python" -m rightmemory.semantic_upgrades refresh --memory-root "$MEMORY_ROOT"
+}
+
 warn_if_rightmemory_not_on_path() {
   resolved_rightmemory="$(command -v rightmemory || true)"
   if [ -z "$resolved_rightmemory" ]; then
@@ -371,6 +375,7 @@ EOF
 fi
 
 install_cli_runtime_layout
+refresh_semantic_upgrades
 for skills_target in "${SKILLS_TARGETS[@]}"; do
   schema_dst="$skills_target/rightmemory-schema.md"
   cp "$REPO_ROOT/skills/rightmemory-schema.md" "$schema_dst"

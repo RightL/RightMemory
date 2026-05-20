@@ -19,7 +19,22 @@ class InstallScriptTests(unittest.TestCase):
             "#!/usr/bin/env sh\n"
             "if [ \"$1\" = \"venv\" ]; then\n"
             "  mkdir -p \"$2/bin\"\n"
-            "  printf '#!/usr/bin/env sh\\n' > \"$2/bin/python\"\n"
+            "  cat > \"$2/bin/python\" <<'PYEOF'\n"
+            "#!/usr/bin/env sh\n"
+            "if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"rightmemory.semantic_upgrades\" ]; then\n"
+            "  memory_root=''\n"
+            "  previous=''\n"
+            "  for arg in \"$@\"; do\n"
+            "    if [ \"$previous\" = \"--memory-root\" ]; then memory_root=\"$arg\"; fi\n"
+            "    previous=\"$arg\"\n"
+            "  done\n"
+            "  echo '  [notice]  1 semantic upgrade note(s) pending for the next dreamer cycle:'\n"
+            "  echo '            user-context-agent-behavior-split'\n"
+            "  mkdir -p \"$memory_root/.runtime\"\n"
+            "  printf '{\"absorbed\": {}}\\n' > \"$memory_root/.runtime/semantic-upgrades.json\"\n"
+            "fi\n"
+            "exit 0\n"
+            "PYEOF\n"
             "  chmod 755 \"$2/bin/python\"\n"
             "fi\n"
             "exit 0\n",
@@ -129,7 +144,22 @@ class InstallScriptTests(unittest.TestCase):
                 "#!/usr/bin/env sh\n"
                 "if [ \"$1\" = \"venv\" ]; then\n"
                 "  mkdir -p \"$2/bin\"\n"
-                "  printf '#!/usr/bin/env sh\\n' > \"$2/bin/python\"\n"
+                "  cat > \"$2/bin/python\" <<'PYEOF'\n"
+                "#!/usr/bin/env sh\n"
+                "if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"rightmemory.semantic_upgrades\" ]; then\n"
+                "  memory_root=''\n"
+                "  previous=''\n"
+                "  for arg in \"$@\"; do\n"
+                "    if [ \"$previous\" = \"--memory-root\" ]; then memory_root=\"$arg\"; fi\n"
+                "    previous=\"$arg\"\n"
+                "  done\n"
+                "  echo '  [notice]  1 semantic upgrade note(s) pending for the next dreamer cycle:'\n"
+                "  echo '            user-context-agent-behavior-split'\n"
+                "  mkdir -p \"$memory_root/.runtime\"\n"
+                "  printf '{\"absorbed\": {}}\\n' > \"$memory_root/.runtime/semantic-upgrades.json\"\n"
+                "fi\n"
+                "exit 0\n"
+                "PYEOF\n"
                 "  chmod 755 \"$2/bin/python\"\n"
                 "fi\n"
                 "exit 0\n",
@@ -163,6 +193,19 @@ class InstallScriptTests(unittest.TestCase):
             self.assertIn("MODE         = standalone", result.stdout)
             self.assertIn("Write role model config", result.stdout)
             self.assertIn("rightmemory is installed", result.stdout)
+
+    def test_install_reports_pending_semantic_upgrade_notes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+
+            result = self._install(memory_root, skills_target)
+            state_exists = (memory_root / ".runtime" / "semantic-upgrades.json").exists()
+
+        self.assertIn("semantic upgrade note(s) pending", result.stdout)
+        self.assertIn("user-context-agent-behavior-split", result.stdout)
+        self.assertTrue(state_exists)
 
     def test_install_warns_when_stale_rightmemory_precedes_installed_wrapper(self):
         with tempfile.TemporaryDirectory() as tempdir:
