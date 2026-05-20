@@ -3,6 +3,7 @@ import types
 import json
 import tomllib
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +11,7 @@ from rightmemory.agent_cli import NO_SESSION_RIGHTMEMORY_SESSION_ID
 from rightmemory.config import AgentCliConfig, RuntimeConfig, load_config, load_review_config, load_sync_config
 from rightmemory.prompt import build_cli_agent_instructions, build_instructions
 from rightmemory.runtime import RightMemoryRuntime, build_model
+from rightmemory.semantic_upgrades import SemanticUpgradeContext, SemanticUpgradeNote
 from rightmemory.sync import SyncResult
 
 
@@ -1413,6 +1415,46 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("rightmemory-schema.md", prompt)
         self.assertNotIn("{{MEMORY_ROOT}}", prompt)
         self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+
+    def test_dreamer_prompt_includes_pending_semantic_upgrade_context(self):
+        context = SemanticUpgradeContext(
+            notes=[
+                SemanticUpgradeNote(
+                    id="example-note",
+                    introduced_at=date(2026, 5, 20),
+                    title="Example Note",
+                    body="# Example Note\n\nReconsider older memory.",
+                    source="example.md",
+                )
+            ],
+            warnings=[],
+        )
+
+        prompt = build_instructions(Path("/home/example/.rightmemory"), "dreamer", semantic_upgrades=context)
+
+        self.assertIn("Pending semantic upgrade notes", prompt)
+        self.assertIn("example-note", prompt)
+        self.assertIn("later notes refine, narrow, or contradict earlier notes", prompt)
+        self.assertIn("Do not copy these notes into memory as maintenance text", prompt)
+
+    def test_non_dreamer_prompt_ignores_semantic_upgrade_context(self):
+        context = SemanticUpgradeContext(
+            notes=[
+                SemanticUpgradeNote(
+                    id="example-note",
+                    introduced_at=date(2026, 5, 20),
+                    title="Example Note",
+                    body="# Example Note\n\nReconsider older memory.",
+                    source="example.md",
+                )
+            ],
+            warnings=[],
+        )
+
+        prompt = build_instructions(Path("/home/example/.rightmemory"), "update", semantic_upgrades=context)
+
+        self.assertNotIn("Pending semantic upgrade notes", prompt)
+        self.assertNotIn("example-note", prompt)
 
     def test_reviewer_prompt_has_role_prompt(self):
         prompt = build_instructions(Path("/home/example/.rightmemory"), "reviewer")

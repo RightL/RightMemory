@@ -11,6 +11,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from .config import ROLES, AgentCliConfig
 from .prompt import build_cli_agent_instructions
 from .provider_sessions import ProviderSessionRecord, ProviderSessionStore
+from .semantic_upgrades import SemanticUpgradeContext
 
 
 READ_ROLES = {"retrieve"}
@@ -25,11 +26,18 @@ class AgentCliResult:
 
 
 class CliAgentExecutor:
-    def __init__(self, memory_root: Path, role: str, config: AgentCliConfig):
+    def __init__(
+        self,
+        memory_root: Path,
+        role: str,
+        config: AgentCliConfig,
+        semantic_upgrades: SemanticUpgradeContext | None = None,
+    ):
         _validate_role(role)
         self.memory_root = memory_root
         self.role = role
         self.config = config
+        self.semantic_upgrades = semantic_upgrades
         self.store = ProviderSessionStore(memory_root, role)
 
     def run_turn(self, message: str) -> str:
@@ -72,7 +80,7 @@ class CliAgentExecutor:
         resume: bool,
         rightmemory_session_id: str,
     ) -> AgentCliResult:
-        prompt = _turn_prompt(self.memory_root, self.role, message)
+        prompt = _turn_prompt(self.memory_root, self.role, message, self.semantic_upgrades)
         if self.config.provider == "codex":
             command = build_codex_command(self.memory_root, self.role, self.config, prompt, provider_session_id)
             stdout = _run_cli(command, self.memory_root, "Codex")
@@ -160,8 +168,13 @@ def parse_claude_output(stdout: str) -> AgentCliResult:
     return AgentCliResult(provider_session_id=session_id, text=result)
 
 
-def _turn_prompt(memory_root: Path, role: str, message: str) -> str:
-    instructions = build_cli_agent_instructions(memory_root, role).rstrip()
+def _turn_prompt(
+    memory_root: Path,
+    role: str,
+    message: str,
+    semantic_upgrades: SemanticUpgradeContext | None = None,
+) -> str:
+    instructions = build_cli_agent_instructions(memory_root, role, semantic_upgrades=semantic_upgrades).rstrip()
     return f"{instructions}\n\nCaller message:\n{message}\n"
 
 

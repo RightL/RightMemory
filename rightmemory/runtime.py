@@ -16,6 +16,7 @@ from .recent_submitted import (
     append_recent_submitted_memory,
     collect_recent_submitted_memory,
 )
+from .semantic_upgrades import SemanticUpgradeContext, mark_absorbed, pending_context
 from .session import MemoryWriteLock, MessageSessionStore
 from .sync import SyncManager
 from .tools import MemoryTools
@@ -57,6 +58,8 @@ class RightMemoryRuntime:
         self._message_history: list[Any] = []
         self._active_trace: DebugTrace | None = None
         self._sync_manager: SyncManager | None = None
+        self.semantic_upgrades = self._semantic_upgrade_context()
+        self._semantic_upgrade_ids = self.semantic_upgrades.ids if self.semantic_upgrades is not None else []
         self.agent = self._build_cli_agent() if config.runtime_mode == "cli-agent" else self._build_agent()
 
     def run_turn(self, message: str) -> str:
@@ -68,6 +71,7 @@ class RightMemoryRuntime:
             )
             if post_sync is not None:
                 self._run_sync_reconciler(post_sync)
+            self._mark_semantic_upgrades_absorbed()
             return str(result)
         prepared_message, recent_submitted_entries = self._prepare_retrieve_message(
             NO_SESSION_RIGHTMEMORY_SESSION_ID,
@@ -85,6 +89,7 @@ class RightMemoryRuntime:
         self._record_recent_submitted_delivery(NO_SESSION_RIGHTMEMORY_SESSION_ID, recent_submitted_entries)
         if post_sync is not None:
             self._run_sync_reconciler(post_sync)
+        self._mark_semantic_upgrades_absorbed()
         return self._result_output(result)
 
     def run_session_turn(self, session_id: str, message: str) -> str:
@@ -109,8 +114,10 @@ class RightMemoryRuntime:
                 raise
             if post_sync is not None:
                 self._run_sync_reconciler(post_sync)
-            self._trace("run_finished", output=self._result_output(result))
-        return self._result_output(result)
+            self._mark_semantic_upgrades_absorbed()
+            output = self._result_output(result)
+            self._trace("run_finished", output=output)
+        return output
 
     def _run_session_model(self, session_id: str, message: str):
         with self.sessions.locked(session_id) as session:
@@ -223,6 +230,20 @@ class RightMemoryRuntime:
             return
         self.recent_submitted_delivery.record_delivered(session_id, entries)
 
+    def _semantic_upgrade_context(self) -> SemanticUpgradeContext | None:
+        if self.config.role != "dreamer":
+            return None
+        context = pending_context(self.config.memory_root)
+        if not context.notes and not context.warnings:
+            return None
+        return context
+
+    def _mark_semantic_upgrades_absorbed(self) -> None:
+        if self.config.role != "dreamer" or not self._semantic_upgrade_ids:
+            return
+        mark_absorbed(self.config.memory_root, self._semantic_upgrade_ids)
+        self._semantic_upgrade_ids = []
+
     def _build_agent(self):
         try:
             from pydantic_ai import Agent
@@ -231,7 +252,11 @@ class RightMemoryRuntime:
 
         return Agent(
             model=build_model(self.config),
-            instructions=build_instructions(self.config.memory_root, self.config.role),
+            instructions=build_instructions(
+                self.config.memory_root,
+                self.config.role,
+                semantic_upgrades=self.semantic_upgrades,
+            ),
             tools=self._agent_tools(),
             retries=self.config.max_tool_retries,
         )
@@ -239,7 +264,14 @@ class RightMemoryRuntime:
     def _build_cli_agent(self) -> CliAgentExecutor:
         if self.config.agent_cli is None:
             raise RuntimeError("cli-agent runtime requires agent_cli config")
-        return CliAgentExecutor(self.config.memory_root, self.config.role, self.config.agent_cli)
+        if self.semantic_upgrades is None:
+            return CliAgentExecutor(self.config.memory_root, self.config.role, self.config.agent_cli)
+        return CliAgentExecutor(
+            self.config.memory_root,
+            self.config.role,
+            self.config.agent_cli,
+            semantic_upgrades=self.semantic_upgrades,
+        )
 
     def _agent_tools(self) -> list[Callable[..., Any]]:
         read_tools = [

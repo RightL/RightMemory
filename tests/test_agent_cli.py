@@ -1,6 +1,7 @@
 import subprocess
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ from rightmemory.agent_cli import (
 )
 from rightmemory.config import ROLES, AgentCliConfig, RuntimeConfig, SyncConfig
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
+from rightmemory.semantic_upgrades import SemanticUpgradeContext, SemanticUpgradeNote
 
 
 class ProviderSessionStoreTests(unittest.TestCase):
@@ -174,6 +176,48 @@ class AgentCliCommandTests(unittest.TestCase):
                 "prompt",
             ],
         )
+
+    def test_cli_agent_executor_includes_semantic_upgrades_for_dreamer_prompt(self):
+        context = SemanticUpgradeContext(
+            notes=[
+                SemanticUpgradeNote(
+                    id="example-note",
+                    introduced_at=date(2026, 5, 20),
+                    title="Example Note",
+                    body="# Example Note\n\nReconsider older memory.",
+                    source="example.md",
+                )
+            ],
+            warnings=[],
+        )
+        prompts = []
+
+        def fake_build_codex_command(memory_root, role, config, prompt, provider_session_id):
+            prompts.append(prompt)
+            return ["codex"]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            with (
+                patch("rightmemory.agent_cli.build_codex_command", fake_build_codex_command),
+                patch(
+                    "rightmemory.agent_cli._run_cli",
+                    return_value=(
+                        '{"type":"thread.started","thread_id":"t1"}\n'
+                        '{"item":{"type":"agent_message","text":"done"}}\n'
+                    ),
+                ),
+            ):
+                executor = CliAgentExecutor(
+                    Path(tempdir),
+                    "dreamer",
+                    AgentCliConfig(provider="codex"),
+                    semantic_upgrades=context,
+                )
+                result = executor.run_session_turn("dreamer-session", "run")
+
+        self.assertEqual(result, "done")
+        self.assertIn("Pending semantic upgrade notes", prompts[0])
+        self.assertIn("example-note", prompts[0])
 
     def test_build_claude_resume_command_uses_auto_permission_for_write_role(self):
         session_id = "123e4567-e89b-12d3-a456-426614174000"

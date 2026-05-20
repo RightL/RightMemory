@@ -3,15 +3,22 @@ from __future__ import annotations
 from importlib import resources
 from pathlib import Path
 
+from .semantic_upgrades import SemanticUpgradeContext, render_prompt_context
+
 
 ROLE_PROMPTS = {"dreamer", "retrieve", "reviewer", "sync-reconciler", "update"}
 
 
-def build_cli_agent_instructions(memory_root: Path, role: str) -> str:
+def build_cli_agent_instructions(
+    memory_root: Path,
+    role: str,
+    semantic_upgrades: SemanticUpgradeContext | None = None,
+) -> str:
     if role not in ROLE_PROMPTS:
         raise ValueError(f"role must be one of: {_role_list()}")
     schema = _read_prompt_file("skills/rightmemory-schema.md")
     role_guidance = _read_prompt_file(f"prompts/{role}.md")
+    semantic_guidance = _semantic_upgrade_guidance(role, semantic_upgrades)
 
     return f"""You are RightMemory {role} mode.
 
@@ -27,13 +34,18 @@ Return a concise final reply.
 
 RightMemory schema:
 {schema}
+{semantic_guidance}
 
 Role instructions:
 {role_guidance}
 """
 
 
-def build_instructions(memory_root: Path, role: str) -> str:
+def build_instructions(
+    memory_root: Path,
+    role: str,
+    semantic_upgrades: SemanticUpgradeContext | None = None,
+) -> str:
     if role not in ROLE_PROMPTS:
         raise ValueError(f"role must be one of: {_role_list()}")
     schema = _read_prompt_file("skills/rightmemory-schema.md")
@@ -41,6 +53,7 @@ def build_instructions(memory_root: Path, role: str) -> str:
     command_guidance = _command_guidance(role)
     sync_guidance = _sync_guidance(role)
     tool_guidance = _tool_guidance(role)
+    semantic_guidance = _semantic_upgrade_guidance(role, semantic_upgrades)
 
     return f"""You are RightMemory standalone {role} mode.
 
@@ -69,10 +82,20 @@ RightMemory schema:
 Standalone adaptation:
 - Treat the embedded schema above as the schema source of truth. Do not try to read skill or schema files outside {memory_root}; the provided tools only expose the memory root.
 - Treat the caller's message according to the command-selected behavior and the role instructions below.
+{semantic_guidance}
 
 Role instructions:
 {role_guidance}
 """
+
+
+def _semantic_upgrade_guidance(role: str, semantic_upgrades: SemanticUpgradeContext | None) -> str:
+    if role != "dreamer" or semantic_upgrades is None:
+        return ""
+    rendered = render_prompt_context(semantic_upgrades)
+    if not rendered:
+        return ""
+    return f"\nSemantic upgrade context:\n{rendered}\n"
 
 
 def _command_guidance(role: str) -> str:
