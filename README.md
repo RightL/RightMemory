@@ -34,7 +34,7 @@ For CLI-agent mode, where RightMemory delegates role execution to Codex CLI or C
 ./install.sh --mode cli-agent ~/.rightmemory ~/.codex/skills
 ```
 
-After install, open `~/.rightmemory/MEMORY.md` and add your own memory before the managed example block. Real memory can include project context, durable user context, and cross-session agent behavior guidance. Re-run the installer after pulling updates. Existing real memory is preserved, the managed example block refreshes when present, and pending semantic upgrade notes are reported for the next dreamer cycle. Semantic upgrade notes are maintainer-authored prompts for dreamer to revisit older memory under the current schema and role model; install does not run dreamer or edit user memory to apply them.
+After install, open `~/.rightmemory/MEMORY.md` and add your own memory before the managed example block. Real memory can include project context, durable user context, and cross-session agent behavior guidance. Fresh installs baseline the current semantic upgrade notes because the seeded memory already matches the current schema. Re-run the installer after pulling updates; existing real memory is preserved, the managed example block refreshes when present, and pending semantic upgrade notes are reported for the next dreamer cycle. Semantic upgrade notes are maintainer-authored prompts for dreamer to revisit older memory under the current schema and role model; install does not run dreamer or edit user memory to apply them.
 
 ## Memory Model
 

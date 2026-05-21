@@ -146,11 +146,37 @@ def format_refresh_summary(context: SemanticUpgradeContext) -> str:
     return "\n".join(lines)
 
 
+def baseline_packaged_notes(memory_root: Path) -> SemanticUpgradeContext:
+    loaded = load_packaged_notes()
+    note_ids = [note.id for note in loaded.notes]
+    if note_ids:
+        mark_absorbed(memory_root, note_ids)
+    else:
+        _write_state_if_missing(memory_root)
+    return SemanticUpgradeContext(notes=loaded.notes, warnings=loaded.warnings)
+
+
+def format_baseline_summary(context: SemanticUpgradeContext) -> str:
+    lines: list[str] = []
+    for warning in context.warnings:
+        lines.append(f"  [warning] semantic upgrade note skipped: {warning}")
+    if context.notes:
+        lines.append(
+            f"  [keep]    semantic upgrade baseline recorded for {len(context.notes)} current note(s):"
+        )
+        lines.extend(f"            {note.id}" for note in context.notes)
+    else:
+        lines.append("  [keep]    semantic upgrade baseline has no current notes")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m rightmemory.semantic_upgrades")
     subparsers = parser.add_subparsers(dest="command", required=True)
     refresh = subparsers.add_parser("refresh", help="refresh semantic upgrade pending state")
     refresh.add_argument("--memory-root", required=True, help="RightMemory memory root")
+    baseline = subparsers.add_parser("baseline", help="mark current packaged semantic upgrades as absorbed")
+    baseline.add_argument("--memory-root", required=True, help="RightMemory memory root")
     args = parser.parse_args(argv)
 
     if args.command == "refresh":
@@ -160,6 +186,13 @@ def main(argv: list[str] | None = None) -> int:
         context = pending_context(memory_root)
         _write_state_if_missing(memory_root)
         print(format_refresh_summary(context))
+        return 0
+    if args.command == "baseline":
+        memory_root = Path(args.memory_root).expanduser().resolve()
+        _ensure_runtime_gitignore(memory_root / ".runtime")
+        memory_root.joinpath(".runtime").mkdir(parents=True, exist_ok=True)
+        context = baseline_packaged_notes(memory_root)
+        print(format_baseline_summary(context))
         return 0
     raise ValueError(f"unknown semantic upgrade command: {args.command}")
 

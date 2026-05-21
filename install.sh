@@ -128,6 +128,7 @@ RIGHTMEMORY_BIN="$RIGHTMEMORY_BIN_DIR/rightmemory"
 EXAMPLE_START_MARKER="rightmemory:example:start"
 EXAMPLE_END_MARKER="rightmemory:example:end"
 INSTALL_STAMP="$MEMORY_ROOT/.runtime/install.stamp"
+MEMORY_INSTALL_ACTION=""
 
 echo "Installing RightMemory"
 echo "  MODE         = $MODE"
@@ -269,6 +270,7 @@ install_or_refresh_memory() {
   if [ ! -f "$memory_file" ]; then
     cp "$REPO_ROOT/MEMORY.example.md" "$memory_file"
     echo "  [new]     $memory_file  (from MEMORY.example.md)"
+    MEMORY_INSTALL_ACTION="new"
     rm -f "$block_file"
     return
   fi
@@ -276,14 +278,17 @@ install_or_refresh_memory() {
   if grep -q "$EXAMPLE_START_MARKER" "$memory_file" && grep -q "$EXAMPLE_END_MARKER" "$memory_file"; then
     refresh_marked_example "$memory_file" "$block_file"
     echo "  [refresh] $memory_file  (managed example block)"
+    MEMORY_INSTALL_ACTION="refresh"
     rm -f "$block_file"
     return
   fi
 
   if migrate_known_example "$memory_file" "$block_file"; then
     echo "  [refresh] $memory_file  (migrated known example block)"
+    MEMORY_INSTALL_ACTION="migrate"
   else
     echo "  [keep]    $memory_file already exists; no managed example block found"
+    MEMORY_INSTALL_ACTION="keep"
   fi
   rm -f "$block_file"
 }
@@ -317,6 +322,10 @@ EOF
 
 refresh_semantic_upgrades() {
   "$RIGHTMEMORY_VENV/bin/python" -m rightmemory.semantic_upgrades refresh --memory-root "$MEMORY_ROOT"
+}
+
+baseline_semantic_upgrades() {
+  "$RIGHTMEMORY_VENV/bin/python" -m rightmemory.semantic_upgrades baseline --memory-root "$MEMORY_ROOT"
 }
 
 warn_if_rightmemory_not_on_path() {
@@ -375,7 +384,11 @@ EOF
 fi
 
 install_cli_runtime_layout
-refresh_semantic_upgrades
+if [ "$MEMORY_INSTALL_ACTION" = "new" ]; then
+  baseline_semantic_upgrades
+else
+  refresh_semantic_upgrades
+fi
 for skills_target in "${SKILLS_TARGETS[@]}"; do
   schema_dst="$skills_target/rightmemory-schema.md"
   cp "$REPO_ROOT/skills/rightmemory-schema.md" "$schema_dst"

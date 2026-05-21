@@ -22,16 +22,28 @@ class InstallScriptTests(unittest.TestCase):
             "  cat > \"$2/bin/python\" <<'PYEOF'\n"
             "#!/usr/bin/env sh\n"
             "if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"rightmemory.semantic_upgrades\" ]; then\n"
+            "  command=\"$3\"\n"
             "  memory_root=''\n"
             "  previous=''\n"
             "  for arg in \"$@\"; do\n"
             "    if [ \"$previous\" = \"--memory-root\" ]; then memory_root=\"$arg\"; fi\n"
             "    previous=\"$arg\"\n"
             "  done\n"
-            "  echo '  [notice]  1 semantic upgrade note(s) pending for the next dreamer cycle:'\n"
-            "  echo '            user-context-agent-behavior-split'\n"
             "  mkdir -p \"$memory_root/.runtime\"\n"
-            "  printf '{\"absorbed\": {}}\\n' > \"$memory_root/.runtime/semantic-upgrades.json\"\n"
+            "  state=\"$memory_root/.runtime/semantic-upgrades.json\"\n"
+            "  if [ \"$command\" = \"baseline\" ]; then\n"
+            "    echo '  [keep]    semantic upgrade baseline recorded for 2 current note(s):'\n"
+            "    echo '            user-context-agent-behavior-split'\n"
+            "    echo '            open-context-questions'\n"
+            "    printf '{\"absorbed\":{\"user-context-agent-behavior-split\":{},\"open-context-questions\":{}}}\\n' > \"$state\"\n"
+            "  elif grep -q 'user-context-agent-behavior-split' \"$state\" 2>/dev/null; then\n"
+            "    echo '  [keep]    no semantic upgrade notes pending'\n"
+            "  else\n"
+            "    echo '  [notice]  2 semantic upgrade note(s) pending for the next dreamer cycle:'\n"
+            "    echo '            user-context-agent-behavior-split'\n"
+            "    echo '            open-context-questions'\n"
+            "    printf '{\"absorbed\": {}}\\n' > \"$state\"\n"
+            "  fi\n"
             "fi\n"
             "exit 0\n"
             "PYEOF\n"
@@ -57,12 +69,15 @@ class InstallScriptTests(unittest.TestCase):
             self._install(memory_root, skills_target)
 
             memory = (memory_root / "MEMORY.md").read_text(encoding="utf-8")
+            state = (memory_root / ".runtime" / "semantic-upgrades.json").read_text(encoding="utf-8")
             install_stamp_exists = (memory_root / ".runtime" / "install.stamp").exists()
 
         self.assertIn(EXAMPLE_START, memory)
         self.assertIn(EXAMPLE_END, memory)
         self.assertIn("# Open Context Questions {#open-context-questions}", memory)
         self.assertIn("q-rightmemory-project-context", memory)
+        self.assertIn("user-context-agent-behavior-split", state)
+        self.assertIn("open-context-questions", state)
         self.assertTrue(install_stamp_exists)
 
     def test_cli_agent_installs_command_backed_orchestrator_without_role_skills(self):
@@ -150,16 +165,28 @@ class InstallScriptTests(unittest.TestCase):
                 "  cat > \"$2/bin/python\" <<'PYEOF'\n"
                 "#!/usr/bin/env sh\n"
                 "if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"rightmemory.semantic_upgrades\" ]; then\n"
+                "  command=\"$3\"\n"
                 "  memory_root=''\n"
                 "  previous=''\n"
                 "  for arg in \"$@\"; do\n"
                 "    if [ \"$previous\" = \"--memory-root\" ]; then memory_root=\"$arg\"; fi\n"
                 "    previous=\"$arg\"\n"
                 "  done\n"
-                "  echo '  [notice]  1 semantic upgrade note(s) pending for the next dreamer cycle:'\n"
-                "  echo '            user-context-agent-behavior-split'\n"
                 "  mkdir -p \"$memory_root/.runtime\"\n"
-                "  printf '{\"absorbed\": {}}\\n' > \"$memory_root/.runtime/semantic-upgrades.json\"\n"
+                "  state=\"$memory_root/.runtime/semantic-upgrades.json\"\n"
+                "  if [ \"$command\" = \"baseline\" ]; then\n"
+                "    echo '  [keep]    semantic upgrade baseline recorded for 2 current note(s):'\n"
+                "    echo '            user-context-agent-behavior-split'\n"
+                "    echo '            open-context-questions'\n"
+                "    printf '{\"absorbed\":{\"user-context-agent-behavior-split\":{},\"open-context-questions\":{}}}\\n' > \"$state\"\n"
+                "  elif grep -q 'user-context-agent-behavior-split' \"$state\" 2>/dev/null; then\n"
+                "    echo '  [keep]    no semantic upgrade notes pending'\n"
+                "  else\n"
+                "    echo '  [notice]  2 semantic upgrade note(s) pending for the next dreamer cycle:'\n"
+                "    echo '            user-context-agent-behavior-split'\n"
+                "    echo '            open-context-questions'\n"
+                "    printf '{\"absorbed\": {}}\\n' > \"$state\"\n"
+                "  fi\n"
                 "fi\n"
                 "exit 0\n"
                 "PYEOF\n"
@@ -196,18 +223,26 @@ class InstallScriptTests(unittest.TestCase):
             self.assertIn("MODE         = standalone", result.stdout)
             self.assertIn("Write role model config", result.stdout)
             self.assertIn("rightmemory is installed", result.stdout)
+            self.assertIn("semantic upgrade baseline recorded", result.stdout)
+            self.assertNotIn("pending for the next dreamer cycle", result.stdout)
 
-    def test_install_reports_pending_semantic_upgrade_notes(self):
+    def test_install_reports_pending_semantic_upgrade_notes_for_existing_memory(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
             skills_target = root / "skills"
+            memory_root.mkdir()
+            (memory_root / "MEMORY.md").write_text(
+                "# Existing Memory {#existing-memory}\n\n- `existing-node` keep me. → []\n",
+                encoding="utf-8",
+            )
 
             result = self._install(memory_root, skills_target)
             state_exists = (memory_root / ".runtime" / "semantic-upgrades.json").exists()
 
         self.assertIn("semantic upgrade note(s) pending", result.stdout)
         self.assertIn("user-context-agent-behavior-split", result.stdout)
+        self.assertIn("open-context-questions", result.stdout)
         self.assertTrue(state_exists)
 
     def test_install_warns_when_stale_rightmemory_precedes_installed_wrapper(self):

@@ -12,6 +12,7 @@ from rightmemory.runtime import RightMemoryRuntime
 from rightmemory.semantic_upgrades import (
     SemanticUpgradeContext,
     SemanticUpgradeNote,
+    baseline_packaged_notes,
     format_refresh_summary,
     load_notes_from_directory,
     load_packaged_notes,
@@ -105,6 +106,18 @@ class SemanticUpgradeStateTests(unittest.TestCase):
             context = pending_context(root)
 
         self.assertNotIn("user-context-agent-behavior-split", context.ids)
+        self.assertIn("open-context-questions", context.ids)
+
+    def test_baseline_packaged_notes_marks_current_notes_absorbed(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+
+            baseline = baseline_packaged_notes(root)
+            context = pending_context(root)
+
+        self.assertIn("user-context-agent-behavior-split", baseline.ids)
+        self.assertIn("open-context-questions", baseline.ids)
+        self.assertEqual([], context.ids)
 
     def test_corrupt_state_warns_and_treats_notes_as_pending(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -125,6 +138,17 @@ class SemanticUpgradeStateTests(unittest.TestCase):
             exit_code = main(["refresh", "--memory-root", str(root)])
 
             self.assertEqual(exit_code, 0)
+            self.assertTrue((root / ".runtime" / "semantic-upgrades.json").exists())
+
+    def test_baseline_cli_prints_current_baseline_and_clears_pending_notes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+
+            exit_code = main(["baseline", "--memory-root", str(root)])
+            context = pending_context(root)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual([], context.ids)
             self.assertTrue((root / ".runtime" / "semantic-upgrades.json").exists())
 
     def test_format_refresh_summary_lists_pending_ids(self):

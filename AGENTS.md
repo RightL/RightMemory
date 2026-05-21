@@ -31,7 +31,7 @@
 - The installer creates a memory-root `.gitignore` allowlist so git status normally shows only `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`.
 - Runtime/session/review state belongs under `.runtime/` and should not be committed.
 - Scheduled watcher locks, install refresh stamps, and dreamer watch state also belong under `.runtime/`.
-- Semantic upgrade absorption state belongs under `.runtime/semantic-upgrades.json`. Install may report pending semantic upgrade notes, but dreamer is responsible for applying them during consolidation.
+- Semantic upgrade absorption state belongs under `.runtime/semantic-upgrades.json`. Fresh installs baseline current semantic upgrade notes because the seeded memory already matches the current schema. Existing memory roots may report pending semantic upgrade notes; dreamer is responsible for applying them during consolidation.
 - Reviewer scans process one time-adjacent batch of eligible provider sessions per bounded scan. `scan --once` attempts one batch and exits; `watch` repeats batch scans until no eligible work remains. Review state remains session-level: once a provider session has been reviewed, later changes or resumed turns with the same source/session id are skipped unless the review state is cleared.
 - The default review window is 3 days via `[review].since_days`; keep that default unless the user explicitly changes the backlog policy.
 
