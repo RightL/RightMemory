@@ -1,8 +1,65 @@
 # RightMemory
 
-A tree + graph hybrid memory system for AI coding agents.
+**Tree + graph memory for AI coding agents.**
 
-RightMemory keeps durable project and workflow context in Markdown files structured for agent retrieval. The tree gives agents local reading context; the graph gives agents cross-links between related headings and facts. Humans can still inspect and edit the files directly, but the format is primarily an agent memory substrate, not a notes app.
+RightMemory gives Codex, Claude Code, and other coding agents a local Markdown memory they can retrieve, update, review, and consolidate. A heading tree gives agents local context; graph edges connect related facts across sessions and files.
+
+![RightMemory terminal demo](docs/assets/rightmemory-demo.svg)
+
+## Why RightMemory
+
+Modern coding agents are strong inside a single conversation, then strangely forgetful in the next one. RightMemory treats memory as owned project state:
+
+- **Readable files:** memory lives in `MEMORY.md`, optional `MEMORY_<slug>.md` detail files, and `dream_logs/`.
+- **Agent-shaped structure:** headings provide local reading context, while node ids and typed edges connect related facts across the tree.
+- **Clear ownership:** retrieval, updates, transcript review, sync repair, and consolidation run through role-specific commands instead of letting the main agent half-edit memory while doing unrelated work.
+- **Local-first operation:** memory is inspectable, diffable, syncable with Git, and usable with Codex CLI, Claude Code CLI, or RightMemory's standalone runtime.
+
+## Who It Is For
+
+RightMemory is aimed at developers who spend serious time with coding agents and want durable context that stays understandable outside a vendor UI. It is especially useful when your agent needs to remember project decisions, user preferences, repeated workflow constraints, cross-session behavior guidance, or review notes from prior Codex and Claude sessions.
+
+## Quick Start
+
+```bash
+git clone https://github.com/RightL/RightMemory.git
+cd RightMemory
+./install.sh
+```
+
+The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs the command-backed orchestrator skill into both `~/.codex/skills` and `~/.claude/skills`.
+
+If you already use Codex CLI or Claude Code CLI and want RightMemory roles to run through those tools:
+
+```bash
+./install.sh --mode cli-agent ~/.rightmemory ~/.codex/skills
+rightmemory doctor agent-cli
+```
+
+After install, open `~/.rightmemory/MEMORY.md` and add real memory before the managed example block. Good first entries are project context, durable user context, and cross-session agent behavior guidance.
+
+## Demo Flow
+
+A typical RightMemory turn looks like this:
+
+```text
+You ask a coding agent:
+  "Continue the sync work from last time."
+
+memory-orchestrator calls:
+  rightmemory retrieve --session <id> "project sync decisions and open issues"
+
+RightMemory returns:
+  relevant Markdown headings, node ids, and graph-linked facts
+
+After the task:
+  rightmemory update submit --session <id> "what changed and what should persist"
+
+Later:
+  rightmemory dreamer consolidates stale, duplicated, or overgrown memory
+```
+
+For a short recording script, see [docs/DEMO.md](docs/DEMO.md). For launch copy, GitHub topics, and community post drafts, see [docs/PROMOTION.md](docs/PROMOTION.md).
 
 ## What It Gives You
 
@@ -14,27 +71,32 @@ RightMemory keeps durable project and workflow context in Markdown files structu
 - Two executor modes behind the same `rightmemory` CLI: local standalone runtime or delegated Codex/Claude CLI role execution.
 - Optional automatic transcript review for idle Codex and Claude sessions.
 
-## Quick Start
+## Install Options And Updates
 
-```bash
-git clone https://github.com/RightL/RightMemory.git
-cd RightMemory
-./install.sh
-```
-
-The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs the command-backed orchestrator skill into both `~/.codex/skills` and `~/.claude/skills`. For a custom memory root or skill target:
+For a custom memory root or skill target:
 
 ```bash
 ./install.sh ~/.rightmemory ~/.codex/skills
 ```
 
-For CLI-agent mode, where RightMemory delegates role execution to Codex CLI or Claude Code CLI:
+CLI-agent mode delegates role execution to Codex CLI or Claude Code CLI while preserving the same `rightmemory` command surface:
 
 ```bash
 ./install.sh --mode cli-agent ~/.rightmemory ~/.codex/skills
 ```
 
-After install, open `~/.rightmemory/MEMORY.md` and add your own memory before the managed example block. Real memory can include project context, durable user context, and cross-session agent behavior guidance. Fresh installs baseline the current semantic upgrade notes because the seeded memory already matches the current schema. Re-run the installer after pulling updates; existing real memory is preserved, the managed example block refreshes when present, and pending semantic upgrade notes are reported for the next dreamer cycle. Semantic upgrade notes are maintainer-authored prompts for dreamer to revisit older memory under the current schema and role model; install does not run dreamer or edit user memory to apply them.
+Fresh installs baseline the current semantic upgrade notes because the seeded memory already matches the current schema. Re-run the installer after pulling updates; existing real memory is preserved, the managed example block refreshes when present, and pending semantic upgrade notes are reported for the next dreamer cycle. Semantic upgrade notes are maintainer-authored prompts for dreamer to revisit older memory under the current schema and role model; install does not run dreamer or edit user memory to apply them.
+
+## Why Not Raw Notes Or A Vector DB?
+
+RightMemory is not trying to replace notes, search, or embeddings. It focuses on the part those systems often leave underspecified: who owns memory edits, how agents retrieve enough surrounding context, and how durable facts stay reviewable over time.
+
+| Approach | Works Well For | RightMemory Adds |
+| --- | --- | --- |
+| Raw Markdown notes | Human-readable context | Agent-addressable nodes, graph edges, and role-owned updates |
+| Vector retrieval | Fuzzy recall across large text | Inspectable structure, deterministic files, and explicit consolidation |
+| Agent chat history | Recent session continuity | Durable project memory that survives new sessions and tool changes |
+| MCP memory adapters | Tool integration | A file schema and command runtime that can be wrapped by adapters later |
 
 ## Memory Model
 
@@ -425,6 +487,10 @@ Repository:
 ```text
 RightMemory/
 ├── README.md
+├── docs/
+│   ├── DEMO.md
+│   ├── PROMOTION.md
+│   └── assets/
 ├── install.sh
 ├── MEMORY.example.md
 ├── rightmemory/

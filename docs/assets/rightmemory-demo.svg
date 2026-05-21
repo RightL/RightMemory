@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">RightMemory terminal demo</title>
+  <desc id="desc">A terminal-style diagram showing an agent retrieving, updating, and consolidating tree plus graph Markdown memory through RightMemory.</desc>
+  <rect width="1200" height="620" rx="28" fill="#10151f"/>
+  <rect x="36" y="36" width="1128" height="548" rx="18" fill="#17202c" stroke="#2d3a4e" stroke-width="2"/>
+  <circle cx="68" cy="68" r="8" fill="#ff6b6b"/>
+  <circle cx="96" cy="68" r="8" fill="#ffd166"/>
+  <circle cx="124" cy="68" r="8" fill="#50d890"/>
+  <text x="156" y="74" fill="#97a6ba" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">RightMemory demo</text>
+
+  <text x="66" y="130" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24">$ codex</text>
+  <text x="66" y="170" fill="#9be7c3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24">You:</text>
+  <text x="130" y="170" fill="#e5edf7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24">Continue the sync design from last time.</text>
+
+  <rect x="66" y="210" width="1068" height="86" rx="12" fill="#0f1722" stroke="#2f4058" stroke-width="1"/>
+  <text x="90" y="244" fill="#8bd3ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22">memory-orchestrator</text>
+  <text x="90" y="276" fill="#d7e1ee" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="21">rightmemory retrieve --session codex-42 "sync decisions and open issues"</text>
+
+  <rect x="66" y="326" width="500" height="180" rx="12" fill="#121b26" stroke="#2f4058" stroke-width="1"/>
+  <text x="90" y="362" fill="#ffd166" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22">MEMORY.md</text>
+  <text x="90" y="398" fill="#e5edf7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19"># Project Context {#project}</text>
+  <text x="90" y="430" fill="#e5edf7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19">- `sync-preflight` merges clean upstream</text>
+  <text x="90" y="462" fill="#e5edf7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19">- `sync-reconciler` repairs conflicts</text>
+
+  <rect x="626" y="326" width="508" height="180" rx="12" fill="#121b26" stroke="#2f4058" stroke-width="1"/>
+  <text x="650" y="362" fill="#ffd166" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22">Agent receives</text>
+  <text x="650" y="398" fill="#e5edf7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19">local tree context</text>
+  <text x="650" y="430" fill="#e5edf7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19">graph-linked facts</text>
+  <text x="650" y="462" fill="#e5edf7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19">role-owned update path</text>
+
+  <path d="M575 416 C595 416 602 416 620 416" stroke="#8bd3ff" stroke-width="3" fill="none"/>
+  <path d="M620 416 L606 407 L606 425 Z" fill="#8bd3ff"/>
+
+  <text x="66" y="548" fill="#9be7c3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22">after work:</text>
+  <text x="210" y="548" fill="#d7e1ee" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22">rightmemory update submit ...  ->  dreamer consolidates later</text>
+</svg>
