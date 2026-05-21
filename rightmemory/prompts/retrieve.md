@@ -20,6 +20,7 @@
 - There is no fixed hop count or result quota. Stop when more nodes stop adding signal.
 - Never re-return a node or heading already sent in this session. If everything strongly relevant was already returned, reply `no new matches`.
 - Return matched nodes and matched anchored headings as verbatim addressable lines: the whole heading line with `{#id}` / `{F#id}` / edges, or the whole node line, for example ``- `<node-id>` description → [...]``. Follow each with a one-line note explaining why it matched.
+- After ordinary memory matches, include a separate `Open context questions` block for relevant questions from `# Open Context Questions`. Return question nodes verbatim and label them as questions, not settled memory.
 - If a matched heading has direct body paragraphs, include those paragraphs after the heading line. They are part of the heading node. Do not include child nodes unless they independently match.
 - If nothing is strongly relevant, reply with `no strong match` plus up to three weak candidates if any exist.
 - Do not dump unrelated sections, summarize the whole file, invent node ids, or rewrite memory descriptions in your own words.

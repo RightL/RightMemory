@@ -76,4 +76,12 @@ Store cross-project behavior memory here when it should change how future agents
 
 ---
 
+# Open Context Questions {#open-context-questions}
+
+This section stores loose ends in memory as short questions for future agents. These questions are not declarative memory facts; they point to related memory with `todo:` and should be removed or revised after the answer is saved as ordinary memory.
+
+- `q-rightmemory-project-context` Which local project path is the active RightMemory checkout, and which runtime environment should agents use when installing, testing, or debugging it? → [todo:pref-env-check]
+
+---
+
 <!-- rightmemory:example:end -->

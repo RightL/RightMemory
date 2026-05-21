@@ -61,6 +61,8 @@ class InstallScriptTests(unittest.TestCase):
 
         self.assertIn(EXAMPLE_START, memory)
         self.assertIn(EXAMPLE_END, memory)
+        self.assertIn("# Open Context Questions {#open-context-questions}", memory)
+        self.assertIn("q-rightmemory-project-context", memory)
         self.assertTrue(install_stamp_exists)
 
     def test_cli_agent_installs_command_backed_orchestrator_without_role_skills(self):
@@ -80,6 +82,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertNotIn("Write role model config", result.stdout)
         self.assertIn("mode=cli-agent", install_stamp)
         self.assertIn("installed `rightmemory` command", orchestrator)
+        self.assertIn("Open context questions", orchestrator)
         self.assertNotIn("standalone mode", orchestrator)
         self.assertNotIn("standalone runtime", orchestrator)
         self.assertFalse(curator_exists)

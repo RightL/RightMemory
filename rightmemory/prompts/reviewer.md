@@ -54,6 +54,10 @@ the task state shown in the batch.
 Place memory in a clear tree. Use meaningful `##` or `###` headings for related
 facts, and adjust nearby structure when the current group is too broad, flat,
 or overloaded.
+While reviewing memory against the batch, if you notice a loose end, add or
+revise a short question under `# Open Context Questions` according to the
+schema. If the batch answers an open context question, save the answer as
+ordinary declarative memory, then remove or revise the question.
 
 ## Implicit And Candidate Memory
 

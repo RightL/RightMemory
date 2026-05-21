@@ -18,6 +18,8 @@
 - Choose the edit shape that leaves memory coherent: merge into an existing entry, replace stale wording, narrow over-broad guidance, delete obsolete memory, or add a compact new fact when no existing entry should change.
 - If a conflict cannot be resolved safely from the candidate and existing memory, leave settled memory unchanged, skip the unsafe part, and mention the unresolved conflict in the final reply.
 - Place memory in a clear tree. Use meaningful `##` or `###` headings for related facts, and adjust nearby structure when the current group is too broad, flat, or overloaded.
+- While editing memory, if you notice a loose end, add or revise a short question under `# Open Context Questions` according to the schema.
+- If the update answers an open context question, save the answer as ordinary declarative memory, then remove or revise the question.
 - When a batch contains related candidates, reconcile the batch as a whole instead of appending one node per candidate. Candidate ids are operational labels; do not preserve them in memory unless they are meaningful to the user.
 
 ## Edit Planning

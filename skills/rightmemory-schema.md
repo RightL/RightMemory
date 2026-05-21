@@ -32,6 +32,8 @@ Memory domains are ordinary `#` headings. Use `# User Context` for durable conte
 
 Use `# Cross-Session Agent Behavior` for guidance about how agents should work with the user, such as communication style, workflow expectations, tool or process preferences, and repeated agent mistakes that future agents can avoid.
 
+Use global `# Open Context Questions` for loose ends in memory. These are short questions for future agents, not declarative memory facts. Use them when a memory area feels incomplete, unclear, or hard to apply because something still needs to be pinned down. Question nodes use normal node syntax and link to related memory with `todo:`. When the answer becomes clear, write the answer into the appropriate declarative memory section, then remove or revise the question.
+
 When a fact could fit either domain, place it by what the memory should help with. Facts about the user's context or direction belong under user context; instructions about agent behavior belong under agent behavior.
 
 ## Edge Types

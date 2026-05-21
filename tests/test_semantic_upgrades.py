@@ -85,10 +85,14 @@ class SemanticUpgradeParserTests(unittest.TestCase):
         self.assertEqual(len(result.warnings), 1)
         self.assertIn("duplicate semantic upgrade id", result.warnings[0])
 
-    def test_load_packaged_notes_includes_user_context_split_note(self):
+    def test_load_packaged_notes_includes_current_notes(self):
         result = load_packaged_notes()
 
-        self.assertIn("user-context-agent-behavior-split", [note.id for note in result.notes])
+        notes_by_id = {note.id: note for note in result.notes}
+        self.assertIn("user-context-agent-behavior-split", notes_by_id)
+        self.assertIn("open-context-questions", notes_by_id)
+        self.assertIn("# Open Context Questions {#open-context-questions}", notes_by_id["open-context-questions"].body)
+        self.assertIn("not declarative memory facts", notes_by_id["open-context-questions"].body)
         self.assertEqual([], result.warnings)
 
 
@@ -198,8 +202,9 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
             state = json.loads((root / ".runtime" / "semantic-upgrades.json").read_text(encoding="utf-8"))
 
         self.assertEqual(result, "dreamed")
-        self.assertEqual(calls, [("dreamer-1", "run", ["user-context-agent-behavior-split"])])
+        self.assertEqual(calls, [("dreamer-1", "run", ["user-context-agent-behavior-split", "open-context-questions"])])
         self.assertIn("user-context-agent-behavior-split", state["absorbed"])
+        self.assertIn("open-context-questions", state["absorbed"])
 
     def test_dreamer_failure_leaves_semantic_upgrades_pending(self):
         class FailingDreamerExecutor:

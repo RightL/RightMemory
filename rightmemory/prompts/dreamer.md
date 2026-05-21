@@ -14,6 +14,7 @@
 - Do not add reverse edges mechanically. Choose reciprocal edges only when they improve future retrieval or understanding without making the relationship misleading.
 - Deep restructures should improve the memory tree or graph even when they require broad edits. Keep each restructuring coherent, explain the rationale in the dream report, and surface uncertain cases instead of guessing.
 - During consolidation, judge each item by durable value: whether it helps a future agent act, decide, retrieve context, or avoid repeating work. Compress or remove memory that mainly records transient progress, overly granular trace detail, stale state, or low-value repetition.
+- Keep `# Open Context Questions` compact and current. Merge duplicate questions, remove stale questions, revise questions whose linked memory changed, and add a short question when consolidation exposes a loose end in memory.
 - Preserve hard-to-reproduce reasoning, conclusions, failed investigations, and decisions when recreating them later would take meaningful effort. If the surrounding record is noisy, keep the durable conclusion and simplify the trace around it.
 - When consolidating, use heading bodies for text that describes an addressable heading itself. Keep child nodes for facts that should stand independently.
 - Aging uses git history, not inline timestamps. Use judgment on what "long-untouched" means given the node's nature. Move stale nodes into a `## Graveyard` heading inside the same `#` memory domain; nodes that sit in a graveyard across multiple cycles can be deleted.
