@@ -32,7 +32,7 @@ Schema rules live in `skills/rightmemory-schema.md` instead of at the top of eve
 
 ### Automatic write isolation
 
-Automatic `update`, `reviewer`, and `dreamer` turns run in temporary Git worktrees when they operate on the main state root. The role still behaves like an ordinary memory writer: it reads, edits, validates, and commits allowed memory files. Runtime validates those temporary commits, keeps `MEMORY.md` as a regular file, lands successful commits in the main memory repo, and promotes the temporary session/provider state only after the isolated turn succeeds.
+Automatic `update`, `reviewer`, and `dreamer` turns run in temporary Git worktrees when they operate on the main state root. The role still behaves like an ordinary memory writer: it reads, edits, validates, and commits allowed memory files. Runtime validates those temporary commits, keeps `MEMORY.md` as a regular file, lands successful commits in the main memory repo, and promotes temporary session/provider state after the isolated turn succeeds. CLI-agent isolation uses a fresh provider session for speculative work so failed attempts do not advance the prior durable provider session.
 
 This keeps the user-facing memory repo focused on completed memory commits instead of partial agent editing state. Failed or interrupted temporary work is discarded because the durable retry source is the original update batch, transcript batch, or dreamer trigger balance. Dirty main memory files block automatic semantic writes independently of remote sync so local edits remain visible instead of being blended into a model-created change.
 

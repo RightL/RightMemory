@@ -41,7 +41,6 @@ DREAMER_WATCH_MESSAGE = "Run a scheduled dream cycle."
 _DREAMER_WATCH_SKIPPED = "skipped"
 _DREAMER_WATCH_SUCCEEDED = "succeeded"
 _DREAMER_WATCH_FAILED = "failed"
-_DREAMER_WATCH_NOT_CONSUMED = "not-consumed"
 SYNC_WATCH_SESSION_ID = "sync-watch"
 
 
@@ -449,13 +448,7 @@ def _dreamer_watch_once(watch_config: Any, session_id: str, run_cycle: Callable[
         return _DREAMER_WATCH_FAILED
 
     print(output, flush=True)
-    if not store.consume_if_available(watch_config.trigger_points):
-        print(
-            "Warning: dreamer cycle completed but trigger points were not consumed; threshold no longer available",
-            file=sys.stderr,
-            flush=True,
-        )
-        return _DREAMER_WATCH_NOT_CONSUMED
+    store.consume_if_available(watch_config.trigger_points)
     return _DREAMER_WATCH_SUCCEEDED
 
 
@@ -483,7 +476,7 @@ def _dreamer_watch(interval: int | None, session_id: str) -> int:
 
                 status = _dreamer_watch_once(watch_config, session_id, run_cycle)
                 _reexec_if_install_changed(refresh, stop)
-                if status in {_DREAMER_WATCH_SKIPPED, _DREAMER_WATCH_NOT_CONSUMED}:
+                if status == _DREAMER_WATCH_SKIPPED:
                     if not _sleep_with_refresh_check(watch_config.check_interval_seconds, refresh, stop):
                         break
                 elif status == _DREAMER_WATCH_FAILED:

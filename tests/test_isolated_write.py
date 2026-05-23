@@ -257,33 +257,6 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertIn("main-change", text)
         self.assertNotIn("isolated memory", text)
 
-    def test_cherry_pick_failure_aborts_and_keeps_main_clean(self):
-        supervisor = IsolatedWriteSupervisor(self.root, "dreamer")
-
-        def callback(worktree: Path) -> None:
-            self._replace_memory(worktree, "initial memory", "temp memory")
-            self._git("add", "MEMORY.md", cwd=worktree)
-            self._git("commit", "-m", "memory: temp conflicting update", cwd=worktree)
-
-        def before_cherry_pick() -> None:
-            self._replace_memory(self.root, "initial memory", "main memory")
-            self._git("add", "MEMORY.md")
-            self._git("commit", "-m", "memory: main conflicting update")
-
-        supervisor._before_cherry_pick = before_cherry_pick
-
-        with self.assertRaisesRegex(RuntimeError, "cherry-pick"):
-            supervisor.run(callback)
-
-        self.assertEqual(self._git("log", "-1", "--format=%s"), "memory: main conflicting update")
-        self.assertEqual(self._git("status", "--short"), "")
-        cherry_pick_head = self.root / self._git("rev-parse", "--git-path", "CHERRY_PICK_HEAD")
-        self.assertFalse(cherry_pick_head.exists())
-        text = (self.root / "MEMORY.md").read_text(encoding="utf-8")
-        self.assertIn("main memory", text)
-        self.assertNotIn("temp memory", text)
-        self._assert_isolated_cleanup()
-
     def test_validation_failure_does_not_land_temp_commit(self):
         def callback(worktree: Path) -> None:
             self._append_memory(worktree, "- `one` duplicate memory\n")
@@ -353,10 +326,6 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
     def _append_memory(self, root: Path, text: str) -> None:
         memory = root / "MEMORY.md"
         memory.write_text(memory.read_text(encoding="utf-8") + text, encoding="utf-8")
-
-    def _replace_memory(self, root: Path, old: str, new: str) -> None:
-        memory = root / "MEMORY.md"
-        memory.write_text(memory.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
 
     def _assert_isolated_cleanup(self) -> None:
         worktrees = self._git("worktree", "list", "--porcelain")

@@ -4,6 +4,7 @@ import unittest
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
+from uuid import UUID
 
 from rightmemory.doctor import DoctorCheck, format_doctor_report, run_agent_cli_doctor
 from rightmemory.agent_cli import (
@@ -454,6 +455,39 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertEqual(calls[0][calls[0].index("--session-id") + 1], expected_session_id)
         self.assertIn("--resume", calls[1])
         self.assertEqual(calls[1][calls[1].index("--resume") + 1], expected_session_id)
+
+    def test_fresh_provider_session_uses_new_claude_uuid(self):
+        calls = []
+        stable_session_id = _stable_claude_session_id("update", "agent-1")
+        fresh_session_id = "123e4567-e89b-12d3-a456-426614174999"
+
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+            calls.append(command)
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=f'{{"type":"result","session_id":"{fresh_session_id}","result":"done"}}',
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            executor = CliAgentExecutor(
+                Path(tempdir),
+                "update",
+                AgentCliConfig(provider="claude"),
+                fresh_provider_session=True,
+            )
+
+            with (
+                patch("rightmemory.agent_cli.uuid4", return_value=UUID(fresh_session_id)),
+                patch("rightmemory.agent_cli.subprocess.run", fake_run),
+            ):
+                result = executor.run_session_turn("agent-1", "remember")
+
+        self.assertEqual(result, "done")
+        self.assertIn("--session-id", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--session-id") + 1], fresh_session_id)
+        self.assertNotEqual(fresh_session_id, stable_session_id)
 
     def test_cli_failure_includes_stdout_and_stderr(self):
         def fake_run(command, cwd=None, capture_output=None, text=None, check=None):

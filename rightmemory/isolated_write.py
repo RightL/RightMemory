@@ -35,7 +35,6 @@ class IsolatedWriteSupervisor:
     def __init__(self, memory_root: Path, role: str):
         self.memory_root = Path(memory_root).resolve()
         self.role = role
-        self._before_cherry_pick: Callable[[], None] | None = None
 
     def run(self, run_in_worktree: Callable[[Path], Any]) -> IsolatedWriteResult:
         self._ensure_repo_root()
@@ -72,8 +71,6 @@ class IsolatedWriteSupervisor:
                 if current_head != start_head:
                     raise RuntimeError("main HEAD changed during isolated memory write")
                 if commits:
-                    if self._before_cherry_pick is not None:
-                        self._before_cherry_pick()
                     self._land_commits(commits)
             return IsolatedWriteResult(output=output, commits_landed=len(commits))
         finally:

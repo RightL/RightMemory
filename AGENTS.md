@@ -12,7 +12,6 @@
 - For syntax-only checks, use `conda run -n rightmemory python -m compileall -q rightmemory tests`.
 - Use `./install.sh [--mode cli-agent|standalone] <memory-root> <skills-target>` when verifying install behavior.
 - `uv` is available through the existing conda environment: `conda run -n rightmemory uv --version`. Use `conda run -n rightmemory ./install.sh ...` when the installer needs `uv`.
-- The installer preflights `git`, `uv`, and Python >=3.11 provisioning through `uv` before creating or changing install files.
 - Useful review commands are `rightmemory review scan --once`, `rightmemory review watch`, and `rightmemory review normalize --source <codex|claude> --path <file>`.
 - Use `rightmemory watch start|status|stop|restart` to manage background review and dreamer watchers. Use `rightmemory dreamer watch` directly when debugging the lower-level trigger loop.
 - Use `rightmemory doctor agent-cli` after configuring cli-agent mode to check provider commands, role config, and basic read/write probes.
@@ -36,7 +35,7 @@
 - Reviewer scans process one time-adjacent batch of eligible provider sessions per bounded scan. `scan --once` attempts one batch and exits; `watch` repeats batch scans until no eligible work remains. Review state remains session-level: once a provider session has been reviewed, later changes or resumed turns with the same source/session id are skipped unless the review state is cleared.
 - The default review window is 3 days via `[review].since_days`; keep that default unless the user explicitly changes the backlog policy.
 - Dreamer watch reads `.runtime/dreamer/trigger-state.json` and runs when accumulated points reach `[dreamer.watch].trigger_points`. Defaults are trigger `50`, update candidate `1.0`, reviewed provider session `1.5`, and check interval `3000` seconds. `rightmemory dreamer watch --interval <seconds>` changes the trigger-check cadence for that process.
-- Automatic `update`, `reviewer`, and `dreamer` session turns that operate on the main state root run in isolated `.runtime/worktrees/` checkouts on `rightmemory-isolated-<role>-<uuid>` branches. The role commits normally; runtime validates and lands successful memory commits back to the main memory repo, then promotes temporary session/provider state.
+- Automatic `update`, `reviewer`, and `dreamer` session turns that operate on the main state root run in isolated `.runtime/worktrees/` checkouts on `rightmemory-isolated-<role>-<uuid>` branches. The role commits normally; runtime validates and lands successful memory commits back to the main memory repo, then promotes temporary session/provider state. CLI-agent isolated turns use a fresh provider session for speculative work and promote the new provider record after success.
 - Dirty main memory files block automatic semantic writes. Temporary commits may touch `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`, and each temporary commit must keep `MEMORY.md` as a regular file. Failed isolated work is discarded and retried from the original source state.
 - Stale isolated cleanup is role-scoped for review/dreamer watcher startup and skips sync. Cleanup removes matching temporary branches and worktrees, not dirty files in the main memory repo.
 

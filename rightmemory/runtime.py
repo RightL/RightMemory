@@ -163,20 +163,30 @@ class RightMemoryRuntime:
 
     def _run_session_turn_isolated(self, session_id: str, message: str):
         supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
-        state = _IsolatedStateOverlay(self.config.state_root, self.config.role, session_id)
+        state = _IsolatedStateOverlay(
+            self.config.state_root,
+            self.config.role,
+            session_id,
+            seed_provider_session=self.config.runtime_mode != "cli-agent",
+        )
         with self.sessions.locked(session_id):
             with state as state_root:
-                result = supervisor.run(
-                    lambda worktree: self._run_session_turn_in_worktree(worktree, state_root, session_id, message)
-                )
-                state.promote()
-                return result.output
+                try:
+                    result = supervisor.run(
+                        lambda worktree: self._run_session_turn_in_worktree(worktree, state_root, session_id, message)
+                    )
+                    state.promote()
+                    return result.output
+                except Exception:
+                    state.archive_failed_provider_session()
+                    raise
 
     def _run_session_turn_in_worktree(self, worktree: Path, state_root: Path, session_id: str, message: str):
         nested_config = replace(
             self.config,
             memory_root=worktree,
             state_root=state_root,
+            fresh_provider_session=self.config.runtime_mode == "cli-agent",
             sync=replace(self.config.sync, memory_root=worktree, enabled=False),
         )
         nested = RightMemoryRuntime(nested_config)
@@ -333,7 +343,10 @@ class RightMemoryRuntime:
     def _build_cli_agent(self) -> CliAgentExecutor:
         if self.config.agent_cli is None:
             raise RuntimeError("cli-agent runtime requires agent_cli config")
-        kwargs: dict[str, Any] = {"state_root": self.config.state_root}
+        kwargs: dict[str, Any] = {
+            "state_root": self.config.state_root,
+            "fresh_provider_session": self.config.fresh_provider_session,
+        }
         if self.semantic_upgrades is not None:
             kwargs["semantic_upgrades"] = self.semantic_upgrades
         return CliAgentExecutor(
@@ -473,10 +486,11 @@ class RightMemoryRuntime:
 
 
 class _IsolatedStateOverlay:
-    def __init__(self, state_root: Path, role: str, session_id: str):
+    def __init__(self, state_root: Path, role: str, session_id: str, *, seed_provider_session: bool = True):
         self.state_root = state_root
         self.role = role
         self.session_id = session_id
+        self.seed_provider_session = seed_provider_session
         self.overlay_root = state_root / ".runtime" / "isolated-state" / f"{role}-{uuid.uuid4().hex}"
 
     def __enter__(self) -> Path:
@@ -492,13 +506,33 @@ class _IsolatedStateOverlay:
         for relative_path in self._promoted_paths():
             _copy_state_file(self.overlay_root / relative_path, self.state_root / relative_path)
 
+    def archive_failed_provider_session(self) -> None:
+        if self.seed_provider_session:
+            return
+        source = ProviderSessionStore(self.overlay_root, self.role).path(self.session_id)
+        if not source.exists():
+            return
+        data = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(f"provider session record must be a JSON object: {source}")
+        archive_session_id = f"failed-isolated-{self.role}-{uuid.uuid4().hex}"
+        data["rightmemory_session_id"] = archive_session_id
+        destination = ProviderSessionStore(self.state_root, self.role).path(archive_session_id)
+        _write_state_json_file(data, destination)
+
     def _seed(self) -> None:
         for relative_path in self._seeded_paths():
             _copy_state_file(self.state_root / relative_path, self.overlay_root / relative_path)
         _ensure_runtime_gitignore(self.overlay_root / ".runtime")
 
     def _seeded_paths(self) -> list[Path]:
-        paths = self._promoted_paths()
+        paths = [
+            MessageSessionStore(self.state_root, self.role).paths(self.session_id).history.relative_to(self.state_root)
+        ]
+        if self.seed_provider_session:
+            paths.append(
+                ProviderSessionStore(self.state_root, self.role).path(self.session_id).relative_to(self.state_root)
+            )
         if self.role == "dreamer":
             paths.append(Path(".runtime") / "semantic-upgrades.json")
         return paths
@@ -519,6 +553,22 @@ def _copy_state_file(source: Path, destination: Path) -> None:
     tmp_path = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
     try:
         shutil.copy2(source, tmp_path)
+        os.replace(tmp_path, destination)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    _fsync_directory(destination.parent)
+
+
+def _write_state_json_file(data: dict[str, Any], destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    content = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp_path, destination)
     except OSError:
         tmp_path.unlink(missing_ok=True)

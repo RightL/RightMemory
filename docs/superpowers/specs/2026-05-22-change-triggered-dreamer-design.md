@@ -113,11 +113,13 @@ atomically and protect read-modify-write operations with a file lock so
 concurrent update, review, and dreamer watchers do not lose increments.
 
 Isolated execution also creates temporary runtime state under
-`.runtime/isolated-state/`. Session history and provider-session records are
-seeded there for the isolated turn and promoted back to the main state root only
-after successful landing or a valid no-op. Failed or interrupted isolated turns
-discard that temporary state, so main runtime state does not advance when memory
-work did not land.
+`.runtime/isolated-state/`. Standalone message history is seeded there for the
+isolated turn and promoted back to the main state root after successful landing
+or a valid no-op. CLI-agent isolated turns do not seed the prior provider-session
+record; they start speculative provider work in a fresh provider session and
+promote that record after success. Failed or interrupted isolated turns discard
+temporary state, so main runtime state does not advance when memory work did not
+land.
 
 ## Isolated Write Flow
 
@@ -162,9 +164,9 @@ even if some commits were created before the failure.
 
 Durable runtime state stays rooted at the main memory root. The temporary
 worktree is for memory files and semantic commits, while the temporary state
-root holds session/provider state that may be promoted after success. Async
-queues, review state, trigger state, watcher pid files, and logs remain under
-the main root `.runtime/`.
+root holds state that may be promoted after success. Async queues, review state,
+trigger state, watcher pid files, and logs remain under the main root
+`.runtime/`.
 
 ## Main Memory Dirty State
 

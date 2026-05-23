@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from .config import ROLES, AgentCliConfig
 from .prompt import build_cli_agent_instructions
@@ -33,6 +33,7 @@ class CliAgentExecutor:
         config: AgentCliConfig,
         semantic_upgrades: SemanticUpgradeContext | None = None,
         state_root: Path | None = None,
+        fresh_provider_session: bool = False,
     ):
         _validate_role(role)
         self.memory_root = memory_root
@@ -40,6 +41,7 @@ class CliAgentExecutor:
         self.role = role
         self.config = config
         self.semantic_upgrades = semantic_upgrades
+        self.fresh_provider_session = fresh_provider_session
         self.store = ProviderSessionStore(self.state_root, role)
 
     def run_turn(self, message: str) -> str:
@@ -88,7 +90,12 @@ class CliAgentExecutor:
             stdout = _run_cli(command, self.memory_root, "Codex")
             return parse_codex_output(stdout)
         if self.config.provider == "claude":
-            claude_session_id = provider_session_id or _stable_claude_session_id(self.role, rightmemory_session_id)
+            if provider_session_id is not None:
+                claude_session_id = provider_session_id
+            elif self.fresh_provider_session:
+                claude_session_id = str(uuid4())
+            else:
+                claude_session_id = _stable_claude_session_id(self.role, rightmemory_session_id)
             command = build_claude_command(self.role, self.config, prompt, claude_session_id, resume)
             stdout = _run_cli(command, self.memory_root, "Claude")
             return parse_claude_output(stdout)

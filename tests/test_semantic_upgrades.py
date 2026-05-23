@@ -205,6 +205,7 @@ class RuntimeStateRootTests(unittest.TestCase):
                 agent_cli=AgentCliConfig(provider="codex"),
                 memory_root=memory_root,
                 state_root=state_root,
+                fresh_provider_session=False,
             )
 
             with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
@@ -223,6 +224,7 @@ class RuntimeStateRootTests(unittest.TestCase):
             "retrieve",
             AgentCliConfig(provider="codex"),
             state_root=state_root,
+            fresh_provider_session=False,
         )
 
 
@@ -231,7 +233,15 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
         calls = []
 
         class FakeDreamerExecutor:
-            def __init__(self, memory_root, role, config, semantic_upgrades=None, state_root=None):
+            def __init__(
+                self,
+                memory_root,
+                role,
+                config,
+                semantic_upgrades=None,
+                state_root=None,
+                fresh_provider_session=False,
+            ):
                 self.semantic_upgrades = semantic_upgrades
 
             def run_session_turn(self, session_id: str, message: str) -> str:
@@ -269,7 +279,15 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
 
     def test_dreamer_success_marks_semantic_upgrades_absorbed_under_state_root(self):
         class FakeDreamerExecutor:
-            def __init__(self, memory_root, role, config, semantic_upgrades=None, state_root=None):
+            def __init__(
+                self,
+                memory_root,
+                role,
+                config,
+                semantic_upgrades=None,
+                state_root=None,
+                fresh_provider_session=False,
+            ):
                 self.semantic_upgrades = semantic_upgrades
 
             def run_session_turn(self, session_id: str, message: str) -> str:
@@ -307,7 +325,15 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
 
     def test_dreamer_failure_leaves_semantic_upgrades_pending(self):
         class FailingDreamerExecutor:
-            def __init__(self, memory_root, role, config, semantic_upgrades=None, state_root=None):
+            def __init__(
+                self,
+                memory_root,
+                role,
+                config,
+                semantic_upgrades=None,
+                state_root=None,
+                fresh_provider_session=False,
+            ):
                 self.semantic_upgrades = semantic_upgrades
 
             def run_session_turn(self, session_id: str, message: str) -> str:

@@ -75,6 +75,7 @@ class RuntimeConfig:
     max_tool_retries: int = DEFAULT_MAX_TOOL_RETRIES
     debug_trace: bool = False
     sync: SyncConfig = field(default_factory=SyncConfig)
+    fresh_provider_session: bool = False
 
     def __post_init__(self) -> None:
         if self.state_root is _STATE_ROOT_UNSET:

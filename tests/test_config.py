@@ -19,6 +19,7 @@ from rightmemory.config import (
 )
 from rightmemory.isolated_write import IsolatedWriteResult
 from rightmemory.prompt import build_cli_agent_instructions, build_instructions
+from rightmemory.provider_sessions import ProviderSessionStore
 from rightmemory.runtime import RightMemoryRuntime, build_model
 from rightmemory.semantic_upgrades import SemanticUpgradeContext, SemanticUpgradeNote
 from rightmemory.sync import SyncResult
@@ -552,6 +553,7 @@ class RuntimeTests(unittest.TestCase):
             "retrieve",
             AgentCliConfig(provider="codex"),
             state_root=Path(self.tempdir.name),
+            fresh_provider_session=False,
         )
         executor_class.return_value.run_session_turn.assert_called_once_with("agent-session", "remember one")
 
@@ -659,6 +661,7 @@ class RuntimeTests(unittest.TestCase):
         nested_config = nested_configs[0]
         self.assertEqual(nested_config.memory_root, worktree)
         self.assertEqual(nested_config.state_root, state_root)
+        self.assertFalse(nested_config.fresh_provider_session)
         self.assertFalse(nested_config.sync.enabled)
         self.assertEqual(nested_config.sync.memory_root, worktree)
         self.assertEqual(
@@ -710,6 +713,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result, "cli result")
         self.assertEqual(nested_configs[0].memory_root, worktree)
         self.assertEqual(nested_configs[0].state_root, state_root)
+        self.assertTrue(nested_configs[0].fresh_provider_session)
         self.assertFalse(nested_configs[0].sync.enabled)
         self.assertEqual(
             calls,
@@ -968,6 +972,100 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(len(temp_roots), 1)
         self.assertFalse(temp_roots[0].exists())
+
+    def test_cli_agent_isolated_run_does_not_seed_prior_provider_session(self):
+        main_root = Path(self.tempdir.name)
+        worktree = main_root / ".runtime" / "worktrees" / "reviewer-123"
+        old_provider = self._provider_record_json("reviewer", "agent-session", "old-thread")
+        new_provider = self._provider_record_json("reviewer", "agent-session", "new-thread")
+        self._write_runtime_state(main_root, "reviewer", "agent-session", history='["old message"]', provider=old_provider)
+
+        class FakeSupervisor:
+            def __init__(self, memory_root, role):
+                pass
+
+            def run(self, callback):
+                return IsolatedWriteResult(output=callback(worktree), commits_landed=1)
+
+        def nested(_runtime, _worktree, state_root, session_id, _message):
+            self.assertEqual(
+                self._runtime_history_path(state_root, "reviewer", session_id).read_text(encoding="utf-8"),
+                '["old message"]',
+            )
+            self.assertFalse(self._provider_session_path(state_root, "reviewer", session_id).exists())
+            self._write_runtime_state(
+                state_root,
+                "reviewer",
+                session_id,
+                history='["new message"]',
+                provider=new_provider,
+            )
+            return "nested output"
+
+        config = RuntimeConfig(
+            role="reviewer",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=main_root,
+        )
+
+        with (
+            patch("rightmemory.runtime.CliAgentExecutor"),
+            patch("rightmemory.runtime.IsolatedWriteSupervisor", FakeSupervisor),
+            patch.object(RightMemoryRuntime, "_run_session_turn_in_worktree", nested),
+        ):
+            runtime = RightMemoryRuntime(config)
+            result = runtime._run_session_turn_isolated("agent-session", "review one")
+
+        self.assertEqual(result, "nested output")
+        provider = json.loads(self._provider_session_path(main_root, "reviewer", "agent-session").read_text(encoding="utf-8"))
+        self.assertEqual(provider["provider_session_id"], "new-thread")
+
+    def test_failed_cli_agent_isolated_run_keeps_prior_provider_session(self):
+        main_root = Path(self.tempdir.name)
+        worktree = main_root / ".runtime" / "worktrees" / "reviewer-123"
+        old_provider = self._provider_record_json("reviewer", "agent-session", "old-thread")
+        new_provider = self._provider_record_json("reviewer", "agent-session", "new-thread")
+        self._write_runtime_state(main_root, "reviewer", "agent-session", history='["old message"]', provider=old_provider)
+
+        class FailingSupervisor:
+            def __init__(self, memory_root, role):
+                pass
+
+            def run(self, callback):
+                callback(worktree)
+                raise RuntimeError("validation failed")
+
+        def nested(_runtime, _worktree, state_root, session_id, _message):
+            self.assertFalse(self._provider_session_path(state_root, "reviewer", session_id).exists())
+            self._write_runtime_state(
+                state_root,
+                "reviewer",
+                session_id,
+                history='["new message"]',
+                provider=new_provider,
+            )
+            return "nested output"
+
+        config = RuntimeConfig(
+            role="reviewer",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=main_root,
+        )
+
+        with (
+            patch("rightmemory.runtime.CliAgentExecutor"),
+            patch("rightmemory.runtime.IsolatedWriteSupervisor", FailingSupervisor),
+            patch.object(RightMemoryRuntime, "_run_session_turn_in_worktree", nested),
+        ):
+            runtime = RightMemoryRuntime(config)
+            with self.assertRaises(RuntimeError):
+                runtime._run_session_turn_isolated("agent-session", "review one")
+
+        provider = json.loads(self._provider_session_path(main_root, "reviewer", "agent-session").read_text(encoding="utf-8"))
+        self.assertEqual(provider["provider_session_id"], "old-thread")
+        self.assertTrue(ProviderSessionStore.is_internal_provider_session(main_root, "codex", "new-thread"))
 
     def test_cli_agent_run_turn_uses_reserved_session_lock(self):
         config = RuntimeConfig(
@@ -1735,6 +1833,18 @@ class RuntimeTests(unittest.TestCase):
 
     def _provider_session_path(self, root: Path, role: str, session_id: str) -> Path:
         return root / ".runtime" / "agent_cli_sessions" / role / f"{session_id}.json"
+
+    def _provider_record_json(self, role: str, session_id: str, provider_session_id: str) -> str:
+        return json.dumps(
+            {
+                "provider": "codex",
+                "provider_session_id": provider_session_id,
+                "role": role,
+                "rightmemory_session_id": session_id,
+                "created_at": "2026-05-20T00:00:00+00:00",
+                "updated_at": "2026-05-20T00:00:00+00:00",
+            }
+        )
 
     def _fake_pydantic_modules(self):
         class FakeModelRetry(Exception):

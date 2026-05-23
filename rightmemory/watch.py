@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import fcntl
-import json
-import math
 import os
 import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -88,65 +85,6 @@ class StopWatchResult:
     state: str
     pid: int | None
     log_path: Path
-
-
-@dataclass(frozen=True)
-class PeriodicRunDue:
-    seconds: int
-
-    @property
-    def due_now(self) -> bool:
-        return self.seconds <= 0
-
-
-class PeriodicRunState:
-    def __init__(self, memory_root: Path, name: str):
-        self.memory_root = memory_root
-        self.path = memory_root / ".runtime" / name / "watch-state.json"
-
-    def seconds_until_due(self, interval_seconds: int, now: datetime | None = None) -> PeriodicRunDue:
-        now = now or datetime.now(UTC)
-        last_run_at = self.last_run_at()
-        if last_run_at is None:
-            return PeriodicRunDue(0)
-        next_run_at = last_run_at + timedelta(seconds=interval_seconds)
-        remaining = math.ceil((next_run_at - now).total_seconds())
-        if remaining <= 0:
-            return PeriodicRunDue(0)
-        return PeriodicRunDue(remaining)
-
-    def mark_run(self, status: str, now: datetime | None = None) -> None:
-        now = now or datetime.now(UTC)
-        data = {
-            "last_run_at": now.isoformat(),
-            "last_status": status,
-        }
-        _ensure_runtime_gitignore(self.memory_root / ".runtime")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, self.path)
-        _fsync_directory(self.path.parent)
-
-    def last_run_at(self) -> datetime | None:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError):
-            return None
-        value = data.get("last_run_at")
-        if not isinstance(value, str):
-            return None
-        try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=UTC)
-        return parsed.astimezone(UTC)
 
 
 def install_stamp_path(memory_root: Path) -> Path:

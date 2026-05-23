@@ -873,32 +873,6 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("session dreamer-watch: dream", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
 
-    def test_dreamer_watch_once_reports_when_successful_cycle_cannot_consume_points(self):
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        consumed = []
-
-        class FakeStore:
-            def read(self):
-                return type("TriggerState", (), {"points": 10.0})()
-
-            def consume_if_available(self, threshold: float) -> bool:
-                consumed.append(threshold)
-                return False
-
-        watch_config = _dreamer_watch_config(memory_root=Path("/memory"), trigger_points=10.0)
-        with (
-            patch("rightmemory.cli.DreamerTriggerStore", return_value=FakeStore()),
-            patch("sys.stdout", stdout),
-            patch("sys.stderr", stderr),
-        ):
-            result = _dreamer_watch_once(watch_config, "dreamer-watch", lambda session_id: f"{session_id}: ok")
-
-        self.assertEqual(result, "not-consumed")
-        self.assertEqual(consumed, [10.0])
-        self.assertIn("dreamer-watch: ok", stdout.getvalue())
-        self.assertIn("trigger points were not consumed", stderr.getvalue())
-
     def test_dreamer_watch_once_does_not_consume_on_failure(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -984,38 +958,6 @@ class JsonRequestTests(unittest.TestCase):
         sleep.assert_called_once_with(9)
         self.assertIn("rightmemory dreamer cycle", stdout.getvalue())
         self.assertIn("session dreamer-watch: Run a scheduled dream cycle.", stdout.getvalue())
-        self.assertIn("rightmemory dreamer watch stopped", stderr.getvalue())
-
-    def test_dreamer_watch_not_consumed_sleeps_with_config_interval(self):
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-
-        class FakeStore:
-            def read(self):
-                return type("TriggerState", (), {"points": 6.0})()
-
-            def consume_if_available(self, threshold: float) -> bool:
-                return False
-
-        with tempfile.TemporaryDirectory() as tempdir:
-            memory_root = Path(tempdir)
-            runtime_config = type("Config", (), {"memory_root": memory_root})()
-            watch_config = _dreamer_watch_config(memory_root=memory_root, trigger_points=5.0, check_interval_seconds=13)
-            with (
-                patch("rightmemory.cli.load_dreamer_watch_config", return_value=watch_config),
-                patch("rightmemory.cli.load_config", return_value=runtime_config),
-                patch("rightmemory.cli.DreamerTriggerStore", return_value=FakeStore()),
-                patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
-                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
-                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
-                patch("sys.stdout", stdout),
-                patch("sys.stderr", stderr),
-            ):
-                result = main(["dreamer", "watch"])
-
-        self.assertEqual(result, 130)
-        sleep.assert_called_once_with(13)
-        self.assertIn("trigger points were not consumed", stderr.getvalue())
         self.assertIn("rightmemory dreamer watch stopped", stderr.getvalue())
 
     def test_dreamer_watch_failed_cycle_sleeps_without_consuming_points(self):
