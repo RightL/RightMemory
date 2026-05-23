@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .isolated_write import IsolatedWriteSupervisor
 from .session import _ensure_runtime_gitignore, _fsync_directory
 
 
@@ -22,6 +23,10 @@ WATCH_COMMANDS = {
     "review": ("review", "watch"),
     "dreamer": ("dreamer", "watch"),
     "sync": ("sync", "watch"),
+}
+WATCH_CLEANUP_ROLES = {
+    "review": "reviewer",
+    "dreamer": "dreamer",
 }
 
 
@@ -182,6 +187,10 @@ def start_managed_watch(memory_root: Path, name: str, python_executable: str | N
         raise RuntimeError(f"rightmemory {name} watch is already running outside the manager")
     if status.state == "stale":
         watch_pid_path(memory_root, name).unlink(missing_ok=True)
+
+    cleanup_role = WATCH_CLEANUP_ROLES.get(name)
+    if cleanup_role is not None:
+        IsolatedWriteSupervisor(memory_root, cleanup_role).cleanup_stale()
 
     runtime_root = memory_root / ".runtime"
     _ensure_runtime_gitignore(runtime_root)

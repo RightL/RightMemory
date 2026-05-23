@@ -73,9 +73,10 @@ def load_notes_from_directory(directory: Path) -> SemanticUpgradeLoadResult:
     return _load_note_entries(entries)
 
 
-def pending_context(memory_root: Path) -> SemanticUpgradeContext:
+def pending_context(memory_root: Path, state_root: Path | None = None) -> SemanticUpgradeContext:
+    state_root = state_root if state_root is not None else memory_root
     loaded = load_packaged_notes()
-    absorbed, state_warnings = _read_absorbed_ids(memory_root)
+    absorbed, state_warnings = _read_absorbed_ids(state_root)
     notes = [note for note in loaded.notes if note.id not in absorbed]
     return SemanticUpgradeContext(notes=notes, warnings=[*loaded.warnings, *state_warnings])
 

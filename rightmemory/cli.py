@@ -11,10 +11,11 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .async_update import AsyncUpdateStore, format_state
-from .config import MEMORY_ROOT, ROLES, load_config, load_review_config, load_sync_config
+from .config import MEMORY_ROOT, ROLES, load_config, load_dreamer_watch_config, load_review_config, load_sync_config
+from .dreamer_trigger import DreamerTriggerStore
 from .doctor import format_doctor_report, run_agent_cli_doctor
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
@@ -24,7 +25,6 @@ from .watch import (
     MANAGED_WATCH_TARGETS,
     InstallStamp,
     ManagedWatchStatus,
-    PeriodicRunState,
     StopWatchResult,
     WatchLock,
     managed_watch_status,
@@ -33,11 +33,15 @@ from .watch import (
 )
 
 DEFAULT_REVIEW_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
-DEFAULT_DREAMER_WATCH_INTERVAL_SECONDS = 2 * 24 * 60 * 60
+DEFAULT_DREAMER_WATCH_RETRY_SECONDS = 60
 DEFAULT_SYNC_WATCH_INTERVAL_SECONDS = 60 * 60
 WATCH_REFRESH_POLL_SECONDS = 5
 DREAMER_WATCH_SESSION_ID = "dreamer-watch"
 DREAMER_WATCH_MESSAGE = "Run a scheduled dream cycle."
+_DREAMER_WATCH_SKIPPED = "skipped"
+_DREAMER_WATCH_SUCCEEDED = "succeeded"
+_DREAMER_WATCH_FAILED = "failed"
+_DREAMER_WATCH_NOT_CONSUMED = "not-consumed"
 SYNC_WATCH_SESSION_ID = "sync-watch"
 
 
@@ -272,8 +276,7 @@ def _dreamer_watch_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--interval",
         type=int,
-        default=DEFAULT_DREAMER_WATCH_INTERVAL_SECONDS,
-        help="seconds between scheduled dream cycles",
+        help="override seconds between trigger checks",
     )
     parser.add_argument(
         "--session",
@@ -376,9 +379,17 @@ def _run_review_scan_with_config(reviewer_config: Any, since_days: int | None = 
         if since_days < 1:
             raise ValueError("--since-days must be a positive integer")
         review_config = replace(review_config, since_days=since_days)
+    dreamer_watch_config = load_dreamer_watch_config()
     runtime = RightMemoryRuntime(reviewer_config)
     try:
-        scanner = ReviewScanner(review_config, runtime.run_session_turn)
+        scanner = ReviewScanner(
+            review_config,
+            runtime.run_session_turn,
+            on_review_success=_dreamer_trigger_incrementer(
+                reviewer_config.memory_root,
+                dreamer_watch_config.review_session_points,
+            ),
+        )
         return scanner.scan_once()
     finally:
         runtime.cleanup()
@@ -423,38 +434,62 @@ def _run_dream_cycle(session_id: str, dreamer_config: Any | None = None) -> str:
         runtime.cleanup()
 
 
-def _dreamer_watch(interval: int, session_id: str) -> int:
-    if interval < 1:
-        raise ValueError("--interval must be a positive integer")
-    dreamer_config = load_config("dreamer")
-    refresh = InstallStamp(dreamer_config.memory_root)
-    state = PeriodicRunState(dreamer_config.memory_root, "dreamer")
+def _dreamer_watch_once(watch_config: Any, session_id: str, run_cycle: Callable[[str], str]) -> str:
+    store = DreamerTriggerStore(watch_config.memory_root)
+    state = store.read()
+    if state.points < watch_config.trigger_points:
+        return _DREAMER_WATCH_SKIPPED
+
+    timestamp = datetime.now(UTC).isoformat()
+    print(f"[{timestamp}] rightmemory dreamer cycle", flush=True)
     try:
-        with _watch_stop_signal("dreamer") as stop, WatchLock(dreamer_config.memory_root, "dreamer"):
+        output = run_cycle(session_id)
+    except Exception as exc:
+        print(f"rightmemory dreamer cycle failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        return _DREAMER_WATCH_FAILED
+
+    print(output, flush=True)
+    if not store.consume_if_available(watch_config.trigger_points):
+        print(
+            "Warning: dreamer cycle completed but trigger points were not consumed; threshold no longer available",
+            file=sys.stderr,
+            flush=True,
+        )
+        return _DREAMER_WATCH_NOT_CONSUMED
+    return _DREAMER_WATCH_SUCCEEDED
+
+
+def _dreamer_watch(interval: int | None, session_id: str) -> int:
+    if interval is not None and interval < 1:
+        raise ValueError("--interval must be a positive integer")
+    watch_config = load_dreamer_watch_config()
+    if interval is not None:
+        watch_config = replace(watch_config, check_interval_seconds=interval)
+    dreamer_config = load_config("dreamer")
+    refresh = InstallStamp(watch_config.memory_root)
+    try:
+        with _watch_stop_signal("dreamer") as stop, WatchLock(watch_config.memory_root, "dreamer"):
             next_config: Any | None = dreamer_config
             while not stop.requested:
                 _reexec_if_install_changed(refresh, stop)
-                due = state.seconds_until_due(interval)
-                if not due.due_now:
-                    if not _sleep_with_refresh_check(due.seconds, refresh, stop):
-                        break
-                    continue
-                timestamp = datetime.now(UTC).isoformat()
-                print(f"[{timestamp}] rightmemory dreamer cycle", flush=True)
-                status = "succeeded"
-                try:
+
+                def run_cycle(current_session_id: str) -> str:
+                    nonlocal next_config
                     if next_config is None:
-                        output = _run_dream_cycle(session_id)
-                    else:
-                        output = _run_dream_cycle(session_id, next_config)
-                        next_config = None
-                    print(output, flush=True)
-                except Exception as exc:
-                    status = "failed"
-                    print(f"rightmemory dreamer cycle failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
-                finally:
-                    state.mark_run(status)
+                        return _run_dream_cycle(current_session_id)
+                    output = _run_dream_cycle(current_session_id, next_config)
+                    next_config = None
+                    return output
+
+                status = _dreamer_watch_once(watch_config, session_id, run_cycle)
                 _reexec_if_install_changed(refresh, stop)
+                if status in {_DREAMER_WATCH_SKIPPED, _DREAMER_WATCH_NOT_CONSUMED}:
+                    if not _sleep_with_refresh_check(watch_config.check_interval_seconds, refresh, stop):
+                        break
+                elif status == _DREAMER_WATCH_FAILED:
+                    retry_seconds = min(watch_config.check_interval_seconds, DEFAULT_DREAMER_WATCH_RETRY_SECONDS)
+                    if not _sleep_with_refresh_check(retry_seconds, refresh, stop):
+                        break
         print("rightmemory dreamer watch stopped", file=sys.stderr)
         return 0
     except KeyboardInterrupt:
@@ -621,11 +656,35 @@ def _submitted_worker(
 ) -> int:
     if message_parts:
         raise ValueError("_submitted-worker does not accept message arguments")
+    dreamer_watch_config = load_dreamer_watch_config()
     store = AsyncUpdateStore(memory_root, role)
-    state = store.run_pending_batches(session_id, lambda message: runtime.run_session_turn(session_id, message))
+    state = store.run_pending_batches(
+        session_id,
+        lambda message: runtime.run_session_turn(session_id, message),
+        on_batch_success=_dreamer_trigger_incrementer(
+            memory_root,
+            dreamer_watch_config.update_candidate_points,
+        ),
+    )
     if state.status == "failed":
         return 1
     return 0
+
+
+def _dreamer_trigger_incrementer(memory_root: Path, points_per_item: float) -> Callable[[int], None]:
+    store = DreamerTriggerStore(memory_root)
+
+    def increment(count: int) -> None:
+        try:
+            store.increment(count * points_per_item)
+        except OSError as exc:
+            print(
+                f"Warning: could not update dreamer trigger state: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    return increment
 
 
 if __name__ == "__main__":

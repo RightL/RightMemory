@@ -111,6 +111,35 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertEqual(only_state.session_id, "s1")
         self.assertEqual(only_state.source, "codex")
 
+    def test_scan_success_callback_runs_after_state_save_with_session_count(self):
+        callback_calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            transcript = source / "session.jsonl"
+            self._write_codex(transcript, turns=[("u1", "a1")])
+            self._set_mtime(transcript, 1_000)
+
+            def on_review_success(count: int) -> None:
+                saved = ReviewStateStore(root).load()
+                callback_calls.append((count, len(saved.sessions)))
+
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                lambda session_id, message: "ok",
+                on_review_success=on_review_success,
+            )
+
+            result = scanner.scan_once(now=10_000)
+
+        self.assertEqual(result.reviewed, 1)
+        self.assertEqual(callback_calls, [(1, 1)])
+
     def test_scan_reviews_time_adjacent_batch_per_call(self):
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:
@@ -211,6 +240,7 @@ class ReviewScannerTests(unittest.TestCase):
 
     def test_scan_retries_once_then_stops_after_reviewer_failure(self):
         calls = []
+        callbacks = []
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             source = root / "codex"
@@ -235,6 +265,7 @@ class ReviewScannerTests(unittest.TestCase):
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
                 fail,
+                on_review_success=callbacks.append,
             )
 
             result = scanner.scan_once(now=10_000)
@@ -247,6 +278,7 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertIn('"user": "fail"', calls[0])
         self.assertIn('"user": "review"', calls[0])
         self.assertEqual(len(state.sessions), 0)
+        self.assertEqual(callbacks, [])
 
     def test_scan_skips_sessions_older_than_since_days(self):
         calls = []

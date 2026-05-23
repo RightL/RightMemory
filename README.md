@@ -67,7 +67,7 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md). For launch copy,
 - A tree of `#`, `##`, and `###` headings for hierarchical retrieval context.
 - Addressable heading anchors and node ids for agent retrieval.
 - Typed edges such as `dep:`, `cfg:`, `ver:`, `doc:`, and `todo:` for graph traversal across the tree.
-- A command-backed `memory-orchestrator` skill for retrieval, updates, and periodic consolidation.
+- A command-backed `memory-orchestrator` skill for retrieval, updates, and change-triggered consolidation.
 - Two executor modes behind the same `rightmemory` CLI: local standalone runtime or delegated Codex/Claude CLI role execution.
 - Optional automatic transcript review for idle Codex and Claude sessions.
 
@@ -281,6 +281,7 @@ The runtime is intentionally small:
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - The installer creates a root `.gitignore` allowlist so git status only surfaces `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; existing user `.gitignore` files are preserved.
 - Async `update submit` calls for the same `--session` accumulate as pending candidates. The worker waits one hour from the latest submit, then sends the pending candidates to the update role as one batch; `pull` reports phase, pending candidates, current batch, and timing. While submissions are waiting or being processed, retrieve can see newly submitted unconsolidated memory as `Recent submitted memory` so fresh context is available before the updater writes it.
+- Automatic `update`, `reviewer`, and `dreamer` turns run in isolated Git worktrees when they operate on the main state root. The role still commits normally; runtime validates and lands successful memory commits back into the main memory repo.
 - Standalone daemon context is preserved with Pydantic AI message history.
 - MCP support can be added later as an adapter over the same daemon.
 
@@ -438,19 +439,35 @@ marks every included provider session reviewed; a failed batch marks none. If
 the same provider session later changes or resumes, scanner state treats it as
 already reviewed unless you clear the corresponding review state.
 
-### Scheduled Dream Cycles
+### Change-Triggered Dream Cycles
 
-Dreamer can run periodic consolidation from the same manager:
+Dreamer can run background consolidation from the same manager:
 
 ```bash
 rightmemory watch start dreamer
 ```
 
-The underlying `rightmemory dreamer watch` process runs a dream cycle when no prior scheduled run is recorded, then records its last attempt under `<memory-root>/.runtime/dreamer/watch-state.json`. After that, the default interval is 2 days; override it with `rightmemory dreamer watch --interval <seconds>` when running the lower-level loop directly.
+`rightmemory dreamer watch` checks `<memory-root>/.runtime/dreamer/trigger-state.json` and runs after successful memory work has accumulated enough points. With the default `[dreamer.watch]` settings, each successful update candidate adds `1.0` point, each reviewed provider session adds `1.5` points, the trigger threshold is `50`, and the watcher checks every `3000` seconds.
 
-Review and dreamer watchers hold per-role watch locks under `.runtime/watch/`, so a duplicate watcher exits instead of creating a competing background loop. The write phase still uses the shared memory write lock, so review, update, and dreamer roles do not edit memory files at the same time.
+```toml
+[dreamer.watch]
+trigger_points = 50
+update_candidate_points = 1.0
+review_session_points = 1.5
+check_interval_seconds = 3000
+```
+
+Successful async update batches add points after semantic success and async state update. Successful review batches add points after reviewer success and review state save. A successful automatic dream consumes the configured threshold after the cycle lands or completes as a valid no-op; failed cycles preserve the accumulated points. `rightmemory dreamer watch --interval <seconds>` overrides this process's trigger-check cadence, not a fixed dream-cycle spacing. The old `<memory-root>/.runtime/dreamer/watch-state.json` scheduling state is no longer used.
+
+Review and dreamer watchers hold per-role watch locks under `.runtime/watch/`, so a duplicate watcher exits instead of creating a competing background loop. Isolated roles may do model work in temporary checkouts, and the landing phase uses the shared memory write lock before changing the main memory repo.
 
 `rightmemory watch stop` sends a graceful terminate signal. A sleeping watcher exits within a few seconds; a watcher doing model work finishes the current cycle first. When `install.sh` finishes, it updates `<memory-root>/.runtime/install.stamp`. Watchers check that stamp between runs and while sleeping; if it changes, they re-exec themselves with the same arguments.
+
+### Isolated Automatic Writes
+
+Automatic `update`, `reviewer`, and `dreamer` session turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. The role edits, validates, and commits as usual inside that temporary checkout. Runtime then validates that temporary commits touch memory files (`MEMORY.md`, `MEMORY_*.md`, or `dream_logs/*.md`) and keep `MEMORY.md` as a regular file before landing successful commits back into the main memory repo.
+
+Temporary session and provider state lives under `.runtime/isolated-state/` during the isolated turn and is promoted after a successful landing or valid no-op. If the role fails, is interrupted, leaves dirty temporary files, or cannot land cleanly, the temporary work is discarded and the original source remains the retry source: the update batch, provider transcript batch, or dreamer trigger balance. Dirty main memory files block automatic semantic writes before a temporary role starts; local dirty memory is not made safe by disabling sync.
 
 ### Automatic Global Sync
 
@@ -464,7 +481,7 @@ enabled = true
 stale_pull_after_hours = 24
 ```
 
-When sync is enabled, runtime code runs deterministic Git preflight for `update`, `reviewer`, and `dreamer` before model work. Clean sync state stays invisible to the role; dirty or conflicted memory state is routed to `sync-reconciler` for repair. After a semantic role commits durable memory changes, the runtime pushes the committed state and invokes `sync-reconciler` if that push exposes dirty state or a conflict. Retrieval stays local by default for speed.
+When sync is enabled, runtime code handles remote Git synchronization around automatic semantic work. It checks upstream state before model work, pushes after successful memory commits land, and can invoke `sync-reconciler` for sync-detected dirty or conflicted memory state. The isolated-write dirty-main check is separate from remote sync: local dirty memory files block automatic semantic writes even when `[sync].enabled` is false. Retrieval stays local by default for speed.
 
 Managed watch includes a `sync` target. `rightmemory watch start` starts it when sync is enabled, and `rightmemory watch start sync` runs that target by itself. The sync watcher pulls when no successful pull is recorded or when the last successful pull is older than `stale_pull_after_hours`; clean pulls and fresh checks stay deterministic and do not call a model.
 

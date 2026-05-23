@@ -326,6 +326,45 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertEqual(record.rightmemory_session_id, NO_SESSION_RIGHTMEMORY_SESSION_ID)
         self.assertTrue(is_internal)
 
+    def test_run_turn_records_provider_session_under_state_root(self):
+        calls = []
+
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+            calls.append((command, cwd))
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"type":"thread.started","thread_id":"thread-state"}\n'
+                    '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n'
+                ),
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            state_root = root / "state"
+            memory_root.mkdir()
+            executor = CliAgentExecutor(
+                memory_root,
+                "retrieve",
+                AgentCliConfig(provider="codex"),
+                state_root=state_root,
+            )
+
+            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
+                result = executor.run_session_turn("agent-1", "hello")
+
+            state_record = ProviderSessionStore(state_root, "retrieve").load("agent-1")
+            memory_record = ProviderSessionStore(memory_root, "retrieve").load("agent-1")
+
+        self.assertEqual(result, "done")
+        self.assertEqual(calls[0][1], str(memory_root))
+        self.assertIsNotNone(state_record)
+        self.assertEqual(state_record.provider_session_id, "thread-state")
+        self.assertIsNone(memory_record)
+
     def test_run_turn_resumes_saved_provider_session_in_second_executor(self):
         calls = []
 
@@ -510,6 +549,7 @@ class AgentCliDoctorTests(unittest.TestCase):
         ])
         self.assertTrue(runtime_configs)
         self.assertTrue(all(config.memory_root.name == "memory" for config in runtime_configs))
+        self.assertTrue(all(config.state_root == config.memory_root for config in runtime_configs))
         self.assertTrue(all(not config.sync.enabled for config in runtime_configs))
         first_call_roles = {role for role, provider, session_id, message in turn_calls if "Reply exactly `RM_FIRST_" in message}
         self.assertEqual(first_call_roles, ROLES)

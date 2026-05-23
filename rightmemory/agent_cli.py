@@ -32,13 +32,15 @@ class CliAgentExecutor:
         role: str,
         config: AgentCliConfig,
         semantic_upgrades: SemanticUpgradeContext | None = None,
+        state_root: Path | None = None,
     ):
         _validate_role(role)
         self.memory_root = memory_root
+        self.state_root = state_root if state_root is not None else memory_root
         self.role = role
         self.config = config
         self.semantic_upgrades = semantic_upgrades
-        self.store = ProviderSessionStore(memory_root, role)
+        self.store = ProviderSessionStore(self.state_root, role)
 
     def run_turn(self, message: str) -> str:
         return self.run_session_turn(NO_SESSION_RIGHTMEMORY_SESSION_ID, message)

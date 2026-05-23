@@ -102,9 +102,16 @@ class ReviewStateStore:
 
 
 class ReviewScanner:
-    def __init__(self, config: ReviewConfig, run_reviewer: Callable[[str, str], str]):
+    def __init__(
+        self,
+        config: ReviewConfig,
+        run_reviewer: Callable[[str, str], str],
+        *,
+        on_review_success: Callable[[int], None] | None = None,
+    ):
         self.config = config
         self.run_reviewer = run_reviewer
+        self.on_review_success = on_review_success
         self.state_store = ReviewStateStore(config.memory_root)
 
     def scan_once(self, *, now: float | None = None) -> ReviewScanResult:
@@ -199,6 +206,8 @@ class ReviewScanner:
             )
         self.state_store.save(ReviewState(sessions=sessions))
         counts["reviewed"] += len(normalized_batch)
+        if self.on_review_success is not None:
+            self.on_review_success(len(normalized_batch))
         return ReviewScanResult(**counts)
 
     def _review_with_retry(self, payload: list[NormalizedSession], counts: dict[str, int]) -> bool:

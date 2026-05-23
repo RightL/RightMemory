@@ -2,11 +2,161 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
-from rightmemory.async_update import AsyncUpdateStore
+from rightmemory.async_update import AsyncUpdateJob, AsyncUpdateState, AsyncUpdateStore
 
 
 class AsyncUpdateStateTests(unittest.TestCase):
+    def test_dead_worker_running_batch_returns_batch_to_pending(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            interrupted = _job(1, "interrupted")
+            already_pending = _job(2, "already pending")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="running",
+                    started_at="2026-05-15T00:00:00+00:00",
+                    pid=12345,
+                    current_batch=[interrupted],
+                    pending=[already_pending],
+                    next_id=3,
+                ),
+            )
+
+            with patch("rightmemory.async_update._process_exists", return_value=False):
+                recovered = store.read("agent-1")
+
+        self.assertEqual(recovered.status, "failed")
+        self.assertIsNone(recovered.phase)
+        self.assertIsNone(recovered.next_flush_at)
+        self.assertEqual(recovered.current_batch, [])
+        self.assertEqual([job.id for job in recovered.pending], [1, 2])
+        self.assertEqual(recovered.pending[0].message, "interrupted")
+        self.assertIn("worker process exited before writing result", recovered.error or "")
+
+    def test_submit_after_failed_state_preserves_pending_order_and_starts_worker(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="failed",
+                    session_id="agent-1",
+                    role="update",
+                    finished_at="2026-05-15T00:00:00+00:00",
+                    error="previous failure",
+                    pending=[_job(1, "retry first")],
+                    next_id=2,
+                ),
+            )
+            process = Mock(pid=4242)
+
+            with patch("rightmemory.async_update.subprocess.Popen", return_value=process) as popen:
+                state = store.submit("agent-1", "new update")
+
+        popen.assert_called_once()
+        self.assertEqual(state.status, "running")
+        self.assertEqual(state.phase, "waiting")
+        self.assertEqual(state.pid, 4242)
+        self.assertEqual([job.message for job in state.pending], ["retry first", "new update"])
+        self.assertEqual([job.id for job in state.pending], [1, 2])
+        self.assertEqual(state.current_batch, [])
+
+    def test_submit_after_failed_state_recovers_leftover_current_batch(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="failed",
+                    session_id="agent-1",
+                    role="update",
+                    phase=None,
+                    finished_at="2026-05-15T00:00:00+00:00",
+                    error="previous failure",
+                    current_batch=[_job(1, "interrupted first"), _job(2, "interrupted second")],
+                    pending=[_job(3, "already pending")],
+                    next_id=4,
+                ),
+            )
+            process = Mock(pid=4242)
+
+            with patch("rightmemory.async_update.subprocess.Popen", return_value=process):
+                state = store.submit("agent-1", "new update")
+
+        self.assertEqual(state.status, "running")
+        self.assertEqual(state.phase, "waiting")
+        self.assertEqual(state.current_batch, [])
+        self.assertEqual(
+            [job.message for job in state.pending],
+            ["interrupted first", "interrupted second", "already pending", "new update"],
+        )
+        self.assertEqual([job.id for job in state.pending], [1, 2, 3, 4])
+
+    def test_run_pending_batches_failure_returns_current_batch_to_pending(self):
+        callback = Mock()
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    started_at="2026-05-15T00:00:00+00:00",
+                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    pending=[_job(1, "first"), _job(2, "second")],
+                    next_id=3,
+                ),
+            )
+
+            state = store.run_pending_batches(
+                "agent-1",
+                Mock(side_effect=RuntimeError("isolated failure")),
+                on_batch_success=callback,
+            )
+
+        self.assertEqual(state.status, "failed")
+        self.assertIsNone(state.phase)
+        self.assertIsNone(state.next_flush_at)
+        self.assertEqual(state.current_batch, [])
+        self.assertEqual([job.id for job in state.pending], [1, 2])
+        self.assertEqual(state.error, "isolated failure")
+        callback.assert_not_called()
+
+    def test_run_pending_batches_success_calls_callback_with_candidate_count(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    started_at="2026-05-15T00:00:00+00:00",
+                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    pending=[_job(1, "first"), _job(2, "second")],
+                    next_id=3,
+                ),
+            )
+
+            state = store.run_pending_batches(
+                "agent-1",
+                lambda message: "ok",
+                on_batch_success=calls.append,
+            )
+
+        self.assertEqual(state.status, "succeeded")
+        self.assertEqual(calls, [2])
+
     def test_read_rejects_state_missing_required_identity_fields(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
@@ -41,6 +191,10 @@ class AsyncUpdateStateTests(unittest.TestCase):
                 store.read("agent-1")
 
         self.assertIn("unsupported legacy job fields", str(caught.exception))
+
+
+def _job(job_id: int, message: str) -> AsyncUpdateJob:
+    return AsyncUpdateJob(id=job_id, message=message, submitted_at="2026-05-15T00:00:00+00:00")
 
 
 if __name__ == "__main__":

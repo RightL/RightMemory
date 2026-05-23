@@ -84,7 +84,7 @@ def _load_agent_cli_configs(checks: list[DoctorCheck]) -> dict[str, RuntimeConfi
 
 def _doctor_config(config: RuntimeConfig, memory_root: Path) -> RuntimeConfig:
     sync = SyncConfig(memory_root=memory_root, enabled=False, stale_pull_after_hours=config.sync.stale_pull_after_hours)
-    return replace(config, memory_root=memory_root, sync=sync)
+    return replace(config, memory_root=memory_root, state_root=memory_root, sync=sync)
 
 
 def _check_first_provider_calls(

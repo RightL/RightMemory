@@ -84,6 +84,7 @@ class AsyncUpdateStore:
         run_message: Callable[[str], str],
         *,
         sleep_until: Callable[[datetime], None] | None = None,
+        on_batch_success: Callable[[int], None] | None = None,
     ) -> AsyncUpdateState:
         sleep_until = _sleep_until if sleep_until is None else sleep_until
         self._record_worker_pid(session_id, os.getpid())
@@ -133,7 +134,9 @@ class AsyncUpdateStore:
                 result = run_message(_format_batch_message(batch))
             except Exception as exc:
                 return self._fail_if_current_batch(session_id, batch_ids, str(exc))
-            state = self._finish_current(session_id, batch_ids, result)
+            state, accepted = self._finish_current(session_id, batch_ids, result)
+            if accepted and on_batch_success is not None:
+                on_batch_success(len(batch))
             if state.status != "running":
                 return state
 
@@ -162,7 +165,7 @@ class AsyncUpdateStore:
         start_worker: bool,
         now: datetime,
     ) -> AsyncUpdateState:
-        pending = [*state.pending, job]
+        pending = [*state.current_batch, *state.pending, job] if start_worker else [*state.pending, job]
         next_id = max(state.next_id, job.id + 1)
         next_flush_at = _format_time(now + timedelta(seconds=UPDATE_DEBOUNCE_SECONDS))
         if not start_worker:
@@ -219,11 +222,11 @@ class AsyncUpdateStore:
             error=None,
         )
 
-    def _finish_current(self, session_id: str, batch_ids: list[int], result: str) -> AsyncUpdateState:
+    def _finish_current(self, session_id: str, batch_ids: list[int], result: str) -> tuple[AsyncUpdateState, bool]:
         with self._locked(session_id):
             state = self._read_raw(session_id)
             if [job.id for job in state.current_batch] != batch_ids:
-                return state
+                return state, False
             if state.pending:
                 next_flush_at = state.next_flush_at or _format_time(
                     _now_dt() + timedelta(seconds=UPDATE_DEBOUNCE_SECONDS)
@@ -253,7 +256,7 @@ class AsyncUpdateStore:
                     error=None,
                 )
             self._write(session_id, next_state)
-            return next_state
+            return next_state, True
 
     def _record_worker_pid(self, session_id: str, pid: int) -> AsyncUpdateState:
         with self._locked(session_id):
@@ -276,6 +279,7 @@ class AsyncUpdateStore:
 
     def _fail_locked(self, session_id: str, error: str) -> AsyncUpdateState:
         current = self._read_raw(session_id)
+        retry_pending = [*current.current_batch, *current.pending]
         state = replace(
             current,
             status="failed",
@@ -284,6 +288,8 @@ class AsyncUpdateStore:
             pid=os.getpid(),
             error=error,
             next_flush_at=None,
+            current_batch=[],
+            pending=retry_pending,
         )
         self._write(session_id, state)
         return state

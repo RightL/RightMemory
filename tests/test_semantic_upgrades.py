@@ -192,12 +192,46 @@ class SemanticUpgradeStateTests(unittest.TestCase):
         self.assertIn("Do not copy these notes into memory as maintenance text", rendered)
 
 
+class RuntimeStateRootTests(unittest.TestCase):
+    def test_runtime_state_stores_use_state_root_while_tools_use_memory_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            state_root = root / "state"
+            memory_root.mkdir()
+            config = RuntimeConfig(
+                role="retrieve",
+                runtime_mode="cli-agent",
+                agent_cli=AgentCliConfig(provider="codex"),
+                memory_root=memory_root,
+                state_root=state_root,
+            )
+
+            with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+                runtime = RightMemoryRuntime(config)
+                try:
+                    session_paths = runtime.sessions.paths("agent-1")
+                    delivery_path = runtime.recent_submitted_delivery._state_path("agent-1")
+                finally:
+                    runtime.cleanup()
+
+        self.assertEqual(runtime.tools.memory_root, memory_root.resolve())
+        self.assertEqual(session_paths.history, state_root / ".runtime" / "sessions" / "retrieve" / "agent-1.json")
+        self.assertEqual(delivery_path, state_root / ".runtime" / "recent_submitted" / "retrieve" / "agent-1.json")
+        executor_class.assert_called_once_with(
+            memory_root,
+            "retrieve",
+            AgentCliConfig(provider="codex"),
+            state_root=state_root,
+        )
+
+
 class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
     def test_dreamer_success_marks_injected_semantic_upgrades_absorbed(self):
         calls = []
 
         class FakeDreamerExecutor:
-            def __init__(self, memory_root, role, config, semantic_upgrades=None):
+            def __init__(self, memory_root, role, config, semantic_upgrades=None, state_root=None):
                 self.semantic_upgrades = semantic_upgrades
 
             def run_session_turn(self, session_id: str, message: str) -> str:
@@ -209,11 +243,14 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
+            memory_root = root / "memory"
+            memory_root.mkdir()
             config = RuntimeConfig(
                 role="dreamer",
                 runtime_mode="cli-agent",
                 agent_cli=AgentCliConfig(provider="codex"),
-                memory_root=root,
+                memory_root=memory_root,
+                state_root=root,
             )
 
             with patch("rightmemory.runtime.CliAgentExecutor", FakeDreamerExecutor):
@@ -230,9 +267,47 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
         self.assertIn("user-context-agent-behavior-split", state["absorbed"])
         self.assertIn("open-context-questions", state["absorbed"])
 
+    def test_dreamer_success_marks_semantic_upgrades_absorbed_under_state_root(self):
+        class FakeDreamerExecutor:
+            def __init__(self, memory_root, role, config, semantic_upgrades=None, state_root=None):
+                self.semantic_upgrades = semantic_upgrades
+
+            def run_session_turn(self, session_id: str, message: str) -> str:
+                return "dreamed"
+
+            def cleanup(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            state_root = root / "state"
+            memory_root.mkdir()
+            config = RuntimeConfig(
+                role="dreamer",
+                runtime_mode="cli-agent",
+                agent_cli=AgentCliConfig(provider="codex"),
+                memory_root=memory_root,
+                state_root=state_root,
+            )
+
+            with patch("rightmemory.runtime.CliAgentExecutor", FakeDreamerExecutor):
+                runtime = RightMemoryRuntime(config)
+                try:
+                    result = runtime.run_session_turn("dreamer-1", "run")
+                finally:
+                    runtime.cleanup()
+
+            state = json.loads((state_root / ".runtime" / "semantic-upgrades.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result, "dreamed")
+        self.assertIn("user-context-agent-behavior-split", state["absorbed"])
+        self.assertIn("open-context-questions", state["absorbed"])
+        self.assertFalse((memory_root / ".runtime" / "semantic-upgrades.json").exists())
+
     def test_dreamer_failure_leaves_semantic_upgrades_pending(self):
         class FailingDreamerExecutor:
-            def __init__(self, memory_root, role, config, semantic_upgrades=None):
+            def __init__(self, memory_root, role, config, semantic_upgrades=None, state_root=None):
                 self.semantic_upgrades = semantic_upgrades
 
             def run_session_turn(self, session_id: str, message: str) -> str:
@@ -243,11 +318,14 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
+            memory_root = root / "memory"
+            memory_root.mkdir()
             config = RuntimeConfig(
                 role="dreamer",
                 runtime_mode="cli-agent",
                 agent_cli=AgentCliConfig(provider="codex"),
-                memory_root=root,
+                memory_root=memory_root,
+                state_root=root,
             )
 
             with patch("rightmemory.runtime.CliAgentExecutor", FailingDreamerExecutor):

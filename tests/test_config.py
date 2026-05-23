@@ -3,12 +3,21 @@ import types
 import json
 import tomllib
 import unittest
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.agent_cli import NO_SESSION_RIGHTMEMORY_SESSION_ID
-from rightmemory.config import AgentCliConfig, RuntimeConfig, load_config, load_review_config, load_sync_config
+from rightmemory.config import (
+    AgentCliConfig,
+    RuntimeConfig,
+    load_config,
+    load_dreamer_watch_config,
+    load_review_config,
+    load_sync_config,
+)
+from rightmemory.isolated_write import IsolatedWriteResult
 from rightmemory.prompt import build_cli_agent_instructions, build_instructions
 from rightmemory.runtime import RightMemoryRuntime, build_model
 from rightmemory.semantic_upgrades import SemanticUpgradeContext, SemanticUpgradeNote
@@ -312,6 +321,72 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("[review].batch_size must be a positive integer", str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_dreamer_watch_config_defaults(self):
+        config_path = self._write_config("")
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_dreamer_watch_config()
+
+        self.assertEqual(config.memory_root, Path("/home/example/.rightmemory"))
+        self.assertEqual(config.trigger_points, 50.0)
+        self.assertEqual(config.update_candidate_points, 1.0)
+        self.assertEqual(config.review_session_points, 1.5)
+        self.assertEqual(config.check_interval_seconds, 3000)
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_dreamer_watch_config_parses_custom_values(self):
+        config_path = self._write_config(
+            """
+            [dreamer.model]
+            model_id = "openai/dreamer"
+
+            [dreamer.watch]
+            trigger_points = 75.5
+            update_candidate_points = 2
+            review_session_points = 3.25
+            check_interval_seconds = 120
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_dreamer_watch_config()
+            runtime_config = load_config("dreamer")
+
+        self.assertEqual(config.trigger_points, 75.5)
+        self.assertEqual(config.update_candidate_points, 2)
+        self.assertEqual(config.review_session_points, 3.25)
+        self.assertEqual(config.check_interval_seconds, 120)
+        self.assertEqual(runtime_config.model_id, "openai/dreamer")
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_dreamer_watch_config_rejects_invalid_values(self):
+        cases = [
+            ("trigger_points = 0", "[dreamer.watch].trigger_points must be a positive number"),
+            ("trigger_points = nan", "[dreamer.watch].trigger_points must be a positive number"),
+            ("trigger_points = inf", "[dreamer.watch].trigger_points must be a positive number"),
+            ("update_candidate_points = -1", "[dreamer.watch].update_candidate_points must be a positive number"),
+            ("review_session_points = true", "[dreamer.watch].review_session_points must be a positive number"),
+            ("review_session_points = -inf", "[dreamer.watch].review_session_points must be a positive number"),
+            ("check_interval_seconds = 1.5", "[dreamer.watch].check_interval_seconds must be a positive integer"),
+            ("unknown = 1", "unsupported [dreamer.watch] config key(s): unknown"),
+        ]
+
+        for watch_config, message in cases:
+            with self.subTest(watch_config=watch_config):
+                config_path = self._write_config(
+                    f"""
+                    [dreamer.watch]
+                    {watch_config}
+                    """
+                )
+
+                with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+                    with self.assertRaises(ValueError) as caught:
+                        load_dreamer_watch_config()
+
+                self.assertIn(message, str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_review_config_allows_sync_section(self):
         config_path = self._write_config(
             """
@@ -418,6 +493,15 @@ class RuntimeTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
 
+    def test_runtime_config_replace_preserves_explicit_state_root_when_memory_root_changes(self):
+        config = RuntimeConfig(role="retrieve", model_id="openai/test")
+        isolated_memory_root = Path("/isolated/rightmemory")
+
+        replaced = replace(config, memory_root=isolated_memory_root, state_root=config.state_root)
+
+        self.assertEqual(replaced.memory_root, isolated_memory_root)
+        self.assertEqual(replaced.state_root, config.state_root)
+
     def test_builds_openai_compatible_model(self):
         config = RuntimeConfig(
             role="retrieve",
@@ -463,8 +547,427 @@ class RuntimeTests(unittest.TestCase):
             result = runtime.run_session_turn("agent-session", "remember one")
 
         self.assertEqual(result, "cli reply")
-        executor_class.assert_called_once_with(Path(self.tempdir.name), "retrieve", AgentCliConfig(provider="codex"))
+        executor_class.assert_called_once_with(
+            Path(self.tempdir.name),
+            "retrieve",
+            AgentCliConfig(provider="codex"),
+            state_root=Path(self.tempdir.name),
+        )
         executor_class.return_value.run_session_turn.assert_called_once_with("agent-session", "remember one")
+
+    def test_write_role_session_turn_uses_isolated_runner(self):
+        cases = [
+            (
+                RuntimeConfig(role="dreamer", model_id="openai/test", memory_root=Path(self.tempdir.name)),
+                patch.dict("sys.modules", self._fake_pydantic_modules()),
+                "_run_session_model",
+            ),
+            (
+                RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name)),
+                patch.dict("sys.modules", self._fake_pydantic_modules()),
+                "_run_session_model",
+            ),
+            (
+                RuntimeConfig(
+                    role="reviewer",
+                    runtime_mode="cli-agent",
+                    agent_cli=AgentCliConfig(provider="codex"),
+                    memory_root=Path(self.tempdir.name),
+                ),
+                patch("rightmemory.runtime.CliAgentExecutor"),
+                "_run_session_cli_agent",
+            ),
+        ]
+
+        for config, build_context, direct_method in cases:
+            with self.subTest(role=config.role, runtime_mode=config.runtime_mode):
+                with (
+                    build_context,
+                    patch.object(RightMemoryRuntime, "_run_session_turn_isolated", return_value="isolated reply") as isolated,
+                    patch.object(
+                        RightMemoryRuntime,
+                        direct_method,
+                        side_effect=AssertionError("direct path should not run"),
+                    ),
+                ):
+                    runtime = RightMemoryRuntime(config)
+                    result = runtime.run_session_turn("agent-session", "remember one")
+
+                self.assertEqual(result, "isolated reply")
+                isolated.assert_called_once_with("agent-session", "remember one")
+
+    def test_sync_reconciler_session_turn_does_not_isolate(self):
+        config = RuntimeConfig(
+            role="sync-reconciler",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
+        )
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch.object(RightMemoryRuntime, "_run_session_turn_isolated", side_effect=AssertionError("should not isolate")),
+            patch.object(RightMemoryRuntime, "_run_session_model", return_value="direct reply") as direct,
+        ):
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_session_turn("sync-repair", "resolve conflict")
+
+        self.assertEqual(result, "direct reply")
+        direct.assert_called_once_with("sync-repair", "resolve conflict")
+
+    def test_isolated_worktree_runtime_uses_temp_state_and_disables_sync(self):
+        main_root = Path(self.tempdir.name)
+        worktree = main_root / ".runtime" / "worktrees" / "update-123"
+        state_root = main_root / ".runtime" / "isolated-state" / "update-123"
+        nested_configs = []
+        calls = []
+        trace = object()
+
+        class FakeNestedRuntime:
+            def __init__(self, config):
+                self.config = config
+                self._active_trace = None
+                nested_configs.append(config)
+
+            def _run_locked_turn(self, callback, *, isolate_write=False):
+                calls.append(("locked", isolate_write))
+                return callback(), None
+
+            def _run_session_model(self, session_id, message):
+                calls.append(("model", session_id, message, self._active_trace))
+                return "model result"
+
+            def cleanup(self):
+                calls.append(("cleanup",))
+
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=main_root,
+            sync=load_sync_config_for_test(main_root, enabled=True),
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+        runtime._active_trace = trace
+
+        with patch("rightmemory.runtime.RightMemoryRuntime", FakeNestedRuntime):
+            result = runtime._run_session_turn_in_worktree(worktree, state_root, "agent-session", "remember one")
+
+        self.assertEqual(result, "model result")
+        self.assertEqual(len(nested_configs), 1)
+        nested_config = nested_configs[0]
+        self.assertEqual(nested_config.memory_root, worktree)
+        self.assertEqual(nested_config.state_root, state_root)
+        self.assertFalse(nested_config.sync.enabled)
+        self.assertEqual(nested_config.sync.memory_root, worktree)
+        self.assertEqual(
+            calls,
+            [
+                ("locked", False),
+                ("model", "agent-session", "remember one", trace),
+                ("cleanup",),
+            ],
+        )
+
+    def test_isolated_worktree_runtime_uses_cli_agent_path(self):
+        main_root = Path(self.tempdir.name)
+        worktree = main_root / ".runtime" / "worktrees" / "reviewer-123"
+        state_root = main_root / ".runtime" / "isolated-state" / "reviewer-123"
+        nested_configs = []
+        calls = []
+
+        class FakeNestedRuntime:
+            def __init__(self, config):
+                self.config = config
+                nested_configs.append(config)
+
+            def _run_locked_turn(self, callback, *, isolate_write=False):
+                calls.append(("locked", isolate_write))
+                return callback(), None
+
+            def _run_session_cli_agent(self, session_id, message):
+                calls.append(("cli-agent", session_id, message))
+                return "cli result"
+
+            def cleanup(self):
+                calls.append(("cleanup",))
+
+        config = RuntimeConfig(
+            role="reviewer",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=main_root,
+            sync=load_sync_config_for_test(main_root, enabled=True),
+        )
+
+        with patch("rightmemory.runtime.CliAgentExecutor"):
+            runtime = RightMemoryRuntime(config)
+
+        with patch("rightmemory.runtime.RightMemoryRuntime", FakeNestedRuntime):
+            result = runtime._run_session_turn_in_worktree(worktree, state_root, "agent-session", "review one")
+
+        self.assertEqual(result, "cli result")
+        self.assertEqual(nested_configs[0].memory_root, worktree)
+        self.assertEqual(nested_configs[0].state_root, state_root)
+        self.assertFalse(nested_configs[0].sync.enabled)
+        self.assertEqual(
+            calls,
+            [
+                ("locked", False),
+                ("cli-agent", "agent-session", "review one"),
+                ("cleanup",),
+            ],
+        )
+
+    def test_nested_worktree_runtime_does_not_reisolate(self):
+        main_root = Path(self.tempdir.name)
+        worktree = main_root / ".runtime" / "worktrees" / "update-123"
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=worktree,
+            state_root=main_root,
+        )
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch.object(
+                RightMemoryRuntime,
+                "_run_session_turn_isolated",
+                side_effect=AssertionError("nested runtime should not re-isolate"),
+            ),
+        ):
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_session_turn("agent-session", "remember one")
+
+        self.assertEqual(result, "reply 1")
+        history_path = main_root / ".runtime" / "sessions" / "update" / "agent-session.json"
+        self.assertEqual(json.loads(history_path.read_text(encoding="utf-8")), ["message 1"])
+
+    def test_isolated_write_turn_does_not_hold_main_lock_around_model(self):
+        events = []
+
+        class FakeLock:
+            def __init__(self, memory_root):
+                self.memory_root = memory_root
+
+            def __enter__(self):
+                events.append(("lock_enter", self.memory_root))
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                events.append(("lock_exit", self.memory_root))
+
+        def isolated(self, session_id, message):
+            events.append(("isolated", session_id, message))
+            return "isolated reply"
+
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+        )
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.MemoryWriteLock", FakeLock),
+            patch.object(RightMemoryRuntime, "_run_session_turn_isolated", isolated),
+        ):
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_session_turn("agent-session", "remember one")
+
+        self.assertEqual(result, "isolated reply")
+        self.assertEqual(events, [("isolated", "agent-session", "remember one")])
+
+    def test_isolated_helper_returns_supervisor_output(self):
+        main_root = Path(self.tempdir.name)
+        worktree = main_root / ".runtime" / "worktrees" / "update-123"
+        calls = []
+
+        class FakeSupervisor:
+            def __init__(self, memory_root, role):
+                calls.append(("supervisor", memory_root, role))
+
+            def run(self, callback):
+                calls.append(("run",))
+                return IsolatedWriteResult(output=callback(worktree), commits_landed=1)
+
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=main_root)
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.IsolatedWriteSupervisor", FakeSupervisor),
+            patch.object(RightMemoryRuntime, "_run_session_turn_in_worktree", return_value="nested output") as nested,
+        ):
+            runtime = RightMemoryRuntime(config)
+            result = runtime._run_session_turn_isolated("agent-session", "remember one")
+
+        self.assertEqual(result, "nested output")
+        self.assertEqual(calls, [("supervisor", main_root, "update"), ("run",)])
+        nested.assert_called_once()
+        nested_worktree, state_root, nested_session_id, nested_message = nested.call_args.args
+        self.assertEqual(nested_worktree, worktree)
+        self.assertTrue(state_root.is_relative_to(main_root / ".runtime" / "isolated-state"))
+        self.assertEqual((nested_session_id, nested_message), ("agent-session", "remember one"))
+        self.assertFalse(state_root.exists())
+
+    def test_isolated_run_holds_main_session_lock_around_supervisor_execution(self):
+        main_root = Path(self.tempdir.name)
+        worktree = main_root / ".runtime" / "worktrees" / "update-123"
+        events = []
+
+        class FakeSessionLock:
+            def __enter__(self):
+                events.append("main_session_lock_enter")
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                events.append("main_session_lock_exit")
+
+        class FakeSupervisor:
+            def __init__(self, memory_root, role):
+                pass
+
+            def run(self, callback):
+                events.append("supervisor_start")
+                output = callback(worktree)
+                events.append("supervisor_end")
+                return IsolatedWriteResult(output=output, commits_landed=1)
+
+        def locked(session_id):
+            events.append(("main_session_locked", session_id))
+            return FakeSessionLock()
+
+        def nested(_runtime, _worktree, _state_root, session_id, message):
+            events.append(("nested", session_id, message))
+            return "nested output"
+
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=main_root)
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.IsolatedWriteSupervisor", FakeSupervisor),
+            patch.object(RightMemoryRuntime, "_run_session_turn_in_worktree", nested),
+        ):
+            runtime = RightMemoryRuntime(config)
+            runtime.sessions.locked = locked
+            result = runtime._run_session_turn_isolated("agent-session", "remember one")
+
+        self.assertEqual(result, "nested output")
+        self.assertEqual(
+            events,
+            [
+                ("main_session_locked", "agent-session"),
+                "main_session_lock_enter",
+                "supervisor_start",
+                ("nested", "agent-session", "remember one"),
+                "supervisor_end",
+                "main_session_lock_exit",
+            ],
+        )
+
+    def test_successful_isolated_run_promotes_temp_session_and_provider_state(self):
+        main_root = Path(self.tempdir.name)
+        worktree = main_root / ".runtime" / "worktrees" / "update-123"
+        seeded = []
+        temp_roots = []
+        self._write_runtime_state(main_root, "update", "agent-session", history='["old message"]', provider='{"old": true}')
+
+        class FakeSupervisor:
+            def __init__(self, memory_root, role):
+                pass
+
+            def run(self, callback):
+                return IsolatedWriteResult(output=callback(worktree), commits_landed=1)
+
+        def nested(_runtime, _worktree, state_root, session_id, _message):
+            temp_roots.append(state_root)
+            seeded.append(
+                (
+                    self._runtime_history_path(state_root, "update", session_id).read_text(encoding="utf-8"),
+                    self._provider_session_path(state_root, "update", session_id).read_text(encoding="utf-8"),
+                )
+            )
+            self._write_runtime_state(
+                state_root,
+                "update",
+                session_id,
+                history='["new message"]',
+                provider='{"new": true}',
+            )
+            return "nested output"
+
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=main_root)
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.IsolatedWriteSupervisor", FakeSupervisor),
+            patch.object(RightMemoryRuntime, "_run_session_turn_in_worktree", nested),
+        ):
+            runtime = RightMemoryRuntime(config)
+            result = runtime._run_session_turn_isolated("agent-session", "remember one")
+
+        self.assertEqual(result, "nested output")
+        self.assertEqual(seeded, [('["old message"]', '{"old": true}')])
+        self.assertEqual(
+            self._runtime_history_path(main_root, "update", "agent-session").read_text(encoding="utf-8"),
+            '["new message"]',
+        )
+        self.assertEqual(
+            self._provider_session_path(main_root, "update", "agent-session").read_text(encoding="utf-8"),
+            '{"new": true}',
+        )
+        self.assertEqual(len(temp_roots), 1)
+        self.assertFalse(temp_roots[0].exists())
+
+    def test_failed_isolated_run_discards_temp_session_and_provider_state(self):
+        main_root = Path(self.tempdir.name)
+        worktree = main_root / ".runtime" / "worktrees" / "update-123"
+        temp_roots = []
+        self._write_runtime_state(main_root, "update", "agent-session", history='["old message"]', provider='{"old": true}')
+
+        class FailingSupervisor:
+            def __init__(self, memory_root, role):
+                pass
+
+            def run(self, callback):
+                callback(worktree)
+                raise RuntimeError("validation failed")
+
+        def nested(_runtime, _worktree, state_root, session_id, _message):
+            temp_roots.append(state_root)
+            self._write_runtime_state(
+                state_root,
+                "update",
+                session_id,
+                history='["new message"]',
+                provider='{"new": true}',
+            )
+            return "nested output"
+
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=main_root)
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.IsolatedWriteSupervisor", FailingSupervisor),
+            patch.object(RightMemoryRuntime, "_run_session_turn_in_worktree", nested),
+        ):
+            runtime = RightMemoryRuntime(config)
+            with self.assertRaises(RuntimeError) as caught:
+                runtime._run_session_turn_isolated("agent-session", "remember one")
+
+        self.assertIn("validation failed", str(caught.exception))
+        self.assertEqual(
+            self._runtime_history_path(main_root, "update", "agent-session").read_text(encoding="utf-8"),
+            '["old message"]',
+        )
+        self.assertEqual(
+            self._provider_session_path(main_root, "update", "agent-session").read_text(encoding="utf-8"),
+            '{"old": true}',
+        )
+        self.assertEqual(len(temp_roots), 1)
+        self.assertFalse(temp_roots[0].exists())
 
     def test_cli_agent_run_turn_uses_reserved_session_lock(self):
         config = RuntimeConfig(
@@ -686,7 +1189,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(state["delivered"], ["update-a:1:2026-05-19T00:00:00+00:00"])
 
     def test_write_role_creates_memory_lock_and_gitignore(self):
-        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name))
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            state_root=Path(self.tempdir.name) / "state",
+        )
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
@@ -713,6 +1221,7 @@ class RuntimeTests(unittest.TestCase):
             role="update",
             model_id="openai/test",
             memory_root=Path(self.tempdir.name),
+            state_root=Path(self.tempdir.name) / "state",
             sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
         )
 
@@ -756,6 +1265,7 @@ class RuntimeTests(unittest.TestCase):
             role="update",
             model_id="openai/test",
             memory_root=Path(self.tempdir.name),
+            state_root=Path(self.tempdir.name) / "state",
             sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
         )
 
@@ -790,6 +1300,7 @@ class RuntimeTests(unittest.TestCase):
             role="update",
             model_id="openai/test",
             memory_root=Path(self.tempdir.name),
+            state_root=Path(self.tempdir.name) / "state",
             sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
         )
 
@@ -815,6 +1326,7 @@ class RuntimeTests(unittest.TestCase):
             role="update",
             model_id="openai/test",
             memory_root=Path(self.tempdir.name),
+            state_root=Path(self.tempdir.name) / "state",
             sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
         )
 
@@ -934,7 +1446,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(gitignore_path.read_text(encoding="utf-8"), "*\n")
 
     def test_strips_visible_thinking_from_output_and_saved_history(self):
-        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name))
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name) / "memory",
+            state_root=Path(self.tempdir.name),
+        )
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
@@ -969,7 +1486,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(history[0]["parts"][0]["content"], "final answer")
 
     def test_sanitizer_preserves_structured_thinking_and_non_response_text(self):
-        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name))
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name) / "memory",
+            state_root=Path(self.tempdir.name),
+        )
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
@@ -1199,6 +1721,20 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("git_add", tool_names)
         self.assertNotIn("git_discard", tool_names)
         self.assertNotIn("git_commit", tool_names)
+
+    def _write_runtime_state(self, root: Path, role: str, session_id: str, *, history: str, provider: str) -> None:
+        history_path = self._runtime_history_path(root, role, session_id)
+        provider_path = self._provider_session_path(root, role, session_id)
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        provider_path.parent.mkdir(parents=True, exist_ok=True)
+        history_path.write_text(history, encoding="utf-8")
+        provider_path.write_text(provider, encoding="utf-8")
+
+    def _runtime_history_path(self, root: Path, role: str, session_id: str) -> Path:
+        return root / ".runtime" / "sessions" / role / f"{session_id}.json"
+
+    def _provider_session_path(self, root: Path, role: str, session_id: str) -> Path:
+        return root / ".runtime" / "agent_cli_sessions" / role / f"{session_id}.json"
 
     def _fake_pydantic_modules(self):
         class FakeModelRetry(Exception):

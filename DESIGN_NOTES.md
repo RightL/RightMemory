@@ -30,9 +30,15 @@ Schema rules live in `skills/rightmemory-schema.md` instead of at the top of eve
 
 `# User Context` is ordinary agent-editable memory for durable context about the user, such as relevant background, current direction, goals, constraints, or values that help future agents collaborate. `# Cross-Session Agent Behavior` stays separate because it describes how agents should behave with the user. This keeps user facts and agent instructions distinct while allowing both to live in the same tree + graph memory model.
 
-### Update baseline commits
+### Automatic write isolation
 
-The update role makes a baseline commit before its first write when the memory repo is already dirty, because pre-existing memory edits should not be mixed with routine model-created changes. Routine update writes remain uncommitted so users can batch or review them, while dreamer remains the commit-oriented consolidation path.
+Automatic `update`, `reviewer`, and `dreamer` turns run in temporary Git worktrees when they operate on the main state root. The role still behaves like an ordinary memory writer: it reads, edits, validates, and commits allowed memory files. Runtime validates those temporary commits, keeps `MEMORY.md` as a regular file, lands successful commits in the main memory repo, and promotes the temporary session/provider state only after the isolated turn succeeds.
+
+This keeps the user-facing memory repo focused on completed memory commits instead of partial agent editing state. Failed or interrupted temporary work is discarded because the durable retry source is the original update batch, transcript batch, or dreamer trigger balance. Dirty main memory files block automatic semantic writes independently of remote sync so local edits remain visible instead of being blended into a model-created change.
+
+### Change-triggered dreamer
+
+Dreamer watch is driven by accumulated successful memory work rather than elapsed time. Successful update and review batches add points under `.runtime/dreamer/trigger-state.json`; the watcher checks that balance on its configured cadence and runs when the threshold is reached. A successful automatic dream consumes the threshold after the cycle lands or completes as a valid no-op, while failure preserves the balance. This makes dreamer a consolidation pressure valve instead of a clock-driven maintenance task.
 
 ### Command-backed roles
 
@@ -58,7 +64,7 @@ Standalone commit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, and `dream_log
 
 Global memory sync remains local-first: every device keeps a complete memory root, and Git provides distributed transport between those roots. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
 
-Runtime code owns deterministic sync mechanics at the point where each one belongs in the workflow. For `update`, `reviewer`, and `dreamer`, preflight fetches, merges available upstream changes, checks freshness, and routes dirty or conflicted memory state to `sync-reconciler` before semantic model work. After those roles commit memory changes, runtime push handling publishes the committed state and routes dirty or conflicted push results to `sync-reconciler`. Retrieval keeps the fast local path by default.
+Runtime code owns deterministic sync mechanics at the point where each one belongs in the workflow. For `update`, `reviewer`, and `dreamer`, sync preflight handles upstream freshness before semantic model work when sync is enabled, and push handling publishes committed memory changes after successful automatic writes land. Sync-detected dirty or conflicted memory state can still route to `sync-reconciler`, while the isolated-write dirty-main guard remains local and runs even when sync is disabled. Retrieval keeps the fast local path by default.
 
 Memory-aware sync repair stays in `sync-reconciler` because Markdown memory conflicts and dirty memory state require durability and schema judgment, not just Git mechanics. Runtime and scheduled sync flows call that role with bounded repair context, and the role validates the file set, commits the repaired state, and calls `sync_push`. `sync-reconciler` stays separate from dreamer because scheduled sync repair is a narrow maintenance responsibility, while dreamer owns broader consolidation and restructuring.
 

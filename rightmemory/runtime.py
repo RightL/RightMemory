@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from functools import wraps
+from pathlib import Path
 from typing import Any
 
 from .agent_cli import CliAgentExecutor, NO_SESSION_RIGHTMEMORY_SESSION_ID
 from .config import RuntimeConfig, load_config
 from .debug import DebugTrace
+from .isolated_write import IsolatedWriteSupervisor
 from .prompt import build_instructions
+from .provider_sessions import ProviderSessionStore
 from .recent_submitted import (
     RecentSubmittedMemoryDeliveryStore,
     RecentSubmittedMemoryEntry,
@@ -17,12 +24,12 @@ from .recent_submitted import (
     collect_recent_submitted_memory,
 )
 from .semantic_upgrades import SemanticUpgradeContext, mark_absorbed, pending_context
-from .session import MemoryWriteLock, MessageSessionStore
+from .session import MemoryWriteLock, MessageSessionStore, _ensure_runtime_gitignore, _fsync_directory
 from .sync import SyncManager
 from .tools import MemoryTools
 
 
-SEMANTIC_SYNC_ROLES = {"dreamer", "reviewer", "update"}
+AUTOMATIC_WRITE_ROLES = {"dreamer", "reviewer", "update"}
 SYNC_TOOL_ROLES = {"sync-reconciler"}
 SYNC_REPAIR_STATUSES = {"conflict", "dirty"}
 SYNC_REPAIR_SESSION_ID = "runtime-sync-repair"
@@ -53,8 +60,8 @@ class RightMemoryRuntime:
             raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
         self.config = config
         self.tools = MemoryTools(config.memory_root)
-        self.sessions = MessageSessionStore(config.memory_root, config.role)
-        self.recent_submitted_delivery = RecentSubmittedMemoryDeliveryStore(config.memory_root)
+        self.sessions = MessageSessionStore(config.state_root, config.role)
+        self.recent_submitted_delivery = RecentSubmittedMemoryDeliveryStore(config.state_root)
         self._message_history: list[Any] = []
         self._active_trace: DebugTrace | None = None
         self._sync_manager: SyncManager | None = None
@@ -105,10 +112,17 @@ class RightMemoryRuntime:
                 api_base=self.config.api_base,
             )
             try:
-                if self.config.runtime_mode == "cli-agent":
-                    result, post_sync = self._run_locked_turn(lambda: self._run_session_cli_agent(session_id, message))
+                isolate_write = self._should_isolate_write_turn()
+                run_session = (
+                    self._run_session_cli_agent
+                    if self.config.runtime_mode == "cli-agent"
+                    else self._run_session_model
+                )
+                if isolate_write:
+                    run_callback = lambda: self._run_session_turn_isolated(session_id, message)
                 else:
-                    result, post_sync = self._run_locked_turn(lambda: self._run_session_model(session_id, message))
+                    run_callback = lambda: run_session(session_id, message)
+                result, post_sync = self._run_locked_turn(run_callback, isolate_write=isolate_write)
             except Exception as exc:
                 self._trace("run_failed", error_type=type(exc).__name__, error=str(exc))
                 raise
@@ -147,8 +161,41 @@ class RightMemoryRuntime:
             self._record_recent_submitted_delivery(session_id, recent_submitted_entries)
             return result
 
-    def _run_locked_turn(self, run_model: Callable[[], Any]) -> tuple[Any, Any | None]:
-        if self.config.role not in SEMANTIC_SYNC_ROLES or not self.config.sync.enabled:
+    def _run_session_turn_isolated(self, session_id: str, message: str):
+        supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
+        state = _IsolatedStateOverlay(self.config.state_root, self.config.role, session_id)
+        with self.sessions.locked(session_id):
+            with state as state_root:
+                result = supervisor.run(
+                    lambda worktree: self._run_session_turn_in_worktree(worktree, state_root, session_id, message)
+                )
+                state.promote()
+                return result.output
+
+    def _run_session_turn_in_worktree(self, worktree: Path, state_root: Path, session_id: str, message: str):
+        nested_config = replace(
+            self.config,
+            memory_root=worktree,
+            state_root=state_root,
+            sync=replace(self.config.sync, memory_root=worktree, enabled=False),
+        )
+        nested = RightMemoryRuntime(nested_config)
+        nested._active_trace = self._active_trace
+        try:
+            if nested.config.runtime_mode == "cli-agent":
+                result, _post_sync = nested._run_locked_turn(
+                    lambda: nested._run_session_cli_agent(session_id, message)
+                )
+                return result
+            result, _post_sync = nested._run_locked_turn(lambda: nested._run_session_model(session_id, message))
+            return result
+        finally:
+            nested.cleanup()
+
+    def _run_locked_turn(self, run_model: Callable[[], Any], *, isolate_write: bool = False) -> tuple[Any, Any | None]:
+        if isolate_write:
+            return self._run_isolated_locked_turn(run_model)
+        if self.config.role not in AUTOMATIC_WRITE_ROLES or not self.config.sync.enabled:
             with self._memory_write_lock():
                 return run_model(), None
 
@@ -166,6 +213,28 @@ class RightMemoryRuntime:
             self._run_sync_reconciler(preflight_repair)
             repaired = True
 
+    def _run_isolated_locked_turn(self, run_model: Callable[[], Any]) -> tuple[Any, Any | None]:
+        if self.config.role not in AUTOMATIC_WRITE_ROLES or not self.config.sync.enabled:
+            return run_model(), None
+
+        repaired = False
+        while True:
+            with self._memory_write_lock():
+                preflight_repair = self._sync_preflight_locked()
+            if preflight_repair is None:
+                result = run_model()
+                with self._memory_write_lock():
+                    return result, self._sync_after_semantic_turn()
+            if repaired:
+                raise RuntimeError(
+                    f"sync repair did not clear {preflight_repair.status} state: {preflight_repair.message}"
+                )
+            self._run_sync_reconciler(preflight_repair)
+            repaired = True
+
+    def _should_isolate_write_turn(self) -> bool:
+        return self.config.role in AUTOMATIC_WRITE_ROLES and self.config.memory_root == self.config.state_root
+
     def _sync(self) -> SyncManager:
         if self._sync_manager is None:
             self._sync_manager = SyncManager(self.config.sync)
@@ -178,7 +247,7 @@ class RightMemoryRuntime:
         return None
 
     def _sync_after_semantic_turn(self):
-        if self.config.role not in SEMANTIC_SYNC_ROLES or not self.config.sync.enabled:
+        if self.config.role not in AUTOMATIC_WRITE_ROLES or not self.config.sync.enabled:
             return None
         result = self._sync().push()
         if result.status in SYNC_REPAIR_STATUSES:
@@ -233,7 +302,7 @@ class RightMemoryRuntime:
     def _semantic_upgrade_context(self) -> SemanticUpgradeContext | None:
         if self.config.role != "dreamer":
             return None
-        context = pending_context(self.config.memory_root)
+        context = pending_context(self.config.memory_root, state_root=self.config.state_root)
         if not context.notes and not context.warnings:
             return None
         return context
@@ -241,7 +310,7 @@ class RightMemoryRuntime:
     def _mark_semantic_upgrades_absorbed(self) -> None:
         if self.config.role != "dreamer" or not self._semantic_upgrade_ids:
             return
-        mark_absorbed(self.config.memory_root, self._semantic_upgrade_ids)
+        mark_absorbed(self.config.state_root, self._semantic_upgrade_ids)
         self._semantic_upgrade_ids = []
 
     def _build_agent(self):
@@ -264,13 +333,14 @@ class RightMemoryRuntime:
     def _build_cli_agent(self) -> CliAgentExecutor:
         if self.config.agent_cli is None:
             raise RuntimeError("cli-agent runtime requires agent_cli config")
-        if self.semantic_upgrades is None:
-            return CliAgentExecutor(self.config.memory_root, self.config.role, self.config.agent_cli)
+        kwargs: dict[str, Any] = {"state_root": self.config.state_root}
+        if self.semantic_upgrades is not None:
+            kwargs["semantic_upgrades"] = self.semantic_upgrades
         return CliAgentExecutor(
             self.config.memory_root,
             self.config.role,
             self.config.agent_cli,
-            semantic_upgrades=self.semantic_upgrades,
+            **kwargs,
         )
 
     def _agent_tools(self) -> list[Callable[..., Any]]:
@@ -356,7 +426,7 @@ class RightMemoryRuntime:
             yield None
             return
         previous = self._active_trace
-        trace = DebugTrace(self.config.memory_root, self.config.role, session_id)
+        trace = DebugTrace(self.config.state_root, self.config.role, session_id)
         self._active_trace = trace
         try:
             yield trace
@@ -400,6 +470,60 @@ class RightMemoryRuntime:
         except json.JSONDecodeError:
             return data
         return json.dumps(_sanitize_message_history_value(value), ensure_ascii=False).encode()
+
+
+class _IsolatedStateOverlay:
+    def __init__(self, state_root: Path, role: str, session_id: str):
+        self.state_root = state_root
+        self.role = role
+        self.session_id = session_id
+        self.overlay_root = state_root / ".runtime" / "isolated-state" / f"{role}-{uuid.uuid4().hex}"
+
+    def __enter__(self) -> Path:
+        _ensure_runtime_gitignore(self.state_root / ".runtime")
+        self._seed()
+        return self.overlay_root
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        shutil.rmtree(self.overlay_root, ignore_errors=True)
+
+    def promote(self) -> None:
+        _ensure_runtime_gitignore(self.state_root / ".runtime")
+        for relative_path in self._promoted_paths():
+            _copy_state_file(self.overlay_root / relative_path, self.state_root / relative_path)
+
+    def _seed(self) -> None:
+        for relative_path in self._seeded_paths():
+            _copy_state_file(self.state_root / relative_path, self.overlay_root / relative_path)
+        _ensure_runtime_gitignore(self.overlay_root / ".runtime")
+
+    def _seeded_paths(self) -> list[Path]:
+        paths = self._promoted_paths()
+        if self.role == "dreamer":
+            paths.append(Path(".runtime") / "semantic-upgrades.json")
+        return paths
+
+    def _promoted_paths(self) -> list[Path]:
+        return [
+            MessageSessionStore(self.state_root, self.role).paths(self.session_id).history.relative_to(self.state_root),
+            ProviderSessionStore(self.state_root, self.role).path(self.session_id).relative_to(self.state_root),
+        ]
+
+
+def _copy_state_file(source: Path, destination: Path) -> None:
+    if not source.exists():
+        return
+    if not source.is_file():
+        raise RuntimeError(f"runtime state path is not a file: {source}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copy2(source, tmp_path)
+        os.replace(tmp_path, destination)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    _fsync_directory(destination.parent)
 
 
 def build_model(config: RuntimeConfig):

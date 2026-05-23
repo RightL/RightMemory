@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 import tomllib
 
 
 MEMORY_ROOT_ENV = "RIGHTMEMORY_ROOT"
 MEMORY_ROOT = Path(os.environ.get(MEMORY_ROOT_ENV, "~/.rightmemory")).expanduser()
+_STATE_ROOT_UNSET = cast(Path, object())
 CONFIG_PATH = MEMORY_ROOT / "rightmemory.toml"
 ROLES = {"dreamer", "retrieve", "reviewer", "sync-reconciler", "update"}
 DEFAULT_MAX_TOOL_RETRIES = 10
@@ -16,6 +18,10 @@ DEFAULT_REVIEW_IDLE_SECONDS = 3600
 DEFAULT_REVIEW_SINCE_DAYS = 3
 DEFAULT_REVIEW_BATCH_SIZE = 3
 DEFAULT_SYNC_STALE_PULL_HOURS = 24
+DEFAULT_DREAMER_TRIGGER_POINTS = 50.0
+DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS = 1.0
+DEFAULT_DREAMER_REVIEW_SESSION_POINTS = 1.5
+DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS = 3000
 
 
 @dataclass(frozen=True)
@@ -41,6 +47,15 @@ class ReviewConfig:
 
 
 @dataclass(frozen=True)
+class DreamerWatchConfig:
+    memory_root: Path = MEMORY_ROOT
+    trigger_points: float = DEFAULT_DREAMER_TRIGGER_POINTS
+    update_candidate_points: float = DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS
+    review_session_points: float = DEFAULT_DREAMER_REVIEW_SESSION_POINTS
+    check_interval_seconds: int = DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS
+
+
+@dataclass(frozen=True)
 class AgentCliConfig:
     provider: str
     model: str | None = None
@@ -56,9 +71,14 @@ class RuntimeConfig:
     api_key: str | None = None
     model_kwargs: dict[str, Any] = field(default_factory=dict)
     memory_root: Path = MEMORY_ROOT
+    state_root: Path = _STATE_ROOT_UNSET
     max_tool_retries: int = DEFAULT_MAX_TOOL_RETRIES
     debug_trace: bool = False
     sync: SyncConfig = field(default_factory=SyncConfig)
+
+    def __post_init__(self) -> None:
+        if self.state_root is _STATE_ROOT_UNSET:
+            object.__setattr__(self, "state_root", self.memory_root)
 
 
 def load_config(role: str) -> RuntimeConfig:
@@ -74,7 +94,10 @@ def load_config(role: str) -> RuntimeConfig:
         role_section = {}
     if not isinstance(role_section, dict):
         raise ValueError(f"[{role}] must be a TOML table")
-    _reject_unknown_keys(role_section, {"model", "agent_cli"}, f"[{role}]")
+    allowed_role_keys = {"model", "agent_cli"}
+    if role == "dreamer":
+        allowed_role_keys.add("watch")
+    _reject_unknown_keys(role_section, allowed_role_keys, f"[{role}]")
 
     has_model = "model" in role_section
     has_agent_cli = "agent_cli" in role_section
@@ -106,6 +129,7 @@ def load_config(role: str) -> RuntimeConfig:
         api_key=api_key,
         model_kwargs=model_kwargs,
         memory_root=MEMORY_ROOT,
+        state_root=MEMORY_ROOT,
         max_tool_retries=DEFAULT_MAX_TOOL_RETRIES,
         debug_trace=_debug_trace(data.get("debug", {})),
         sync=_sync_config(data.get("sync", {})),
@@ -152,6 +176,60 @@ def load_review_config() -> ReviewConfig:
         since_days=since_days,
         batch_size=batch_size,
         sources=sources,
+    )
+
+
+def load_dreamer_watch_config() -> DreamerWatchConfig:
+    data = _load_raw_config()
+
+    if not MEMORY_ROOT.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
+
+    _reject_unknown_keys(data, _top_level_keys(), "top-level")
+    section = data.get("dreamer", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError("[dreamer] must be a TOML table")
+    _reject_unknown_keys(section, {"model", "agent_cli", "watch"}, "[dreamer]")
+
+    watch = section.get("watch", {})
+    if watch is None:
+        watch = {}
+    if not isinstance(watch, dict):
+        raise ValueError("[dreamer.watch] must be a TOML table")
+    _reject_unknown_keys(
+        watch,
+        {"trigger_points", "update_candidate_points", "review_session_points", "check_interval_seconds"},
+        "[dreamer.watch]",
+    )
+
+    return DreamerWatchConfig(
+        memory_root=MEMORY_ROOT,
+        trigger_points=_positive_number(
+            watch,
+            "trigger_points",
+            DEFAULT_DREAMER_TRIGGER_POINTS,
+            "[dreamer.watch]",
+        ),
+        update_candidate_points=_positive_number(
+            watch,
+            "update_candidate_points",
+            DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS,
+            "[dreamer.watch]",
+        ),
+        review_session_points=_positive_number(
+            watch,
+            "review_session_points",
+            DEFAULT_DREAMER_REVIEW_SESSION_POINTS,
+            "[dreamer.watch]",
+        ),
+        check_interval_seconds=_positive_integer(
+            watch,
+            "check_interval_seconds",
+            DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS,
+            "[dreamer.watch]",
+        ),
     )
 
 
@@ -203,6 +281,20 @@ def _model_kwargs(value: object) -> dict[str, Any]:
     return dict(value)
 
 
+def _positive_number(data: dict[str, object], key: str, default: float, context: str) -> float:
+    value = data.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{context}.{key} must be a positive number")
+    return float(value)
+
+
+def _positive_integer(data: dict[str, object], key: str, default: int, context: str) -> int:
+    value = data.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{context}.{key} must be a positive integer")
+    return value
+
+
 def _agent_cli_runtime_config(role: str, data: dict[str, object], role_section: dict[str, object]) -> RuntimeConfig:
     global_section = data.get("agent_cli", {})
     if global_section is None:
@@ -232,6 +324,7 @@ def _agent_cli_runtime_config(role: str, data: dict[str, object], role_section: 
         runtime_mode="cli-agent",
         agent_cli=AgentCliConfig(provider=provider, model=model),
         memory_root=MEMORY_ROOT,
+        state_root=MEMORY_ROOT,
         max_tool_retries=DEFAULT_MAX_TOOL_RETRIES,
         debug_trace=_debug_trace(data.get("debug", {})),
         sync=_sync_config(data.get("sync", {})),
