@@ -8,14 +8,15 @@
 - `install.sh` installs either standalone mode or cli-agent mode, preserves existing user memory files, and refreshes the managed example block when present.
 
 ## Development Commands
-- Run the test suite with `python -m unittest discover -s tests`.
-- For syntax-only checks, use `python -m compileall -q rightmemory tests`.
+- Run the test suite with `conda run -n rightmemory python -m unittest discover -s tests`.
+- For syntax-only checks, use `conda run -n rightmemory python -m compileall -q rightmemory tests`.
 - Use `./install.sh [--mode cli-agent|standalone] <memory-root> <skills-target>` when verifying install behavior.
 - `uv` is available through the existing conda environment: `conda run -n rightmemory uv --version`. Use `conda run -n rightmemory ./install.sh ...` when the installer needs `uv`.
+- The installer preflights `git`, `uv`, and Python >=3.11 provisioning through `uv` before creating or changing install files.
 - Useful review commands are `rightmemory review scan --once`, `rightmemory review watch`, and `rightmemory review normalize --source <codex|claude> --path <file>`.
 - Use `rightmemory watch start|status|stop|restart` to manage background review and dreamer watchers. Use `rightmemory dreamer watch` directly when debugging the lower-level trigger loop.
 - Use `rightmemory doctor agent-cli` after configuring cli-agent mode to check provider commands, role config, and basic read/write probes.
-- Semantic upgrade notes are Markdown files under `rightmemory/semantic_upgrades/`; validate them with `python -m unittest discover -s tests -p 'test_semantic_upgrades.py'`.
+- Semantic upgrade notes are Markdown files under `rightmemory/semantic_upgrades/`; validate them with `conda run -n rightmemory python -m unittest discover -s tests -p 'test_semantic_upgrades.py'`.
 
 ## Maintaining This File (IMPORTANT!)
 - Treat this file (./AGENTS.md) as operational instructions for coding agents, not as a design document. Keep durable design explanation in `README.md` or `DESIGN_NOTES.md`.

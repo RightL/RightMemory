@@ -21,6 +21,26 @@ RightMemory is aimed at developers who spend serious time with coding agents and
 
 ## Quick Start
 
+Install prerequisites:
+
+```bash
+# macOS
+brew install uv git
+# or install git with Apple's tools:
+xcode-select --install
+
+# Ubuntu / Debian / WSL
+curl -LsSf https://astral.sh/uv/install.sh | sh
+sudo apt update && sudo apt install -y git
+
+# Linux Fedora
+curl -LsSf https://astral.sh/uv/install.sh | sh
+sudo dnf install git
+```
+
+More options: [uv install](https://docs.astral.sh/uv/getting-started/installation/),
+[git install](https://git-scm.com/book/en/v2/Getting-Started-Installing-Git).
+
 ```bash
 git clone https://github.com/RightL/RightMemory.git
 cd RightMemory
@@ -36,7 +56,19 @@ If you already use Codex CLI or Claude Code CLI and want RightMemory roles to ru
 rightmemory doctor agent-cli
 ```
 
-After install, open `~/.rightmemory/MEMORY.md` and add real memory before the managed example block. Good first entries are project context, durable user context, and cross-session agent behavior guidance.
+After install, add a short instruction to your agent guidance file, such as
+`AGENTS.md` for Codex or `CLAUDE.md` for Claude Code:
+
+```markdown
+Use the memory-orchestrator skill to retrieve and update memory.
+```
+
+Then start the background watcher. It reviews recent agent sessions and triggers
+dream cycles for memory cleanup and consolidation:
+
+```bash
+rightmemory watch start
+```
 
 ## Demo Flow
 
@@ -59,7 +91,7 @@ Later:
   rightmemory dreamer consolidates stale, duplicated, or overgrown memory
 ```
 
-For a short recording script, see [docs/DEMO.md](docs/DEMO.md). For launch copy, GitHub topics, and community post drafts, see [docs/PROMOTION.md](docs/PROMOTION.md).
+For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 
 ## What It Gives You
 
@@ -226,14 +258,17 @@ The installer arguments are:
 - `<skills-target>` is where your agent loads skills from, such as `~/.claude/skills` or `~/.codex/skills`.
 - With no path arguments, the installer uses `~/.rightmemory` and installs the orchestrator skill into both `~/.codex/skills` and `~/.claude/skills`.
 
-Both modes use `uv` to install the runtime under `${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`. The installer writes a `~/.local/bin/rightmemory` wrapper bound to your chosen memory root. If `~/.local/bin` is not on `PATH`, the installer prints shell-profile guidance after install.
+Both modes require `git` and `uv`. The runtime is installed under
+`${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`, and the `rightmemory`
+command is written to `~/.local/bin/rightmemory`. If `~/.local/bin` is not on
+`PATH`, the installer prints shell-profile guidance after install.
 
 ## Everyday Use
 
-1. Edit `MEMORY.md` after install and add your own durable memory before the managed example block, including user context or project context that should guide future sessions.
-2. Let the installed orchestrator decide when a user request needs memory retrieval.
-3. Let the update role write durable updates after work that should affect future sessions.
-4. Ask for a dream cycle when you want cleanup, consolidation, or stale-memory review.
+1. Keep the `memory-orchestrator` instruction in `AGENTS.md` or `CLAUDE.md`.
+2. Run `rightmemory watch start` for background review and dream cycles.
+3. Let the orchestrator handle memory retrieval and durable updates during agent work.
+4. Use normal git tools in the memory root to inspect or revert memory changes.
 
 Dream cycles write reports to `dream_logs/YYYY-MM-DD.md` and commit touched memory files. If a consolidation is wrong, use normal git tools in the memory root to inspect or revert it.
 
@@ -506,7 +541,6 @@ RightMemory/
 ├── README.md
 ├── docs/
 │   ├── DEMO.md
-│   ├── PROMOTION.md
 │   └── assets/
 ├── install.sh
 ├── MEMORY.example.md

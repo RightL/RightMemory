@@ -23,6 +23,9 @@
 #   cli-agent  Install a command-backed orchestrator skill that calls rightmemory.
 #   standalone Install the same command-backed runtime layout for local standalone use.
 #
+# Requirements:
+#   git and uv must be available on PATH. uv provisions Python >=3.11.
+#
 # Example:
 #   ./install.sh
 #   ./install.sh ~/.rightmemory ~/.codex/skills
@@ -43,6 +46,9 @@ Arguments:
 Modes:
   cli-agent   Install a memory-orchestrator skill that calls the rightmemory command.
   standalone  Install the same command-backed runtime layout for local standalone use.
+
+Requirements:
+  git and uv must be available on PATH. uv provisions Python >=3.11.
 
 Options:
   --mode MODE    standalone (default) or cli-agent.
@@ -111,6 +117,102 @@ case "$MODE" in
     exit 1
     ;;
 esac
+
+print_uv_install_guidance() {
+  cat >&2 <<'EOF'
+
+RightMemory uses uv to create an isolated Python runtime.
+Install uv, restart your shell if needed, then rerun ./install.sh.
+
+macOS:
+  brew install uv
+  # or:
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+
+Linux / WSL:
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+
+Windows:
+  Use WSL, then run the Linux commands inside your WSL distro.
+
+Official uv install guide:
+  https://docs.astral.sh/uv/getting-started/installation/
+EOF
+}
+
+print_git_install_guidance() {
+  cat >&2 <<'EOF'
+
+RightMemory uses git for inspectable memory changes, rollback, isolated worktrees, and sync.
+Install git, restart your shell if needed, then rerun ./install.sh.
+
+macOS:
+  xcode-select --install
+  # or:
+  brew install git
+
+Linux / WSL Debian or Ubuntu:
+  sudo apt update && sudo apt install -y git
+
+Linux Fedora:
+  sudo dnf install git
+
+Windows:
+  Use WSL, then run the Linux commands inside your WSL distro.
+
+Official git install guide:
+  https://git-scm.com/book/en/v2/Getting-Started-Installing-Git
+EOF
+}
+
+print_uv_python_guidance() {
+  cat >&2 <<'EOF'
+
+Could not find or provision Python >=3.11 with uv.
+
+RightMemory asks uv to supply the Python runtime. Try again with network access,
+make sure uv Python downloads are enabled, or install Python 3.11+ so uv can
+discover it. If your uv is old, upgrade it and rerun ./install.sh.
+
+uv Python guide:
+  https://docs.astral.sh/uv/guides/install-python/
+EOF
+}
+
+preflight_requirements() {
+  missing=0
+
+  echo "Checking installer requirements..."
+  if command -v git >/dev/null 2>&1 && git --version >/dev/null 2>&1; then
+    echo "  [ok]      git"
+  else
+    echo "Missing or unusable required command: git" >&2
+    print_git_install_guidance
+    missing=1
+  fi
+
+  if command -v uv >/dev/null 2>&1 && uv --version >/dev/null 2>&1; then
+    echo "  [ok]      uv"
+  else
+    echo "Missing or unusable required command: uv" >&2
+    print_uv_install_guidance
+    missing=1
+  fi
+
+  if [ "$missing" -ne 0 ]; then
+    exit 1
+  fi
+
+  if uv python find --no-project ">=3.11" >/dev/null 2>&1; then
+    echo "  [ok]      Python >=3.11 via uv"
+  else
+    print_uv_python_guidance
+    exit 1
+  fi
+  echo
+}
+
+preflight_requirements
 
 mkdir -p "$MEMORY_ROOT"
 MEMORY_ROOT="$(cd "$MEMORY_ROOT" && pwd)"
@@ -294,21 +396,27 @@ install_or_refresh_memory() {
 }
 
 install_cli_runtime_layout() {
-  if ! command -v uv >/dev/null 2>&1; then
-    echo "Missing required command: uv" >&2
-    echo "Install uv first: https://docs.astral.sh/uv/getting-started/installation/" >&2
-    exit 1
-  fi
-
   mkdir -p "$RIGHTMEMORY_HOME" "$RIGHTMEMORY_BIN_DIR"
   if [ ! -d "$RIGHTMEMORY_VENV" ]; then
-    uv venv "$RIGHTMEMORY_VENV"
+    if ! uv venv --no-project --python ">=3.11" "$RIGHTMEMORY_VENV"; then
+      print_uv_python_guidance
+      exit 1
+    fi
     echo "  [new]     $RIGHTMEMORY_VENV"
   else
     echo "  [keep]    $RIGHTMEMORY_VENV already exists"
   fi
 
-  uv pip install --python "$RIGHTMEMORY_VENV/bin/python" "$REPO_ROOT"
+  if ! uv pip install --python "$RIGHTMEMORY_VENV/bin/python" "$REPO_ROOT"; then
+    cat >&2 <<EOF
+
+Could not install RightMemory into the uv-managed runtime:
+  $RIGHTMEMORY_VENV
+
+Check the uv output above, then rerun ./install.sh.
+EOF
+    exit 1
+  fi
   echo "  [install] rightmemory package into $RIGHTMEMORY_VENV"
 
   cat > "$RIGHTMEMORY_BIN" <<EOF

@@ -17,9 +17,15 @@ class InstallScriptTests(unittest.TestCase):
         fake_uv = fake_bin / "uv"
         fake_uv.write_text(
             "#!/usr/bin/env sh\n"
+            "if [ \"$1\" = \"python\" ] && [ \"$2\" = \"find\" ]; then\n"
+            "  echo '/fake/rightmemory-python'\n"
+            "  exit 0\n"
+            "fi\n"
             "if [ \"$1\" = \"venv\" ]; then\n"
-            "  mkdir -p \"$2/bin\"\n"
-            "  cat > \"$2/bin/python\" <<'PYEOF'\n"
+            "  target=''\n"
+            "  for arg in \"$@\"; do target=\"$arg\"; done\n"
+            "  mkdir -p \"$target/bin\"\n"
+            "  cat > \"$target/bin/python\" <<'PYEOF'\n"
             "#!/usr/bin/env sh\n"
             "if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"rightmemory.semantic_upgrades\" ]; then\n"
             "  command=\"$3\"\n"
@@ -47,7 +53,7 @@ class InstallScriptTests(unittest.TestCase):
             "fi\n"
             "exit 0\n"
             "PYEOF\n"
-            "  chmod 755 \"$2/bin/python\"\n"
+            "  chmod 755 \"$target/bin/python\"\n"
             "fi\n"
             "exit 0\n",
             encoding="utf-8",
@@ -58,6 +64,43 @@ class InstallScriptTests(unittest.TestCase):
             "HOME": str(root / "home"),
             "XDG_DATA_HOME": str(root / "data"),
             "PATH": f"{fake_bin}:/usr/bin:/bin",
+        }
+
+    def _env_with_fake_git_no_uv(self, root: Path) -> dict[str, str]:
+        fake_bin = root / "bin"
+        fake_bin.mkdir(exist_ok=True)
+        fake_git = fake_bin / "git"
+        fake_git.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake_git.chmod(0o755)
+        return {
+            **os.environ,
+            "HOME": str(root / "home"),
+            "XDG_DATA_HOME": str(root / "data"),
+            "PATH": f"{fake_bin}:/bin",
+        }
+
+    def _env_with_failing_uv_python(self, root: Path) -> dict[str, str]:
+        fake_bin = root / "bin"
+        fake_bin.mkdir(exist_ok=True)
+        fake_git = fake_bin / "git"
+        fake_git.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake_git.chmod(0o755)
+        fake_uv = fake_bin / "uv"
+        fake_uv.write_text(
+            "#!/usr/bin/env sh\n"
+            "if [ \"$1\" = \"python\" ] && [ \"$2\" = \"find\" ]; then\n"
+            "  echo 'no Python 3.11 available' >&2\n"
+            "  exit 1\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake_uv.chmod(0o755)
+        return {
+            **os.environ,
+            "HOME": str(root / "home"),
+            "XDG_DATA_HOME": str(root / "data"),
+            "PATH": f"{fake_bin}:/bin",
         }
 
     def test_initial_install_copies_managed_example(self):
@@ -155,53 +198,7 @@ class InstallScriptTests(unittest.TestCase):
     def test_default_install_uses_standalone_and_default_skill_targets(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            fake_uv = fake_bin / "uv"
-            fake_uv.write_text(
-                "#!/usr/bin/env sh\n"
-                "if [ \"$1\" = \"venv\" ]; then\n"
-                "  mkdir -p \"$2/bin\"\n"
-                "  cat > \"$2/bin/python\" <<'PYEOF'\n"
-                "#!/usr/bin/env sh\n"
-                "if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"rightmemory.semantic_upgrades\" ]; then\n"
-                "  command=\"$3\"\n"
-                "  memory_root=''\n"
-                "  previous=''\n"
-                "  for arg in \"$@\"; do\n"
-                "    if [ \"$previous\" = \"--memory-root\" ]; then memory_root=\"$arg\"; fi\n"
-                "    previous=\"$arg\"\n"
-                "  done\n"
-                "  mkdir -p \"$memory_root/.runtime\"\n"
-                "  state=\"$memory_root/.runtime/semantic-upgrades.json\"\n"
-                "  if [ \"$command\" = \"baseline\" ]; then\n"
-                "    echo '  [keep]    semantic upgrade baseline recorded for 2 current note(s):'\n"
-                "    echo '            user-context-agent-behavior-split'\n"
-                "    echo '            open-context-questions'\n"
-                "    printf '{\"absorbed\":{\"user-context-agent-behavior-split\":{},\"open-context-questions\":{}}}\\n' > \"$state\"\n"
-                "  elif grep -q 'user-context-agent-behavior-split' \"$state\" 2>/dev/null; then\n"
-                "    echo '  [keep]    no semantic upgrade notes pending'\n"
-                "  else\n"
-                "    echo '  [notice]  2 semantic upgrade note(s) pending for the next dreamer cycle:'\n"
-                "    echo '            user-context-agent-behavior-split'\n"
-                "    echo '            open-context-questions'\n"
-                "    printf '{\"absorbed\": {}}\\n' > \"$state\"\n"
-                "  fi\n"
-                "fi\n"
-                "exit 0\n"
-                "PYEOF\n"
-                "  chmod 755 \"$2/bin/python\"\n"
-                "fi\n"
-                "exit 0\n",
-                encoding="utf-8",
-            )
-            fake_uv.chmod(0o755)
-            env = {
-                **os.environ,
-                "HOME": str(root / "home"),
-                "XDG_DATA_HOME": str(root / "data"),
-                "PATH": f"{fake_bin}:/usr/bin:/bin",
-            }
+            env = self._env_with_fake_uv(root)
 
             result = subprocess.run(
                 ["bash", "install.sh"],
@@ -225,6 +222,84 @@ class InstallScriptTests(unittest.TestCase):
             self.assertIn("rightmemory is installed", result.stdout)
             self.assertIn("semantic upgrade baseline recorded", result.stdout)
             self.assertNotIn("pending for the next dreamer cycle", result.stdout)
+
+    def test_install_reports_missing_git_before_writes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            env = self._env_with_fake_uv(root)
+            env["PATH"] = f"{root / 'bin'}:/bin"
+
+            result = subprocess.run(
+                ["bash", "install.sh", "--mode", "cli-agent", str(memory_root), str(skills_target)],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            memory_exists = memory_root.exists()
+            skills_exists = skills_target.exists()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing or unusable required command: git", result.stderr)
+        self.assertIn("macOS:", result.stderr)
+        self.assertIn("Linux / WSL", result.stderr)
+        self.assertIn("Official git install guide", result.stderr)
+        self.assertFalse(memory_exists)
+        self.assertFalse(skills_exists)
+
+    def test_install_reports_missing_uv_before_writes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+
+            result = subprocess.run(
+                ["bash", "install.sh", "--mode", "cli-agent", str(memory_root), str(skills_target)],
+                cwd=REPO_ROOT,
+                env=self._env_with_fake_git_no_uv(root),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            memory_exists = memory_root.exists()
+            skills_exists = skills_target.exists()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing or unusable required command: uv", result.stderr)
+        self.assertIn("macOS:", result.stderr)
+        self.assertIn("Linux / WSL", result.stderr)
+        self.assertIn("Official uv install guide", result.stderr)
+        self.assertFalse(memory_exists)
+        self.assertFalse(skills_exists)
+
+    def test_install_reports_uv_python_failure_before_writes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+
+            result = subprocess.run(
+                ["bash", "install.sh", "--mode", "cli-agent", str(memory_root), str(skills_target)],
+                cwd=REPO_ROOT,
+                env=self._env_with_failing_uv_python(root),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            memory_exists = memory_root.exists()
+            skills_exists = skills_target.exists()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not find or provision Python >=3.11 with uv", result.stderr)
+        self.assertIn("uv Python guide", result.stderr)
+        self.assertFalse(memory_exists)
+        self.assertFalse(skills_exists)
 
     def test_install_reports_pending_semantic_upgrade_notes_for_existing_memory(self):
         with tempfile.TemporaryDirectory() as tempdir:
