@@ -6,11 +6,11 @@
 
 ## Example Application {#sample-app} → [rel:sample-infra]
 
-This example domain shows a product memory with graph-addressable headings, compact fact nodes, detail-file pointers, and project-scoped preferences that should guide agents only while working on this project.
+This example domain shows product memory with graph-addressable headings, compact fact nodes, detail-file pointers, and project-scoped preferences for this project.
 
 ### Project Working Preferences {#sample-project-working-preferences}
 
-Use project-scoped preferences when the guidance belongs to one project or domain rather than the user's global working style.
+Use project-scoped preferences when the guidance belongs to one project or domain rather than the user's broader cross-session behavior guidance.
 
 - `proj-pref-contract-first` When changing frontend/backend data flow, update the API contract before changing UI call sites. → [rel:api-public-contract, rel:proj-web, rel:proj-api]
 - `proj-pref-release-proof` Release-facing changes should leave a short verification note in the release runbook. → [rel:sample-release-runbook, rel:proj-deploy]
@@ -48,11 +48,11 @@ Detailed restore drill notes live in `MEMORY_sample-backup-drill.md`; this point
 
 # User Context — Example Domain {#sample-user-context}
 
-This example domain stores durable context about the user when that context helps future agents collaborate without turning sparse evidence into a biography or profile form.
+This example domain stores a compact, evidence-grounded context profile for the user.
 
 ## User Direction {#sample-user-direction}
 
-Use this area for evidence-based context about what the user is pursuing and what matters across sessions.
+Use this area for evidence-based context about what the user is pursuing, what matters across sessions, and why.
 
 - `sample-user-current-focus` Sample user is shaping a local-first memory system for AI agents. → [rel:sample-project-graph, rel:sample-agent-behavior]
 - `sample-user-memory-direction` Sample user wants memory to preserve durable context while staying coherent, reviewable, and useful for future agents. → [rel:sample-user-goals, rel:sample-agent-behavior]
@@ -69,7 +69,7 @@ Store active goals when they express durable direction rather than a momentary t
 
 ## User and Workflow Preferences {#sample-user-workflow-preferences}
 
-Store cross-project behavior memory here when it should change how future agents work. This is separate from `# User Context`: it describes agent behavior, not facts about the user.
+Store cross-project behavior memory here when it should change how future agents work with this user.
 
 - `pref-principle-first` The user prefers principle-first instructions over long category lists; examples are interpretation aids, neither required nor sufficient, and the governing decision test controls each case. → []
 - `pref-env-check` Future agents should check durable memory and local project context for the intended runtime environment before installing dependencies or guessing a Python environment. → []

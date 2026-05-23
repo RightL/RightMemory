@@ -28,7 +28,7 @@ Schema rules live in `skills/rightmemory-schema.md` instead of at the top of eve
 
 ### User context and agent behavior domains
 
-`# User Context` is ordinary agent-editable memory for durable context about the user, such as relevant background, current direction, goals, constraints, or values that help future agents collaborate. `# Cross-Session Agent Behavior` stays separate because it describes how agents should behave with the user. This keeps user facts and agent instructions distinct while allowing both to live in the same tree + graph memory model.
+`# User Context` and `# Cross-Session Agent Behavior` separate subject matter rather than storage mechanics. User context models the user's durable context profile: who they are in relation to ongoing life and work, what they are pursuing, and why. Agent behavior models how coding agents should act with that user. This keeps profile facts and behavior guidance from blurring while allowing both to live in the same tree + graph memory model.
 
 ### Automatic write isolation
 

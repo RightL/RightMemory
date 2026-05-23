@@ -79,7 +79,7 @@ ordinary declarative memory, then remove or revise the question.
   and save the conflict as candidate memory if it may help future agents.
 - When a conflict shows settled memory is too broad, narrow the settled memory
   and keep the uncertain part as candidate memory.
-- When saving implicit user context or a preference, write what the current
+- When saving implicit user context or a user preference, write what the current
   batch supports. Avoid broad guesses about the user's biography, personality,
   goals, or permanent preferences.
 

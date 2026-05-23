@@ -17,7 +17,7 @@ Modern coding agents are strong inside a single conversation, then strangely for
 
 ## Who It Is For
 
-RightMemory is aimed at developers who spend serious time with coding agents and want durable context that stays understandable outside a vendor UI. It is especially useful when your agent needs to remember project decisions, user preferences, repeated workflow constraints, cross-session behavior guidance, or review notes from prior Codex and Claude sessions.
+RightMemory is aimed at developers who spend serious time with coding agents and want durable context that stays understandable outside a vendor UI. It is especially useful when your agent needs to remember project decisions, user context, user preferences, workflow expectations, cross-session behavior guidance, or review notes from prior Codex and Claude sessions.
 
 ## Quick Start
 
@@ -149,7 +149,7 @@ Runtime facts that apply to the whole project.
 
 The tree tells agents where to read in local context. Anchors and node ids tell agents what can be referenced. Edges tell agents where to walk across otherwise separate branches.
 
-Common top-level domains include project or work domains, `# User Context`, and `# Cross-Session Agent Behavior`. User context stores durable facts about the user and their direction when those facts help future collaboration. Agent behavior stores guidance about how agents should communicate, choose tools, and avoid repeated mistakes with the user.
+Common top-level domains include project or work domains, `# User Context`, and `# Cross-Session Agent Behavior`. User context stores the user's durable context profile. Agent behavior stores guidance about how coding agents should collaborate with that user.
 
 ### Headings
 
