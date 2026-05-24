@@ -19,6 +19,8 @@ commits. Forgetting should follow repository activity rather than wall time.
 
 - Add a `pruner` role and `rightmemory prune` command for active-memory
   forgetting.
+- Add a read-only `historian` role and `rightmemory history` command for
+  explicit archaeology of pruned memory.
 - Use Git commit generations as the pruning rhythm.
 - Default one generation to `70` commits since the latest `prune:` commit.
 - Use `prune:` commits as generation boundaries and as the ledger for what was
@@ -37,6 +39,7 @@ commits. Forgetting should follow repository activity rather than wall time.
 - Do not add 30-week, 300-week, or permanent memory tiers in this design.
 - Do not purge or rewrite Git history.
 - Do not use wall-clock age to decide whether a generation is due.
+- Do not fold pruned-memory archaeology into ordinary `retrieve`.
 
 ## Core Semantics
 
@@ -132,6 +135,9 @@ revival_grace_checkpoints = 2
 
 [pruner.model]
 model_id = "..."
+
+[historian.model]
+model_id = "..."
 ```
 
 `generation_commits` is a positive integer. `revival_grace_checkpoints` is a
@@ -143,6 +149,9 @@ Standalone and cli-agent execution should mirror existing write-capable roles.
 Pruner can run manually through `rightmemory prune`; watch integration can call
 the same command opportunistically because the command itself decides whether a
 generation is due.
+
+Historian uses the same executor configuration shape as retrieve. It is
+read-only and receives Git history read tools, not memory edit or commit tools.
 
 ## Comparison Model
 
@@ -196,23 +205,39 @@ generation boundary or grace ledger needs to advance.
 - If the command is invoked before the generation threshold, it exits with a
   status message and does not create a checkpoint.
 
-## Retrieval And Archaeology
+## Historical Retrieval
 
 Ordinary `retrieve` reads the active memory surface and does not inspect old
 prune commits by default.
 
-Historical recovery is explicit. A future history-oriented command or role can
-search `git log --grep '^prune:'`, inspect prune commit bodies, and use
-`git show` to recover removed memory when the user asks for archaeology. This
-design makes prune commits searchable enough for that later work without adding
-a separate index now.
+Historical recovery is explicit through `rightmemory history`, backed by the
+read-only `historian` role. Historian searches the Git archaeology layer without
+changing current memory.
+
+Historian's retrieval flow:
+
+1. Search `prune:` commit subjects and bodies for ids, heading paths, topics,
+   summaries, and query terms.
+2. Inspect matching prune commit bodies to identify removed entries and their
+   source files.
+3. Use Git snapshots such as `<prune-commit>^:<path>` to recover the original
+   addressable line and nearby heading context from before removal.
+4. Return matches clearly labeled as historical/pruned memory rather than active
+   memory.
+5. When a historical item looks useful again, report enough detail for the caller
+   to submit an ordinary update candidate. Historian does not write the recovered
+   item back itself.
+
+Historian can search beyond prune commit bodies when the query names a specific
+id, file path, or phrase, but prune commits remain the primary index because
+their bodies were written for archaeology. No separate history index is added.
 
 ## Tests
 
 Focused tests should cover:
 
 - config defaults and validation for `[pruner]`;
-- role registration and prompt assembly for `pruner`;
+- role registration and prompt assembly for `pruner` and `historian`;
 - first-run threshold behavior with fewer than `generation_commits` commits;
 - first-run pruning from `HEAD~generation_commits`;
 - subsequent pruning from the latest `prune:` commit;
@@ -225,7 +250,13 @@ Focused tests should cover:
 - semantic changes clear revival grace by making the item active again;
 - dirty memory files block pruning;
 - edge cleanup keeps validation passing after deletions;
-- retrieve, update, reviewer, and dreamer prompts do not inherit prune duties.
+- retrieve, update, reviewer, and dreamer prompts do not inherit prune duties;
+- ordinary retrieve does not inspect `prune:` commits;
+- `rightmemory history` uses historian and read-only Git history tools;
+- historian recovers a pruned addressable line from a prune ledger and prior Git
+  snapshot;
+- historian labels returned items as historical/pruned memory and does not write
+  them back.
 
 ## Upgrade Impact
 
@@ -234,6 +265,7 @@ will either report that the repository has not reached the commit threshold or
 establish the first prune generation from existing Git history.
 
 The implementation should update README, design notes, role prompt inventory,
-configuration docs, and tests. A semantic upgrade note is not needed for existing
-memory content because this feature changes future lifecycle behavior rather
-than the schema meaning of existing nodes.
+configuration docs, and tests. A semantic upgrade note is not needed for
+existing memory content because this feature changes future lifecycle behavior
+and adds an explicit archaeology path rather than changing the schema meaning of
+existing nodes.
