@@ -67,10 +67,10 @@ ordinary declarative memory, then remove or revise the question.
 - Treat implicit signals and single-session conflicts as possible memory, not
   as proof. Use candidate memory when the signal may help future agents but is
   not strong enough to become settled memory.
-- Mark candidate memory explicitly in the memory text, for example with
-  `Candidate:` at the start of the description. Candidate memory should name
-  the uncertainty: possible preference, possible exception, possible narrower
-  scope, or possible correction.
+- Mark candidate memory explicitly in the memory text with `Uncertain:` at the
+  start of the description. Candidate memory should name the uncertainty:
+  possible preference, possible exception, possible narrower scope, or possible
+  correction.
 - Promote candidate memory when the batch and existing memory together make it
   look durable. Remove or replace candidate memory when the batch contradicts it
   or shows it was likely a one-off instruction.

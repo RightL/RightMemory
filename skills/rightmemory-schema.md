@@ -25,6 +25,7 @@ Nodes use:
 - `F#` marks a heading as file-backed; the graph id is still `heading-id`, so edges target `type:heading-id`, not `type:F#heading-id`.
 - Edges may connect heading to heading, heading to node, node to heading, or node to node.
 - Node lines with no edges write `→ []`; heading lines with no edges may omit `→ []`.
+- Useful but unsettled memory uses `Uncertain:` at the start of the node description, for example ``- `<node-id>` Uncertain: <tentative memory claim with its scope or doubt> → [...]``. Revise it into ordinary declarative memory when it becomes settled, or remove it when it is contradicted or no longer useful.
 
 ## Memory Domains
 

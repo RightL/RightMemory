@@ -38,16 +38,18 @@ class InstallScriptTests(unittest.TestCase):
             "  mkdir -p \"$memory_root/.runtime\"\n"
             "  state=\"$memory_root/.runtime/semantic-upgrades.json\"\n"
             "  if [ \"$command\" = \"baseline\" ]; then\n"
-            "    echo '  [keep]    semantic upgrade baseline recorded for 2 current note(s):'\n"
+            "    echo '  [keep]    semantic upgrade baseline recorded for 3 current note(s):'\n"
             "    echo '            user-context-agent-behavior-split'\n"
             "    echo '            open-context-questions'\n"
-            "    printf '{\"absorbed\":{\"user-context-agent-behavior-split\":{},\"open-context-questions\":{}}}\\n' > \"$state\"\n"
+            "    echo '            uncertain-memory-marker'\n"
+            "    printf '{\"absorbed\":{\"user-context-agent-behavior-split\":{},\"open-context-questions\":{},\"uncertain-memory-marker\":{}}}\\n' > \"$state\"\n"
             "  elif grep -q 'user-context-agent-behavior-split' \"$state\" 2>/dev/null; then\n"
             "    echo '  [keep]    no semantic upgrade notes pending'\n"
             "  else\n"
-            "    echo '  [notice]  2 semantic upgrade note(s) pending for the next dreamer cycle:'\n"
+            "    echo '  [notice]  3 semantic upgrade note(s) pending for the next dreamer cycle:'\n"
             "    echo '            user-context-agent-behavior-split'\n"
             "    echo '            open-context-questions'\n"
+            "    echo '            uncertain-memory-marker'\n"
             "    printf '{\"absorbed\": {}}\\n' > \"$state\"\n"
             "  fi\n"
             "fi\n"
@@ -318,6 +320,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("semantic upgrade note(s) pending", result.stdout)
         self.assertIn("user-context-agent-behavior-split", result.stdout)
         self.assertIn("open-context-questions", result.stdout)
+        self.assertIn("uncertain-memory-marker", result.stdout)
         self.assertTrue(state_exists)
 
     def test_install_warns_when_stale_rightmemory_precedes_installed_wrapper(self):

@@ -217,8 +217,8 @@ class AgentCliCommandTests(unittest.TestCase):
                 result = executor.run_session_turn("dreamer-session", "run")
 
         self.assertEqual(result, "done")
-        self.assertIn("Pending semantic upgrade notes", prompts[0])
         self.assertIn("example-note", prompts[0])
+        self.assertIn("Reconsider older memory.", prompts[0])
 
     def test_build_claude_resume_command_uses_auto_permission_for_write_role(self):
         session_id = "123e4567-e89b-12d3-a456-426614174000"

@@ -15,7 +15,7 @@
 - Avoid writing unsupported biography, personality guesses, inferred goals from weak evidence, raw process logs, trivial session traces, overly granular facts, duplicate or near-duplicate facts, and details that only mattered during the just-finished turn.
 - Before editing, compare each candidate with relevant existing memory. Look for entries that the candidate updates, contradicts, narrows, duplicates, or makes obsolete.
 - Choose the edit shape that leaves memory coherent: merge into an existing entry, replace stale wording, narrow over-broad guidance, delete obsolete memory, or add a compact new fact when no existing entry should change.
-- If a conflict cannot be resolved safely from the candidate and existing memory, leave settled memory unchanged, skip the unsafe part, and mention the unresolved conflict in the final reply.
+- If a contradiction cannot be reconciled as an update, narrowing, scoped exception, or obsolete memory, leave settled memory unchanged for the unsafe part and add or revise a short question under `# Open Context Questions`.
 - Place memory in a clear tree. Use meaningful `##` or `###` headings for related facts, and adjust nearby structure when the current group is too broad, flat, or overloaded.
 - While editing memory, if you notice a loose end, add or revise a short question under `# Open Context Questions` according to the schema.
 - If the update answers an open context question, save the answer as ordinary declarative memory, then remove or revise the question.
@@ -33,7 +33,7 @@
 
 - Keep edits focused on the update, but use the scope needed to keep memory clear. Preserve unrelated lines, ordering, and indentation.
 - If you changed memory, stage and commit the touched allowed files.
-- When ambiguity prevents a safe edit, skip that edit and explain the ambiguity in the final reply.
+- When ambiguity prevents a safe declarative edit, skip the unsafe part and use `# Open Context Questions` when the ambiguity is useful future context.
 - Before finishing an edit, run a graph sanity pass: no duplicate ids, self-edges, duplicate edges, dangling edges, or child-to-containing-heading edges that only repeat containment.
 
 ## Final Reply

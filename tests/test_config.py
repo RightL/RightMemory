@@ -1948,28 +1948,19 @@ class RuntimeTests(unittest.TestCase):
 
 
 class PromptTests(unittest.TestCase):
-    def test_cli_agent_prompt_is_thin_and_embeds_role_prompt(self):
-        prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), "update")
+    def test_cli_agent_prompt_assembles_without_standalone_tools(self):
+        for role in ("dreamer", "retrieve", "reviewer", "sync-reconciler", "update"):
+            prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), role)
 
-        self.assertIn("You are RightMemory update mode.", prompt)
-        self.assertIn("configured memory root is /home/example/.rightmemory", prompt)
-        self.assertIn("MEMORY.md", prompt)
-        self.assertIn("MEMORY_*.md", prompt)
-        self.assertIn("dream_logs/", prompt)
-        self.assertIn("Follow the canonical role instructions below.", prompt)
-        self.assertIn("Return a concise final reply.", prompt)
-        self.assertIn("RightMemory Schema", prompt)
-        self.assertIn("Update Role", prompt)
-        self.assertIn("candidate memory", prompt)
-        self.assertNotIn("Command-selected behavior", prompt)
-        self.assertNotIn("Standalone adaptation", prompt)
-        self.assertNotIn("read_command", prompt)
-        self.assertNotIn("edit_file(path, old_string, new_string", prompt)
-        self.assertNotIn("create_file", prompt)
-        self.assertNotIn("Pydantic AI", prompt)
-        self.assertNotIn("provider tool", prompt)
-        self.assertNotIn("{{MEMORY_ROOT}}", prompt)
-        self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+            self.assertIn("RightMemory Schema", prompt)
+            self.assertIn(f"{role.title().replace('-', ' ')} Role", prompt)
+            self.assertNotIn("Command-selected behavior", prompt)
+            self.assertNotIn("Standalone adaptation", prompt)
+            self.assertNotIn("validate_memory", prompt)
+            self.assertNotIn("git_discard", prompt)
+            self.assertNotIn("sync_push", prompt)
+            self.assertNotIn("{{MEMORY_ROOT}}", prompt)
+            self.assertNotIn("{{SKILLS_ROOT}}", prompt)
 
     def test_cli_agent_prompt_rejects_unknown_role(self):
         with self.assertRaises(ValueError) as caught:
@@ -1977,99 +1968,15 @@ class PromptTests(unittest.TestCase):
 
         self.assertIn("role must be one of:", str(caught.exception))
 
-    def test_cli_agent_reviewer_prompt_does_not_expose_standalone_tool_names(self):
-        prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), "reviewer")
+    def test_standalone_prompts_assemble_for_each_role(self):
+        for role in ("dreamer", "retrieve", "reviewer", "sync-reconciler", "update"):
+            prompt = build_instructions(Path("/home/example/.rightmemory"), role)
 
-        self.assertIn("Reviewer Role", prompt)
-        self.assertIn("graph sanity", prompt)
-        self.assertNotIn("validate_memory", prompt)
-        self.assertNotIn("git_discard", prompt)
-        self.assertNotIn("sync_push", prompt)
-
-    def test_cli_agent_sync_reconciler_prompt_does_not_expose_standalone_tool_names(self):
-        prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), "sync-reconciler")
-
-        self.assertIn("Sync Reconciler Role", prompt)
-        self.assertIn("available validation", prompt)
-        self.assertIn("runtime-provided sync", prompt)
-        self.assertNotIn("validate_memory", prompt)
-        self.assertNotIn("git_discard", prompt)
-        self.assertNotIn("sync_push", prompt)
-
-    def test_retrieve_prompt_has_role_prompt_and_retrieve_command_behavior(self):
-        prompt = build_instructions(Path("/home/example/.rightmemory"), "retrieve")
-
-        self.assertIn("The only allowed root directory is /home/example/.rightmemory", prompt)
-        self.assertIn("Stay within the command-selected retrieve role", prompt)
-        self.assertNotIn("Do not blend retrieve, update, dreamer, or reviewer responsibilities.", prompt)
-        self.assertIn("rightmemory retrieve", prompt)
-        self.assertIn("read-only retrieval request", prompt)
-        self.assertIn("read_command", prompt)
-        self.assertIn("sed -n", prompt)
-        self.assertIn("Retrieve Role", prompt)
-        self.assertNotIn("Every dispatch must start", prompt)
-        self.assertNotIn("[RETRIEVE]", prompt)
-        self.assertNotIn("[UPDATE]", prompt)
-        self.assertIn("RightMemory Schema", prompt)
-        self.assertIn("embedded schema above", prompt)
-        self.assertIn("Recent submitted memory", prompt)
-        self.assertIn("short-term working memory", prompt)
-        self.assertIn("Open context questions", prompt)
-        self.assertIn("not settled memory", prompt)
-        self.assertNotIn("memory-curator", prompt)
-        self.assertNotIn("memory-dreamer", prompt)
-        self.assertNotIn("rightmemory-schema.md", prompt)
-        self.assertNotIn("{{MEMORY_ROOT}}", prompt)
-        self.assertNotIn("{{SKILLS_ROOT}}", prompt)
-
-    def test_update_prompt_has_role_prompt_and_update_command_behavior(self):
-        prompt = build_instructions(Path("/home/example/.rightmemory"), "update")
-
-        self.assertIn("The only allowed root directory is /home/example/.rightmemory", prompt)
-        self.assertIn("rightmemory update", prompt)
-        self.assertIn("read-write memory update request", prompt)
-        self.assertIn("Update Role", prompt)
-        self.assertIn("candidate memory", prompt)
-        self.assertIn("raw process logs", prompt)
-        self.assertIn("compare each candidate with relevant existing memory", prompt)
-        self.assertIn("delete obsolete memory", prompt)
-        self.assertIn("mention the unresolved conflict in the final reply", prompt)
-        self.assertIn("edit_file(path, old_string, new_string", prompt)
-        self.assertIn("create_file", prompt)
-        self.assertIn("read_command", prompt)
-        self.assertIn("Choose the edit shape that makes memory clearer", prompt)
-        self.assertIn("Place memory in a clear tree", prompt)
-        self.assertNotIn("Codex-style patches", prompt)
-        self.assertNotIn("small, reviewable edits", prompt)
-        self.assertNotIn("Every dispatch must start", prompt)
-        self.assertNotIn("[RETRIEVE]", prompt)
-        self.assertNotIn("[UPDATE]", prompt)
-        self.assertIn("RightMemory Schema", prompt)
-        self.assertIn("embedded schema above", prompt)
-        self.assertIn("ongoing life, work, and direction", prompt)
-        self.assertIn("Guidance that tells an agent how to respond", prompt)
-        self.assertIn("user preferences, workflow expectations", prompt)
-        self.assertNotIn("even when phrased", prompt)
-        self.assertIn("While editing memory, if you notice a loose end", prompt)
-        self.assertIn("save the answer as ordinary declarative memory", prompt)
-        self.assertNotIn("memory-curator", prompt)
-        self.assertNotIn("memory-dreamer", prompt)
-        self.assertNotIn("rightmemory-schema.md", prompt)
-        self.assertNotIn("{{MEMORY_ROOT}}", prompt)
-        self.assertNotIn("{{SKILLS_ROOT}}", prompt)
-
-    def test_dreamer_prompt_has_role_prompt(self):
-        prompt = build_instructions(Path("/home/example/.rightmemory"), "dreamer")
-
-        self.assertIn("The only allowed root directory is /home/example/.rightmemory", prompt)
-        self.assertIn("RightMemory Schema", prompt)
-        self.assertIn("embedded schema above", prompt)
-        self.assertIn("Dreamer Role", prompt)
-        self.assertIn("Keep `# Open Context Questions` compact and current", prompt)
-        self.assertNotIn("memory-curator", prompt)
-        self.assertNotIn("rightmemory-schema.md", prompt)
-        self.assertNotIn("{{MEMORY_ROOT}}", prompt)
-        self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+            self.assertIn("RightMemory Schema", prompt)
+            self.assertIn(f"{role.title().replace('-', ' ')} Role", prompt)
+            self.assertIn("Command-selected behavior", prompt)
+            self.assertNotIn("{{MEMORY_ROOT}}", prompt)
+            self.assertNotIn("{{SKILLS_ROOT}}", prompt)
 
     def test_dreamer_prompt_includes_pending_semantic_upgrade_context(self):
         context = SemanticUpgradeContext(
@@ -2087,10 +1994,8 @@ class PromptTests(unittest.TestCase):
 
         prompt = build_instructions(Path("/home/example/.rightmemory"), "dreamer", semantic_upgrades=context)
 
-        self.assertIn("Pending semantic upgrade notes", prompt)
         self.assertIn("example-note", prompt)
-        self.assertIn("later notes refine, narrow, or contradict earlier notes", prompt)
-        self.assertIn("Do not copy these notes into memory as maintenance text", prompt)
+        self.assertIn("Reconsider older memory.", prompt)
 
     def test_non_dreamer_prompt_ignores_semantic_upgrade_context(self):
         context = SemanticUpgradeContext(
@@ -2108,75 +2013,7 @@ class PromptTests(unittest.TestCase):
 
         prompt = build_instructions(Path("/home/example/.rightmemory"), "update", semantic_upgrades=context)
 
-        self.assertNotIn("Pending semantic upgrade notes", prompt)
         self.assertNotIn("example-note", prompt)
-
-    def test_reviewer_prompt_has_role_prompt(self):
-        prompt = build_instructions(Path("/home/example/.rightmemory"), "reviewer")
-
-        self.assertIn("The only allowed root directory is /home/example/.rightmemory", prompt)
-        self.assertIn("RightMemory Schema", prompt)
-        self.assertIn("embedded schema above", prompt)
-        self.assertIn("Reviewer Role", prompt)
-        self.assertIn("Review Input", prompt)
-        self.assertIn("normalized transcript batch JSON", prompt)
-        self.assertIn("Normalized transcript batch JSON", prompt)
-        self.assertIn("Review the batch as a whole", prompt)
-        self.assertIn("ordered batch", prompt)
-        self.assertIn("memory: review transcript batch", prompt)
-        self.assertIn("<source>:<session_id>", prompt)
-        self.assertIn("What To Save Or Revise", prompt)
-        self.assertIn("Implicit And Candidate Memory", prompt)
-        self.assertIn("Memory Alignment", prompt)
-        self.assertIn("possible memory", prompt)
-        self.assertIn("as proof", prompt)
-        self.assertIn("Candidate:", prompt)
-        self.assertIn("Promote candidate memory", prompt)
-        self.assertIn("single-session conflict evidence", prompt)
-        self.assertIn("future agents", prompt)
-        self.assertIn("compare assistant responses with existing memory", prompt)
-        self.assertIn("Avoid broad guesses", prompt)
-        self.assertIn("validate_memory", prompt)
-        self.assertIn("commit them", prompt)
-        self.assertIn("Choose the edit shape that makes memory clearer", prompt)
-        self.assertIn("Place memory in a clear tree", prompt)
-        self.assertIn("While reviewing memory against the batch, if you notice a loose end", prompt)
-        self.assertNotIn("Dispatch Contract", prompt)
-        self.assertNotIn("Be more conservative than an explicit update request", prompt)
-        self.assertNotIn("candidates for new memory", prompt)
-        self.assertNotIn("promote it to normal memory", prompt)
-        self.assertNotIn("too weak even for a candidate", prompt)
-        self.assertNotIn("grounded rule with scope", prompt)
-        self.assertNotIn("Do not save every mismatch", prompt)
-        self.assertNotIn("memory-curator", prompt)
-        self.assertNotIn("memory-dreamer", prompt)
-        self.assertNotIn("rightmemory-schema.md", prompt)
-        self.assertNotIn("{{MEMORY_ROOT}}", prompt)
-        self.assertNotIn("{{SKILLS_ROOT}}", prompt)
-
-    def test_sync_reconciler_prompt_has_role_prompt(self):
-        prompt = build_instructions(Path("/memory"), "sync-reconciler")
-
-        self.assertIn("The only allowed root directory is /memory", prompt)
-        self.assertIn("sync-reconciler", prompt)
-        self.assertIn("sync watcher selected sync reconciliation behavior", prompt)
-        self.assertIn("current sync repair context", prompt)
-        self.assertIn("scheduled sync workflow supplies repair context", prompt)
-        self.assertIn("Runtime sync context block", prompt)
-        self.assertNotIn("the runtime already performed sync preflight", prompt)
-        self.assertIn("dirty memory state", prompt)
-        self.assertIn("push conflicts", prompt)
-        self.assertIn("git_discard", prompt)
-        self.assertIn("Preserve coherent durable memory", prompt)
-        self.assertIn("commit", prompt)
-        self.assertIn("sync_push", prompt)
-        self.assertIn("call `sync_push` again", prompt)
-        self.assertIn("Final replies should include repaired files", prompt)
-        self.assertIn("Sync Reconciler Role", prompt)
-        self.assertIn("RightMemory Schema", prompt)
-        self.assertIn("embedded schema above", prompt)
-        self.assertNotIn("{{MEMORY_ROOT}}", prompt)
-        self.assertNotIn("{{SKILLS_ROOT}}", prompt)
 
     def test_prompt_assets_are_included_in_wheel(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))

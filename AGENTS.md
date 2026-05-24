@@ -51,6 +51,7 @@
 - When committing code changes, stage only intended repo files.
 - Runtime memory commits must be limited to `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; the tool layer enforces this, but prompts should stay aligned.
 - If a change touches prompt behavior, config shape, transcript review state, or git/memory safety, add or update focused tests.
+- Avoid tests that pin role prompt prose by exact sentence or wording. Prompt tests should cover assembly boundaries and durable invariants, such as the right role/schema being included, placeholders not leaking, and standalone-only tool names not appearing in cli-agent prompts.
 
 ## Writing And Documentation Style
 - When editing README, schema, prompt, or skill text, prefer coherence over patch-like accumulation. The result should read as if it was written fresh around the current idea, not as an old design with exceptions bolted on later.

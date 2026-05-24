@@ -92,8 +92,10 @@ class SemanticUpgradeParserTests(unittest.TestCase):
         notes_by_id = {note.id: note for note in result.notes}
         self.assertIn("user-context-agent-behavior-split", notes_by_id)
         self.assertIn("open-context-questions", notes_by_id)
+        self.assertIn("uncertain-memory-marker", notes_by_id)
         self.assertIn("# Open Context Questions {#open-context-questions}", notes_by_id["open-context-questions"].body)
         self.assertIn("not declarative memory facts", notes_by_id["open-context-questions"].body)
+        self.assertIn("Uncertain:", notes_by_id["uncertain-memory-marker"].body)
         self.assertEqual([], result.warnings)
 
 
@@ -117,6 +119,7 @@ class SemanticUpgradeStateTests(unittest.TestCase):
 
         self.assertIn("user-context-agent-behavior-split", baseline.ids)
         self.assertIn("open-context-questions", baseline.ids)
+        self.assertIn("uncertain-memory-marker", baseline.ids)
         self.assertEqual([], context.ids)
 
     def test_corrupt_state_warns_and_treats_notes_as_pending(self):
@@ -171,7 +174,7 @@ class SemanticUpgradeStateTests(unittest.TestCase):
         self.assertIn("example-note", summary)
         self.assertIn("broken.md: missing front matter", summary)
 
-    def test_render_prompt_context_preserves_chronological_conflict_rule(self):
+    def test_render_prompt_context_includes_note_content(self):
         context = SemanticUpgradeContext(
             notes=[
                 SemanticUpgradeNote(
@@ -187,9 +190,8 @@ class SemanticUpgradeStateTests(unittest.TestCase):
 
         rendered = render_prompt_context(context)
 
-        self.assertIn("Pending semantic upgrade notes", rendered)
-        self.assertIn("later notes refine, narrow, or contradict earlier notes", rendered)
-        self.assertIn("Do not copy these notes into memory as maintenance text", rendered)
+        self.assertIn("example-note", rendered)
+        self.assertIn("Body.", rendered)
 
 
 class RuntimeStateRootTests(unittest.TestCase):
@@ -273,9 +275,19 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
             state = json.loads((root / ".runtime" / "semantic-upgrades.json").read_text(encoding="utf-8"))
 
         self.assertEqual(result, "dreamed")
-        self.assertEqual(calls, [("dreamer-1", "run", ["user-context-agent-behavior-split", "open-context-questions"])])
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "dreamer-1",
+                    "run",
+                    ["user-context-agent-behavior-split", "open-context-questions", "uncertain-memory-marker"],
+                )
+            ],
+        )
         self.assertIn("user-context-agent-behavior-split", state["absorbed"])
         self.assertIn("open-context-questions", state["absorbed"])
+        self.assertIn("uncertain-memory-marker", state["absorbed"])
 
     def test_dreamer_success_marks_semantic_upgrades_absorbed_under_state_root(self):
         class FakeDreamerExecutor:
@@ -321,6 +333,7 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
         self.assertEqual(result, "dreamed")
         self.assertIn("user-context-agent-behavior-split", state["absorbed"])
         self.assertIn("open-context-questions", state["absorbed"])
+        self.assertIn("uncertain-memory-marker", state["absorbed"])
         self.assertFalse((memory_root / ".runtime" / "semantic-upgrades.json").exists())
 
     def test_dreamer_failure_leaves_semantic_upgrades_pending(self):
