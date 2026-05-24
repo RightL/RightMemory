@@ -12,12 +12,14 @@ MEMORY_ROOT_ENV = "RIGHTMEMORY_ROOT"
 MEMORY_ROOT = Path(os.environ.get(MEMORY_ROOT_ENV, "~/.rightmemory")).expanduser()
 _STATE_ROOT_UNSET = cast(Path, object())
 CONFIG_PATH = MEMORY_ROOT / "rightmemory.toml"
-ROLES = {"dreamer", "retrieve", "reviewer", "sync-reconciler", "update"}
+ROLES = {"dreamer", "historian", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"}
 DEFAULT_MAX_TOOL_RETRIES = 10
 DEFAULT_REVIEW_IDLE_SECONDS = 3600
 DEFAULT_REVIEW_SINCE_DAYS = 3
 DEFAULT_REVIEW_BATCH_SIZE = 3
 DEFAULT_SYNC_STALE_PULL_HOURS = 24
+DEFAULT_PRUNER_GENERATION_COMMITS = 70
+DEFAULT_PRUNER_REVIVAL_GRACE_CHECKPOINTS = 2
 DEFAULT_DREAMER_TRIGGER_POINTS = 50.0
 DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS = 1.0
 DEFAULT_DREAMER_REVIEW_SESSION_POINTS = 1.5
@@ -53,6 +55,13 @@ class DreamerWatchConfig:
     update_candidate_points: float = DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS
     review_session_points: float = DEFAULT_DREAMER_REVIEW_SESSION_POINTS
     check_interval_seconds: int = DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS
+
+
+@dataclass(frozen=True)
+class PrunerConfig:
+    memory_root: Path = MEMORY_ROOT
+    generation_commits: int = DEFAULT_PRUNER_GENERATION_COMMITS
+    revival_grace_checkpoints: int = DEFAULT_PRUNER_REVIVAL_GRACE_CHECKPOINTS
 
 
 @dataclass(frozen=True)
@@ -98,6 +107,8 @@ def load_config(role: str) -> RuntimeConfig:
     allowed_role_keys = {"model", "agent_cli"}
     if role == "dreamer":
         allowed_role_keys.add("watch")
+    if role == "pruner":
+        allowed_role_keys.update({"generation_commits", "revival_grace_checkpoints"})
     _reject_unknown_keys(role_section, allowed_role_keys, f"[{role}]")
 
     has_model = "model" in role_section
@@ -230,6 +241,41 @@ def load_dreamer_watch_config() -> DreamerWatchConfig:
             "check_interval_seconds",
             DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS,
             "[dreamer.watch]",
+        ),
+    )
+
+
+def load_pruner_config() -> PrunerConfig:
+    data = _load_raw_config()
+
+    if not MEMORY_ROOT.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
+
+    _reject_unknown_keys(data, _top_level_keys(), "top-level")
+    section = data.get("pruner", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError("[pruner] must be a TOML table")
+    _reject_unknown_keys(
+        section,
+        {"model", "agent_cli", "generation_commits", "revival_grace_checkpoints"},
+        "[pruner]",
+    )
+
+    return PrunerConfig(
+        memory_root=MEMORY_ROOT,
+        generation_commits=_positive_integer(
+            section,
+            "generation_commits",
+            DEFAULT_PRUNER_GENERATION_COMMITS,
+            "[pruner]",
+        ),
+        revival_grace_checkpoints=_positive_integer(
+            section,
+            "revival_grace_checkpoints",
+            DEFAULT_PRUNER_REVIVAL_GRACE_CHECKPOINTS,
+            "[pruner]",
         ),
     )
 

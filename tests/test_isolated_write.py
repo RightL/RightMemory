@@ -163,6 +163,38 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertEqual(self._git("status", "--short"), "")
         self._assert_isolated_cleanup()
 
+    def test_empty_prune_checkpoint_lands(self):
+        def callback(worktree: Path) -> str:
+            self._git(
+                "commit",
+                "--allow-empty",
+                "-m",
+                "prune: checkpoint",
+                "-m",
+                "Boundary: HEAD\n\nRemoved:\n(none)",
+                cwd=worktree,
+            )
+            return "checkpoint"
+
+        result = IsolatedWriteSupervisor(self.root, "pruner").run(callback)
+
+        self.assertEqual(result.output, "checkpoint")
+        self.assertEqual(result.commits_landed, 1)
+        self.assertEqual(self._git("log", "-1", "--format=%s"), "prune: checkpoint")
+        self.assertEqual(self._git("status", "--short"), "")
+        self._assert_isolated_cleanup()
+
+    def test_empty_non_prune_commit_does_not_land(self):
+        def callback(worktree: Path) -> None:
+            self._git("commit", "--allow-empty", "-m", "memory: empty noop", cwd=worktree)
+
+        with self.assertRaisesRegex(RuntimeError, "empty commits are limited"):
+            IsolatedWriteSupervisor(self.root, "update").run(callback)
+
+        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
+        self.assertEqual(self._git("status", "--short"), "")
+        self._assert_isolated_cleanup()
+
     def test_noop_rechecks_main_head_before_accepting(self):
         def callback(_worktree: Path) -> str:
             self._append_memory(self.root, "- `main-change` outside main memory\n")

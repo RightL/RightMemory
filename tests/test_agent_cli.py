@@ -105,6 +105,30 @@ class AgentCliCommandTests(unittest.TestCase):
             ],
         )
 
+    def test_build_codex_uses_workspace_write_for_pruner(self):
+        command = build_codex_command(
+            Path("/memory/root"),
+            "pruner",
+            AgentCliConfig(provider="codex"),
+            "prompt",
+            None,
+        )
+
+        self.assertIn("--sandbox", command)
+        self.assertIn("workspace-write", command)
+
+    def test_build_codex_uses_read_only_for_historian(self):
+        command = build_codex_command(
+            Path("/memory/root"),
+            "historian",
+            AgentCliConfig(provider="codex"),
+            "prompt",
+            None,
+        )
+
+        self.assertIn("--sandbox", command)
+        self.assertIn("read-only", command)
+
     def test_build_codex_resume_command_uses_provider_session_id(self):
         config = AgentCliConfig(provider="codex", model="gpt-5")
 

@@ -14,7 +14,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .async_update import AsyncUpdateStore, format_state
-from .config import MEMORY_ROOT, ROLES, load_config, load_dreamer_watch_config, load_review_config, load_sync_config
+from .config import (
+    MEMORY_ROOT,
+    ROLES,
+    load_config,
+    load_dreamer_watch_config,
+    load_pruner_config,
+    load_review_config,
+    load_sync_config,
+)
 from .dreamer_trigger import DreamerTriggerStore
 from .doctor import format_doctor_report, run_agent_cli_doctor
 from .review import ReviewScanner, normalize_transcript
@@ -54,6 +62,10 @@ def main(argv: list[str] | None = None) -> int:
         return _sync_main(argv[1:])
     if argv and argv[0] == "doctor":
         return _doctor_main(argv[1:])
+    if argv and argv[0] == "prune":
+        return _prune_main(argv[1:])
+    if argv and argv[0] == "history":
+        return _history_main(argv[1:])
 
     parser = argparse.ArgumentParser(prog="rightmemory")
     parser.add_argument("role", choices=tuple(sorted(ROLES)), help="RightMemory runtime role")
@@ -292,6 +304,16 @@ def _turn_parser(role: str) -> argparse.ArgumentParser:
     return parser
 
 
+def _prune_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="rightmemory prune")
+    parser.add_argument(
+        "--session",
+        default="pruner",
+        help="persist pruner message history under this session id",
+    )
+    return parser
+
+
 def _submit_parser(role: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=f"rightmemory {role} submit")
     parser.add_argument("--session", required=True, help="persist Pydantic AI message history under this session id")
@@ -335,6 +357,26 @@ def _review_main(argv: list[str]) -> int:
     if args.command == "watch":
         return _review_watch(args.interval, args.since_days)
     raise ValueError(f"unknown review command: {args.command}")
+
+
+def _prune_main(argv: list[str]) -> int:
+    args = _prune_parser().parse_args(argv)
+    pruner_config = load_pruner_config()
+    runtime = RightMemoryRuntime(load_config("pruner"))
+    try:
+        print(runtime.run_prune_turn(args.session, pruner_config))
+        return 0
+    finally:
+        runtime.cleanup()
+
+
+def _history_main(argv: list[str]) -> int:
+    args = _turn_parser("history").parse_args(argv)
+    runtime = RightMemoryRuntime(load_config("historian"))
+    try:
+        return _session_turn(runtime, args.session, args.message)
+    finally:
+        runtime.cleanup()
 
 
 def _sync_main(argv: list[str]) -> int:

@@ -6,7 +6,7 @@ from pathlib import Path
 from .semantic_upgrades import SemanticUpgradeContext, render_prompt_context
 
 
-ROLE_PROMPTS = {"dreamer", "retrieve", "reviewer", "sync-reconciler", "update"}
+ROLE_PROMPTS = {"dreamer", "historian", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"}
 
 
 def build_cli_agent_instructions(
@@ -106,12 +106,24 @@ def _command_guidance(role: str) -> str:
             "- Do not edit memory files or use git write tools in this mode. If the caller asks you to remember "
             "or change memory, ask them to use `rightmemory update`."
         )
+    if role == "historian":
+        return (
+            "- The `rightmemory history` command selected historical retrieval. Treat every caller message as a "
+            "read-only archaeology request over pruned memory and Git history.\n"
+            "- Return historical matches as historical or pruned memory, not active memory. Do not edit memory files."
+        )
     if role == "update":
         return (
             "- The `rightmemory update` command selected updating. Treat every caller message as a read-write "
             "memory update request without requiring or expecting a dispatch prefix.\n"
             "- A caller message may contain one update candidate or a batch of submitted candidates. Treat them "
             "as candidate memory, not final memory text."
+        )
+    if role == "pruner":
+        return (
+            "- The `rightmemory prune` command selected active-memory pruning. Treat the caller message as the "
+            "current prune generation context.\n"
+            "- Edit memory files when the supplied generation context says pruning is due."
         )
     if role == "dreamer":
         return "- The `rightmemory dreamer` command selected dreamer consolidation behavior. Run one consolidation cycle for the memory store."
@@ -134,7 +146,7 @@ def _command_guidance(role: str) -> str:
 
 
 def _sync_guidance(role: str) -> str:
-    if role == "retrieve":
+    if role in {"historian", "retrieve"}:
         return "- Retrieval uses local memory and does not perform sync preflight by default."
     if role == "sync-reconciler":
         return (
@@ -144,7 +156,7 @@ def _sync_guidance(role: str) -> str:
             "reports dirty state or a conflict, repair the supplied memory files in the same role, validate memory, "
             "commit the repaired state, and call `sync_push` again."
         )
-    if role in {"dreamer", "reviewer", "update"}:
+    if role in {"dreamer", "pruner", "reviewer", "update"}:
         return ""
     return ""
 
@@ -156,6 +168,12 @@ def _tool_guidance(role: str) -> str:
             "and validation.\n"
             "- `read_command` accepts common read-only shell forms such as `cat path`, `sed -n 'X,Yp' path`, "
             "`rg pattern`, `rg --files`, `git status --short`, and `git diff`. It does not run a general shell."
+        )
+    if role == "historian":
+        return (
+            "- Use the provided read-only tools for `read`, `grep`, `glob`, restricted `read_command`, outline, "
+            "validation, `git_log`, and `git_show_file`.\n"
+            "- Use `git_log` to inspect `prune:` commit ledgers and `git_show_file` to recover memory snapshots."
         )
     guidance = (
         "- Use the provided tools for `read`, `grep`, `glob`, restricted `read_command`, outline, exact file "
@@ -173,6 +191,11 @@ def _tool_guidance(role: str) -> str:
         "- Choose the edit shape that makes memory clearer; create, move, split, merge, or rewrite structure "
         "when that improves the tree or graph."
     )
+    if role == "pruner":
+        guidance += (
+            "\n- Use `git_log` to inspect previous `prune:` ledgers and `git_show_file` to compare boundary snapshots.\n"
+            "- Use `git_commit(..., allow_empty=true)` for `prune: checkpoint` commits that advance the prune ledger."
+        )
     if role == "sync-reconciler":
         guidance += (
             "\n- `git_discard(paths)` is destructive. Use it for invalid, partial, or unsafe memory-owned "

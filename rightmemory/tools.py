@@ -45,6 +45,8 @@ NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*→\s*\[(.*?)\])?\s*$")
 EDGE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*([A-Za-z0-9_.-]+)\s*$")
 MEMORY_DETAIL_FILE_RE = re.compile(r"^MEMORY_[A-Za-z0-9_.-]+\.md$")
 DREAM_LOG_FILE_RE = re.compile(r"^dream_logs/[A-Za-z0-9_.-]+\.md$")
+GIT_REVISION_RE = re.compile(r"^[A-Za-z0-9_.^~/-]+$")
+PRUNE_SUBJECT_PREFIX = "prune:"
 
 
 @dataclass(frozen=True)
@@ -357,6 +359,60 @@ class MemoryTools:
                 command.append(resolved.relative_to(self.memory_root).as_posix())
         return self._run_git(command)
 
+    def git_log(self, grep: str = r"^prune:", max_count: int = 20) -> str:
+        """Return recent git commits matching a message pattern."""
+        grep = grep.strip()
+        if not grep:
+            raise ValueError("grep must not be empty")
+        if "\x00" in grep or "\n" in grep:
+            raise ValueError("grep must not contain NUL bytes or newlines")
+        if isinstance(max_count, bool) or max_count < 1:
+            raise ValueError("max_count must be a positive integer")
+        max_count = min(max_count, 200)
+        if grep == r"^prune:":
+            commits = self._prune_subject_commits(max_count)
+            if not commits:
+                return "no matching commits"
+            return "\n".join(
+                self._run_git(
+                    [
+                        "git",
+                        "log",
+                        "--max-count=1",
+                        "--format=commit %H%nsubject %s%n%B%n---",
+                        commit_hash,
+                    ]
+                )
+                for commit_hash in commits
+            )
+        output = self._run_git(
+            [
+                "git",
+                "log",
+                f"--max-count={max_count}",
+                "--extended-regexp",
+                f"--grep={grep}",
+                "--format=commit %H%nsubject %s%n%B%n---",
+            ]
+        )
+        return output or "no matching commits"
+
+    def git_show_file(self, revision: str, path: str, max_lines: int = FULL_READ_LINE_LIMIT) -> str:
+        """Read a memory file as it existed at a git revision."""
+        revision = self._validate_git_revision(revision)
+        relative_path = self._allowed_history_path(path)
+        if isinstance(max_lines, bool) or max_lines < 1:
+            raise ValueError("max_lines must be a positive integer")
+        text = self._run_git(["git", "show", f"{revision}:{relative_path}"])
+        lines = text.splitlines()
+        end = min(len(lines), max_lines)
+        if not lines:
+            return "[empty file]"
+        output = self._format_lines(lines, 1, end)
+        if end < len(lines):
+            output += f"\n[truncated: showing lines 1-{end} of {len(lines)}; raise max_lines for more]"
+        return output
+
     def git_add(self, paths: list[str]) -> str:
         """Stage selected memory files or dream logs under the RightMemory root."""
         if not paths:
@@ -376,18 +432,22 @@ class MemoryTools:
         self._run_git(["git", "add", "--", *relative_paths])
         return "staged: " + ", ".join(relative_paths)
 
-    def git_commit(self, message: str, body: str | None = None) -> str:
+    def git_commit(self, message: str, body: str | None = None, allow_empty: bool = False) -> str:
         """Commit staged memory files and dream logs under the RightMemory root."""
         message = self._validate_commit_subject(message)
         body = self._validate_commit_body(body)
+        if allow_empty and message != "prune: checkpoint":
+            raise ValueError("empty commits are limited to prune: checkpoint")
         staged = self._run_git(["git", "diff", "--cached", "--name-only", "--no-renames", "--"])
         staged_files = [line for line in staged.splitlines() if line]
-        if not staged_files:
+        if not staged_files and not allow_empty:
             raise ValueError("no staged changes to commit")
         for path in staged_files:
             self._allowed_commit_path(path)
 
         command = ["git", "commit", "-m", message]
+        if allow_empty:
+            command.insert(2, "--allow-empty")
         if body is not None:
             command.extend(["-m", body])
         self._run_git(command)
@@ -896,6 +956,34 @@ class MemoryTools:
         if DREAM_LOG_FILE_RE.fullmatch(relative_path):
             return relative_path
         raise ValueError(f"can only stage, commit, or discard MEMORY.md, MEMORY_*.md, or dream_logs/*.md: {relative_path}")
+
+    def _allowed_history_path(self, path: str) -> str:
+        raw_path = Path(path)
+        if raw_path.is_absolute() or ".." in raw_path.parts:
+            raise ValueError("history paths must be relative memory files")
+        relative_path = raw_path.as_posix()
+        if relative_path == "MEMORY.md" or MEMORY_DETAIL_FILE_RE.fullmatch(relative_path):
+            return relative_path
+        raise ValueError(f"can only read historical MEMORY.md or MEMORY_*.md files: {relative_path}")
+
+    def _validate_git_revision(self, revision: str) -> str:
+        revision = revision.strip()
+        if not revision:
+            raise ValueError("revision must not be empty")
+        if revision.startswith("-") or not GIT_REVISION_RE.fullmatch(revision):
+            raise ValueError("revision contains unsupported characters")
+        return revision
+
+    def _prune_subject_commits(self, max_count: int) -> list[str]:
+        output = self._run_git(["git", "log", "--format=%H %s"])
+        commits: list[str] = []
+        for line in output.splitlines():
+            commit_hash, separator, subject = line.partition(" ")
+            if separator and subject.startswith(PRUNE_SUBJECT_PREFIX):
+                commits.append(commit_hash)
+                if len(commits) >= max_count:
+                    break
+        return commits
 
     def _validate_commit_subject(self, message: str) -> str:
         message = message.strip()

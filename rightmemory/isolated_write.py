@@ -110,11 +110,19 @@ class IsolatedWriteSupervisor:
     def _validate_commits(self, worktree: Path, commits: list[str]) -> None:
         for commit in commits:
             changed_paths = self._commit_paths(worktree, commit)
+            if not changed_paths:
+                self._validate_empty_commit(worktree, commit)
             invalid_paths = {path for path in changed_paths if not _is_memory_write_path(path)}
             if invalid_paths:
                 paths = ", ".join(sorted(invalid_paths))
                 raise RuntimeError(f"isolated commit touches non-memory paths: {paths}")
             self._validate_commit_tree(worktree, commit, set(changed_paths))
+
+    def _validate_empty_commit(self, worktree: Path, commit: str) -> None:
+        subject = self._git_stdout(worktree, "log", "--max-count=1", "--format=%s", commit)
+        if self.role == "pruner" and subject == "prune: checkpoint":
+            return
+        raise RuntimeError("isolated empty commits are limited to pruner `prune: checkpoint` commits")
 
     def _validate_commit_tree(self, worktree: Path, commit: str, changed_paths: set[str]) -> None:
         self._validate_regular_memory_path(worktree, commit, "MEMORY.md", required=True)
@@ -159,7 +167,7 @@ class IsolatedWriteSupervisor:
         return _name_status_paths(output)
 
     def _land_commits(self, commits: list[str]) -> None:
-        result = self._run_git(self.memory_root, "cherry-pick", *commits, check=False)
+        result = self._run_git(self.memory_root, "cherry-pick", "--allow-empty", *commits, check=False)
         if result.returncode == 0:
             return
         self._run_git(self.memory_root, "cherry-pick", "--abort", check=False)

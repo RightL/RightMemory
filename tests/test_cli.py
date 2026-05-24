@@ -24,6 +24,10 @@ class FakeRuntime:
         self.session_turns.append((session_id, message))
         return f"session {session_id}: {message}"
 
+    def run_prune_turn(self, session_id: str, pruner_config) -> str:
+        self.session_turns.append((session_id, f"prune:{pruner_config.memory_root}"))
+        return f"prune session {session_id}: {pruner_config.memory_root}"
+
     def cleanup(self):
         pass
 
@@ -114,6 +118,61 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(roles, ["reviewer"])
+
+    def test_history_command_uses_historian_role(self):
+        roles = []
+        stdout = io.StringIO()
+
+        def fake_load_config(role):
+            roles.append(role)
+            return object()
+
+        with (
+            patch("rightmemory.cli.load_config", fake_load_config),
+            patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+            patch("sys.stdout", stdout),
+        ):
+            result = main(["history", "--session", "hist-1", "old", "context"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(roles, ["historian"])
+        self.assertIn("session hist-1: old context", stdout.getvalue())
+
+    def test_prune_command_delegates_due_check_to_pruner_runtime(self):
+        stdout = io.StringIO()
+        pruner_config = type("PrunerConfig", (), {"memory_root": Path("/memory")})()
+
+        with (
+            patch("rightmemory.cli.load_pruner_config", return_value=pruner_config),
+            patch("rightmemory.cli.load_config", return_value=object()),
+            patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+            patch("sys.stdout", stdout),
+        ):
+            result = main(["prune"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(stdout.getvalue().strip(), "prune session pruner: /memory")
+
+    def test_prune_command_uses_requested_session(self):
+        stdout = io.StringIO()
+        pruner_config = type("PrunerConfig", (), {"memory_root": Path("/memory")})()
+        roles = []
+
+        def fake_load_config(role):
+            roles.append(role)
+            return object()
+
+        with (
+            patch("rightmemory.cli.load_pruner_config", return_value=pruner_config),
+            patch("rightmemory.cli.load_config", fake_load_config),
+            patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+            patch("sys.stdout", stdout),
+        ):
+            result = main(["prune", "--session", "prune-1"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(roles, ["pruner"])
+        self.assertIn("prune session prune-1: /memory", stdout.getvalue())
 
     def test_main_rejects_old_curator_role(self):
         with patch("sys.stderr", io.StringIO()):

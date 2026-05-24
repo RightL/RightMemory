@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from .agent_cli import CliAgentExecutor, NO_SESSION_RIGHTMEMORY_SESSION_ID
-from .config import RuntimeConfig, load_config
+from .config import PrunerConfig, RuntimeConfig, load_config
 from .debug import DebugTrace
 from .isolated_write import IsolatedWriteSupervisor
 from .prompt import build_instructions
+from .prune import build_pruner_message, prune_due_status
 from .provider_sessions import ProviderSessionStore
 from .recent_submitted import (
     RecentSubmittedMemoryDeliveryStore,
@@ -29,7 +30,8 @@ from .sync import SyncManager
 from .tools import MemoryTools
 
 
-AUTOMATIC_WRITE_ROLES = {"dreamer", "reviewer", "update"}
+AUTOMATIC_WRITE_ROLES = {"dreamer", "pruner", "reviewer", "update"}
+HISTORY_READ_ROLES = {"historian", "pruner"}
 SYNC_TOOL_ROLES = {"sync-reconciler"}
 SYNC_REPAIR_STATUSES = {"conflict", "dirty"}
 SYNC_REPAIR_SESSION_ID = "runtime-sync-repair"
@@ -133,6 +135,34 @@ class RightMemoryRuntime:
             self._trace("run_finished", output=output)
         return output
 
+    def run_prune_turn(self, session_id: str, pruner_config: PrunerConfig) -> str:
+        if self.config.role != "pruner":
+            raise ValueError("run_prune_turn requires pruner role")
+        if session_id == NO_SESSION_RIGHTMEMORY_SESSION_ID:
+            raise ValueError(f"session id is reserved for internal no-session turns: {session_id}")
+        with self._debug_trace(session_id) as trace:
+            self._trace(
+                "run_started",
+                message="prune generation check",
+                model_id=self._trace_model_id(),
+                api_base=self.config.api_base,
+            )
+            try:
+                isolate_write = self._should_isolate_write_turn()
+                if isolate_write:
+                    run_callback = lambda: self._run_prune_turn_isolated(session_id, pruner_config)
+                else:
+                    run_callback = lambda: self._run_prune_turn_direct(session_id, pruner_config)
+                result, post_sync = self._run_locked_turn(run_callback, isolate_write=isolate_write)
+            except Exception as exc:
+                self._trace("run_failed", error_type=type(exc).__name__, error=str(exc))
+                raise
+            if post_sync is not None:
+                self._run_sync_reconciler(post_sync)
+            output = self._result_output(result)
+            self._trace("run_finished", output=output)
+        return output
+
     def _run_session_model(self, session_id: str, message: str):
         with self.sessions.locked(session_id) as session:
             prepared_message, recent_submitted_entries = self._prepare_retrieve_message(session_id, message)
@@ -161,6 +191,18 @@ class RightMemoryRuntime:
             self._record_recent_submitted_delivery(session_id, recent_submitted_entries)
             return result
 
+    def _run_prune_turn_direct(self, session_id: str, pruner_config: PrunerConfig):
+        status = prune_due_status(
+            self.config.memory_root,
+            replace(pruner_config, memory_root=self.config.memory_root),
+        )
+        if not status.due:
+            return status.message
+        message = build_pruner_message(status)
+        if self.config.runtime_mode == "cli-agent":
+            return self._run_session_cli_agent(session_id, message)
+        return self._run_session_model(session_id, message)
+
     def _run_session_turn_isolated(self, session_id: str, message: str):
         supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
         state = _IsolatedStateOverlay(
@@ -180,6 +222,43 @@ class RightMemoryRuntime:
                 except Exception:
                     state.archive_failed_provider_session()
                     raise
+
+    def _run_prune_turn_isolated(self, session_id: str, pruner_config: PrunerConfig):
+        supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
+        state = _IsolatedStateOverlay(
+            self.config.state_root,
+            self.config.role,
+            session_id,
+            seed_provider_session=self.config.runtime_mode != "cli-agent",
+        )
+        with self.sessions.locked(session_id):
+            with state as state_root:
+                try:
+                    result = supervisor.run(
+                        lambda worktree: self._run_prune_turn_in_worktree(
+                            worktree,
+                            state_root,
+                            session_id,
+                            pruner_config,
+                        )
+                    )
+                    state.promote()
+                    return result.output
+                except Exception:
+                    state.archive_failed_provider_session()
+                    raise
+
+    def _run_prune_turn_in_worktree(
+        self,
+        worktree: Path,
+        state_root: Path,
+        session_id: str,
+        pruner_config: PrunerConfig,
+    ):
+        status = prune_due_status(worktree, replace(pruner_config, memory_root=worktree))
+        if not status.due:
+            return status.message
+        return self._run_session_turn_in_worktree(worktree, state_root, session_id, build_pruner_message(status))
 
     def _run_session_turn_in_worktree(self, worktree: Path, state_root: Path, session_id: str, message: str):
         nested_config = replace(
@@ -283,7 +362,7 @@ class RightMemoryRuntime:
             runtime.cleanup()
 
     def _memory_write_lock(self):
-        if self.config.role == "retrieve":
+        if self.config.role in {"historian", "retrieve"}:
             return nullcontext()
         return MemoryWriteLock(self.config.memory_root)
 
@@ -365,7 +444,14 @@ class RightMemoryRuntime:
             self._agent_tool(self.tools.outline_file),
             self._agent_tool(self.tools.validate_memory),
         ]
-        if self.config.role == "retrieve":
+        if self.config.role in HISTORY_READ_ROLES:
+            read_tools.extend(
+                [
+                    self._agent_tool(self.tools.git_log),
+                    self._agent_tool(self.tools.git_show_file),
+                ]
+            )
+        if self.config.role in {"historian", "retrieve"}:
             return read_tools
         write_tools = [
             *read_tools,

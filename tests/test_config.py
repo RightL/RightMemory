@@ -11,15 +11,18 @@ from unittest.mock import patch
 from rightmemory.agent_cli import NO_SESSION_RIGHTMEMORY_SESSION_ID
 from rightmemory.config import (
     AgentCliConfig,
+    PrunerConfig,
     RuntimeConfig,
     load_config,
     load_dreamer_watch_config,
+    load_pruner_config,
     load_review_config,
     load_sync_config,
 )
 from rightmemory.isolated_write import IsolatedWriteResult
 from rightmemory.prompt import build_cli_agent_instructions, build_instructions
 from rightmemory.provider_sessions import ProviderSessionStore
+from rightmemory.prune import PruneDueStatus
 from rightmemory.runtime import RightMemoryRuntime, build_model
 from rightmemory.semantic_upgrades import SemanticUpgradeContext, SemanticUpgradeNote
 from rightmemory.sync import SyncResult
@@ -388,6 +391,64 @@ class ConfigTests(unittest.TestCase):
                 self.assertIn(message, str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_pruner_config_defaults(self):
+        config_path = self._write_config(
+            """
+            [pruner.model]
+            model_id = "openai/pruner"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            runtime_config = load_config("pruner")
+            pruner_config = load_pruner_config()
+
+        self.assertEqual(runtime_config.role, "pruner")
+        self.assertEqual(runtime_config.model_id, "openai/pruner")
+        self.assertEqual(pruner_config.memory_root, Path("/home/example/.rightmemory"))
+        self.assertEqual(pruner_config.generation_commits, 70)
+        self.assertEqual(pruner_config.revival_grace_checkpoints, 2)
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_pruner_config_accepts_generation_values(self):
+        config_path = self._write_config(
+            """
+            [pruner]
+            generation_commits = 12
+            revival_grace_checkpoints = 3
+
+            [pruner.model]
+            model_id = "openai/pruner"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            runtime_config = load_config("pruner")
+            pruner_config = load_pruner_config()
+
+        self.assertEqual(runtime_config.role, "pruner")
+        self.assertEqual(pruner_config.generation_commits, 12)
+        self.assertEqual(pruner_config.revival_grace_checkpoints, 3)
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_pruner_config_rejects_bool_generation_commits(self):
+        config_path = self._write_config(
+            """
+            [pruner]
+            generation_commits = true
+
+            [pruner.model]
+            model_id = "openai/pruner"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_pruner_config()
+
+        self.assertIn("[pruner].generation_commits must be a positive integer", str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_review_config_allows_sync_section(self):
         config_path = self._write_config(
             """
@@ -566,6 +627,11 @@ class RuntimeTests(unittest.TestCase):
             ),
             (
                 RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name)),
+                patch.dict("sys.modules", self._fake_pydantic_modules()),
+                "_run_session_model",
+            ),
+            (
+                RuntimeConfig(role="pruner", model_id="openai/test", memory_root=Path(self.tempdir.name)),
                 patch.dict("sys.modules", self._fake_pydantic_modules()),
                 "_run_session_model",
             ),
@@ -1445,6 +1511,43 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.agent.calls[0]["message"], "remember one")
         self.assertEqual(repairs, ["dirty"])
 
+    def test_prune_turn_checks_generation_after_sync_preflight(self):
+        events = []
+        memory_root = Path(self.tempdir.name)
+        config = RuntimeConfig(
+            role="pruner",
+            model_id="openai/test",
+            memory_root=memory_root,
+            state_root=memory_root / "state",
+            sync=load_sync_config_for_test(memory_root, enabled=True),
+        )
+
+        def fake_prune_due_status(root, pruner_config):
+            events.append(("status", root))
+            return PruneDueStatus(
+                due=False,
+                message="prune not due after sync",
+                commits_since_boundary=1,
+                generation_commits=70,
+            )
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.SyncManager") as manager_class,
+            patch("rightmemory.runtime.prune_due_status", side_effect=fake_prune_due_status),
+        ):
+            manager_class.return_value.preflight.side_effect = lambda: events.append(("preflight", memory_root)) or SyncResult(
+                "synced",
+                "local memory is current",
+            )
+            manager_class.return_value.push.return_value = SyncResult("pushed", "local memory pushed")
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_prune_turn("prune-session", PrunerConfig(memory_root=memory_root))
+
+        self.assertEqual(result, "prune not due after sync")
+        self.assertEqual(events, [("preflight", memory_root), ("status", memory_root)])
+        self.assertEqual(runtime.agent.calls, [])
+
     def test_retrieve_turn_does_not_run_sync_preflight(self):
         config = RuntimeConfig(
             role="retrieve",
@@ -1462,8 +1565,25 @@ class RuntimeTests(unittest.TestCase):
 
         manager_class.assert_not_called()
 
+    def test_historian_turn_does_not_run_sync_preflight(self):
+        config = RuntimeConfig(
+            role="historian",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
+        )
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.SyncManager") as manager_class,
+        ):
+            runtime = RightMemoryRuntime(config)
+            runtime.run_session_turn("agent-session", "find old memory")
+
+        manager_class.assert_not_called()
+
     def test_sync_reconciler_receives_sync_push_tool_when_sync_enabled(self):
-        for role in ("dreamer", "reviewer", "sync-reconciler", "update"):
+        for role in ("dreamer", "pruner", "reviewer", "sync-reconciler", "update"):
             with self.subTest(role=role):
                 config = RuntimeConfig(
                     role=role,
@@ -1495,8 +1615,28 @@ class RuntimeTests(unittest.TestCase):
         tool_names = [tool.__name__ for tool in runtime.agent.tools]
         self.assertNotIn("sync_push", tool_names)
 
+    def test_history_roles_receive_git_history_read_tools(self):
+        for role in ("historian", "pruner"):
+            with self.subTest(role=role):
+                config = RuntimeConfig(
+                    role=role,
+                    model_id="openai/test",
+                    memory_root=Path(self.tempdir.name),
+                )
+
+                with patch.dict("sys.modules", self._fake_pydantic_modules()):
+                    runtime = RightMemoryRuntime(config)
+
+                tool_names = {tool.__name__ for tool in runtime.agent.tools}
+                self.assertIn("git_log", tool_names)
+                self.assertIn("git_show_file", tool_names)
+                if role == "historian":
+                    self.assertNotIn("git_commit", tool_names)
+                else:
+                    self.assertIn("git_commit", tool_names)
+
     def test_write_roles_do_not_receive_sync_push_tool_when_sync_disabled(self):
-        for role in ("dreamer", "reviewer", "sync-reconciler", "update"):
+        for role in ("dreamer", "pruner", "reviewer", "sync-reconciler", "update"):
             with self.subTest(role=role):
                 config = RuntimeConfig(
                     role=role,
@@ -1949,7 +2089,7 @@ class RuntimeTests(unittest.TestCase):
 
 class PromptTests(unittest.TestCase):
     def test_cli_agent_prompt_assembles_without_standalone_tools(self):
-        for role in ("dreamer", "retrieve", "reviewer", "sync-reconciler", "update"):
+        for role in ("dreamer", "historian", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"):
             prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), role)
 
             self.assertIn("RightMemory Schema", prompt)
@@ -1969,7 +2109,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("role must be one of:", str(caught.exception))
 
     def test_standalone_prompts_assemble_for_each_role(self):
-        for role in ("dreamer", "retrieve", "reviewer", "sync-reconciler", "update"):
+        for role in ("dreamer", "historian", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"):
             prompt = build_instructions(Path("/home/example/.rightmemory"), role)
 
             self.assertIn("RightMemory Schema", prompt)

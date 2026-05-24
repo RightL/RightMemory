@@ -281,6 +281,8 @@ rightmemory retrieve --session <agent-session-id> "find memory about the standal
 rightmemory update submit --session <agent-session-id> "remember that MCP should stay optional"
 rightmemory update pull --session <agent-session-id>
 rightmemory dreamer --session <agent-session-id> "run a dream cycle"
+rightmemory prune
+rightmemory history --session <agent-session-id> "find pruned memory about the old setup"
 rightmemory watch start
 rightmemory watch status
 rightmemory watch stop
@@ -308,15 +310,15 @@ The runtime is intentionally small:
 
 - Standalone mode uses `pydantic_ai.Agent` as a chat-like agent loop.
 - CLI-agent mode delegates the same role turn to Codex CLI or Claude Code CLI and records the provider session under `<memory-root>/.runtime/agent_cli_sessions/`.
-- In standalone mode, retrieve uses Claude-shaped read-only tools (`read`, `grep`, `glob`) plus a restricted `read_command` for familiar forms such as `cat`, `sed -n`, `rg`, and read-only `git`; update, dreamer, and reviewer also get exact `edit_file` replacements, file lifecycle tools, and narrow git tools.
+- In standalone mode, retrieve uses Claude-shaped read-only tools (`read`, `grep`, `glob`) plus a restricted `read_command` for familiar forms such as `cat`, `sed -n`, `rg`, and read-only `git`; historian adds bounded Git history reads; update, dreamer, reviewer, and pruner also get exact `edit_file` replacements, file lifecycle tools, and narrow git tools.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different location.
-- Retrieve, update, dreamer, and reviewer are separate runtime roles selected by command line or scanner.
+- Retrieve, history, update, dreamer, reviewer, pruner, and sync repair are separate runtime roles selected by command line, scanner, or watcher.
 - Role-specific executor settings are read from `<memory-root>/rightmemory.toml`.
 - Standalone one-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`; CLI-agent calls persist provider session mappings under `<memory-root>/.runtime/agent_cli_sessions/<role>/`.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - The installer creates a root `.gitignore` allowlist so git status only surfaces `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; existing user `.gitignore` files are preserved.
 - Async `update submit` calls for the same `--session` accumulate as pending candidates. The worker waits one hour from the latest submit, then sends the pending candidates to the update role as one batch; `pull` reports phase, pending candidates, current batch, and timing. While submissions are waiting or being processed, retrieve can see newly submitted unconsolidated memory as `Recent submitted memory` so fresh context is available before the updater writes it.
-- Automatic `update`, `reviewer`, and `dreamer` turns run in isolated Git worktrees when they operate on the main state root. The role still commits normally; runtime validates and lands successful memory commits back into the main memory repo.
+- Automatic `update`, `reviewer`, `dreamer`, and `pruner` turns run in isolated Git worktrees when they operate on the main state root. The role still commits normally; runtime validates and lands successful memory commits back into the main memory repo.
 - Standalone daemon context is preserved with Pydantic AI message history.
 - MCP support can be added later as an adapter over the same daemon.
 
@@ -334,10 +336,16 @@ model = "gpt-5"
 [update.agent_cli]
 model = "gpt-5"
 
+[historian.agent_cli]
+model = "gpt-5"
+
 [dreamer.agent_cli]
 model = "gpt-5"
 
 [reviewer.agent_cli]
+model = "gpt-5"
+
+[pruner.agent_cli]
 model = "gpt-5"
 
 [sync-reconciler.agent_cli]
@@ -395,9 +403,22 @@ api_key = "<token>"
 
 `model_id` is required for the role being started. `anthropic/...` model ids use `AnthropicModel`; other model ids use `OpenAIChatModel` with `OpenAIProvider`, so OpenAI-compatible local gateways can use `api_base` and `api_key`. `[<role>.model.kwargs]` is forwarded as Pydantic AI model settings and unsupported keys fail fast.
 
-Standalone configs use `[retrieve.model]`, `[update.model]`, `[dreamer.model]`, and optionally `[reviewer.model]`.
+Standalone configs use role-local model tables such as `[retrieve.model]`, `[update.model]`, `[historian.model]`, `[dreamer.model]`, `[reviewer.model]`, and `[pruner.model]` for the roles you run.
 
 `[sync-reconciler.model]` is needed when the sync watcher should repair scheduled pull conflicts. Without it, the watcher can report a conflict but cannot run the repair role. In CLI-agent mode, use `[sync-reconciler.agent_cli]` instead.
+
+Pruner has lifecycle settings in the same role table:
+
+```toml
+[pruner]
+generation_commits = 70
+revival_grace_checkpoints = 2
+
+[pruner.model]
+model_id = "anthropic/example-pruner-model"
+```
+
+`generation_commits` counts commits since the latest `prune:` commit. If no prune checkpoint exists, it counts repository history. `revival_grace_checkpoints` controls how many due prune checkpoints a reactivated item is preserved after it reappears in active memory.
 
 To debug in-flight standalone calls, enable append-only trace logs:
 
@@ -474,6 +495,16 @@ marks every included provider session reviewed; a failed batch marks none. If
 the same provider session later changes or resumes, scanner state treats it as
 already reviewed unless you clear the corresponding review state.
 
+### Forgetting And History
+
+RightMemory keeps the active memory surface intentionally perishable. `rightmemory prune` checks whether the memory repo has accumulated enough commits since the latest `prune:` checkpoint. The default threshold is 70 commits. When due, the runtime supplies the pruner with the boundary commit, current head, previous prune ledger, and grace policy. The pruner removes unchanged active memory when it is no longer worth keeping in the current surface, validates the memory graph, and commits with a `prune:` subject.
+
+If a due prune has nothing to remove, the pruner writes an empty `prune: checkpoint` commit. Checkpoint commits are useful because they keep generations based on work done rather than wall-clock time.
+
+The `prune:` commit body is the lightweight ledger. It records the boundary, removed ids, revived ids under grace, and notable skips. A memory item that was pruned and then written back gets grace across two due prune checkpoints by default; after that, the pruner judges it like ordinary active memory again. The memory files do not carry lifecycle metadata.
+
+Ordinary `rightmemory retrieve` searches current active memory. `rightmemory history --session <id> "query"` asks the historian to search `prune:` ledgers and Git snapshots for pruned memory. Historian returns matches as historical context and does not write them back. When old memory becomes useful again, send an ordinary update so the update role can reactivate it in current memory.
+
 ### Change-Triggered Dream Cycles
 
 Dreamer can run background consolidation from the same manager:
@@ -500,7 +531,7 @@ Review and dreamer watchers hold per-role watch locks under `.runtime/watch/`, s
 
 ### Isolated Automatic Writes
 
-Automatic `update`, `reviewer`, and `dreamer` session turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. The role edits, validates, and commits as usual inside that temporary checkout. Runtime then validates that temporary commits touch memory files (`MEMORY.md`, `MEMORY_*.md`, or `dream_logs/*.md`) and keep `MEMORY.md` as a regular file before landing successful commits back into the main memory repo.
+Automatic `update`, `reviewer`, `dreamer`, and `pruner` session turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. The role edits, validates, and commits as usual inside that temporary checkout. Runtime then validates that temporary commits touch memory files (`MEMORY.md`, `MEMORY_*.md`, or `dream_logs/*.md`) and keep `MEMORY.md` as a regular file before landing successful commits back into the main memory repo. Empty `prune:` checkpoint commits are allowed to land through the same path.
 
 Temporary session and provider state lives under `.runtime/isolated-state/` during the isolated turn and is promoted after a successful landing or valid no-op. Standalone isolated turns seed local message history into that temporary state. CLI-agent isolated turns start speculative provider work in a fresh provider session, then promote the successful provider record, so a failed isolated run does not advance the prior durable provider session. If the role fails, is interrupted, leaves dirty temporary files, or cannot land cleanly, the temporary work is discarded and the original source remains the retry source: the update batch, provider transcript batch, or dreamer trigger balance. Dirty main memory files block automatic semantic writes before a temporary role starts; local dirty memory is not made safe by disabling sync.
 
@@ -516,7 +547,7 @@ enabled = true
 stale_pull_after_hours = 24
 ```
 
-When sync is enabled, runtime code handles remote Git synchronization around automatic semantic work. It checks upstream state before model work, pushes after successful memory commits land, and can invoke `sync-reconciler` for sync-detected dirty or conflicted memory state. The isolated-write dirty-main check is separate from remote sync: local dirty memory files block automatic semantic writes even when `[sync].enabled` is false. Retrieval stays local by default for speed.
+When sync is enabled, runtime code handles remote Git synchronization around automatic semantic work. It checks upstream state before model work, pushes after successful memory commits land, and can invoke `sync-reconciler` for sync-detected dirty or conflicted memory state. The isolated-write dirty-main check is separate from remote sync: local dirty memory files block automatic semantic writes even when `[sync].enabled` is false. Retrieval and historical retrieval stay local by default for speed.
 
 Managed watch includes a `sync` target. `rightmemory watch start` starts it when sync is enabled, and `rightmemory watch start sync` runs that target by itself. The sync watcher pulls when no successful pull is recorded or when the last successful pull is older than `stale_pull_after_hours`; clean pulls and fresh checks stay deterministic and do not call a model.
 

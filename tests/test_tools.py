@@ -360,6 +360,67 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("memory: review codex transcript s1", log)
         self.assertIn("Durable memory updated", log)
 
+    def test_git_commit_allows_empty_prune_checkpoint(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        self.tools.git_add(["MEMORY.md"])
+        self.tools.git_commit("memory: add domain")
+
+        result = self.tools.git_commit(
+            "prune: checkpoint",
+            body="Boundary: HEAD\n\nRemoved:\n(none)",
+            allow_empty=True,
+        )
+
+        self.assertIn("committed", result)
+        self.assertEqual(self._git("log", "-1", "--format=%s"), "prune: checkpoint")
+        self.assertEqual(self.tools.git_status(), "")
+
+    def test_git_commit_rejects_non_prune_empty_commit(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+
+        with self.assertRaisesRegex(ValueError, "empty commits are limited"):
+            self.tools.git_commit("memory: empty", allow_empty=True)
+
+        with self.assertRaisesRegex(ValueError, "empty commits are limited"):
+            self.tools.git_commit("prune: expired active memory", allow_empty=True)
+
+    def test_git_log_and_show_file_read_prune_history(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n\n- `old` old value\n", encoding="utf-8")
+        self.tools.git_add(["MEMORY.md"])
+        self.tools.git_commit("memory: add old")
+        old_head = self._git("rev-parse", "HEAD")
+        self._git("commit", "--allow-empty", "-m", "memory: mentions prune", "-m", "prune: not a checkpoint")
+        self.tools.git_commit(
+            "prune: checkpoint",
+            body="Removed:\n- MEMORY.md#old | old value\n",
+            allow_empty=True,
+        )
+
+        log = self.tools.git_log()
+        shown = self.tools.git_show_file(old_head, "MEMORY.md")
+
+        self.assertIn("subject prune: checkpoint", log)
+        self.assertIn("MEMORY.md#old", log)
+        self.assertNotIn("memory: mentions prune", log)
+        self.assertIn("1: # Domain", shown)
+        self.assertIn("3: - `old` old value", shown)
+
+    def test_git_show_file_rejects_unsafe_revision_and_path(self):
+        self._git("init")
+
+        with self.assertRaisesRegex(ValueError, "revision"):
+            self.tools.git_show_file("--help", "MEMORY.md")
+        with self.assertRaisesRegex(ValueError, "history paths"):
+            self.tools.git_show_file("HEAD", "../MEMORY.md")
+
     def test_git_commit_rejects_nul_in_subject(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")
