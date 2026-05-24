@@ -228,6 +228,14 @@ Historian's retrieval flow:
    to submit an ordinary update candidate. Historian does not write the recovered
    item back itself.
 
+Historian final replies should end with a short reactivation hint when they
+return historical matches:
+
+```text
+If this historical memory is useful again, send an update to reactivate it in
+current memory.
+```
+
 Historian can search beyond prune commit bodies when the query names a specific
 id, file path, or phrase, but prune commits remain the primary index because
 their bodies were written for archaeology. No separate history index is added.
@@ -256,7 +264,9 @@ Focused tests should cover:
 - historian recovers a pruned addressable line from a prune ledger and prior Git
   snapshot;
 - historian labels returned items as historical/pruned memory and does not write
-  them back.
+  them back;
+- historian final replies include a short update-based reactivation hint when
+  they return historical matches.
 
 ## Upgrade Impact
 
