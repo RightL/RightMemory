@@ -525,9 +525,9 @@ echo
 echo "Done. Next steps:"
 echo "  1. Open $MEMORY_ROOT/MEMORY.md and replace the example domain with your own."
 if [ "$MODE" = "cli-agent" ]; then
-  echo "  2. Write [agent_cli] and [<role>.agent_cli] provider/model config to $MEMORY_ROOT/rightmemory.toml."
+  echo "  2. Write [agent_cli], [retrieve.agent_cli], and a default writer [update.agent_cli] config to $MEMORY_ROOT/rightmemory.toml."
 else
-  echo "  2. Write role model config to $MEMORY_ROOT/rightmemory.toml."
+  echo "  2. Write [retrieve.model] and a default writer [update.model] config to $MEMORY_ROOT/rightmemory.toml."
 fi
 echo "  3. Trigger any memory-relevant message in your AI agent — the installed orchestrator calls rightmemory."
 echo "  4. Optional background review, pruning, and dreams: rightmemory watch start"

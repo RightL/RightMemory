@@ -326,7 +326,9 @@ The runtime is intentionally small:
 
 ### CLI-Agent Config
 
-CLI-agent mode uses a global provider and per-role model settings. A minimal Codex setup looks like:
+CLI-agent mode uses a global provider plus role model settings. Most installs only need a retrieve model and a default writer model; dreamer, reviewer, pruner, historian, and sync repair reuse the writer config unless you override them.
+
+A minimal Codex setup:
 
 ```toml
 [agent_cli]
@@ -337,24 +339,9 @@ model = "gpt-5"
 
 [update.agent_cli]
 model = "gpt-5"
-
-[historian.agent_cli]
-model = "gpt-5"
-
-[dreamer.agent_cli]
-model = "gpt-5"
-
-[reviewer.agent_cli]
-model = "gpt-5"
-
-[pruner.agent_cli]
-model = "gpt-5"
-
-[sync-reconciler.agent_cli]
-model = "gpt-5"
 ```
 
-A role can override the provider when a different CLI should execute that role:
+Add a role-specific table only when a role should use a different model or provider:
 
 ```toml
 [agent_cli]
@@ -403,11 +390,11 @@ api_base = "https://api.example.com/anthropic"
 api_key = "<token>"
 ```
 
-`model_id` is required for the role being started. `anthropic/...` model ids use `AnthropicModel`; other model ids use `OpenAIChatModel` with `OpenAIProvider`, so OpenAI-compatible local gateways can use `api_base` and `api_key`. `[<role>.model.kwargs]` is forwarded as Pydantic AI model settings and unsupported keys fail fast.
+`model_id` is required for each explicit `[<role>.model]` table. `anthropic/...` model ids use `AnthropicModel`; other model ids use `OpenAIChatModel` with `OpenAIProvider`, so OpenAI-compatible local gateways can use `api_base` and `api_key`. `[<role>.model.kwargs]` is forwarded as Pydantic AI model settings and unsupported keys fail fast.
 
-Standalone configs use role-local model tables such as `[retrieve.model]`, `[update.model]`, `[historian.model]`, `[dreamer.model]`, `[reviewer.model]`, and `[pruner.model]` for the roles you run.
+Standalone configs use role-local model tables such as `[retrieve.model]`, `[update.model]`, `[historian.model]`, `[dreamer.model]`, `[reviewer.model]`, and `[pruner.model]` for the roles you run. In the common setup, configure `[retrieve.model]` for search and `[update.model]` as the default writer model. Other non-retrieve roles reuse the writer model unless you give them their own table.
 
-`[sync-reconciler.model]` is needed when the sync watcher should repair scheduled pull conflicts. Without it, the watcher can report a conflict but cannot run the repair role. In CLI-agent mode, use `[sync-reconciler.agent_cli]` instead.
+Configure `[sync-reconciler.model]` or `[sync-reconciler.agent_cli]` only if sync repair should use a different model from the default writer.
 
 Pruner has lifecycle settings in the same role table:
 

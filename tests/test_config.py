@@ -238,6 +238,122 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.model_id, "openai/reviewer")
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_non_retrieve_role_inherits_missing_standalone_executor_from_update(self):
+        config_path = self._write_config(
+            """
+            [retrieve.model]
+            model_id = "openai/fast-retrieve"
+
+            [update.model]
+            model_id = "hosted_vllm//models/write-model"
+            api_base = "http://127.0.0.1:8000/v1"
+            api_key = "token"
+
+            [update.model.kwargs]
+            temperature = 0
+
+            [pruner]
+            generation_commits = 12
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_config("pruner")
+
+        self.assertEqual(config.role, "pruner")
+        self.assertEqual(config.runtime_mode, "standalone")
+        self.assertEqual(config.model_id, "hosted_vllm//models/write-model")
+        self.assertEqual(config.api_base, "http://127.0.0.1:8000/v1")
+        self.assertEqual(config.api_key, "token")
+        self.assertEqual(config.model_kwargs, {"temperature": 0})
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_non_retrieve_role_inherits_missing_agent_cli_executor_from_update(self):
+        config_path = self._write_config(
+            """
+            [agent_cli]
+            provider = "codex"
+
+            [update.agent_cli]
+            model = "gpt-5"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_config("sync-reconciler")
+
+        self.assertEqual(config.role, "sync-reconciler")
+        self.assertEqual(config.runtime_mode, "cli-agent")
+        self.assertEqual(config.agent_cli, AgentCliConfig(provider="codex", model="gpt-5"))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_retrieve_does_not_inherit_writer_executor(self):
+        config_path = self._write_config(
+            """
+            [update.model]
+            model_id = "openai/write-model"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_config("retrieve")
+
+        self.assertIn("[agent_cli].provider", str(caught.exception))
+        self.assertIn("[retrieve.agent_cli].provider", str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_writer_executor_fallback_ignores_retrieve_model(self):
+        config_path = self._write_config(
+            """
+            [retrieve.model]
+            model_id = "openai/fast-retrieve"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_config("reviewer")
+
+        self.assertIn("[agent_cli].provider", str(caught.exception))
+        self.assertIn("[reviewer.agent_cli].provider", str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_explicit_incomplete_role_model_does_not_inherit_fields(self):
+        config_path = self._write_config(
+            """
+            [update.model]
+            model_id = "openai/write-model"
+
+            [pruner.model]
+            api_base = "http://127.0.0.1:8000/v1"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_config("pruner")
+
+        self.assertIn("[model].model_id must be a non-empty string", str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_missing_executor_fallback_prefers_update(self):
+        config_path = self._write_config(
+            """
+            [dreamer.model]
+            model_id = "openai/dreamer"
+
+            [update.model]
+            model_id = "openai/update"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_config("reviewer")
+
+        self.assertEqual(config.model_id, "openai/update")
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_debug_trace_config(self):
         config_path = self._write_config(
             """

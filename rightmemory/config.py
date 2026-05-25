@@ -13,6 +13,7 @@ MEMORY_ROOT = Path(os.environ.get(MEMORY_ROOT_ENV, "~/.rightmemory")).expanduser
 _STATE_ROOT_UNSET = cast(Path, object())
 CONFIG_PATH = MEMORY_ROOT / "rightmemory.toml"
 ROLES = {"dreamer", "historian", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"}
+MODEL_FALLBACK_ROLES = ("update", "dreamer", "reviewer", "pruner", "sync-reconciler", "historian")
 DEFAULT_MAX_TOOL_RETRIES = 10
 DEFAULT_REVIEW_IDLE_SECONDS = 3600
 DEFAULT_REVIEW_SINCE_DAYS = 3
@@ -99,29 +100,26 @@ def load_config(role: str) -> RuntimeConfig:
         raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
 
     _reject_unknown_keys(data, _top_level_keys(), "top-level")
-    role_section = data.get(role, {})
-    if role_section is None:
-        role_section = {}
-    if not isinstance(role_section, dict):
-        raise ValueError(f"[{role}] must be a TOML table")
-    allowed_role_keys = {"model", "agent_cli"}
-    if role == "dreamer":
-        allowed_role_keys.add("watch")
-    if role == "pruner":
-        allowed_role_keys.update({"generation_commits", "revival_grace_checkpoints"})
-    _reject_unknown_keys(role_section, allowed_role_keys, f"[{role}]")
+    role_section = _role_section(data, role)
+    executor_role = role
+    if role != "retrieve" and not _has_executor_config(role_section):
+        inherited = _fallback_executor_section(data, role)
+        if inherited is not None:
+            executor_role, role_section = inherited
 
     has_model = "model" in role_section
     has_agent_cli = "agent_cli" in role_section
     if has_model and has_agent_cli:
-        raise ValueError(f"[{role}] must not define both [{role}.model] and [{role}.agent_cli]")
+        raise ValueError(
+            f"[{executor_role}] must not define both [{executor_role}.model] and [{executor_role}.agent_cli]"
+        )
 
     model_section = role_section.get("model") if has_model else None
     if model_section is None:
-        return _agent_cli_runtime_config(role, data, role_section)
+        return _agent_cli_runtime_config(role, data, role_section, executor_role=executor_role)
     if not isinstance(model_section, dict):
-        raise ValueError(f"{CONFIG_PATH} must contain a [{role}.model] table")
-    _reject_unknown_keys(model_section, {"model_id", "api_base", "api_key", "kwargs"}, f"[{role}.model]")
+        raise ValueError(f"{CONFIG_PATH} must contain a [{executor_role}.model] table")
+    _reject_unknown_keys(model_section, {"model_id", "api_base", "api_key", "kwargs"}, f"[{executor_role}.model]")
 
     model_id = _required_string(model_section, "model_id")
     api_base = _optional_string(model_section, "api_base")
@@ -306,6 +304,39 @@ def _top_level_keys() -> set[str]:
     return {*ROLES, "agent_cli", "review", "debug", "sync"}
 
 
+def _role_section(data: dict[str, object], role: str) -> dict[str, object]:
+    section = data.get(role, {})
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError(f"[{role}] must be a TOML table")
+    _reject_unknown_keys(section, _allowed_role_keys(role), f"[{role}]")
+    return section
+
+
+def _allowed_role_keys(role: str) -> set[str]:
+    allowed = {"model", "agent_cli"}
+    if role == "dreamer":
+        allowed.add("watch")
+    if role == "pruner":
+        allowed.update({"generation_commits", "revival_grace_checkpoints"})
+    return allowed
+
+
+def _has_executor_config(section: dict[str, object]) -> bool:
+    return "model" in section or "agent_cli" in section
+
+
+def _fallback_executor_section(data: dict[str, object], role: str) -> tuple[str, dict[str, object]] | None:
+    for candidate in MODEL_FALLBACK_ROLES:
+        if candidate == role:
+            continue
+        section = _role_section(data, candidate)
+        if _has_executor_config(section):
+            return candidate, section
+    return None
+
+
 def _required_string(data: dict[str, object], key: str) -> str:
     value = data.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -342,7 +373,13 @@ def _positive_integer(data: dict[str, object], key: str, default: int, context: 
     return value
 
 
-def _agent_cli_runtime_config(role: str, data: dict[str, object], role_section: dict[str, object]) -> RuntimeConfig:
+def _agent_cli_runtime_config(
+    role: str,
+    data: dict[str, object],
+    role_section: dict[str, object],
+    *,
+    executor_role: str,
+) -> RuntimeConfig:
     global_section = data.get("agent_cli", {})
     if global_section is None:
         global_section = {}
@@ -354,17 +391,17 @@ def _agent_cli_runtime_config(role: str, data: dict[str, object], role_section: 
     if role_cli is None:
         role_cli = {}
     if not isinstance(role_cli, dict):
-        raise ValueError(f"[{role}.agent_cli] must be a TOML table")
-    _reject_unknown_keys(role_cli, {"provider", "model"}, f"[{role}.agent_cli]")
+        raise ValueError(f"[{executor_role}.agent_cli] must be a TOML table")
+    _reject_unknown_keys(role_cli, {"provider", "model"}, f"[{executor_role}.agent_cli]")
 
     provider = role_cli.get("provider", global_section.get("provider"))
     if not isinstance(provider, str) or not provider.strip():
-        raise ValueError(f"[agent_cli].provider or [{role}.agent_cli].provider must be a non-empty string")
+        raise ValueError(f"[agent_cli].provider or [{executor_role}.agent_cli].provider must be a non-empty string")
     provider = provider.strip()
     if provider not in {"codex", "claude"}:
         raise ValueError("agent_cli provider must be one of: claude, codex")
 
-    model = _optional_agent_cli_model(role, role_cli.get("model"))
+    model = _optional_agent_cli_model(executor_role, role_cli.get("model"))
     return RuntimeConfig(
         role=role,
         model_id=None,

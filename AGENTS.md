@@ -6,26 +6,24 @@
 - Canonical role prompts live in `rightmemory/prompts/`. Edit role behavior there first; installed skills do not contain generated curator/dreamer role prompts.
 - `skills/rightmemory-schema.md` is the schema source for memory files. `MEMORY.example.md` is the installer seed and the source for the managed example block that can be refreshed on reinstall.
 - `install.sh` installs either standalone mode or cli-agent mode, preserves existing user memory files, and refreshes the managed example block when present.
+- `retrieve` model config is independent. Other roles may reuse the configured writer executor when their own `[<role>.model]` or `[<role>.agent_cli]` table is absent, so upgrade-added roles can run without rewriting user config.
 
 ## Development Commands
-- Run the test suite with `conda run -n rightmemory python -m unittest discover -s tests`.
-- For syntax-only checks, use `conda run -n rightmemory python -m compileall -q rightmemory tests`.
+- Run the test suite with `python -m unittest discover -s tests`.
+- For syntax-only checks, use `python -m compileall -q rightmemory tests`.
 - Use `./install.sh [--mode cli-agent|standalone] <memory-root> <skills-target>` when verifying install behavior.
-- `uv` is available through the existing conda environment: `conda run -n rightmemory uv --version`. Use `conda run -n rightmemory ./install.sh ...` when the installer needs `uv`.
+- `uv` is available on PATH. Use `uv --version` if you need to check it before running the installer.
 - Useful review commands are `rightmemory review scan --once`, `rightmemory review watch`, and `rightmemory review normalize --source <codex|claude> --path <file>`.
 - Use `rightmemory prune` to run generation-based active memory pruning, and `rightmemory history --session <id> <query>` for explicit retrieval from pruned memory.
 - Use `rightmemory watch start|status|stop|restart` to manage background review, dreamer, pruner, and sync watchers. Use `rightmemory dreamer watch` or `rightmemory prune watch` directly only when debugging lower-level loops.
 - Use `rightmemory doctor agent-cli` after configuring cli-agent mode to check provider commands, role config, and basic read/write probes.
-- Semantic upgrade notes are Markdown files under `rightmemory/semantic_upgrades/`; validate them with `conda run -n rightmemory python -m unittest discover -s tests -p 'test_semantic_upgrades.py'`.
+- Semantic upgrade notes are Markdown files under `rightmemory/semantic_upgrades/`; validate them with `python -m unittest discover -s tests -p 'test_semantic_upgrades.py'`.
 
 ## Maintaining This File (IMPORTANT!)
 - Treat this file (./AGENTS.md) as operational instructions for coding agents, not as a design document. Keep durable design explanation in `README.md` or `DESIGN_NOTES.md`.
 - Update this file when setup commands, test commands, install behavior, role boundaries, or git/memory safety rules change.
 - Remove stale commands or environment assumptions as soon as they stop matching the repo; bad instructions are worse than missing instructions.
 - Keep it concise enough to stay useful in Codex project instructions. Prefer scoped nested `AGENTS.md` files if a subdirectory needs special rules.
-
-## Agent Behavior
-- Do not use Superpowers skills unless the user explicitly asks for them.
 
 ## Memory Runtime Rules
 - A memory root contains `MEMORY.md`, optional sibling `MEMORY_*.md` detail files, `dream_logs/`, `rightmemory.toml`, and `.runtime/`.
