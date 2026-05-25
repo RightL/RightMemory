@@ -396,13 +396,9 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("reviewed: 0", stdout.getvalue())
         self.assertIn("rightmemory review watch stopped", stderr.getvalue())
 
-    def test_review_watch_retries_failed_scan_without_sleeping(self):
+    def test_review_watch_failed_scan_uses_retry_sleep(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
-        results = [
-            FakeReviewResult("failed: 1", failed=1),
-            FakeReviewResult("reviewed: 0", reviewed=0),
-        ]
 
         class FakeScanner:
             def __init__(self, config, run_reviewer, *, on_review_success=None):
@@ -411,7 +407,7 @@ class JsonRequestTests(unittest.TestCase):
                 self.on_review_success = on_review_success
 
             def scan_once(self):
-                return results.pop(0)
+                return FakeReviewResult("failed: 1", failed=1)
 
         with tempfile.TemporaryDirectory() as tempdir:
             config = type("Config", (), {"memory_root": Path(tempdir)})()
@@ -421,16 +417,16 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_dreamer_watch_config", return_value=_dreamer_watch_config()),
                 patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
                 patch("rightmemory.cli.ReviewScanner", FakeScanner),
+                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
                 patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
                 patch("sys.stdout", stdout),
                 patch("sys.stderr", stderr),
             ):
-                result = main(["review", "watch", "--interval", "5"])
+                result = main(["review", "watch", "--interval", "120"])
 
         self.assertEqual(result, 130)
-        sleep.assert_called_once_with(5)
+        sleep.assert_called_once_with(60)
         self.assertIn("failed: 1", stdout.getvalue())
-        self.assertIn("reviewed: 0", stdout.getvalue())
 
     def test_review_watch_default_interval_is_two_hours(self):
         stdout = io.StringIO()

@@ -41,6 +41,7 @@ from .watch import (
 )
 
 DEFAULT_REVIEW_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
+DEFAULT_REVIEW_WATCH_RETRY_SECONDS = 60
 DEFAULT_DREAMER_WATCH_RETRY_SECONDS = 60
 DEFAULT_PRUNER_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 DEFAULT_PRUNER_WATCH_RETRY_SECONDS = 60
@@ -480,7 +481,12 @@ def _review_watch(interval: int, since_days: int | None = None) -> int:
                     next_config = None
                 print(result.format(), flush=True)
                 _reexec_if_install_changed(refresh, stop)
-                if not stop.requested and (result.reviewed > 0 or result.failed > 0):
+                if not stop.requested and result.reviewed > 0:
+                    continue
+                if not stop.requested and result.failed > 0:
+                    retry_seconds = min(interval, DEFAULT_REVIEW_WATCH_RETRY_SECONDS)
+                    if not _sleep_with_refresh_check(retry_seconds, refresh, stop):
+                        break
                     continue
                 if not _sleep_with_refresh_check(interval, refresh, stop):
                     break

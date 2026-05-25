@@ -451,10 +451,11 @@ rightmemory review watch
 ```
 
 It starts immediately and runs one-batch scans until no eligible work remains,
-then sleeps before checking again. A reviewed or failed batch triggers another
-immediate scan, so backlog and recovery attempts are not delayed by the
-interval. The default interval is two hours; override it with
-`--interval <seconds>`.
+then sleeps before checking again. A reviewed batch triggers another immediate
+scan so backlog is not delayed by the interval. A failed batch is retried after
+at most 60 seconds, which keeps transient recovery quick without tight-looping
+on a persistent failure. The default idle interval is two hours; override it
+with `--interval <seconds>`.
 
 For cron, launchd, or other supervisors, call one bounded scan at a time:
 
