@@ -429,7 +429,7 @@ To debug in-flight standalone calls, enable append-only trace logs:
 trace = true
 ```
 
-Trace files include run, history-save, and tool events. They may include prompts, model outputs, and tool results, with very large fields truncated to keep trace files bounded. Leave tracing off unless you need live debugging.
+Trace files include run, history-save, and tool events. They may include prompts, model outputs, and tool results. Trace files are append-only, so repeated failures can make them grow quickly; leave tracing off unless you need live debugging.
 
 ### Background Watchers
 

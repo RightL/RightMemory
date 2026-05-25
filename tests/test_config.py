@@ -19,7 +19,6 @@ from rightmemory.config import (
     load_review_config,
     load_sync_config,
 )
-from rightmemory.debug import DebugTrace, MAX_DEBUG_TRACE_FIELD_CHARS
 from rightmemory.isolated_write import IsolatedWriteResult, MainMemoryDirtyError
 from rightmemory.prompt import build_cli_agent_instructions, build_instructions
 from rightmemory.provider_sessions import ProviderSessionStore
@@ -1950,18 +1949,6 @@ class RuntimeTests(unittest.TestCase):
         events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([event["event"] for event in events], ["tool_started", "tool_finished"])
         self.assertEqual(events[0]["tool"], "glob")
-
-    def test_debug_trace_truncates_large_fields(self):
-        trace = DebugTrace(Path(self.tempdir.name), "reviewer", "batch")
-        large_message = "x" * (MAX_DEBUG_TRACE_FIELD_CHARS * 2)
-
-        trace.append("run_started", message=large_message)
-
-        trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "reviewer" / "batch.jsonl"
-        event = json.loads(trace_path.read_text(encoding="utf-8"))
-        self.assertLess(len(event["message"]), len(large_message))
-        self.assertIn("debug trace field truncated", event["message"])
-        self.assertIn(f"original_chars={len(large_message)}", event["message"])
 
     def test_debug_trace_records_failures_before_history_save(self):
         config = RuntimeConfig(
