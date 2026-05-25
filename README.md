@@ -63,8 +63,9 @@ After install, add a short instruction to your agent guidance file, such as
 Use the memory-orchestrator skill to retrieve and update memory.
 ```
 
-Then start the background watcher. It reviews recent agent sessions and triggers
-dream cycles for memory cleanup and consolidation:
+Then start the background watcher. It reviews recent agent sessions, checks
+prune generations, and triggers dream cycles for memory cleanup and
+consolidation:
 
 ```bash
 rightmemory watch start
@@ -266,7 +267,7 @@ command is written to `~/.local/bin/rightmemory`. If `~/.local/bin` is not on
 ## Everyday Use
 
 1. Keep the `memory-orchestrator` instruction in `AGENTS.md` or `CLAUDE.md`.
-2. Run `rightmemory watch start` for background review and dream cycles.
+2. Run `rightmemory watch start` for background review, pruning, and dream cycles.
 3. Let the orchestrator handle memory retrieval and durable updates during agent work.
 4. Use normal git tools in the memory root to inspect or revert memory changes.
 
@@ -282,6 +283,7 @@ rightmemory update submit --session <agent-session-id> "remember that MCP should
 rightmemory update pull --session <agent-session-id>
 rightmemory dreamer --session <agent-session-id> "run a dream cycle"
 rightmemory prune
+rightmemory prune watch
 rightmemory history --session <agent-session-id> "find pruned memory about the old setup"
 rightmemory watch start
 rightmemory watch status
@@ -429,9 +431,9 @@ trace = true
 
 Trace files include run, history-save, and tool events. They may include prompts, model outputs, and tool results, so leave tracing off unless you need live debugging.
 
-### Automatic Transcript Review
+### Background Watchers
 
-RightMemory can scan idle provider chat sessions and run the `reviewer` role. The normal background controls are:
+RightMemory can keep automatic review, pruning, dreamer, and sync loops under the same background manager. The normal controls are:
 
 ```bash
 rightmemory watch start
@@ -440,7 +442,7 @@ rightmemory watch stop
 rightmemory watch restart
 ```
 
-By default these commands manage review and dreamer watchers, plus sync when `[sync].enabled` is true. Pass a target name when you want one role: `rightmemory watch start review`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.
+By default these commands manage review, dreamer, and pruner watchers, plus sync when `[sync].enabled` is true. Pass a target name when you want one role: `rightmemory watch start review`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.
 
 The lower-level review loop is still available:
 
@@ -497,7 +499,7 @@ already reviewed unless you clear the corresponding review state.
 
 ### Forgetting And History
 
-RightMemory keeps the active memory surface intentionally perishable. `rightmemory prune` checks whether the memory repo has accumulated enough commits since the latest `prune:` checkpoint. The default threshold is 70 commits. When due, the runtime supplies the pruner with the boundary commit, current head, previous prune ledger, and grace policy. The pruner removes unchanged active memory when it is no longer worth keeping in the current surface, validates the memory graph, and commits with a `prune:` subject.
+RightMemory keeps the active memory surface intentionally perishable. `rightmemory prune` checks whether the memory repo has accumulated enough commits since the latest `prune:` checkpoint. The default threshold is 70 commits. `rightmemory prune watch` runs the same check periodically, and the managed `rightmemory watch start` command starts that pruner watcher by default. When pruning is due, the runtime supplies the pruner with the boundary commit, current head, previous prune ledger, and grace policy. The pruner removes unchanged active memory when it is no longer worth keeping in the current surface, validates the memory graph, and commits with a `prune:` subject.
 
 If a due prune has nothing to remove, the pruner writes an empty `prune: checkpoint` commit. Checkpoint commits are useful because they keep generations based on work done rather than wall-clock time.
 
@@ -525,9 +527,9 @@ check_interval_seconds = 3000
 
 Successful async update batches add points after semantic success and async state update. Successful review batches add points after reviewer success and review state save. A successful automatic dream consumes the configured threshold after the cycle lands or completes as a valid no-op; failed cycles preserve the accumulated points. `rightmemory dreamer watch --interval <seconds>` overrides this process's trigger-check cadence, not a fixed dream-cycle spacing. The old `<memory-root>/.runtime/dreamer/watch-state.json` scheduling state is no longer used.
 
-Review and dreamer watchers hold per-role watch locks under `.runtime/watch/`, so a duplicate watcher exits instead of creating a competing background loop. Isolated roles may do model work in temporary checkouts, and the landing phase uses the shared memory write lock before changing the main memory repo.
+Review, dreamer, and pruner watchers hold per-role watch locks under `.runtime/watch/`, so a duplicate watcher exits instead of creating a competing background loop. Isolated roles may do model work in temporary checkouts, and the landing phase uses the shared memory write lock before changing the main memory repo.
 
-`rightmemory watch stop` sends a graceful terminate signal. A sleeping watcher exits within a few seconds; a watcher doing model work finishes the current cycle first. When `install.sh` finishes, it updates `<memory-root>/.runtime/install.stamp`. Watchers check that stamp between runs and while sleeping; if it changes, they re-exec themselves with the same arguments.
+`rightmemory watch stop` sends a graceful terminate signal. A sleeping watcher exits within a few seconds; a watcher doing model work finishes the current cycle first. When `install.sh` finishes, it updates `<memory-root>/.runtime/install.stamp`. Watchers check that stamp between runs and while sleeping; if it changes, they re-exec themselves with the same arguments. Re-exec updates existing target processes; run `rightmemory watch start` or `rightmemory watch restart` after an upgrade to start any newly introduced managed target.
 
 ### Isolated Automatic Writes
 

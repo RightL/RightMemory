@@ -519,6 +519,7 @@ fi
 } > "$INSTALL_STAMP"
 echo "  [refresh] $INSTALL_STAMP"
 echo "             running watch processes refresh after their current cycle or sleep check"
+echo "             run rightmemory watch start or restart to start newly added watch targets"
 
 echo
 echo "Done. Next steps:"
@@ -529,7 +530,7 @@ else
   echo "  2. Write role model config to $MEMORY_ROOT/rightmemory.toml."
 fi
 echo "  3. Trigger any memory-relevant message in your AI agent — the installed orchestrator calls rightmemory."
-echo "  4. Optional background review and dreams: rightmemory watch start"
+echo "  4. Optional background review, pruning, and dreams: rightmemory watch start"
 echo
 echo "Re-run this script any time you pull updates from the RightMemory repo;"
 echo "your existing MEMORY.md, MEMORY_*.md, and dream_logs/ are preserved."

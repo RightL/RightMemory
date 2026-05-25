@@ -174,6 +174,84 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(roles, ["pruner"])
         self.assertIn("prune session prune-1: /memory", stdout.getvalue())
 
+    def test_prune_watch_help_does_not_load_config(self):
+        stdout = io.StringIO()
+
+        with (
+            patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
+            patch("rightmemory.cli.load_pruner_config", side_effect=AssertionError("pruner config should not load")),
+            patch("sys.stdout", stdout),
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                main(["prune", "watch", "--help"])
+
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("rightmemory prune watch", stdout.getvalue())
+
+    def test_prune_watch_rejects_non_positive_interval(self):
+        with (
+            patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
+            patch("rightmemory.cli.load_pruner_config", side_effect=AssertionError("pruner config should not load")),
+        ):
+            with self.assertRaises(ValueError):
+                main(["prune", "watch", "--interval", "0"])
+
+    def test_prune_watch_sleeps_until_interrupted(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            pruner_config = type("PrunerConfig", (), {"memory_root": memory_root})()
+            runtime_config = type("Config", (), {"memory_root": memory_root})()
+
+            with (
+                patch("rightmemory.cli.load_pruner_config", return_value=pruner_config),
+                patch("rightmemory.cli.load_config", return_value=runtime_config),
+                patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["prune", "watch", "--interval", "60"])
+
+        self.assertEqual(result, 130)
+        sleep.assert_called_once_with(60)
+        self.assertIn("rightmemory prune check", stdout.getvalue())
+        self.assertIn(f"prune session pruner-watch: {memory_root}", stdout.getvalue())
+        self.assertIn("rightmemory pruner watch stopped", stderr.getvalue())
+
+    def test_prune_watch_failure_logs_and_retries(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        class FailingRuntime(FakeRuntime):
+            def run_prune_turn(self, session_id: str, pruner_config) -> str:
+                raise RuntimeError(f"boom for {session_id}")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            pruner_config = type("PrunerConfig", (), {"memory_root": memory_root})()
+            runtime_config = type("Config", (), {"memory_root": memory_root})()
+
+            with (
+                patch("rightmemory.cli.load_pruner_config", return_value=pruner_config),
+                patch("rightmemory.cli.load_config", return_value=runtime_config),
+                patch("rightmemory.cli.RightMemoryRuntime", FailingRuntime),
+                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["prune", "watch", "--interval", "120"])
+
+        self.assertEqual(result, 130)
+        sleep.assert_called_once_with(60)
+        self.assertIn("rightmemory prune check", stdout.getvalue())
+        self.assertIn("rightmemory prune check failed: RuntimeError: boom for pruner-watch", stderr.getvalue())
+        self.assertIn("rightmemory pruner watch stopped", stderr.getvalue())
+
     def test_main_rejects_old_curator_role(self):
         with patch("sys.stderr", io.StringIO()):
             with self.assertRaises(SystemExit) as caught:
@@ -390,7 +468,7 @@ class JsonRequestTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 main(["review", "watch", "--interval", "0"])
 
-    def test_watch_start_starts_review_and_dreamer_managed_processes(self):
+    def test_watch_start_starts_review_dreamer_and_pruner_managed_processes(self):
         stdout = io.StringIO()
 
         class FakeProcess:
@@ -412,21 +490,27 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
                 patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
-                patch("rightmemory.watch.subprocess.Popen", side_effect=[FakeProcess(101), FakeProcess(102)]) as popen,
+                patch(
+                    "rightmemory.watch.subprocess.Popen",
+                    side_effect=[FakeProcess(101), FakeProcess(102), FakeProcess(103)],
+                ) as popen,
                 patch("sys.stdout", stdout),
             ):
                 result = main(["watch", "start"])
 
             review_pid = (memory_root / ".runtime" / "watch" / "review.pid").read_text(encoding="utf-8")
             dreamer_pid = (memory_root / ".runtime" / "watch" / "dreamer.pid").read_text(encoding="utf-8")
+            pruner_pid = (memory_root / ".runtime" / "watch" / "pruner.pid").read_text(encoding="utf-8")
 
         self.assertEqual(result, 0)
-        self.assertEqual(roles, ["reviewer", "dreamer"])
-        self.assertEqual(popen.call_count, 2)
+        self.assertEqual(roles, ["reviewer", "dreamer", "pruner"])
+        self.assertEqual(popen.call_count, 3)
         self.assertEqual(review_pid, "101\n")
         self.assertEqual(dreamer_pid, "102\n")
+        self.assertEqual(pruner_pid, "103\n")
         self.assertIn("review: running pid 101", stdout.getvalue())
         self.assertIn("dreamer: running pid 102", stdout.getvalue())
+        self.assertIn("pruner: running pid 103", stdout.getvalue())
         self.assertIn("sync: disabled", stdout.getvalue())
 
     def test_watch_start_starts_sync_when_enabled(self):
@@ -449,7 +533,10 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
                 patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
-                patch("rightmemory.watch.subprocess.Popen", side_effect=[FakeProcess(101), FakeProcess(102), FakeProcess(103)]) as popen,
+                patch(
+                    "rightmemory.watch.subprocess.Popen",
+                    side_effect=[FakeProcess(101), FakeProcess(102), FakeProcess(103), FakeProcess(104)],
+                ) as popen,
                 patch("sys.stdout", stdout),
             ):
                 result = main(["watch", "start"])
@@ -457,9 +544,9 @@ class JsonRequestTests(unittest.TestCase):
             sync_pid = (memory_root / ".runtime" / "watch" / "sync.pid").read_text(encoding="utf-8")
 
         self.assertEqual(result, 0)
-        self.assertEqual(popen.call_count, 3)
-        self.assertEqual(sync_pid, "103\n")
-        self.assertIn("sync: running pid 103", stdout.getvalue())
+        self.assertEqual(popen.call_count, 4)
+        self.assertEqual(sync_pid, "104\n")
+        self.assertIn("sync: running pid 104", stdout.getvalue())
 
     def test_watch_start_skips_sync_when_disabled(self):
         stdout = io.StringIO()
@@ -481,13 +568,16 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
                 patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
-                patch("rightmemory.watch.subprocess.Popen", side_effect=[FakeProcess(101), FakeProcess(102)]) as popen,
+                patch(
+                    "rightmemory.watch.subprocess.Popen",
+                    side_effect=[FakeProcess(101), FakeProcess(102), FakeProcess(103)],
+                ) as popen,
                 patch("sys.stdout", stdout),
             ):
                 result = main(["watch", "start"])
 
         self.assertEqual(result, 0)
-        self.assertEqual(popen.call_count, 2)
+        self.assertEqual(popen.call_count, 3)
         self.assertIn("sync: disabled", stdout.getvalue())
 
     def test_watch_start_reports_failure_after_attempting_later_targets(self):
@@ -515,25 +605,31 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
                 patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
-                patch("rightmemory.watch.subprocess.Popen", side_effect=[FakeProcess(201), FakeProcess(202)]) as popen,
+                patch(
+                    "rightmemory.watch.subprocess.Popen",
+                    side_effect=[FakeProcess(201), FakeProcess(202), FakeProcess(203)],
+                ) as popen,
                 patch("sys.stdout", stdout),
                 patch("sys.stderr", stderr),
             ):
                 result = main(["watch", "start"])
 
             dreamer_pid = (memory_root / ".runtime" / "watch" / "dreamer.pid").read_text(encoding="utf-8")
+            pruner_pid = (memory_root / ".runtime" / "watch" / "pruner.pid").read_text(encoding="utf-8")
             sync_pid = (memory_root / ".runtime" / "watch" / "sync.pid").read_text(encoding="utf-8")
 
         self.assertEqual(result, 1)
-        self.assertEqual(roles, ["reviewer", "dreamer"])
-        self.assertEqual(popen.call_count, 2)
+        self.assertEqual(roles, ["reviewer", "dreamer", "pruner"])
+        self.assertEqual(popen.call_count, 3)
         self.assertEqual(dreamer_pid, "201\n")
-        self.assertEqual(sync_pid, "202\n")
+        self.assertEqual(pruner_pid, "202\n")
+        self.assertEqual(sync_pid, "203\n")
         self.assertIn("review: error: RuntimeError: review unavailable", stderr.getvalue())
         self.assertIn("dreamer: running pid 201", stdout.getvalue())
-        self.assertIn("sync: running pid 202", stdout.getvalue())
+        self.assertIn("pruner: running pid 202", stdout.getvalue())
+        self.assertIn("sync: running pid 203", stdout.getvalue())
 
-    def test_watch_start_cleans_isolated_worktrees_for_review_and_dreamer_not_sync(self):
+    def test_watch_start_cleans_isolated_worktrees_for_write_targets_not_sync(self):
         stdout = io.StringIO()
         events = []
 
@@ -579,6 +675,8 @@ class JsonRequestTests(unittest.TestCase):
                 ("start", "review"),
                 ("cleanup", "dreamer"),
                 ("start", "dreamer"),
+                ("cleanup", "pruner"),
+                ("start", "prune"),
                 ("start", "sync"),
             ],
         )
@@ -586,6 +684,10 @@ class JsonRequestTests(unittest.TestCase):
     def test_sync_is_a_managed_watch_target(self):
         self.assertIn("sync", MANAGED_WATCH_TARGETS)
         self.assertEqual(WATCH_COMMANDS["sync"], ("sync", "watch"))
+
+    def test_pruner_is_a_managed_watch_target(self):
+        self.assertIn("pruner", MANAGED_WATCH_TARGETS)
+        self.assertEqual(WATCH_COMMANDS["pruner"], ("prune", "watch"))
 
     def test_watch_status_reports_stopped_without_config(self):
         stdout = io.StringIO()
@@ -601,6 +703,7 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("review: stopped", stdout.getvalue())
         self.assertIn("dreamer: stopped", stdout.getvalue())
+        self.assertIn("pruner: stopped", stdout.getvalue())
         self.assertIn("sync: stopped", stdout.getvalue())
 
     def test_sync_watch_help_does_not_load_config(self):

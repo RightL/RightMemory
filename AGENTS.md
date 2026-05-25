@@ -14,7 +14,7 @@
 - `uv` is available through the existing conda environment: `conda run -n rightmemory uv --version`. Use `conda run -n rightmemory ./install.sh ...` when the installer needs `uv`.
 - Useful review commands are `rightmemory review scan --once`, `rightmemory review watch`, and `rightmemory review normalize --source <codex|claude> --path <file>`.
 - Use `rightmemory prune` to run generation-based active memory pruning, and `rightmemory history --session <id> <query>` for explicit retrieval from pruned memory.
-- Use `rightmemory watch start|status|stop|restart` to manage background review and dreamer watchers. Use `rightmemory dreamer watch` directly when debugging the lower-level trigger loop.
+- Use `rightmemory watch start|status|stop|restart` to manage background review, dreamer, pruner, and sync watchers. Use `rightmemory dreamer watch` or `rightmemory prune watch` directly only when debugging lower-level loops.
 - Use `rightmemory doctor agent-cli` after configuring cli-agent mode to check provider commands, role config, and basic read/write probes.
 - Semantic upgrade notes are Markdown files under `rightmemory/semantic_upgrades/`; validate them with `conda run -n rightmemory python -m unittest discover -s tests -p 'test_semantic_upgrades.py'`.
 
@@ -40,7 +40,7 @@
 - Dreamer watch reads `.runtime/dreamer/trigger-state.json` and runs when accumulated points reach `[dreamer.watch].trigger_points`. Defaults are trigger `50`, update candidate `1.0`, reviewed provider session `1.5`, and check interval `3000` seconds. `rightmemory dreamer watch --interval <seconds>` changes the trigger-check cadence for that process.
 - Automatic `update`, `reviewer`, `dreamer`, and `pruner` session turns that operate on the main state root run in isolated `.runtime/worktrees/` checkouts on `rightmemory-isolated-<role>-<uuid>` branches. The role commits normally; runtime validates and lands successful memory commits back to the main memory repo, then promotes temporary session/provider state. CLI-agent isolated turns use a fresh provider session for speculative work and promote the new provider record after success.
 - Dirty main memory files block automatic semantic writes. Temporary commits may touch `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`, and each temporary commit must keep `MEMORY.md` as a regular file. Failed isolated work is discarded and retried from the original source state.
-- Stale isolated cleanup is role-scoped for review/dreamer watcher startup and skips sync. Cleanup removes matching temporary branches and worktrees, not dirty files in the main memory repo.
+- Stale isolated cleanup is role-scoped for review/dreamer/pruner watcher startup and skips sync. Cleanup removes matching temporary branches and worktrees, not dirty files in the main memory repo.
 
 ## Upgrade Safety
 - Before changing persisted state or install/watch/config behavior, check upgrade impact.

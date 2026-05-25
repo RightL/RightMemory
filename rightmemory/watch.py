@@ -15,15 +15,17 @@ from .session import _ensure_runtime_gitignore, _fsync_directory
 
 
 INSTALL_STAMP_FILE = "install.stamp"
-MANAGED_WATCH_TARGETS = ("review", "dreamer", "sync")
+MANAGED_WATCH_TARGETS = ("review", "dreamer", "pruner", "sync")
 WATCH_COMMANDS = {
     "review": ("review", "watch"),
     "dreamer": ("dreamer", "watch"),
+    "pruner": ("prune", "watch"),
     "sync": ("sync", "watch"),
 }
 WATCH_CLEANUP_ROLES = {
     "review": "reviewer",
     "dreamer": "dreamer",
+    "pruner": "pruner",
 }
 
 

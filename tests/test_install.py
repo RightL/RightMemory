@@ -231,6 +231,9 @@ class InstallScriptTests(unittest.TestCase):
             memory_root = root / "memory"
             skills_target = root / "skills"
             env = self._env_with_fake_uv(root)
+            fake_git = root / "bin" / "git"
+            fake_git.write_text("#!/usr/bin/env sh\nexit 1\n", encoding="utf-8")
+            fake_git.chmod(0o755)
             env["PATH"] = f"{root / 'bin'}:/bin"
 
             result = subprocess.run(

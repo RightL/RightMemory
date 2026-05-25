@@ -42,6 +42,8 @@ from .watch import (
 
 DEFAULT_REVIEW_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 DEFAULT_DREAMER_WATCH_RETRY_SECONDS = 60
+DEFAULT_PRUNER_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
+DEFAULT_PRUNER_WATCH_RETRY_SECONDS = 60
 DEFAULT_SYNC_WATCH_INTERVAL_SECONDS = 60 * 60
 WATCH_REFRESH_POLL_SECONDS = 5
 DREAMER_WATCH_SESSION_ID = "dreamer-watch"
@@ -49,6 +51,7 @@ DREAMER_WATCH_MESSAGE = "Run a scheduled dream cycle."
 _DREAMER_WATCH_SKIPPED = "skipped"
 _DREAMER_WATCH_SUCCEEDED = "succeeded"
 _DREAMER_WATCH_FAILED = "failed"
+PRUNER_WATCH_SESSION_ID = "pruner-watch"
 SYNC_WATCH_SESSION_ID = "sync-watch"
 
 
@@ -245,6 +248,8 @@ def _watch_role(name: str) -> str:
         return "reviewer"
     if name == "dreamer":
         return "dreamer"
+    if name == "pruner":
+        return "pruner"
     raise ValueError(f"unknown watch target: {name}")
 
 
@@ -305,10 +310,29 @@ def _turn_parser(role: str) -> argparse.ArgumentParser:
 
 
 def _prune_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rightmemory prune")
+    parser = argparse.ArgumentParser(
+        prog="rightmemory prune",
+        epilog="Use `rightmemory prune watch` to run periodic prune generation checks.",
+    )
     parser.add_argument(
         "--session",
         default="pruner",
+        help="persist pruner message history under this session id",
+    )
+    return parser
+
+
+def _prune_watch_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="rightmemory prune watch")
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=DEFAULT_PRUNER_WATCH_INTERVAL_SECONDS,
+        help="seconds between prune generation checks",
+    )
+    parser.add_argument(
+        "--session",
+        default=PRUNER_WATCH_SESSION_ID,
         help="persist pruner message history under this session id",
     )
     return parser
@@ -360,14 +384,15 @@ def _review_main(argv: list[str]) -> int:
 
 
 def _prune_main(argv: list[str]) -> int:
+    if argv and argv[0] == "watch":
+        if _is_help_request(argv[1:]):
+            _prune_watch_parser().parse_args(argv[1:])
+            return 0
+        watch_args = _prune_watch_parser().parse_args(argv[1:])
+        return _prune_watch(watch_args.interval, watch_args.session)
     args = _prune_parser().parse_args(argv)
-    pruner_config = load_pruner_config()
-    runtime = RightMemoryRuntime(load_config("pruner"))
-    try:
-        print(runtime.run_prune_turn(args.session, pruner_config))
-        return 0
-    finally:
-        runtime.cleanup()
+    print(_run_prune_cycle(args.session))
+    return 0
 
 
 def _history_main(argv: list[str]) -> int:
@@ -529,6 +554,56 @@ def _dreamer_watch(interval: int | None, session_id: str) -> int:
         return 0
     except KeyboardInterrupt:
         print("rightmemory dreamer watch stopped", file=sys.stderr)
+        return 130
+
+
+def _run_prune_cycle(session_id: str, pruner_config: Any | None = None, runtime_config: Any | None = None) -> str:
+    config = pruner_config if pruner_config is not None else load_pruner_config()
+    runtime = RightMemoryRuntime(
+        runtime_config if runtime_config is not None else load_config("pruner")
+    )
+    try:
+        return runtime.run_prune_turn(session_id, config)
+    finally:
+        runtime.cleanup()
+
+
+def _prune_watch(interval: int, session_id: str) -> int:
+    if interval < 1:
+        raise ValueError("--interval must be a positive integer")
+    pruner_config = load_pruner_config()
+    runtime_config = load_config("pruner")
+    refresh = InstallStamp(pruner_config.memory_root)
+    try:
+        with _watch_stop_signal("pruner") as stop, WatchLock(pruner_config.memory_root, "pruner"):
+            next_pruner_config: Any | None = pruner_config
+            next_runtime_config: Any | None = runtime_config
+            while not stop.requested:
+                _reexec_if_install_changed(refresh, stop)
+                timestamp = datetime.now(UTC).isoformat()
+                print(f"[{timestamp}] rightmemory prune check", flush=True)
+                try:
+                    output = _run_prune_cycle(session_id, next_pruner_config, next_runtime_config)
+                    next_pruner_config = None
+                    next_runtime_config = None
+                except Exception as exc:
+                    print(
+                        f"rightmemory prune check failed: {type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    retry_seconds = min(interval, DEFAULT_PRUNER_WATCH_RETRY_SECONDS)
+                    if not _sleep_with_refresh_check(retry_seconds, refresh, stop):
+                        break
+                    continue
+                print(output, flush=True)
+                _reexec_if_install_changed(refresh, stop)
+                if not _sleep_with_refresh_check(interval, refresh, stop):
+                    break
+        print("rightmemory pruner watch stopped", file=sys.stderr)
+        return 0
+    except KeyboardInterrupt:
+        print("rightmemory pruner watch stopped", file=sys.stderr)
         return 130
 
 
