@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from rightmemory.async_update import AsyncUpdateStore
 from rightmemory.cli import _daemon_stdio_json, _dreamer_watch_once, _handle_json_request, main
 from rightmemory.config import DreamerWatchConfig
 from rightmemory.dreamer_trigger import DreamerTriggerStore
@@ -1409,6 +1410,11 @@ class JsonRequestTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 main(["retrieve", "submit", "--session", "agent-1", "remember", "this"])
 
+    def test_undo_is_only_supported_for_update_role(self):
+        with patch("rightmemory.cli.load_config", return_value=object()):
+            with self.assertRaises(ValueError):
+                main(["retrieve", "undo", "--session", "agent-1", "1"])
+
     def test_subcommand_help_does_not_load_config(self):
         stdout = io.StringIO()
 
@@ -1453,6 +1459,58 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("current_batch: 0", output)
         self.assertIn("pending: 2", output)
         self.assertIn("pending_ids: 1, 2", output)
+
+    def test_main_cancels_pending_update_without_building_runtime(self):
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+
+            def fake_load_config(role):
+                return type("Config", (), {"memory_root": memory_root})()
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.async_update.subprocess.Popen") as popen,
+                patch("rightmemory.async_update._process_exists", return_value=True),
+                patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
+                patch("sys.stdout", stdout),
+            ):
+                popen.return_value.pid = 123
+                first = main(["update", "submit", "--session", "agent-1", "first"])
+                second = main(["update", "submit", "--session", "agent-1", "second"])
+                undo = main(["update", "undo", "--session", "agent-1", "2"])
+                state = AsyncUpdateStore(memory_root, "update").read("agent-1")
+
+        self.assertEqual(first, 0)
+        self.assertEqual(second, 0)
+        self.assertEqual(undo, 0)
+        self.assertEqual(popen.call_count, 1)
+        self.assertEqual([job.id for job in state.pending], [1])
+        output = stdout.getvalue()
+        self.assertIn("canceled pending candidate: 2", output)
+        self.assertIn("pending: 1", output)
+        self.assertIn("pending_ids: 1", output)
+
+    def test_main_reports_non_pending_update_undo(self):
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+
+            def fake_load_config(role):
+                return type("Config", (), {"memory_root": memory_root})()
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["update", "undo", "--session", "agent-1", "1"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("candidate is not pending: 1", stdout.getvalue())
+        self.assertIn("status: idle", stdout.getvalue())
 
     def test_pull_marks_dead_worker_failed_and_keeps_pending_updates(self):
         stdout = io.StringIO()

@@ -109,6 +109,12 @@ def main(argv: list[str] | None = None) -> int:
         if _is_help_request(remaining[1:]):
             _pull_parser(args.role).parse_args(remaining[1:])
             return 0
+    if remaining and remaining[0] == "undo":
+        if args.role != "update":
+            raise ValueError("undo is only supported for the update role")
+        if _is_help_request(remaining[1:]):
+            _undo_parser(args.role).parse_args(remaining[1:])
+            return 0
     if remaining and remaining[0] == "_submitted-worker" and args.role != "update":
         raise ValueError("_submitted-worker is only supported for the update role")
     if remaining and remaining[0] == "chat" and _is_help_request(remaining[1:]):
@@ -133,6 +139,9 @@ def main(argv: list[str] | None = None) -> int:
     if remaining and remaining[0] == "pull":
         pull_args = _pull_parser(args.role).parse_args(remaining[1:])
         return _pull(config.memory_root, args.role, pull_args.session)
+    if remaining and remaining[0] == "undo":
+        undo_args = _undo_parser(args.role).parse_args(remaining[1:])
+        return _undo(config.memory_root, args.role, undo_args.session, undo_args.candidate_id)
 
     runtime = RightMemoryRuntime(config)
     try:
@@ -364,6 +373,23 @@ def _pull_parser(role: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=f"rightmemory {role} pull")
     parser.add_argument("--session", required=True, help="read the latest async update state for this session id")
     return parser
+
+
+def _undo_parser(role: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=f"rightmemory {role} undo")
+    parser.add_argument("--session", required=True, help="cancel a pending candidate for this update session id")
+    parser.add_argument("candidate_id", type=_candidate_id, help="pending candidate id to cancel")
+    return parser
+
+
+def _candidate_id(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("candidate id must be a positive integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("candidate id must be a positive integer")
+    return parsed
 
 
 def _review_main(argv: list[str]) -> int:
@@ -808,6 +834,16 @@ def _submit(memory_root, role: str, session_id: str, message_parts: list[str]) -
 
 def _pull(memory_root, role: str, session_id: str) -> int:
     state = AsyncUpdateStore(memory_root, role).read(session_id)
+    print(format_state(state))
+    return 0
+
+
+def _undo(memory_root, role: str, session_id: str, candidate_id: int) -> int:
+    state, canceled = AsyncUpdateStore(memory_root, role).cancel_pending(session_id, candidate_id)
+    if canceled:
+        print(f"canceled pending candidate: {candidate_id}")
+    else:
+        print(f"candidate is not pending: {candidate_id}")
     print(format_state(state))
     return 0
 

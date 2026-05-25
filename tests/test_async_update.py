@@ -98,6 +98,78 @@ class AsyncUpdateStateTests(unittest.TestCase):
         )
         self.assertEqual([job.id for job in state.pending], [1, 2, 3, 4])
 
+    def test_cancel_pending_removes_matching_candidate(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    pending=[_job(1, "first"), _job(2, "second"), _job(3, "third")],
+                    next_id=4,
+                ),
+            )
+
+            state, canceled = store.cancel_pending("agent-1", 2)
+
+        self.assertTrue(canceled)
+        self.assertEqual([job.id for job in state.pending], [1, 3])
+        self.assertEqual([job.message for job in state.pending], ["first", "third"])
+
+    def test_cancel_pending_leaves_current_batch_unchanged(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="running",
+                    pid=12345,
+                    current_batch=[_job(1, "running")],
+                    pending=[_job(2, "pending")],
+                    next_id=3,
+                ),
+            )
+
+            with patch("rightmemory.async_update._process_exists", return_value=True):
+                state, canceled = store.cancel_pending("agent-1", 1)
+
+        self.assertFalse(canceled)
+        self.assertEqual([job.id for job in state.current_batch], [1])
+        self.assertEqual([job.id for job in state.pending], [2])
+
+    def test_cancel_pending_missing_candidate_leaves_state_unchanged(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    pending=[_job(1, "first")],
+                    next_id=2,
+                ),
+            )
+
+            state, canceled = store.cancel_pending("agent-1", 99)
+
+        self.assertFalse(canceled)
+        self.assertEqual([job.id for job in state.pending], [1])
+
+    def test_cancel_pending_rejects_invalid_candidate_id(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+
+            with self.assertRaisesRegex(ValueError, "candidate id must be a positive integer"):
+                store.cancel_pending("agent-1", "1")
+
     def test_run_pending_batches_failure_returns_current_batch_to_pending(self):
         callback = Mock()
         with tempfile.TemporaryDirectory() as tempdir:

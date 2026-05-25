@@ -51,6 +51,18 @@ class AsyncUpdateStore:
         with self._locked(session_id):
             return self._read_checked_locked(session_id)
 
+    def cancel_pending(self, session_id: str, candidate_id: int) -> tuple[AsyncUpdateState, bool]:
+        if not isinstance(candidate_id, int) or isinstance(candidate_id, bool) or candidate_id < 1:
+            raise ValueError("candidate id must be a positive integer")
+        with self._locked(session_id):
+            state = self._read_checked_locked(session_id)
+            pending = [job for job in state.pending if job.id != candidate_id]
+            canceled = len(pending) != len(state.pending)
+            if canceled:
+                state = replace(state, pending=pending)
+                self._write(session_id, state)
+            return state, canceled
+
     def submit(self, session_id: str, message: str) -> AsyncUpdateState:
         now = _now_dt()
         with self._locked(session_id):
