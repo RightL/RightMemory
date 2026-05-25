@@ -518,7 +518,10 @@ ensure_memory_initial_commit() {
   )
 
   local -a staged_memory_files
-  mapfile -t staged_memory_files < <(
+  local staged_memory_file
+  while IFS= read -r staged_memory_file; do
+    [ -n "$staged_memory_file" ] && staged_memory_files+=("$staged_memory_file")
+  done < <(
     cd "$MEMORY_ROOT" &&
       git diff --cached --name-only -- MEMORY.md 'MEMORY_*.md' 'dream_logs/*.md'
   )
