@@ -14,7 +14,7 @@ from typing import Any
 from .agent_cli import CliAgentExecutor, NO_SESSION_RIGHTMEMORY_SESSION_ID
 from .config import PrunerConfig, RuntimeConfig, load_config
 from .debug import DebugTrace
-from .isolated_write import IsolatedWriteSupervisor
+from .isolated_write import IsolatedWriteSupervisor, MainMemoryDirtyError
 from .prompt import build_instructions
 from .prune import build_pruner_message, prune_due_status
 from .provider_sessions import ProviderSessionStore
@@ -26,7 +26,7 @@ from .recent_submitted import (
 )
 from .semantic_upgrades import SemanticUpgradeContext, mark_absorbed, pending_context
 from .session import MemoryWriteLock, MessageSessionStore, _ensure_runtime_gitignore, _fsync_directory
-from .sync import SyncManager
+from .sync import SyncManager, SyncResult
 from .tools import MemoryTools
 
 
@@ -303,23 +303,36 @@ class RightMemoryRuntime:
             repaired = True
 
     def _run_isolated_locked_turn(self, run_model: Callable[[], Any]) -> tuple[Any, Any | None]:
-        if self.config.role not in AUTOMATIC_WRITE_ROLES or not self.config.sync.enabled:
+        if self.config.role not in AUTOMATIC_WRITE_ROLES:
             return run_model(), None
 
+        dirty_main_repaired = False
         repaired = False
         while True:
-            with self._memory_write_lock():
-                preflight_repair = self._sync_preflight_locked()
-            if preflight_repair is None:
+            if self.config.sync.enabled:
+                with self._memory_write_lock():
+                    preflight_repair = self._sync_preflight_locked()
+                if preflight_repair is not None:
+                    if repaired:
+                        raise RuntimeError(
+                            f"sync repair did not clear {preflight_repair.status} state: {preflight_repair.message}"
+                        )
+                    self._run_sync_reconciler(preflight_repair)
+                    repaired = True
+                    continue
+            try:
                 result = run_model()
+            except MainMemoryDirtyError as exc:
+                if dirty_main_repaired:
+                    paths = ", ".join(exc.paths) if exc.paths else "memory files"
+                    raise RuntimeError(f"dirty-main repair did not clear memory files: {paths}") from exc
+                self._run_dirty_main_reconciler(exc.paths)
+                dirty_main_repaired = True
+                continue
+            if self.config.sync.enabled:
                 with self._memory_write_lock():
                     return result, self._sync_after_semantic_turn()
-            if repaired:
-                raise RuntimeError(
-                    f"sync repair did not clear {preflight_repair.status} state: {preflight_repair.message}"
-                )
-            self._run_sync_reconciler(preflight_repair)
-            repaired = True
+            return result, None
 
     def _should_isolate_write_turn(self) -> bool:
         return self.config.role in AUTOMATIC_WRITE_ROLES and self.config.memory_root == self.config.state_root
@@ -360,6 +373,14 @@ class RightMemoryRuntime:
             runtime.run_session_turn(SYNC_REPAIR_SESSION_ID, self._sync().repair_message(result))
         finally:
             runtime.cleanup()
+
+    def _run_dirty_main_reconciler(self, paths: tuple[str, ...]) -> None:
+        result = SyncResult(
+            "dirty",
+            "local main memory has uncommitted changes before automatic semantic work",
+            list(paths),
+        )
+        self._run_sync_reconciler(result)
 
     def _memory_write_lock(self):
         if self.config.role in {"historian", "retrieve"}:

@@ -91,6 +91,12 @@ positive lesson. Otherwise, leave the event out of durable memory.
 
 ## Dirty-State Recovery
 
+This section was superseded by the isolated-write design on 2026-05-22. Current
+runtime behavior keeps reviewer transcript processing separate from dirty-main
+repair: automatic writes stop at the dirty-main guard, call `sync-reconciler`
+once with bounded dirty-file context, and retry the original review only after
+the memory repo is clean.
+
 The shared memory write lock should prevent overlapping reviewer, update, and
 dreamer edits. If tracked reviewer-owned paths are dirty anyway, the reviewer
 resolves them before reviewing the transcript.

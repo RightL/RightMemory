@@ -192,6 +192,11 @@ isolated write preflight remains separate: it rejects dirty main memory files
 before the temporary role starts, including when `[sync].enabled` is false.
 Remote fetch, merge, and push behavior still depends on `[sync].enabled`.
 
+Current runtime behavior reuses `sync-reconciler` for one bounded local
+dirty-main repair attempt before failing the automatic write. If repair leaves
+memory files dirty, the automatic write still fails rather than layering new
+semantic work onto unclear local state.
+
 Dirty main-repo content whose origin is unclear stays visible for repair instead
 of being silently discarded or overwritten by a new automatic semantic write.
 

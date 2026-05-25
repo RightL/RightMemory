@@ -19,7 +19,8 @@ from rightmemory.config import (
     load_review_config,
     load_sync_config,
 )
-from rightmemory.isolated_write import IsolatedWriteResult
+from rightmemory.debug import DebugTrace, MAX_DEBUG_TRACE_FIELD_CHARS
+from rightmemory.isolated_write import IsolatedWriteResult, MainMemoryDirtyError
 from rightmemory.prompt import build_cli_agent_instructions, build_instructions
 from rightmemory.provider_sessions import ProviderSessionStore
 from rightmemory.prune import PruneDueStatus
@@ -1484,6 +1485,109 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(repairs, ["dirty"])
         self.assertEqual(runtime.agent.calls[0]["message"], "remember one")
 
+    def test_dirty_main_guard_runs_sync_reconciler_when_sync_disabled(self):
+        repairs = []
+        calls = []
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            state_root=Path(self.tempdir.name),
+            sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=False),
+        )
+
+        def run_model():
+            if not calls:
+                calls.append("dirty")
+                raise MainMemoryDirtyError(["MEMORY.md"])
+            calls.append("model")
+            return "updated"
+
+        def repair(runtime, result):
+            repairs.append((result.status, result.message, result.files))
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch.object(RightMemoryRuntime, "_run_sync_reconciler", repair),
+        ):
+            runtime = RightMemoryRuntime(config)
+            result, post_sync = runtime._run_isolated_locked_turn(run_model)
+
+        self.assertEqual(result, "updated")
+        self.assertEqual(post_sync, None)
+        self.assertEqual(calls, ["dirty", "model"])
+        self.assertEqual(
+            repairs,
+            [
+                (
+                    "dirty",
+                    "local main memory has uncommitted changes before automatic semantic work",
+                    ["MEMORY.md"],
+                )
+            ],
+        )
+
+    def test_dirty_main_guard_retries_full_sync_preflight_after_repair(self):
+        repairs = []
+        calls = []
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            state_root=Path(self.tempdir.name),
+            sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
+        )
+
+        def run_model():
+            if not calls:
+                calls.append("dirty")
+                raise MainMemoryDirtyError(["MEMORY.md"])
+            calls.append("model")
+            return "updated"
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.SyncManager") as manager_class,
+            patch.object(RightMemoryRuntime, "_run_sync_reconciler", lambda self, result: repairs.append(result.status)),
+        ):
+            manager_class.return_value.preflight.side_effect = [
+                SyncResult("synced", "local memory is current"),
+                SyncResult("synced", "local memory is current"),
+            ]
+            manager_class.return_value.push.return_value = SyncResult("pushed", "local memory pushed")
+            runtime = RightMemoryRuntime(config)
+            result, post_sync = runtime._run_isolated_locked_turn(run_model)
+
+        self.assertEqual(result, "updated")
+        self.assertEqual(post_sync, None)
+        self.assertEqual(calls, ["dirty", "model"])
+        self.assertEqual(repairs, ["dirty"])
+        self.assertEqual(manager_class.return_value.preflight.call_count, 2)
+        manager_class.return_value.push.assert_called_once()
+
+    def test_dirty_main_guard_fails_after_one_uncleared_repair(self):
+        repairs = []
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            state_root=Path(self.tempdir.name),
+        )
+
+        def run_model():
+            raise MainMemoryDirtyError(["MEMORY.md"])
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch.object(RightMemoryRuntime, "_run_sync_reconciler", lambda self, result: repairs.append(result.status)),
+        ):
+            runtime = RightMemoryRuntime(config)
+            with self.assertRaises(RuntimeError) as caught:
+                runtime._run_isolated_locked_turn(run_model)
+
+        self.assertEqual(repairs, ["dirty"])
+        self.assertIn("dirty-main repair did not clear memory files: MEMORY.md", str(caught.exception))
+
     def test_dirty_push_runs_sync_reconciler_after_update_agent(self):
         repairs = []
         config = RuntimeConfig(
@@ -1846,6 +1950,18 @@ class RuntimeTests(unittest.TestCase):
         events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([event["event"] for event in events], ["tool_started", "tool_finished"])
         self.assertEqual(events[0]["tool"], "glob")
+
+    def test_debug_trace_truncates_large_fields(self):
+        trace = DebugTrace(Path(self.tempdir.name), "reviewer", "batch")
+        large_message = "x" * (MAX_DEBUG_TRACE_FIELD_CHARS * 2)
+
+        trace.append("run_started", message=large_message)
+
+        trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "reviewer" / "batch.jsonl"
+        event = json.loads(trace_path.read_text(encoding="utf-8"))
+        self.assertLess(len(event["message"]), len(large_message))
+        self.assertIn("debug trace field truncated", event["message"])
+        self.assertIn(f"original_chars={len(large_message)}", event["message"])
 
     def test_debug_trace_records_failures_before_history_save(self):
         config = RuntimeConfig(

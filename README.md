@@ -429,7 +429,7 @@ To debug in-flight standalone calls, enable append-only trace logs:
 trace = true
 ```
 
-Trace files include run, history-save, and tool events. They may include prompts, model outputs, and tool results, so leave tracing off unless you need live debugging.
+Trace files include run, history-save, and tool events. They may include prompts, model outputs, and tool results, with very large fields truncated to keep trace files bounded. Leave tracing off unless you need live debugging.
 
 ### Background Watchers
 
@@ -536,7 +536,9 @@ Review, dreamer, and pruner watchers hold per-role watch locks under `.runtime/w
 
 Automatic `update`, `reviewer`, `dreamer`, and `pruner` session turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. The role edits, validates, and commits as usual inside that temporary checkout. Runtime then validates that temporary commits touch memory files (`MEMORY.md`, `MEMORY_*.md`, or `dream_logs/*.md`) and keep `MEMORY.md` as a regular file before landing successful commits back into the main memory repo. Empty `prune:` checkpoint commits are allowed to land through the same path.
 
-Temporary session and provider state lives under `.runtime/isolated-state/` during the isolated turn and is promoted after a successful landing or valid no-op. Standalone isolated turns seed local message history into that temporary state. CLI-agent isolated turns start speculative provider work in a fresh provider session, then promote the successful provider record, so a failed isolated run does not advance the prior durable provider session. If the role fails, is interrupted, leaves dirty temporary files, or cannot land cleanly, the temporary work is discarded and the original source remains the retry source: the update batch, provider transcript batch, or dreamer trigger balance. Dirty main memory files block automatic semantic writes before a temporary role starts; local dirty memory is not made safe by disabling sync.
+Temporary session and provider state lives under `.runtime/isolated-state/` during the isolated turn and is promoted after a successful landing or valid no-op. Standalone isolated turns seed local message history into that temporary state. CLI-agent isolated turns start speculative provider work in a fresh provider session, then promote the successful provider record, so a failed isolated run does not advance the prior durable provider session. If the role fails, is interrupted, leaves dirty temporary files, or cannot land cleanly, the temporary work is discarded and the original source remains the retry source: the update batch, provider transcript batch, or dreamer trigger balance.
+
+Dirty main memory files still block automatic semantic writes before a temporary role starts, but the runtime now gives `sync-reconciler` one chance to repair that local dirty state first. If repair commits a clean memory state, the original automatic write restarts from its source input. If the memory files remain dirty after repair, the automatic write fails instead of stacking new model work on top of unclear local changes.
 
 ### Automatic Global Sync
 
@@ -550,7 +552,7 @@ enabled = true
 stale_pull_after_hours = 24
 ```
 
-When sync is enabled, runtime code handles remote Git synchronization around automatic semantic work. It checks upstream state before model work, pushes after successful memory commits land, and can invoke `sync-reconciler` for sync-detected dirty or conflicted memory state. The isolated-write dirty-main check is separate from remote sync: local dirty memory files block automatic semantic writes even when `[sync].enabled` is false. Retrieval and historical retrieval stay local by default for speed.
+When sync is enabled, runtime code handles remote Git synchronization around automatic semantic work. It checks upstream state before model work, pushes after successful memory commits land, and can invoke `sync-reconciler` for sync-detected dirty or conflicted memory state. The isolated-write dirty-main check is separate from remote sync: local dirty memory files block automatic semantic writes even when `[sync].enabled` is false, and the same reconciler role can repair that local dirty state before the blocked automatic write retries. Retrieval and historical retrieval stay local by default for speed.
 
 Managed watch includes a `sync` target. `rightmemory watch start` starts it when sync is enabled, and `rightmemory watch start sync` runs that target by itself. The sync watcher pulls when no successful pull is recorded or when the last successful pull is older than `stale_pull_after_hours`; clean pulls and fresh checks stay deterministic and do not call a model.
 

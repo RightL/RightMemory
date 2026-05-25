@@ -135,10 +135,10 @@ def _command_guidance(role: str) -> str:
         )
     if role == "sync-reconciler":
         return (
-            "- The sync watcher selected sync reconciliation behavior. Treat the caller message as the current "
-            "sync repair context for this turn.\n"
-            "- Repair RightMemory dirty or conflicted sync state by reconciling the memory file set, validating it, "
-            "committing the repaired memory state, and calling `sync_push`.\n"
+            "- Runtime selected memory reconciliation behavior. Treat the caller message as the current repair "
+            "context for this turn.\n"
+            "- Repair RightMemory dirty or conflicted memory state by reconciling the memory file set, validating "
+            "it, committing the repaired memory state, and calling `sync_push` when sync is enabled.\n"
             "- Preserve coherent durable memory when the evidence supports it, narrowing or marking uncertainty "
             "rather than dropping durable information."
         )
@@ -150,7 +150,7 @@ def _sync_guidance(role: str) -> str:
         return "- Retrieval uses local memory and does not perform sync preflight by default."
     if role == "sync-reconciler":
         return (
-            "- The scheduled sync workflow supplies repair context in the caller message. If the caller message "
+            "- The runtime supplies repair context in the caller message. If the caller message "
             "contains a Runtime sync context block, treat that block as authoritative for this turn.\n"
             "- When sync is enabled and you commit memory changes, call `sync_push` after the commit. If `sync_push` "
             "reports dirty state or a conflict, repair the supplied memory files in the same role, validate memory, "
