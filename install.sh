@@ -465,6 +465,72 @@ EOF
   fi
 }
 
+ensure_memory_git_author() {
+  local name
+  local email
+  local global_name
+  local global_email
+
+  name="$(cd "$MEMORY_ROOT" && git config --local --get user.name 2>/dev/null || true)"
+  email="$(cd "$MEMORY_ROOT" && git config --local --get user.email 2>/dev/null || true)"
+
+  if [ -n "$name" ] && [ -n "$email" ]; then
+    echo "  [keep]    git author configured for $MEMORY_ROOT"
+    return
+  fi
+
+  if [ -z "$name" ]; then
+    global_name="$(git config --global --get user.name 2>/dev/null || true)"
+    if [ -n "$global_name" ]; then
+      name="$global_name"
+    else
+      name="RightMemory"
+    fi
+    (cd "$MEMORY_ROOT" && git config --local user.name "$name")
+    echo "  [config] git user.name = $name  ($MEMORY_ROOT)"
+  fi
+
+  if [ -z "$email" ]; then
+    global_email="$(git config --global --get user.email 2>/dev/null || true)"
+    if [ -n "$global_email" ]; then
+      email="$global_email"
+    else
+      email="rightmemory@localhost"
+    fi
+    (cd "$MEMORY_ROOT" && git config --local user.email "$email")
+    echo "  [config] git user.email = $email  ($MEMORY_ROOT)"
+  fi
+}
+
+ensure_memory_initial_commit() {
+  if (cd "$MEMORY_ROOT" && git rev-parse --verify HEAD >/dev/null 2>&1); then
+    echo "  [keep]    initial memory commit already exists"
+    return
+  fi
+
+  (
+    cd "$MEMORY_ROOT"
+    shopt -s nullglob
+    files=(MEMORY.md MEMORY_*.md dream_logs/*.md)
+    if [ "${#files[@]}" -gt 0 ]; then
+      git add -- "${files[@]}"
+    fi
+  )
+
+  local -a staged_memory_files
+  mapfile -t staged_memory_files < <(
+    cd "$MEMORY_ROOT" &&
+      git diff --cached --name-only -- MEMORY.md 'MEMORY_*.md' 'dream_logs/*.md'
+  )
+  if [ "${#staged_memory_files[@]}" -eq 0 ]; then
+    echo "  [skip]    no memory files to baseline commit"
+    return
+  fi
+
+  (cd "$MEMORY_ROOT" && git commit -q -m "memory: initial baseline" -- "${staged_memory_files[@]}")
+  echo "  [new]     initial memory baseline commit"
+}
+
 # 1. MEMORY.md seed / managed example refresh
 mkdir -p "$MEMORY_ROOT/dream_logs"
 install_or_refresh_memory
@@ -476,6 +542,7 @@ else
   (cd "$MEMORY_ROOT" && git init -q)
   echo "  [new]     git init in $MEMORY_ROOT"
 fi
+ensure_memory_git_author
 
 # Keep git status focused on memory artifacts. Existing user .gitignore files are preserved.
 if [ -f "$MEMORY_ROOT/.gitignore" ]; then
@@ -490,6 +557,7 @@ else
 EOF
   echo "  [new]     $MEMORY_ROOT/.gitignore  (memory allowlist)"
 fi
+ensure_memory_initial_commit
 
 install_cli_runtime_layout
 if [ "$MEMORY_INSTALL_ACTION" = "new" ]; then

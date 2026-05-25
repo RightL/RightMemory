@@ -125,6 +125,43 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("open-context-questions", state)
         self.assertTrue(install_stamp_exists)
 
+    def test_initial_install_configures_git_author_and_baseline_commit(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+
+            result = self._install(memory_root, skills_target)
+            git_name = self._git(memory_root, "config", "--local", "--get", "user.name")
+            git_email = self._git(memory_root, "config", "--local", "--get", "user.email")
+            head = self._git(memory_root, "log", "--oneline", "-1")
+            status = self._git(memory_root, "status", "--short")
+
+        self.assertEqual(git_name, "RightMemory")
+        self.assertEqual(git_email, "rightmemory@localhost")
+        self.assertIn("memory: initial baseline", head)
+        self.assertEqual(status, "")
+        self.assertIn("git user.name = RightMemory", result.stdout)
+        self.assertIn("initial memory baseline commit", result.stdout)
+
+    def test_install_preserves_existing_memory_repo_author(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=memory_root, check=True)
+            subprocess.run(["git", "config", "--local", "user.name", "Existing User"], cwd=memory_root, check=True)
+            subprocess.run(["git", "config", "--local", "user.email", "existing@example.com"], cwd=memory_root, check=True)
+
+            result = self._install(memory_root, skills_target)
+            git_name = self._git(memory_root, "config", "--local", "--get", "user.name")
+            git_email = self._git(memory_root, "config", "--local", "--get", "user.email")
+
+        self.assertEqual(git_name, "Existing User")
+        self.assertEqual(git_email, "existing@example.com")
+        self.assertIn("git author configured", result.stdout)
+
     def test_cli_agent_installs_command_backed_orchestrator_without_role_skills(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -434,6 +471,17 @@ class InstallScriptTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=True,
         )
+
+    def _git(self, memory_root: Path, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=memory_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        return result.stdout.strip()
 
 
 if __name__ == "__main__":

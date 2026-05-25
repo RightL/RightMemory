@@ -252,6 +252,36 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("rightmemory prune check failed: RuntimeError: boom for pruner-watch", stderr.getvalue())
         self.assertIn("rightmemory pruner watch stopped", stderr.getvalue())
 
+    def test_prune_watch_stops_after_consecutive_failures(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        class FailingRuntime(FakeRuntime):
+            def run_prune_turn(self, session_id: str, pruner_config) -> str:
+                raise RuntimeError(f"boom for {session_id}")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            pruner_config = type("PrunerConfig", (), {"memory_root": memory_root})()
+            runtime_config = type("Config", (), {"memory_root": memory_root})()
+
+            with (
+                patch("rightmemory.cli.DEFAULT_WATCH_MAX_CONSECUTIVE_FAILURES", 2),
+                patch("rightmemory.cli.load_pruner_config", return_value=pruner_config),
+                patch("rightmemory.cli.load_config", return_value=runtime_config),
+                patch("rightmemory.cli.RightMemoryRuntime", FailingRuntime),
+                patch("rightmemory.cli._sleep_with_refresh_check", return_value=True) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["prune", "watch", "--interval", "120"])
+
+        self.assertEqual(result, 1)
+        sleep.assert_called_once()
+        self.assertEqual(stdout.getvalue().count("rightmemory prune check"), 2)
+        self.assertIn("rightmemory pruner watch stopping after 2 consecutive failed cycles", stderr.getvalue())
+        self.assertIn("rightmemory pruner watch stopped", stderr.getvalue())
+
     def test_main_rejects_old_curator_role(self):
         with patch("sys.stderr", io.StringIO()):
             with self.assertRaises(SystemExit) as caught:
@@ -427,6 +457,40 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 130)
         sleep.assert_called_once_with(60)
         self.assertIn("failed: 1", stdout.getvalue())
+
+    def test_review_watch_stops_after_consecutive_failed_scans(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        class FakeScanner:
+            def __init__(self, config, run_reviewer, *, on_review_success=None):
+                self.config = config
+                self.run_reviewer = run_reviewer
+                self.on_review_success = on_review_success
+
+            def scan_once(self):
+                return FakeReviewResult("failed: 1", failed=1)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = type("Config", (), {"memory_root": Path(tempdir)})()
+            with (
+                patch("rightmemory.cli.DEFAULT_WATCH_MAX_CONSECUTIVE_FAILURES", 2),
+                patch("rightmemory.cli.load_config", return_value=config),
+                patch("rightmemory.cli.load_review_config", return_value=object()),
+                patch("rightmemory.cli.load_dreamer_watch_config", return_value=_dreamer_watch_config()),
+                patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+                patch("rightmemory.cli.ReviewScanner", FakeScanner),
+                patch("rightmemory.cli._sleep_with_refresh_check", return_value=True) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["review", "watch", "--interval", "120"])
+
+        self.assertEqual(result, 1)
+        sleep.assert_called_once()
+        self.assertEqual(stdout.getvalue().count("failed: 1"), 2)
+        self.assertIn("rightmemory review watch stopping after 2 consecutive failed cycles", stderr.getvalue())
+        self.assertIn("rightmemory review watch stopped", stderr.getvalue())
 
     def test_review_watch_default_interval_is_two_hours(self):
         stdout = io.StringIO()
@@ -807,6 +871,31 @@ class JsonRequestTests(unittest.TestCase):
         sleep.assert_called_once_with(60)
         self.assertIn("rightmemory sync check failed: RuntimeError: boom", stderr.getvalue())
 
+    def test_sync_watch_stops_after_consecutive_failures(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            sync_config = type("SyncConfig", (), {"memory_root": Path(tempdir), "enabled": True, "stale_pull_after_hours": 24})()
+
+            with (
+                patch("rightmemory.cli.DEFAULT_WATCH_MAX_CONSECUTIVE_FAILURES", 2),
+                patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
+                patch("rightmemory.cli.load_sync_config", return_value=sync_config),
+                patch("rightmemory.cli.SyncManager") as manager_class,
+                patch("rightmemory.cli._sleep_with_refresh_check", return_value=True) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                manager_class.return_value.background_pull.side_effect = RuntimeError("boom")
+                result = main(["sync", "watch", "--interval", "60"])
+
+        self.assertEqual(result, 1)
+        sleep.assert_called_once()
+        self.assertEqual(stdout.getvalue().count("rightmemory sync check"), 2)
+        self.assertIn("rightmemory sync watch stopping after 2 consecutive failed cycles", stderr.getvalue())
+        self.assertIn("rightmemory sync watch stopped", stderr.getvalue())
+
     def test_sync_watch_clean_pull_does_not_load_runtime(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -1152,6 +1241,42 @@ class JsonRequestTests(unittest.TestCase):
         sleep.assert_called_once_with(60)
         self.assertIn("rightmemory dreamer cycle", stdout.getvalue())
         self.assertIn("rightmemory dreamer cycle failed: RuntimeError: boom", stderr.getvalue())
+        self.assertIn("rightmemory dreamer watch stopped", stderr.getvalue())
+
+    def test_dreamer_watch_stops_after_consecutive_failures(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        class FailingRuntime(FakeRuntime):
+            def run_session_turn(self, session_id: str, message: str) -> str:
+                raise RuntimeError("boom")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            DreamerTriggerStore(memory_root).increment(6.0)
+            runtime_config = type("Config", (), {"memory_root": memory_root})()
+            watch_config = _dreamer_watch_config(
+                memory_root=memory_root,
+                trigger_points=5.0,
+                check_interval_seconds=3000,
+            )
+            with (
+                patch("rightmemory.cli.DEFAULT_WATCH_MAX_CONSECUTIVE_FAILURES", 2),
+                patch("rightmemory.cli.load_dreamer_watch_config", return_value=watch_config),
+                patch("rightmemory.cli.load_config", return_value=runtime_config),
+                patch("rightmemory.cli.RightMemoryRuntime", FailingRuntime),
+                patch("rightmemory.cli._sleep_with_refresh_check", return_value=True) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["dreamer", "watch"])
+            trigger = DreamerTriggerStore(memory_root).read()
+
+        self.assertEqual(result, 1)
+        self.assertEqual(trigger.points, 6.0)
+        sleep.assert_called_once()
+        self.assertEqual(stdout.getvalue().count("rightmemory dreamer cycle"), 2)
+        self.assertIn("rightmemory dreamer watch stopping after 2 consecutive failed cycles", stderr.getvalue())
         self.assertIn("rightmemory dreamer watch stopped", stderr.getvalue())
 
     def test_dreamer_watch_interval_overrides_trigger_check_interval(self):

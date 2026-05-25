@@ -46,6 +46,7 @@ DEFAULT_DREAMER_WATCH_RETRY_SECONDS = 60
 DEFAULT_PRUNER_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 DEFAULT_PRUNER_WATCH_RETRY_SECONDS = 60
 DEFAULT_SYNC_WATCH_INTERVAL_SECONDS = 60 * 60
+DEFAULT_WATCH_MAX_CONSECUTIVE_FAILURES = 3
 WATCH_REFRESH_POLL_SECONDS = 5
 DREAMER_WATCH_SESSION_ID = "dreamer-watch"
 DREAMER_WATCH_MESSAGE = "Run a scheduled dream cycle."
@@ -54,6 +55,19 @@ _DREAMER_WATCH_SUCCEEDED = "succeeded"
 _DREAMER_WATCH_FAILED = "failed"
 PRUNER_WATCH_SESSION_ID = "pruner-watch"
 SYNC_WATCH_SESSION_ID = "sync-watch"
+
+
+def _watch_failure_limit_reached(label: str, failures: int) -> bool:
+    if failures < DEFAULT_WATCH_MAX_CONSECUTIVE_FAILURES:
+        return False
+    print(
+        "rightmemory "
+        f"{label} watch stopping after {failures} consecutive failed cycles; "
+        "fix the error and restart the watch",
+        file=sys.stderr,
+        flush=True,
+    )
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -467,6 +481,8 @@ def _review_watch(interval: int, since_days: int | None = None) -> int:
         raise ValueError("--interval must be a positive integer")
     reviewer_config = load_config("reviewer")
     refresh = InstallStamp(reviewer_config.memory_root)
+    consecutive_failures = 0
+    exit_code = 0
     try:
         with _watch_stop_signal("review") as stop, WatchLock(reviewer_config.memory_root, "review"):
             next_config: Any | None = reviewer_config
@@ -481,17 +497,22 @@ def _review_watch(interval: int, since_days: int | None = None) -> int:
                     next_config = None
                 print(result.format(), flush=True)
                 _reexec_if_install_changed(refresh, stop)
-                if not stop.requested and result.reviewed > 0:
-                    continue
-                if not stop.requested and result.failed > 0:
+                if result.failed > 0:
+                    consecutive_failures += 1
+                    if _watch_failure_limit_reached("review", consecutive_failures):
+                        exit_code = 1
+                        break
                     retry_seconds = min(interval, DEFAULT_REVIEW_WATCH_RETRY_SECONDS)
                     if not _sleep_with_refresh_check(retry_seconds, refresh, stop):
                         break
                     continue
+                consecutive_failures = 0
+                if not stop.requested and result.reviewed > 0:
+                    continue
                 if not _sleep_with_refresh_check(interval, refresh, stop):
                     break
         print("rightmemory review watch stopped", file=sys.stderr)
-        return 0
+        return exit_code
     except KeyboardInterrupt:
         print("rightmemory review watch stopped", file=sys.stderr)
         return 130
@@ -533,6 +554,8 @@ def _dreamer_watch(interval: int | None, session_id: str) -> int:
         watch_config = replace(watch_config, check_interval_seconds=interval)
     dreamer_config = load_config("dreamer")
     refresh = InstallStamp(watch_config.memory_root)
+    consecutive_failures = 0
+    exit_code = 0
     try:
         with _watch_stop_signal("dreamer") as stop, WatchLock(watch_config.memory_root, "dreamer"):
             next_config: Any | None = dreamer_config
@@ -550,14 +573,21 @@ def _dreamer_watch(interval: int | None, session_id: str) -> int:
                 status = _dreamer_watch_once(watch_config, session_id, run_cycle)
                 _reexec_if_install_changed(refresh, stop)
                 if status == _DREAMER_WATCH_SKIPPED:
+                    consecutive_failures = 0
                     if not _sleep_with_refresh_check(watch_config.check_interval_seconds, refresh, stop):
                         break
                 elif status == _DREAMER_WATCH_FAILED:
+                    consecutive_failures += 1
+                    if _watch_failure_limit_reached("dreamer", consecutive_failures):
+                        exit_code = 1
+                        break
                     retry_seconds = min(watch_config.check_interval_seconds, DEFAULT_DREAMER_WATCH_RETRY_SECONDS)
                     if not _sleep_with_refresh_check(retry_seconds, refresh, stop):
                         break
+                else:
+                    consecutive_failures = 0
         print("rightmemory dreamer watch stopped", file=sys.stderr)
-        return 0
+        return exit_code
     except KeyboardInterrupt:
         print("rightmemory dreamer watch stopped", file=sys.stderr)
         return 130
@@ -580,6 +610,8 @@ def _prune_watch(interval: int, session_id: str) -> int:
     pruner_config = load_pruner_config()
     runtime_config = load_config("pruner")
     refresh = InstallStamp(pruner_config.memory_root)
+    consecutive_failures = 0
+    exit_code = 0
     try:
         with _watch_stop_signal("pruner") as stop, WatchLock(pruner_config.memory_root, "pruner"):
             next_pruner_config: Any | None = pruner_config
@@ -598,16 +630,21 @@ def _prune_watch(interval: int, session_id: str) -> int:
                         file=sys.stderr,
                         flush=True,
                     )
+                    consecutive_failures += 1
+                    if _watch_failure_limit_reached("pruner", consecutive_failures):
+                        exit_code = 1
+                        break
                     retry_seconds = min(interval, DEFAULT_PRUNER_WATCH_RETRY_SECONDS)
                     if not _sleep_with_refresh_check(retry_seconds, refresh, stop):
                         break
                     continue
+                consecutive_failures = 0
                 print(output, flush=True)
                 _reexec_if_install_changed(refresh, stop)
                 if not _sleep_with_refresh_check(interval, refresh, stop):
                     break
         print("rightmemory pruner watch stopped", file=sys.stderr)
-        return 0
+        return exit_code
     except KeyboardInterrupt:
         print("rightmemory pruner watch stopped", file=sys.stderr)
         return 130
@@ -621,6 +658,8 @@ def _sync_watch(interval: int) -> int:
         print("rightmemory sync watch disabled", file=sys.stderr)
         return 0
     refresh = InstallStamp(sync_config.memory_root)
+    consecutive_failures = 0
+    exit_code = 0
     try:
         with _watch_stop_signal("sync") as stop, WatchLock(sync_config.memory_root, "sync"):
             while not stop.requested:
@@ -628,6 +667,7 @@ def _sync_watch(interval: int) -> int:
                 timestamp = datetime.now(UTC).isoformat()
                 print(f"[{timestamp}] rightmemory sync check", flush=True)
                 manager = SyncManager(sync_config)
+                cycle_failed = False
                 try:
                     with MemoryWriteLock(sync_config.memory_root):
                         result = manager.background_pull()
@@ -637,6 +677,7 @@ def _sync_watch(interval: int) -> int:
                         file=sys.stderr,
                         flush=True,
                     )
+                    cycle_failed = True
                 else:
                     print(result.message, flush=True)
                     if result.status in {"conflict", "dirty"}:
@@ -648,11 +689,19 @@ def _sync_watch(interval: int) -> int:
                                 file=sys.stderr,
                                 flush=True,
                             )
+                            cycle_failed = True
+                if cycle_failed:
+                    consecutive_failures += 1
+                    if _watch_failure_limit_reached("sync", consecutive_failures):
+                        exit_code = 1
+                        break
+                else:
+                    consecutive_failures = 0
                 _reexec_if_install_changed(refresh, stop)
                 if not _sleep_with_refresh_check(interval, refresh, stop):
                     break
         print("rightmemory sync watch stopped", file=sys.stderr)
-        return 0
+        return exit_code
     except KeyboardInterrupt:
         print("rightmemory sync watch stopped", file=sys.stderr)
         return 130
