@@ -33,4 +33,4 @@ description: "Use when the user's request may depend on long-term context from e
 - Later updates with the same session id may be shorter when earlier submitted context or queued candidates are enough. Include fresh context when the meaning changed or depends on details not yet submitted.
 - For corrections to retrieved memory, describe the stale or wrong memory well enough for the updater to find it, and say whether it should be revised, narrowed, or deleted.
 - When the user asks for a memory-update result or status, call `rightmemory update pull --session <stable-session-id>`; the output includes current phase, pending candidates, current batch, and timing information.
-- When the user asks to cancel a submitted update candidate that is still pending, call `rightmemory update undo --session <stable-session-id> <candidate-id>`.
+- To cancel a submitted update candidate that is still pending, call `rightmemory update undo --session <stable-session-id> <candidate-id>`.
