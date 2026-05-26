@@ -76,7 +76,7 @@ Add these tests near the existing file-backed heading validation tests in `tests
 Run:
 
 ```bash
-python -m unittest tests.test_tools.MemoryToolsTests.test_validate_memory_accepts_skill_heading_marker tests.test_tools.MemoryToolsTests.test_validate_memory_allows_four_hash_skill_pointer
+python -m unittest discover -s tests -p 'test_tools.py' -k test_validate_memory_accepts_skill_heading_marker -k test_validate_memory_allows_four_hash_skill_pointer
 ```
 
 Expected: FAIL. The first test reports a dangling edge to `two-side-review`; the second reports that a `####` pointer must use `{F#slug}`.
@@ -111,7 +111,7 @@ Then update the `depth == 4` branch in `_structure_errors()` to use the shared p
 Run:
 
 ```bash
-python -m unittest tests.test_tools.MemoryToolsTests.test_validate_memory_accepts_skill_heading_marker tests.test_tools.MemoryToolsTests.test_validate_memory_allows_four_hash_skill_pointer
+python -m unittest discover -s tests -p 'test_tools.py' -k test_validate_memory_accepts_skill_heading_marker -k test_validate_memory_allows_four_hash_skill_pointer
 ```
 
 Expected: PASS.
@@ -121,7 +121,7 @@ Expected: PASS.
 Run:
 
 ```bash
-python -m unittest tests.test_tools
+python -m unittest discover -s tests -p 'test_tools.py'
 ```
 
 Expected: PASS.
@@ -163,7 +163,7 @@ Add this test near `test_git_add_accepts_memory_files_and_dream_logs` in `tests/
 Run:
 
 ```bash
-python -m unittest tests.test_tools.MemoryToolsTests.test_git_add_accepts_memory_skill_files
+python -m unittest discover -s tests -p 'test_tools.py' -k test_git_add_accepts_memory_skill_files
 ```
 
 Expected: PASS before code changes. This confirms the existing `MEMORY_*.md` allowlist already covers skill files.
@@ -219,7 +219,7 @@ Add this test near the existing prompt/instruction tests in `tests/test_config.p
 Run:
 
 ```bash
-python -m unittest tests.test_config.PromptTests.test_schema_level_memory_skill_guidance_is_in_role_prompts
+python -m unittest discover -s tests -p 'test_config.py' -k test_schema_level_memory_skill_guidance_is_in_role_prompts
 ```
 
 Expected: FAIL because the schema and role prompts do not yet mention `S#` skill semantics.
@@ -318,7 +318,7 @@ Preserve ordinary memory for facts, context, and preferences. Use skills for reu
 Run:
 
 ```bash
-python -m unittest tests.test_config.PromptTests.test_schema_level_memory_skill_guidance_is_in_role_prompts
+python -m unittest discover -s tests -p 'test_config.py' -k test_schema_level_memory_skill_guidance_is_in_role_prompts
 ```
 
 Expected: PASS.
@@ -328,7 +328,8 @@ Expected: PASS.
 Run:
 
 ```bash
-python -m unittest tests.test_config tests.test_tools
+python -m unittest discover -s tests -p 'test_config.py'
+python -m unittest discover -s tests -p 'test_tools.py'
 ```
 
 Expected: PASS.
@@ -361,7 +362,7 @@ In `tests/test_semantic_upgrades.py`, update `test_load_packaged_notes_includes_
 Run:
 
 ```bash
-python -m unittest tests.test_semantic_upgrades.SemanticUpgradeParserTests.test_load_packaged_notes_includes_current_notes
+python -m unittest discover -s tests -p 'test_semantic_upgrades.py' -k test_load_packaged_notes_includes_current_notes
 ```
 
 Expected: FAIL because the packaged note does not exist yet.
@@ -388,7 +389,7 @@ Review existing instruction-like or prompt-like memories. Convert strong candida
 Run:
 
 ```bash
-python -m unittest tests.test_semantic_upgrades
+python -m unittest discover -s tests -p 'test_semantic_upgrades.py'
 ```
 
 Expected: PASS.
