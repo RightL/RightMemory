@@ -259,6 +259,20 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.tools.git_add(["rightmemory.toml"])
 
+    def test_git_add_accepts_memory_skill_files(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        (self.root / "MEMORY_SKILL_two-side-review.md").write_text("# Two-Side Review\n", encoding="utf-8")
+
+        result = self.tools.git_add(["MEMORY.md", "MEMORY_SKILL_two-side-review.md"])
+
+        self.assertEqual(result, "staged: MEMORY.md, MEMORY_SKILL_two-side-review.md")
+        status = self.tools.git_status()
+        self.assertIn("A  MEMORY.md", status)
+        self.assertIn("A  MEMORY_SKILL_two-side-review.md", status)
+
     def test_git_add_rejects_directory_path_before_git_mutation(self):
         self._git("init")
         memory_dir = self.root / "MEMORY_tree.md"
