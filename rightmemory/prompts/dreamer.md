@@ -23,9 +23,7 @@
 
 During consolidation, consider whether existing memory describes a recurring way an agent should act but lacks enough instruction to apply it. Strong instruction-like or prompt-like memories may become `S#` memory skills backed by `MEMORY_SKILL_<slug>.md`.
 
-Preserve ordinary memory for facts, context, and preferences. Use skills for reusable agent instructions. Keep the skill file flexible and practical; do not impose a rigid section template.
-
-Skill files are free-form instruction Markdown. Keep graph ids and edges on the `S#` heading or nearby ordinary memory.
+Preserve ordinary memory for facts, context, and preferences. Use skills for reusable agent instructions.
 
 ## Conflicts And Boundaries
 

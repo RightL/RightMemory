@@ -69,8 +69,6 @@ Use the governing distinction: ordinary memory records what is true or preferred
 
 Skip broad, speculative, overlapping, or template-shaped skills when evidence is weak. When evidence is useful but unsettled, prefer ordinary `Uncertain:` memory.
 
-Skill files are free-form instruction Markdown. Put graph ids and edges on the `S#` heading or nearby ordinary memory, and write the skill body as instructions the future agent can apply.
-
 ## Implicit And Candidate Memory
 
 - Users often express preferences, workflow expectations, and corrections
