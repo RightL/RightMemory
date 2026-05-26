@@ -18,7 +18,7 @@
 
 `S#` headings are memory skills: reusable instruction assets backed by `MEMORY_SKILL_<slug>.md`.
 
-Use progressive disclosure. During broad retrieval, return strongly relevant `S#` heading lines and direct body paragraphs so the caller can decide whether the skill applies. When the caller asks to see, use, or retrieve a specific skill, open `MEMORY_SKILL_<slug>.md` and return the skill body.
+Use progressive disclosure. During broad retrieval, return strongly relevant `S#` heading lines and direct body paragraphs so the caller can decide whether the skill applies. When the caller asks to see, use, or retrieve a specific skill, open `MEMORY_SKILL_<slug>.md` and return the skill body as instruction Markdown.
 
 Keep broad recall compact. Return a full skill file when the caller specifically asks for that skill's contents.
 

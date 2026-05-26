@@ -45,6 +45,7 @@ HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$")
 NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*→\s*\[(.*?)\])?\s*$")
 EDGE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*([A-Za-z0-9_.-]+)\s*$")
 MEMORY_DETAIL_FILE_RE = re.compile(r"^MEMORY_[A-Za-z0-9_.-]+\.md$")
+MEMORY_SKILL_FILE_RE = re.compile(r"^MEMORY_SKILL_[A-Za-z0-9_.-]+\.md$")
 DREAM_LOG_FILE_RE = re.compile(r"^dream_logs/[A-Za-z0-9_.-]+\.md$")
 GIT_REVISION_RE = re.compile(r"^[A-Za-z0-9_.^~/-]+$")
 PRUNE_SUBJECT_PREFIX = "prune:"
@@ -513,10 +514,11 @@ class MemoryTools:
     def validate_memory(self) -> str:
         """Validate RightMemory ids, graph edges, and memory file structure."""
         files = self._memory_files()
+        graph_files = [file_path for file_path in files if not self._is_memory_skill_file(file_path)]
         ids: dict[str, MemoryId] = {}
         errors: list[str] = []
 
-        for file_path in files:
+        for file_path in graph_files:
             for item in self._parse_file(file_path):
                 if item.id in ids:
                     previous = ids[item.id]
@@ -546,7 +548,8 @@ class MemoryTools:
                 if target_item is None:
                     errors.append(f"dangling edge `{edge_type}:{target}` at {self._loc(item)}")
 
-        errors.extend(self._structure_errors(files))
+        errors.extend(self._structure_errors(graph_files))
+        errors.extend(self._skill_backing_file_errors(graph_files))
         if errors:
             return "validation failed:\n" + "\n".join(f"- {error}" for error in errors)
         return f"validation passed: {len(ids)} ids across {len(files)} memory files"
@@ -800,6 +803,19 @@ class MemoryTools:
             )
         return items
 
+    def _skill_backing_file_errors(self, files: list[Path]) -> list[str]:
+        errors: list[str] = []
+        for file_path in files:
+            relative_path = file_path.relative_to(self.memory_root)
+            for line_number, line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), start=1):
+                anchor_match = ANCHOR_KIND_RE.match(line)
+                if anchor_match is None or anchor_match.group(2) != "S#":
+                    continue
+                skill_file = f"MEMORY_SKILL_{anchor_match.group(3)}.md"
+                if not (self.memory_root / skill_file).is_file():
+                    errors.append(f"missing skill file `{skill_file}` for S# heading at {relative_path}:{line_number}")
+        return errors
+
     def _parse_edges(self, edge_text: str) -> tuple[list[tuple[str, str]], list[str]]:
         edges: list[tuple[str, str]] = []
         malformed_edges: list[str] = []
@@ -968,6 +984,10 @@ class MemoryTools:
         if relative_path == "MEMORY.md" or MEMORY_DETAIL_FILE_RE.fullmatch(relative_path):
             return relative_path
         raise ValueError(f"can only read historical MEMORY.md or MEMORY_*.md files: {relative_path}")
+
+    def _is_memory_skill_file(self, path: Path) -> bool:
+        relative_path = path.relative_to(self.memory_root).as_posix()
+        return bool(MEMORY_SKILL_FILE_RE.fullmatch(relative_path))
 
     def _validate_git_revision(self, revision: str) -> str:
         revision = revision.strip()

@@ -25,6 +25,8 @@ During consolidation, consider whether existing memory describes a recurring way
 
 Preserve ordinary memory for facts, context, and preferences. Use skills for reusable agent instructions. Keep the skill file flexible and practical; do not impose a rigid section template.
 
+Skill files are free-form instruction Markdown. Keep graph ids and edges on the `S#` heading or nearby ordinary memory.
+
 ## Conflicts And Boundaries
 
 - Never auto-resolve contradictions. When two nodes disagree about the same entity, keep both and surface the conflict in the dream report for the user to settle.

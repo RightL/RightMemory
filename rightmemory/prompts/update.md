@@ -27,7 +27,7 @@ An `S#` memory skill is a reusable instruction asset. Ordinary memory records du
 
 Create or refine an `S#` skill when an update request describes a reusable workflow, judgment playbook, recurring prompt-shaped instruction, or bounded operating style that future agents should apply. Keep weak or one-off signals as ordinary memory or uncertain memory.
 
-Skill files live at `MEMORY_SKILL_<slug>.md`. They should contain enough guidance for an agent to apply the skill after reading it, without forcing a rigid section template.
+Skill files live at `MEMORY_SKILL_<slug>.md`. They are free-form instruction Markdown and should contain enough guidance for an agent to apply the skill after reading it, without forcing a rigid section template. Put graph ids and edges on the `S#` heading or nearby ordinary memory.
 
 ## Edit Planning
 

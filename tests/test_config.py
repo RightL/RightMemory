@@ -2348,6 +2348,7 @@ class PromptTests(unittest.TestCase):
                 instructions = build_instructions(Path("/memory"), role)
                 self.assertIn("reusable instruction asset", instructions)
                 self.assertIn("ordinary memory", instructions)
+                self.assertIn("free-form instruction Markdown", instructions)
                 self.assertIn("rigid", instructions)
 
     def test_dreamer_prompt_includes_pending_semantic_upgrade_context(self):

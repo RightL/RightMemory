@@ -50,6 +50,11 @@ full instruction belongs in `MEMORY_SKILL_<slug>.md`. The skill file should be
 clear enough for an agent to apply after reading it, but it should not follow a
 rigid section template.
 
+Skill files are free-form instruction Markdown, not graph-bearing memory files.
+Put graph ids, edges, and placement context on the `S#` heading or nearby
+ordinary memory. Inside `MEMORY_SKILL_<slug>.md`, Markdown headings, bullets, and
+backticked labels are treated as instructional text rather than memory nodes.
+
 ## Memory Domains
 
 Memory domains are ordinary `#` headings. Use `# User Context` for durable context about the user as a person with an ongoing life, work, and direction: relevant background, active pursuits, longer-term goals, important responsibilities or life/work circumstances, and why those things matter. It is a compact context profile grounded in evidence.

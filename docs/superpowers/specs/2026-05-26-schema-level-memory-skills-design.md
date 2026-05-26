@@ -102,6 +102,11 @@ criteria, a reusable prompt, or pointers to exact commands when the action is
 fully determined. The expected output and stopping point should be clear enough
 for a future agent to know when it has completed the skill.
 
+Skill files are free-form instruction Markdown rather than graph-bearing memory
+files. Their headings, bullets, and prompt labels should read naturally as
+instructions; graph ids and edges belong on the `S#` heading or nearby ordinary
+memory.
+
 Example:
 
 ```md

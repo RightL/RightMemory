@@ -693,6 +693,35 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertIn("validation passed", result)
 
+    def test_validate_memory_requires_skill_backing_file(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Domain {#domain}\n\n"
+            "## Two-Side Review {S#two-side-review} → [rel:domain]\n",
+            encoding="utf-8",
+        )
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("missing skill file `MEMORY_SKILL_two-side-review.md`", result)
+
+    def test_validate_memory_treats_skill_file_body_as_freeform_markdown(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Domain {#domain}\n\n"
+            "## Two-Side Review {S#two-side-review} → [rel:domain]\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_SKILL_two-side-review.md").write_text(
+            "# Two-Side Review\n\n"
+            "#### When to use\n\n"
+            "- `trigger` this is a prompt label, not a memory graph node.\n"
+            "- `missing` this should not create a duplicate id or dangling edge → [rel:no-such-id]\n",
+            encoding="utf-8",
+        )
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("validation passed", result)
+
     def test_validate_memory_allows_four_hash_skill_pointer(self):
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
