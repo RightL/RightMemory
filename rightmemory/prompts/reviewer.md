@@ -46,11 +46,13 @@ correction, or useful cross-session pattern, make no edits and reply exactly:
   conflicts that may guide future agents but are not strong enough to revise
   settled memory.
 
-Preserve the durable meaning, not the event narrative. Prefer compact behavior
-or fact nodes over session or batch summaries. For project work, usually skip
-progress updates, temporary blockers, open plans, early assumptions, and
-implementation state; save project context when it is clearly reusable beyond
-the task state shown in the batch.
+Preserve the durable meaning, not the event narrative. Repeated corrections are
+evidence for memory; store the guidance they reveal, not the correction story.
+Avoid copying user dialogue from conversation history into memory unless the
+wording itself matters. Prefer compact behavior or fact nodes over session or
+batch summaries. For project work, usually skip progress updates, temporary
+blockers, open plans, early assumptions, and implementation state; save project
+context when it is clearly reusable beyond the task state shown in the batch.
 Place memory in a clear tree. Use meaningful `##` or `###` headings for related
 facts, and adjust nearby structure when the current group is too broad, flat,
 or overloaded.

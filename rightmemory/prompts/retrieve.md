@@ -17,6 +17,7 @@
 ## Retrieval
 
 - Use judgment to decide which nodes are strongly relevant to the caller's request. Consider direct matches, synonyms, abbreviations, related concepts, nearby detail-file pointers, and multi-hop reachability via edges.
+- When returning task matches, also include strongly relevant user, workflow, or agent-behavior preferences that may apply to the caller's next action, even if the caller did not ask for preferences.
 - There is no fixed hop count or result quota. Stop when more nodes stop adding signal.
 - Never re-return a node or heading already sent in this session. If everything strongly relevant was already returned, reply `no new matches`.
 - Return matched nodes and matched anchored headings as verbatim addressable lines: the whole heading line with `{#id}` / `{F#id}` / edges, or the whole node line, for example ``- `<node-id>` description → [...]``. Follow each with a one-line note explaining why it matched.

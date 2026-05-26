@@ -27,6 +27,12 @@ Nodes use:
 - Node lines with no edges write `→ []`; heading lines with no edges may omit `→ []`.
 - Useful but unsettled memory uses `Uncertain:` at the start of the node description, for example ``- `<node-id>` Uncertain: <tentative memory claim with its scope or doubt> → [...]``. Revise it into ordinary declarative memory when it becomes settled, or remove it when it is contradicted or no longer useful.
 
+## Memory Entry Shape
+
+A memory entry is durable, reusable knowledge for future agents. It should
+preserve what future agents need to know, rather than narrate how that knowledge
+appeared.
+
 ## Memory Domains
 
 Memory domains are ordinary `#` headings. Use `# User Context` for durable context about the user as a person with an ongoing life, work, and direction: relevant background, active pursuits, longer-term goals, important responsibilities or life/work circumstances, and why those things matter. It is a compact context profile grounded in evidence.
