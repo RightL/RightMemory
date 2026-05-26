@@ -37,8 +37,9 @@ MAX_CLOSE_MATCHES = 3
 MAX_EDIT_MATCH_LINES = 8
 MAX_MATCH_PREVIEW_CHARS = 180
 
-ANCHOR_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
-ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{(F#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
+ANCHOR_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|S#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
+ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{(F#|S#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
+POINTER_HEADING_KINDS = {"F#", "S#"}
 ANY_HEADING_RE = re.compile(r"^(#+)\s+(.+?)\s*$")
 HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$")
 NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*→\s*\[(.*?)\])?\s*$")
@@ -847,11 +848,13 @@ class MemoryTools:
                     errors.append(f"heading deeper than #### at {relative_path}:{line_number}")
                 elif depth == 4:
                     anchor_match = ANCHOR_KIND_RE.match(line)
-                    if anchor_match is None or anchor_match.group(2) != "F#":
-                        errors.append(f"#### pointer must use `{{F#slug}}` at {relative_path}:{line_number}")
+                    if anchor_match is None or anchor_match.group(2) not in POINTER_HEADING_KINDS:
+                        errors.append(
+                            f"#### pointer must use `{{F#slug}}` or `{{S#slug}}` at {relative_path}:{line_number}"
+                        )
                     if parent_depth != 3:
                         errors.append(f"#### pointer must be under a ### heading at {relative_path}:{line_number}")
-                    if anchor_match is not None and anchor_match.group(2) == "F#":
+                    if anchor_match is not None and anchor_match.group(2) in POINTER_HEADING_KINDS:
                         active_pointer = (depth, line_number)
 
                 heading_stack.append((depth, line_number))

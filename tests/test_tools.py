@@ -662,6 +662,42 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertIn("validation passed", result)
 
+    def test_validate_memory_accepts_skill_heading_marker(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Domain {#domain}\n\n"
+            "## Two-Side Review {S#two-side-review} → [rel:domain]\n\n"
+            "A reusable instruction asset for opposing review passes.\n\n"
+            "- `review-signal` Use the skill when the user asks for two-side review. → [rel:two-side-review]\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_SKILL_two-side-review.md").write_text(
+            "# Two-Side Review\n\nRun support and risk passes, then summarize.\n",
+            encoding="utf-8",
+        )
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("validation passed", result)
+
+    def test_validate_memory_allows_four_hash_skill_pointer(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Domain {#domain}\n\n"
+            "### Agent Behavior\n\n"
+            "#### Two-Side Review {S#two-side-review}\n\n"
+            "A compact skill description can live under the pointer.\n\n"
+            "---\n\n"
+            "### Other Topic\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_SKILL_two-side-review.md").write_text(
+            "# Two-Side Review\n\nRun support and risk passes, then summarize.\n",
+            encoding="utf-8",
+        )
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("validation passed", result)
+
     def test_validate_memory_catches_self_and_duplicate_edges(self):
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
