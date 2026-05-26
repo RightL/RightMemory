@@ -9,6 +9,7 @@ Addressable headings use:
 ```md
 ### Human Title {#heading-id} → [edge1, edge2, ...]
 ### File-Backed Title {F#heading-id} → [edge1, edge2, ...]
+### Skill Title {S#heading-id} → [edge1, edge2, ...]
 ```
 
 Plain tree headings without graph edges may omit the anchor and edge list.
@@ -22,7 +23,9 @@ Nodes use:
 ```
 
 - `heading-id` and `node-id` share one namespace; do not reuse an id between a heading and a node.
-- `F#` marks a heading as file-backed; the graph id is still `heading-id`, so edges target `type:heading-id`, not `type:F#heading-id`.
+- `F#` marks a heading as backed by an ordinary detail file. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:F#heading-id`.
+- `S#` marks a heading as backed by a memory skill file. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:S#heading-id`.
+- `S#heading-id` maps to sibling skill file `MEMORY_SKILL_heading-id.md`.
 - Edges may connect heading to heading, heading to node, node to heading, or node to node.
 - Node lines with no edges write `→ []`; heading lines with no edges may omit `→ []`.
 - Useful but unsettled memory uses `Uncertain:` at the start of the node description, for example ``- `<node-id>` Uncertain: <tentative memory claim with its scope or doubt> → [...]``. Revise it into ordinary declarative memory when it becomes settled, or remove it when it is contradicted or no longer useful.
@@ -32,6 +35,20 @@ Nodes use:
 A memory entry is durable, reusable knowledge for future agents. It should
 preserve what future agents need to know, rather than narrate how that knowledge
 appeared.
+
+## Memory Skills
+
+A memory skill is a reusable instruction asset. It can be a workflow, a judgment
+playbook, a prompt-shaped instruction the user would otherwise repeat, or a
+bounded operating style for a recurring situation.
+
+Ordinary memory records durable facts, context, and preferences. Skill memory
+tells a future agent how to act when the relevant situation comes up.
+
+Use an `S#` heading when the heading body can give a compact description and the
+full instruction belongs in `MEMORY_SKILL_<slug>.md`. The skill file should be
+clear enough for an agent to apply after reading it, but it should not follow a
+rigid section template.
 
 ## Memory Domains
 
@@ -68,8 +85,10 @@ Written edges may be one-way or reciprocal [stored on both records so either sid
 - `#`, `##`, and `###` are normal tree layers and may contain memory content.
 - `#`, `##`, and `###` may have `{#short-slug}` anchors and edges when the whole subtree is a graph target.
 - A file-backed `#`, `##`, or `###` heading uses `{F#short-slug}` and maps to sibling detail file `MEMORY_<short-slug>.md`.
+- A skill-backed `#`, `##`, or `###` heading uses `{S#short-slug}` and maps to sibling skill file `MEMORY_SKILL_<short-slug>.md`.
 - When a heading's child content moves into its detail file, keep only the heading line and any heading body paragraphs in the current file. Do not leave child node lines or child headings under that heading in the current file.
 - `#### Human Title {F#short-slug}` is the deepest heading level allowed in a memory file and points to sibling detail file `MEMORY_<short-slug>.md`.
+- `#### Human Title {S#short-slug}` is also allowed as a skill pointer under an existing `###` topic and points to sibling skill file `MEMORY_SKILL_<short-slug>.md`.
 - A `####` pointer may have body paragraphs directly under it when they summarize the detail file or explain the pointer.
 - Do not write child node lines or child headings under a `####` pointer in the current file.
 - Create `####` pointers only under an existing or newly created `###` topic; do not jump directly from `#` or `##` to `####`.

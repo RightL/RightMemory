@@ -61,6 +61,14 @@ revise a short question under `# Open Context Questions` according to the
 schema. If the batch answers an open context question, save the answer as
 ordinary declarative memory, then remove or revise the question.
 
+## Memory Skills
+
+Automatic review may create or refine `S#` memory skills when the transcript evidence supports a reusable instruction asset. A skill can capture a workflow, judgment playbook, recurring prompt-shaped instruction, or bounded operating style.
+
+Use the governing distinction: ordinary memory records what is true or preferred; skill memory tells future agents how to act. Strong candidates have a recognizable trigger, stable enough input shape, useful action or judgment guidance, and a clear output or stopping condition.
+
+Skip broad, speculative, overlapping, or template-shaped skills when evidence is weak. When evidence is useful but unsettled, prefer ordinary `Uncertain:` memory.
+
 ## Implicit And Candidate Memory
 
 - Users often express preferences, workflow expectations, and corrections

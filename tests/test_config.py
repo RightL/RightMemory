@@ -2337,6 +2337,19 @@ class PromptTests(unittest.TestCase):
             self.assertNotIn("{{MEMORY_ROOT}}", prompt)
             self.assertNotIn("{{SKILLS_ROOT}}", prompt)
 
+    def test_schema_level_memory_skill_guidance_is_in_role_prompts(self):
+        retrieve_instructions = build_instructions(Path("/memory"), "retrieve")
+        self.assertIn("S#", retrieve_instructions)
+        self.assertIn("MEMORY_SKILL_<slug>.md", retrieve_instructions)
+        self.assertIn("progressive disclosure", retrieve_instructions)
+
+        for role in ("update", "reviewer", "dreamer"):
+            with self.subTest(role=role):
+                instructions = build_instructions(Path("/memory"), role)
+                self.assertIn("reusable instruction asset", instructions)
+                self.assertIn("ordinary memory", instructions)
+                self.assertIn("rigid", instructions)
+
     def test_dreamer_prompt_includes_pending_semantic_upgrade_context(self):
         context = SemanticUpgradeContext(
             notes=[

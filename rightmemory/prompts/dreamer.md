@@ -19,6 +19,12 @@
 - When consolidating, use heading bodies for text that describes an addressable heading itself. Keep child nodes for facts that should stand independently.
 - Aging uses git history, not inline timestamps. Use judgment on what "long-untouched" means given the node's nature. Move stale nodes into a `## Graveyard` heading inside the same `#` memory domain; nodes that sit in a graveyard across multiple cycles can be deleted.
 
+## Memory Skills
+
+During consolidation, consider whether existing memory describes a recurring way an agent should act but lacks enough instruction to apply it. Strong instruction-like or prompt-like memories may become `S#` memory skills backed by `MEMORY_SKILL_<slug>.md`.
+
+Preserve ordinary memory for facts, context, and preferences. Use skills for reusable agent instructions. Keep the skill file flexible and practical; do not impose a rigid section template.
+
 ## Conflicts And Boundaries
 
 - Never auto-resolve contradictions. When two nodes disagree about the same entity, keep both and surface the conflict in the dream report for the user to settle.

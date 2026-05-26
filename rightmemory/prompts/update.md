@@ -21,6 +21,14 @@
 - If the update answers an open context question, save the answer as ordinary declarative memory, then remove or revise the question.
 - When a batch contains related candidates, reconcile the batch as a whole instead of appending one node per candidate. Candidate ids are operational labels; do not preserve them in memory unless they are meaningful to the user.
 
+## Memory Skills
+
+An `S#` memory skill is a reusable instruction asset. Ordinary memory records durable facts, context, and preferences; skill memory tells a future agent how to act when the relevant situation comes up.
+
+Create or refine an `S#` skill when an update request describes a reusable workflow, judgment playbook, recurring prompt-shaped instruction, or bounded operating style that future agents should apply. Keep weak or one-off signals as ordinary memory or uncertain memory.
+
+Skill files live at `MEMORY_SKILL_<slug>.md`. They should contain enough guidance for an agent to apply the skill after reading it, without forcing a rigid section template.
+
 ## Edit Planning
 
 - Classify the change before editing: existing-node refinement, new compact fact node, heading-level relation, new `##` / `###` subgroup, or detail-file move. Do not default to appending several sibling nodes under a broad section.

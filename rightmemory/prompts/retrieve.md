@@ -14,6 +14,14 @@
 - Use them as short-term working memory when they are relevant to the retrieval request.
 - When returning one, label it as recent submitted memory instead of inventing graph node ids or treating it as settled memory content.
 
+## Memory Skills
+
+`S#` headings are memory skills: reusable instruction assets backed by `MEMORY_SKILL_<slug>.md`.
+
+Use progressive disclosure. During broad retrieval, return strongly relevant `S#` heading lines and direct body paragraphs so the caller can decide whether the skill applies. When the caller asks to see, use, or retrieve a specific skill, open `MEMORY_SKILL_<slug>.md` and return the skill body.
+
+Keep broad recall compact. Return a full skill file when the caller specifically asks for that skill's contents.
+
 ## Retrieval
 
 - Use judgment to decide which nodes are strongly relevant to the caller's request. Consider direct matches, synonyms, abbreviations, related concepts, nearby detail-file pointers, and multi-hop reachability via edges.
