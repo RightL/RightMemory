@@ -34,6 +34,7 @@ class ReviewState:
 @dataclass(frozen=True)
 class ReviewScanResult:
     reviewed: int = 0
+    waiting_for_batch: int = 0
     skipped_idle: int = 0
     skipped_old: int = 0
     skipped_reviewed: int = 0
@@ -45,6 +46,7 @@ class ReviewScanResult:
     def format(self) -> str:
         return (
             f"reviewed: {self.reviewed}\n"
+            f"waiting_for_batch: {self.waiting_for_batch}\n"
             f"skipped_idle: {self.skipped_idle}\n"
             f"skipped_old: {self.skipped_old}\n"
             f"skipped_reviewed: {self.skipped_reviewed}\n"
@@ -114,13 +116,14 @@ class ReviewScanner:
         self.on_review_success = on_review_success
         self.state_store = ReviewStateStore(config.memory_root)
 
-    def scan_once(self, *, now: float | None = None) -> ReviewScanResult:
+    def scan_once(self, *, now: float | None = None, require_full_batch: bool = False) -> ReviewScanResult:
         now = time.time() if now is None else now
         state = self.state_store.load()
         sessions = dict(state.sessions)
         candidates: list[ReviewCandidate] = []
         counts = {
             "reviewed": 0,
+            "waiting_for_batch": 0,
             "skipped_idle": 0,
             "skipped_old": 0,
             "skipped_reviewed": 0,
@@ -188,6 +191,10 @@ class ReviewScanner:
                 continue
             seen_candidate_keys.add(state_key)
             unique_candidates.append(candidate)
+
+        if require_full_batch and len(unique_candidates) < self.config.batch_size:
+            counts["waiting_for_batch"] += len(unique_candidates)
+            return ReviewScanResult(**counts)
 
         batch = unique_candidates[: self.config.batch_size]
         if not batch:

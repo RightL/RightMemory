@@ -292,6 +292,7 @@ class JsonRequestTests(unittest.TestCase):
 
     def test_review_scan_once_runs_scanner(self):
         roles = []
+        scan_flags = []
         stdout = io.StringIO()
 
         class FakeScanner:
@@ -300,7 +301,8 @@ class JsonRequestTests(unittest.TestCase):
                 self.run_reviewer = run_reviewer
                 self.on_review_success = on_review_success
 
-            def scan_once(self):
+            def scan_once(self, *, require_full_batch=False):
+                scan_flags.append(require_full_batch)
                 return FakeReviewResult("reviewed: 1", reviewed=1)
 
         def fake_load_config(role):
@@ -321,6 +323,7 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(roles, ["reviewer"])
+        self.assertEqual(scan_flags, [False])
         self.assertEqual(stdout.getvalue().strip(), "reviewed: 1")
 
     def test_review_scan_once_increments_dreamer_trigger_points(self):
@@ -330,7 +333,7 @@ class JsonRequestTests(unittest.TestCase):
             def __init__(self, config, run_reviewer, *, on_review_success=None):
                 self.on_review_success = on_review_success
 
-            def scan_once(self):
+            def scan_once(self, *, require_full_batch=False):
                 self.on_review_success(2)
                 return FakeReviewResult("reviewed: 2", reviewed=2)
 
@@ -378,6 +381,7 @@ class JsonRequestTests(unittest.TestCase):
 
     def test_review_watch_runs_scans_until_interrupted(self):
         roles = []
+        scan_flags = []
         stdout = io.StringIO()
         stderr = io.StringIO()
         results = [
@@ -391,7 +395,8 @@ class JsonRequestTests(unittest.TestCase):
                 self.run_reviewer = run_reviewer
                 self.on_review_success = on_review_success
 
-            def scan_once(self):
+            def scan_once(self, *, require_full_batch=False):
+                scan_flags.append(require_full_batch)
                 result = results.pop(0)
                 if result.reviewed:
                     self.on_review_success(result.reviewed)
@@ -421,6 +426,7 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 130)
         self.assertEqual(roles, ["reviewer", "reviewer"])
+        self.assertEqual(scan_flags, [True, True])
         self.assertEqual(trigger.points, 4.0)
         self.assertIn("rightmemory review scan", stdout.getvalue())
         self.assertIn("reviewed: 1", stdout.getvalue())
@@ -437,7 +443,7 @@ class JsonRequestTests(unittest.TestCase):
                 self.run_reviewer = run_reviewer
                 self.on_review_success = on_review_success
 
-            def scan_once(self):
+            def scan_once(self, *, require_full_batch=False):
                 return FakeReviewResult("failed: 1", failed=1)
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -469,7 +475,7 @@ class JsonRequestTests(unittest.TestCase):
                 self.run_reviewer = run_reviewer
                 self.on_review_success = on_review_success
 
-            def scan_once(self):
+            def scan_once(self, *, require_full_batch=False):
                 return FakeReviewResult("failed: 1", failed=1)
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -503,7 +509,7 @@ class JsonRequestTests(unittest.TestCase):
                 self.run_reviewer = run_reviewer
                 self.on_review_success = on_review_success
 
-            def scan_once(self):
+            def scan_once(self, *, require_full_batch=False):
                 return FakeReviewResult("reviewed: 0", reviewed=0)
 
         with tempfile.TemporaryDirectory() as tempdir:

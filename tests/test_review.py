@@ -140,6 +140,35 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertEqual(result.reviewed, 1)
         self.assertEqual(callback_calls, [(1, 1)])
 
+    def test_scan_full_batch_gate_waits_before_reviewing(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            first = source / "01-first.jsonl"
+            second = source / "02-second.jsonl"
+            self._write_codex(first, turns=[("first", "a1")], session_id="s1")
+            self._write_codex(second, turns=[("second", "a2")], session_id="s2")
+            self._set_mtime(first, 1_000)
+            self._set_mtime(second, 2_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                lambda session_id, message: calls.append(message) or "ok",
+            )
+
+            result = scanner.scan_once(now=10_000, require_full_batch=True)
+            state = ReviewStateStore(root).load()
+
+        self.assertEqual(result.reviewed, 0)
+        self.assertEqual(result.waiting_for_batch, 2)
+        self.assertEqual(calls, [])
+        self.assertEqual(state.sessions, {})
+
     def test_scan_reviews_time_adjacent_batch_per_call(self):
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:

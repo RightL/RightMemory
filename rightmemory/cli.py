@@ -475,12 +475,17 @@ def _doctor_main(argv: list[str]) -> int:
     raise ValueError(f"unknown doctor command: {args.command}")
 
 
-def _run_review_scan(since_days: int | None = None):
+def _run_review_scan(since_days: int | None = None, *, require_full_batch: bool = False):
     reviewer_config = load_config("reviewer")
-    return _run_review_scan_with_config(reviewer_config, since_days)
+    return _run_review_scan_with_config(reviewer_config, since_days, require_full_batch=require_full_batch)
 
 
-def _run_review_scan_with_config(reviewer_config: Any, since_days: int | None = None):
+def _run_review_scan_with_config(
+    reviewer_config: Any,
+    since_days: int | None = None,
+    *,
+    require_full_batch: bool = False,
+):
     review_config = load_review_config()
     if since_days is not None:
         if since_days < 1:
@@ -497,7 +502,7 @@ def _run_review_scan_with_config(reviewer_config: Any, since_days: int | None = 
                 dreamer_watch_config.review_session_points,
             ),
         )
-        return scanner.scan_once()
+        return scanner.scan_once(require_full_batch=require_full_batch)
     finally:
         runtime.cleanup()
 
@@ -517,9 +522,9 @@ def _review_watch(interval: int, since_days: int | None = None) -> int:
                 timestamp = datetime.now(UTC).isoformat()
                 print(f"[{timestamp}] rightmemory review scan", flush=True)
                 if next_config is None:
-                    result = _run_review_scan(since_days)
+                    result = _run_review_scan(since_days, require_full_batch=True)
                 else:
-                    result = _run_review_scan_with_config(next_config, since_days)
+                    result = _run_review_scan_with_config(next_config, since_days, require_full_batch=True)
                     next_config = None
                 print(result.format(), flush=True)
                 _reexec_if_install_changed(refresh, stop)
