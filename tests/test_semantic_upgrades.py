@@ -290,6 +290,7 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
                         "open-context-questions",
                         "uncertain-memory-marker",
                         "schema-level-memory-skills",
+                        "future-facing-behavior-memory",
                     ],
                 )
             ],
@@ -298,6 +299,7 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
         self.assertIn("open-context-questions", state["absorbed"])
         self.assertIn("uncertain-memory-marker", state["absorbed"])
         self.assertIn("schema-level-memory-skills", state["absorbed"])
+        self.assertIn("future-facing-behavior-memory", state["absorbed"])
 
     def test_dreamer_success_marks_semantic_upgrades_absorbed_under_state_root(self):
         class FakeDreamerExecutor:

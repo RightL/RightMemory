@@ -34,7 +34,9 @@ Nodes use:
 
 A memory entry is durable, reusable knowledge for future agents. It should
 preserve what future agents need to know, rather than narrate how that knowledge
-appeared.
+appeared. Rewrite session evidence, user quotes, correction stories, and
+"observed during" provenance into the durable rule or conclusion; keep exact
+phrasing only when the wording itself is a reusable trigger or artifact.
 
 ## Memory Skills
 
@@ -59,7 +61,7 @@ backticked labels are treated as instructional text rather than memory nodes.
 
 Memory domains are ordinary `#` headings. Use `# User Context` for durable context about the user as a person with an ongoing life, work, and direction: relevant background, active pursuits, longer-term goals, important responsibilities or life/work circumstances, and why those things matter. It is a compact context profile grounded in evidence.
 
-Use `# Cross-Session Agent Behavior` for guidance about how agents should work with this user when they use coding agents: communication style, workflow expectations, tool or process preferences, and repeated agent mistakes that future agents can avoid.
+Use `# Cross-Session Agent Behavior` for future-facing guidance about how agents should work with this user when they use coding agents: communication style, workflow expectations, tool or process preferences, and repeated agent mistakes that future agents can avoid. These entries should read like operating instructions, not transcript review notes.
 
 Use global `# Open Context Questions` for loose ends in memory. These are short questions for future agents, not declarative memory facts. Use them when a memory area feels incomplete, unclear, or hard to apply because something still needs to be pinned down. Question nodes use normal node syntax and link to related memory with `todo:`. When the answer becomes clear, write the answer into the appropriate declarative memory section, then remove or revise the question.
 
