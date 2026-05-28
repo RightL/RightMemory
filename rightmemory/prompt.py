@@ -64,9 +64,9 @@ Command-selected behavior:
 {sync_guidance}
 
 Workspace rule:
-- The only allowed root directory is {memory_root}.
-- Treat the current working directory as {memory_root}.
-- Do not read, write, inspect, or run commands against paths outside {memory_root}.
+- The provided tools are rooted at the RightMemory memory store.
+- Use memory-store-relative paths such as `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`.
+- Do not read, write, inspect, or run commands against paths outside the memory store.
 {tool_guidance}
 - Return concise natural-language answers to the caller.
 
@@ -80,7 +80,7 @@ RightMemory schema:
 {schema}
 
 Standalone adaptation:
-- Treat the embedded schema above as the schema source of truth. Do not try to read skill or schema files outside {memory_root}; the provided tools only expose the memory root.
+- Treat the embedded schema above as the schema source of truth. Do not try to read skill or schema files outside the memory store; the provided tools only expose that store.
 - Treat the caller's message according to the command-selected behavior and the role instructions below.
 {semantic_guidance}
 

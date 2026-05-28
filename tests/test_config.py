@@ -2311,6 +2311,7 @@ class PromptTests(unittest.TestCase):
         for role in ("dreamer", "historian", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"):
             prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), role)
 
+            self.assertIn("The configured memory root is /home/example/.rightmemory.", prompt)
             self.assertIn("RightMemory Schema", prompt)
             self.assertIn(f"{role.title().replace('-', ' ')} Role", prompt)
             self.assertNotIn("Command-selected behavior", prompt)
@@ -2336,6 +2337,14 @@ class PromptTests(unittest.TestCase):
             self.assertIn("Command-selected behavior", prompt)
             self.assertNotIn("{{MEMORY_ROOT}}", prompt)
             self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+
+    def test_standalone_prompt_does_not_embed_memory_root_path(self):
+        first = build_instructions(Path("/home/example/.rightmemory/.runtime/worktrees/update-111"), "update")
+        second = build_instructions(Path("/home/example/.rightmemory/.runtime/worktrees/update-222"), "update")
+
+        self.assertEqual(first, second)
+        self.assertNotIn("/home/example/.rightmemory", first)
+        self.assertIn("memory-store-relative paths", first)
 
     def test_schema_level_memory_skill_guidance_is_in_role_prompts(self):
         retrieve_instructions = build_instructions(Path("/memory"), "retrieve")
