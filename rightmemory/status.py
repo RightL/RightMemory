@@ -19,7 +19,7 @@ from .watch import MANAGED_WATCH_TARGETS, ManagedWatchStatus, _is_managed_watch_
 MAX_PREVIEW_CHARS = 300
 MAX_PREVIEW_LINES = 3
 MAX_LOG_TAIL_BYTES = 32 * 1024
-FAILURE_MARKERS = ("failed", "error", "stopping after")
+FAILURE_MARKERS = ("failed", "error")
 LOG_EVENT_PATTERN = re.compile(r"^\[\d{4}-\d{2}-\d{2}T")
 NEUTRAL_FAILURE_COUNTER_PATTERN = re.compile(r"^(failed|errors?)\s*[:=]\s*0\s*$", re.IGNORECASE)
 

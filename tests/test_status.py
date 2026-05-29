@@ -310,6 +310,36 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("failed: 0", review.last)
         self.assertNotIn("review: failed: 0", issues)
 
+    def test_collect_managed_watches_does_not_surface_graceful_stop_notice_as_issue(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            log = root / ".runtime" / "watch" / "dreamer.log"
+            log.parent.mkdir(parents=True)
+            log.write_text("rightmemory dreamer watch stopping after current work\n", encoding="utf-8")
+            statuses = {}
+            for name in ("review", "dreamer", "pruner", "sync"):
+                statuses[name] = type(
+                    "WatchStatus",
+                    (),
+                    {
+                        "name": name,
+                        "state": "stopped",
+                        "pid": None,
+                        "log_path": root / ".runtime" / "watch" / f"{name}.log",
+                    },
+                )()
+            statuses["dreamer"].log_path = log
+
+            watches, issues = collect_managed_watch_sections(
+                root,
+                watch_status_reader=lambda memory_root, name: statuses[name],
+                sync_config_loader=lambda: type("SyncConfig", (), {"enabled": False})(),
+            )
+
+        dreamer = next(watch for watch in watches if watch.name == "dreamer")
+        self.assertEqual(dreamer.last, "rightmemory dreamer watch stopping after current work")
+        self.assertEqual(issues, [])
+
     def test_collect_managed_watches_default_reader_does_not_create_lock_files(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
