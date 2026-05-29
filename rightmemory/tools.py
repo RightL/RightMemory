@@ -405,6 +405,11 @@ class MemoryTools:
         relative_path = self._allowed_history_path(path)
         if isinstance(max_lines, bool) or max_lines < 1:
             raise ValueError("max_lines must be a positive integer")
+        object_type = self._git_path_type_at_revision(revision, relative_path)
+        if object_type is None:
+            return f"[file not present at revision: {revision}:{relative_path}]"
+        if object_type != "blob":
+            raise ValueError(f"historical path is not a file at revision: {revision}:{relative_path}")
         text = self._run_git(["git", "show", f"{revision}:{relative_path}"])
         lines = text.splitlines()
         end = min(len(lines), max_lines)
@@ -996,6 +1001,19 @@ class MemoryTools:
         if revision.startswith("-") or not GIT_REVISION_RE.fullmatch(revision):
             raise ValueError("revision contains unsupported characters")
         return revision
+
+    def _git_path_type_at_revision(self, revision: str, path: str) -> str | None:
+        self._run_git(["git", "rev-parse", "--verify", f"{revision}^{{commit}}"])
+        process = subprocess.run(
+            ["git", "cat-file", "-t", f"{revision}:{path}"],
+            cwd=self.memory_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if process.returncode != 0:
+            return None
+        return process.stdout.strip()
 
     def _prune_subject_commits(self, max_count: int) -> list[str]:
         output = self._run_git(["git", "log", "--format=%H %s"])

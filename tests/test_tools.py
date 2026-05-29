@@ -427,6 +427,22 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("1: # Domain", shown)
         self.assertIn("3: - `old` old value", shown)
 
+    def test_git_show_file_reports_file_missing_at_revision(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        self.tools.git_add(["MEMORY.md"])
+        self.tools.git_commit("memory: add root")
+        old_head = self._git("rev-parse", "HEAD")
+        (self.root / "MEMORY_new.md").write_text("# New Domain\n", encoding="utf-8")
+        self.tools.git_add(["MEMORY_new.md"])
+        self.tools.git_commit("memory: add new detail")
+
+        shown = self.tools.git_show_file(old_head, "MEMORY_new.md")
+
+        self.assertEqual(shown, f"[file not present at revision: {old_head}:MEMORY_new.md]")
+
     def test_git_show_file_rejects_unsafe_revision_and_path(self):
         self._git("init")
 
