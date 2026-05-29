@@ -1484,19 +1484,18 @@ class JsonRequestTests(unittest.TestCase):
             ):
                 popen.return_value.pid = 123
                 first = main(["update", "submit", "--session", "agent-1", "first"])
-                second = main(["update", "submit", "--session", "agent-1", "second"])
-                undo = main(["update", "undo", "--session", "agent-1", "2"])
+                second = main(["update", "submit", "--session", "agent-2", "second"])
+                undo = main(["update", "undo", "--session", "agent-1", "1"])
                 state = AsyncUpdateStore(memory_root, "update").read("agent-1")
 
         self.assertEqual(first, 0)
         self.assertEqual(second, 0)
         self.assertEqual(undo, 0)
         self.assertEqual(popen.call_count, 1)
-        self.assertEqual([job.id for job in state.pending], [1])
+        self.assertEqual([job.id for job in state.pending], [])
         output = stdout.getvalue()
-        self.assertIn("canceled pending candidate: 2", output)
-        self.assertIn("pending: 1", output)
-        self.assertIn("pending_ids: 1", output)
+        self.assertIn("canceled pending candidate: 1", output)
+        self.assertIn("pending: 0", output)
 
     def test_main_reports_non_pending_update_undo(self):
         stdout = io.StringIO()
@@ -1551,7 +1550,7 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("current_batch: 0", output)
         self.assertIn("pending: 2", output)
         self.assertIn("pending_ids: 1, 2", output)
-        self.assertIn("error: worker process exited before writing result: pid 123", output)
+        self.assertIn("error: worker process exited before writing result", output)
 
     def test_main_pulls_async_update_state(self):
         stdout = io.StringIO()

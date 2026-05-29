@@ -8,6 +8,60 @@ from rightmemory.async_update import AsyncUpdateJob, AsyncUpdateState, AsyncUpda
 
 
 class AsyncUpdateStateTests(unittest.TestCase):
+    def test_worker_command_uses_global_async_worker(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+
+            command = store._worker_command()
+
+        self.assertEqual(command[-2:], ["update", "_async-worker"])
+        self.assertNotIn("--session", command)
+
+    def test_worker_state_round_trips_and_detects_live_pid(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            with store._worker_locked():
+                store._write_worker_locked(
+                    status="running",
+                    pid=4242,
+                    batch_id="update-batch-test",
+                    session_ids=["agent-1", "agent-2"],
+                    error=None,
+                )
+
+            with patch("rightmemory.async_update._process_exists", return_value=True):
+                active = store._active_worker_pid()
+
+        self.assertEqual(active, 4242)
+
+    def test_session_state_paths_exclude_worker_state(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2026-05-15T00:00:00+00:00",
+                    pending=[_job(1, "first")],
+                    next_id=2,
+                ),
+            )
+            with store._worker_locked():
+                store._write_worker_locked(
+                    status="running",
+                    pid=4242,
+                    batch_id=None,
+                    session_ids=[],
+                    error=None,
+                )
+
+            paths = [path.name for path in store._session_state_paths()]
+
+        self.assertEqual(paths, ["agent-1.json"])
+
     def test_dead_worker_running_batch_returns_batch_to_pending(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
@@ -39,6 +93,26 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(recovered.pending[0].message, "interrupted")
         self.assertIn("worker process exited before writing result", recovered.error or "")
 
+    def test_submit_starts_only_one_global_worker_for_multiple_sessions(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            process = Mock(pid=4242)
+
+            with (
+                patch("rightmemory.async_update.subprocess.Popen", return_value=process) as popen,
+                patch("rightmemory.async_update._process_exists", return_value=True),
+            ):
+                first = store.submit("agent-1", "first")
+                second = store.submit("agent-2", "second")
+
+        popen.assert_called_once()
+        self.assertEqual(first.status, "running")
+        self.assertEqual(second.status, "running")
+        self.assertEqual(first.phase, "waiting")
+        self.assertEqual(second.phase, "waiting")
+        self.assertEqual([job.message for job in first.pending], ["first"])
+        self.assertEqual([job.message for job in second.pending], ["second"])
+
     def test_submit_after_failed_state_preserves_pending_order_and_starts_worker(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
@@ -58,11 +132,13 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
             with patch("rightmemory.async_update.subprocess.Popen", return_value=process) as popen:
                 state = store.submit("agent-1", "new update")
+                with store._worker_locked():
+                    worker = store._read_worker_locked()
 
         popen.assert_called_once()
         self.assertEqual(state.status, "running")
         self.assertEqual(state.phase, "waiting")
-        self.assertEqual(state.pid, 4242)
+        self.assertEqual(worker["pid"], 4242)
         self.assertEqual([job.message for job in state.pending], ["retry first", "new update"])
         self.assertEqual([job.id for job in state.pending], [1, 2])
         self.assertEqual(state.current_batch, [])
@@ -135,6 +211,14 @@ class AsyncUpdateStateTests(unittest.TestCase):
                     next_id=3,
                 ),
             )
+            with store._worker_locked():
+                store._write_worker_locked(
+                    status="running",
+                    pid=12345,
+                    batch_id="update-batch-test",
+                    session_ids=["agent-1"],
+                    error=None,
+                )
 
             with patch("rightmemory.async_update._process_exists", return_value=True):
                 state, canceled = store.cancel_pending("agent-1", 1)
