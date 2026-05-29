@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .config import load_dreamer_watch_config, load_sync_config
+from .dreamer_trigger import DreamerTriggerStore
+from .watch import MANAGED_WATCH_TARGETS, managed_watch_status
 
 
 MAX_PREVIEW_CHARS = 300
@@ -82,6 +87,85 @@ def read_log_preview(path: Path) -> str | None:
     return _cap_preview("\n".join(meaningful[-MAX_PREVIEW_LINES:]))
 
 
+def collect_managed_watch_sections(
+    memory_root: Path,
+    *,
+    watch_status_reader: Callable[[Path, str], object] = managed_watch_status,
+    sync_config_loader: Callable[[], object] = load_sync_config,
+) -> tuple[list[SectionStatus], list[str]]:
+    sections: list[SectionStatus] = []
+    issues: list[str] = []
+    sync_disabled = False
+    try:
+        sync_config = sync_config_loader()
+        sync_disabled = not bool(getattr(sync_config, "enabled", False))
+    except Exception as exc:
+        sync_error = f"sync config error: {type(exc).__name__}: {exc}"
+        issues.append(sync_error)
+        sync_disabled = False
+
+    for name in MANAGED_WATCH_TARGETS:
+        try:
+            status = watch_status_reader(memory_root, name)
+            log_path = Path(getattr(status, "log_path"))
+            state = str(getattr(status, "state"))
+            pid = getattr(status, "pid", None)
+            if name == "sync" and sync_disabled:
+                section_state = "disabled"
+            elif state == "running" and pid is not None:
+                section_state = f"running pid {pid}"
+            elif state == "stale" and pid is not None:
+                section_state = f"stale pid {pid}"
+                issues.append(f"{name}: stale pid {pid}")
+            elif state == "external":
+                section_state = "running outside manager"
+                issues.append(f"{name}: running outside manager")
+            else:
+                section_state = state
+            last = None if name == "sync" and sync_disabled else read_log_preview(log_path)
+            sections.append(
+                SectionStatus(
+                    name=name,
+                    state=section_state,
+                    log_path=_display_path(memory_root, log_path),
+                    last=last,
+                    issue=issues[-1] if issues and issues[-1].startswith(f"{name}:") else None,
+                )
+            )
+        except Exception as exc:
+            message = f"{name}: status error: {type(exc).__name__}: {exc}"
+            sections.append(SectionStatus(name=name, state=message, issue=message))
+            issues.append(message)
+    return sections, issues
+
+
+def collect_dreamer_section(
+    memory_root: Path,
+    *,
+    trigger_reader: Callable[[Path], object] | None = None,
+    config_loader: Callable[[], object] = load_dreamer_watch_config,
+) -> SectionStatus:
+    if trigger_reader is None:
+        trigger_reader = lambda root: DreamerTriggerStore(root).read()
+    try:
+        state = trigger_reader(memory_root)
+        config = config_loader()
+        detail = (
+            f"trigger: {getattr(state, 'points')}/{getattr(config, 'trigger_points')} points\n"
+            f"check interval: {getattr(config, 'check_interval_seconds')} seconds"
+        )
+        updated_at = getattr(state, "updated_at", None)
+        if updated_at:
+            detail += f"\nupdated: {updated_at}"
+        return SectionStatus(name="dreamer", state="trigger progress", detail=detail)
+    except Exception as exc:
+        return SectionStatus(
+            name="dreamer",
+            state=f"error: {type(exc).__name__}: {exc}",
+            issue=f"dreamer trigger error: {type(exc).__name__}: {exc}",
+        )
+
+
 def format_status_dashboard(status: DashboardStatus) -> str:
     lines: list[str] = [
         "RightMemory",
@@ -135,6 +219,13 @@ def _cap_preview(text: str) -> str:
     if len(preview) > MAX_PREVIEW_CHARS:
         return preview[:MAX_PREVIEW_CHARS]
     return preview
+
+
+def _display_path(memory_root: Path, path: Path) -> str:
+    try:
+        return path.resolve(strict=False).relative_to(memory_root.resolve(strict=False)).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:

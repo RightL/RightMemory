@@ -7,7 +7,9 @@ from rightmemory.status import (
     DashboardStatus,
     GitStatus,
     SectionStatus,
+    collect_dreamer_section,
     collect_git_status,
+    collect_managed_watch_sections,
     format_status_dashboard,
     read_log_preview,
 )
@@ -119,6 +121,88 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("review: running pid 123", output)
         self.assertIn("Async Update", output)
         self.assertIn("Recent Issues\n  pruner failed", output)
+
+    def test_collect_managed_watches_includes_sync_disabled_and_log_preview(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            log = root / ".runtime" / "watch" / "review.log"
+            log.parent.mkdir(parents=True)
+            log.write_text("reviewed 3 sessions\n", encoding="utf-8")
+
+            statuses = {
+                "review": type(
+                    "WatchStatus",
+                    (),
+                    {"name": "review", "state": "running", "pid": 123, "log_path": log},
+                )(),
+                "dreamer": type(
+                    "WatchStatus",
+                    (),
+                    {
+                        "name": "dreamer",
+                        "state": "stopped",
+                        "pid": None,
+                        "log_path": root / ".runtime" / "watch" / "dreamer.log",
+                    },
+                )(),
+                "pruner": type(
+                    "WatchStatus",
+                    (),
+                    {
+                        "name": "pruner",
+                        "state": "stale",
+                        "pid": 456,
+                        "log_path": root / ".runtime" / "watch" / "pruner.log",
+                    },
+                )(),
+                "sync": type(
+                    "WatchStatus",
+                    (),
+                    {
+                        "name": "sync",
+                        "state": "stopped",
+                        "pid": None,
+                        "log_path": root / ".runtime" / "watch" / "sync.log",
+                    },
+                )(),
+            }
+
+            watches, issues = collect_managed_watch_sections(
+                root,
+                watch_status_reader=lambda memory_root, name: statuses[name],
+                sync_config_loader=lambda: type("SyncConfig", (), {"enabled": False})(),
+            )
+
+        self.assertEqual([watch.name for watch in watches], ["review", "dreamer", "pruner", "sync"])
+        self.assertEqual(watches[0].state, "running pid 123")
+        self.assertEqual(watches[0].last, "reviewed 3 sessions")
+        self.assertEqual(watches[2].state, "stale pid 456")
+        self.assertEqual(watches[3].state, "disabled")
+        self.assertIn("pruner: stale pid 456", issues)
+
+    def test_collect_dreamer_section_reports_trigger_progress(self):
+        state = type(
+            "DreamerState",
+            (),
+            {
+                "points": 37.5,
+                "updated_at": "2026-05-29T08:00:00+00:00",
+                "last_successful_dream_at": "2026-05-28T08:00:00+00:00",
+                "last_recovery_at": None,
+            },
+        )()
+        config = type("DreamerConfig", (), {"trigger_points": 50.0, "check_interval_seconds": 3000})()
+
+        section = collect_dreamer_section(
+            Path("/memory/root"),
+            trigger_reader=lambda memory_root: state,
+            config_loader=lambda: config,
+        )
+
+        self.assertEqual(section.name, "dreamer")
+        self.assertEqual(section.state, "trigger progress")
+        self.assertIn("trigger: 37.5/50.0 points", section.detail)
+        self.assertIn("check interval: 3000 seconds", section.detail)
 
     def _git(self, root: Path, *args: str) -> str:
         result = subprocess.run(
