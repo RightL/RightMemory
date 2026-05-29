@@ -286,6 +286,7 @@ rightmemory dreamer --session <agent-session-id> "run a dream cycle"
 rightmemory prune
 rightmemory prune watch
 rightmemory history --session <agent-session-id> "find pruned memory about the old setup"
+rightmemory status
 rightmemory watch start
 rightmemory watch status
 rightmemory watch stop
@@ -319,6 +320,7 @@ The runtime is intentionally small:
 - Role-specific executor settings are read from `<memory-root>/rightmemory.toml`.
 - Standalone one-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`; CLI-agent calls persist provider session mappings under `<memory-root>/.runtime/agent_cli_sessions/<role>/`.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
+- Use `rightmemory status` for a read-only operational dashboard across the configured memory root. It summarizes Git state, managed watches, dreamer trigger progress, async update queues, bounded last-message previews, and file paths for full logs or state. Use `rightmemory watch status` only when you need the lower-level managed-watch process view.
 - The installer creates a root `.gitignore` allowlist so git status only surfaces `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; existing user `.gitignore` files are preserved.
 - Async `update submit` calls for the same `--session` still accumulate as pending candidates and reset that session's one-hour quiet period. A single global async update worker scans all eligible session queues, batches whole session queues until it reaches `[update.async].target_batch_candidates` candidates by default, and falls back after `[update.async].max_wait_seconds`. `pull` and `undo` remain per-session. While submissions are waiting or being processed, retrieve can see newly submitted unconsolidated memory as `Recent submitted memory` so fresh context is available before the updater writes it.
 - Automatic `update`, `reviewer`, `dreamer`, and `pruner` turns run in isolated Git worktrees when they operate on the main state root. The role still commits normally; runtime validates and lands successful memory commits back into the main memory repo.
@@ -340,6 +342,10 @@ max_wait_seconds = 86400
 eligible session queues whole, so a batch may overshoot the target.
 `max_wait_seconds` is measured from the oldest eligible queue's quiet-period
 deadline.
+
+`rightmemory status` includes aggregate async update worker and queue state
+without requiring a session id. For one session's detailed pending, running,
+result, or error state, continue to use `rightmemory update pull --session <id>`.
 
 ### CLI-Agent Config
 
@@ -447,6 +453,11 @@ rightmemory watch restart
 ```
 
 By default these commands manage review, dreamer, and pruner watchers, plus sync when `[sync].enabled` is true. Pass a target name when you want one role: `rightmemory watch start review`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.
+
+For a single read-only view of watcher state, dreamer trigger progress, async
+update queues, recent previews, and paths to the underlying logs or state files,
+use `rightmemory status`. `rightmemory watch status` intentionally stays focused
+on managed watch process state.
 
 The lower-level review loop is still available:
 
