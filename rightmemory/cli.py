@@ -29,6 +29,7 @@ from .doctor import format_doctor_report, run_agent_cli_doctor
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 from .session import MemoryWriteLock
+from .status import collect_status, format_status_dashboard
 from .sync import SyncManager
 from .watch import (
     MANAGED_WATCH_TARGETS,
@@ -81,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
         return _sync_main(argv[1:])
     if argv and argv[0] == "doctor":
         return _doctor_main(argv[1:])
+    if argv and argv[0] == "status":
+        return _status_main(argv[1:])
     if argv and argv[0] == "prune":
         return _prune_main(argv[1:])
     if argv and argv[0] == "history":
@@ -416,6 +419,13 @@ def _review_main(argv: list[str]) -> int:
     if args.command == "watch":
         return _review_watch(args.interval, args.since_days)
     raise ValueError(f"unknown review command: {args.command}")
+
+
+def _status_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="rightmemory status")
+    parser.parse_args(argv)
+    print(format_status_dashboard(collect_status(MEMORY_ROOT)))
+    return 0
 
 
 def _prune_main(argv: list[str]) -> int:

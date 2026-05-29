@@ -245,6 +245,47 @@ def collect_async_update_section(
     )
 
 
+def collect_status(
+    memory_root: Path,
+    *,
+    watch_collector: Callable[[Path], tuple[list[SectionStatus], list[str]]] | None = None,
+    dreamer_collector: Callable[[Path], SectionStatus] = collect_dreamer_section,
+    update_collector: Callable[[Path], tuple[SectionStatus, list[str]]] = collect_async_update_section,
+) -> DashboardStatus:
+    root = Path(memory_root)
+    git = collect_git_status(root)
+    if watch_collector is None:
+        watch_collector = collect_managed_watch_sections
+
+    issues: list[str] = []
+    try:
+        watches, watch_issues = watch_collector(root)
+        issues.extend(watch_issues)
+    except Exception as exc:
+        message = f"managed watches: status error: {type(exc).__name__}: {exc}"
+        watches = [SectionStatus(name="watches", state=message, issue=message)]
+        issues.append(message)
+
+    try:
+        dreamer = dreamer_collector(root)
+        if dreamer.issue:
+            issues.append(dreamer.issue)
+    except Exception as exc:
+        message = f"dreamer: status error: {type(exc).__name__}: {exc}"
+        dreamer = SectionStatus(name="dreamer", state=message, issue=message)
+        issues.append(message)
+
+    try:
+        update, update_issues = update_collector(root)
+        issues.extend(update_issues)
+    except Exception as exc:
+        message = f"update: status error: {type(exc).__name__}: {exc}"
+        update = SectionStatus(name="update", state=message, issue=message)
+        issues.append(message)
+
+    return DashboardStatus(root=root, git=git, watches=watches, dreamer=dreamer, update=update, issues=issues)
+
+
 def format_status_dashboard(status: DashboardStatus) -> str:
     lines: list[str] = [
         "RightMemory",
@@ -284,7 +325,7 @@ def _format_section(section: SectionStatus) -> list[str]:
     if section.log_path:
         lines.append(f"    log: {section.log_path}")
     if section.detail:
-        lines.append(f"    {section.detail}")
+        lines.extend(f"    {line}" for line in section.detail.splitlines())
     if section.last:
         for index, line in enumerate(section.last.splitlines()):
             prefix = "last: " if index == 0 else "      "

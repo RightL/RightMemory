@@ -785,6 +785,46 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("pruner: stopped", stdout.getvalue())
         self.assertIn("sync: stopped", stdout.getvalue())
 
+    def test_main_status_prints_operational_dashboard(self):
+        stdout = io.StringIO()
+        dashboard = "RightMemory\n  root: /memory/root\n  git: clean on main @ abc1234"
+
+        with (
+            patch("rightmemory.cli.MEMORY_ROOT", Path("/memory/root")),
+            patch("rightmemory.cli.collect_status", return_value=object()) as collect_status,
+            patch("rightmemory.cli.format_status_dashboard", return_value=dashboard),
+            patch("sys.stdout", stdout),
+        ):
+            result = main(["status"])
+
+        self.assertEqual(result, 0)
+        collect_status.assert_called_once_with(Path("/memory/root"))
+        self.assertEqual(stdout.getvalue().strip(), dashboard)
+
+    def test_watch_status_remains_managed_watch_process_view(self):
+        stdout = io.StringIO()
+        status = type(
+            "WatchStatus",
+            (),
+            {
+                "name": "review",
+                "state": "running",
+                "pid": 123,
+                "log_path": Path("/memory/.runtime/watch/review.log"),
+            },
+        )()
+
+        with (
+            patch("rightmemory.cli.MEMORY_ROOT", Path("/memory")),
+            patch("rightmemory.cli.managed_watch_status", return_value=status),
+            patch("sys.stdout", stdout),
+        ):
+            result = main(["watch", "status", "review"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("review: running pid 123, log /memory/.runtime/watch/review.log", stdout.getvalue())
+        self.assertNotIn("Async Update", stdout.getvalue())
+
     def test_sync_watch_help_does_not_load_config(self):
         stdout = io.StringIO()
 

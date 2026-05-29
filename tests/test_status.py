@@ -12,6 +12,7 @@ from rightmemory.status import (
     collect_dreamer_section,
     collect_git_status,
     collect_managed_watch_sections,
+    collect_status,
     format_status_dashboard,
     read_log_preview,
 )
@@ -326,6 +327,36 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("state error", section.state)
         self.assertEqual(len(issues), 1)
         self.assertIn("update: state error", issues[0])
+
+    def test_collect_status_aggregates_sections_and_issues(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            self._git(root, "init")
+            self._git(root, "config", "user.email", "test@example.com")
+            self._git(root, "config", "user.name", "Test User")
+            (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+            self._git(root, "add", "MEMORY.md")
+            self._git(root, "commit", "-m", "initial memory")
+
+            dashboard = collect_status(
+                root,
+                watch_collector=lambda memory_root: (
+                    [SectionStatus(name="pruner", state="stale pid 42", issue="pruner: stale pid 42")],
+                    ["pruner: stale pid 42"],
+                ),
+                dreamer_collector=lambda memory_root: SectionStatus(
+                    name="dreamer",
+                    state="trigger progress",
+                    detail="trigger: 1.0/50.0 points",
+                ),
+                update_collector=lambda memory_root: (SectionStatus(name="update", state="worker: idle"), []),
+            )
+
+        self.assertEqual(dashboard.root, root)
+        self.assertEqual(len(dashboard.watches), 1)
+        self.assertEqual(dashboard.dreamer.name, "dreamer")
+        self.assertEqual(dashboard.update.name, "update")
+        self.assertIn("pruner: stale pid 42", dashboard.issues)
 
     def _git(self, root: Path, *args: str) -> str:
         result = subprocess.run(
