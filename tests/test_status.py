@@ -312,6 +312,22 @@ class StatusDashboardTests(unittest.TestCase):
             self.assertEqual(trigger_path.read_text(encoding="utf-8"), "{not json")
             self.assertEqual(list(trigger_path.parent.glob("trigger-state.corrupt-*.json")), [])
 
+    def test_collect_dreamer_section_reports_invalid_trigger_timestamp(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            trigger_path = root / ".runtime" / "dreamer" / "trigger-state.json"
+            trigger_path.parent.mkdir(parents=True)
+            trigger_path.write_text(
+                json.dumps({"points": 5.0, "updated_at": "not-a-date"}),
+                encoding="utf-8",
+            )
+            config = type("DreamerConfig", (), {"trigger_points": 50.0, "check_interval_seconds": 3000})()
+
+            section = collect_dreamer_section(root, config_loader=lambda: config)
+
+        self.assertIn("error", section.state)
+        self.assertIn("updated_at must be an ISO datetime string or null", section.issue)
+
     def test_collect_async_update_section_reports_idle_when_state_missing(self):
         with tempfile.TemporaryDirectory() as tempdir:
             section, issues = collect_async_update_section(Path(tempdir))
@@ -440,6 +456,37 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(section.last, "newer result")
         self.assertEqual(issues, [])
 
+    def test_collect_async_update_section_surfaces_session_error_as_issue(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            async_root = root / ".runtime" / "async" / "update"
+            async_root.mkdir(parents=True)
+            (async_root / "agent-1.json").write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "session_id": "agent-1",
+                        "role": "update",
+                        "phase": None,
+                        "started_at": "2026-05-29T08:00:00+00:00",
+                        "finished_at": "2026-05-29T09:00:00+00:00",
+                        "pid": None,
+                        "result": None,
+                        "error": "boom",
+                        "next_flush_at": None,
+                        "current_batch": [],
+                        "pending": [],
+                        "next_id": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            section, issues = collect_async_update_section(root)
+
+        self.assertEqual(section.last, "error: boom")
+        self.assertIn("update: agent-1: error: boom", issues)
+
     def test_collect_async_update_section_reports_running_worker(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -537,6 +584,50 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(dashboard.dreamer.name, "dreamer")
         self.assertEqual(dashboard.update.name, "update")
         self.assertIn("pruner: stale pid 42", dashboard.issues)
+
+    def test_collect_status_surfaces_failed_async_session_in_recent_issues(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            self._git(root, "init")
+            self._git(root, "config", "user.email", "test@example.com")
+            self._git(root, "config", "user.name", "Test User")
+            (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+            self._git(root, "add", "MEMORY.md")
+            self._git(root, "commit", "-m", "initial memory")
+            async_root = root / ".runtime" / "async" / "update"
+            async_root.mkdir(parents=True)
+            (async_root / "agent-1.json").write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "session_id": "agent-1",
+                        "role": "update",
+                        "phase": None,
+                        "started_at": "2026-05-29T08:00:00+00:00",
+                        "finished_at": "2026-05-29T09:00:00+00:00",
+                        "pid": None,
+                        "result": None,
+                        "error": "boom",
+                        "next_flush_at": None,
+                        "current_batch": [],
+                        "pending": [],
+                        "next_id": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            dashboard = collect_status(
+                root,
+                watch_collector=lambda memory_root: ([], []),
+                dreamer_collector=lambda memory_root: SectionStatus(name="dreamer", state="trigger progress"),
+            )
+            output = format_status_dashboard(dashboard)
+
+        self.assertIn("Async Update", output)
+        self.assertIn("last: error: boom", output)
+        self.assertIn("Recent Issues", output)
+        self.assertIn("  update: agent-1: error: boom", output)
 
     def _git(self, root: Path, *args: str) -> str:
         result = subprocess.run(

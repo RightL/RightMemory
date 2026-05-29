@@ -6,6 +6,7 @@ import math
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -233,6 +234,7 @@ def collect_async_update_section(
     current_sessions = 0
     flush_times: list[str] = []
     last_values: list[tuple[str, str, str]] = []
+    issues = [worker_issue] if worker_issue else []
 
     for path, state in session_states:
         pending = state.pending
@@ -247,6 +249,8 @@ def collect_async_update_section(
         if next_flush_at:
             flush_times.append(next_flush_at)
         if state.error:
+            error_preview = _cap_preview(f"error: {state.error}").splitlines()[0]
+            issues.append(f"update: {state.session_id}: {error_preview}")
             last_values.append((_async_outcome_time(path, state), path.name, f"error: {state.error}"))
         elif state.result:
             last_values.append((_async_outcome_time(path, state), path.name, state.result))
@@ -266,7 +270,6 @@ def collect_async_update_section(
         detail_lines.insert(1, f"next flush: {min(flush_times)}")
     if worker_state.detail:
         detail_lines.insert(0, worker_state.detail)
-    issues = [worker_issue] if worker_issue else []
     last_value = max(last_values, key=lambda item: (item[0], item[1]))[2] if last_values else None
     return (
         SectionStatus(
@@ -494,14 +497,25 @@ def _read_dreamer_trigger_snapshot(memory_root: Path) -> _DreamerTriggerSnapshot
         raise ValueError("dreamer trigger points must be a nonnegative finite number")
     return _DreamerTriggerSnapshot(
         points=points,
-        updated_at=_optional_str(data.get("updated_at")),
-        last_successful_dream_at=_optional_str(data.get("last_successful_dream_at")),
-        last_recovery_at=_optional_str(data.get("last_recovery_at")),
+        updated_at=_optional_iso_datetime_str(data.get("updated_at"), "updated_at"),
+        last_successful_dream_at=_optional_iso_datetime_str(
+            data.get("last_successful_dream_at"),
+            "last_successful_dream_at",
+        ),
+        last_recovery_at=_optional_iso_datetime_str(data.get("last_recovery_at"), "last_recovery_at"),
     )
 
 
-def _optional_str(value: object) -> str | None:
-    return value if isinstance(value, str) else None
+def _optional_iso_datetime_str(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string or null")
+    try:
+        datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO datetime string or null") from exc
+    return value
 
 
 def _required_worker_str(data: dict[str, Any], key: str) -> str:
