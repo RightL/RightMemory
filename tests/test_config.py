@@ -13,6 +13,7 @@ from rightmemory.config import (
     AgentCliConfig,
     PrunerConfig,
     RuntimeConfig,
+    load_async_update_config,
     load_config,
     load_dreamer_watch_config,
     load_pruner_config,
@@ -439,6 +440,77 @@ class ConfigTests(unittest.TestCase):
                 load_review_config()
 
         self.assertIn("[review].batch_size must be a positive integer", str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_async_update_config_defaults(self):
+        config_path = self._write_config("")
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_async_update_config()
+
+        self.assertEqual(config.memory_root, Path("/home/example/.rightmemory"))
+        self.assertEqual(config.target_batch_candidates, 15)
+        self.assertEqual(config.max_wait_seconds, 86400)
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_async_update_config_parses_custom_values(self):
+        config_path = self._write_config(
+            """
+            [update.model]
+            model_id = "openai/update"
+
+            [update.async]
+            target_batch_candidates = 22
+            max_wait_seconds = 7200
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            async_config = load_async_update_config()
+            runtime_config = load_config("update")
+
+        self.assertEqual(async_config.target_batch_candidates, 22)
+        self.assertEqual(async_config.max_wait_seconds, 7200)
+        self.assertEqual(runtime_config.model_id, "openai/update")
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_async_update_config_rejects_invalid_values(self):
+        cases = [
+            ("target_batch_candidates = 0", "[update.async].target_batch_candidates must be a positive integer"),
+            ("target_batch_candidates = true", "[update.async].target_batch_candidates must be a positive integer"),
+            ("max_wait_seconds = 0", "[update.async].max_wait_seconds must be a positive integer"),
+            ("max_wait_seconds = true", "[update.async].max_wait_seconds must be a positive integer"),
+        ]
+        for body, message in cases:
+            with self.subTest(body=body):
+                config_path = self._write_config(
+                    f"""
+                    [update.async]
+                    {body}
+                    """
+                )
+
+                with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+                    with self.assertRaises(ValueError) as caught:
+                        load_async_update_config()
+
+                self.assertIn(message, str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_async_update_config_rejects_unknown_key(self):
+        config_path = self._write_config(
+            """
+            [update.async]
+            target_batch_candidates = 15
+            extra = 1
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_async_update_config()
+
+        self.assertIn("unsupported [update.async] config key(s): extra", str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_dreamer_watch_config_defaults(self):

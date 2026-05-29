@@ -18,6 +18,8 @@ DEFAULT_MAX_TOOL_RETRIES = 10
 DEFAULT_REVIEW_IDLE_SECONDS = 3600
 DEFAULT_REVIEW_SINCE_DAYS = 3
 DEFAULT_REVIEW_BATCH_SIZE = 3
+DEFAULT_UPDATE_TARGET_BATCH_CANDIDATES = 15
+DEFAULT_UPDATE_MAX_WAIT_SECONDS = 24 * 60 * 60
 DEFAULT_SYNC_STALE_PULL_HOURS = 24
 DEFAULT_PRUNER_GENERATION_COMMITS = 70
 DEFAULT_PRUNER_REVIVAL_GRACE_CHECKPOINTS = 2
@@ -47,6 +49,13 @@ class ReviewConfig:
     since_days: int = DEFAULT_REVIEW_SINCE_DAYS
     batch_size: int = DEFAULT_REVIEW_BATCH_SIZE
     sources: list[ReviewSourceConfig] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AsyncUpdateConfig:
+    memory_root: Path = MEMORY_ROOT
+    target_batch_candidates: int = DEFAULT_UPDATE_TARGET_BATCH_CANDIDATES
+    max_wait_seconds: int = DEFAULT_UPDATE_MAX_WAIT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -189,6 +198,44 @@ def load_review_config() -> ReviewConfig:
     )
 
 
+def load_async_update_config() -> AsyncUpdateConfig:
+    data = _load_raw_config()
+
+    if not MEMORY_ROOT.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
+
+    _reject_unknown_keys(data, _top_level_keys(), "top-level")
+    section = data.get("update", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError("[update] must be a TOML table")
+    _reject_unknown_keys(section, {"model", "agent_cli", "async"}, "[update]")
+
+    async_section = section.get("async", {})
+    if async_section is None:
+        async_section = {}
+    if not isinstance(async_section, dict):
+        raise ValueError("[update.async] must be a TOML table")
+    _reject_unknown_keys(async_section, {"target_batch_candidates", "max_wait_seconds"}, "[update.async]")
+
+    return AsyncUpdateConfig(
+        memory_root=MEMORY_ROOT,
+        target_batch_candidates=_positive_integer(
+            async_section,
+            "target_batch_candidates",
+            DEFAULT_UPDATE_TARGET_BATCH_CANDIDATES,
+            "[update.async]",
+        ),
+        max_wait_seconds=_positive_integer(
+            async_section,
+            "max_wait_seconds",
+            DEFAULT_UPDATE_MAX_WAIT_SECONDS,
+            "[update.async]",
+        ),
+    )
+
+
 def load_dreamer_watch_config() -> DreamerWatchConfig:
     data = _load_raw_config()
 
@@ -320,6 +367,8 @@ def _allowed_role_keys(role: str) -> set[str]:
         allowed.add("watch")
     if role == "pruner":
         allowed.update({"generation_commits", "revival_grace_checkpoints"})
+    if role == "update":
+        allowed.add("async")
     return allowed
 
 
