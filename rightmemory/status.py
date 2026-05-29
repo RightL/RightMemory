@@ -210,7 +210,11 @@ def collect_async_update_section(
     async_root = Path(memory_root) / ".runtime" / "async" / "update"
     worker_state, worker_issue = _read_worker_state(async_root, process_exists)
     try:
-        session_states = [_state_from_json(_read_json(path)) for path in sorted(async_root.glob("*.json")) if path.is_file()]
+        session_states = [
+            (path, _state_from_json(_read_json(path)))
+            for path in sorted(async_root.glob("*.json"))
+            if path.is_file()
+        ]
     except Exception as exc:
         issue = f"update: state error: {type(exc).__name__}: {exc}"
         return (
@@ -228,9 +232,9 @@ def collect_async_update_section(
     current_candidates = 0
     current_sessions = 0
     flush_times: list[str] = []
-    last_values: list[str] = []
+    last_values: list[tuple[str, str, str]] = []
 
-    for state in session_states:
+    for path, state in session_states:
         pending = state.pending
         current = state.current_batch
         if pending:
@@ -243,9 +247,9 @@ def collect_async_update_section(
         if next_flush_at:
             flush_times.append(next_flush_at)
         if state.error:
-            last_values.append(f"error: {state.error}")
+            last_values.append((_async_outcome_time(path, state), path.name, f"error: {state.error}"))
         elif state.result:
-            last_values.append(state.result)
+            last_values.append((_async_outcome_time(path, state), path.name, state.result))
 
     detail_lines = [
         (
@@ -263,12 +267,13 @@ def collect_async_update_section(
     if worker_state.detail:
         detail_lines.insert(0, worker_state.detail)
     issues = [worker_issue] if worker_issue else []
+    last_value = max(last_values, key=lambda item: (item[0], item[1]))[2] if last_values else None
     return (
         SectionStatus(
             name="update",
             state=worker_state.state,
             detail="\n".join(detail_lines),
-            last=_cap_preview(last_values[-1]) if last_values else None,
+            last=_cap_preview(last_value) if last_value else None,
             issue=worker_issue,
         ),
         issues,
@@ -433,26 +438,29 @@ def _read_worker_state(async_root: Path, process_exists: Callable[[int], bool]) 
         return _WorkerSummary(state="worker: idle"), None
     try:
         data = _read_json(path)
+        status = _required_worker_str(data, "status")
+        pid = _optional_worker_int(data, "pid")
+        batch_id = _optional_worker_str(data, "batch_id")
+        session_ids = _required_worker_str_list(data, "session_ids")
     except Exception as exc:
         issue = f"update worker: state error: {type(exc).__name__}: {exc}"
         return _WorkerSummary(state=f"worker: state error: {type(exc).__name__}: {exc}"), issue
-    pid = data.get("pid")
-    status = data.get("status")
-    if not isinstance(pid, int):
+    if pid is None and status == "idle":
         return _WorkerSummary(state="worker: idle"), None
+    if pid is None:
+        error = "ValueError: async update worker state must contain integer field: pid"
+        issue = f"update worker: state error: {error}"
+        return _WorkerSummary(state=f"worker: state error: {error}"), issue
     if not process_exists(pid):
         issue = f"update worker: stale pid {pid}"
         return _WorkerSummary(state=f"worker: stale pid {pid}"), issue
     detail_parts = []
-    batch_id = data.get("batch_id")
-    if isinstance(batch_id, str) and batch_id:
+    if batch_id:
         detail_parts.append(f"batch: {batch_id}")
-    session_ids = data.get("session_ids")
-    if isinstance(session_ids, list):
-        visible = ", ".join(item for item in session_ids if isinstance(item, str))
-        if visible:
-            detail_parts.append(f"sessions: {visible}")
-    state = f"worker: {status} pid {pid}" if isinstance(status, str) and status else f"worker: running pid {pid}"
+    visible = ", ".join(session_ids)
+    if visible:
+        detail_parts.append(f"sessions: {visible}")
+    state = f"worker: {status} pid {pid}"
     return _WorkerSummary(state=state, detail="\n".join(detail_parts) if detail_parts else None), None
 
 
@@ -461,6 +469,16 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"JSON object expected in {path}")
     return data
+
+
+def _async_outcome_time(path: Path, state: object) -> str:
+    timestamp = getattr(state, "finished_at", None) or getattr(state, "started_at", None)
+    if isinstance(timestamp, str) and timestamp:
+        return timestamp
+    try:
+        return f"{path.stat().st_mtime_ns:020d}"
+    except OSError:
+        return ""
 
 
 def _read_dreamer_trigger_snapshot(memory_root: Path) -> _DreamerTriggerSnapshot:
@@ -484,6 +502,38 @@ def _read_dreamer_trigger_snapshot(memory_root: Path) -> _DreamerTriggerSnapshot
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _required_worker_str(data: dict[str, Any], key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"async update worker state must contain string field: {key}")
+    return value
+
+
+def _optional_worker_str(data: dict[str, Any], key: str) -> str | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"async update worker state must contain string or null field: {key}")
+    return value
+
+
+def _optional_worker_int(data: dict[str, Any], key: str) -> int | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"async update worker state must contain integer or null field: {key}")
+    return value
+
+
+def _required_worker_str_list(data: dict[str, Any], key: str) -> list[str]:
+    value = data.get(key)
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"async update worker state must contain string list field: {key}")
+    return value
 
 
 def _plural(word: str, count: int) -> str:

@@ -395,6 +395,51 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(section.last, "accepted 1 candidate")
         self.assertEqual(issues, [])
 
+    def test_collect_async_update_section_uses_recent_outcome_for_last_preview(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            async_root = root / ".runtime" / "async" / "update"
+            async_root.mkdir(parents=True)
+            base_state = {
+                "status": "succeeded",
+                "role": "update",
+                "phase": None,
+                "started_at": "2026-05-29T08:00:00+00:00",
+                "pid": None,
+                "error": None,
+                "next_flush_at": None,
+                "current_batch": [],
+                "pending": [],
+                "next_id": 1,
+            }
+            (async_root / "agent-a.json").write_text(
+                json.dumps(
+                    {
+                        **base_state,
+                        "session_id": "agent-a",
+                        "finished_at": "2026-05-29T11:00:00+00:00",
+                        "result": "newer result",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (async_root / "agent-z.json").write_text(
+                json.dumps(
+                    {
+                        **base_state,
+                        "session_id": "agent-z",
+                        "finished_at": "2026-05-29T10:00:00+00:00",
+                        "result": "older result",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            section, issues = collect_async_update_section(root)
+
+        self.assertEqual(section.last, "newer result")
+        self.assertEqual(issues, [])
+
     def test_collect_async_update_section_reports_running_worker(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -420,6 +465,19 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("batch: update-batch-abc", section.detail)
         self.assertIn("sessions: agent-1", section.detail)
         self.assertEqual(issues, [])
+
+    def test_collect_async_update_section_reports_invalid_worker_state_shape_locally(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            worker_root = root / ".runtime" / "async" / "update" / "_worker"
+            worker_root.mkdir(parents=True)
+            (worker_root / "state.json").write_text("{}", encoding="utf-8")
+
+            section, issues = collect_async_update_section(root)
+
+        self.assertIn("worker: state error", section.state)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("update worker: state error", issues[0])
 
     def test_collect_async_update_section_reports_malformed_state_locally(self):
         with tempfile.TemporaryDirectory() as tempdir:
