@@ -1,10 +1,11 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from rightmemory.async_update import AsyncUpdateJob, AsyncUpdateState, AsyncUpdateStore
+from rightmemory.async_update import AsyncUpdateJob, AsyncUpdateSessionBatch, AsyncUpdateState, AsyncUpdateStore
 
 
 class AsyncUpdateStateTests(unittest.TestCase):
@@ -173,6 +174,141 @@ class AsyncUpdateStateTests(unittest.TestCase):
             ["interrupted first", "interrupted second", "already pending", "new update"],
         )
         self.assertEqual([job.id for job in state.pending], [1, 2, 3, 4])
+
+    def test_submit_during_running_batch_keeps_current_batch_in_flight(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            original = _job(1, "running")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    pending=[original],
+                    next_id=2,
+                ),
+            )
+            with store._worker_locked():
+                store._write_worker_locked(
+                    status="running",
+                    pid=os.getpid(),
+                    batch_id="update-batch-test",
+                    session_ids=["agent-1"],
+                    error=None,
+                )
+            started = store._start_cross_session_batch(
+                [AsyncUpdateSessionBatch("agent-1", _dt("2000-01-01T00:00:00+00:00"), [original])]
+            )
+
+            with patch("rightmemory.async_update.subprocess.Popen") as popen:
+                submitted = store.submit("agent-1", "new while running")
+            accepted = store._finish_cross_session_batch(started, "ok")
+            final = store.read("agent-1")
+
+        popen.assert_not_called()
+        self.assertEqual([job.id for job in submitted.current_batch], [1])
+        self.assertEqual([job.id for job in submitted.pending], [2])
+        self.assertEqual(accepted, 1)
+        self.assertEqual(final.status, "running")
+        self.assertEqual(final.phase, "waiting")
+        self.assertEqual(final.current_batch, [])
+        self.assertEqual([job.message for job in final.pending], ["new while running"])
+        self.assertEqual(final.result, "ok")
+
+    def test_submit_between_selection_and_start_keeps_new_pending_quiet_period(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            original = _job(1, "selected")
+            selected = [AsyncUpdateSessionBatch("agent-1", _dt("2000-01-01T00:00:00+00:00"), [original])]
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    pending=[original],
+                    next_id=2,
+                ),
+            )
+            with store._worker_locked():
+                store._write_worker_locked(
+                    status="running",
+                    pid=os.getpid(),
+                    batch_id="update-batch-test",
+                    session_ids=["agent-1"],
+                    error=None,
+                )
+
+            with patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T00:00:00+00:00")):
+                submitted = store.submit("agent-1", "new while selected")
+            started = store._start_cross_session_batch(selected)
+            accepted = store._finish_cross_session_batch(started, "ok")
+            final = store.read("agent-1")
+
+        self.assertEqual([job.id for job in submitted.pending], [1, 2])
+        self.assertEqual(accepted, 1)
+        self.assertEqual([job.message for job in final.pending], ["new while selected"])
+        self.assertEqual(final.next_flush_at, "2026-05-15T01:00:00+00:00")
+
+    def test_waiting_state_without_worker_record_is_not_failed_during_startup_window(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    pending=[_job(1, "queued")],
+                    next_flush_at="2026-05-15T00:00:00+00:00",
+                    next_id=2,
+                ),
+            )
+
+            state = store.read("agent-1")
+
+        self.assertEqual(state.status, "running")
+        self.assertEqual(state.phase, "waiting")
+        self.assertIsNone(state.error)
+        self.assertEqual([job.message for job in state.pending], ["queued"])
+
+    def test_stale_running_batch_is_recovered_when_another_worker_is_active(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="running",
+                    pid=999999,
+                    current_batch=[_job(1, "interrupted")],
+                    pending=[_job(2, "already pending")],
+                    next_id=3,
+                ),
+            )
+            with store._worker_locked():
+                store._write_worker_locked(
+                    status="running",
+                    pid=os.getpid(),
+                    batch_id="update-batch-other",
+                    session_ids=["agent-2"],
+                    error=None,
+                )
+
+            recovered = store.read("agent-1")
+
+        self.assertEqual(recovered.status, "failed")
+        self.assertEqual(recovered.current_batch, [])
+        self.assertEqual([job.id for job in recovered.pending], [1, 2])
+        self.assertIn("worker process exited before writing result", recovered.error or "")
 
     def test_cancel_pending_removes_matching_candidate(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -380,9 +516,32 @@ class AsyncUpdateStateTests(unittest.TestCase):
                 )
 
         self.assertEqual(len(slept), 1)
-        self.assertEqual(slept[0], _dt("2026-05-16T00:00:00+00:00"))
+        self.assertEqual(slept[0], _dt("2026-05-15T00:10:30+00:00"))
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(len(calls), 1)
+
+    def test_global_worker_rechecks_no_work_exit_when_submit_wakes_it(self):
+        calls = 0
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+
+            def fake_next_batch(target_batch_candidates, max_wait_seconds):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    with store._worker_locked():
+                        store._increment_wake_counter_locked()
+                return None, None
+
+            with patch.object(store, "_next_batch", side_effect=fake_next_batch):
+                result = store.run_pending_batches(
+                    Mock(side_effect=AssertionError("no batch should run")),
+                    target_batch_candidates=15,
+                    max_wait_seconds=86400,
+                )
+
+        self.assertEqual(result.status, "idle")
+        self.assertEqual(calls, 2)
 
     def test_global_worker_failure_returns_all_current_batches_to_pending(self):
         with tempfile.TemporaryDirectory() as tempdir:

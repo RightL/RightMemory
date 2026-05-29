@@ -16,6 +16,7 @@ from pathlib import Path
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
 
 UPDATE_DEBOUNCE_SECONDS = 60 * 60
+WORKER_IDLE_POLL_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,14 @@ class AsyncUpdateWorkerResult:
     status: str
     processed: int = 0
     failed: bool = False
+
+
+@dataclass(frozen=True)
+class _WorkerSnapshot:
+    pid: int | None = None
+    batch_id: str | None = None
+    session_ids: frozenset[str] = frozenset()
+    dead_pid: int | None = None
 
 
 class AsyncUpdateStore:
@@ -111,17 +120,42 @@ class AsyncUpdateStore:
             )
 
         processed = 0
+        worker_state_cleared = False
         try:
             while True:
+                wake_counter = self._read_wake_counter()
                 batch, deadline = self._next_batch(target_batch_candidates, max_wait_seconds)
                 if batch is None:
                     if deadline is None:
+                        with self._worker_locked():
+                            if self._read_wake_counter_locked() != wake_counter:
+                                continue
+                            self._clear_current_worker_locked()
+                            worker_state_cleared = True
                         return AsyncUpdateWorkerResult(status="succeeded" if processed else "idle", processed=processed)
-                    sleep_until(deadline)
+                    sleep_until(min(deadline, _now_dt() + timedelta(seconds=WORKER_IDLE_POLL_SECONDS)))
                     continue
 
+                batch_id = _batch_session_id(batch)
+                session_ids = [item.session_id for item in batch]
+                with self._worker_locked():
+                    self._write_worker_locked(
+                        status="running",
+                        pid=os.getpid(),
+                        batch_id=batch_id,
+                        session_ids=session_ids,
+                        error=None,
+                    )
                 started = self._start_cross_session_batch(batch)
                 if not started:
+                    with self._worker_locked():
+                        self._write_worker_locked(
+                            status="running",
+                            pid=os.getpid(),
+                            batch_id=None,
+                            session_ids=[],
+                            error=None,
+                        )
                     continue
                 batch = started
 
@@ -148,8 +182,9 @@ class AsyncUpdateStore:
                     if on_batch_success is not None:
                         on_batch_success(accepted_count)
         finally:
-            with self._worker_locked():
-                self._clear_worker_locked()
+            if not worker_state_cleared:
+                with self._worker_locked():
+                    self._clear_current_worker_locked()
 
     def _next_batch(
         self,
@@ -163,7 +198,7 @@ class AsyncUpdateStore:
         for path in self._session_state_paths():
             session_id = path.stem
             with self._locked(session_id):
-                state = self._read_raw(session_id)
+                state = self._read_checked_locked(session_id)
                 if state.role != self.role:
                     continue
                 if state.status != "running" or state.phase != "waiting":
@@ -212,7 +247,7 @@ class AsyncUpdateStore:
                     finished_at=None,
                     current_batch=current_batch,
                     pending=pending,
-                    next_flush_at=None,
+                    next_flush_at=state.next_flush_at if pending else None,
                     result=None,
                     error=None,
                     pid=os.getpid(),
@@ -285,6 +320,9 @@ class AsyncUpdateStore:
     def _worker_lock_path(self) -> Path:
         return self.worker_root / "state.lock"
 
+    def _worker_wake_path(self) -> Path:
+        return self.worker_root / "wake.json"
+
     @contextmanager
     def _worker_locked(self):
         _ensure_runtime_gitignore(self.memory_root / ".runtime")
@@ -305,6 +343,35 @@ class AsyncUpdateStore:
         if not isinstance(data, dict):
             raise ValueError("async update worker state must be a JSON object")
         return data
+
+    def _read_wake_counter(self) -> int:
+        with self._worker_locked():
+            return self._read_wake_counter_locked()
+
+    def _read_wake_counter_locked(self) -> int:
+        path = self._worker_wake_path()
+        if not path.exists():
+            return 0
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("async update worker wake state must be a JSON object")
+        counter = data.get("counter")
+        if not isinstance(counter, int):
+            raise ValueError("async update worker wake state must contain integer field: counter")
+        return counter
+
+    def _increment_wake_counter_locked(self) -> int:
+        counter = self._read_wake_counter_locked() + 1
+        path = self._worker_wake_path()
+        tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        content = json.dumps({"counter": counter}, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        _fsync_directory(path.parent)
+        return counter
 
     def _write_worker_locked(
         self,
@@ -342,23 +409,47 @@ class AsyncUpdateStore:
     def _clear_worker_locked(self) -> None:
         self._write_worker_locked(status="idle", pid=None, batch_id=None, session_ids=[], error=None)
 
-    def _active_worker_pid(self) -> int | None:
-        with self._worker_locked():
-            state = self._read_worker_locked()
-            pid = state.get("pid")
-            if not isinstance(pid, int):
-                return None
-            if _process_exists(pid):
-                return pid
+    def _clear_current_worker_locked(self) -> None:
+        state = self._read_worker_locked()
+        pid = state.get("pid")
+        if pid is None or pid == os.getpid():
             self._clear_worker_locked()
-            return None
+
+    def _active_worker_pid(self) -> int | None:
+        return self._worker_snapshot().pid
+
+    def _worker_snapshot(self) -> _WorkerSnapshot:
+        with self._worker_locked():
+            return self._worker_snapshot_locked()
+
+    def _worker_snapshot_locked(self) -> _WorkerSnapshot:
+        state = self._read_worker_locked()
+        pid = state.get("pid")
+        if not isinstance(pid, int):
+            return _WorkerSnapshot()
+        if not _process_exists(pid):
+            self._clear_worker_locked()
+            return _WorkerSnapshot(dead_pid=pid)
+        batch_id = state.get("batch_id")
+        raw_session_ids = state.get("session_ids")
+        session_ids: frozenset[str] = frozenset()
+        if isinstance(raw_session_ids, list):
+            session_ids = frozenset(item for item in raw_session_ids if isinstance(item, str))
+        return _WorkerSnapshot(
+            pid=pid,
+            batch_id=batch_id if isinstance(batch_id, str) else None,
+            session_ids=session_ids,
+        )
 
     def _start_worker_if_needed(self, session_id: str) -> None:
         with self._worker_locked():
+            self._increment_wake_counter_locked()
             state = self._read_worker_locked()
             pid = state.get("pid")
             if isinstance(pid, int) and _process_exists(pid):
                 return
+            if isinstance(pid, int):
+                self._clear_worker_locked()
             try:
                 process = subprocess.Popen(
                     self._worker_command(),
@@ -387,7 +478,14 @@ class AsyncUpdateStore:
 
     def _read_checked_locked(self, session_id: str) -> AsyncUpdateState:
         state = self._read_raw(session_id)
-        if state.status == "running" and self._active_worker_pid() is None:
+        if state.status != "running":
+            return state
+        worker = self._worker_snapshot()
+        if state.phase == "running" and state.current_batch:
+            if worker.pid is not None and state.pid == worker.pid:
+                return state
+            return self._fail_locked(session_id, "worker process exited before writing result")
+        if worker.pid is None and (state.pid is not None or worker.dead_pid is not None):
             return self._fail_locked(session_id, "worker process exited before writing result")
         return state
 
@@ -399,9 +497,24 @@ class AsyncUpdateStore:
         now: datetime,
         worker_pid: int | None,
     ) -> AsyncUpdateState:
-        pending = [*state.current_batch, *state.pending, job]
         next_id = max(state.next_id, job.id + 1)
         next_flush_at = _format_time(now + timedelta(seconds=UPDATE_DEBOUNCE_SECONDS))
+        if (
+            state.status == "running"
+            and state.phase == "running"
+            and state.current_batch
+            and worker_pid is not None
+            and state.pid == worker_pid
+        ):
+            return replace(
+                state,
+                pid=worker_pid,
+                pending=[*state.pending, job],
+                next_id=next_id,
+                next_flush_at=next_flush_at,
+                error=None,
+            )
+        pending = [*state.current_batch, *state.pending, job]
         return AsyncUpdateState(
             status="running",
             session_id=state.session_id,
