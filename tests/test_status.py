@@ -81,6 +81,23 @@ class StatusDashboardTests(unittest.TestCase):
 
         self.assertEqual(preview, "rightmemory dreamer cycle failed: RuntimeError: boom")
 
+    def test_read_log_preview_ignores_old_failure_before_later_event(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            log = Path(tempdir) / "dreamer.log"
+            log.write_text(
+                "[2026-05-29T08:00:00+00:00] rightmemory dreamer cycle\n"
+                "rightmemory dreamer cycle failed: RuntimeError: old boom\n"
+                "[2026-05-29T09:00:00+00:00] rightmemory dreamer cycle\n"
+                "## Dream Cycle Complete\n"
+                "Validation: Passed\n"
+                "Commit: abc1234\n",
+                encoding="utf-8",
+            )
+
+            preview = read_log_preview(log)
+
+        self.assertEqual(preview, "## Dream Cycle Complete\nValidation: Passed\nCommit: abc1234")
+
     def test_read_log_preview_uses_bounded_tail(self):
         with tempfile.TemporaryDirectory() as tempdir:
             log = Path(tempdir) / "pruner.log"
@@ -256,6 +273,42 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(pruner.last, "rightmemory pruner check failed: RuntimeError: boom")
         self.assertIn("pruner: rightmemory pruner check failed: RuntimeError: boom", issues)
         self.assertTrue(review.log_missing)
+
+    def test_collect_managed_watches_does_not_surface_zero_failed_counter_as_issue(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            log = root / ".runtime" / "watch" / "review.log"
+            log.parent.mkdir(parents=True)
+            log.write_text(
+                "[2026-05-29T15:00:00+00:00] rightmemory review scan\n"
+                "reviewed: 0\n"
+                "retried: 0\n"
+                "failed: 0\n",
+                encoding="utf-8",
+            )
+            statuses = {}
+            for name in ("review", "dreamer", "pruner", "sync"):
+                statuses[name] = type(
+                    "WatchStatus",
+                    (),
+                    {
+                        "name": name,
+                        "state": "running" if name == "review" else "stopped",
+                        "pid": 123 if name == "review" else None,
+                        "log_path": root / ".runtime" / "watch" / f"{name}.log",
+                    },
+                )()
+            statuses["review"].log_path = log
+
+            watches, issues = collect_managed_watch_sections(
+                root,
+                watch_status_reader=lambda memory_root, name: statuses[name],
+                sync_config_loader=lambda: type("SyncConfig", (), {"enabled": False})(),
+            )
+
+        review = next(watch for watch in watches if watch.name == "review")
+        self.assertIn("failed: 0", review.last)
+        self.assertNotIn("review: failed: 0", issues)
 
     def test_collect_managed_watches_default_reader_does_not_create_lock_files(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -525,6 +578,30 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("worker: state error", section.state)
         self.assertEqual(len(issues), 1)
         self.assertIn("update worker: state error", issues[0])
+
+    def test_collect_async_update_section_reports_stale_for_non_worker_pid(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            worker_root = root / ".runtime" / "async" / "update" / "_worker"
+            worker_root.mkdir(parents=True)
+            (worker_root / "state.json").write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "pid": 4,
+                        "started_at": "2026-05-29T08:00:00+00:00",
+                        "batch_id": None,
+                        "session_ids": [],
+                        "error": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            section, issues = collect_async_update_section(root, process_exists=lambda pid: False)
+
+        self.assertEqual(section.state, "worker: stale pid 4")
+        self.assertIn("update worker: stale pid 4", issues)
 
     def test_collect_async_update_section_reports_malformed_state_locally(self):
         with tempfile.TemporaryDirectory() as tempdir:

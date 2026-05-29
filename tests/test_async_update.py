@@ -5,7 +5,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from rightmemory.async_update import AsyncUpdateJob, AsyncUpdateSessionBatch, AsyncUpdateState, AsyncUpdateStore
+from rightmemory.async_update import (
+    AsyncUpdateJob,
+    AsyncUpdateSessionBatch,
+    AsyncUpdateState,
+    AsyncUpdateStore,
+    _is_async_worker_process,
+)
 
 
 class AsyncUpdateStateTests(unittest.TestCase):
@@ -34,6 +40,38 @@ class AsyncUpdateStateTests(unittest.TestCase):
                 active = store._active_worker_pid()
 
         self.assertEqual(active, 4242)
+
+    def test_async_worker_process_check_rejects_unrelated_pid(self):
+        with (
+            patch("rightmemory.async_update._process_exists", return_value=True),
+            patch("rightmemory.async_update._read_process_cmdline", return_value=["[kworker/R-rcu_g]"]),
+        ):
+            active = _is_async_worker_process(4, "update")
+
+        self.assertFalse(active)
+
+    def test_submit_replaces_stale_worker_pid_that_belongs_to_another_process(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            with store._worker_locked():
+                store._write_worker_locked(
+                    status="running",
+                    pid=4,
+                    batch_id=None,
+                    session_ids=[],
+                    error=None,
+                )
+            process = Mock(pid=4242)
+
+            with (
+                patch("rightmemory.async_update.subprocess.Popen", return_value=process) as popen,
+                patch("rightmemory.async_update._process_exists", return_value=True),
+                patch("rightmemory.async_update._read_process_cmdline", return_value=["[kworker/R-rcu_g]"]),
+            ):
+                state = store.submit("agent-1", "first")
+
+        popen.assert_called_once()
+        self.assertEqual(state.status, "running")
 
     def test_session_state_paths_exclude_worker_state(self):
         with tempfile.TemporaryDirectory() as tempdir:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import json
 import math
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -10,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .async_update import _process_exists, _state_from_json
+from .async_update import _is_async_worker_process, _state_from_json
 from .config import load_dreamer_watch_config, load_sync_config
 from .watch import MANAGED_WATCH_TARGETS, ManagedWatchStatus, _is_managed_watch_process, watch_log_path, watch_pid_path
 
@@ -19,6 +20,8 @@ MAX_PREVIEW_CHARS = 300
 MAX_PREVIEW_LINES = 3
 MAX_LOG_TAIL_BYTES = 32 * 1024
 FAILURE_MARKERS = ("failed", "error", "stopping after")
+LOG_EVENT_PATTERN = re.compile(r"^\[\d{4}-\d{2}-\d{2}T")
+NEUTRAL_FAILURE_COUNTER_PATTERN = re.compile(r"^(failed|errors?)\s*[:=]\s*0\s*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -95,11 +98,11 @@ def read_log_preview(path: Path) -> str | None:
     meaningful = [line.strip() for line in lines if line.strip()]
     if not meaningful:
         return None
-    for line in reversed(meaningful):
-        lower = line.lower()
-        if any(marker in lower for marker in FAILURE_MARKERS):
+    recent = _latest_log_event_lines(meaningful)
+    for line in reversed(recent):
+        if _looks_like_failure(line):
             return _cap_preview(line)
-    return _cap_preview("\n".join(meaningful[-MAX_PREVIEW_LINES:]))
+    return _cap_preview("\n".join(recent[-MAX_PREVIEW_LINES:]))
 
 
 def collect_managed_watch_sections(
@@ -206,8 +209,10 @@ def collect_dreamer_section(
 def collect_async_update_section(
     memory_root: Path,
     *,
-    process_exists: Callable[[int], bool] = _process_exists,
+    process_exists: Callable[[int], bool] | None = None,
 ) -> tuple[SectionStatus, list[str]]:
+    if process_exists is None:
+        process_exists = _update_worker_process_exists
     async_root = Path(memory_root) / ".runtime" / "async" / "update"
     worker_state, worker_issue = _read_worker_state(async_root, process_exists)
     try:
@@ -389,8 +394,23 @@ def _read_text_tail(path: Path, max_bytes: int) -> str:
 
 
 def _looks_like_failure(text: str) -> bool:
-    lower = text.lower()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines = [line for line in lines if not NEUTRAL_FAILURE_COUNTER_PATTERN.match(line)]
+    if not lines:
+        return False
+    lower = "\n".join(lines).lower()
     return any(marker in lower for marker in FAILURE_MARKERS)
+
+
+def _latest_log_event_lines(lines: list[str]) -> list[str]:
+    for index in range(len(lines) - 1, -1, -1):
+        if LOG_EVENT_PATTERN.match(lines[index]):
+            return lines[index:]
+    return lines
+
+
+def _update_worker_process_exists(pid: int) -> bool:
+    return _is_async_worker_process(pid, "update")
 
 
 def _display_path(memory_root: Path, path: Path) -> str:

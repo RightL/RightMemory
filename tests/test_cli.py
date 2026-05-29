@@ -10,7 +10,7 @@ from rightmemory.cli import _daemon_stdio_json, _dreamer_watch_once, _handle_jso
 from rightmemory.config import DreamerWatchConfig
 from rightmemory.dreamer_trigger import DreamerTriggerStore
 from rightmemory.doctor import DoctorCheck
-from rightmemory.watch import MANAGED_WATCH_TARGETS, WATCH_COMMANDS
+from rightmemory.watch import MANAGED_WATCH_TARGETS, WATCH_COMMANDS, _process_command
 
 
 class FakeRuntime:
@@ -784,6 +784,12 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("dreamer: stopped", stdout.getvalue())
         self.assertIn("pruner: stopped", stdout.getvalue())
         self.assertIn("sync: stopped", stdout.getvalue())
+
+    def test_watch_process_command_prefers_proc_cmdline(self):
+        with patch("rightmemory.watch.Path.read_bytes", return_value=b"python\0-m\0rightmemory.cli\0review\0watch\0"):
+            command = _process_command(123)
+
+        self.assertEqual(command, "python -m rightmemory.cli review watch")
 
     def test_main_status_prints_operational_dashboard(self):
         stdout = io.StringIO()

@@ -249,6 +249,16 @@ def _process_exists(pid: int) -> bool:
 
 def _process_command(pid: int) -> str | None:
     try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raw = b""
+    if raw:
+        parts = [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
+        if parts:
+            return " ".join(parts)
+    try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "command="],
             text=True,

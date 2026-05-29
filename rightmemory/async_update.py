@@ -427,7 +427,7 @@ class AsyncUpdateStore:
         pid = state.get("pid")
         if not isinstance(pid, int):
             return _WorkerSnapshot()
-        if not _process_exists(pid):
+        if not _is_async_worker_process(pid, self.role):
             self._clear_worker_locked()
             return _WorkerSnapshot(dead_pid=pid)
         batch_id = state.get("batch_id")
@@ -446,7 +446,7 @@ class AsyncUpdateStore:
             self._increment_wake_counter_locked()
             state = self._read_worker_locked()
             pid = state.get("pid")
-            if isinstance(pid, int) and _process_exists(pid):
+            if isinstance(pid, int) and _is_async_worker_process(pid, self.role):
                 return
             if isinstance(pid, int):
                 self._clear_worker_locked()
@@ -737,3 +737,28 @@ def _process_exists(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _is_async_worker_process(pid: int, role: str | None = None) -> bool:
+    if not _process_exists(pid):
+        return False
+    if pid == os.getpid():
+        return True
+    cmdline = _read_process_cmdline(pid)
+    if cmdline is None:
+        return True
+    if "_async-worker" not in cmdline:
+        return False
+    if "rightmemory.cli" not in cmdline:
+        return False
+    return role is None or role in cmdline
+
+
+def _read_process_cmdline(pid: int) -> list[str] | None:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    return [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
