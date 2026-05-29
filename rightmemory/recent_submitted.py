@@ -112,7 +112,7 @@ def collect_recent_submitted_memory(memory_root: Path) -> list[RecentSubmittedMe
         return []
 
     entries: list[RecentSubmittedMemoryEntry] = []
-    for state_path in sorted(store.root.glob("*.json")):
+    for state_path in store._session_state_paths():
         session_hint = state_path.stem
         with store._locked(session_hint):
             state = store._read_checked_locked(session_hint)

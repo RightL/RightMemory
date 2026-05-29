@@ -60,6 +60,43 @@ class RecentSubmittedMemoryCollectionTests(unittest.TestCase):
         self.assertEqual(entries[0].candidate_id, 3)
         self.assertEqual(entries[0].message, "remember active batch item")
 
+    def test_collect_ignores_async_worker_state_files(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store_root = root / ".runtime" / "async" / "update"
+            worker_root = store_root / "_worker"
+            worker_root.mkdir(parents=True)
+            (worker_root / "state.json").write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "pid": 123,
+                        "started_at": "2026-05-29T00:00:00+00:00",
+                        "batch_id": "update-batch-test",
+                        "session_ids": ["agent-1"],
+                        "error": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self._write_state(
+                root,
+                "agent-1",
+                pending=[
+                    {
+                        "id": 1,
+                        "message": "remember real pending item",
+                        "submitted_at": "2026-05-19T00:00:00+00:00",
+                    }
+                ],
+            )
+
+            entries = collect_recent_submitted_memory(root)
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].update_session_id, "agent-1")
+        self.assertEqual(entries[0].message, "remember real pending item")
+
     def test_formats_recent_submitted_block_for_retriever(self):
         entries = [
             RecentSubmittedMemoryEntry(
