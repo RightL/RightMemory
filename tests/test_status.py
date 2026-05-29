@@ -59,6 +59,13 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("unavailable", status.summary)
         self.assertIsNotNone(status.issue)
 
+    def test_collect_git_status_reports_missing_root_without_crashing(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            status = collect_git_status(Path(tempdir) / "missing")
+
+        self.assertIn("unavailable", status.summary)
+        self.assertIn("git unavailable", status.issue)
+
     def test_read_log_preview_prefers_recent_failure_line(self):
         with tempfile.TemporaryDirectory() as tempdir:
             log = Path(tempdir) / "dreamer.log"
@@ -73,6 +80,21 @@ class StatusDashboardTests(unittest.TestCase):
             preview = read_log_preview(log)
 
         self.assertEqual(preview, "rightmemory dreamer cycle failed: RuntimeError: boom")
+
+    def test_read_log_preview_uses_bounded_tail(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            log = Path(tempdir) / "pruner.log"
+            log.write_text(
+                "rightmemory pruner check failed: ancient\n"
+                + ("ordinary success message\n" * 4000)
+                + "latest success\n",
+                encoding="utf-8",
+            )
+
+            preview = read_log_preview(log)
+
+        self.assertIn("latest success", preview)
+        self.assertNotIn("ancient", preview)
 
     def test_read_log_preview_caps_long_preview(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -111,8 +133,7 @@ class StatusDashboardTests(unittest.TestCase):
             update=SectionStatus(
                 name="update",
                 state="worker: idle",
-                log_path=".runtime/async/update/",
-                detail="pending: 0 candidates across 0 sessions",
+                detail="pending: 0 candidates across 0 sessions\nstate: .runtime/async/update",
             ),
             issues=["pruner failed"],
         )
@@ -123,7 +144,27 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("Managed Watches", output)
         self.assertIn("review: running pid 123", output)
         self.assertIn("Async Update", output)
+        self.assertIn("state: .runtime/async/update", output)
+        self.assertNotIn("log: .runtime/async/update", output)
         self.assertIn("Recent Issues\n  pruner failed", output)
+
+    def test_format_status_dashboard_marks_missing_logs(self):
+        dashboard = DashboardStatus(
+            root=Path("/memory/root"),
+            git=GitStatus(summary="clean on main @ abc1234"),
+            watches=[
+                SectionStatus(
+                    name="review",
+                    state="stopped",
+                    log_path=".runtime/watch/review.log",
+                    log_missing=True,
+                ),
+            ],
+        )
+
+        output = format_status_dashboard(dashboard)
+
+        self.assertIn("log: .runtime/watch/review.log (missing)", output)
 
     def test_collect_managed_watches_includes_sync_disabled_and_log_preview(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -182,6 +223,39 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(watches[2].state, "stale pid 456")
         self.assertEqual(watches[3].state, "disabled")
         self.assertIn("pruner: stale pid 456", issues)
+
+    def test_collect_managed_watches_surfaces_failure_preview_as_issue(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            log = root / ".runtime" / "watch" / "pruner.log"
+            log.parent.mkdir(parents=True)
+            log.write_text("rightmemory pruner check failed: RuntimeError: boom\n", encoding="utf-8")
+
+            statuses = {}
+            for name in ("review", "dreamer", "pruner", "sync"):
+                statuses[name] = type(
+                    "WatchStatus",
+                    (),
+                    {
+                        "name": name,
+                        "state": "stopped",
+                        "pid": None,
+                        "log_path": root / ".runtime" / "watch" / f"{name}.log",
+                    },
+                )()
+            statuses["pruner"].log_path = log
+
+            watches, issues = collect_managed_watch_sections(
+                root,
+                watch_status_reader=lambda memory_root, name: statuses[name],
+                sync_config_loader=lambda: type("SyncConfig", (), {"enabled": True})(),
+            )
+
+        pruner = next(watch for watch in watches if watch.name == "pruner")
+        review = next(watch for watch in watches if watch.name == "review")
+        self.assertEqual(pruner.last, "rightmemory pruner check failed: RuntimeError: boom")
+        self.assertIn("pruner: rightmemory pruner check failed: RuntimeError: boom", issues)
+        self.assertTrue(review.log_missing)
 
     def test_collect_managed_watches_default_reader_does_not_create_lock_files(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -245,6 +319,8 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(section.name, "update")
         self.assertEqual(section.state, "worker: idle")
         self.assertIn("pending: 0 candidates across 0 sessions", section.detail)
+        self.assertIn("state: .runtime/async/update", section.detail)
+        self.assertIsNone(section.log_path)
         self.assertEqual(issues, [])
 
     def test_collect_async_update_section_counts_pending_and_current_batches(self):
@@ -356,6 +432,21 @@ class StatusDashboardTests(unittest.TestCase):
 
         self.assertEqual(section.name, "update")
         self.assertIn("state error", section.state)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("update: state error", issues[0])
+
+    def test_collect_async_update_section_reports_invalid_state_shape_locally(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            async_root = root / ".runtime" / "async" / "update"
+            async_root.mkdir(parents=True)
+            (async_root / "agent-1.json").write_text("{}", encoding="utf-8")
+
+            section, issues = collect_async_update_section(root)
+
+        self.assertEqual(section.name, "update")
+        self.assertIn("state error", section.state)
+        self.assertIn("state: .runtime/async/update", section.detail)
         self.assertEqual(len(issues), 1)
         self.assertIn("update: state error", issues[0])
 

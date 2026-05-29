@@ -1,21 +1,22 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import subprocess
-import fcntl
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .async_update import _process_exists
+from .async_update import _process_exists, _state_from_json
 from .config import load_dreamer_watch_config, load_sync_config
 from .watch import MANAGED_WATCH_TARGETS, ManagedWatchStatus, _is_managed_watch_process, watch_log_path, watch_pid_path
 
 
 MAX_PREVIEW_CHARS = 300
 MAX_PREVIEW_LINES = 3
+MAX_LOG_TAIL_BYTES = 32 * 1024
 FAILURE_MARKERS = ("failed", "error", "stopping after")
 
 
@@ -30,6 +31,7 @@ class SectionStatus:
     name: str
     state: str
     log_path: str | None = None
+    log_missing: bool = False
     detail: str | None = None
     last: str | None = None
     issue: str | None = None
@@ -83,7 +85,7 @@ def collect_git_status(memory_root: Path) -> GitStatus:
 
 def read_log_preview(path: Path) -> str | None:
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = _read_text_tail(path, MAX_LOG_TAIL_BYTES).splitlines()
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -122,28 +124,34 @@ def collect_managed_watch_sections(
         try:
             status = watch_status_reader(memory_root, name)
             log_path = Path(getattr(status, "log_path"))
+            log_missing = not log_path.exists()
             state = str(getattr(status, "state"))
             pid = getattr(status, "pid", None)
+            section_issues: list[str] = []
             if name == "sync" and sync_disabled:
                 section_state = "disabled"
             elif state == "running" and pid is not None:
                 section_state = f"running pid {pid}"
             elif state == "stale" and pid is not None:
                 section_state = f"stale pid {pid}"
-                issues.append(f"{name}: stale pid {pid}")
+                section_issues.append(f"{name}: stale pid {pid}")
             elif state == "external":
                 section_state = "running outside manager"
-                issues.append(f"{name}: running outside manager")
+                section_issues.append(f"{name}: running outside manager")
             else:
                 section_state = state
             last = None if name == "sync" and sync_disabled else read_log_preview(log_path)
+            if last and _looks_like_failure(last):
+                section_issues.append(f"{name}: {last.splitlines()[0]}")
+            issues.extend(section_issues)
             sections.append(
                 SectionStatus(
                     name=name,
                     state=section_state,
                     log_path=_display_path(memory_root, log_path),
+                    log_missing=log_missing,
                     last=last,
-                    issue=issues[-1] if issues and issues[-1].startswith(f"{name}:") else None,
+                    issue=section_issues[0] if section_issues else None,
                 )
             )
         except Exception as exc:
@@ -202,14 +210,14 @@ def collect_async_update_section(
     async_root = Path(memory_root) / ".runtime" / "async" / "update"
     worker_state, worker_issue = _read_worker_state(async_root, process_exists)
     try:
-        session_states = [_read_json(path) for path in sorted(async_root.glob("*.json")) if path.is_file()]
+        session_states = [_state_from_json(_read_json(path)) for path in sorted(async_root.glob("*.json")) if path.is_file()]
     except Exception as exc:
         issue = f"update: state error: {type(exc).__name__}: {exc}"
         return (
             SectionStatus(
                 name="update",
                 state=f"state error: {type(exc).__name__}: {exc}",
-                log_path=_display_path(Path(memory_root), async_root),
+                detail=f"state: {_display_path(Path(memory_root), async_root)}",
                 issue=issue,
             ),
             [issue],
@@ -223,23 +231,21 @@ def collect_async_update_section(
     last_values: list[str] = []
 
     for state in session_states:
-        pending = _list_field(state, "pending")
-        current = _list_field(state, "current_batch")
+        pending = state.pending
+        current = state.current_batch
         if pending:
             pending_candidates += len(pending)
             pending_sessions += 1
         if current:
             current_candidates += len(current)
             current_sessions += 1
-        next_flush_at = state.get("next_flush_at")
-        if isinstance(next_flush_at, str) and next_flush_at:
+        next_flush_at = state.next_flush_at
+        if next_flush_at:
             flush_times.append(next_flush_at)
-        result = state.get("result")
-        error = state.get("error")
-        if isinstance(error, str) and error:
-            last_values.append(f"error: {error}")
-        elif isinstance(result, str) and result:
-            last_values.append(result)
+        if state.error:
+            last_values.append(f"error: {state.error}")
+        elif state.result:
+            last_values.append(state.result)
 
     detail_lines = [
         (
@@ -261,7 +267,6 @@ def collect_async_update_section(
         SectionStatus(
             name="update",
             state=worker_state.state,
-            log_path=_display_path(Path(memory_root), async_root),
             detail="\n".join(detail_lines),
             last=_cap_preview(last_values[-1]) if last_values else None,
             issue=worker_issue,
@@ -348,7 +353,8 @@ def format_status_dashboard(status: DashboardStatus) -> str:
 def _format_section(section: SectionStatus) -> list[str]:
     lines = [f"  {section.name}: {section.state}"]
     if section.log_path:
-        lines.append(f"    log: {section.log_path}")
+        suffix = " (missing)" if section.log_missing else ""
+        lines.append(f"    log: {section.log_path}{suffix}")
     if section.detail:
         lines.extend(f"    {line}" for line in section.detail.splitlines())
     if section.last:
@@ -364,6 +370,19 @@ def _cap_preview(text: str) -> str:
     if len(preview) > MAX_PREVIEW_CHARS:
         return preview[:MAX_PREVIEW_CHARS]
     return preview
+
+
+def _read_text_tail(path: Path, max_bytes: int) -> str:
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        handle.seek(max(0, size - max_bytes))
+        return handle.read(max_bytes).decode("utf-8", errors="replace")
+
+
+def _looks_like_failure(text: str) -> bool:
+    lower = text.lower()
+    return any(marker in lower for marker in FAILURE_MARKERS)
 
 
 def _display_path(memory_root: Path, path: Path) -> str:
@@ -467,25 +486,29 @@ def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _list_field(data: dict[str, Any], key: str) -> list[Any]:
-    value = data.get(key)
-    return value if isinstance(value, list) else []
-
-
 def _plural(word: str, count: int) -> str:
     return word if count == 1 else f"{word}s"
 
 
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=root,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    command = ["git", *args]
+    try:
+        return subprocess.run(
+            command,
+            cwd=root,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        return subprocess.CompletedProcess(
+            command,
+            returncode=1,
+            stdout="",
+            stderr=f"{type(exc).__name__}: {exc}",
+        )
 
 
 def _command_detail(result: subprocess.CompletedProcess[str]) -> str:
