@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
+import fcntl
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,8 +11,7 @@ from typing import Any
 
 from .async_update import _process_exists
 from .config import load_dreamer_watch_config, load_sync_config
-from .dreamer_trigger import DreamerTriggerStore
-from .watch import MANAGED_WATCH_TARGETS, managed_watch_status
+from .watch import MANAGED_WATCH_TARGETS, ManagedWatchStatus, _is_managed_watch_process, watch_log_path, watch_pid_path
 
 
 MAX_PREVIEW_CHARS = 300
@@ -42,6 +43,14 @@ class DashboardStatus:
     dreamer: SectionStatus | None = None
     update: SectionStatus | None = None
     issues: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _DreamerTriggerSnapshot:
+    points: float = 0.0
+    updated_at: str | None = None
+    last_successful_dream_at: str | None = None
+    last_recovery_at: str | None = None
 
 
 def collect_git_status(memory_root: Path) -> GitStatus:
@@ -93,11 +102,13 @@ def read_log_preview(path: Path) -> str | None:
 def collect_managed_watch_sections(
     memory_root: Path,
     *,
-    watch_status_reader: Callable[[Path, str], object] = managed_watch_status,
+    watch_status_reader: Callable[[Path, str], object] | None = None,
     sync_config_loader: Callable[[], object] = load_sync_config,
 ) -> tuple[list[SectionStatus], list[str]]:
     sections: list[SectionStatus] = []
     issues: list[str] = []
+    if watch_status_reader is None:
+        watch_status_reader = read_only_managed_watch_status
     sync_disabled = False
     try:
         sync_config = sync_config_loader()
@@ -142,6 +153,20 @@ def collect_managed_watch_sections(
     return sections, issues
 
 
+def read_only_managed_watch_status(memory_root: Path, name: str) -> ManagedWatchStatus:
+    log_path = watch_log_path(memory_root, name)
+    pid = _read_watch_pid(watch_pid_path(memory_root, name))
+    if pid is not None:
+        if _is_managed_watch_process(pid, name):
+            return ManagedWatchStatus(name=name, state="running", pid=pid, log_path=log_path)
+        if _watch_lock_held_read_only(memory_root, name):
+            return ManagedWatchStatus(name=name, state="external", pid=None, log_path=log_path)
+        return ManagedWatchStatus(name=name, state="stale", pid=pid, log_path=log_path)
+    if _watch_lock_held_read_only(memory_root, name):
+        return ManagedWatchStatus(name=name, state="external", pid=None, log_path=log_path)
+    return ManagedWatchStatus(name=name, state="stopped", pid=None, log_path=log_path)
+
+
 def collect_dreamer_section(
     memory_root: Path,
     *,
@@ -149,7 +174,7 @@ def collect_dreamer_section(
     config_loader: Callable[[], object] = load_dreamer_watch_config,
 ) -> SectionStatus:
     if trigger_reader is None:
-        trigger_reader = lambda root: DreamerTriggerStore(root).read()
+        trigger_reader = _read_dreamer_trigger_snapshot
     try:
         state = trigger_reader(memory_root)
         config = config_loader()
@@ -348,6 +373,35 @@ def _display_path(memory_root: Path, path: Path) -> str:
         return str(path)
 
 
+def _read_watch_pid(path: Path) -> int | None:
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        pid = int(raw)
+    except (OSError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _watch_lock_held_read_only(memory_root: Path, name: str) -> bool:
+    path = memory_root / ".runtime" / "watch" / f"{name}.lock"
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            finally:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+    except OSError:
+        return False
+    return False
+
+
 @dataclass(frozen=True)
 class _WorkerSummary:
     state: str
@@ -388,6 +442,29 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"JSON object expected in {path}")
     return data
+
+
+def _read_dreamer_trigger_snapshot(memory_root: Path) -> _DreamerTriggerSnapshot:
+    path = Path(memory_root) / ".runtime" / "dreamer" / "trigger-state.json"
+    if not path.exists():
+        return _DreamerTriggerSnapshot()
+    data = _read_json(path)
+    points = data.get("points", 0.0)
+    if isinstance(points, bool) or not isinstance(points, (int, float)):
+        raise ValueError("dreamer trigger points must be a number")
+    points = float(points)
+    if not math.isfinite(points) or points < 0:
+        raise ValueError("dreamer trigger points must be a nonnegative finite number")
+    return _DreamerTriggerSnapshot(
+        points=points,
+        updated_at=_optional_str(data.get("updated_at")),
+        last_successful_dream_at=_optional_str(data.get("last_successful_dream_at")),
+        last_recovery_at=_optional_str(data.get("last_recovery_at")),
+    )
+
+
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _list_field(data: dict[str, Any], key: str) -> list[Any]:

@@ -183,6 +183,23 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(watches[3].state, "disabled")
         self.assertIn("pruner: stale pid 456", issues)
 
+    def test_collect_managed_watches_default_reader_does_not_create_lock_files(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            watch_dir = root / ".runtime" / "watch"
+            watch_dir.mkdir(parents=True)
+
+            watches, issues = collect_managed_watch_sections(
+                root,
+                sync_config_loader=lambda: type("SyncConfig", (), {"enabled": False})(),
+            )
+
+            self.assertEqual([watch.name for watch in watches], ["review", "dreamer", "pruner", "sync"])
+            self.assertEqual(issues, [])
+            self.assertFalse((watch_dir / "review.lock").exists())
+            self.assertFalse((watch_dir / "dreamer.lock").exists())
+            self.assertFalse((watch_dir / "pruner.lock").exists())
+
     def test_collect_dreamer_section_reports_trigger_progress(self):
         state = type(
             "DreamerState",
@@ -206,6 +223,20 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(section.state, "trigger progress")
         self.assertIn("trigger: 37.5/50.0 points", section.detail)
         self.assertIn("check interval: 3000 seconds", section.detail)
+
+    def test_collect_dreamer_section_reports_malformed_trigger_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            trigger_path = root / ".runtime" / "dreamer" / "trigger-state.json"
+            trigger_path.parent.mkdir(parents=True)
+            trigger_path.write_text("{not json", encoding="utf-8")
+            config = type("DreamerConfig", (), {"trigger_points": 50.0, "check_interval_seconds": 3000})()
+
+            section = collect_dreamer_section(root, config_loader=lambda: config)
+
+            self.assertIn("error", section.state)
+            self.assertEqual(trigger_path.read_text(encoding="utf-8"), "{not json")
+            self.assertEqual(list(trigger_path.parent.glob("trigger-state.corrupt-*.json")), [])
 
     def test_collect_async_update_section_reports_idle_when_state_missing(self):
         with tempfile.TemporaryDirectory() as tempdir:
