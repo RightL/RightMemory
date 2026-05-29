@@ -90,7 +90,7 @@ One-shot standalone calls use an explicit `--session` id and persist native Pyda
 
 ### Batched command updates
 
-Update submissions accumulate as candidate briefs for one hour from the latest submit before the update role is invoked, because memory quality is better when small corrections and follow-up clarifications are reconciled together instead of written as separate turn-by-turn facts. The worker remains automatic so callers do not need an explicit flush step, but update state distinguishes pending candidates from the current batch so status output can explain whether the worker is waiting or actively editing. Async state files keep their own `session_id` and `role` fields instead of inferring them from the read path because submitted candidates are operational state and malformed state should fail visibly.
+Update submissions accumulate as candidate briefs under their original session id. Each session keeps a one-hour quiet period from its latest submit, but execution is owned by one global async update worker per memory root. The worker batches eligible session queues by candidate count, keeps each included session queue whole, and runs the update role once for the cross-session batch; per-session state still powers `pull`, `undo`, retry, and recent-submitted retrieval. Async state files keep their own `session_id` and `role` fields instead of inferring them from the read path because submitted candidates are operational state and malformed state should fail visibly.
 
 ### Command role prompts
 

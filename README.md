@@ -320,10 +320,26 @@ The runtime is intentionally small:
 - Standalone one-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`; CLI-agent calls persist provider session mappings under `<memory-root>/.runtime/agent_cli_sessions/<role>/`.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - The installer creates a root `.gitignore` allowlist so git status only surfaces `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; existing user `.gitignore` files are preserved.
-- Async `update submit` calls for the same `--session` accumulate as pending candidates. The worker waits one hour from the latest submit, then sends the pending candidates to the update role as one batch; `pull` reports phase, pending candidates, current batch, and timing. Use `rightmemory update undo --session <id> <pending-candidate-id>` to cancel a candidate that is still pending. While submissions are waiting or being processed, retrieve can see newly submitted unconsolidated memory as `Recent submitted memory` so fresh context is available before the updater writes it.
+- Async `update submit` calls for the same `--session` still accumulate as pending candidates and reset that session's one-hour quiet period. A single global async update worker scans all eligible session queues, batches whole session queues until it reaches `[update.async].target_batch_candidates` candidates by default, and falls back after `[update.async].max_wait_seconds`. `pull` and `undo` remain per-session. While submissions are waiting or being processed, retrieve can see newly submitted unconsolidated memory as `Recent submitted memory` so fresh context is available before the updater writes it.
 - Automatic `update`, `reviewer`, `dreamer`, and `pruner` turns run in isolated Git worktrees when they operate on the main state root. The role still commits normally; runtime validates and lands successful memory commits back into the main memory repo.
 - Standalone daemon context is preserved with Pydantic AI message history.
 - MCP support can be added later as an adapter over the same daemon.
+
+### Async Update Config
+
+Submitted updates keep a per-session one-hour quiet period, then the global
+async update worker groups eligible session queues by candidate count:
+
+```toml
+[update.async]
+target_batch_candidates = 15
+max_wait_seconds = 86400
+```
+
+`target_batch_candidates` is a fill threshold, not a hard cap. The worker keeps
+eligible session queues whole, so a batch may overshoot the target.
+`max_wait_seconds` is measured from the oldest eligible queue's quiet-period
+deadline.
 
 ### CLI-Agent Config
 
