@@ -59,6 +59,18 @@ def _dreamer_watch_config(
     )
 
 
+def _async_update_config(memory_root: Path, *, target: int = 15, max_wait: int = 86400):
+    return type(
+        "AsyncUpdateConfig",
+        (),
+        {
+            "memory_root": memory_root,
+            "target_batch_candidates": target,
+            "max_wait_seconds": max_wait,
+        },
+    )()
+
+
 class JsonRequestTests(unittest.TestCase):
     def test_handle_json_request(self):
         response = _handle_json_request(FakeRuntime(), {"message": "hello"})
@@ -1567,7 +1579,7 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("status: idle", stdout.getvalue())
 
-    def test_submitted_worker_processes_pending_updates_as_one_batch(self):
+    def test_async_worker_processes_multiple_sessions_as_one_batch(self):
         calls = []
 
         class RecordingRuntime(FakeRuntime):
@@ -1583,6 +1595,7 @@ class JsonRequestTests(unittest.TestCase):
 
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_async_update_config", return_value=_async_update_config(memory_root, target=2)),
                 patch("rightmemory.async_update.subprocess.Popen") as popen,
                 patch("rightmemory.async_update.UPDATE_DEBOUNCE_SECONDS", 0),
                 patch("rightmemory.async_update._process_exists", return_value=True),
@@ -1591,14 +1604,15 @@ class JsonRequestTests(unittest.TestCase):
             ):
                 popen.return_value.pid = 123
                 self.assertEqual(main(["update", "submit", "--session", "agent-1", "first"]), 0)
-                self.assertEqual(main(["update", "submit", "--session", "agent-1", "second"]), 0)
+                self.assertEqual(main(["update", "submit", "--session", "agent-2", "second"]), 0)
 
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_async_update_config", return_value=_async_update_config(memory_root, target=2)),
                 patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
                 patch("rightmemory.cli.load_dreamer_watch_config", return_value=_dreamer_watch_config()),
             ):
-                result = main(["update", "_submitted-worker", "--session", "agent-1"])
+                result = main(["update", "_async-worker"])
 
             stdout = io.StringIO()
             with patch("rightmemory.cli.load_config", fake_load_config), patch("sys.stdout", stdout):
@@ -1607,15 +1621,15 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(pull_result, 0)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0], "agent-1")
+        self.assertTrue(calls[0][0].startswith("update-batch-"))
         self.assertIn("Process the following submitted memory update candidates as one batch.", calls[0][1])
-        self.assertIn("first", calls[0][1])
-        self.assertIn("second", calls[0][1])
+        self.assertIn("[update session: agent-1 | candidate: 1", calls[0][1])
+        self.assertIn("[update session: agent-2 | candidate: 1", calls[0][1])
         self.assertIn("status: succeeded", stdout.getvalue())
         self.assertIn("pending: 0", stdout.getvalue())
-        self.assertIn("result: session agent-1: Process the following", stdout.getvalue())
+        self.assertIn("result: session update-batch-", stdout.getvalue())
 
-    def test_submitted_worker_increments_dreamer_trigger_points(self):
+    def test_async_worker_increments_dreamer_trigger_points(self):
         class RecordingRuntime(FakeRuntime):
             def run_session_turn(self, session_id: str, message: str) -> str:
                 return "updated"
@@ -1628,6 +1642,7 @@ class JsonRequestTests(unittest.TestCase):
 
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_async_update_config", return_value=_async_update_config(memory_root, target=1)),
                 patch("rightmemory.async_update.subprocess.Popen") as popen,
                 patch("rightmemory.async_update.UPDATE_DEBOUNCE_SECONDS", 0),
                 patch("rightmemory.async_update._process_exists", return_value=True),
@@ -1640,20 +1655,21 @@ class JsonRequestTests(unittest.TestCase):
 
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_async_update_config", return_value=_async_update_config(memory_root, target=1)),
                 patch(
                     "rightmemory.cli.load_dreamer_watch_config",
                     return_value=_dreamer_watch_config(update_candidate_points=2.5),
                 ),
                 patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
             ):
-                result = main(["update", "_submitted-worker", "--session", "agent-1"])
+                result = main(["update", "_async-worker"])
 
             trigger = DreamerTriggerStore(memory_root).read()
 
         self.assertEqual(result, 0)
         self.assertEqual(trigger.points, 5.0)
 
-    def test_submitted_worker_warns_when_trigger_increment_fails_without_failing(self):
+    def test_async_worker_warns_when_trigger_increment_fails_without_failing(self):
         class RecordingRuntime(FakeRuntime):
             def run_session_turn(self, session_id: str, message: str) -> str:
                 return "updated"
@@ -1667,6 +1683,7 @@ class JsonRequestTests(unittest.TestCase):
 
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_async_update_config", return_value=_async_update_config(memory_root, target=1)),
                 patch("rightmemory.async_update.subprocess.Popen") as popen,
                 patch("rightmemory.async_update.UPDATE_DEBOUNCE_SECONDS", 0),
                 patch("rightmemory.async_update._process_exists", return_value=True),
@@ -1678,6 +1695,7 @@ class JsonRequestTests(unittest.TestCase):
 
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_async_update_config", return_value=_async_update_config(memory_root, target=1)),
                 patch(
                     "rightmemory.cli.load_dreamer_watch_config",
                     return_value=_dreamer_watch_config(update_candidate_points=2.5),
@@ -1687,11 +1705,25 @@ class JsonRequestTests(unittest.TestCase):
                 patch("sys.stderr", stderr),
             ):
                 trigger_store.return_value.increment.side_effect = OSError("disk full")
-                result = main(["update", "_submitted-worker", "--session", "agent-1"])
+                result = main(["update", "_async-worker"])
 
         self.assertEqual(result, 0)
         self.assertIn("Warning: could not update dreamer trigger state", stderr.getvalue())
         self.assertIn("disk full", stderr.getvalue())
+
+    def test_submitted_worker_private_command_is_removed(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+
+            def fake_load_config(role):
+                return type("Config", (), {"memory_root": memory_root})()
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+            ):
+                with self.assertRaises(SystemExit):
+                    main(["update", "_submitted-worker", "--session", "agent-1"])
 
 
 if __name__ == "__main__":

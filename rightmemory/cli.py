@@ -17,6 +17,7 @@ from .async_update import AsyncUpdateStore, format_state
 from .config import (
     MEMORY_ROOT,
     ROLES,
+    load_async_update_config,
     load_config,
     load_dreamer_watch_config,
     load_pruner_config,
@@ -115,8 +116,8 @@ def main(argv: list[str] | None = None) -> int:
         if _is_help_request(remaining[1:]):
             _undo_parser(args.role).parse_args(remaining[1:])
             return 0
-    if remaining and remaining[0] == "_submitted-worker" and args.role != "update":
-        raise ValueError("_submitted-worker is only supported for the update role")
+    if remaining and remaining[0] == "_async-worker" and args.role != "update":
+        raise ValueError("_async-worker is only supported for the update role")
     if remaining and remaining[0] == "chat" and _is_help_request(remaining[1:]):
         _chat_parser(args.role).parse_args(remaining[1:])
         return 0
@@ -145,15 +146,8 @@ def main(argv: list[str] | None = None) -> int:
 
     runtime = RightMemoryRuntime(config)
     try:
-        if remaining and remaining[0] == "_submitted-worker":
-            worker_args = _submit_parser(args.role).parse_args(remaining[1:])
-            return _submitted_worker(
-                runtime,
-                config.memory_root,
-                args.role,
-                worker_args.session,
-                worker_args.message,
-            )
+        if remaining and remaining[0] == "_async-worker":
+            return _async_worker(runtime, config.memory_root, args.role)
         if not remaining or remaining[0] == "chat":
             chat_args = _chat_parser(args.role).parse_args(remaining[1:] if remaining else [])
             return _chat(runtime, chat_args.session)
@@ -853,26 +847,24 @@ def _undo(memory_root, role: str, session_id: str, candidate_id: int) -> int:
     return 0
 
 
-def _submitted_worker(
+def _async_worker(
     runtime: RightMemoryRuntime,
     memory_root,
     role: str,
-    session_id: str,
-    message_parts: list[str],
 ) -> int:
-    if message_parts:
-        raise ValueError("_submitted-worker does not accept message arguments")
     dreamer_watch_config = load_dreamer_watch_config()
+    async_update_config = load_async_update_config()
     store = AsyncUpdateStore(memory_root, role)
-    state = store.run_pending_batches(
-        session_id,
-        lambda message: runtime.run_session_turn(session_id, message),
+    result = store.run_pending_batches(
+        lambda batch_session_id, message: runtime.run_session_turn(batch_session_id, message),
+        target_batch_candidates=async_update_config.target_batch_candidates,
+        max_wait_seconds=async_update_config.max_wait_seconds,
         on_batch_success=_dreamer_trigger_incrementer(
             memory_root,
             dreamer_watch_config.update_candidate_points,
         ),
     )
-    if state.status == "failed":
+    if result.status == "failed":
         return 1
     return 0
 
