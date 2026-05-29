@@ -1,3 +1,4 @@
+import json
 import subprocess
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ from rightmemory.status import (
     DashboardStatus,
     GitStatus,
     SectionStatus,
+    collect_async_update_section,
     collect_dreamer_section,
     collect_git_status,
     collect_managed_watch_sections,
@@ -203,6 +205,127 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(section.state, "trigger progress")
         self.assertIn("trigger: 37.5/50.0 points", section.detail)
         self.assertIn("check interval: 3000 seconds", section.detail)
+
+    def test_collect_async_update_section_reports_idle_when_state_missing(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            section, issues = collect_async_update_section(Path(tempdir))
+
+        self.assertEqual(section.name, "update")
+        self.assertEqual(section.state, "worker: idle")
+        self.assertIn("pending: 0 candidates across 0 sessions", section.detail)
+        self.assertEqual(issues, [])
+
+    def test_collect_async_update_section_counts_pending_and_current_batches(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            async_root = root / ".runtime" / "async" / "update"
+            async_root.mkdir(parents=True)
+            (async_root / "agent-1.json").write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "session_id": "agent-1",
+                        "role": "update",
+                        "phase": "waiting",
+                        "started_at": "2026-05-29T08:00:00+00:00",
+                        "finished_at": None,
+                        "pid": None,
+                        "result": None,
+                        "error": None,
+                        "next_flush_at": "2026-05-29T10:00:00+00:00",
+                        "current_batch": [],
+                        "pending": [
+                            {
+                                "id": 1,
+                                "message": "first",
+                                "submitted_at": "2026-05-29T08:00:00+00:00",
+                            },
+                            {
+                                "id": 2,
+                                "message": "second",
+                                "submitted_at": "2026-05-29T08:05:00+00:00",
+                            },
+                        ],
+                        "next_id": 3,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (async_root / "agent-2.json").write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "session_id": "agent-2",
+                        "role": "update",
+                        "phase": "running",
+                        "started_at": "2026-05-29T08:30:00+00:00",
+                        "finished_at": None,
+                        "pid": 111,
+                        "result": "accepted 1 candidate",
+                        "error": None,
+                        "next_flush_at": None,
+                        "current_batch": [
+                            {
+                                "id": 1,
+                                "message": "running",
+                                "submitted_at": "2026-05-29T08:30:00+00:00",
+                            }
+                        ],
+                        "pending": [],
+                        "next_id": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            section, issues = collect_async_update_section(root, process_exists=lambda pid: True)
+
+        self.assertEqual(section.state, "worker: idle")
+        self.assertIn("pending: 2 candidates across 1 session", section.detail)
+        self.assertIn("current batch: 1 candidate across 1 session", section.detail)
+        self.assertIn("next flush: 2026-05-29T10:00:00+00:00", section.detail)
+        self.assertEqual(section.last, "accepted 1 candidate")
+        self.assertEqual(issues, [])
+
+    def test_collect_async_update_section_reports_running_worker(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            worker_root = root / ".runtime" / "async" / "update" / "_worker"
+            worker_root.mkdir(parents=True)
+            (worker_root / "state.json").write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "pid": 999,
+                        "started_at": "2026-05-29T08:00:00+00:00",
+                        "batch_id": "update-batch-abc",
+                        "session_ids": ["agent-1"],
+                        "error": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            section, issues = collect_async_update_section(root, process_exists=lambda pid: True)
+
+        self.assertEqual(section.state, "worker: running pid 999")
+        self.assertIn("batch: update-batch-abc", section.detail)
+        self.assertIn("sessions: agent-1", section.detail)
+        self.assertEqual(issues, [])
+
+    def test_collect_async_update_section_reports_malformed_state_locally(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            async_root = root / ".runtime" / "async" / "update"
+            async_root.mkdir(parents=True)
+            (async_root / "agent-1.json").write_text("{not json", encoding="utf-8")
+
+            section, issues = collect_async_update_section(root)
+
+        self.assertEqual(section.name, "update")
+        self.assertIn("state error", section.state)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("update: state error", issues[0])
 
     def _git(self, root: Path, *args: str) -> str:
         result = subprocess.run(

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
+from .async_update import _process_exists
 from .config import load_dreamer_watch_config, load_sync_config
 from .dreamer_trigger import DreamerTriggerStore
 from .watch import MANAGED_WATCH_TARGETS, managed_watch_status
@@ -166,6 +169,82 @@ def collect_dreamer_section(
         )
 
 
+def collect_async_update_section(
+    memory_root: Path,
+    *,
+    process_exists: Callable[[int], bool] = _process_exists,
+) -> tuple[SectionStatus, list[str]]:
+    async_root = Path(memory_root) / ".runtime" / "async" / "update"
+    worker_state, worker_issue = _read_worker_state(async_root, process_exists)
+    try:
+        session_states = [_read_json(path) for path in sorted(async_root.glob("*.json")) if path.is_file()]
+    except Exception as exc:
+        issue = f"update: state error: {type(exc).__name__}: {exc}"
+        return (
+            SectionStatus(
+                name="update",
+                state=f"state error: {type(exc).__name__}: {exc}",
+                log_path=_display_path(Path(memory_root), async_root),
+                issue=issue,
+            ),
+            [issue],
+        )
+
+    pending_candidates = 0
+    pending_sessions = 0
+    current_candidates = 0
+    current_sessions = 0
+    flush_times: list[str] = []
+    last_values: list[str] = []
+
+    for state in session_states:
+        pending = _list_field(state, "pending")
+        current = _list_field(state, "current_batch")
+        if pending:
+            pending_candidates += len(pending)
+            pending_sessions += 1
+        if current:
+            current_candidates += len(current)
+            current_sessions += 1
+        next_flush_at = state.get("next_flush_at")
+        if isinstance(next_flush_at, str) and next_flush_at:
+            flush_times.append(next_flush_at)
+        result = state.get("result")
+        error = state.get("error")
+        if isinstance(error, str) and error:
+            last_values.append(f"error: {error}")
+        elif isinstance(result, str) and result:
+            last_values.append(result)
+
+    detail_lines = [
+        (
+            f"pending: {pending_candidates} {_plural('candidate', pending_candidates)} "
+            f"across {pending_sessions} {_plural('session', pending_sessions)}"
+        ),
+        (
+            f"current batch: {current_candidates} {_plural('candidate', current_candidates)} "
+            f"across {current_sessions} {_plural('session', current_sessions)}"
+        ),
+        f"state: {_display_path(Path(memory_root), async_root)}",
+    ]
+    if flush_times:
+        detail_lines.insert(1, f"next flush: {min(flush_times)}")
+    if worker_state.detail:
+        detail_lines.insert(0, worker_state.detail)
+    issues = [worker_issue] if worker_issue else []
+    return (
+        SectionStatus(
+            name="update",
+            state=worker_state.state,
+            log_path=_display_path(Path(memory_root), async_root),
+            detail="\n".join(detail_lines),
+            last=_cap_preview(last_values[-1]) if last_values else None,
+            issue=worker_issue,
+        ),
+        issues,
+    )
+
+
 def format_status_dashboard(status: DashboardStatus) -> str:
     lines: list[str] = [
         "RightMemory",
@@ -226,6 +305,57 @@ def _display_path(memory_root: Path, path: Path) -> str:
         return path.resolve(strict=False).relative_to(memory_root.resolve(strict=False)).as_posix()
     except ValueError:
         return str(path)
+
+
+@dataclass(frozen=True)
+class _WorkerSummary:
+    state: str
+    detail: str | None = None
+
+
+def _read_worker_state(async_root: Path, process_exists: Callable[[int], bool]) -> tuple[_WorkerSummary, str | None]:
+    path = async_root / "_worker" / "state.json"
+    if not path.exists():
+        return _WorkerSummary(state="worker: idle"), None
+    try:
+        data = _read_json(path)
+    except Exception as exc:
+        issue = f"update worker: state error: {type(exc).__name__}: {exc}"
+        return _WorkerSummary(state=f"worker: state error: {type(exc).__name__}: {exc}"), issue
+    pid = data.get("pid")
+    status = data.get("status")
+    if not isinstance(pid, int):
+        return _WorkerSummary(state="worker: idle"), None
+    if not process_exists(pid):
+        issue = f"update worker: stale pid {pid}"
+        return _WorkerSummary(state=f"worker: stale pid {pid}"), issue
+    detail_parts = []
+    batch_id = data.get("batch_id")
+    if isinstance(batch_id, str) and batch_id:
+        detail_parts.append(f"batch: {batch_id}")
+    session_ids = data.get("session_ids")
+    if isinstance(session_ids, list):
+        visible = ", ".join(item for item in session_ids if isinstance(item, str))
+        if visible:
+            detail_parts.append(f"sessions: {visible}")
+    state = f"worker: {status} pid {pid}" if isinstance(status, str) and status else f"worker: running pid {pid}"
+    return _WorkerSummary(state=state, detail="\n".join(detail_parts) if detail_parts else None), None
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"JSON object expected in {path}")
+    return data
+
+
+def _list_field(data: dict[str, Any], key: str) -> list[Any]:
+    value = data.get(key)
+    return value if isinstance(value, list) else []
+
+
+def _plural(word: str, count: int) -> str:
+    return word if count == 1 else f"{word}s"
 
 
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
