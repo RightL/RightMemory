@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -41,6 +42,20 @@ class AsyncUpdateState:
     next_id: int = 1
 
 
+@dataclass(frozen=True)
+class AsyncUpdateSessionBatch:
+    session_id: str
+    ready_at: datetime
+    jobs: list[AsyncUpdateJob]
+
+
+@dataclass(frozen=True)
+class AsyncUpdateWorkerResult:
+    status: str
+    processed: int = 0
+    failed: bool = False
+
+
 class AsyncUpdateStore:
     def __init__(self, memory_root: Path, role: str):
         self.memory_root = memory_root
@@ -78,65 +93,182 @@ class AsyncUpdateStore:
 
     def run_pending_batches(
         self,
-        session_id: str,
-        run_message: Callable[[str], str],
+        run_message: Callable[[str, str], str],
         *,
+        target_batch_candidates: int,
+        max_wait_seconds: int,
         sleep_until: Callable[[datetime], None] | None = None,
         on_batch_success: Callable[[int], None] | None = None,
-    ) -> AsyncUpdateState:
+    ) -> AsyncUpdateWorkerResult:
         sleep_until = _sleep_until if sleep_until is None else sleep_until
-        self._record_worker_pid(session_id, os.getpid())
-        while True:
-            batch: list[AsyncUpdateJob] | None = None
-            deadline: datetime | None = None
+        with self._worker_locked():
+            self._write_worker_locked(
+                status="running",
+                pid=os.getpid(),
+                batch_id=None,
+                session_ids=[],
+                error=None,
+            )
+
+        processed = 0
+        try:
+            while True:
+                batch, deadline = self._next_batch(target_batch_candidates, max_wait_seconds)
+                if batch is None:
+                    if deadline is None:
+                        return AsyncUpdateWorkerResult(status="succeeded" if processed else "idle", processed=processed)
+                    sleep_until(deadline)
+                    continue
+
+                started = self._start_cross_session_batch(batch)
+                if not started:
+                    continue
+                batch = started
+
+                batch_id = _batch_session_id(batch)
+                session_ids = [item.session_id for item in batch]
+                with self._worker_locked():
+                    self._write_worker_locked(
+                        status="running",
+                        pid=os.getpid(),
+                        batch_id=batch_id,
+                        session_ids=session_ids,
+                        error=None,
+                    )
+
+                try:
+                    result = run_message(batch_id, _format_batch_message(batch))
+                except Exception as exc:
+                    self._fail_cross_session_batch(batch, str(exc))
+                    return AsyncUpdateWorkerResult(status="failed", processed=processed, failed=True)
+
+                accepted_count = self._finish_cross_session_batch(batch, result)
+                if accepted_count:
+                    processed += accepted_count
+                    if on_batch_success is not None:
+                        on_batch_success(accepted_count)
+        finally:
+            with self._worker_locked():
+                self._clear_worker_locked()
+
+    def _next_batch(
+        self,
+        target_batch_candidates: int,
+        max_wait_seconds: int,
+    ) -> tuple[list[AsyncUpdateSessionBatch] | None, datetime | None]:
+        now = _now_dt()
+        eligible: list[AsyncUpdateSessionBatch] = []
+        future_deadlines: list[datetime] = []
+
+        for path in self._session_state_paths():
+            session_id = path.stem
             with self._locked(session_id):
                 state = self._read_raw(session_id)
-                if state.status != "running":
-                    return state
-                if state.phase == "waiting":
-                    if not state.pending:
-                        idle = replace(
-                            state,
-                            status="idle",
-                            phase=None,
-                            pid=None,
-                            started_at=None,
-                            finished_at=None,
-                            next_flush_at=None,
-                            current_batch=[],
-                        )
-                        self._write(session_id, idle)
-                        return idle
-                    deadline = _required_time(state.next_flush_at, "next_flush_at")
-                    if deadline <= _now_dt():
-                        state = self._start_pending_batch_locked(state)
-                        self._write(session_id, state)
-                        batch = state.current_batch
-                elif state.phase == "running":
-                    if not state.current_batch:
-                        state = self._start_wait_or_idle_locked(state)
-                        self._write(session_id, state)
-                        continue
-                    batch = state.current_batch
+                if state.role != self.role:
+                    continue
+                if state.status != "running" or state.phase != "waiting":
+                    continue
+                if state.current_batch or not state.pending:
+                    continue
+                ready_at = _required_time(state.next_flush_at, "next_flush_at")
+                if ready_at <= now:
+                    eligible.append(AsyncUpdateSessionBatch(state.session_id, ready_at, list(state.pending)))
                 else:
-                    return self._fail_locked(session_id, f"invalid async update phase: {state.phase}")
+                    future_deadlines.append(ready_at)
 
-            if deadline is not None and batch is None:
-                sleep_until(deadline)
-                continue
-            if batch is None:
-                continue
+        eligible.sort(key=lambda item: (item.ready_at, item.session_id))
+        if not eligible:
+            return None, min(future_deadlines) if future_deadlines else None
 
-            batch_ids = [job.id for job in batch]
-            try:
-                result = run_message(_format_batch_message(batch))
-            except Exception as exc:
-                return self._fail_if_current_batch(session_id, batch_ids, str(exc))
-            state, accepted = self._finish_current(session_id, batch_ids, result)
-            if accepted and on_batch_success is not None:
-                on_batch_success(len(batch))
-            if state.status != "running":
-                return state
+        selected: list[AsyncUpdateSessionBatch] = []
+        total = 0
+        for item in eligible:
+            selected.append(item)
+            total += len(item.jobs)
+            if total >= target_batch_candidates:
+                return selected, None
+
+        fallback_at = eligible[0].ready_at + timedelta(seconds=max_wait_seconds)
+        if now >= fallback_at:
+            return selected, None
+
+        deadlines = [fallback_at, *future_deadlines]
+        return None, min(deadlines)
+
+    def _start_cross_session_batch(self, batch: list[AsyncUpdateSessionBatch]) -> list[AsyncUpdateSessionBatch]:
+        started: list[AsyncUpdateSessionBatch] = []
+        for item in sorted(batch, key=lambda entry: entry.session_id):
+            expected_ids = [job.id for job in item.jobs]
+            with self._locked(item.session_id):
+                state = self._read_raw(item.session_id)
+                if [job.id for job in state.pending[: len(expected_ids)]] != expected_ids:
+                    continue
+                current_batch = state.pending[: len(expected_ids)]
+                pending = state.pending[len(expected_ids):]
+                next_state = replace(
+                    state,
+                    phase="running",
+                    started_at=_now(),
+                    finished_at=None,
+                    current_batch=current_batch,
+                    pending=pending,
+                    next_flush_at=None,
+                    result=None,
+                    error=None,
+                    pid=os.getpid(),
+                )
+                self._write(item.session_id, next_state)
+                started.append(AsyncUpdateSessionBatch(item.session_id, item.ready_at, current_batch))
+        return started
+
+    def _finish_cross_session_batch(self, batch: list[AsyncUpdateSessionBatch], result: str) -> int:
+        accepted = 0
+        for item in sorted(batch, key=lambda entry: entry.session_id):
+            expected_ids = [job.id for job in item.jobs]
+            with self._locked(item.session_id):
+                state = self._read_raw(item.session_id)
+                if [job.id for job in state.current_batch] != expected_ids:
+                    continue
+                accepted += len(state.current_batch)
+                if state.pending:
+                    next_flush_at = state.next_flush_at or _format_time(
+                        _now_dt() + timedelta(seconds=UPDATE_DEBOUNCE_SECONDS)
+                    )
+                    next_state = replace(
+                        state,
+                        phase="waiting",
+                        started_at=_now(),
+                        finished_at=None,
+                        pid=os.getpid(),
+                        current_batch=[],
+                        next_flush_at=next_flush_at,
+                        result=result,
+                        error=None,
+                    )
+                else:
+                    next_state = replace(
+                        state,
+                        status="succeeded",
+                        phase=None,
+                        finished_at=_now(),
+                        pid=os.getpid(),
+                        current_batch=[],
+                        pending=[],
+                        next_flush_at=None,
+                        result=result,
+                        error=None,
+                    )
+                self._write(item.session_id, next_state)
+        return accepted
+
+    def _fail_cross_session_batch(self, batch: list[AsyncUpdateSessionBatch], error: str) -> None:
+        for item in sorted(batch, key=lambda entry: entry.session_id):
+            expected_ids = [job.id for job in item.jobs]
+            with self._locked(item.session_id):
+                state = self._read_raw(item.session_id)
+                if [job.id for job in state.current_batch] != expected_ids:
+                    continue
+                self._fail_locked(item.session_id, error)
 
     def _worker_command(self) -> list[str]:
         return [
@@ -513,18 +645,31 @@ def format_state(state: AsyncUpdateState) -> str:
     return "\n".join(lines)
 
 
-def _format_batch_message(jobs: list[AsyncUpdateJob]) -> str:
+def _format_batch_message(batches: list[AsyncUpdateSessionBatch]) -> str:
     lines = [
         "Process the following submitted memory update candidates as one batch.",
         "Use the standalone update instructions to decide what should become durable memory.",
         "",
         "Candidates:",
     ]
-    for job in jobs:
-        lines.append(f"[candidate {job.id} | submitted_at: {job.submitted_at}]")
-        lines.extend(job.message.splitlines() or [""])
-        lines.append("")
+    for batch in batches:
+        for job in batch.jobs:
+            lines.append(
+                f"[update session: {batch.session_id} | "
+                f"candidate: {job.id} | submitted_at: {job.submitted_at}]"
+            )
+            lines.extend(job.message.splitlines() or [""])
+            lines.append("")
     return "\n".join(lines).rstrip()
+
+
+def _batch_session_id(batches: list[AsyncUpdateSessionBatch]) -> str:
+    parts = []
+    for batch in batches:
+        for job in batch.jobs:
+            parts.append(f"{batch.session_id}:{job.id}:{job.submitted_at}")
+    digest = hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()[:12]
+    return f"update-batch-{digest}"
 
 
 def _required_time(value: str | None, field: str) -> datetime:

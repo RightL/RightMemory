@@ -254,39 +254,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "candidate id must be a positive integer"):
                 store.cancel_pending("agent-1", "1")
 
-    def test_run_pending_batches_failure_returns_current_batch_to_pending(self):
-        callback = Mock()
-        with tempfile.TemporaryDirectory() as tempdir:
-            store = AsyncUpdateStore(Path(tempdir), "update")
-            store._write(
-                "agent-1",
-                AsyncUpdateState(
-                    status="running",
-                    session_id="agent-1",
-                    role="update",
-                    phase="waiting",
-                    started_at="2026-05-15T00:00:00+00:00",
-                    next_flush_at="2000-01-01T00:00:00+00:00",
-                    pending=[_job(1, "first"), _job(2, "second")],
-                    next_id=3,
-                ),
-            )
-
-            state = store.run_pending_batches(
-                "agent-1",
-                Mock(side_effect=RuntimeError("isolated failure")),
-                on_batch_success=callback,
-            )
-
-        self.assertEqual(state.status, "failed")
-        self.assertIsNone(state.phase)
-        self.assertIsNone(state.next_flush_at)
-        self.assertEqual(state.current_batch, [])
-        self.assertEqual([job.id for job in state.pending], [1, 2])
-        self.assertEqual(state.error, "isolated failure")
-        callback.assert_not_called()
-
-    def test_run_pending_batches_success_calls_callback_with_candidate_count(self):
+    def test_global_worker_batches_multiple_eligible_sessions_by_candidate_count(self):
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
@@ -299,19 +267,157 @@ class AsyncUpdateStateTests(unittest.TestCase):
                     phase="waiting",
                     started_at="2026-05-15T00:00:00+00:00",
                     next_flush_at="2000-01-01T00:00:00+00:00",
-                    pending=[_job(1, "first"), _job(2, "second")],
+                    pending=[_job(1, "a1"), _job(2, "a2")],
+                    next_id=3,
+                ),
+            )
+            store._write(
+                "agent-2",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-2",
+                    role="update",
+                    phase="waiting",
+                    started_at="2026-05-15T00:00:00+00:00",
+                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    pending=[_job(1, "b1")],
+                    next_id=2,
+                ),
+            )
+
+            result = store.run_pending_batches(
+                lambda batch_session_id, message: calls.append((batch_session_id, message)) or "ok",
+                target_batch_candidates=3,
+                max_wait_seconds=86400,
+                on_batch_success=calls.append,
+            )
+            first = store.read("agent-1")
+            second = store.read("agent-2")
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(first.status, "succeeded")
+        self.assertEqual(second.status, "succeeded")
+        self.assertEqual(first.pending, [])
+        self.assertEqual(second.pending, [])
+        self.assertEqual(len([call for call in calls if isinstance(call, tuple)]), 1)
+        batch_session_id, message = [call for call in calls if isinstance(call, tuple)][0]
+        self.assertTrue(batch_session_id.startswith("update-batch-"))
+        self.assertIn("[update session: agent-1 | candidate: 1", message)
+        self.assertIn("[update session: agent-1 | candidate: 2", message)
+        self.assertIn("[update session: agent-2 | candidate: 1", message)
+        self.assertIn("a1", message)
+        self.assertIn("b1", message)
+        self.assertIn(3, calls)
+
+    def test_global_worker_includes_whole_session_when_it_overshoots_target(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    pending=[_job(1, "a1"), _job(2, "a2")],
+                    next_id=3,
+                ),
+            )
+            store._write(
+                "agent-2",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-2",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    pending=[_job(1, "b1"), _job(2, "b2")],
                     next_id=3,
                 ),
             )
 
-            state = store.run_pending_batches(
-                "agent-1",
-                lambda message: "ok",
-                on_batch_success=calls.append,
+            result = store.run_pending_batches(
+                lambda batch_session_id, message: calls.append(message) or "ok",
+                target_batch_candidates=3,
+                max_wait_seconds=86400,
             )
 
-        self.assertEqual(state.status, "succeeded")
-        self.assertEqual(calls, [2])
+        self.assertEqual(result.processed, 4)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("b2", calls[0])
+
+    def test_global_worker_waits_below_target_until_max_wait_fallback(self):
+        slept = []
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2026-05-15T00:00:00+00:00",
+                    pending=[_job(1, "a1")],
+                    next_id=2,
+                ),
+            )
+
+            def fake_now():
+                if slept:
+                    return _dt("2026-05-16T00:00:00+00:00")
+                return _dt("2026-05-15T00:10:00+00:00")
+
+            with patch("rightmemory.async_update._now_dt", side_effect=fake_now):
+                result = store.run_pending_batches(
+                    lambda batch_session_id, message: calls.append(message) or "ok",
+                    target_batch_candidates=15,
+                    max_wait_seconds=86400,
+                    sleep_until=slept.append,
+                )
+
+        self.assertEqual(len(slept), 1)
+        self.assertEqual(slept[0], _dt("2026-05-16T00:00:00+00:00"))
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(len(calls), 1)
+
+    def test_global_worker_failure_returns_all_current_batches_to_pending(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            for session_id, message in (("agent-1", "a1"), ("agent-2", "b1")):
+                store._write(
+                    session_id,
+                    AsyncUpdateState(
+                        status="running",
+                        session_id=session_id,
+                        role="update",
+                        phase="waiting",
+                        next_flush_at="2000-01-01T00:00:00+00:00",
+                        pending=[_job(1, message)],
+                        next_id=2,
+                    ),
+                )
+
+            result = store.run_pending_batches(
+                Mock(side_effect=RuntimeError("isolated failure")),
+                target_batch_candidates=2,
+                max_wait_seconds=86400,
+            )
+            first = store.read("agent-1")
+            second = store.read("agent-2")
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(first.status, "failed")
+        self.assertEqual(second.status, "failed")
+        self.assertEqual([job.message for job in first.pending], ["a1"])
+        self.assertEqual([job.message for job in second.pending], ["b1"])
+        self.assertEqual(first.current_batch, [])
+        self.assertEqual(second.current_batch, [])
+        self.assertEqual(first.error, "isolated failure")
+        self.assertEqual(second.error, "isolated failure")
 
     def test_read_rejects_state_missing_required_identity_fields(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -351,6 +457,12 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
 def _job(job_id: int, message: str) -> AsyncUpdateJob:
     return AsyncUpdateJob(id=job_id, message=message, submitted_at="2026-05-15T00:00:00+00:00")
+
+
+def _dt(value: str):
+    from datetime import datetime
+
+    return datetime.fromisoformat(value)
 
 
 if __name__ == "__main__":
