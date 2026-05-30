@@ -117,6 +117,17 @@ class AgentCliCommandTests(unittest.TestCase):
         self.assertIn("--sandbox", command)
         self.assertIn("workspace-write", command)
 
+    def test_build_codex_uses_workspace_write_for_insight(self):
+        command = build_codex_command(
+            Path("/memory/root"),
+            "insight",
+            AgentCliConfig(provider="codex"),
+            "prompt",
+            None,
+        )
+
+        self.assertIn("workspace-write", command)
+
     def test_build_codex_uses_read_only_for_historian(self):
         command = build_codex_command(
             Path("/memory/root"),

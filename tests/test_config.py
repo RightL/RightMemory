@@ -2444,7 +2444,7 @@ class RuntimeTests(unittest.TestCase):
 
 class PromptTests(unittest.TestCase):
     def test_cli_agent_prompt_assembles_without_standalone_tools(self):
-        for role in ("dreamer", "historian", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"):
+        for role in ("dreamer", "historian", "insight", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"):
             prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), role)
 
             self.assertIn("The configured memory root is /home/example/.rightmemory.", prompt)
@@ -2465,7 +2465,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("role must be one of:", str(caught.exception))
 
     def test_standalone_prompts_assemble_for_each_role(self):
-        for role in ("dreamer", "historian", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"):
+        for role in ("dreamer", "historian", "insight", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"):
             prompt = build_instructions(Path("/home/example/.rightmemory"), role)
 
             self.assertIn("RightMemory Schema", prompt)
@@ -2473,6 +2473,22 @@ class PromptTests(unittest.TestCase):
             self.assertIn("Command-selected behavior", prompt)
             self.assertNotIn("{{MEMORY_ROOT}}", prompt)
             self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+
+    def test_dreamer_prompt_no_longer_mentions_dream_logs(self):
+        prompt = build_instructions(Path("/memory"), "dreamer")
+
+        self.assertNotIn("dream_logs", prompt)
+        self.assertNotIn("dream report", prompt.lower())
+        self.assertIn("# Open Context Questions", prompt)
+
+    def test_insight_prompt_uses_insight_logs_and_excludes_memory_validation(self):
+        prompt = build_instructions(Path("/memory"), "insight")
+
+        self.assertIn("Insight Role", prompt)
+        self.assertIn("insight_logs/", prompt)
+        self.assertIn("operator hint", prompt)
+        self.assertNotIn("validate_memory", prompt)
+        self.assertNotIn("dream_logs", prompt)
 
     def test_standalone_prompt_does_not_embed_memory_root_path(self):
         first = build_instructions(Path("/home/example/.rightmemory/.runtime/worktrees/update-111"), "update")
