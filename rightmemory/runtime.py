@@ -31,6 +31,7 @@ from .tools import MemoryTools
 
 
 AUTOMATIC_WRITE_ROLES = {"dreamer", "insight", "pruner", "reviewer", "update"}
+CYCLE_ROLES = {"dreamer", "insight"}
 HISTORY_READ_ROLES = {"historian", "pruner"}
 SYNC_TOOL_ROLES = {"sync-reconciler"}
 SYNC_REPAIR_STATUSES = {"conflict", "dirty"}
@@ -134,6 +135,20 @@ class RightMemoryRuntime:
             output = self._result_output(result)
             self._trace("run_finished", output=output)
         return output
+
+    def run_cycle(self, session_id: str, operator_hint: str | None = None) -> str:
+        if self.config.role not in CYCLE_ROLES:
+            raise ValueError("run_cycle requires dreamer or insight role")
+        hint = (operator_hint or "none").strip() or "none"
+        message = "\n".join(
+            (
+                "<rightmemory_cycle>",
+                f"role: {self.config.role}",
+                f"operator_hint: {hint}",
+                "</rightmemory_cycle>",
+            )
+        )
+        return self.run_session_turn(session_id, message)
 
     def run_prune_turn(self, session_id: str, pruner_config: PrunerConfig) -> str:
         if self.config.role != "pruner":

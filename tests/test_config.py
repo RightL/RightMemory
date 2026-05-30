@@ -921,6 +921,24 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(result, "isolated reply")
                 isolated.assert_called_once_with("agent-session", "remember one")
 
+    def test_run_cycle_passes_operator_hint_message(self):
+        config = RuntimeConfig(
+            role="insight",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            state_root=Path(self.tempdir.name) / "state",
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_cycle("insight-watch", operator_hint="focus on risks")
+
+        self.assertEqual(result, "reply 1")
+        sent = runtime.agent.calls[0]["message"]
+        self.assertIn("<rightmemory_cycle>", sent)
+        self.assertIn("role: insight", sent)
+        self.assertIn("operator_hint: focus on risks", sent)
+
     def test_sync_reconciler_session_turn_does_not_isolate(self):
         config = RuntimeConfig(
             role="sync-reconciler",
