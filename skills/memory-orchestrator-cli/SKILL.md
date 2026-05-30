@@ -12,7 +12,7 @@ description: "Use when the user's request may depend on long-term context from e
 
 ## Retrieval
 
-- For retrieval, call `rightmemory retrieve --session <stable-session-id> "<memory need>"`. Describe the memory needed based on the user's intent instead of blindly forwarding the user's message verbatim. Do not add a dispatch prefix; the command selects retrieval behavior.
+- For retrieval, call `rightmemory retrieve --session <stable-session-id> "<memory need>"`. Describe the memory needed based on the user's intent instead of blindly forwarding the user's message verbatim.
 - Do not retrieve on every turn. Retrieve when the user message clearly depends on prior shared context that is not available in the current conversation itself. If in doubt, skip retrieval for ordinary task facts.
 - For user, workflow, or behavior context, use a lower bar: if prior memory could reasonably change how the agent acts now, do one targeted retrieval. Preferences, communication expectations, tool/environment constraints, process rules, and repeated failure patterns are recognition cues; apply judgment to the current turn.
 - Consider retrieving again when the work changes phase or topic, e.g. from discussion to implementation or from implementation to finishing or verification, to surface relevant user preferences, workflow expectations, or agent-behavior guidance.
