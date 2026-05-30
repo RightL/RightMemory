@@ -582,7 +582,7 @@ class JsonRequestTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 main(["review", "watch", "--interval", "0"])
 
-    def test_watch_start_starts_review_dreamer_and_pruner_managed_processes(self):
+    def test_watch_start_starts_review_dreamer_pruner_and_insight_managed_processes(self):
         stdout = io.StringIO()
 
         class FakeProcess:
@@ -606,7 +606,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
                 patch(
                     "rightmemory.watch.subprocess.Popen",
-                    side_effect=[FakeProcess(101), FakeProcess(102), FakeProcess(103)],
+                    side_effect=[FakeProcess(101), FakeProcess(102), FakeProcess(103), FakeProcess(104)],
                 ) as popen,
                 patch("sys.stdout", stdout),
             ):
@@ -615,16 +615,19 @@ class JsonRequestTests(unittest.TestCase):
             review_pid = (memory_root / ".runtime" / "watch" / "review.pid").read_text(encoding="utf-8")
             dreamer_pid = (memory_root / ".runtime" / "watch" / "dreamer.pid").read_text(encoding="utf-8")
             pruner_pid = (memory_root / ".runtime" / "watch" / "pruner.pid").read_text(encoding="utf-8")
+            insight_pid = (memory_root / ".runtime" / "watch" / "insight.pid").read_text(encoding="utf-8")
 
         self.assertEqual(result, 0)
-        self.assertEqual(roles, ["reviewer", "dreamer", "pruner"])
-        self.assertEqual(popen.call_count, 3)
+        self.assertEqual(roles, ["reviewer", "dreamer", "pruner", "insight"])
+        self.assertEqual(popen.call_count, 4)
         self.assertEqual(review_pid, "101\n")
         self.assertEqual(dreamer_pid, "102\n")
         self.assertEqual(pruner_pid, "103\n")
+        self.assertEqual(insight_pid, "104\n")
         self.assertIn("review: running pid 101", stdout.getvalue())
         self.assertIn("dreamer: running pid 102", stdout.getvalue())
         self.assertIn("pruner: running pid 103", stdout.getvalue())
+        self.assertIn("insight: running pid 104", stdout.getvalue())
         self.assertIn("sync: disabled", stdout.getvalue())
 
     def test_watch_start_starts_sync_when_enabled(self):
@@ -649,7 +652,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
                 patch(
                     "rightmemory.watch.subprocess.Popen",
-                    side_effect=[FakeProcess(101), FakeProcess(102), FakeProcess(103), FakeProcess(104)],
+                    side_effect=[FakeProcess(101), FakeProcess(102), FakeProcess(103), FakeProcess(104), FakeProcess(105)],
                 ) as popen,
                 patch("sys.stdout", stdout),
             ):
@@ -658,9 +661,9 @@ class JsonRequestTests(unittest.TestCase):
             sync_pid = (memory_root / ".runtime" / "watch" / "sync.pid").read_text(encoding="utf-8")
 
         self.assertEqual(result, 0)
-        self.assertEqual(popen.call_count, 4)
-        self.assertEqual(sync_pid, "104\n")
-        self.assertIn("sync: running pid 104", stdout.getvalue())
+        self.assertEqual(popen.call_count, 5)
+        self.assertEqual(sync_pid, "105\n")
+        self.assertIn("sync: running pid 105", stdout.getvalue())
 
     def test_watch_start_skips_sync_when_disabled(self):
         stdout = io.StringIO()
@@ -684,14 +687,14 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
                 patch(
                     "rightmemory.watch.subprocess.Popen",
-                    side_effect=[FakeProcess(101), FakeProcess(102), FakeProcess(103)],
+                    side_effect=[FakeProcess(101), FakeProcess(102), FakeProcess(103), FakeProcess(104)],
                 ) as popen,
                 patch("sys.stdout", stdout),
             ):
                 result = main(["watch", "start"])
 
         self.assertEqual(result, 0)
-        self.assertEqual(popen.call_count, 3)
+        self.assertEqual(popen.call_count, 4)
         self.assertIn("sync: disabled", stdout.getvalue())
 
     def test_watch_start_reports_failure_after_attempting_later_targets(self):
@@ -721,7 +724,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
                 patch(
                     "rightmemory.watch.subprocess.Popen",
-                    side_effect=[FakeProcess(201), FakeProcess(202), FakeProcess(203)],
+                    side_effect=[FakeProcess(201), FakeProcess(202), FakeProcess(203), FakeProcess(204)],
                 ) as popen,
                 patch("sys.stdout", stdout),
                 patch("sys.stderr", stderr),
@@ -730,18 +733,21 @@ class JsonRequestTests(unittest.TestCase):
 
             dreamer_pid = (memory_root / ".runtime" / "watch" / "dreamer.pid").read_text(encoding="utf-8")
             pruner_pid = (memory_root / ".runtime" / "watch" / "pruner.pid").read_text(encoding="utf-8")
+            insight_pid = (memory_root / ".runtime" / "watch" / "insight.pid").read_text(encoding="utf-8")
             sync_pid = (memory_root / ".runtime" / "watch" / "sync.pid").read_text(encoding="utf-8")
 
         self.assertEqual(result, 1)
-        self.assertEqual(roles, ["reviewer", "dreamer", "pruner"])
-        self.assertEqual(popen.call_count, 3)
+        self.assertEqual(roles, ["reviewer", "dreamer", "pruner", "insight"])
+        self.assertEqual(popen.call_count, 4)
         self.assertEqual(dreamer_pid, "201\n")
         self.assertEqual(pruner_pid, "202\n")
-        self.assertEqual(sync_pid, "203\n")
+        self.assertEqual(insight_pid, "203\n")
+        self.assertEqual(sync_pid, "204\n")
         self.assertIn("review: error: RuntimeError: review unavailable", stderr.getvalue())
         self.assertIn("dreamer: running pid 201", stdout.getvalue())
         self.assertIn("pruner: running pid 202", stdout.getvalue())
-        self.assertIn("sync: running pid 203", stdout.getvalue())
+        self.assertIn("insight: running pid 203", stdout.getvalue())
+        self.assertIn("sync: running pid 204", stdout.getvalue())
 
     def test_watch_start_cleans_isolated_worktrees_for_write_targets_not_sync(self):
         stdout = io.StringIO()
@@ -791,6 +797,8 @@ class JsonRequestTests(unittest.TestCase):
                 ("start", "dreamer"),
                 ("cleanup", "pruner"),
                 ("start", "prune"),
+                ("cleanup", "insight"),
+                ("start", "insight"),
                 ("start", "sync"),
             ],
         )
@@ -802,6 +810,10 @@ class JsonRequestTests(unittest.TestCase):
     def test_pruner_is_a_managed_watch_target(self):
         self.assertIn("pruner", MANAGED_WATCH_TARGETS)
         self.assertEqual(WATCH_COMMANDS["pruner"], ("prune", "watch"))
+
+    def test_insight_is_a_managed_watch_target(self):
+        self.assertIn("insight", MANAGED_WATCH_TARGETS)
+        self.assertEqual(WATCH_COMMANDS["insight"], ("insight", "watch"))
 
     def test_watch_status_reports_stopped_without_config(self):
         stdout = io.StringIO()
@@ -818,6 +830,7 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("review: stopped", stdout.getvalue())
         self.assertIn("dreamer: stopped", stdout.getvalue())
         self.assertIn("pruner: stopped", stdout.getvalue())
+        self.assertIn("insight: stopped", stdout.getvalue())
         self.assertIn("sync: stopped", stdout.getvalue())
 
     def test_watch_process_command_prefers_proc_cmdline(self):

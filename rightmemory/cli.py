@@ -283,6 +283,8 @@ def _watch_role(name: str) -> str:
         return "dreamer"
     if name == "pruner":
         return "pruner"
+    if name == "insight":
+        return "insight"
     raise ValueError(f"unknown watch target: {name}")
 
 

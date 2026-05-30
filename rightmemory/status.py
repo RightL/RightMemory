@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .async_update import _is_async_worker_process, _state_from_json
-from .config import load_dreamer_watch_config, load_sync_config
+from .config import load_dreamer_watch_config, load_insight_watch_config, load_sync_config
 from .watch import MANAGED_WATCH_TARGETS, ManagedWatchStatus, _is_managed_watch_process, watch_log_path, watch_pid_path
 
 
@@ -47,6 +47,7 @@ class DashboardStatus:
     git: GitStatus
     watches: list[SectionStatus] = field(default_factory=list)
     dreamer: SectionStatus | None = None
+    insight: SectionStatus | None = None
     update: SectionStatus | None = None
     issues: list[str] = field(default_factory=list)
 
@@ -56,6 +57,14 @@ class _DreamerTriggerSnapshot:
     points: float = 0.0
     updated_at: str | None = None
     last_successful_dream_at: str | None = None
+    last_recovery_at: str | None = None
+
+
+@dataclass(frozen=True)
+class _InsightTriggerSnapshot:
+    points: float = 0.0
+    updated_at: str | None = None
+    last_successful_insight_at: str | None = None
     last_recovery_at: str | None = None
 
 
@@ -206,6 +215,34 @@ def collect_dreamer_section(
         )
 
 
+def collect_insight_section(
+    memory_root: Path,
+    *,
+    trigger_reader: Callable[[Path], object] | None = None,
+    config_loader: Callable[[], object] = load_insight_watch_config,
+) -> SectionStatus:
+    if trigger_reader is None:
+        trigger_reader = _read_insight_trigger_snapshot
+    try:
+        state = trigger_reader(memory_root)
+        config = config_loader()
+        detail = (
+            f"trigger: {getattr(state, 'points')}/{getattr(config, 'trigger_points')} points\n"
+            f"check interval: {getattr(config, 'check_interval_seconds')} seconds"
+        )
+        updated_at = getattr(state, "updated_at", None)
+        if updated_at:
+            detail += f"\nupdated: {updated_at}"
+        last = getattr(state, "last_successful_insight_at", None)
+        return SectionStatus(name="insight", state="trigger progress", detail=detail, last=last)
+    except Exception as exc:
+        return SectionStatus(
+            name="insight",
+            state=f"error: {type(exc).__name__}: {exc}",
+            issue=f"insight trigger error: {type(exc).__name__}: {exc}",
+        )
+
+
 def collect_async_update_section(
     memory_root: Path,
     *,
@@ -293,6 +330,7 @@ def collect_status(
     *,
     watch_collector: Callable[[Path], tuple[list[SectionStatus], list[str]]] | None = None,
     dreamer_collector: Callable[[Path], SectionStatus] = collect_dreamer_section,
+    insight_collector: Callable[[Path], SectionStatus] = collect_insight_section,
     update_collector: Callable[[Path], tuple[SectionStatus, list[str]]] = collect_async_update_section,
 ) -> DashboardStatus:
     root = Path(memory_root)
@@ -319,6 +357,15 @@ def collect_status(
         issues.append(message)
 
     try:
+        insight = insight_collector(root)
+        if insight.issue:
+            issues.append(insight.issue)
+    except Exception as exc:
+        message = f"insight: status error: {type(exc).__name__}: {exc}"
+        insight = SectionStatus(name="insight", state=message, issue=message)
+        issues.append(message)
+
+    try:
         update, update_issues = update_collector(root)
         issues.extend(update_issues)
     except Exception as exc:
@@ -326,7 +373,7 @@ def collect_status(
         update = SectionStatus(name="update", state=message, issue=message)
         issues.append(message)
 
-    return DashboardStatus(root=root, git=git, watches=watches, dreamer=dreamer, update=update, issues=issues)
+    return DashboardStatus(root=root, git=git, watches=watches, dreamer=dreamer, insight=insight, update=update, issues=issues)
 
 
 def format_status_dashboard(status: DashboardStatus) -> str:
@@ -347,6 +394,11 @@ def format_status_dashboard(status: DashboardStatus) -> str:
         lines.append("")
         lines.append("Dreamer")
         lines.extend(_format_section(status.dreamer))
+
+    if status.insight is not None:
+        lines.append("")
+        lines.append("Insight")
+        lines.extend(_format_section(status.insight))
 
     if status.update is not None:
         lines.append("")
@@ -521,6 +573,28 @@ def _read_dreamer_trigger_snapshot(memory_root: Path) -> _DreamerTriggerSnapshot
         last_successful_dream_at=_optional_iso_datetime_str(
             data.get("last_successful_dream_at"),
             "last_successful_dream_at",
+        ),
+        last_recovery_at=_optional_iso_datetime_str(data.get("last_recovery_at"), "last_recovery_at"),
+    )
+
+
+def _read_insight_trigger_snapshot(memory_root: Path) -> _InsightTriggerSnapshot:
+    path = Path(memory_root) / ".runtime" / "insight" / "trigger-state.json"
+    if not path.exists():
+        return _InsightTriggerSnapshot()
+    data = _read_json(path)
+    points = data.get("points", 0.0)
+    if isinstance(points, bool) or not isinstance(points, (int, float)):
+        raise ValueError("insight trigger points must be a number")
+    points = float(points)
+    if not math.isfinite(points) or points < 0:
+        raise ValueError("insight trigger points must be a nonnegative finite number")
+    return _InsightTriggerSnapshot(
+        points=points,
+        updated_at=_optional_iso_datetime_str(data.get("updated_at"), "updated_at"),
+        last_successful_insight_at=_optional_iso_datetime_str(
+            data.get("last_successful_insight_at"),
+            "last_successful_insight_at",
         ),
         last_recovery_at=_optional_iso_datetime_str(data.get("last_recovery_at"), "last_recovery_at"),
     )
