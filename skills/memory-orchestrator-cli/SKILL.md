@@ -8,7 +8,7 @@ description: "Use when the user's request may depend on long-term context from e
 ## Access Rules
 
 - Do not spawn memory-curator or memory-dreamer subagents, and do not invoke memory-curator or memory-dreamer skills directly.
-- The main agent must not access any `{{MEMORY_ROOT}}/MEMORY*.md` file by any means — no reading it, no editing it, no writing to it, no running commands that view or modify it. All access to the memory file set goes through the installed `rightmemory` command; do not replace it with repo-local Python or environment-specific launchers.
+- The memory root is `{{MEMORY_ROOT}}`; the main agent must not read or edit files there by any means unless the user explicitly permits direct access.
 - Pick one stable session id for this agent conversation and reuse it for every retrieve/update call. Use a separate stable dreamer session id when the user explicitly asks for consolidation.
 
 ## Retrieval
