@@ -7,9 +7,8 @@ description: "Use when the user's request may depend on long-term context from e
 
 ## Access Rules
 
-- Do not spawn memory-curator or memory-dreamer subagents, and do not invoke memory-curator or memory-dreamer skills directly.
 - The memory root is `{{MEMORY_ROOT}}`; the main agent must not read or edit files there by any means unless the user explicitly permits direct access.
-- Pick one stable session id for this agent conversation and reuse it for every retrieve/update call. Use a separate stable dreamer session id when the user explicitly asks for consolidation.
+- Pick one stable session id for this agent conversation and reuse it for every retrieve/update call.
 
 ## Retrieval
 
