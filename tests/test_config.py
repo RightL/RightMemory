@@ -16,6 +16,7 @@ from rightmemory.config import (
     load_async_update_config,
     load_config,
     load_dreamer_watch_config,
+    load_insight_watch_config,
     load_pruner_config,
     load_review_config,
     load_sync_config,
@@ -575,6 +576,69 @@ class ConfigTests(unittest.TestCase):
                 with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
                     with self.assertRaises(ValueError) as caught:
                         load_dreamer_watch_config()
+
+                self.assertIn(message, str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_insight_watch_config_defaults(self):
+        config_path = self._write_config("")
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_insight_watch_config()
+
+        self.assertEqual(config.memory_root, Path("/home/example/.rightmemory"))
+        self.assertEqual(config.trigger_points, 150.0)
+        self.assertEqual(config.update_candidate_points, 1.0)
+        self.assertEqual(config.review_session_points, 1.5)
+        self.assertEqual(config.check_interval_seconds, 3000)
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_insight_watch_config_parses_custom_values(self):
+        config_path = self._write_config(
+            """
+            [insight.model]
+            model_id = "openai/insight"
+
+            [insight.watch]
+            trigger_points = 225
+            update_candidate_points = 2.5
+            review_session_points = 4
+            check_interval_seconds = 600
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_insight_watch_config()
+            runtime_config = load_config("insight")
+
+        self.assertEqual(config.trigger_points, 225.0)
+        self.assertEqual(config.update_candidate_points, 2.5)
+        self.assertEqual(config.review_session_points, 4.0)
+        self.assertEqual(config.check_interval_seconds, 600)
+        self.assertEqual(runtime_config.model_id, "openai/insight")
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_insight_watch_config_rejects_invalid_values(self):
+        cases = [
+            ("trigger_points = 0", "[insight.watch].trigger_points must be a positive number"),
+            ("update_candidate_points = -1", "[insight.watch].update_candidate_points must be a positive number"),
+            ("review_session_points = true", "[insight.watch].review_session_points must be a positive number"),
+            ("check_interval_seconds = 1.5", "[insight.watch].check_interval_seconds must be a positive integer"),
+            ("unknown = 1", "unsupported [insight.watch] config key(s): unknown"),
+        ]
+
+        for watch_config, message in cases:
+            with self.subTest(watch_config=watch_config):
+                config_path = self._write_config(
+                    f"""
+                    [insight.watch]
+                    {watch_config}
+                    """
+                )
+
+                with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+                    with self.assertRaises(ValueError) as caught:
+                        load_insight_watch_config()
 
                 self.assertIn(message, str(caught.exception))
 
