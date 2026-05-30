@@ -6,10 +6,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.async_update import AsyncUpdateStore
-from rightmemory.cli import _daemon_stdio_json, _dreamer_watch_once, _handle_json_request, main
-from rightmemory.config import DreamerWatchConfig
+from rightmemory.cli import _daemon_stdio_json, _dreamer_watch_once, _handle_json_request, _insight_watch_once, main
+from rightmemory.config import DreamerWatchConfig, InsightWatchConfig
 from rightmemory.dreamer_trigger import DreamerTriggerStore
 from rightmemory.doctor import DoctorCheck
+from rightmemory.insight_trigger import InsightTriggerStore
 from rightmemory.watch import MANAGED_WATCH_TARGETS, WATCH_COMMANDS, _process_command
 
 
@@ -24,6 +25,10 @@ class FakeRuntime:
     def run_session_turn(self, session_id: str, message: str) -> str:
         self.session_turns.append((session_id, message))
         return f"session {session_id}: {message}"
+
+    def run_cycle(self, session_id: str, operator_hint=None) -> str:
+        self.session_turns.append((session_id, operator_hint))
+        return f"cycle {session_id}: {operator_hint}"
 
     def run_prune_turn(self, session_id: str, pruner_config) -> str:
         self.session_turns.append((session_id, f"prune:{pruner_config.memory_root}"))
@@ -51,6 +56,22 @@ def _dreamer_watch_config(
     check_interval_seconds: int = 3000,
 ):
     return DreamerWatchConfig(
+        memory_root=Path("/unused") if memory_root is None else memory_root,
+        trigger_points=trigger_points,
+        update_candidate_points=update_candidate_points,
+        review_session_points=review_session_points,
+        check_interval_seconds=check_interval_seconds,
+    )
+
+
+def _insight_watch_config(
+    memory_root: Path | None = None,
+    trigger_points: float = 150.0,
+    update_candidate_points: float = 1.0,
+    review_session_points: float = 1.5,
+    check_interval_seconds: int = 3000,
+):
+    return InsightWatchConfig(
         memory_root=Path("/unused") if memory_root is None else memory_root,
         trigger_points=trigger_points,
         update_candidate_points=update_candidate_points,
@@ -327,6 +348,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.cli.load_review_config", return_value=object()),
                 patch("rightmemory.cli.load_dreamer_watch_config", return_value=_dreamer_watch_config()),
+                patch("rightmemory.cli.load_insight_watch_config", return_value=_insight_watch_config()),
                 patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
                 patch("rightmemory.cli.ReviewScanner", FakeScanner),
                 patch("sys.stdout", stdout),
@@ -338,7 +360,7 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(scan_flags, [False])
         self.assertEqual(stdout.getvalue().strip(), "reviewed: 1")
 
-    def test_review_scan_once_increments_dreamer_trigger_points(self):
+    def test_review_scan_increments_dreamer_and_insight_triggers(self):
         stdout = io.StringIO()
 
         class FakeScanner:
@@ -357,7 +379,11 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_review_config", return_value=object()),
                 patch(
                     "rightmemory.cli.load_dreamer_watch_config",
-                    return_value=_dreamer_watch_config(review_session_points=3.0),
+                    return_value=_dreamer_watch_config(memory_root=memory_root, review_session_points=1.5),
+                ),
+                patch(
+                    "rightmemory.cli.load_insight_watch_config",
+                    return_value=_insight_watch_config(memory_root=memory_root, review_session_points=1.5),
                 ),
                 patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
                 patch("rightmemory.cli.ReviewScanner", FakeScanner),
@@ -366,9 +392,11 @@ class JsonRequestTests(unittest.TestCase):
                 result = main(["review", "scan", "--once"])
 
             trigger = DreamerTriggerStore(memory_root).read()
+            insight_trigger = InsightTriggerStore(memory_root).read()
 
         self.assertEqual(result, 0)
-        self.assertEqual(trigger.points, 6.0)
+        self.assertEqual(trigger.points, 3.0)
+        self.assertEqual(insight_trigger.points, 3.0)
         self.assertEqual(stdout.getvalue().strip(), "reviewed: 2")
 
     def test_doctor_agent_cli_prints_report_and_returns_success(self):
@@ -427,6 +455,10 @@ class JsonRequestTests(unittest.TestCase):
                     "rightmemory.cli.load_dreamer_watch_config",
                     return_value=_dreamer_watch_config(review_session_points=4.0),
                 ),
+                patch(
+                    "rightmemory.cli.load_insight_watch_config",
+                    return_value=_insight_watch_config(memory_root=memory_root, review_session_points=4.0),
+                ),
                 patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
                 patch("rightmemory.cli.ReviewScanner", FakeScanner),
                 patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt),
@@ -464,6 +496,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_config", return_value=config),
                 patch("rightmemory.cli.load_review_config", return_value=object()),
                 patch("rightmemory.cli.load_dreamer_watch_config", return_value=_dreamer_watch_config()),
+                patch("rightmemory.cli.load_insight_watch_config", return_value=_insight_watch_config()),
                 patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
                 patch("rightmemory.cli.ReviewScanner", FakeScanner),
                 patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
@@ -497,6 +530,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_config", return_value=config),
                 patch("rightmemory.cli.load_review_config", return_value=object()),
                 patch("rightmemory.cli.load_dreamer_watch_config", return_value=_dreamer_watch_config()),
+                patch("rightmemory.cli.load_insight_watch_config", return_value=_insight_watch_config()),
                 patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
                 patch("rightmemory.cli.ReviewScanner", FakeScanner),
                 patch("rightmemory.cli._sleep_with_refresh_check", return_value=True) as sleep,
@@ -530,6 +564,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_config", return_value=config),
                 patch("rightmemory.cli.load_review_config", return_value=object()),
                 patch("rightmemory.cli.load_dreamer_watch_config", return_value=_dreamer_watch_config()),
+                patch("rightmemory.cli.load_insight_watch_config", return_value=_insight_watch_config()),
                 patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
                 patch("rightmemory.cli.ReviewScanner", FakeScanner),
                 patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
@@ -1185,6 +1220,32 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("session dreamer-watch: dream", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
 
+    def test_insight_watch_once_runs_and_consumes_threshold_on_success(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        calls = []
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            InsightTriggerStore(memory_root).increment(155.0)
+            watch_config = _insight_watch_config(memory_root=memory_root, trigger_points=150.0)
+
+            def run_cycle(session_id: str) -> str:
+                calls.append(session_id)
+                return f"session {session_id}: insight"
+
+            with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+                result = _insight_watch_once(watch_config, "insight-watch", run_cycle)
+            trigger = InsightTriggerStore(memory_root).read()
+
+        self.assertEqual(result, "succeeded")
+        self.assertEqual(calls, ["insight-watch"])
+        self.assertEqual(trigger.points, 5.0)
+        self.assertIsNotNone(trigger.last_successful_insight_at)
+        self.assertIn("rightmemory insight cycle", stdout.getvalue())
+        self.assertIn("session insight-watch: insight", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
     def test_dreamer_watch_once_does_not_consume_on_failure(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -1237,9 +1298,9 @@ class JsonRequestTests(unittest.TestCase):
         calls = []
 
         class RecordingRuntime(FakeRuntime):
-            def run_session_turn(self, session_id: str, message: str) -> str:
-                calls.append((session_id, message))
-                return super().run_session_turn(session_id, message)
+            def run_cycle(self, session_id: str, operator_hint=None) -> str:
+                calls.append((session_id, operator_hint))
+                return f"cycle {session_id}: {operator_hint}"
 
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
@@ -1264,20 +1325,54 @@ class JsonRequestTests(unittest.TestCase):
             written_old_state = json.loads(old_state_path.read_text(encoding="utf-8"))
 
         self.assertEqual(result, 130)
-        self.assertEqual(calls, [("dreamer-watch", "Run a scheduled dream cycle.")])
+        self.assertEqual(calls, [("dreamer-watch", None)])
         self.assertEqual(trigger.points, 1.0)
         self.assertEqual(written_old_state, old_state)
         sleep.assert_called_once_with(9)
         self.assertIn("rightmemory dreamer cycle", stdout.getvalue())
-        self.assertIn("session dreamer-watch: Run a scheduled dream cycle.", stdout.getvalue())
+        self.assertIn("cycle dreamer-watch: None", stdout.getvalue())
         self.assertIn("rightmemory dreamer watch stopped", stderr.getvalue())
+
+    def test_insight_watch_cli_uses_cycle_entry_point(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        calls = []
+
+        class RecordingRuntime(FakeRuntime):
+            def run_cycle(self, session_id: str, operator_hint=None) -> str:
+                calls.append((session_id, operator_hint))
+                return f"cycle {session_id}: {operator_hint}"
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            InsightTriggerStore(memory_root).increment(151.0)
+            runtime_config = type("Config", (), {"memory_root": memory_root})()
+            watch_config = _insight_watch_config(memory_root=memory_root, trigger_points=150.0, check_interval_seconds=9)
+            with (
+                patch("rightmemory.cli.load_insight_watch_config", return_value=watch_config),
+                patch("rightmemory.cli.load_config", return_value=runtime_config),
+                patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
+                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["insight", "watch"])
+            trigger = InsightTriggerStore(memory_root).read()
+
+        self.assertEqual(result, 130)
+        self.assertEqual(calls, [("insight-watch", None)])
+        self.assertEqual(trigger.points, 1.0)
+        sleep.assert_called_once_with(9)
+        self.assertIn("rightmemory insight cycle", stdout.getvalue())
+        self.assertIn("rightmemory insight watch stopped", stderr.getvalue())
 
     def test_dreamer_watch_failed_cycle_sleeps_without_consuming_points(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
 
         class FailingRuntime(FakeRuntime):
-            def run_session_turn(self, session_id: str, message: str) -> str:
+            def run_cycle(self, session_id: str, operator_hint=None) -> str:
                 raise RuntimeError("boom")
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1313,7 +1408,7 @@ class JsonRequestTests(unittest.TestCase):
         stderr = io.StringIO()
 
         class FailingRuntime(FakeRuntime):
-            def run_session_turn(self, session_id: str, message: str) -> str:
+            def run_cycle(self, session_id: str, operator_hint=None) -> str:
                 raise RuntimeError("boom")
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1373,7 +1468,7 @@ class JsonRequestTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 main(["dreamer", "watch", "--interval", "0"])
 
-    def test_watch_is_only_supported_for_dreamer_role(self):
+    def test_role_watch_is_supported_for_dreamer_and_insight_roles(self):
         with patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")):
             with self.assertRaises(ValueError):
                 main(["retrieve", "watch"])
@@ -1657,6 +1752,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_async_update_config", return_value=_async_update_config(memory_root, target=2)),
                 patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
                 patch("rightmemory.cli.load_dreamer_watch_config", return_value=_dreamer_watch_config()),
+                patch("rightmemory.cli.load_insight_watch_config", return_value=_insight_watch_config()),
             ):
                 result = main(["update", "_async-worker"])
 
@@ -1675,7 +1771,7 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("pending: 0", stdout.getvalue())
         self.assertIn("result: session update-batch-", stdout.getvalue())
 
-    def test_async_worker_increments_dreamer_trigger_points(self):
+    def test_async_worker_increments_dreamer_and_insight_trigger_points(self):
         class RecordingRuntime(FakeRuntime):
             def run_session_turn(self, session_id: str, message: str) -> str:
                 return "updated"
@@ -1706,14 +1802,20 @@ class JsonRequestTests(unittest.TestCase):
                     "rightmemory.cli.load_dreamer_watch_config",
                     return_value=_dreamer_watch_config(update_candidate_points=2.5),
                 ),
+                patch(
+                    "rightmemory.cli.load_insight_watch_config",
+                    return_value=_insight_watch_config(memory_root=memory_root, update_candidate_points=2.5),
+                ),
                 patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
             ):
                 result = main(["update", "_async-worker"])
 
             trigger = DreamerTriggerStore(memory_root).read()
+            insight_trigger = InsightTriggerStore(memory_root).read()
 
         self.assertEqual(result, 0)
         self.assertEqual(trigger.points, 5.0)
+        self.assertEqual(insight_trigger.points, 5.0)
 
     def test_async_worker_warns_when_trigger_increment_fails_without_failing(self):
         class RecordingRuntime(FakeRuntime):
@@ -1746,6 +1848,7 @@ class JsonRequestTests(unittest.TestCase):
                     "rightmemory.cli.load_dreamer_watch_config",
                     return_value=_dreamer_watch_config(update_candidate_points=2.5),
                 ),
+                patch("rightmemory.cli.load_insight_watch_config", return_value=_insight_watch_config(memory_root=memory_root)),
                 patch("rightmemory.cli.DreamerTriggerStore") as trigger_store,
                 patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
                 patch("sys.stderr", stderr),
