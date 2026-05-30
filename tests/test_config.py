@@ -878,6 +878,11 @@ class RuntimeTests(unittest.TestCase):
                 "_run_session_model",
             ),
             (
+                RuntimeConfig(role="insight", model_id="openai/test", memory_root=Path(self.tempdir.name)),
+                patch.dict("sys.modules", self._fake_pydantic_modules()),
+                "_run_session_model",
+            ),
+            (
                 RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name)),
                 patch.dict("sys.modules", self._fake_pydantic_modules()),
                 "_run_session_model",
@@ -1989,6 +1994,22 @@ class RuntimeTests(unittest.TestCase):
                     self.assertNotIn("git_commit", tool_names)
                 else:
                     self.assertIn("git_commit", tool_names)
+
+    def test_insight_role_tools_exclude_memory_validation(self):
+        config = RuntimeConfig(
+            role="insight",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            state_root=Path(self.tempdir.name) / "state",
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+        tool_names = [tool.__name__ for tool in runtime.agent.tools]
+        self.assertIn("create_file", tool_names)
+        self.assertIn("git_commit", tool_names)
+        self.assertNotIn("validate_memory", tool_names)
 
     def test_write_roles_do_not_receive_sync_push_tool_when_sync_disabled(self):
         for role in ("dreamer", "pruner", "reviewer", "sync-reconciler", "update"):

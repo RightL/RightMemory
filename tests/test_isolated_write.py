@@ -243,7 +243,23 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertFalse(called)
         self.assertEqual(self._git("status", "--short", "--", "MEMORY.md"), "M MEMORY.md")
 
-    def test_untracked_main_dream_log_blocks_before_callback(self):
+    def test_untracked_insight_log_blocks_insight_before_callback(self):
+        called = False
+        insight = self.root / "insight_logs" / "2026-05-30-143012.md"
+        insight.parent.mkdir()
+        insight.write_text("# Insight\n", encoding="utf-8")
+
+        def callback(_worktree: Path) -> None:
+            nonlocal called
+            called = True
+
+        with self.assertRaises(MainMemoryDirtyError) as caught:
+            IsolatedWriteSupervisor(self.root, "insight").run(callback)
+
+        self.assertEqual(caught.exception.paths, ("insight_logs/2026-05-30-143012.md",))
+        self.assertFalse(called)
+
+    def test_untracked_main_dream_log_does_not_block_dreamer(self):
         called = False
         dream_log = self.root / "dream_logs" / "2026-05-22.md"
         dream_log.parent.mkdir()
@@ -253,11 +269,36 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
             nonlocal called
             called = True
 
-        with self.assertRaises(MainMemoryDirtyError) as caught:
-            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+        result = IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
 
-        self.assertEqual(caught.exception.paths, ("dream_logs/2026-05-22.md",))
-        self.assertFalse(called)
+        self.assertIsNone(result.output)
+        self.assertTrue(called)
+
+    def test_insight_commit_lands_insight_log(self):
+        def callback(worktree: Path) -> str:
+            insight = worktree / "insight_logs" / "2026-05-30-143012.md"
+            insight.parent.mkdir()
+            insight.write_text("# Insight\n\nUseful reflection.\n", encoding="utf-8")
+            self._git("add", "insight_logs/2026-05-30-143012.md", cwd=worktree)
+            self._git("commit", "-m", "insight: reflect on memory shape", cwd=worktree)
+            return "insight"
+
+        result = IsolatedWriteSupervisor(self.root, "insight").run(callback)
+
+        self.assertEqual(result.output, "insight")
+        self.assertTrue((self.root / "insight_logs" / "2026-05-30-143012.md").is_file())
+        self.assertEqual(self._git("log", "-1", "--format=%s"), "insight: reflect on memory shape")
+
+    def test_insight_commit_rejects_memory_edit(self):
+        def callback(worktree: Path) -> None:
+            self._append_memory(worktree, "- `two` invalid insight memory edit\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "insight: invalid memory edit", cwd=worktree)
+
+        with self.assertRaisesRegex(RuntimeError, r"non-insight paths: MEMORY\.md"):
+            IsolatedWriteSupervisor(self.root, "insight").run(callback)
+
+        self.assertNotIn("invalid insight", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
 
     def test_uncommitted_temp_change_does_not_land(self):
         def callback(worktree: Path) -> str:

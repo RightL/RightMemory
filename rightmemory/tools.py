@@ -46,9 +46,11 @@ NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*→\s*\[(.*?)\])?\s*$")
 EDGE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*([A-Za-z0-9_.-]+)\s*$")
 MEMORY_DETAIL_FILE_RE = re.compile(r"^MEMORY_[A-Za-z0-9_.-]+\.md$")
 MEMORY_SKILL_FILE_RE = re.compile(r"^MEMORY_SKILL_[A-Za-z0-9_.-]+\.md$")
-DREAM_LOG_FILE_RE = re.compile(r"^dream_logs/[A-Za-z0-9_.-]+\.md$")
+INSIGHT_LOG_FILE_RE = re.compile(r"^insight_logs/[A-Za-z0-9_.-]+\.md$")
 GIT_REVISION_RE = re.compile(r"^[A-Za-z0-9_.^~/-]+$")
 PRUNE_SUBJECT_PREFIX = "prune:"
+ACTIVE_MEMORY_ROLES = {"dreamer", "pruner", "reviewer", "sync-reconciler", "update"}
+INSIGHT_ROLES = {"insight"}
 
 
 @dataclass(frozen=True)
@@ -61,8 +63,9 @@ class MemoryId:
 
 
 class MemoryTools:
-    def __init__(self, memory_root: Path):
+    def __init__(self, memory_root: Path, role: str | None = None):
         self.memory_root = memory_root.resolve()
+        self.role = role
         self._read_signatures: dict[Path, str] = {}
 
     def list_files(self, pattern: str = "MEMORY*.md") -> list[str]:
@@ -283,8 +286,8 @@ class MemoryTools:
         """Replace exact text in a file under the RightMemory root."""
         if not old_string:
             raise ValueError("old_string must not be empty")
-        resolved = self._resolve_path(path)
-        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        relative_path = self._allowed_write_path(path)
+        resolved = self.memory_root / relative_path
         if not resolved.is_file():
             raise FileNotFoundError(f"file not found: {relative_path}")
 
@@ -311,8 +314,8 @@ class MemoryTools:
 
     def create_file(self, path: str, content: str = "") -> str:
         """Create a new file under the RightMemory root."""
-        resolved = self._resolve_path(path)
-        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        relative_path = self._allowed_write_path(path)
+        resolved = self.memory_root / relative_path
         if resolved.exists():
             raise ValueError(f"file already exists: {relative_path}")
         resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -322,8 +325,8 @@ class MemoryTools:
 
     def delete_file(self, path: str) -> str:
         """Delete a file under the RightMemory root."""
-        resolved = self._resolve_path(path)
-        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        relative_path = self._allowed_write_path(path)
+        resolved = self.memory_root / relative_path
         if not resolved.is_file():
             raise FileNotFoundError(f"file not found: {relative_path}")
         resolved.unlink()
@@ -332,10 +335,10 @@ class MemoryTools:
 
     def rename_file(self, old_path: str, new_path: str) -> str:
         """Rename a file under the RightMemory root without overwriting an existing file."""
-        source = self._resolve_path(old_path)
-        destination = self._resolve_path(new_path)
-        source_relative = source.relative_to(self.memory_root).as_posix()
-        destination_relative = destination.relative_to(self.memory_root).as_posix()
+        source_relative = self._allowed_write_path(old_path)
+        destination_relative = self._allowed_write_path(new_path)
+        source = self.memory_root / source_relative
+        destination = self.memory_root / destination_relative
         if not source.is_file():
             raise FileNotFoundError(f"file not found: {source_relative}")
         if destination.exists():
@@ -421,7 +424,7 @@ class MemoryTools:
         return output
 
     def git_add(self, paths: list[str]) -> str:
-        """Stage selected memory files or dream logs under the RightMemory root."""
+        """Stage selected role-owned files under the RightMemory root."""
         if not paths:
             raise ValueError("paths must not be empty")
         relative_paths = []
@@ -440,7 +443,7 @@ class MemoryTools:
         return "staged: " + ", ".join(relative_paths)
 
     def git_commit(self, message: str, body: str | None = None, allow_empty: bool = False) -> str:
-        """Commit staged memory files and dream logs under the RightMemory root."""
+        """Commit staged role-owned files under the RightMemory root."""
         message = self._validate_commit_subject(message)
         body = self._validate_commit_body(body)
         if allow_empty and message != "prune: checkpoint":
@@ -465,7 +468,7 @@ class MemoryTools:
         return f"committed {commit_hash}: {message}"
 
     def git_discard(self, paths: list[str]) -> str:
-        """Discard selected memory file or dream log changes."""
+        """Discard selected role-owned file changes."""
         if not paths:
             raise ValueError("paths must not be empty")
         relative_paths = [self._allowed_commit_path(path) for path in paths]
@@ -973,13 +976,26 @@ class MemoryTools:
     def _allowed_commit_path(self, path: str) -> str:
         resolved = self._resolve_path(path)
         relative_path = resolved.relative_to(self.memory_root).as_posix()
-        if relative_path == "MEMORY.md":
+        if self._is_allowed_write_path(relative_path):
             return relative_path
-        if MEMORY_DETAIL_FILE_RE.fullmatch(relative_path):
+        raise ValueError(f"can only stage, commit, or discard {self._write_policy_label()}: {relative_path}")
+
+    def _write_policy_label(self) -> str:
+        if self.role in INSIGHT_ROLES:
+            return "insight_logs/*.md"
+        return "MEMORY.md or MEMORY_*.md"
+
+    def _is_allowed_write_path(self, relative_path: str) -> bool:
+        if self.role in INSIGHT_ROLES:
+            return bool(INSIGHT_LOG_FILE_RE.fullmatch(relative_path))
+        return relative_path == "MEMORY.md" or bool(MEMORY_DETAIL_FILE_RE.fullmatch(relative_path))
+
+    def _allowed_write_path(self, path: str) -> str:
+        resolved = self._resolve_path(path)
+        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        if self._is_allowed_write_path(relative_path):
             return relative_path
-        if DREAM_LOG_FILE_RE.fullmatch(relative_path):
-            return relative_path
-        raise ValueError(f"can only stage, commit, or discard MEMORY.md, MEMORY_*.md, or dream_logs/*.md: {relative_path}")
+        raise ValueError(f"can only write {self._write_policy_label()}: {relative_path}")
 
     def _allowed_history_path(self, path: str) -> str:
         raw_path = Path(path)

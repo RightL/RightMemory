@@ -30,7 +30,7 @@ from .sync import SyncManager, SyncResult
 from .tools import MemoryTools
 
 
-AUTOMATIC_WRITE_ROLES = {"dreamer", "pruner", "reviewer", "update"}
+AUTOMATIC_WRITE_ROLES = {"dreamer", "insight", "pruner", "reviewer", "update"}
 HISTORY_READ_ROLES = {"historian", "pruner"}
 SYNC_TOOL_ROLES = {"sync-reconciler"}
 SYNC_REPAIR_STATUSES = {"conflict", "dirty"}
@@ -61,7 +61,7 @@ class RightMemoryRuntime:
         if config.runtime_mode not in {"standalone", "cli-agent"}:
             raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
         self.config = config
-        self.tools = MemoryTools(config.memory_root)
+        self.tools = MemoryTools(config.memory_root, role=config.role)
         self.sessions = MessageSessionStore(config.state_root, config.role)
         self.recent_submitted_delivery = RecentSubmittedMemoryDeliveryStore(config.state_root)
         self._message_history: list[Any] = []
@@ -463,8 +463,9 @@ class RightMemoryRuntime:
             self._agent_tool(self.tools.read),
             self._agent_tool(self.tools.read_command),
             self._agent_tool(self.tools.outline_file),
-            self._agent_tool(self.tools.validate_memory),
         ]
+        if self.config.role != "insight":
+            read_tools.append(self._agent_tool(self.tools.validate_memory))
         if self.config.role in HISTORY_READ_ROLES:
             read_tools.extend(
                 [

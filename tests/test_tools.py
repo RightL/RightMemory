@@ -236,28 +236,54 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertEqual(delete_result, "deleted MEMORY_renamed.md")
         self.assertFalse((self.root / "MEMORY_renamed.md").exists())
 
-    def test_git_add_accepts_memory_files_and_dream_logs(self):
+    def test_git_add_accepts_active_memory_files(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")
         self._git("config", "user.name", "Test User")
         (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
         (self.root / "MEMORY_detail.md").write_text("# Detail\n", encoding="utf-8")
-        dream_logs = self.root / "dream_logs"
-        dream_logs.mkdir()
-        (dream_logs / "2026-05-08.md").write_text("# Dream\n", encoding="utf-8")
         (self.root / "rightmemory.toml").write_text("[update]\n", encoding="utf-8")
 
-        result = self.tools.git_add(["MEMORY.md", "MEMORY_detail.md", "dream_logs/2026-05-08.md"])
+        result = self.tools.git_add(["MEMORY.md", "MEMORY_detail.md"])
 
-        self.assertEqual(result, "staged: MEMORY.md, MEMORY_detail.md, dream_logs/2026-05-08.md")
+        self.assertEqual(result, "staged: MEMORY.md, MEMORY_detail.md")
         status = self.tools.git_status()
         self.assertIn("A  MEMORY.md", status)
         self.assertIn("A  MEMORY_detail.md", status)
-        self.assertIn("A  dream_logs/2026-05-08.md", status)
         self.assertIn("?? rightmemory.toml", status)
 
         with self.assertRaises(ValueError):
             self.tools.git_add(["rightmemory.toml"])
+
+    def test_insight_tools_commit_only_insight_logs(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        (self.root / "insight_logs").mkdir()
+        (self.root / "insight_logs" / "2026-05-30-143012.md").write_text("# Insight\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="insight")
+
+        result = tools.git_add(["insight_logs/2026-05-30-143012.md"])
+
+        self.assertEqual(result, "staged: insight_logs/2026-05-30-143012.md")
+        with self.assertRaisesRegex(ValueError, r"insight_logs/\*\.md"):
+            tools.git_add(["MEMORY.md"])
+
+    def test_dreamer_tools_reject_dream_logs(self):
+        self._git("init")
+        (self.root / "dream_logs").mkdir()
+        (self.root / "dream_logs" / "2026-05-30.md").write_text("# Dream\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="dreamer")
+
+        with self.assertRaisesRegex(ValueError, r"MEMORY.md or MEMORY_\*\.md"):
+            tools.git_add(["dream_logs/2026-05-30.md"])
+
+    def test_insight_create_file_rejects_active_memory(self):
+        tools = MemoryTools(self.root, role="insight")
+
+        with self.assertRaisesRegex(ValueError, r"can only write insight_logs/\*\.md"):
+            tools.create_file("MEMORY_new.md", "# New\n")
 
     def test_git_add_accepts_memory_skill_files(self):
         self._git("init")
@@ -471,25 +497,24 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "commit body must not contain NUL bytes"):
             self.tools.git_commit("memory: add domain", body="body\x00text")
 
-    def test_git_discard_reverts_allowed_tracked_changes(self):
+    def test_git_discard_reverts_allowed_tracked_memory_changes(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")
         self._git("config", "user.name", "Test User")
         memory = self.root / "MEMORY.md"
+        detail = self.root / "MEMORY_detail.md"
         memory.write_text("# Domain\n", encoding="utf-8")
-        dream = self.root / "dream_logs" / "2026-05-08.md"
-        dream.parent.mkdir()
-        dream.write_text("# Dream\n", encoding="utf-8")
-        self._git("add", "MEMORY.md", "dream_logs/2026-05-08.md")
+        detail.write_text("# Detail\n", encoding="utf-8")
+        self._git("add", "MEMORY.md", "MEMORY_detail.md")
         self._git("commit", "-m", "initial memory")
         memory.write_text("# Broken\n", encoding="utf-8")
-        dream.write_text("# Broken\n", encoding="utf-8")
+        detail.write_text("# Broken\n", encoding="utf-8")
 
-        result = self.tools.git_discard(["MEMORY.md", "dream_logs/2026-05-08.md"])
+        result = self.tools.git_discard(["MEMORY.md", "MEMORY_detail.md"])
 
-        self.assertEqual(result, "discarded: MEMORY.md, dream_logs/2026-05-08.md")
+        self.assertEqual(result, "discarded: MEMORY.md, MEMORY_detail.md")
         self.assertEqual(memory.read_text(encoding="utf-8"), "# Domain\n")
-        self.assertEqual(dream.read_text(encoding="utf-8"), "# Dream\n")
+        self.assertEqual(detail.read_text(encoding="utf-8"), "# Detail\n")
         self.assertEqual(self.tools.git_status(), "")
 
     def test_git_discard_reverts_staged_and_unstaged_changes(self):

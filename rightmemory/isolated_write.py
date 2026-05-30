@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .session import MemoryWriteLock, _ensure_runtime_gitignore
-from .tools import DREAM_LOG_FILE_RE, MEMORY_DETAIL_FILE_RE, MemoryTools
+from .tools import INSIGHT_LOG_FILE_RE, MEMORY_DETAIL_FILE_RE, MemoryTools
 
 
 GIT_TIMEOUT_SECONDS = 30
-MEMORY_WRITE_PATHS = ("MEMORY.md", "MEMORY_*.md", "dream_logs/*.md")
+ACTIVE_MEMORY_WRITE_PATHS = ("MEMORY.md", "MEMORY_*.md")
+INSIGHT_WRITE_PATHS = ("insight_logs/*.md",)
 ROLE_SAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 TEMP_BRANCH_PREFIX = "rightmemory-isolated-"
 
@@ -100,8 +101,13 @@ class IsolatedWriteSupervisor:
             raise RuntimeError(f"runtime worktree path is not ignored by git: {relative_path}")
 
     def _dirty_memory_files(self) -> list[str]:
-        status = self._git_stdout(self.memory_root, "status", "--porcelain", "--", *MEMORY_WRITE_PATHS)
+        status = self._git_stdout(self.memory_root, "status", "--porcelain", "--", *self._write_paths())
         return _porcelain_paths(status)
+
+    def _write_paths(self) -> tuple[str, ...]:
+        if self.role == "insight":
+            return INSIGHT_WRITE_PATHS
+        return ACTIVE_MEMORY_WRITE_PATHS
 
     def _temp_commits(self, worktree: Path, start_head: str) -> list[str]:
         output = self._git_stdout(worktree, "rev-list", "--reverse", f"{start_head}..HEAD")
@@ -112,10 +118,11 @@ class IsolatedWriteSupervisor:
             changed_paths = self._commit_paths(worktree, commit)
             if not changed_paths:
                 self._validate_empty_commit(worktree, commit)
-            invalid_paths = {path for path in changed_paths if not _is_memory_write_path(path)}
+            invalid_paths = {path for path in changed_paths if not self._is_role_write_path(path)}
             if invalid_paths:
                 paths = ", ".join(sorted(invalid_paths))
-                raise RuntimeError(f"isolated commit touches non-memory paths: {paths}")
+                label = "non-insight paths" if self.role == "insight" else "non-memory paths"
+                raise RuntimeError(f"isolated commit touches {label}: {paths}")
             self._validate_commit_tree(worktree, commit, set(changed_paths))
 
     def _validate_empty_commit(self, worktree: Path, commit: str) -> None:
@@ -125,9 +132,15 @@ class IsolatedWriteSupervisor:
         raise RuntimeError("isolated empty commits are limited to pruner `prune: checkpoint` commits")
 
     def _validate_commit_tree(self, worktree: Path, commit: str, changed_paths: set[str]) -> None:
-        self._validate_regular_memory_path(worktree, commit, "MEMORY.md", required=True)
+        if self.role != "insight":
+            self._validate_regular_memory_path(worktree, commit, "MEMORY.md", required=True)
         for path in sorted(changed_paths - {"MEMORY.md"}):
             self._validate_regular_memory_path(worktree, commit, path, required=False)
+
+    def _is_role_write_path(self, path: str) -> bool:
+        if self.role == "insight":
+            return bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
+        return path == "MEMORY.md" or bool(MEMORY_DETAIL_FILE_RE.fullmatch(path))
 
     def _validate_regular_memory_path(self, worktree: Path, commit: str, path: str, required: bool) -> None:
         tree_entry = self._tree_entry(worktree, commit, path)
@@ -254,14 +267,6 @@ def _is_temp_branch_for_role(branch: str, role_slug: str) -> bool:
             rf"{re.escape(TEMP_BRANCH_PREFIX)}{re.escape(role_slug)}-[0-9a-f]{{32}}",
             branch,
         )
-    )
-
-
-def _is_memory_write_path(path: str) -> bool:
-    return (
-        path == "MEMORY.md"
-        or bool(MEMORY_DETAIL_FILE_RE.fullmatch(path))
-        or bool(DREAM_LOG_FILE_RE.fullmatch(path))
     )
 
 
