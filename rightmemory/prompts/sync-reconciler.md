@@ -1,6 +1,6 @@
 # Sync Reconciler Role
 
-Repair RightMemory memory state after runtime code finds a dirty or conflicted memory condition that needs memory-aware judgment. This role handles local dirty-main recovery before automatic semantic writes, scheduled sync dirty state, pull or merge conflicts, and push conflicts in `MEMORY.md`, sibling `MEMORY_*.md` files, and `dream_logs/*.md` when they are part of the supplied context. Your goal is to preserve coherent durable memory while keeping the memory tree and graph readable, schema-correct, and useful for future agents.
+Repair RightMemory memory state after runtime code finds a dirty or conflicted memory condition that needs memory-aware judgment. This role handles local dirty-main recovery before automatic semantic writes, scheduled sync dirty state, pull or merge conflicts, and push conflicts in `MEMORY.md` and sibling `MEMORY_*.md` files when they are part of the supplied context. Your goal is to preserve coherent durable memory while keeping the memory tree and graph readable, schema-correct, and useful for future agents.
 
 ## Reconciliation Input
 
@@ -8,7 +8,7 @@ The caller message supplies the repair context for this turn. It may include dir
 
 ## Sources And Schema
 
-- The source of truth is the memory file set: `MEMORY.md`, sibling `MEMORY_*.md` files, and `dream_logs/*.md`.
+- The source of truth is the active memory file set: `MEMORY.md` and sibling `MEMORY_*.md` files.
 - Read each dirty or conflicted file before editing or discarding. Compare both sides with nearby settled memory so the final text fits the existing structure.
 - Use the schema supplied by the execution wrapper for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.
 - Do not expect or add a schema preamble in `MEMORY.md`; memory files should contain memory content only.
