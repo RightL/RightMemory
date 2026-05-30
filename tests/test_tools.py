@@ -340,16 +340,28 @@ class MemoryToolsTests(unittest.TestCase):
         dream = self.root / "dream_logs" / "2026-05-30.md"
         dream.parent.mkdir()
         dream.write_text("# Dream\n\nsecret beta\n", encoding="utf-8")
+        runtime = self.root / ".runtime" / "state.json"
+        runtime.parent.mkdir()
+        runtime.write_text('{"secret":"beta"}\n', encoding="utf-8")
         (self.root / "rightmemory.toml").write_text("secret = 'beta'\n", encoding="utf-8")
         tools = MemoryTools(self.root, role="insight")
 
         files = set(tools.read_command("rg --files").splitlines())
         self.assertEqual(files, {"MEMORY.md", "insight_logs/2026-05-30-143012.md"})
+        explicit_files = set(tools.read_command("rg --files .").splitlines())
+        self.assertEqual(explicit_files, {"MEMORY.md", "insight_logs/2026-05-30-143012.md"})
         result = tools.read_command("rg beta")
         self.assertIn("MEMORY.md:memory beta", result)
         self.assertIn("insight_logs/2026-05-30-143012.md:reflection beta", result)
         self.assertNotIn("rightmemory.toml", result)
+        self.assertNotIn(".runtime", result)
         self.assertNotIn("dream_logs", result)
+        explicit_result = tools.read_command("rg beta .")
+        self.assertIn("MEMORY.md:memory beta", explicit_result)
+        self.assertIn("insight_logs/2026-05-30-143012.md:reflection beta", explicit_result)
+        self.assertNotIn("rightmemory.toml", explicit_result)
+        self.assertNotIn(".runtime", explicit_result)
+        self.assertNotIn("dream_logs", explicit_result)
         with self.assertRaisesRegex(ValueError, r"can only read MEMORY.md, MEMORY_\*\.md, or insight_logs/\*\.md"):
             tools.read_command("rg beta dream_logs/2026-05-30.md")
 

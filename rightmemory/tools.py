@@ -643,6 +643,10 @@ class MemoryTools:
             path_start = len(args)
             args = [*args, *readable_paths]
             path_indices = set(range(path_start, len(args)))
+        elif self._has_role_read_scope() and path_indices:
+            args, path_indices = self._expand_role_read_command_dirs(args, path_indices)
+            if not path_indices:
+                return "no matches"
         self._validate_read_command_path_tokens(args, path_indices)
         if "--files" not in args and "--with-filename" not in args and "--no-filename" not in args:
             args = [args[0], "--with-filename", *args[1:]]
@@ -786,6 +790,24 @@ class MemoryTools:
                     raise ValueError("read command paths must stay under the RightMemory root")
             if self._has_role_read_scope():
                 self._check_allowed_read_command_path(token)
+
+    def _expand_role_read_command_dirs(self, args: list[str], path_indices: set[int]) -> tuple[list[str], set[int]]:
+        expanded: list[str] = []
+        expanded_path_indices: set[int] = set()
+        for index, token in enumerate(args):
+            if index not in path_indices:
+                expanded.append(token)
+                continue
+            resolved = self._resolve_path(token)
+            if not resolved.is_dir():
+                expanded_path_indices.add(len(expanded))
+                expanded.append(token)
+                continue
+            self._check_allowed_read_search_dir(resolved, token)
+            for relative_path in self._existing_role_read_paths_under(resolved):
+                expanded_path_indices.add(len(expanded))
+                expanded.append(relative_path)
+        return expanded, expanded_path_indices
 
     def _validate_git_diff_command(self, args: list[str]) -> None:
         if len(args) == 2:
@@ -1081,6 +1103,21 @@ class MemoryTools:
             if path.is_file() and self._is_under_root(path) and self._is_allowed_read_file(path)
         ]
         return sorted(set(paths))
+
+    def _existing_role_read_paths_under(self, directory: Path) -> list[str]:
+        directory = directory.resolve(strict=False)
+        return [
+            relative_path
+            for relative_path in self._existing_role_read_paths()
+            if self._path_is_self_or_under(self.memory_root / relative_path, directory)
+        ]
+
+    def _path_is_self_or_under(self, path: Path, directory: Path) -> bool:
+        try:
+            path.resolve(strict=False).relative_to(directory)
+        except ValueError:
+            return False
+        return True
 
     def _is_active_memory_path(self, relative_path: str) -> bool:
         return relative_path == "MEMORY.md" or bool(MEMORY_DETAIL_FILE_RE.fullmatch(relative_path))
