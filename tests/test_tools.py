@@ -285,6 +285,74 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"can only write insight_logs/\*\.md"):
             tools.create_file("MEMORY_new.md", "# New\n")
 
+    def test_sync_reconciler_can_repair_active_memory_and_insight_logs(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Domain\n", encoding="utf-8")
+        insight = self.root / "insight_logs" / "2026-05-30-143012.md"
+        insight.parent.mkdir()
+        insight.write_text("# Insight\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="sync-reconciler")
+
+        result = tools.git_add(["MEMORY.md", "insight_logs/2026-05-30-143012.md"])
+
+        self.assertEqual(result, "staged: MEMORY.md, insight_logs/2026-05-30-143012.md")
+        with self.assertRaisesRegex(ValueError, r"MEMORY.md, MEMORY_\*\.md, or insight_logs/\*\.md"):
+            tools.git_add(["rightmemory.toml"])
+
+    def test_insight_read_tools_are_limited_to_active_memory_and_insight_logs(self):
+        (self.root / "MEMORY.md").write_text("# Domain\n\nmemory beta\n", encoding="utf-8")
+        (self.root / "MEMORY_detail.md").write_text("# Detail\n", encoding="utf-8")
+        insight = self.root / "insight_logs" / "2026-05-30-143012.md"
+        insight.parent.mkdir()
+        insight.write_text("# Insight\n\nreflection beta\n", encoding="utf-8")
+        dream = self.root / "dream_logs" / "2026-05-30.md"
+        dream.parent.mkdir()
+        dream.write_text("# Dream\n\nsecret beta\n", encoding="utf-8")
+        runtime = self.root / ".runtime" / "state.json"
+        runtime.parent.mkdir()
+        runtime.write_text('{"secret":"beta"}\n', encoding="utf-8")
+        (self.root / "rightmemory.toml").write_text("secret = 'beta'\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="insight")
+
+        self.assertEqual(
+            set(tools.glob("**/*")),
+            {"MEMORY.md", "MEMORY_detail.md", "insight_logs/2026-05-30-143012.md"},
+        )
+        self.assertIn("MEMORY.md:3: memory beta", tools.grep("beta", glob="**/*.md"))
+        self.assertIn("insight_logs/2026-05-30-143012.md:3: reflection beta", tools.grep("reflection", glob="**/*.md"))
+        self.assertEqual(tools.grep("secret", glob="**/*.md"), "no matches")
+        self.assertIn("reflection beta", tools.read("insight_logs/2026-05-30-143012.md"))
+        with self.assertRaisesRegex(ValueError, r"can only read MEMORY.md, MEMORY_\*\.md, or insight_logs/\*\.md"):
+            tools.read("rightmemory.toml")
+        with self.assertRaisesRegex(ValueError, r"can only read MEMORY.md, MEMORY_\*\.md, or insight_logs/\*\.md"):
+            tools.outline_file("dream_logs/2026-05-30.md")
+        with self.assertRaisesRegex(ValueError, r"can only read MEMORY.md, MEMORY_\*\.md, or insight_logs/\*\.md"):
+            tools.read_command("cat rightmemory.toml")
+
+    @unittest.skipIf(shutil.which("rg") is None, "rg is not installed")
+    def test_insight_read_command_rg_uses_limited_read_scope(self):
+        (self.root / "MEMORY.md").write_text("# Domain\n\nmemory beta\n", encoding="utf-8")
+        insight = self.root / "insight_logs" / "2026-05-30-143012.md"
+        insight.parent.mkdir()
+        insight.write_text("# Insight\n\nreflection beta\n", encoding="utf-8")
+        dream = self.root / "dream_logs" / "2026-05-30.md"
+        dream.parent.mkdir()
+        dream.write_text("# Dream\n\nsecret beta\n", encoding="utf-8")
+        (self.root / "rightmemory.toml").write_text("secret = 'beta'\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="insight")
+
+        files = set(tools.read_command("rg --files").splitlines())
+        self.assertEqual(files, {"MEMORY.md", "insight_logs/2026-05-30-143012.md"})
+        result = tools.read_command("rg beta")
+        self.assertIn("MEMORY.md:memory beta", result)
+        self.assertIn("insight_logs/2026-05-30-143012.md:reflection beta", result)
+        self.assertNotIn("rightmemory.toml", result)
+        self.assertNotIn("dream_logs", result)
+        with self.assertRaisesRegex(ValueError, r"can only read MEMORY.md, MEMORY_\*\.md, or insight_logs/\*\.md"):
+            tools.read_command("rg beta dream_logs/2026-05-30.md")
+
     def test_git_add_accepts_memory_skill_files(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")

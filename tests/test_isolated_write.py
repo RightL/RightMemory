@@ -289,6 +289,25 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertTrue((self.root / "insight_logs" / "2026-05-30-143012.md").is_file())
         self.assertEqual(self._git("log", "-1", "--format=%s"), "insight: reflect on memory shape")
 
+    def test_insight_commit_lands_when_active_memory_is_invalid(self):
+        self._append_memory(self.root, "- `one` duplicate active memory\n")
+        self._git("add", "MEMORY.md")
+        self._git("commit", "-m", "memory: preexisting invalid active memory")
+
+        def callback(worktree: Path) -> str:
+            insight = worktree / "insight_logs" / "2026-05-30-143012.md"
+            insight.parent.mkdir()
+            insight.write_text("# Insight\n\nUseful reflection.\n", encoding="utf-8")
+            self._git("add", "insight_logs/2026-05-30-143012.md", cwd=worktree)
+            self._git("commit", "-m", "insight: reflect on memory shape", cwd=worktree)
+            return "insight"
+
+        result = IsolatedWriteSupervisor(self.root, "insight").run(callback)
+
+        self.assertEqual(result.output, "insight")
+        self.assertTrue((self.root / "insight_logs" / "2026-05-30-143012.md").is_file())
+        self.assertEqual(self._git("log", "-1", "--format=%s"), "insight: reflect on memory shape")
+
     def test_insight_commit_rejects_memory_edit(self):
         def callback(worktree: Path) -> None:
             self._append_memory(worktree, "- `two` invalid insight memory edit\n")

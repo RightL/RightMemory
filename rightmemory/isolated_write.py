@@ -60,9 +60,10 @@ class IsolatedWriteSupervisor:
             commits = self._temp_commits(worktree, start_head)
             if commits:
                 self._validate_commits(worktree, commits)
-                validation = MemoryTools(worktree).validate_memory()
-                if validation.startswith("validation failed:"):
-                    raise RuntimeError(validation)
+                if self.role != "insight":
+                    validation = MemoryTools(worktree, role=self.role).validate_memory()
+                    if validation.startswith("validation failed:"):
+                        raise RuntimeError(validation)
 
             with MemoryWriteLock(self.memory_root):
                 dirty = self._dirty_memory_files()
