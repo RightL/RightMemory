@@ -32,9 +32,9 @@ Schema rules live in `skills/rightmemory-schema.md` instead of at the top of eve
 
 ### Automatic write isolation
 
-Automatic `update`, `reviewer`, `dreamer`, and `pruner` turns run in temporary Git worktrees when they operate on the main state root. The role still behaves like an ordinary memory writer: it reads, edits, validates, and commits allowed memory files. Runtime validates those temporary commits, keeps `MEMORY.md` as a regular file, lands successful commits in the main memory repo, and promotes temporary session/provider state after the isolated turn succeeds. CLI-agent isolation uses a fresh provider session for speculative work so failed attempts do not advance the prior durable provider session.
+Automatic `update`, `reviewer`, `dreamer`, `insight`, and `pruner` turns run in temporary Git worktrees when they operate on the main state root. Each role keeps its own write boundary: memory-editing roles read, edit, validate, and commit active memory files, while Insight reads memory-root context and commits reflective logs. Runtime validates those temporary commits, keeps active memory files regular for memory-editing roles, lands successful commits in the main memory repo, and promotes temporary session/provider state after the isolated turn succeeds. CLI-agent isolation uses a fresh provider session for speculative work so failed attempts do not advance the prior durable provider session.
 
-This keeps the user-facing memory repo focused on completed memory commits instead of partial agent editing state. Failed or interrupted temporary work is discarded because the durable retry source is the original update batch, transcript batch, or dreamer trigger balance. Dirty main memory files block automatic semantic writes independently of remote sync so local edits remain visible instead of being blended into a model-created change.
+This keeps the user-facing memory repo focused on completed role-owned commits instead of partial agent editing state. Failed or interrupted temporary work is discarded because the durable retry source is the original update batch, transcript batch, Dreamer trigger balance, or Insight trigger balance. Dirty main memory files block automatic semantic writes independently of remote sync so local edits remain visible instead of being blended into a model-created change.
 
 ### Generation pruning
 
@@ -48,9 +48,13 @@ Historical retrieval is explicit. `retrieve` stays focused on current active mem
 
 Dreamer watch is driven by accumulated successful memory work rather than elapsed time. Successful update and review batches add points under `.runtime/dreamer/trigger-state.json`; the watcher checks that balance on its configured cadence and runs when the threshold is reached. A successful automatic dream consumes the threshold after the cycle lands or completes as a valid no-op, while failure preserves the balance. This makes dreamer a consolidation pressure valve instead of a clock-driven maintenance task.
 
+### Insight logs
+
+Insight logs are a reflective artifact stream inside the memory repo. They are useful when memory activity reveals broader patterns, strategy, risks, recommendations, or next-step ideas that should be preserved without turning them into active memory facts. Insight reads active memory and prior Insight logs, writes timestamped essays under `insight_logs/`, and leaves memory edits to the memory-editing roles. Its watcher has an independent trigger balance under `.runtime/insight/trigger-state.json`, so reflection cadence can differ from Dreamer consolidation pressure.
+
 ### Command-backed roles
 
-RightMemory exposes explicit command roles because each memory operation has a different authority boundary. `retrieve` is fast and read-oriented. `history` is read-only archaeology over pruned memory. `update` writes candidate memory. `dreamer` consolidates and restructures. `pruner` removes stale active memory after a generation threshold. The caller chooses the role at startup so the runtime can load the right prompt, authority boundary, session history, and executor config without asking one model context to infer behavior from dispatch tags; the configured memory root remains the runtime root because that is the memory store and the intended ownership boundary.
+RightMemory exposes explicit command roles because each memory operation has a different authority boundary. `retrieve` is fast and read-oriented. `history` is read-only archaeology over pruned memory. `update` writes candidate memory. `dreamer` consolidates and restructures active memory. `insight` reflects over active memory and prior Insight logs, producing durable essay artifacts without editing active memory. `pruner` removes stale active memory after a generation threshold. The caller chooses the role at startup so the runtime can load the right prompt, authority boundary, session history, and executor config without asking one model context to infer behavior from dispatch tags; the configured memory root remains the runtime root because that is the memory store and the intended ownership boundary.
 
 ### Command-backed install modes
 
@@ -58,7 +62,7 @@ Both install modes give the host agent the same workflow: a `memory-orchestrator
 
 ### Executor config
 
-Standalone mode uses role-local model tables because retrieve, history, update, dreamer, reviewer, pruner, and sync repair may need different providers or model sizes. CLI-agent mode uses global `[agent_cli].provider` plus role-local `[<role>.agent_cli]` tables so one memory root can use Codex for some roles and Claude for others. `anthropic/...` remains the explicit Anthropic selector for standalone models; other model ids are treated as OpenAI-compatible so local gateways and hosted vLLM endpoints stay simple.
+Standalone mode uses role-local model tables because retrieve, history, update, dreamer, insight, reviewer, pruner, and sync repair may need different providers or model sizes. CLI-agent mode uses global `[agent_cli].provider` plus role-local `[<role>.agent_cli]` tables so one memory root can use Codex for some roles and Claude for others. `anthropic/...` remains the explicit Anthropic selector for standalone models; other model ids are treated as OpenAI-compatible so local gateways and hosted vLLM endpoints stay simple.
 
 ### Standalone tool boundary
 
@@ -66,13 +70,13 @@ Standalone mode exposes narrow filesystem and git tools instead of arbitrary Pyt
 
 ### Standalone commit boundary
 
-Standalone commit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md` because write-capable roles need to preserve memory edits and dream reports without gaining arbitrary repository-write authority. Empty commits are reserved for `prune:` checkpoints so generation boundaries can advance even when the pruner removes nothing. Retrieve and historian do not receive write tools, so active and historical retrieval remain lower-authority paths. Unrelated untracked files remain visible through status but outside the stage/commit allowlist so model-driven commits do not sweep up local config, backups, or test artifacts.
+Standalone commit tools are role-aware: memory-editing roles commit active memory files, while Insight commits `insight_logs/*.md`. Empty commits are reserved for `prune:` checkpoints so generation boundaries can advance even when the pruner removes nothing. Retrieve and historian do not receive write tools, so active and historical retrieval remain lower-authority paths. Unrelated untracked files remain visible through status but outside the stage/commit allowlist so model-driven commits do not sweep up local config, backups, or test artifacts.
 
 ### Global memory sync
 
 Global memory sync remains local-first: every device keeps a complete memory root, and Git provides distributed transport between those roots. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
 
-Runtime code owns deterministic sync mechanics at the point where each one belongs in the workflow. For `update`, `reviewer`, `dreamer`, and `pruner`, sync preflight handles upstream freshness before semantic model work when sync is enabled, and push handling publishes committed memory changes after successful automatic writes land. Sync-detected dirty or conflicted memory state routes to `sync-reconciler`; the isolated-write dirty-main guard remains local and runs even when sync is disabled, but it also gives `sync-reconciler` one bounded repair attempt before failing the automatic write. Retrieval and historical retrieval keep the fast local path by default.
+Runtime code owns deterministic sync mechanics at the point where each one belongs in the workflow. For `update`, `reviewer`, `dreamer`, `insight`, and `pruner`, sync preflight handles upstream freshness before semantic model work when sync is enabled, and push handling publishes committed role-owned changes after successful automatic writes land. Sync-detected dirty or conflicted memory state routes to `sync-reconciler`; the isolated-write dirty-main guard remains local and runs even when sync is disabled, but it also gives `sync-reconciler` one bounded repair attempt before failing the automatic write. Retrieval and historical retrieval keep the fast local path by default.
 
 Memory-aware repair stays in `sync-reconciler` because Markdown memory conflicts and dirty memory state require durability and schema judgment, not just Git mechanics. Runtime dirty-main checks and scheduled sync flows call that role with bounded repair context, and the role validates the file set, commits the repaired state, and calls `sync_push` when sync is enabled. `sync-reconciler` stays separate from dreamer because repair is a narrow maintenance responsibility, while dreamer owns broader consolidation and restructuring.
 
