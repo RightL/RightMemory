@@ -259,6 +259,20 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertEqual(caught.exception.paths, ("insight_logs/2026-05-30-143012.md",))
         self.assertFalse(called)
 
+    def test_dirty_active_memory_blocks_insight_before_callback(self):
+        called = False
+        self._append_memory(self.root, "- `two` uncommitted active memory\n")
+
+        def callback(_worktree: Path) -> None:
+            nonlocal called
+            called = True
+
+        with self.assertRaises(MainMemoryDirtyError) as caught:
+            IsolatedWriteSupervisor(self.root, "insight").run(callback)
+
+        self.assertEqual(caught.exception.paths, ("MEMORY.md",))
+        self.assertFalse(called)
+
     def test_untracked_main_dream_log_does_not_block_dreamer(self):
         called = False
         dream_log = self.root / "dream_logs" / "2026-05-22.md"

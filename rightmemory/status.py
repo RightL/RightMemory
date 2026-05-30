@@ -65,6 +65,7 @@ class _InsightTriggerSnapshot:
     points: float = 0.0
     updated_at: str | None = None
     last_successful_insight_at: str | None = None
+    last_successful_insight_result: str | None = None
     last_recovery_at: str | None = None
 
 
@@ -233,6 +234,9 @@ def collect_insight_section(
         updated_at = getattr(state, "updated_at", None)
         if updated_at:
             detail += f"\nupdated: {updated_at}"
+        last_result = getattr(state, "last_successful_insight_result", None)
+        if last_result:
+            detail += f"\nlast result: {last_result}"
         last = getattr(state, "last_successful_insight_at", None)
         return SectionStatus(name="insight", state="trigger progress", detail=detail, last=last)
     except Exception as exc:
@@ -596,6 +600,10 @@ def _read_insight_trigger_snapshot(memory_root: Path) -> _InsightTriggerSnapshot
             data.get("last_successful_insight_at"),
             "last_successful_insight_at",
         ),
+        last_successful_insight_result=_optional_insight_result_str(
+            data.get("last_successful_insight_result"),
+            "last_successful_insight_result",
+        ),
         last_recovery_at=_optional_iso_datetime_str(data.get("last_recovery_at"), "last_recovery_at"),
     )
 
@@ -609,6 +617,14 @@ def _optional_iso_datetime_str(value: object, field: str) -> str | None:
         datetime.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(f"{field} must be an ISO datetime string or null") from exc
+    return value
+
+
+def _optional_insight_result_str(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    if value not in {"artifact", "noop"}:
+        raise ValueError(f"{field} must be artifact, noop, or null")
     return value
 
 

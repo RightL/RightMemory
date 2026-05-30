@@ -407,6 +407,7 @@ class StatusDashboardTests(unittest.TestCase):
                 "points": 88.0,
                 "updated_at": "2026-05-30T08:00:00+00:00",
                 "last_successful_insight_at": "2026-05-29T08:00:00+00:00",
+                "last_successful_insight_result": "artifact",
                 "last_recovery_at": None,
             },
         )()
@@ -422,6 +423,31 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(section.state, "trigger progress")
         self.assertIn("trigger: 88.0/150.0 points", section.detail)
         self.assertIn("check interval: 3000 seconds", section.detail)
+        self.assertIn("last result: artifact", section.detail)
+
+    def test_collect_insight_section_reads_noop_last_result(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            trigger_path = root / ".runtime" / "insight" / "trigger-state.json"
+            trigger_path.parent.mkdir(parents=True)
+            trigger_path.write_text(
+                json.dumps(
+                    {
+                        "points": 0.0,
+                        "updated_at": "2026-05-30T08:00:00+00:00",
+                        "last_successful_insight_at": "2026-05-30T08:00:00+00:00",
+                        "last_successful_insight_result": "noop",
+                        "last_recovery_at": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = type("InsightConfig", (), {"trigger_points": 150.0, "check_interval_seconds": 3000})()
+
+            section = collect_insight_section(root, config_loader=lambda: config)
+
+        self.assertEqual(section.last, "2026-05-30T08:00:00+00:00")
+        self.assertIn("last result: noop", section.detail)
 
     def test_collect_dreamer_section_reports_malformed_trigger_without_rewriting(self):
         with tempfile.TemporaryDirectory() as tempdir:

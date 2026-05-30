@@ -107,7 +107,7 @@ class IsolatedWriteSupervisor:
 
     def _write_paths(self) -> tuple[str, ...]:
         if self.role == "insight":
-            return INSIGHT_WRITE_PATHS
+            return (*ACTIVE_MEMORY_WRITE_PATHS, *INSIGHT_WRITE_PATHS)
         return ACTIVE_MEMORY_WRITE_PATHS
 
     def _temp_commits(self, worktree: Path, start_head: str) -> list[str]:

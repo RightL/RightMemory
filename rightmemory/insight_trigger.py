@@ -19,6 +19,7 @@ class InsightTriggerState:
     points: float = 0.0
     updated_at: str | None = None
     last_successful_insight_at: str | None = None
+    last_successful_insight_result: str | None = None
     last_recovery_at: str | None = None
 
 
@@ -48,8 +49,9 @@ class InsightTriggerStore:
             self._write_locked(next_state)
             return next_state
 
-    def consume_if_available(self, threshold: float) -> bool:
+    def consume_if_available(self, threshold: float, result: str | None = None) -> bool:
         amount = _positive_finite_number(threshold, "threshold")
+        result = _validate_optional_result(result, "result")
         with self._locked():
             state = self._read_locked()
             if state.points < amount:
@@ -60,6 +62,7 @@ class InsightTriggerStore:
                 points=state.points - amount,
                 updated_at=now,
                 last_successful_insight_at=now,
+                last_successful_insight_result=result,
             )
             self._write_locked(next_state)
             return True
@@ -137,6 +140,10 @@ def _state_from_json(data: Any) -> InsightTriggerState:
             data.get("last_successful_insight_at"),
             "last_successful_insight_at",
         ),
+        last_successful_insight_result=_validate_optional_result(
+            data.get("last_successful_insight_result"),
+            "last_successful_insight_result",
+        ),
         last_recovery_at=_validate_optional_time(data.get("last_recovery_at"), "last_recovery_at"),
     )
 
@@ -145,6 +152,7 @@ def _validate_state(state: InsightTriggerState) -> None:
     _nonnegative_finite_number(state.points, "points")
     _validate_optional_time(state.updated_at, "updated_at")
     _validate_optional_time(state.last_successful_insight_at, "last_successful_insight_at")
+    _validate_optional_result(state.last_successful_insight_result, "last_successful_insight_result")
     _validate_optional_time(state.last_recovery_at, "last_recovery_at")
 
 
@@ -183,6 +191,14 @@ def _validate_optional_time(value: object, field: str) -> str | None:
         datetime.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(f"{field} must be an ISO datetime string or null") from exc
+    return value
+
+
+def _validate_optional_result(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    if value not in {"artifact", "noop"}:
+        raise ValueError(f"{field} must be artifact, noop, or null")
     return value
 
 

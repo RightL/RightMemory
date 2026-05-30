@@ -1255,8 +1255,33 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(calls, ["insight-watch"])
         self.assertEqual(trigger.points, 5.0)
         self.assertIsNotNone(trigger.last_successful_insight_at)
+        self.assertEqual(trigger.last_successful_insight_result, "noop")
         self.assertIn("rightmemory insight cycle", stdout.getvalue())
         self.assertIn("session insight-watch: insight", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_insight_watch_once_records_artifact_result_when_log_changes(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            InsightTriggerStore(memory_root).increment(155.0)
+            watch_config = _insight_watch_config(memory_root=memory_root, trigger_points=150.0)
+
+            def run_cycle(session_id: str) -> str:
+                insight = memory_root / "insight_logs" / "2026-05-30-143012.md"
+                insight.parent.mkdir()
+                insight.write_text(f"# Insight\n\n{session_id}\n", encoding="utf-8")
+                return f"session {session_id}: insight"
+
+            with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+                result = _insight_watch_once(watch_config, "insight-watch", run_cycle)
+            trigger = InsightTriggerStore(memory_root).read()
+
+        self.assertEqual(result, "succeeded")
+        self.assertEqual(trigger.points, 5.0)
+        self.assertEqual(trigger.last_successful_insight_result, "artifact")
         self.assertEqual(stderr.getvalue(), "")
 
     def test_dreamer_watch_once_does_not_consume_on_failure(self):

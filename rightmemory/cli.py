@@ -10,6 +10,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable
 
@@ -680,6 +681,7 @@ def _insight_watch_once(watch_config: Any, session_id: str, run_cycle: Callable[
     if state.points < watch_config.trigger_points:
         return _INSIGHT_WATCH_SKIPPED
 
+    before_logs = _insight_log_fingerprints(watch_config.memory_root)
     timestamp = datetime.now(UTC).isoformat()
     print(f"[{timestamp}] rightmemory insight cycle", flush=True)
     try:
@@ -689,8 +691,21 @@ def _insight_watch_once(watch_config: Any, session_id: str, run_cycle: Callable[
         return _INSIGHT_WATCH_FAILED
 
     print(output, flush=True)
-    store.consume_if_available(watch_config.trigger_points)
+    after_logs = _insight_log_fingerprints(watch_config.memory_root)
+    result = "artifact" if after_logs != before_logs else "noop"
+    store.consume_if_available(watch_config.trigger_points, result=result)
     return _INSIGHT_WATCH_SUCCEEDED
+
+
+def _insight_log_fingerprints(memory_root: Path) -> dict[str, str]:
+    root = Path(memory_root)
+    fingerprints: dict[str, str] = {}
+    for path in sorted((root / "insight_logs").glob("*.md")):
+        if not path.is_file():
+            continue
+        relative_path = path.relative_to(root).as_posix()
+        fingerprints[relative_path] = sha256(path.read_bytes()).hexdigest()
+    return fingerprints
 
 
 def _insight_watch(interval: int | None, session_id: str) -> int:

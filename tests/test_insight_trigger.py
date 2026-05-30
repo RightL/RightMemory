@@ -36,6 +36,27 @@ class InsightTriggerStoreTests(unittest.TestCase):
         self.assertEqual(after.points, 3.0)
         self.assertIsNone(after.last_successful_insight_at)
 
+    def test_consume_records_last_successful_result(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = InsightTriggerStore(root)
+            store.increment(12.5)
+
+            consumed = store.consume_if_available(10.0, result="artifact")
+            after = store.read()
+
+        self.assertTrue(consumed)
+        self.assertEqual(after.last_successful_insight_result, "artifact")
+
+    def test_consume_rejects_invalid_result(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = InsightTriggerStore(root)
+            store.increment(12.5)
+
+            with self.assertRaises(ValueError):
+                store.consume_if_available(10.0, result="maybe")
+
     def test_corrupt_state_is_recovered_under_insight_directory(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
