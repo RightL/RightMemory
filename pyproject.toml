@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "rightmemory"
 version = "0.1.0"
-description = "Tree + graph memory for AI coding agents, stored in local Markdown."
+description = "Tree + graph memory for AI coding agents, backed by Git-syncable Markdown."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -16,6 +16,7 @@ keywords = [
   "claude-code",
   "markdown",
   "local-first",
+  "git-sync",
   "context-engineering",
 ]
 classifiers = [

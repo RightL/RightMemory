@@ -1,8 +1,8 @@
 # RightMemory
 
-**Tree + graph memory for AI coding agents.**
+**Tree + graph memory that AI coding agents can share across sessions, clients, and devices.**
 
-RightMemory gives Codex, Claude Code, and other coding agents a local Markdown memory they can retrieve, update, review, and consolidate. A heading tree gives agents local context; graph edges connect related facts across sessions and files.
+RightMemory gives coding agents a structured memory substrate: a heading tree for local context, graph edges for cross-session relationships, and command-backed roles for retrieval, updates, transcript review, sync repair, pruning, and consolidation. Memory stays in ordinary Git-syncable files, so the same durable context can move across devices and agent clients instead of living inside one vendor UI.
 
 ![RightMemory terminal demo](docs/assets/rightmemory-demo.svg)
 
@@ -10,14 +10,14 @@ RightMemory gives Codex, Claude Code, and other coding agents a local Markdown m
 
 Modern coding agents are strong inside a single conversation, then strangely forgetful in the next one. RightMemory treats memory as owned project state:
 
-- **Readable files:** memory lives in `MEMORY.md`, optional `MEMORY_<slug>.md` detail files, and `dream_logs/`.
-- **Agent-shaped structure:** headings provide local reading context, while node ids and typed edges connect related facts across the tree.
+- **Tree + graph structure:** headings give agents local reading context, while node ids and typed edges connect related facts across sessions and files.
+- **Git-syncable memory:** memory lives in `MEMORY.md`, optional `MEMORY_<slug>.md` detail files, and `dream_logs/`, so it can be inspected, diffed, versioned, and shared through a normal Git remote.
 - **Clear ownership:** retrieval, updates, transcript review, sync repair, and consolidation run through role-specific commands instead of letting the main agent half-edit memory while doing unrelated work.
-- **Local-first operation:** memory is inspectable, diffable, syncable with Git, and usable with Codex CLI, Claude Code CLI, or RightMemory's standalone runtime.
+- **Vendor-neutral command surface:** Codex CLI and Claude Code CLI have built-in delegated execution today; Gemini CLI-style workflows and other command-capable agents can use the same `rightmemory` CLI or JSON-over-stdio daemon surface.
 
 ## Who It Is For
 
-RightMemory is aimed at developers who spend serious time with coding agents and want durable context that stays understandable outside a vendor UI. It is especially useful when your agent needs to remember project decisions, user context, user preferences, workflow expectations, cross-session behavior guidance, or review notes from prior Codex and Claude sessions.
+RightMemory is aimed at developers who spend serious time with coding agents and want durable context that survives new sessions, new devices, and agent-client changes. It is especially useful when your agents need to remember project decisions, user context, workflow expectations, cross-session behavior guidance, or review notes from supported agent sessions.
 
 ## Quick Start
 
@@ -47,7 +47,7 @@ cd RightMemory
 ./install.sh
 ```
 
-The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs the command-backed orchestrator skill into both `~/.codex/skills` and `~/.claude/skills`.
+The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs the command-backed orchestrator skill into both `~/.codex/skills` and `~/.claude/skills`. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
 
 If you already use Codex CLI or Claude Code CLI and want RightMemory roles to run through those tools:
 
@@ -96,12 +96,12 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 
 ## What It Gives You
 
-- A root memory file, `MEMORY.md`, plus optional sibling detail files named `MEMORY_<slug>.md`.
-- A tree of `#`, `##`, and `###` headings for hierarchical retrieval context.
-- Addressable heading anchors and node ids for agent retrieval.
-- Typed edges such as `dep:`, `cfg:`, `ver:`, `doc:`, and `todo:` for graph traversal across the tree.
+- A heading tree of `#`, `##`, and `###` sections for hierarchical retrieval context.
+- Addressable heading anchors and node ids for precise agent references.
+- Typed graph edges such as `dep:`, `cfg:`, `ver:`, `doc:`, and `todo:` for traversal across the tree.
+- Ordinary Git-syncable files: `MEMORY.md`, optional sibling detail files named `MEMORY_<slug>.md`, and `dream_logs/`.
 - A command-backed `memory-orchestrator` skill for retrieval, updates, and change-triggered consolidation.
-- Two executor modes behind the same `rightmemory` CLI: local standalone runtime or delegated Codex/Claude CLI role execution.
+- Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex/Claude CLI role execution.
 - Optional automatic transcript review for idle Codex and Claude sessions.
 
 ## Install Options And Updates
@@ -122,13 +122,13 @@ Fresh installs baseline the current semantic upgrade notes because the seeded me
 
 ## Why Not Raw Notes Or A Vector DB?
 
-RightMemory is not trying to replace notes, search, or embeddings. It focuses on the part those systems often leave underspecified: who owns memory edits, how agents retrieve enough surrounding context, and how durable facts stay reviewable over time.
+RightMemory is not trying to replace notes, search, or embeddings. It focuses on the part those systems often leave underspecified: how agents preserve structured context, who owns memory edits, how related facts stay connected across sessions, and how durable memory remains reviewable over time.
 
 | Approach | Works Well For | RightMemory Adds |
 | --- | --- | --- |
-| Raw Markdown notes | Human-readable context | Agent-addressable nodes, graph edges, and role-owned updates |
+| Raw Markdown notes | Human-readable context | Agent-addressable trees, graph edges, and role-owned updates |
 | Vector retrieval | Fuzzy recall across large text | Inspectable structure, deterministic files, and explicit consolidation |
-| Agent chat history | Recent session continuity | Durable project memory that survives new sessions and tool changes |
+| Agent chat history | Recent session continuity | Durable project memory that survives new sessions, devices, and agent clients |
 | MCP memory adapters | Tool integration | A file schema and command runtime that can be wrapped by adapters later |
 
 ## Memory Model
@@ -238,7 +238,7 @@ rightmemory/prompts/reviewer.md
 rightmemory/prompts/sync-reconciler.md
 ```
 
-Both install modes use these files through the `rightmemory` runtime. Standalone mode loads them into the local Pydantic AI agent and tool loop. CLI-agent mode wraps the same role instructions into prompts sent to Codex CLI or Claude Code CLI. The installed `memory-orchestrator` remains a thin command dispatcher, so role behavior should be edited in the canonical prompt files.
+Both install modes use these files through the `rightmemory` runtime. Standalone mode loads them into the local Pydantic AI agent and tool loop. CLI-agent mode wraps the same role instructions into prompts sent to Codex CLI or Claude Code CLI. Other command-capable agents can call the same CLI or daemon surface without changing the memory schema. The installed `memory-orchestrator` remains a thin command dispatcher, so role behavior should be edited in the canonical prompt files.
 
 ## Install Modes
 
@@ -263,6 +263,12 @@ Both modes require `git` and `uv`. The runtime is installed under
 `${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`, and the `rightmemory`
 command is written to `~/.local/bin/rightmemory`. If `~/.local/bin` is not on
 `PATH`, the installer prints shell-profile guidance after install.
+
+Because the memory root is an ordinary Git repository, you can put it on a
+private remote and share the same memory across laptops, desktops, and agent
+clients. Enable RightMemory's managed sync loop when you want the runtime to
+pull before automatic semantic work and push successful memory commits after
+they land.
 
 ## Everyday Use
 
