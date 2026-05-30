@@ -5,7 +5,7 @@
 #   ./install.sh [--mode cli-agent|standalone] [<memory-root> <skills-target>]
 #
 # Arguments:
-#   <memory-root>    Where MEMORY.md, MEMORY_*.md, and dream_logs/ will live.
+#   <memory-root>    Where MEMORY.md, MEMORY_*.md, and insight_logs/ will live.
 #                    e.g. ~/.rightmemory  or  ~/Documents/memory
 #
 #   <skills-target>  Where RightMemory skill folders will be installed.
@@ -38,7 +38,7 @@ usage() {
 Usage: $0 [--mode cli-agent|standalone] [<memory-root> <skills-target>]
 
 Arguments:
-  <memory-root>    Where MEMORY.md, MEMORY_*.md, and dream_logs/ will live.
+  <memory-root>    Where MEMORY.md, MEMORY_*.md, and insight_logs/ will live.
   <skills-target>  Where RightMemory skill folders will be installed.
                    If omitted, defaults to ~/.rightmemory plus both
                    ~/.codex/skills and ~/.claude/skills.
@@ -511,7 +511,7 @@ ensure_memory_initial_commit() {
   (
     cd "$MEMORY_ROOT"
     shopt -s nullglob
-    files=(MEMORY.md MEMORY_*.md dream_logs/*.md)
+    files=(MEMORY.md MEMORY_*.md insight_logs/*.md)
     if [ "${#files[@]}" -gt 0 ]; then
       git add -- "${files[@]}"
     fi
@@ -523,7 +523,7 @@ ensure_memory_initial_commit() {
     [ -n "$staged_memory_file" ] && staged_memory_files+=("$staged_memory_file")
   done < <(
     cd "$MEMORY_ROOT" &&
-      git diff --cached --name-only -- MEMORY.md 'MEMORY_*.md' 'dream_logs/*.md'
+      git diff --cached --name-only -- MEMORY.md 'MEMORY_*.md' 'insight_logs/*.md'
   )
   if [ "${#staged_memory_files[@]}" -eq 0 ]; then
     echo "  [skip]    no memory files to baseline commit"
@@ -535,10 +535,10 @@ ensure_memory_initial_commit() {
 }
 
 # 1. MEMORY.md seed / managed example refresh
-mkdir -p "$MEMORY_ROOT/dream_logs"
+mkdir -p "$MEMORY_ROOT/insight_logs"
 install_or_refresh_memory
 
-# 2. Init git repo for memory tracking (the dreamer/reviewer need git for revertability)
+# 2. Init git repo for memory tracking (memory-editing roles need git for revertability)
 if [ -d "$MEMORY_ROOT/.git" ]; then
   echo "  [keep]    $MEMORY_ROOT is already a git repo"
 else
@@ -547,19 +547,15 @@ else
 fi
 ensure_memory_git_author
 
-# Keep git status focused on memory artifacts. Existing user .gitignore files are preserved.
-if [ -f "$MEMORY_ROOT/.gitignore" ]; then
-  echo "  [keep]    $MEMORY_ROOT/.gitignore already exists"
-else
-  cat > "$MEMORY_ROOT/.gitignore" <<'EOF'
+# Keep git status focused on current memory artifacts.
+cat > "$MEMORY_ROOT/.gitignore" <<'EOF'
 *
 !MEMORY.md
 !MEMORY_*.md
-!dream_logs/
-!dream_logs/*.md
+!insight_logs/
+!insight_logs/*.md
 EOF
-  echo "  [new]     $MEMORY_ROOT/.gitignore  (memory allowlist)"
-fi
+echo "  [refresh] $MEMORY_ROOT/.gitignore  (memory allowlist)"
 ensure_memory_initial_commit
 
 install_cli_runtime_layout
@@ -601,7 +597,7 @@ else
   echo "  2. Write [retrieve.model] and a default writer [update.model] config to $MEMORY_ROOT/rightmemory.toml."
 fi
 echo "  3. Trigger any memory-relevant message in your AI agent — the installed orchestrator calls rightmemory."
-echo "  4. Optional background review, pruning, and dreams: rightmemory watch start"
+echo "  4. Optional background review, pruning, and insight: rightmemory watch start"
 echo
 echo "Re-run this script any time you pull updates from the RightMemory repo;"
-echo "your existing MEMORY.md, MEMORY_*.md, and dream_logs/ are preserved."
+echo "your existing MEMORY.md, MEMORY_*.md, and insight_logs/ are preserved."
