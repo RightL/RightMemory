@@ -202,7 +202,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("Write [agent_cli], [retrieve.agent_cli], and a default writer [update.agent_cli] config", result.stdout)
         self.assertNotIn("Write [retrieve.model] and a default writer [update.model] config", result.stdout)
         self.assertIn("mode=cli-agent", install_stamp)
-        self.assertIn("installed `rightmemory` command", orchestrator)
+        self.assertIn("rightmemory retrieve --session <stable-session-id>", orchestrator)
         self.assertIn("Open context questions", orchestrator)
         self.assertNotIn("standalone mode", orchestrator)
         self.assertNotIn("standalone runtime", orchestrator)
