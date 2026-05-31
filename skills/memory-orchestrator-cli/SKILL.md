@@ -35,9 +35,8 @@ description: "Use when the user's request may depend on long-term context from e
 - Submit an update when previous work involved a significant amount of effort or reasoning, and reproducing that work later would take substantial effort.
 - Memory-worthy context may include durable user context, user preferences, workflow expectations, emergent reusable workflows discovered through iteration, environment/tooling constraints, repeated agent failure patterns and their fixes, project facts, decisions, or blockers. These categories are reminders; apply the future-use test above in each case.
 - For updates, call `rightmemory update submit --session <stable-session-id> "<concrete candidate brief>"` and proceed without waiting or pulling for the update result.
-- The runtime accumulates submitted candidates, waits 1 hour from the latest submit, and sends the pending candidates to the update role as one batch.
 - The first update for a stable session id should include fuller surrounding context: meaning, relevance, uncertainty, and relationship to existing memory.
 - Later updates with the same session id may be shorter when earlier submitted context or queued candidates are enough. Include fresh context when the meaning changed or depends on details not yet submitted.
 - For corrections to retrieved memory, describe the stale or wrong memory well enough for the updater to find it, and say whether it should be revised, narrowed, or deleted.
-- When the user asks for a memory-update result or status, call `rightmemory update pull --session <stable-session-id>`; the output includes current phase, pending candidates, current batch, and timing information.
+- When the user asks for a memory-update result or status, call `rightmemory update pull --session <stable-session-id>`.
 - To cancel a submitted update candidate that is still pending, call `rightmemory update undo --session <stable-session-id> <candidate-id>`.
