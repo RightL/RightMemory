@@ -19,7 +19,10 @@ description: "Use when the user's request may depend on long-term context from e
 - Retrieve preference-, workflow-, and behavior-related memory more frequently, especially when the work changes phase or topic, e.g. from discussion to implementation or from implementation to finishing or verification.
 - When running retrieve, wait at least 3 minutes for the command before acting on memory. During that wait, do not explore files or advance the task independently.
 - The retriever skips items already returned in this session; ask explicitly if you need something again.
-- Treat retrieved behavior guidance seriously: apply it directly when the fit is clear, briefly say how it will guide the work when useful, and ask the user when the fit is unclear.
+- A returned `S#...` heading is a memory skill: reusable instruction backed by a separate skill body, not an ordinary memory fact.
+- Broad retrieval usually returns only the skill heading and brief body paragraph.
+- Before using a memory skill, retrieve that specific skill again to get its full body.
+- Treat retrieved behavior guidance and memory skills seriously: apply them directly when the fit is clear, briefly say how they will guide the work when useful, and ask the user when the fit is unclear.
 - If current work shows retrieved memory is stale, wrong, too broad, or misleading, send the correction in the next update brief. This matters because bad memory can keep steering future agents wrong.
 - Retrieval may include an `Open context questions` block after ordinary memory matches. Treat those lines as agent-facing questions, not memory facts.
 - If the current task or workspace context already answers one, include the question id and answer in the next memory update brief.
