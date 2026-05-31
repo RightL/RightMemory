@@ -176,6 +176,25 @@ class SyncManagerTests(unittest.TestCase):
         self.assertNotIn("committed local", remote_memory)
         self.assertNotIn("dirty local", remote_memory)
 
+    def test_push_reports_dirty_insight_log(self):
+        insight = self.device / "insight_logs" / "2026-05-30-143012.md"
+        insight.parent.mkdir()
+        insight.write_text("# Insight\n", encoding="utf-8")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).push()
+
+        self.assertEqual(result.status, "dirty")
+        self.assertEqual(result.files, ["insight_logs/2026-05-30-143012.md"])
+
+    def test_push_ignores_untracked_retired_dream_log(self):
+        dream = self.device / "dream_logs" / "2026-05-30.md"
+        dream.parent.mkdir()
+        dream.write_text("# Dream\n", encoding="utf-8")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).push()
+
+        self.assertEqual(result.status, "pushed")
+
     def test_push_uses_upstream_even_when_local_branch_name_differs(self):
         self._git(self.device, "checkout", "-B", "memory-device", "origin/main")
         self._git(self.device, "branch", "--set-upstream-to", "origin/main")

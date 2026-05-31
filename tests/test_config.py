@@ -16,6 +16,7 @@ from rightmemory.config import (
     load_async_update_config,
     load_config,
     load_dreamer_watch_config,
+    load_insight_watch_config,
     load_pruner_config,
     load_review_config,
     load_sync_config,
@@ -579,6 +580,69 @@ class ConfigTests(unittest.TestCase):
                 self.assertIn(message, str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_insight_watch_config_defaults(self):
+        config_path = self._write_config("")
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_insight_watch_config()
+
+        self.assertEqual(config.memory_root, Path("/home/example/.rightmemory"))
+        self.assertEqual(config.trigger_points, 150.0)
+        self.assertEqual(config.update_candidate_points, 1.0)
+        self.assertEqual(config.review_session_points, 1.5)
+        self.assertEqual(config.check_interval_seconds, 3000)
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_insight_watch_config_parses_custom_values(self):
+        config_path = self._write_config(
+            """
+            [insight.model]
+            model_id = "openai/insight"
+
+            [insight.watch]
+            trigger_points = 225
+            update_candidate_points = 2.5
+            review_session_points = 4
+            check_interval_seconds = 600
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            config = load_insight_watch_config()
+            runtime_config = load_config("insight")
+
+        self.assertEqual(config.trigger_points, 225.0)
+        self.assertEqual(config.update_candidate_points, 2.5)
+        self.assertEqual(config.review_session_points, 4.0)
+        self.assertEqual(config.check_interval_seconds, 600)
+        self.assertEqual(runtime_config.model_id, "openai/insight")
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_insight_watch_config_rejects_invalid_values(self):
+        cases = [
+            ("trigger_points = 0", "[insight.watch].trigger_points must be a positive number"),
+            ("update_candidate_points = -1", "[insight.watch].update_candidate_points must be a positive number"),
+            ("review_session_points = true", "[insight.watch].review_session_points must be a positive number"),
+            ("check_interval_seconds = 1.5", "[insight.watch].check_interval_seconds must be a positive integer"),
+            ("unknown = 1", "unsupported [insight.watch] config key(s): unknown"),
+        ]
+
+        for watch_config, message in cases:
+            with self.subTest(watch_config=watch_config):
+                config_path = self._write_config(
+                    f"""
+                    [insight.watch]
+                    {watch_config}
+                    """
+                )
+
+                with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+                    with self.assertRaises(ValueError) as caught:
+                        load_insight_watch_config()
+
+                self.assertIn(message, str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_pruner_config_defaults(self):
         config_path = self._write_config(
             """
@@ -814,6 +878,11 @@ class RuntimeTests(unittest.TestCase):
                 "_run_session_model",
             ),
             (
+                RuntimeConfig(role="insight", model_id="openai/test", memory_root=Path(self.tempdir.name)),
+                patch.dict("sys.modules", self._fake_pydantic_modules()),
+                "_run_session_model",
+            ),
+            (
                 RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name)),
                 patch.dict("sys.modules", self._fake_pydantic_modules()),
                 "_run_session_model",
@@ -851,6 +920,24 @@ class RuntimeTests(unittest.TestCase):
 
                 self.assertEqual(result, "isolated reply")
                 isolated.assert_called_once_with("agent-session", "remember one")
+
+    def test_run_cycle_passes_operator_hint_message(self):
+        config = RuntimeConfig(
+            role="insight",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            state_root=Path(self.tempdir.name) / "state",
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_cycle("insight-watch", operator_hint="focus on risks")
+
+        self.assertEqual(result, "reply 1")
+        sent = runtime.agent.calls[0]["message"]
+        self.assertIn("<rightmemory_cycle>", sent)
+        self.assertIn("role: insight", sent)
+        self.assertIn("operator_hint: focus on risks", sent)
 
     def test_sync_reconciler_session_turn_does_not_isolate(self):
         config = RuntimeConfig(
@@ -1555,7 +1642,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue((Path(self.tempdir.name) / ".runtime" / "memory.lock").exists())
         self.assertEqual(
             (Path(self.tempdir.name) / ".gitignore").read_text(encoding="utf-8"),
-            "*\n!MEMORY.md\n!MEMORY_*.md\n!dream_logs/\n!dream_logs/*.md\n",
+            "*\n!MEMORY.md\n!MEMORY_*.md\n!insight_logs/\n!insight_logs/*.md\n",
         )
 
     def test_retrieve_role_does_not_create_memory_lock(self):
@@ -1925,6 +2012,22 @@ class RuntimeTests(unittest.TestCase):
                     self.assertNotIn("git_commit", tool_names)
                 else:
                     self.assertIn("git_commit", tool_names)
+
+    def test_insight_role_tools_exclude_memory_validation(self):
+        config = RuntimeConfig(
+            role="insight",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+            state_root=Path(self.tempdir.name) / "state",
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+        tool_names = [tool.__name__ for tool in runtime.agent.tools]
+        self.assertIn("create_file", tool_names)
+        self.assertIn("git_commit", tool_names)
+        self.assertNotIn("validate_memory", tool_names)
 
     def test_write_roles_do_not_receive_sync_push_tool_when_sync_disabled(self):
         for role in ("dreamer", "pruner", "reviewer", "sync-reconciler", "update"):
@@ -2380,7 +2483,7 @@ class RuntimeTests(unittest.TestCase):
 
 class PromptTests(unittest.TestCase):
     def test_cli_agent_prompt_assembles_without_standalone_tools(self):
-        for role in ("dreamer", "historian", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"):
+        for role in ("dreamer", "historian", "insight", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"):
             prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), role)
 
             self.assertIn("The configured memory root is /home/example/.rightmemory.", prompt)
@@ -2401,7 +2504,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("role must be one of:", str(caught.exception))
 
     def test_standalone_prompts_assemble_for_each_role(self):
-        for role in ("dreamer", "historian", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"):
+        for role in ("dreamer", "historian", "insight", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"):
             prompt = build_instructions(Path("/home/example/.rightmemory"), role)
 
             self.assertIn("RightMemory Schema", prompt)
@@ -2409,6 +2512,22 @@ class PromptTests(unittest.TestCase):
             self.assertIn("Command-selected behavior", prompt)
             self.assertNotIn("{{MEMORY_ROOT}}", prompt)
             self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+
+    def test_dreamer_prompt_no_longer_mentions_dream_logs(self):
+        prompt = build_instructions(Path("/memory"), "dreamer")
+
+        self.assertNotIn("dream_logs", prompt)
+        self.assertNotIn("dream report", prompt.lower())
+        self.assertIn("# Open Context Questions", prompt)
+
+    def test_insight_prompt_uses_insight_logs_and_excludes_memory_validation(self):
+        prompt = build_instructions(Path("/memory"), "insight")
+
+        self.assertIn("Insight Role", prompt)
+        self.assertIn("insight_logs/", prompt)
+        self.assertIn("operator hint", prompt)
+        self.assertNotIn("validate_memory", prompt)
+        self.assertNotIn("dream_logs", prompt)
 
     def test_standalone_prompt_does_not_embed_memory_root_path(self):
         first = build_instructions(Path("/home/example/.rightmemory/.runtime/worktrees/update-111"), "update")

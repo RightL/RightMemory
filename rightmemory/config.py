@@ -12,8 +12,8 @@ MEMORY_ROOT_ENV = "RIGHTMEMORY_ROOT"
 MEMORY_ROOT = Path(os.environ.get(MEMORY_ROOT_ENV, "~/.rightmemory")).expanduser()
 _STATE_ROOT_UNSET = cast(Path, object())
 CONFIG_PATH = MEMORY_ROOT / "rightmemory.toml"
-ROLES = {"dreamer", "historian", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"}
-MODEL_FALLBACK_ROLES = ("update", "dreamer", "reviewer", "pruner", "sync-reconciler", "historian")
+ROLES = {"dreamer", "historian", "insight", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"}
+MODEL_FALLBACK_ROLES = ("update", "dreamer", "insight", "reviewer", "pruner", "sync-reconciler", "historian")
 DEFAULT_MAX_TOOL_RETRIES = 10
 DEFAULT_REVIEW_IDLE_SECONDS = 3600
 DEFAULT_REVIEW_SINCE_DAYS = 3
@@ -27,6 +27,10 @@ DEFAULT_DREAMER_TRIGGER_POINTS = 50.0
 DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS = 1.0
 DEFAULT_DREAMER_REVIEW_SESSION_POINTS = 1.5
 DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS = 3000
+DEFAULT_INSIGHT_TRIGGER_POINTS = 150.0
+DEFAULT_INSIGHT_UPDATE_CANDIDATE_POINTS = 1.0
+DEFAULT_INSIGHT_REVIEW_SESSION_POINTS = 1.5
+DEFAULT_INSIGHT_CHECK_INTERVAL_SECONDS = 3000
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,15 @@ class DreamerWatchConfig:
     update_candidate_points: float = DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS
     review_session_points: float = DEFAULT_DREAMER_REVIEW_SESSION_POINTS
     check_interval_seconds: int = DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS
+
+
+@dataclass(frozen=True)
+class InsightWatchConfig:
+    memory_root: Path = MEMORY_ROOT
+    trigger_points: float = DEFAULT_INSIGHT_TRIGGER_POINTS
+    update_candidate_points: float = DEFAULT_INSIGHT_UPDATE_CANDIDATE_POINTS
+    review_session_points: float = DEFAULT_INSIGHT_REVIEW_SESSION_POINTS
+    check_interval_seconds: int = DEFAULT_INSIGHT_CHECK_INTERVAL_SECONDS
 
 
 @dataclass(frozen=True)
@@ -290,6 +303,60 @@ def load_dreamer_watch_config() -> DreamerWatchConfig:
     )
 
 
+def load_insight_watch_config() -> InsightWatchConfig:
+    data = _load_raw_config()
+
+    if not MEMORY_ROOT.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
+
+    _reject_unknown_keys(data, _top_level_keys(), "top-level")
+    section = data.get("insight", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError("[insight] must be a TOML table")
+    _reject_unknown_keys(section, {"model", "agent_cli", "watch"}, "[insight]")
+
+    watch = section.get("watch", {})
+    if watch is None:
+        watch = {}
+    if not isinstance(watch, dict):
+        raise ValueError("[insight.watch] must be a TOML table")
+    _reject_unknown_keys(
+        watch,
+        {"trigger_points", "update_candidate_points", "review_session_points", "check_interval_seconds"},
+        "[insight.watch]",
+    )
+
+    return InsightWatchConfig(
+        memory_root=MEMORY_ROOT,
+        trigger_points=_positive_number(
+            watch,
+            "trigger_points",
+            DEFAULT_INSIGHT_TRIGGER_POINTS,
+            "[insight.watch]",
+        ),
+        update_candidate_points=_positive_number(
+            watch,
+            "update_candidate_points",
+            DEFAULT_INSIGHT_UPDATE_CANDIDATE_POINTS,
+            "[insight.watch]",
+        ),
+        review_session_points=_positive_number(
+            watch,
+            "review_session_points",
+            DEFAULT_INSIGHT_REVIEW_SESSION_POINTS,
+            "[insight.watch]",
+        ),
+        check_interval_seconds=_positive_integer(
+            watch,
+            "check_interval_seconds",
+            DEFAULT_INSIGHT_CHECK_INTERVAL_SECONDS,
+            "[insight.watch]",
+        ),
+    )
+
+
 def load_pruner_config() -> PrunerConfig:
     data = _load_raw_config()
 
@@ -363,7 +430,7 @@ def _role_section(data: dict[str, object], role: str) -> dict[str, object]:
 
 def _allowed_role_keys(role: str) -> set[str]:
     allowed = {"model", "agent_cli"}
-    if role == "dreamer":
+    if role in {"dreamer", "insight"}:
         allowed.add("watch")
     if role == "pruner":
         allowed.update({"generation_commits", "revival_grace_checkpoints"})

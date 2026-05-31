@@ -6,7 +6,7 @@ from pathlib import Path
 from .semantic_upgrades import SemanticUpgradeContext, render_prompt_context
 
 
-ROLE_PROMPTS = {"dreamer", "historian", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"}
+ROLE_PROMPTS = {"dreamer", "historian", "insight", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"}
 
 
 def build_cli_agent_instructions(
@@ -27,7 +27,7 @@ Work in the configured memory root. The configured memory root is {memory_root}.
 Memory store:
 - MEMORY.md
 - MEMORY_*.md
-- dream_logs/
+- insight_logs/
 
 Follow the canonical role instructions below. Use the embedded schema as the schema source of truth.
 Return a concise final reply.
@@ -65,7 +65,7 @@ Command-selected behavior:
 
 Workspace rule:
 - The provided tools are rooted at the RightMemory memory store.
-- Use memory-store-relative paths such as `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`.
+- Use memory-store-relative paths such as `MEMORY.md`, `MEMORY_*.md`, and `insight_logs/*.md` when they are allowed for the selected role.
 - Do not read, write, inspect, or run commands against paths outside the memory store.
 {tool_guidance}
 - Return concise natural-language answers to the caller.
@@ -73,7 +73,7 @@ Workspace rule:
 Memory source of truth:
 - The root file is MEMORY.md.
 - Optional detail files are named MEMORY_<slug>.md.
-- The dream report directory is dream_logs/.
+- Insight logs are stored under insight_logs/.
 - MEMORY.md is normal memory, not a routing-only index.
 
 RightMemory schema:
@@ -126,7 +126,15 @@ def _command_guidance(role: str) -> str:
             "- Edit memory files when the supplied generation context says pruning is due."
         )
     if role == "dreamer":
-        return "- The `rightmemory dreamer` command selected dreamer consolidation behavior. Run one consolidation cycle for the memory store."
+        return (
+            "- The `rightmemory dreamer` command selected dreamer consolidation behavior. Run one consolidation cycle for the memory store.\n"
+            "- Treat the caller message as an optional operator hint, not as the ordinary source of truth."
+        )
+    if role == "insight":
+        return (
+            "- The `rightmemory insight` command selected insight behavior. Run one reflection cycle for the memory store.\n"
+            "- Treat the caller message as an optional operator hint, not as the ordinary source of truth."
+        )
     if role == "reviewer":
         return (
             "- The automatic transcript review scanner selected reviewer behavior. Treat the normalized transcript "
@@ -156,7 +164,7 @@ def _sync_guidance(role: str) -> str:
             "reports dirty state or a conflict, repair the supplied memory files in the same role, validate memory, "
             "commit the repaired state, and call `sync_push` again."
         )
-    if role in {"dreamer", "pruner", "reviewer", "update"}:
+    if role in {"dreamer", "insight", "pruner", "reviewer", "update"}:
         return ""
     return ""
 
@@ -175,6 +183,12 @@ def _tool_guidance(role: str) -> str:
             "validation, `git_log`, and `git_show_file`.\n"
             "- Use `git_log` to inspect `prune:` commit ledgers and `git_show_file` to recover memory snapshots."
         )
+    if role == "insight":
+        return (
+            "- Use the provided tools for memory-root reads, Insight log creation or refinement, git inspection, and committing Insight logs.\n"
+            "- Commit tools are scoped to `insight_logs/*.md`; keep active memory and unrelated files out of Insight commits.\n"
+            "- Do not run memory validation; Insight does not edit the memory graph."
+        )
     guidance = (
         "- Use the provided tools for `read`, `grep`, `glob`, restricted `read_command`, outline, exact file "
         "edits, file creation, file deletion, file renames, git inspection, and validation.\n"
@@ -186,7 +200,7 @@ def _tool_guidance(role: str) -> str:
         "and make it large enough to identify the intended occurrence.\n"
         "- Use `create_file`, `delete_file`, and `rename_file` for file lifecycle changes instead of encoding "
         "those operations as textual replacements.\n"
-        "- Commit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, and `dream_logs/*.md`; keep unrelated "
+        "- Commit tools are scoped to `MEMORY.md` and `MEMORY_*.md`; keep unrelated "
         "untracked files out of memory commits unless the caller explicitly asks about them.\n"
         "- Choose the edit shape that makes memory clearer; create, move, split, merge, or rewrite structure "
         "when that improves the tree or graph."

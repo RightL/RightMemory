@@ -282,7 +282,7 @@ def _append_check(checks: list[DoctorCheck], name: str, failures: list[str], ok_
 
 def _seed_memory_root(memory_root: Path, retrieve_token: str) -> None:
     memory_root.mkdir(parents=True)
-    (memory_root / "dream_logs").mkdir()
+    (memory_root / "insight_logs").mkdir()
     (memory_root / "MEMORY.md").write_text(
         "# RightMemory Doctor\n\n"
         f"DOCTOR_RETRIEVE_TOKEN: {retrieve_token}\n",

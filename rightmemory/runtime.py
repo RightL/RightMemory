@@ -30,7 +30,8 @@ from .sync import SyncManager, SyncResult
 from .tools import MemoryTools
 
 
-AUTOMATIC_WRITE_ROLES = {"dreamer", "pruner", "reviewer", "update"}
+AUTOMATIC_WRITE_ROLES = {"dreamer", "insight", "pruner", "reviewer", "update"}
+CYCLE_ROLES = {"dreamer", "insight"}
 HISTORY_READ_ROLES = {"historian", "pruner"}
 SYNC_TOOL_ROLES = {"sync-reconciler"}
 SYNC_REPAIR_STATUSES = {"conflict", "dirty"}
@@ -61,7 +62,7 @@ class RightMemoryRuntime:
         if config.runtime_mode not in {"standalone", "cli-agent"}:
             raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
         self.config = config
-        self.tools = MemoryTools(config.memory_root)
+        self.tools = MemoryTools(config.memory_root, role=config.role)
         self.sessions = MessageSessionStore(config.state_root, config.role)
         self.recent_submitted_delivery = RecentSubmittedMemoryDeliveryStore(config.state_root)
         self._message_history: list[Any] = []
@@ -134,6 +135,20 @@ class RightMemoryRuntime:
             output = self._result_output(result)
             self._trace("run_finished", output=output)
         return output
+
+    def run_cycle(self, session_id: str, operator_hint: str | None = None) -> str:
+        if self.config.role not in CYCLE_ROLES:
+            raise ValueError("run_cycle requires dreamer or insight role")
+        hint = (operator_hint or "none").strip() or "none"
+        message = "\n".join(
+            (
+                "<rightmemory_cycle>",
+                f"role: {self.config.role}",
+                f"operator_hint: {hint}",
+                "</rightmemory_cycle>",
+            )
+        )
+        return self.run_session_turn(session_id, message)
 
     def run_prune_turn(self, session_id: str, pruner_config: PrunerConfig) -> str:
         if self.config.role != "pruner":
@@ -463,8 +478,9 @@ class RightMemoryRuntime:
             self._agent_tool(self.tools.read),
             self._agent_tool(self.tools.read_command),
             self._agent_tool(self.tools.outline_file),
-            self._agent_tool(self.tools.validate_memory),
         ]
+        if self.config.role != "insight":
+            read_tools.append(self._agent_tool(self.tools.validate_memory))
         if self.config.role in HISTORY_READ_ROLES:
             read_tools.extend(
                 [

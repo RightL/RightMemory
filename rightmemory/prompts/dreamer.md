@@ -12,7 +12,7 @@
 
 - Light fixes are mechanical and unbounded each cycle: remove duplicate edges, self-edges, dangling edges, and child-to-containing-heading edges that only express containment. Upgrade obvious `rel:` edges when the schema clearly provides a better fit.
 - Do not add reverse edges mechanically. Choose reciprocal edges only when they improve future retrieval or understanding without making the relationship misleading.
-- Deep restructures should improve the memory tree or graph even when they require broad edits. Keep each restructuring coherent, explain the rationale in the dream report, and surface uncertain cases instead of guessing.
+- Deep restructures are encouraged when they make the memory tree or graph clearer and better structured, even when they require broad edits.
 - During consolidation, judge each item by durable value: whether it helps a future agent act, decide, retrieve context, or avoid repeating work. Compress or remove memory that mainly records transient progress, overly granular trace detail, stale state, or low-value repetition.
 - Keep `# Open Context Questions` compact and current. Merge duplicate questions, remove stale questions, revise questions whose linked memory changed, and add a short question when consolidation exposes a loose end in memory.
 - Preserve hard-to-reproduce reasoning, conclusions, failed investigations, and decisions when recreating them later would take meaningful effort. If the surrounding record is noisy, keep the durable conclusion and simplify the trace around it.
@@ -27,17 +27,16 @@ Preserve ordinary memory for facts, context, and preferences. Use skills for reu
 
 ## Conflicts And Boundaries
 
-- Never auto-resolve contradictions. When two nodes disagree about the same entity, keep both and surface the conflict in the dream report for the user to settle.
+- Resolve contradictions with judgment: update, merge, narrow, or remove memory when the evidence is clear. When a remaining problem needs an answer or user attention, add or refine a compact `# Open Context Questions` item.
 - Schema rules apply unchanged; pick the most specific edge type, falling back to `rel:` only when nothing else fits.
 - Keep or add edges only when they express cross-links or relations not implied by heading position.
 
-## Report And Commit
+## Commit
 
-- Write a dream report to `dream_logs/YYYY-MM-DD.md`. Create `dream_logs/` if it does not exist. If a same-day report exists, append a new section instead of overwriting.
-- Write the report in your own words, covering only what matters: what you did, what requires user attention, and anything noteworthy you observed.
-- Commit changes after editing. Stage touched `MEMORY*.md` files and the new dream report file; do not commit unrelated files. If the working directory is not yet a git repo, initialize it first.
-- Dreaming must be idempotent. If the file is already in good shape, write a short report saying so and skip the commit.
+- Commit changes after editing. Stage touched `MEMORY*.md` files; do not commit unrelated files.
+- Use the commit subject as the title. Put the dreamer report in the commit body, covering what matters: what you did, what requires user attention, and anything noteworthy you observed.
+- Dreaming must be idempotent. If the file is already in good shape, skip the commit and return a concise no-op.
 
 ## Final Reply
 
-- Final replies should include the number of light fixes applied, deep restructures applied, items surfaced for the user, the dream report path, and the resulting commit hash or `no commit`.
+- Final replies should include the number of light fixes applied, deep restructures applied, durable open questions surfaced or refined, and the resulting commit hash or `no commit`.

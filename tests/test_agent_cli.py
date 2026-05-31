@@ -117,6 +117,17 @@ class AgentCliCommandTests(unittest.TestCase):
         self.assertIn("--sandbox", command)
         self.assertIn("workspace-write", command)
 
+    def test_build_codex_uses_workspace_write_for_insight(self):
+        command = build_codex_command(
+            Path("/memory/root"),
+            "insight",
+            AgentCliConfig(provider="codex"),
+            "prompt",
+            None,
+        )
+
+        self.assertIn("workspace-write", command)
+
     def test_build_codex_uses_read_only_for_historian(self):
         command = build_codex_command(
             Path("/memory/root"),
@@ -243,6 +254,31 @@ class AgentCliCommandTests(unittest.TestCase):
         self.assertEqual(result, "done")
         self.assertIn("example-note", prompts[0])
         self.assertIn("Reconsider older memory.", prompts[0])
+
+    def test_cli_agent_cycle_prompt_marks_operator_hint(self):
+        prompts = []
+
+        def fake_build_codex_command(memory_root, role, config, prompt, provider_session_id):
+            prompts.append(prompt)
+            return ["codex", "exec"]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            with (
+                patch("rightmemory.agent_cli.build_codex_command", fake_build_codex_command),
+                patch(
+                    "rightmemory.agent_cli._run_cli",
+                    return_value='{"type":"thread.started","thread_id":"t1"}\n{"item":{"type":"agent_message","text":"done"}}\n',
+                ),
+            ):
+                executor = CliAgentExecutor(Path(tempdir), "insight", AgentCliConfig(provider="codex"))
+                executor.run_session_turn(
+                    "insight-watch",
+                    "<rightmemory_cycle>\nrole: insight\noperator_hint: none\n</rightmemory_cycle>",
+                )
+
+        self.assertIn("Caller message:", prompts[0])
+        self.assertIn("<rightmemory_cycle>", prompts[0])
+        self.assertIn("operator_hint: none", prompts[0])
 
     def test_build_claude_resume_command_uses_auto_permission_for_write_role(self):
         session_id = "123e4567-e89b-12d3-a456-426614174000"

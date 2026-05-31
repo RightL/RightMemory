@@ -116,6 +116,8 @@ class InstallScriptTests(unittest.TestCase):
             memory = (memory_root / "MEMORY.md").read_text(encoding="utf-8")
             state = (memory_root / ".runtime" / "semantic-upgrades.json").read_text(encoding="utf-8")
             install_stamp_exists = (memory_root / ".runtime" / "install.stamp").exists()
+            insight_logs_exists = (memory_root / "insight_logs").is_dir()
+            dream_logs_exists = (memory_root / "dream_logs").exists()
 
         self.assertIn(EXAMPLE_START, memory)
         self.assertIn(EXAMPLE_END, memory)
@@ -124,6 +126,8 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("user-context-agent-behavior-split", state)
         self.assertIn("open-context-questions", state)
         self.assertTrue(install_stamp_exists)
+        self.assertTrue(insight_logs_exists)
+        self.assertFalse(dream_logs_exists)
 
     def test_initial_install_configures_git_author_and_baseline_commit(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -161,6 +165,26 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(git_name, "Existing User")
         self.assertEqual(git_email, "existing@example.com")
         self.assertIn("git author configured", result.stdout)
+
+    def test_install_refreshes_memory_gitignore_to_current_allowlist(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            (memory_root / ".gitignore").write_text(
+                "*\n!MEMORY.md\n!dream_logs/\n!dream_logs/*.md\n",
+                encoding="utf-8",
+            )
+
+            result = self._install(memory_root, skills_target)
+            gitignore = (memory_root / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            gitignore,
+            "*\n!MEMORY.md\n!MEMORY_*.md\n!insight_logs/\n!insight_logs/*.md\n",
+        )
 
     def test_cli_agent_installs_command_backed_orchestrator_without_role_skills(self):
         with tempfile.TemporaryDirectory() as tempdir:

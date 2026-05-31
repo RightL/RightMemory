@@ -10,6 +10,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,12 +21,14 @@ from .config import (
     load_async_update_config,
     load_config,
     load_dreamer_watch_config,
+    load_insight_watch_config,
     load_pruner_config,
     load_review_config,
     load_sync_config,
 )
 from .dreamer_trigger import DreamerTriggerStore
 from .doctor import format_doctor_report, run_agent_cli_doctor
+from .insight_trigger import InsightTriggerStore
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 from .session import MemoryWriteLock
@@ -45,16 +48,20 @@ from .watch import (
 DEFAULT_REVIEW_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 DEFAULT_REVIEW_WATCH_RETRY_SECONDS = 60
 DEFAULT_DREAMER_WATCH_RETRY_SECONDS = 60
+DEFAULT_INSIGHT_WATCH_RETRY_SECONDS = 60
 DEFAULT_PRUNER_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 DEFAULT_PRUNER_WATCH_RETRY_SECONDS = 60
 DEFAULT_SYNC_WATCH_INTERVAL_SECONDS = 60 * 60
 DEFAULT_WATCH_MAX_CONSECUTIVE_FAILURES = 3
 WATCH_REFRESH_POLL_SECONDS = 5
 DREAMER_WATCH_SESSION_ID = "dreamer-watch"
-DREAMER_WATCH_MESSAGE = "Run a scheduled dream cycle."
 _DREAMER_WATCH_SKIPPED = "skipped"
 _DREAMER_WATCH_SUCCEEDED = "succeeded"
 _DREAMER_WATCH_FAILED = "failed"
+INSIGHT_WATCH_SESSION_ID = "insight-watch"
+_INSIGHT_WATCH_SKIPPED = "skipped"
+_INSIGHT_WATCH_SUCCEEDED = "succeeded"
+_INSIGHT_WATCH_FAILED = "failed"
 PRUNER_WATCH_SESSION_ID = "pruner-watch"
 SYNC_WATCH_SESSION_ID = "sync-watch"
 
@@ -128,13 +135,19 @@ def main(argv: list[str] | None = None) -> int:
         _daemon_parser(args.role).parse_args(remaining[1:])
         return 0
     if remaining and remaining[0] == "watch":
-        if args.role != "dreamer":
-            raise ValueError("watch is only supported for the dreamer role")
-        if _is_help_request(remaining[1:]):
-            _dreamer_watch_parser().parse_args(remaining[1:])
-            return 0
-        watch_args = _dreamer_watch_parser().parse_args(remaining[1:])
-        return _dreamer_watch(watch_args.interval, watch_args.session)
+        if args.role == "dreamer":
+            if _is_help_request(remaining[1:]):
+                _dreamer_watch_parser().parse_args(remaining[1:])
+                return 0
+            watch_args = _dreamer_watch_parser().parse_args(remaining[1:])
+            return _dreamer_watch(watch_args.interval, watch_args.session)
+        if args.role == "insight":
+            if _is_help_request(remaining[1:]):
+                _insight_watch_parser().parse_args(remaining[1:])
+                return 0
+            watch_args = _insight_watch_parser().parse_args(remaining[1:])
+            return _insight_watch(watch_args.interval, watch_args.session)
+        raise ValueError("watch is supported for dreamer and insight roles")
 
     config = load_config(args.role)
     if remaining and remaining[0] == "submit":
@@ -271,6 +284,8 @@ def _watch_role(name: str) -> str:
         return "dreamer"
     if name == "pruner":
         return "pruner"
+    if name == "insight":
+        return "insight"
     raise ValueError(f"unknown watch target: {name}")
 
 
@@ -319,6 +334,22 @@ def _dreamer_watch_parser() -> argparse.ArgumentParser:
         "--session",
         default=DREAMER_WATCH_SESSION_ID,
         help="persist dreamer message history under this session id",
+    )
+    return parser
+
+
+def _insight_watch_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="rightmemory insight watch")
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=None,
+        help="override trigger check interval in seconds",
+    )
+    parser.add_argument(
+        "--session",
+        default=INSIGHT_WATCH_SESSION_ID,
+        help="persist insight message history under this session id",
     )
     return parser
 
@@ -496,14 +527,21 @@ def _run_review_scan_with_config(
             raise ValueError("--since-days must be a positive integer")
         review_config = replace(review_config, since_days=since_days)
     dreamer_watch_config = load_dreamer_watch_config()
+    insight_watch_config = load_insight_watch_config()
     runtime = RightMemoryRuntime(reviewer_config)
     try:
         scanner = ReviewScanner(
             review_config,
             runtime.run_session_turn,
-            on_review_success=_dreamer_trigger_incrementer(
-                reviewer_config.memory_root,
-                dreamer_watch_config.review_session_points,
+            on_review_success=_combined_trigger_incrementer(
+                _dreamer_trigger_incrementer(
+                    reviewer_config.memory_root,
+                    dreamer_watch_config.review_session_points,
+                ),
+                _insight_trigger_incrementer(
+                    reviewer_config.memory_root,
+                    insight_watch_config.review_session_points,
+                ),
             ),
         )
         return scanner.scan_once(require_full_batch=require_full_batch)
@@ -557,7 +595,7 @@ def _run_dream_cycle(session_id: str, dreamer_config: Any | None = None) -> str:
     config = dreamer_config if dreamer_config is not None else load_config("dreamer")
     runtime = RightMemoryRuntime(config)
     try:
-        return runtime.run_session_turn(session_id, DREAMER_WATCH_MESSAGE)
+        return runtime.run_cycle(session_id)
     finally:
         runtime.cleanup()
 
@@ -625,6 +663,95 @@ def _dreamer_watch(interval: int | None, session_id: str) -> int:
         return exit_code
     except KeyboardInterrupt:
         print("rightmemory dreamer watch stopped", file=sys.stderr)
+        return 130
+
+
+def _run_insight_cycle(session_id: str, insight_config: Any | None = None) -> str:
+    config = insight_config if insight_config is not None else load_config("insight")
+    runtime = RightMemoryRuntime(config)
+    try:
+        return runtime.run_cycle(session_id)
+    finally:
+        runtime.cleanup()
+
+
+def _insight_watch_once(watch_config: Any, session_id: str, run_cycle: Callable[[str], str]) -> str:
+    store = InsightTriggerStore(watch_config.memory_root)
+    state = store.read()
+    if state.points < watch_config.trigger_points:
+        return _INSIGHT_WATCH_SKIPPED
+
+    before_logs = _insight_log_fingerprints(watch_config.memory_root)
+    timestamp = datetime.now(UTC).isoformat()
+    print(f"[{timestamp}] rightmemory insight cycle", flush=True)
+    try:
+        output = run_cycle(session_id)
+    except Exception as exc:
+        print(f"rightmemory insight cycle failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        return _INSIGHT_WATCH_FAILED
+
+    print(output, flush=True)
+    after_logs = _insight_log_fingerprints(watch_config.memory_root)
+    result = "artifact" if after_logs != before_logs else "noop"
+    store.consume_if_available(watch_config.trigger_points, result=result)
+    return _INSIGHT_WATCH_SUCCEEDED
+
+
+def _insight_log_fingerprints(memory_root: Path) -> dict[str, str]:
+    root = Path(memory_root)
+    fingerprints: dict[str, str] = {}
+    for path in sorted((root / "insight_logs").glob("*.md")):
+        if not path.is_file():
+            continue
+        relative_path = path.relative_to(root).as_posix()
+        fingerprints[relative_path] = sha256(path.read_bytes()).hexdigest()
+    return fingerprints
+
+
+def _insight_watch(interval: int | None, session_id: str) -> int:
+    if interval is not None and interval < 1:
+        raise ValueError("--interval must be a positive integer")
+    watch_config = load_insight_watch_config()
+    if interval is not None:
+        watch_config = replace(watch_config, check_interval_seconds=interval)
+    insight_config = load_config("insight")
+    refresh = InstallStamp(watch_config.memory_root)
+    consecutive_failures = 0
+    exit_code = 0
+    try:
+        with _watch_stop_signal("insight") as stop, WatchLock(watch_config.memory_root, "insight"):
+            next_config: Any | None = insight_config
+            while not stop.requested:
+                _reexec_if_install_changed(refresh, stop)
+
+                def run_cycle(current_session_id: str) -> str:
+                    nonlocal next_config
+                    if next_config is None:
+                        return _run_insight_cycle(current_session_id)
+                    output = _run_insight_cycle(current_session_id, next_config)
+                    next_config = None
+                    return output
+
+                status = _insight_watch_once(watch_config, session_id, run_cycle)
+                _reexec_if_install_changed(refresh, stop)
+                if status == _INSIGHT_WATCH_SKIPPED:
+                    consecutive_failures = 0
+                    if not _sleep_with_refresh_check(watch_config.check_interval_seconds, refresh, stop):
+                        break
+                elif status == _INSIGHT_WATCH_FAILED:
+                    consecutive_failures += 1
+                    if _watch_failure_limit_reached("insight", consecutive_failures):
+                        exit_code = 1
+                        break
+                    retry_seconds = min(watch_config.check_interval_seconds, DEFAULT_INSIGHT_WATCH_RETRY_SECONDS)
+                    if not _sleep_with_refresh_check(retry_seconds, refresh, stop):
+                        break
+                else:
+                    consecutive_failures = 0
+        print("rightmemory insight watch stopped", file=sys.stderr)
+        return exit_code
+    except KeyboardInterrupt:
+        print("rightmemory insight watch stopped", file=sys.stderr)
         return 130
 
 
@@ -863,20 +990,35 @@ def _async_worker(
     role: str,
 ) -> int:
     dreamer_watch_config = load_dreamer_watch_config()
+    insight_watch_config = load_insight_watch_config()
     async_update_config = load_async_update_config()
     store = AsyncUpdateStore(memory_root, role)
     result = store.run_pending_batches(
         lambda batch_session_id, message: runtime.run_session_turn(batch_session_id, message),
         target_batch_candidates=async_update_config.target_batch_candidates,
         max_wait_seconds=async_update_config.max_wait_seconds,
-        on_batch_success=_dreamer_trigger_incrementer(
-            memory_root,
-            dreamer_watch_config.update_candidate_points,
+        on_batch_success=_combined_trigger_incrementer(
+            _dreamer_trigger_incrementer(
+                memory_root,
+                dreamer_watch_config.update_candidate_points,
+            ),
+            _insight_trigger_incrementer(
+                memory_root,
+                insight_watch_config.update_candidate_points,
+            ),
         ),
     )
     if result.status == "failed":
         return 1
     return 0
+
+
+def _combined_trigger_incrementer(*incrementers: Callable[[int], None]) -> Callable[[int], None]:
+    def increment(count: int) -> None:
+        for item in incrementers:
+            item(count)
+
+    return increment
 
 
 def _dreamer_trigger_incrementer(memory_root: Path, points_per_item: float) -> Callable[[int], None]:
@@ -888,6 +1030,22 @@ def _dreamer_trigger_incrementer(memory_root: Path, points_per_item: float) -> C
         except OSError as exc:
             print(
                 f"Warning: could not update dreamer trigger state: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    return increment
+
+
+def _insight_trigger_incrementer(memory_root: Path, points_per_item: float) -> Callable[[int], None]:
+    store = InsightTriggerStore(memory_root)
+
+    def increment(count: int) -> None:
+        try:
+            store.increment(count * points_per_item)
+        except OSError as exc:
+            print(
+                f"Warning: could not update insight trigger state: {type(exc).__name__}: {exc}",
                 file=sys.stderr,
                 flush=True,
             )

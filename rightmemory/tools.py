@@ -46,9 +46,13 @@ NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*→\s*\[(.*?)\])?\s*$")
 EDGE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*([A-Za-z0-9_.-]+)\s*$")
 MEMORY_DETAIL_FILE_RE = re.compile(r"^MEMORY_[A-Za-z0-9_.-]+\.md$")
 MEMORY_SKILL_FILE_RE = re.compile(r"^MEMORY_SKILL_[A-Za-z0-9_.-]+\.md$")
-DREAM_LOG_FILE_RE = re.compile(r"^dream_logs/[A-Za-z0-9_.-]+\.md$")
+INSIGHT_LOG_FILE_RE = re.compile(r"^insight_logs/[A-Za-z0-9_.-]+\.md$")
 GIT_REVISION_RE = re.compile(r"^[A-Za-z0-9_.^~/-]+$")
 PRUNE_SUBJECT_PREFIX = "prune:"
+ACTIVE_MEMORY_ROLES = {"dreamer", "pruner", "reviewer", "sync-reconciler", "update"}
+INSIGHT_ROLES = {"insight"}
+SYNC_RECONCILER_ROLES = {"sync-reconciler"}
+INSIGHT_READ_PATHS = ("MEMORY.md", "MEMORY_*.md", "insight_logs/*.md")
 
 
 @dataclass(frozen=True)
@@ -61,8 +65,9 @@ class MemoryId:
 
 
 class MemoryTools:
-    def __init__(self, memory_root: Path):
+    def __init__(self, memory_root: Path, role: str | None = None):
         self.memory_root = memory_root.resolve()
+        self.role = role
         self._read_signatures: dict[Path, str] = {}
 
     def list_files(self, pattern: str = "MEMORY*.md") -> list[str]:
@@ -72,7 +77,7 @@ class MemoryTools:
         paths = [
             path.relative_to(self.memory_root).as_posix()
             for path in self.memory_root.glob(pattern)
-            if path.is_file() and self._is_under_root(path)
+            if path.is_file() and self._is_under_root(path) and self._is_allowed_read_file(path)
         ]
         paths.sort()
         if len(paths) > MAX_LIST_FILES:
@@ -85,13 +90,14 @@ class MemoryTools:
         base = self._resolve_path(path)
         if not base.is_dir():
             raise ValueError(f"glob path is not a directory: {path}")
+        self._check_allowed_read_search_dir(base, path)
         raw_pattern = Path(pattern)
         if raw_pattern.is_absolute() or ".." in raw_pattern.parts:
             raise ValueError("glob pattern must be relative and must not contain '..'")
         files = [
             item
             for item in base.glob(pattern)
-            if item.is_file() and self._is_under_root(item)
+            if item.is_file() and self._is_under_root(item) and self._is_allowed_read_file(item)
         ]
         files.sort(key=lambda item: (-item.stat().st_mtime, item.relative_to(self.memory_root).as_posix()))
         if len(files) > MAX_LIST_FILES:
@@ -100,7 +106,7 @@ class MemoryTools:
 
     def read(self, path: str, offset: int = 1, limit: int = READ_TOOL_LINE_LIMIT) -> str:
         """Read a line-numbered file range under the RightMemory root."""
-        resolved = self._resolve_path(path)
+        resolved = self._allowed_read_path(path)
         lines = self._read_lines(resolved, path)
         self._validate_positive("offset", offset)
         self._validate_positive("limit", limit)
@@ -120,7 +126,7 @@ class MemoryTools:
         max_lines: int = FULL_READ_LINE_LIMIT,
     ) -> str:
         """Read a file under the RightMemory root, optionally by inclusive line range."""
-        resolved = self._resolve_path(path)
+        resolved = self._allowed_read_path(path)
         lines = self._read_lines(resolved, path)
         self._validate_positive("max_lines", max_lines)
 
@@ -145,7 +151,7 @@ class MemoryTools:
 
     def read_around(self, path: str, line_number: int, context_lines: int = 40) -> str:
         """Read a window of lines around a target line in a file under the RightMemory root."""
-        resolved = self._resolve_path(path)
+        resolved = self._allowed_read_path(path)
         lines = self._read_lines(resolved, path)
         self._validate_positive("line_number", line_number)
         if context_lines < 0:
@@ -261,7 +267,7 @@ class MemoryTools:
 
     def outline_file(self, path: str, max_items: int = MAX_OUTLINE_ITEMS) -> str:
         """Return Markdown headings with line numbers for one file under the RightMemory root."""
-        resolved = self._resolve_path(path)
+        resolved = self._allowed_read_path(path)
         lines = self._read_lines(resolved, path)
         self._validate_positive("max_items", max_items)
         max_items = min(max_items, MAX_OUTLINE_ITEMS)
@@ -283,8 +289,8 @@ class MemoryTools:
         """Replace exact text in a file under the RightMemory root."""
         if not old_string:
             raise ValueError("old_string must not be empty")
-        resolved = self._resolve_path(path)
-        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        relative_path = self._allowed_write_path(path)
+        resolved = self.memory_root / relative_path
         if not resolved.is_file():
             raise FileNotFoundError(f"file not found: {relative_path}")
 
@@ -311,8 +317,8 @@ class MemoryTools:
 
     def create_file(self, path: str, content: str = "") -> str:
         """Create a new file under the RightMemory root."""
-        resolved = self._resolve_path(path)
-        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        relative_path = self._allowed_write_path(path)
+        resolved = self.memory_root / relative_path
         if resolved.exists():
             raise ValueError(f"file already exists: {relative_path}")
         resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -322,8 +328,8 @@ class MemoryTools:
 
     def delete_file(self, path: str) -> str:
         """Delete a file under the RightMemory root."""
-        resolved = self._resolve_path(path)
-        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        relative_path = self._allowed_write_path(path)
+        resolved = self.memory_root / relative_path
         if not resolved.is_file():
             raise FileNotFoundError(f"file not found: {relative_path}")
         resolved.unlink()
@@ -332,10 +338,10 @@ class MemoryTools:
 
     def rename_file(self, old_path: str, new_path: str) -> str:
         """Rename a file under the RightMemory root without overwriting an existing file."""
-        source = self._resolve_path(old_path)
-        destination = self._resolve_path(new_path)
-        source_relative = source.relative_to(self.memory_root).as_posix()
-        destination_relative = destination.relative_to(self.memory_root).as_posix()
+        source_relative = self._allowed_write_path(old_path)
+        destination_relative = self._allowed_write_path(new_path)
+        source = self.memory_root / source_relative
+        destination = self.memory_root / destination_relative
         if not source.is_file():
             raise FileNotFoundError(f"file not found: {source_relative}")
         if destination.exists():
@@ -349,6 +355,8 @@ class MemoryTools:
 
     def git_status(self) -> str:
         """Return short git status for the RightMemory root."""
+        if self._has_role_read_scope():
+            return self._run_git(["git", "status", "--short", "--", *INSIGHT_READ_PATHS])
         return self._run_git(["git", "status", "--short"])
 
     def git_diff(self, paths: list[str] | None = None) -> str:
@@ -357,8 +365,10 @@ class MemoryTools:
         if paths:
             command.append("--")
             for path in paths:
-                resolved = self._resolve_path(path)
+                resolved = self._allowed_read_path(path)
                 command.append(resolved.relative_to(self.memory_root).as_posix())
+        elif self._has_role_read_scope():
+            command.extend(["--", *INSIGHT_READ_PATHS])
         return self._run_git(command)
 
     def git_log(self, grep: str = r"^prune:", max_count: int = 20) -> str:
@@ -421,7 +431,7 @@ class MemoryTools:
         return output
 
     def git_add(self, paths: list[str]) -> str:
-        """Stage selected memory files or dream logs under the RightMemory root."""
+        """Stage selected role-owned files under the RightMemory root."""
         if not paths:
             raise ValueError("paths must not be empty")
         relative_paths = []
@@ -440,7 +450,7 @@ class MemoryTools:
         return "staged: " + ", ".join(relative_paths)
 
     def git_commit(self, message: str, body: str | None = None, allow_empty: bool = False) -> str:
-        """Commit staged memory files and dream logs under the RightMemory root."""
+        """Commit staged role-owned files under the RightMemory root."""
         message = self._validate_commit_subject(message)
         body = self._validate_commit_body(body)
         if allow_empty and message != "prune: checkpoint":
@@ -465,7 +475,7 @@ class MemoryTools:
         return f"committed {commit_hash}: {message}"
 
     def git_discard(self, paths: list[str]) -> str:
-        """Discard selected memory file or dream log changes."""
+        """Discard selected role-owned file changes."""
         if not paths:
             raise ValueError("paths must not be empty")
         relative_paths = [self._allowed_commit_path(path) for path in paths]
@@ -589,9 +599,10 @@ class MemoryTools:
             return self.list_files(glob_pattern)
         resolved = self._resolve_path(path)
         if resolved.is_file():
-            return [resolved.relative_to(self.memory_root).as_posix()]
+            return [self._allowed_read_path(path).relative_to(self.memory_root).as_posix()]
         if resolved.is_dir():
             relative_base = resolved.relative_to(self.memory_root).as_posix()
+            self._check_allowed_read_search_dir(resolved, path)
             if relative_base == ".":
                 return self.list_files(glob_pattern)
             return self.glob(glob_pattern, relative_base)
@@ -624,7 +635,19 @@ class MemoryTools:
         args, explicit_path_count, expanded_path_count = self._expand_rg_path_globs(args)
         if explicit_path_count and expanded_path_count == 0:
             return "no matches"
-        self._validate_read_command_paths(args[1:])
+        path_indices = self._rg_path_token_indices(args)
+        if self._has_role_read_scope() and not path_indices:
+            readable_paths = self._existing_role_read_paths()
+            if not readable_paths:
+                return "no matches"
+            path_start = len(args)
+            args = [*args, *readable_paths]
+            path_indices = set(range(path_start, len(args)))
+        elif self._has_role_read_scope() and path_indices:
+            args, path_indices = self._expand_role_read_command_dirs(args, path_indices)
+            if not path_indices:
+                return "no matches"
+        self._validate_read_command_path_tokens(args, path_indices)
         if "--files" not in args and "--with-filename" not in args and "--no-filename" not in args:
             args = [args[0], "--with-filename", *args[1:]]
         process = subprocess.run(
@@ -713,7 +736,9 @@ class MemoryTools:
         matches = [
             path.relative_to(self.memory_root).as_posix()
             for path in self.memory_root.glob(pattern)
-            if (path.is_file() or path.is_dir()) and self._is_under_root(path)
+            if (path.is_file() or path.is_dir())
+            and self._is_under_root(path)
+            and self._is_allowed_read_command_candidate(path)
         ]
         matches.sort()
         if len(matches) > MAX_LIST_FILES:
@@ -725,11 +750,13 @@ class MemoryTools:
             return self.git_status()
         if len(args) >= 2 and args[1] == "diff":
             self._validate_git_diff_command(args)
+            if self._has_role_read_scope() and len(args) == 2:
+                return self.git_diff()
             return self._run_git(args)
         raise ValueError("supported git read commands are: git status --short, git diff")
 
     def _read_raw_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
-        resolved = self._resolve_path(path)
+        resolved = self._allowed_read_path(path)
         relative_path = resolved.relative_to(self.memory_root).as_posix()
         if not resolved.is_file():
             raise FileNotFoundError(f"file not found: {relative_path}")
@@ -751,18 +778,9 @@ class MemoryTools:
             + f"\n[truncated: output exceeded {COMMAND_OUTPUT_CHAR_LIMIT} characters]"
         )
 
-    def _validate_read_command_paths(self, args: list[str]) -> None:
-        option_takes_value = {"-g", "--glob", "--type", "-t"}
-        skip_next = False
-        for token in args:
-            if skip_next:
-                skip_next = False
-                continue
-            if token in option_takes_value:
-                skip_next = True
-                continue
-            if token.startswith("-"):
-                continue
+    def _validate_read_command_path_tokens(self, args: list[str], path_indices: set[int]) -> None:
+        for index in path_indices:
+            token = args[index]
             if token.startswith("~"):
                 raise ValueError("read command paths must stay under the RightMemory root")
             raw = Path(token)
@@ -770,6 +788,26 @@ class MemoryTools:
                 resolved = self._resolve_path(token)
                 if not self._is_under_root(resolved):
                     raise ValueError("read command paths must stay under the RightMemory root")
+            if self._has_role_read_scope():
+                self._check_allowed_read_command_path(token)
+
+    def _expand_role_read_command_dirs(self, args: list[str], path_indices: set[int]) -> tuple[list[str], set[int]]:
+        expanded: list[str] = []
+        expanded_path_indices: set[int] = set()
+        for index, token in enumerate(args):
+            if index not in path_indices:
+                expanded.append(token)
+                continue
+            resolved = self._resolve_path(token)
+            if not resolved.is_dir():
+                expanded_path_indices.add(len(expanded))
+                expanded.append(token)
+                continue
+            self._check_allowed_read_search_dir(resolved, token)
+            for relative_path in self._existing_role_read_paths_under(resolved):
+                expanded_path_indices.add(len(expanded))
+                expanded.append(relative_path)
+        return expanded, expanded_path_indices
 
     def _validate_git_diff_command(self, args: list[str]) -> None:
         if len(args) == 2:
@@ -778,7 +816,7 @@ class MemoryTools:
             raise ValueError("supported git diff form is: git diff or git diff -- <paths>")
         separator = 2
         for path in args[separator + 1 :]:
-            self._resolve_path(path)
+            self._allowed_read_path(path)
 
     def _format_lines(self, lines: list[str], start: int, end: int) -> str:
         selected = lines[start - 1 : end]
@@ -973,22 +1011,119 @@ class MemoryTools:
     def _allowed_commit_path(self, path: str) -> str:
         resolved = self._resolve_path(path)
         relative_path = resolved.relative_to(self.memory_root).as_posix()
-        if relative_path == "MEMORY.md":
+        if self._is_allowed_write_path(relative_path):
             return relative_path
-        if MEMORY_DETAIL_FILE_RE.fullmatch(relative_path):
+        raise ValueError(f"can only stage, commit, or discard {self._write_policy_label()}: {relative_path}")
+
+    def _write_policy_label(self) -> str:
+        if self.role in INSIGHT_ROLES:
+            return "insight_logs/*.md"
+        if self.role in SYNC_RECONCILER_ROLES:
+            return "MEMORY.md, MEMORY_*.md, or insight_logs/*.md"
+        return "MEMORY.md or MEMORY_*.md"
+
+    def _is_allowed_write_path(self, relative_path: str) -> bool:
+        if self.role in INSIGHT_ROLES:
+            return self._is_insight_log_path(relative_path)
+        if self.role in SYNC_RECONCILER_ROLES:
+            return self._is_active_memory_path(relative_path) or self._is_insight_log_path(relative_path)
+        return self._is_active_memory_path(relative_path)
+
+    def _allowed_write_path(self, path: str) -> str:
+        resolved = self._resolve_path(path)
+        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        if self._is_allowed_write_path(relative_path):
             return relative_path
-        if DREAM_LOG_FILE_RE.fullmatch(relative_path):
-            return relative_path
-        raise ValueError(f"can only stage, commit, or discard MEMORY.md, MEMORY_*.md, or dream_logs/*.md: {relative_path}")
+        raise ValueError(f"can only write {self._write_policy_label()}: {relative_path}")
 
     def _allowed_history_path(self, path: str) -> str:
         raw_path = Path(path)
         if raw_path.is_absolute() or ".." in raw_path.parts:
             raise ValueError("history paths must be relative memory files")
         relative_path = raw_path.as_posix()
-        if relative_path == "MEMORY.md" or MEMORY_DETAIL_FILE_RE.fullmatch(relative_path):
+        if self._is_active_memory_path(relative_path):
             return relative_path
         raise ValueError(f"can only read historical MEMORY.md or MEMORY_*.md files: {relative_path}")
+
+    def _allowed_read_path(self, path: str) -> Path:
+        resolved = self._resolve_path(path)
+        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        if self._is_allowed_read_relative_file(relative_path):
+            return resolved
+        raise ValueError(f"can only read {self._read_policy_label()}: {relative_path}")
+
+    def _has_role_read_scope(self) -> bool:
+        return self.role in INSIGHT_ROLES
+
+    def _read_policy_label(self) -> str:
+        return "MEMORY.md, MEMORY_*.md, or insight_logs/*.md"
+
+    def _is_allowed_read_file(self, path: Path) -> bool:
+        if not self._has_role_read_scope():
+            return True
+        relative_path = path.relative_to(self.memory_root).as_posix()
+        return self._is_allowed_read_relative_file(relative_path)
+
+    def _is_allowed_read_relative_file(self, relative_path: str) -> bool:
+        if not self._has_role_read_scope():
+            return True
+        return self._is_active_memory_path(relative_path) or self._is_insight_log_path(relative_path)
+
+    def _check_allowed_read_search_dir(self, path: Path, original_path: str) -> None:
+        if not self._has_role_read_scope():
+            return
+        relative_path = path.relative_to(self.memory_root).as_posix()
+        if relative_path in {".", "insight_logs"}:
+            return
+        raise ValueError(f"can only search {self._read_policy_label()}: {relative_path or original_path}")
+
+    def _is_allowed_read_command_candidate(self, path: Path) -> bool:
+        if not self._has_role_read_scope():
+            return True
+        relative_path = path.relative_to(self.memory_root).as_posix()
+        if path.is_dir():
+            return relative_path == "insight_logs"
+        return self._is_allowed_read_relative_file(relative_path)
+
+    def _check_allowed_read_command_path(self, path: str) -> None:
+        resolved = self._resolve_path(path)
+        relative_path = resolved.relative_to(self.memory_root).as_posix()
+        if resolved.is_dir():
+            self._check_allowed_read_search_dir(resolved, path)
+            return
+        if self._is_allowed_read_relative_file(relative_path):
+            return
+        raise ValueError(f"can only read {self._read_policy_label()}: {relative_path}")
+
+    def _existing_role_read_paths(self) -> list[str]:
+        paths = [
+            path.relative_to(self.memory_root).as_posix()
+            for pattern in INSIGHT_READ_PATHS
+            for path in self.memory_root.glob(pattern)
+            if path.is_file() and self._is_under_root(path) and self._is_allowed_read_file(path)
+        ]
+        return sorted(set(paths))
+
+    def _existing_role_read_paths_under(self, directory: Path) -> list[str]:
+        directory = directory.resolve(strict=False)
+        return [
+            relative_path
+            for relative_path in self._existing_role_read_paths()
+            if self._path_is_self_or_under(self.memory_root / relative_path, directory)
+        ]
+
+    def _path_is_self_or_under(self, path: Path, directory: Path) -> bool:
+        try:
+            path.resolve(strict=False).relative_to(directory)
+        except ValueError:
+            return False
+        return True
+
+    def _is_active_memory_path(self, relative_path: str) -> bool:
+        return relative_path == "MEMORY.md" or bool(MEMORY_DETAIL_FILE_RE.fullmatch(relative_path))
+
+    def _is_insight_log_path(self, relative_path: str) -> bool:
+        return bool(INSIGHT_LOG_FILE_RE.fullmatch(relative_path))
 
     def _is_memory_skill_file(self, path: Path) -> bool:
         relative_path = path.relative_to(self.memory_root).as_posix()

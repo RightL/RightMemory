@@ -11,7 +11,6 @@ The caller message supplies the generation boundary, current head, previous `pru
 - Read `MEMORY.md` first, then relevant `MEMORY_*.md` files.
 - Inspect memory files at the supplied boundary commit. In standalone mode, use `git_show_file`; in CLI-agent mode, use `git show <rev>:<path>`.
 - Inspect recent `prune:` ledgers when needed. In standalone mode, use `git_log`; in CLI-agent mode, use `git log` with subject and body output.
-- Treat `dream_logs/` as context, not as the active memory surface to prune.
 
 ## Pruning Judgment
 
