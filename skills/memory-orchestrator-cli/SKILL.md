@@ -14,17 +14,13 @@ description: "Use when the user's request may depend on long-term context from e
 
 - For retrieval, call `rightmemory retrieve --session <stable-session-id> "<memory need>"`.
 - Describe the memory needed based on the user's intent instead of blindly forwarding the user's message verbatim.
-- Do not retrieve on every turn. Retrieve when the user message clearly depends on prior shared context that is not available in the current conversation itself.
-- For user, workflow, or behavior context, use a lower bar: if prior memory could reasonably change how the agent acts now, do one targeted retrieval.
-- Preferences, communication expectations, tool/environment constraints, process rules, and repeated failure patterns are recognition cues; apply judgment to the current turn.
-- Consider retrieving again when the work changes phase or topic, e.g. from discussion to implementation or from implementation to finishing or verification, to surface relevant user preferences, workflow expectations, or agent-behavior guidance.
-- If in doubt, skip retrieval for ordinary task facts.
+- Do not retrieve on every turn. Retrieve when the current conversation lacks the background needed to answer or work well.
 - Skip retrieval when the message is clearly self-contained and answerable from the conversation alone.
-- When retrieval is needed, wait at least 3 minutes for the retrieve command before acting on that memory.
+- Retrieve preference-, workflow-, and behavior-related memory more frequently, especially when the work changes phase or topic, e.g. from discussion to implementation or from implementation to finishing or verification.
+- When running retrieve, wait at least 3 minutes for the command before acting on memory. During that wait, do not explore files or advance the task independently.
 - The retriever skips items already returned in this session; ask explicitly if you need something again.
-- If the retriever reports "no strong match", proceed without memory; do not retry the same query.
-- Use returned addressable lines as context; quote them verbatim when relying on them — do not paraphrase heading ids, node ids, descriptions, or edges.
-- If current work shows retrieved memory is stale, wrong, too broad, or misleading, preserve the returned address and the correction needed for the next update brief.
+- Treat retrieved behavior guidance seriously: apply it directly when the fit is clear, briefly say how it will guide the work when useful, and ask the user when the fit is unclear.
+- If current work shows retrieved memory is stale, wrong, too broad, or misleading, send the correction in the next update brief. This matters because bad memory can keep steering future agents wrong.
 - Retrieval may include an `Open context questions` block after ordinary memory matches. Treat those lines as agent-facing questions, not memory facts.
 - If the current task or workspace context already answers one, include the question id and answer in the next memory update brief.
 - Do not start extra investigation just because a question was surfaced.
