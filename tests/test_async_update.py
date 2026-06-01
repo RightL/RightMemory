@@ -126,11 +126,38 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
         self.assertEqual(recovered.status, "failed")
         self.assertIsNone(recovered.phase)
+        self.assertEqual(recovered.attempts, 1)
+        self.assertIsNotNone(recovered.next_retry_at)
         self.assertIsNone(recovered.next_flush_at)
         self.assertEqual(recovered.current_batch, [])
         self.assertEqual([job.id for job in recovered.pending], [1, 2])
         self.assertEqual(recovered.pending[0].message, "interrupted")
         self.assertIn("worker process exited before writing result", recovered.error or "")
+
+    def test_legacy_failed_pending_state_becomes_manual_recovery(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="failed",
+                    session_id="agent-1",
+                    role="update",
+                    finished_at="2026-05-15T00:00:00+00:00",
+                    error="old failure",
+                    pending=[_job(1, "old pending")],
+                    next_id=2,
+                ),
+            )
+
+            state = store.read("agent-1")
+
+        self.assertEqual(state.status, "needs_manual_recovery")
+        self.assertEqual(state.attempts, 2)
+        self.assertEqual(state.current_batch, [])
+        self.assertEqual([job.message for job in state.pending], ["old pending"])
+        self.assertEqual(state.error, "old failure")
+        self.assertEqual(state.last_error, "old failure")
 
     def test_submit_starts_only_one_global_worker_for_multiple_sessions(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -152,7 +179,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual([job.message for job in first.pending], ["first"])
         self.assertEqual([job.message for job in second.pending], ["second"])
 
-    def test_submit_after_failed_state_preserves_pending_order_and_starts_worker(self):
+    def test_submit_during_retry_cooldown_appends_without_recovering(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
             store._write(
@@ -161,39 +188,44 @@ class AsyncUpdateStateTests(unittest.TestCase):
                     status="failed",
                     session_id="agent-1",
                     role="update",
-                    finished_at="2026-05-15T00:00:00+00:00",
+                    attempts=1,
+                    next_retry_at="2026-05-15T01:00:00+00:00",
                     error="previous failure",
+                    last_error="previous failure",
                     pending=[_job(1, "retry first")],
                     next_id=2,
                 ),
             )
             process = Mock(pid=4242)
 
-            with patch("rightmemory.async_update.subprocess.Popen", return_value=process) as popen:
+            with (
+                patch("rightmemory.async_update.subprocess.Popen", return_value=process) as popen,
+                patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T00:10:00+00:00")),
+            ):
                 state = store.submit("agent-1", "new update")
-                with store._worker_locked():
-                    worker = store._read_worker_locked()
 
         popen.assert_called_once()
-        self.assertEqual(state.status, "running")
-        self.assertEqual(state.phase, "waiting")
-        self.assertEqual(worker["pid"], 4242)
+        self.assertEqual(state.status, "failed")
+        self.assertIsNone(state.phase)
+        self.assertEqual(state.attempts, 1)
+        self.assertEqual(state.next_retry_at, "2026-05-15T01:00:00+00:00")
+        self.assertEqual(state.error, "previous failure")
         self.assertEqual([job.message for job in state.pending], ["retry first", "new update"])
         self.assertEqual([job.id for job in state.pending], [1, 2])
         self.assertEqual(state.current_batch, [])
 
-    def test_submit_after_failed_state_recovers_leftover_current_batch(self):
+    def test_submit_during_manual_recovery_appends_without_recovering(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
             store._write(
                 "agent-1",
                 AsyncUpdateState(
-                    status="failed",
+                    status="needs_manual_recovery",
                     session_id="agent-1",
                     role="update",
-                    phase=None,
-                    finished_at="2026-05-15T00:00:00+00:00",
+                    attempts=2,
                     error="previous failure",
+                    last_error="previous failure",
                     current_batch=[_job(1, "interrupted first"), _job(2, "interrupted second")],
                     pending=[_job(3, "already pending")],
                     next_id=4,
@@ -204,8 +236,9 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with patch("rightmemory.async_update.subprocess.Popen", return_value=process):
                 state = store.submit("agent-1", "new update")
 
-        self.assertEqual(state.status, "running")
-        self.assertEqual(state.phase, "waiting")
+        self.assertEqual(state.status, "needs_manual_recovery")
+        self.assertIsNone(state.phase)
+        self.assertEqual(state.attempts, 2)
         self.assertEqual(state.current_batch, [])
         self.assertEqual(
             [job.message for job in state.pending],
@@ -345,6 +378,8 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
         self.assertEqual(recovered.status, "failed")
         self.assertEqual(recovered.current_batch, [])
+        self.assertEqual(recovered.attempts, 1)
+        self.assertIsNotNone(recovered.next_retry_at)
         self.assertEqual([job.id for job in recovered.pending], [1, 2])
         self.assertIn("worker process exited before writing result", recovered.error or "")
 
@@ -581,6 +616,120 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(result.status, "idle")
         self.assertEqual(calls, 2)
 
+    def test_retryable_failed_session_runs_below_target_without_waiting(self):
+        calls = []
+        slept = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="failed",
+                    session_id="agent-1",
+                    role="update",
+                    attempts=1,
+                    next_retry_at="2000-01-01T00:00:00+00:00",
+                    error="previous failure",
+                    last_error="previous failure",
+                    pending=[_job(1, "retry me")],
+                    next_id=2,
+                ),
+            )
+
+            result = store.run_pending_batches(
+                lambda batch_session_id, message: calls.append((batch_session_id, message)) or "ok",
+                target_batch_candidates=15,
+                max_wait_seconds=86400,
+                sleep_until=slept.append,
+            )
+            state = store.read("agent-1")
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(slept, [])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("retry me", calls[0][1])
+        self.assertEqual(state.status, "succeeded")
+
+    def test_failed_session_in_cooldown_waits_until_retry_deadline(self):
+        slept = []
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="failed",
+                    session_id="agent-1",
+                    role="update",
+                    attempts=1,
+                    next_retry_at="2026-05-15T01:00:00+00:00",
+                    error="previous failure",
+                    last_error="previous failure",
+                    pending=[_job(1, "retry later")],
+                    next_id=2,
+                ),
+            )
+
+            def fake_now():
+                if slept:
+                    return _dt("2026-05-15T01:00:00+00:00")
+                return _dt("2026-05-15T00:00:00+00:00")
+
+            with patch("rightmemory.async_update._now_dt", side_effect=fake_now):
+                result = store.run_pending_batches(
+                    lambda batch_session_id, message: calls.append(message) or "ok",
+                    target_batch_candidates=15,
+                    max_wait_seconds=86400,
+                    sleep_until=slept.append,
+                )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(slept, [_dt("2026-05-15T00:00:30+00:00")])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("retry later", calls[0])
+
+    def test_retryable_sessions_run_before_normal_batching(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "retry-session",
+                AsyncUpdateState(
+                    status="failed",
+                    session_id="retry-session",
+                    role="update",
+                    attempts=1,
+                    next_retry_at="2000-01-01T00:00:00+00:00",
+                    error="previous failure",
+                    last_error="previous failure",
+                    pending=[_job(1, "retry first")],
+                    next_id=2,
+                ),
+            )
+            store._write(
+                "normal-session",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="normal-session",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    pending=[_job(1, "normal later")],
+                    next_id=2,
+                ),
+            )
+
+            result = store.run_pending_batches(
+                lambda batch_session_id, message: calls.append(message) or "ok",
+                target_batch_candidates=15,
+                max_wait_seconds=86400,
+            )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertGreaterEqual(len(calls), 1)
+        self.assertIn("retry first", calls[0])
+        self.assertNotIn("normal later", calls[0])
+
     def test_global_worker_failure_returns_all_current_batches_to_pending(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
@@ -609,12 +758,139 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(result.status, "failed")
         self.assertEqual(first.status, "failed")
         self.assertEqual(second.status, "failed")
+        self.assertEqual(first.attempts, 1)
+        self.assertEqual(second.attempts, 1)
+        self.assertIsNotNone(first.next_retry_at)
+        self.assertIsNotNone(second.next_retry_at)
         self.assertEqual([job.message for job in first.pending], ["a1"])
         self.assertEqual([job.message for job in second.pending], ["b1"])
         self.assertEqual(first.current_batch, [])
         self.assertEqual(second.current_batch, [])
         self.assertEqual(first.error, "isolated failure")
         self.assertEqual(second.error, "isolated failure")
+
+    def test_second_failure_moves_to_manual_recovery(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="failed",
+                    session_id="agent-1",
+                    role="update",
+                    attempts=1,
+                    next_retry_at="2000-01-01T00:00:00+00:00",
+                    error="first failure",
+                    last_error="first failure",
+                    pending=[_job(1, "retry me")],
+                    next_id=2,
+                ),
+            )
+
+            with patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T02:00:00+00:00")):
+                result = store.run_pending_batches(
+                    Mock(side_effect=RuntimeError("second failure")),
+                    target_batch_candidates=15,
+                    max_wait_seconds=86400,
+                )
+            state = store.read("agent-1")
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(state.status, "needs_manual_recovery")
+        self.assertEqual(state.attempts, 2)
+        self.assertIsNone(state.next_retry_at)
+        self.assertEqual(state.current_batch, [])
+        self.assertEqual([job.message for job in state.pending], ["retry me"])
+        self.assertEqual(state.error, "second failure")
+        self.assertEqual(state.last_error, "second failure")
+
+    def test_successful_retry_clears_retry_metadata(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="failed",
+                    session_id="agent-1",
+                    role="update",
+                    attempts=1,
+                    next_retry_at="2000-01-01T00:00:00+00:00",
+                    error="first failure",
+                    last_error="first failure",
+                    pending=[_job(1, "retry me")],
+                    next_id=2,
+                ),
+            )
+
+            result = store.run_pending_batches(
+                lambda batch_session_id, message: calls.append(message) or "ok",
+                target_batch_candidates=15,
+                max_wait_seconds=86400,
+            )
+            state = store.read("agent-1")
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(state.status, "succeeded")
+        self.assertEqual(state.attempts, 0)
+        self.assertIsNone(state.next_retry_at)
+        self.assertIsNone(state.last_error)
+        self.assertIsNone(state.error)
+        self.assertEqual(state.pending, [])
+
+    def test_retry_manual_recovery_requeues_all_manual_sessions(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="needs_manual_recovery",
+                    session_id="agent-1",
+                    role="update",
+                    attempts=2,
+                    error="boom",
+                    last_error="boom",
+                    pending=[_job(1, "first")],
+                    next_id=2,
+                ),
+            )
+            store._write(
+                "agent-2",
+                AsyncUpdateState(
+                    status="needs_manual_recovery",
+                    session_id="agent-2",
+                    role="update",
+                    attempts=2,
+                    error="boom",
+                    last_error="boom",
+                    pending=[_job(1, "second"), _job(2, "third")],
+                    next_id=3,
+                ),
+            )
+            process = Mock(pid=4242)
+
+            with (
+                patch("rightmemory.async_update.subprocess.Popen", return_value=process) as popen,
+                patch("rightmemory.async_update._process_exists", return_value=True),
+                patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T04:00:00+00:00")),
+            ):
+                result = store.retry_manual_recovery()
+            first = store.read("agent-1")
+            second = store.read("agent-2")
+
+        popen.assert_called_once()
+        self.assertEqual(result.requeued_sessions, 2)
+        self.assertEqual(result.requeued_candidates, 3)
+        self.assertEqual(result.skipped_sessions, 0)
+        self.assertEqual(result.worker_pid, 4242)
+        self.assertEqual(result.worker_action, "started")
+        for state in (first, second):
+            self.assertEqual(state.status, "failed")
+            self.assertEqual(state.attempts, 0)
+            self.assertEqual(state.next_retry_at, "2026-05-15T04:00:00+00:00")
+            self.assertIsNone(state.error)
+            self.assertIsNone(state.last_error)
 
     def test_read_rejects_state_missing_required_identity_fields(self):
         with tempfile.TemporaryDirectory() as tempdir:

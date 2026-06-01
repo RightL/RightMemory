@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .async_update import _is_async_worker_process, _state_from_json
+from .async_update import STATUS_MANUAL_RECOVERY, _is_async_worker_process, _is_legacy_failed_pending_state, _state_from_json
 from .config import load_dreamer_watch_config, load_insight_watch_config, load_sync_config
 from .watch import MANAGED_WATCH_TARGETS, ManagedWatchStatus, _is_managed_watch_process, watch_log_path, watch_pid_path
 
@@ -276,6 +276,10 @@ def collect_async_update_section(
 
     pending_candidates = 0
     pending_sessions = 0
+    retrying_candidates = 0
+    retrying_sessions = 0
+    manual_candidates = 0
+    manual_sessions = 0
     current_candidates = 0
     current_sessions = 0
     flush_times: list[str] = []
@@ -285,7 +289,19 @@ def collect_async_update_section(
     for path, state in session_states:
         pending = state.pending
         current = state.current_batch
-        if pending:
+        manual_recovery = state.status == STATUS_MANUAL_RECOVERY or _is_legacy_failed_pending_state(state)
+        retrying = bool(pending) and state.status == "failed" and not manual_recovery
+        normal_pending = state.status == "running" and bool(pending)
+        if pending and manual_recovery:
+            manual_candidates += len(pending)
+            manual_sessions += 1
+        elif pending and retrying:
+            retrying_candidates += len(pending)
+            retrying_sessions += 1
+        elif pending and normal_pending:
+            pending_candidates += len(pending)
+            pending_sessions += 1
+        elif pending:
             pending_candidates += len(pending)
             pending_sessions += 1
         if current:
@@ -295,8 +311,13 @@ def collect_async_update_section(
         if next_flush_at:
             flush_times.append(next_flush_at)
         if state.error:
-            error_preview = _cap_preview(f"error: {state.error}").splitlines()[0]
-            issues.append(f"update: {state.session_id}: {error_preview}")
+            error_preview = _cap_preview(str(state.error)).splitlines()[0]
+            if manual_recovery:
+                issues.append(f"update: {state.session_id}: manual recovery required: {error_preview}")
+            elif retrying:
+                issues.append(f"update: {state.session_id}: retrying after error: {error_preview}")
+            else:
+                issues.append(f"update: {state.session_id}: error: {error_preview}")
             last_values.append((_async_outcome_time(path, state), path.name, f"error: {state.error}"))
         elif state.result:
             last_values.append((_async_outcome_time(path, state), path.name, state.result))
@@ -305,6 +326,14 @@ def collect_async_update_section(
         (
             f"pending: {pending_candidates} {_plural('candidate', pending_candidates)} "
             f"across {pending_sessions} {_plural('session', pending_sessions)}"
+        ),
+        (
+            f"retrying: {retrying_candidates} {_plural('candidate', retrying_candidates)} "
+            f"across {retrying_sessions} {_plural('session', retrying_sessions)}"
+        ),
+        (
+            f"manual recovery: {manual_candidates} {_plural('candidate', manual_candidates)} "
+            f"across {manual_sessions} {_plural('session', manual_sessions)}"
         ),
         (
             f"current batch: {current_candidates} {_plural('candidate', current_candidates)} "

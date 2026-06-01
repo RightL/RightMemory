@@ -16,7 +16,16 @@ from pathlib import Path
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
 
 UPDATE_DEBOUNCE_SECONDS = 60 * 60
+UPDATE_RETRY_COOLDOWN_SECONDS = 60 * 60
+UPDATE_MAX_AUTOMATIC_ATTEMPTS = 2
 WORKER_IDLE_POLL_SECONDS = 30
+STATUS_MANUAL_RECOVERY = "needs_manual_recovery"
+MANUAL_RECOVERY_WARNING = (
+    "CRITICAL: this async memory update session is blocked after "
+    f"{UPDATE_MAX_AUTOMATIC_ATTEMPTS} failed attempts.\n"
+    "The new candidate was saved, but this session will not be processed until manual recovery runs.\n"
+    "Agent: report this issue to the user and suggest `rightmemory update retry`."
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +46,9 @@ class AsyncUpdateState:
     pid: int | None = None
     result: str | None = None
     error: str | None = None
+    attempts: int = 0
+    next_retry_at: str | None = None
+    last_error: str | None = None
     next_flush_at: str | None = None
     current_batch: list[AsyncUpdateJob] = field(default_factory=list)
     pending: list[AsyncUpdateJob] = field(default_factory=list)
@@ -55,6 +67,15 @@ class AsyncUpdateWorkerResult:
     status: str
     processed: int = 0
     failed: bool = False
+
+
+@dataclass(frozen=True)
+class AsyncUpdateRetryResult:
+    requeued_sessions: int = 0
+    requeued_candidates: int = 0
+    skipped_sessions: int = 0
+    worker_pid: int | None = None
+    worker_action: str = "not started"
 
 
 @dataclass(frozen=True)
@@ -88,6 +109,58 @@ class AsyncUpdateStore:
                 self._write(session_id, state)
             return state, canceled
 
+    def retry_manual_recovery(self) -> AsyncUpdateRetryResult:
+        now = _now_dt()
+        requeued_sessions = 0
+        requeued_candidates = 0
+        skipped_sessions = 0
+        first_session_id: str | None = None
+
+        for path in self._session_state_paths():
+            session_id = path.stem
+            with self._locked(session_id):
+                state = self._read_checked_locked(session_id)
+                if state.status != STATUS_MANUAL_RECOVERY:
+                    continue
+                retry_pending = [*state.current_batch, *state.pending]
+                if not retry_pending:
+                    skipped_sessions += 1
+                    continue
+                next_state = replace(
+                    state,
+                    status="failed",
+                    phase=None,
+                    finished_at=None,
+                    pid=None,
+                    error=None,
+                    attempts=0,
+                    next_retry_at=_format_time(now),
+                    last_error=None,
+                    current_batch=[],
+                    pending=retry_pending,
+                )
+                self._write(session_id, next_state)
+                requeued_sessions += 1
+                requeued_candidates += len(retry_pending)
+                if first_session_id is None:
+                    first_session_id = session_id
+
+        worker_pid = None
+        worker_action = "not started"
+        if first_session_id is not None:
+            before_pid = self._active_worker_pid()
+            self._start_worker_if_needed(first_session_id)
+            worker_pid = self._active_worker_pid()
+            if worker_pid is not None:
+                worker_action = "woken" if before_pid is not None else "started"
+        return AsyncUpdateRetryResult(
+            requeued_sessions=requeued_sessions,
+            requeued_candidates=requeued_candidates,
+            skipped_sessions=skipped_sessions,
+            worker_pid=worker_pid,
+            worker_action=worker_action,
+        )
+
     def submit(self, session_id: str, message: str) -> AsyncUpdateState:
         now = _now_dt()
         with self._locked(session_id):
@@ -97,7 +170,8 @@ class AsyncUpdateStore:
             state = self._enqueue_locked(current, job, now=now, worker_pid=worker_pid)
             self._write(session_id, state)
 
-        self._start_worker_if_needed(session_id)
+        if state.status != STATUS_MANUAL_RECOVERY:
+            self._start_worker_if_needed(session_id)
         return state
 
     def run_pending_batches(
@@ -192,6 +266,7 @@ class AsyncUpdateStore:
         max_wait_seconds: int,
     ) -> tuple[list[AsyncUpdateSessionBatch] | None, datetime | None]:
         now = _now_dt()
+        recovery: list[AsyncUpdateSessionBatch] = []
         eligible: list[AsyncUpdateSessionBatch] = []
         future_deadlines: list[datetime] = []
 
@@ -201,15 +276,26 @@ class AsyncUpdateStore:
                 state = self._read_checked_locked(session_id)
                 if state.role != self.role:
                     continue
-                if state.status != "running" or state.phase != "waiting":
-                    continue
                 if state.current_batch or not state.pending:
+                    continue
+                if state.status == "failed":
+                    ready_at = _required_time(state.next_retry_at, "next_retry_at")
+                    if ready_at <= now:
+                        recovery.append(AsyncUpdateSessionBatch(state.session_id, ready_at, list(state.pending)))
+                    else:
+                        future_deadlines.append(ready_at)
+                    continue
+                if state.status != "running" or state.phase != "waiting":
                     continue
                 ready_at = _required_time(state.next_flush_at, "next_flush_at")
                 if ready_at <= now:
                     eligible.append(AsyncUpdateSessionBatch(state.session_id, ready_at, list(state.pending)))
                 else:
                     future_deadlines.append(ready_at)
+
+        recovery.sort(key=lambda item: (item.ready_at, item.session_id))
+        if recovery:
+            return recovery, None
 
         eligible.sort(key=lambda item: (item.ready_at, item.session_id))
         if not eligible:
@@ -242,6 +328,7 @@ class AsyncUpdateStore:
                 pending = state.pending[len(expected_ids):]
                 next_state = replace(
                     state,
+                    status="running",
                     phase="running",
                     started_at=_now(),
                     finished_at=None,
@@ -271,6 +358,7 @@ class AsyncUpdateStore:
                     )
                     next_state = replace(
                         state,
+                        status="running",
                         phase="waiting",
                         started_at=_now(),
                         finished_at=None,
@@ -279,6 +367,9 @@ class AsyncUpdateStore:
                         next_flush_at=next_flush_at,
                         result=result,
                         error=None,
+                        attempts=0,
+                        next_retry_at=None,
+                        last_error=None,
                     )
                 else:
                     next_state = replace(
@@ -292,6 +383,9 @@ class AsyncUpdateStore:
                         next_flush_at=None,
                         result=result,
                         error=None,
+                        attempts=0,
+                        next_retry_at=None,
+                        last_error=None,
                     )
                 self._write(item.session_id, next_state)
         return accepted
@@ -478,6 +572,8 @@ class AsyncUpdateStore:
 
     def _read_checked_locked(self, session_id: str) -> AsyncUpdateState:
         state = self._read_raw(session_id)
+        if _is_legacy_failed_pending_state(state):
+            return self._manual_recovery_locked(session_id, state)
         if state.status != "running":
             return state
         worker = self._worker_snapshot()
@@ -499,6 +595,16 @@ class AsyncUpdateStore:
     ) -> AsyncUpdateState:
         next_id = max(state.next_id, job.id + 1)
         next_flush_at = _format_time(now + timedelta(seconds=UPDATE_DEBOUNCE_SECONDS))
+        if state.status in {"failed", STATUS_MANUAL_RECOVERY}:
+            pending = [*state.current_batch, *state.pending, job]
+            return replace(
+                state,
+                phase=None,
+                pid=worker_pid,
+                current_batch=[],
+                pending=pending,
+                next_id=next_id,
+            )
         if (
             state.status == "running"
             and state.phase == "running"
@@ -534,19 +640,42 @@ class AsyncUpdateStore:
     def _fail_locked(self, session_id: str, error: str) -> AsyncUpdateState:
         current = self._read_raw(session_id)
         retry_pending = [*current.current_batch, *current.pending]
+        attempts = current.attempts + 1
+        manual = attempts >= UPDATE_MAX_AUTOMATIC_ATTEMPTS
+        now = _now_dt()
         state = replace(
             current,
-            status="failed",
+            status=STATUS_MANUAL_RECOVERY if manual else "failed",
             phase=None,
-            finished_at=_now(),
+            finished_at=_format_time(now),
             pid=os.getpid(),
             error=error,
+            attempts=attempts,
+            next_retry_at=None if manual else _format_time(now + timedelta(seconds=UPDATE_RETRY_COOLDOWN_SECONDS)),
+            last_error=error,
             next_flush_at=None,
             current_batch=[],
             pending=retry_pending,
         )
         self._write(session_id, state)
         return state
+
+    def _manual_recovery_locked(self, session_id: str, state: AsyncUpdateState) -> AsyncUpdateState:
+        retry_pending = [*state.current_batch, *state.pending]
+        next_state = replace(
+            state,
+            status=STATUS_MANUAL_RECOVERY,
+            phase=None,
+            finished_at=state.finished_at or _now(),
+            pid=os.getpid(),
+            attempts=max(state.attempts, UPDATE_MAX_AUTOMATIC_ATTEMPTS),
+            next_retry_at=None,
+            last_error=state.last_error or state.error,
+            current_batch=[],
+            pending=retry_pending,
+        )
+        self._write(session_id, next_state)
+        return next_state
 
     def _state_path(self, session_id: str) -> Path:
         safe_id = _safe_session_id(session_id)
@@ -608,6 +737,9 @@ def _state_from_json(data: dict[str, object]) -> AsyncUpdateState:
         pid=data.get("pid") if isinstance(data.get("pid"), int) else None,
         result=_optional_str(data.get("result")),
         error=_optional_str(data.get("error")),
+        attempts=_optional_nonnegative_int(data.get("attempts"), "attempts"),
+        next_retry_at=_optional_str(data.get("next_retry_at")),
+        last_error=_optional_str(data.get("last_error")),
         next_flush_at=_optional_str(data.get("next_flush_at")),
         current_batch=_required_job_list(data, "current_batch"),
         pending=_required_job_list(data, "pending"),
@@ -647,6 +779,23 @@ def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _optional_nonnegative_int(value: object, field: str) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"async update state must contain nonnegative integer field: {field}")
+    return value
+
+
+def _is_legacy_failed_pending_state(state: AsyncUpdateState) -> bool:
+    return (
+        state.status == "failed"
+        and state.attempts == 0
+        and state.next_retry_at is None
+        and bool(state.current_batch or state.pending)
+    )
+
+
 def format_state(state: AsyncUpdateState) -> str:
     lines = [f"status: {state.status}", f"session: {state.session_id}"]
     if state.phase:
@@ -670,6 +819,25 @@ def format_state(state: AsyncUpdateState) -> str:
     if state.error:
         lines.append(f"error: {state.error}")
     return "\n".join(lines)
+
+
+def format_retry_result(result: AsyncUpdateRetryResult) -> str:
+    lines = [
+        f"requeued sessions: {result.requeued_sessions}",
+        f"requeued candidates: {result.requeued_candidates}",
+        f"skipped sessions: {result.skipped_sessions}",
+    ]
+    if result.worker_pid is None:
+        lines.append("worker: not started")
+    else:
+        lines.append(f"worker: {result.worker_action} pid {result.worker_pid}")
+    return "\n".join(lines)
+
+
+def manual_recovery_warning(state: AsyncUpdateState) -> str | None:
+    if state.status != STATUS_MANUAL_RECOVERY:
+        return None
+    return MANUAL_RECOVERY_WARNING
 
 
 def _format_batch_message(batches: list[AsyncUpdateSessionBatch]) -> str:

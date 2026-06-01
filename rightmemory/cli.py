@@ -14,7 +14,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable
 
-from .async_update import AsyncUpdateStore, format_state
+from .async_update import AsyncUpdateStore, format_retry_result, format_state, manual_recovery_warning
 from .config import (
     MEMORY_ROOT,
     ROLES,
@@ -126,6 +126,12 @@ def main(argv: list[str] | None = None) -> int:
         if _is_help_request(remaining[1:]):
             _undo_parser(args.role).parse_args(remaining[1:])
             return 0
+    if remaining and remaining[0] == "retry":
+        if args.role != "update":
+            raise ValueError("retry is only supported for the update role")
+        if _is_help_request(remaining[1:]):
+            _retry_parser(args.role).parse_args(remaining[1:])
+            return 0
     if remaining and remaining[0] == "_async-worker" and args.role != "update":
         raise ValueError("_async-worker is only supported for the update role")
     if remaining and remaining[0] == "chat" and _is_help_request(remaining[1:]):
@@ -159,6 +165,9 @@ def main(argv: list[str] | None = None) -> int:
     if remaining and remaining[0] == "undo":
         undo_args = _undo_parser(args.role).parse_args(remaining[1:])
         return _undo(config.memory_root, args.role, undo_args.session, undo_args.candidate_id)
+    if remaining and remaining[0] == "retry":
+        _retry_parser(args.role).parse_args(remaining[1:])
+        return _retry(config.memory_root, args.role)
 
     runtime = RightMemoryRuntime(config)
     try:
@@ -408,6 +417,10 @@ def _undo_parser(role: str) -> argparse.ArgumentParser:
     parser.add_argument("--session", required=True, help="cancel a pending candidate for this update session id")
     parser.add_argument("candidate_id", type=_candidate_id, help="pending candidate id to cancel")
     return parser
+
+
+def _retry_parser(role: str) -> argparse.ArgumentParser:
+    return argparse.ArgumentParser(prog=f"rightmemory {role} retry")
 
 
 def _candidate_id(value: str) -> int:
@@ -965,6 +978,10 @@ def _submit(memory_root, role: str, session_id: str, message_parts: list[str]) -
         raise ValueError("message must not be empty")
     state = AsyncUpdateStore(memory_root, role).submit(session_id, message)
     print(format_state(state))
+    warning = manual_recovery_warning(state)
+    if warning:
+        print()
+        print(warning)
     return 0
 
 
@@ -981,6 +998,12 @@ def _undo(memory_root, role: str, session_id: str, candidate_id: int) -> int:
     else:
         print(f"candidate is not pending: {candidate_id}")
     print(format_state(state))
+    return 0
+
+
+def _retry(memory_root, role: str) -> int:
+    result = AsyncUpdateStore(memory_root, role).retry_manual_recovery()
+    print(format_retry_result(result))
     return 0
 
 

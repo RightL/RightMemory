@@ -557,10 +557,123 @@ class StatusDashboardTests(unittest.TestCase):
 
         self.assertEqual(section.state, "worker: idle")
         self.assertIn("pending: 2 candidates across 1 session", section.detail)
+        self.assertIn("retrying: 0 candidates across 0 sessions", section.detail)
+        self.assertIn("manual recovery: 0 candidates across 0 sessions", section.detail)
         self.assertIn("current batch: 1 candidate across 1 session", section.detail)
         self.assertIn("next flush: 2026-05-29T10:00:00+00:00", section.detail)
         self.assertEqual(section.last, "accepted 1 candidate")
         self.assertEqual(issues, [])
+
+    def test_collect_async_update_section_separates_retrying_and_manual_recovery(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            async_root = root / ".runtime" / "async" / "update"
+            async_root.mkdir(parents=True)
+            base = {
+                "role": "update",
+                "phase": None,
+                "started_at": "2026-05-29T08:00:00+00:00",
+                "finished_at": None,
+                "pid": None,
+                "result": None,
+                "next_flush_at": None,
+                "current_batch": [],
+                "next_id": 2,
+            }
+            (async_root / "retrying.json").write_text(
+                json.dumps(
+                    {
+                        **base,
+                        "status": "failed",
+                        "session_id": "retrying",
+                        "error": "temporary boom",
+                        "attempts": 1,
+                        "next_retry_at": "2026-05-29T09:00:00+00:00",
+                        "last_error": "temporary boom",
+                        "pending": [
+                            {
+                                "id": 1,
+                                "message": "retrying",
+                                "submitted_at": "2026-05-29T08:00:00+00:00",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (async_root / "manual.json").write_text(
+                json.dumps(
+                    {
+                        **base,
+                        "status": "needs_manual_recovery",
+                        "session_id": "manual",
+                        "error": "permanent boom",
+                        "attempts": 2,
+                        "next_retry_at": None,
+                        "last_error": "permanent boom",
+                        "pending": [
+                            {
+                                "id": 1,
+                                "message": "manual",
+                                "submitted_at": "2026-05-29T08:00:00+00:00",
+                            },
+                            {
+                                "id": 2,
+                                "message": "manual two",
+                                "submitted_at": "2026-05-29T08:01:00+00:00",
+                            },
+                        ],
+                        "next_id": 3,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            section, issues = collect_async_update_section(root)
+
+        self.assertIn("pending: 0 candidates across 0 sessions", section.detail)
+        self.assertIn("retrying: 1 candidate across 1 session", section.detail)
+        self.assertIn("manual recovery: 2 candidates across 1 session", section.detail)
+        self.assertIn("current batch: 0 candidates across 0 sessions", section.detail)
+        self.assertIn("update: retrying: retrying after error: temporary boom", issues)
+        self.assertIn("update: manual: manual recovery required: permanent boom", issues)
+
+    def test_collect_async_update_section_counts_legacy_failed_pending_as_manual_recovery(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            async_root = root / ".runtime" / "async" / "update"
+            async_root.mkdir(parents=True)
+            (async_root / "legacy.json").write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "session_id": "legacy",
+                        "role": "update",
+                        "phase": None,
+                        "started_at": "2026-05-29T08:00:00+00:00",
+                        "finished_at": "2026-05-29T09:00:00+00:00",
+                        "pid": None,
+                        "result": None,
+                        "error": "old boom",
+                        "next_flush_at": None,
+                        "current_batch": [],
+                        "pending": [
+                            {
+                                "id": 1,
+                                "message": "legacy",
+                                "submitted_at": "2026-05-29T08:00:00+00:00",
+                            }
+                        ],
+                        "next_id": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            section, issues = collect_async_update_section(root)
+
+        self.assertIn("manual recovery: 1 candidate across 1 session", section.detail)
+        self.assertIn("update: legacy: manual recovery required: old boom", issues)
 
     def test_collect_async_update_section_uses_recent_outcome_for_last_preview(self):
         with tempfile.TemporaryDirectory() as tempdir:

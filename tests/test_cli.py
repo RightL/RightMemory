@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rightmemory.async_update import AsyncUpdateStore
+from rightmemory.async_update import AsyncUpdateState, AsyncUpdateStore
 from rightmemory.cli import _daemon_stdio_json, _dreamer_watch_once, _handle_json_request, _insight_watch_once, main
 from rightmemory.config import DreamerWatchConfig, InsightWatchConfig
 from rightmemory.dreamer_trigger import DreamerTriggerStore
@@ -1602,6 +1602,45 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("pending: 1", stdout.getvalue())
         self.assertIn("pending_ids: 1", stdout.getvalue())
 
+    def test_submit_into_manual_recovery_prints_critical_warning(self):
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            store = AsyncUpdateStore(memory_root, "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="needs_manual_recovery",
+                    session_id="agent-1",
+                    role="update",
+                    attempts=2,
+                    error="previous failure",
+                    last_error="previous failure",
+                    pending=[],
+                    next_id=1,
+                ),
+            )
+
+            def fake_load_config(role):
+                return type("Config", (), {"memory_root": memory_root})()
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.async_update.subprocess.Popen") as popen,
+                patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
+                patch("sys.stdout", stdout),
+            ):
+                popen.return_value.pid = 123
+                result = main(["update", "submit", "--session", "agent-1", "new", "candidate"])
+
+        output = stdout.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("status: needs_manual_recovery", output)
+        self.assertIn("pending: 1", output)
+        self.assertIn("CRITICAL: this async memory update session is blocked after 2 failed attempts.", output)
+        self.assertIn("Agent: report this issue to the user", output)
+
     def test_submit_is_only_supported_for_update_role(self):
         with patch("rightmemory.cli.load_config", return_value=object()):
             with self.assertRaises(ValueError):
@@ -1611,6 +1650,11 @@ class JsonRequestTests(unittest.TestCase):
         with patch("rightmemory.cli.load_config", return_value=object()):
             with self.assertRaises(ValueError):
                 main(["retrieve", "undo", "--session", "agent-1", "1"])
+
+    def test_retry_is_only_supported_for_update_role(self):
+        with patch("rightmemory.cli.load_config", return_value=object()):
+            with self.assertRaises(ValueError):
+                main(["retrieve", "retry"])
 
     def test_subcommand_help_does_not_load_config(self):
         stdout = io.StringIO()
@@ -1757,6 +1801,62 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("status: idle", stdout.getvalue())
+
+    def test_update_retry_requeues_manual_recovery_without_session(self):
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            async_root = memory_root / ".runtime" / "async" / "update"
+            async_root.mkdir(parents=True)
+            (async_root / "agent-1.json").write_text(
+                json.dumps(
+                    {
+                        "status": "needs_manual_recovery",
+                        "session_id": "agent-1",
+                        "role": "update",
+                        "phase": None,
+                        "started_at": None,
+                        "finished_at": None,
+                        "pid": None,
+                        "result": None,
+                        "error": "boom",
+                        "attempts": 2,
+                        "next_retry_at": None,
+                        "last_error": "boom",
+                        "next_flush_at": None,
+                        "current_batch": [],
+                        "pending": [
+                            {
+                                "id": 1,
+                                "message": "manual item",
+                                "submitted_at": "2026-05-15T00:00:00+00:00",
+                            }
+                        ],
+                        "next_id": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_load_config(role):
+                return type("Config", (), {"memory_root": memory_root})()
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.async_update.subprocess.Popen") as popen,
+                patch("rightmemory.async_update._process_exists", return_value=True),
+                patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
+                patch("sys.stdout", stdout),
+            ):
+                popen.return_value.pid = 123
+                result = main(["update", "retry"])
+
+        output = stdout.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("requeued sessions: 1", output)
+        self.assertIn("requeued candidates: 1", output)
+        self.assertIn("worker: started pid 123", output)
 
     def test_async_worker_processes_multiple_sessions_as_one_batch(self):
         calls = []
