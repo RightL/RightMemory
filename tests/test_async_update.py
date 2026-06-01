@@ -731,6 +731,8 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertNotIn("normal later", calls[0])
 
     def test_global_worker_failure_returns_all_current_batches_to_pending(self):
+        retry_ready = False
+        slept = []
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
             for session_id, message in (("agent-1", "a1"), ("agent-2", "b1")):
@@ -747,27 +749,42 @@ class AsyncUpdateStateTests(unittest.TestCase):
                     ),
                 )
 
-            result = store.run_pending_batches(
-                Mock(side_effect=RuntimeError("isolated failure")),
-                target_batch_candidates=2,
-                max_wait_seconds=86400,
-            )
+            def fake_now():
+                if retry_ready:
+                    return _dt("2026-05-15T01:00:00+00:00")
+                return _dt("2026-05-15T00:00:00+00:00")
+
+            def fake_sleep(deadline):
+                nonlocal retry_ready
+                slept.append(deadline)
+                retry_ready = True
+
+            run_message = Mock(side_effect=[RuntimeError("isolated failure"), "ok"])
+            with patch("rightmemory.async_update._now_dt", side_effect=fake_now):
+                result = store.run_pending_batches(
+                    run_message,
+                    target_batch_candidates=2,
+                    max_wait_seconds=86400,
+                    sleep_until=fake_sleep,
+                )
             first = store.read("agent-1")
             second = store.read("agent-2")
 
-        self.assertEqual(result.status, "failed")
-        self.assertEqual(first.status, "failed")
-        self.assertEqual(second.status, "failed")
-        self.assertEqual(first.attempts, 1)
-        self.assertEqual(second.attempts, 1)
-        self.assertIsNotNone(first.next_retry_at)
-        self.assertIsNotNone(second.next_retry_at)
-        self.assertEqual([job.message for job in first.pending], ["a1"])
-        self.assertEqual([job.message for job in second.pending], ["b1"])
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(run_message.call_count, 2)
+        self.assertEqual(slept, [_dt("2026-05-15T00:00:30+00:00")])
+        self.assertEqual(first.status, "succeeded")
+        self.assertEqual(second.status, "succeeded")
+        self.assertEqual(first.attempts, 0)
+        self.assertEqual(second.attempts, 0)
+        self.assertIsNone(first.next_retry_at)
+        self.assertIsNone(second.next_retry_at)
+        self.assertEqual(first.pending, [])
+        self.assertEqual(second.pending, [])
         self.assertEqual(first.current_batch, [])
         self.assertEqual(second.current_batch, [])
-        self.assertEqual(first.error, "isolated failure")
-        self.assertEqual(second.error, "isolated failure")
+        self.assertIsNone(first.error)
+        self.assertIsNone(second.error)
 
     def test_second_failure_moves_to_manual_recovery(self):
         with tempfile.TemporaryDirectory() as tempdir:

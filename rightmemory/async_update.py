@@ -198,6 +198,7 @@ class AsyncUpdateStore:
             )
 
         processed = 0
+        manual_failure = False
         worker_state_cleared = False
         try:
             while True:
@@ -210,7 +211,8 @@ class AsyncUpdateStore:
                                 continue
                             self._clear_current_worker_locked()
                             worker_state_cleared = True
-                        return AsyncUpdateWorkerResult(status="succeeded" if processed else "idle", processed=processed)
+                        status = "failed" if manual_failure else "succeeded" if processed else "idle"
+                        return AsyncUpdateWorkerResult(status=status, processed=processed, failed=manual_failure)
                     sleep_until(min(deadline, _now_dt() + timedelta(seconds=WORKER_IDLE_POLL_SECONDS)))
                     continue
 
@@ -251,7 +253,20 @@ class AsyncUpdateStore:
                 try:
                     result = run_message(batch_id, _format_batch_message(batch))
                 except Exception as exc:
-                    self._fail_cross_session_batch(batch, str(exc))
+                    failed_states = self._fail_cross_session_batch(batch, str(exc))
+                    manual_failure = manual_failure or any(
+                        state.status == STATUS_MANUAL_RECOVERY for state in failed_states
+                    )
+                    with self._worker_locked():
+                        self._write_worker_locked(
+                            status="running",
+                            pid=os.getpid(),
+                            batch_id=None,
+                            session_ids=[],
+                            error=None,
+                        )
+                    if any(state.status == "failed" and state.pending for state in failed_states):
+                        continue
                     return AsyncUpdateWorkerResult(status="failed", processed=processed, failed=True)
 
                 accepted_count = self._finish_cross_session_batch(batch, result)
@@ -394,14 +409,16 @@ class AsyncUpdateStore:
                 self._write(item.session_id, next_state)
         return accepted
 
-    def _fail_cross_session_batch(self, batch: list[AsyncUpdateSessionBatch], error: str) -> None:
+    def _fail_cross_session_batch(self, batch: list[AsyncUpdateSessionBatch], error: str) -> list[AsyncUpdateState]:
+        failed_states: list[AsyncUpdateState] = []
         for item in sorted(batch, key=lambda entry: entry.session_id):
             expected_ids = [job.id for job in item.jobs]
             with self._locked(item.session_id):
                 state = self._read_raw(item.session_id)
                 if [job.id for job in state.current_batch] != expected_ids:
                     continue
-                self._fail_locked(item.session_id, error)
+                failed_states.append(self._fail_locked(item.session_id, error))
+        return failed_states
 
     def _worker_command(self) -> list[str]:
         return [
