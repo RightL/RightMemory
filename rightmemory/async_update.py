@@ -156,8 +156,8 @@ class AsyncUpdateStore:
         worker_action = "not started"
         worker_error = None
         if first_session_id is not None:
-            before_pid = self._active_worker_pid()
             try:
+                before_pid = self._active_worker_pid()
                 self._start_worker_if_needed(first_session_id)
             except Exception as exc:
                 worker_error = f"{type(exc).__name__}: {exc}"
