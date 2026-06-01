@@ -657,7 +657,7 @@ class AgentCliDoctorTests(unittest.TestCase):
         self.assertTrue(all(len(nonce) == 32 for nonce in nonce_parts))
 
     def test_doctor_reports_config_failure_without_provider_calls(self):
-        def fake_load_config(role: str):
+        def fake_load_config(role: str, memory_root=None):
             if role == "retrieve":
                 return RuntimeConfig(role=role, model_id="openai/test")
             return _doctor_config(role)
@@ -832,7 +832,7 @@ class AgentCliDoctorTests(unittest.TestCase):
         self.assertIn("outside write blocked", boundary.detail)
 
 
-def _doctor_config(role: str) -> RuntimeConfig:
+def _doctor_config(role: str, memory_root=None) -> RuntimeConfig:
     return RuntimeConfig(
         role=role,
         runtime_mode="cli-agent",
