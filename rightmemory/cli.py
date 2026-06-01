@@ -105,7 +105,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv[:1])
     remaining = argv[1:]
     if remaining == ["-h"] or remaining == ["--help"]:
-        _turn_parser(args.role).parse_args(remaining)
+        if args.role == "update":
+            _update_parser().parse_args(remaining)
+        else:
+            _turn_parser(args.role).parse_args(remaining)
         return 0
 
     if remaining and remaining[0] == "submit":
@@ -370,6 +373,20 @@ def _turn_parser(role: str) -> argparse.ArgumentParser:
     return parser
 
 
+def _update_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="rightmemory update",
+        description="Run update turns or manage asynchronous memory update candidates.",
+        epilog="Use `rightmemory update retry` to requeue sessions blocked in manual recovery.",
+    )
+    subparsers = parser.add_subparsers(metavar="command")
+    subparsers.add_parser("submit", help="save an async memory update candidate")
+    subparsers.add_parser("pull", help="read the latest async update state for one session")
+    subparsers.add_parser("undo", help="cancel a pending candidate for one session")
+    subparsers.add_parser("retry", help="requeue all sessions blocked in manual recovery")
+    return parser
+
+
 def _prune_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rightmemory prune",
@@ -420,7 +437,11 @@ def _undo_parser(role: str) -> argparse.ArgumentParser:
 
 
 def _retry_parser(role: str) -> argparse.ArgumentParser:
-    return argparse.ArgumentParser(prog=f"rightmemory {role} retry")
+    return argparse.ArgumentParser(
+        prog=f"rightmemory {role} retry",
+        description="Requeue all async update sessions blocked in manual recovery.",
+        epilog="No --session is required; retry runs globally for manual-recovery sessions.",
+    )
 
 
 def _candidate_id(value: str) -> int:

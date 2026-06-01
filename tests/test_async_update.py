@@ -892,6 +892,42 @@ class AsyncUpdateStateTests(unittest.TestCase):
             self.assertIsNone(state.error)
             self.assertIsNone(state.last_error)
 
+    def test_retry_manual_recovery_skips_malformed_state_files(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="needs_manual_recovery",
+                    session_id="agent-1",
+                    role="update",
+                    attempts=2,
+                    error="boom",
+                    last_error="boom",
+                    pending=[_job(1, "first")],
+                    next_id=2,
+                ),
+            )
+            bad_path = store._state_path("broken-agent")
+            bad_path.parent.mkdir(parents=True, exist_ok=True)
+            bad_path.write_text("{not json", encoding="utf-8")
+            process = Mock(pid=4242)
+
+            with (
+                patch("rightmemory.async_update.subprocess.Popen", return_value=process),
+                patch("rightmemory.async_update._process_exists", return_value=True),
+                patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T04:00:00+00:00")),
+            ):
+                result = store.retry_manual_recovery()
+            state = store.read("agent-1")
+
+        self.assertEqual(result.requeued_sessions, 1)
+        self.assertEqual(result.requeued_candidates, 1)
+        self.assertEqual(result.skipped_sessions, 1)
+        self.assertEqual(result.worker_pid, 4242)
+        self.assertEqual(state.status, "failed")
+        self.assertEqual(state.next_retry_at, "2026-05-15T04:00:00+00:00")
+
     def test_read_rejects_state_missing_required_identity_fields(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")

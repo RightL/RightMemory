@@ -119,7 +119,11 @@ class AsyncUpdateStore:
         for path in self._session_state_paths():
             session_id = path.stem
             with self._locked(session_id):
-                state = self._read_checked_locked(session_id)
+                try:
+                    state = self._read_checked_locked(session_id)
+                except (OSError, json.JSONDecodeError, ValueError):
+                    skipped_sessions += 1
+                    continue
                 if state.status != STATUS_MANUAL_RECOVERY:
                     continue
                 retry_pending = [*state.current_batch, *state.pending]

@@ -1669,6 +1669,38 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 0)
         self.assertIn("rightmemory update submit", stdout.getvalue())
 
+    def test_update_help_reveals_retry_command_without_loading_config(self):
+        stdout = io.StringIO()
+
+        with (
+            patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
+            patch("sys.stdout", stdout),
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                main(["update", "--help"])
+
+        output = stdout.getvalue()
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("rightmemory update", output)
+        self.assertIn("retry", output)
+        self.assertIn("manual recovery", output)
+
+    def test_update_retry_help_reveals_global_manual_recovery(self):
+        stdout = io.StringIO()
+
+        with (
+            patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
+            patch("sys.stdout", stdout),
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                main(["update", "retry", "--help"])
+
+        output = stdout.getvalue()
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("rightmemory update retry", output)
+        self.assertIn("manual recovery", output)
+        self.assertIn("No --session is required", output)
+
     def test_main_accumulates_pending_update_while_worker_is_waiting(self):
         stdout = io.StringIO()
 
