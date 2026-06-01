@@ -821,6 +821,50 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(popen.call_count, 4)
         self.assertIn("sync: disabled", stdout.getvalue())
 
+    def test_watch_start_passes_selected_profile_root_to_subprocess_env(self):
+        stdout = io.StringIO()
+        events = []
+
+        class FakeProcess:
+            pid = 501
+
+        def fake_popen(command, **kwargs):
+            events.append((command, kwargs["env"]["RIGHTMEMORY_ROOT"], kwargs["cwd"]))
+            return FakeProcess()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_root = Path(tempdir) / "default"
+            profile_root = Path(tempdir) / "profile-root"
+            default_root.mkdir()
+            profile_root.mkdir()
+            (default_root / "profiles.toml").write_text(
+                f'[profiles.alpha]\nroot = "{profile_root}"\n',
+                encoding="utf-8",
+            )
+
+            def fake_load_config(role, **kwargs):
+                self.assertEqual(kwargs.get("memory_root"), profile_root)
+                return type("Config", (), {"memory_root": profile_root})()
+
+            def fake_load_sync_config(**kwargs):
+                self.assertEqual(kwargs.get("memory_root"), profile_root)
+                return type("SyncConfig", (), {"memory_root": profile_root, "enabled": False})()
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=default_root),
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
+                patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
+                patch("rightmemory.watch.subprocess.Popen", side_effect=fake_popen),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["--profile", "alpha", "watch", "start", "review"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(events[0][1], str(profile_root))
+        self.assertEqual(events[0][2], str(profile_root))
+        self.assertIn("review: running pid 501", stdout.getvalue())
+
     def test_watch_start_reports_failure_after_attempting_later_targets(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .config import MEMORY_ROOT_ENV
 from .isolated_write import IsolatedWriteSupervisor
 from .session import _ensure_runtime_gitignore, _fsync_directory
 
@@ -140,14 +141,17 @@ def start_managed_watch(memory_root: Path, name: str, python_executable: str | N
     watch_dir.mkdir(parents=True, exist_ok=True)
     log_path = watch_log_path(memory_root, name)
     command = [python_executable or sys.executable, "-m", "rightmemory.cli", *WATCH_COMMANDS[name]]
+    env = {**os.environ, MEMORY_ROOT_ENV: str(memory_root)}
     with log_path.open("ab") as log:
         process = subprocess.Popen(
             command,
+            cwd=str(memory_root),
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
             close_fds=True,
+            env=env,
         )
     _write_pid(watch_pid_path(memory_root, name), process.pid)
     return ManagedWatchStatus(name=name, state="running", pid=process.pid, log_path=log_path)
