@@ -320,7 +320,8 @@ class AsyncUpdateStore:
                 if state.status != "running" or state.phase != "waiting":
                     continue
                 ready_at = _required_time(state.next_flush_at, "next_flush_at")
-                if ready_at <= now:
+                pressure_ready = len(state.pending) >= target_batch_candidates
+                if ready_at <= now or pressure_ready:
                     eligible.append(AsyncUpdateSessionBatch(state.session_id, ready_at, list(state.pending)))
                 else:
                     future_deadlines.append(ready_at)

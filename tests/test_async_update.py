@@ -588,6 +588,64 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("b2", calls[0])
 
+    def test_single_session_reaching_target_runs_before_quiet_period(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2026-05-15T01:00:00+00:00",
+                    pending=[_job(1, "a1"), _job(2, "a2"), _job(3, "a3")],
+                    next_id=4,
+                ),
+            )
+
+            def fail_sleep(deadline):
+                raise AssertionError(f"threshold-ready session should not sleep until {deadline}")
+
+            with patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T00:00:00+00:00")):
+                result = store.run_pending_batches(
+                    lambda batch_session_id, message: calls.append(message) or "ok",
+                    target_batch_candidates=3,
+                    max_wait_seconds=86400,
+                    sleep_until=fail_sleep,
+                )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.processed, 3)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("a3", calls[0])
+
+    def test_single_session_below_target_is_not_eligible_before_quiet_period(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2026-05-15T01:00:00+00:00",
+                    pending=[_job(1, "a1"), _job(2, "a2")],
+                    next_id=3,
+                ),
+            )
+
+            with patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T00:00:00+00:00")):
+                batch, deadline = store._next_batch(
+                    target_batch_candidates=3,
+                    max_wait_seconds=86400,
+                )
+
+        self.assertIsNone(batch)
+        self.assertEqual(deadline, _dt("2026-05-15T01:00:00+00:00"))
+
     def test_global_worker_waits_below_target_until_max_wait_fallback(self):
         slept = []
         calls = []
@@ -744,17 +802,22 @@ class AsyncUpdateStateTests(unittest.TestCase):
                     session_id="normal-session",
                     role="update",
                     phase="waiting",
-                    next_flush_at="2000-01-01T00:00:00+00:00",
-                    pending=[_job(1, "normal later")],
-                    next_id=2,
+                    next_flush_at="2026-05-15T01:00:00+00:00",
+                    pending=[_job(1, "normal later"), _job(2, "normal also later")],
+                    next_id=3,
                 ),
             )
 
-            result = store.run_pending_batches(
-                lambda batch_session_id, message: calls.append(message) or "ok",
-                target_batch_candidates=15,
-                max_wait_seconds=86400,
-            )
+            def fail_sleep(deadline):
+                raise AssertionError(f"threshold-ready normal work should not sleep until {deadline}")
+
+            with patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T00:00:00+00:00")):
+                result = store.run_pending_batches(
+                    lambda batch_session_id, message: calls.append(message) or "ok",
+                    target_batch_candidates=2,
+                    max_wait_seconds=86400,
+                    sleep_until=fail_sleep,
+                )
 
         self.assertEqual(result.status, "succeeded")
         self.assertGreaterEqual(len(calls), 1)
