@@ -2587,12 +2587,13 @@ class PromptTests(unittest.TestCase):
 
         self.assertNotIn("example-note", prompt)
 
-    def test_prompt_assets_are_included_in_wheel(self):
+    def test_external_skill_assets_are_included_in_wheel(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 
         force_include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
         self.assertEqual(force_include["skills"], "rightmemory/skills")
-        self.assertEqual(force_include["rightmemory/prompts"], "rightmemory/prompts")
+        self.assertNotIn("rightmemory/prompts", force_include)
+        self.assertNotIn("rightmemory/semantic_upgrades", force_include)
 
 
 def load_sync_config_for_test(memory_root: Path, enabled: bool):
