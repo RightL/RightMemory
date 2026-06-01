@@ -290,13 +290,14 @@ def collect_async_update_section(
         pending = state.pending
         current = state.current_batch
         manual_recovery = state.status == STATUS_MANUAL_RECOVERY or _is_legacy_failed_pending_state(state)
-        retrying = bool(pending) and state.status == "failed" and not manual_recovery
+        retrying = bool(pending or current) and state.status == "failed" and not manual_recovery
         normal_pending = state.status == "running" and bool(pending)
-        if pending and manual_recovery:
-            manual_candidates += len(pending)
+        running_current = state.status == "running" and state.phase == "running" and bool(current)
+        if (pending or current) and manual_recovery:
+            manual_candidates += len(pending) + len(current)
             manual_sessions += 1
-        elif pending and retrying:
-            retrying_candidates += len(pending)
+        elif (pending or current) and retrying:
+            retrying_candidates += len(pending) + len(current)
             retrying_sessions += 1
         elif pending and normal_pending:
             pending_candidates += len(pending)
@@ -304,7 +305,7 @@ def collect_async_update_section(
         elif pending:
             pending_candidates += len(pending)
             pending_sessions += 1
-        if current:
+        if running_current:
             current_candidates += len(current)
             current_sessions += 1
         next_flush_at = state.next_flush_at

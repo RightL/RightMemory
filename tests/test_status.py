@@ -675,6 +675,47 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("manual recovery: 1 candidate across 1 session", section.detail)
         self.assertIn("update: legacy: manual recovery required: old boom", issues)
 
+    def test_collect_async_update_section_counts_manual_current_batch_as_manual_recovery(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            async_root = root / ".runtime" / "async" / "update"
+            async_root.mkdir(parents=True)
+            (async_root / "manual-current.json").write_text(
+                json.dumps(
+                    {
+                        "status": "needs_manual_recovery",
+                        "session_id": "manual-current",
+                        "role": "update",
+                        "phase": None,
+                        "started_at": "2026-05-29T08:00:00+00:00",
+                        "finished_at": "2026-05-29T09:00:00+00:00",
+                        "pid": None,
+                        "result": None,
+                        "error": "old boom",
+                        "attempts": 2,
+                        "next_retry_at": None,
+                        "last_error": "old boom",
+                        "next_flush_at": None,
+                        "current_batch": [
+                            {
+                                "id": 1,
+                                "message": "manual current",
+                                "submitted_at": "2026-05-29T08:00:00+00:00",
+                            }
+                        ],
+                        "pending": [],
+                        "next_id": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            section, issues = collect_async_update_section(root)
+
+        self.assertIn("manual recovery: 1 candidate across 1 session", section.detail)
+        self.assertIn("current batch: 0 candidates across 0 sessions", section.detail)
+        self.assertIn("update: manual-current: manual recovery required: old boom", issues)
+
     def test_collect_async_update_section_uses_recent_outcome_for_last_preview(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

@@ -233,9 +233,10 @@ class AsyncUpdateStateTests(unittest.TestCase):
             )
             process = Mock(pid=4242)
 
-            with patch("rightmemory.async_update.subprocess.Popen", return_value=process):
+            with patch("rightmemory.async_update.subprocess.Popen", return_value=process) as popen:
                 state = store.submit("agent-1", "new update")
 
+        popen.assert_not_called()
         self.assertEqual(state.status, "needs_manual_recovery")
         self.assertIsNone(state.phase)
         self.assertEqual(state.attempts, 2)
@@ -245,6 +246,36 @@ class AsyncUpdateStateTests(unittest.TestCase):
             ["interrupted first", "interrupted second", "already pending", "new update"],
         )
         self.assertEqual([job.id for job in state.pending], [1, 2, 3, 4])
+
+    def test_submit_to_empty_failed_state_starts_fresh_pending_work(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="failed",
+                    session_id="agent-1",
+                    role="update",
+                    attempts=0,
+                    error="old empty failure",
+                    next_id=1,
+                ),
+            )
+            process = Mock(pid=4242)
+
+            with (
+                patch("rightmemory.async_update.subprocess.Popen", return_value=process),
+                patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T00:00:00+00:00")),
+            ):
+                state = store.submit("agent-1", "new update")
+
+        self.assertEqual(state.status, "running")
+        self.assertEqual(state.phase, "waiting")
+        self.assertEqual(state.attempts, 0)
+        self.assertIsNone(state.next_retry_at)
+        self.assertIsNone(state.error)
+        self.assertEqual(state.next_flush_at, "2026-05-15T01:00:00+00:00")
+        self.assertEqual([job.message for job in state.pending], ["new update"])
 
     def test_submit_during_running_batch_keeps_current_batch_in_flight(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -944,6 +975,45 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(result.worker_pid, 4242)
         self.assertEqual(state.status, "failed")
         self.assertEqual(state.next_retry_at, "2026-05-15T04:00:00+00:00")
+
+    def test_retry_manual_recovery_restores_manual_state_when_worker_start_fails(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            for session_id, message in (("agent-1", "first"), ("agent-2", "second")):
+                store._write(
+                    session_id,
+                    AsyncUpdateState(
+                        status="needs_manual_recovery",
+                        session_id=session_id,
+                        role="update",
+                        attempts=2,
+                        error="boom",
+                        last_error="boom",
+                        pending=[_job(1, message)],
+                        next_id=2,
+                    ),
+                )
+
+            with (
+                patch("rightmemory.async_update.subprocess.Popen", side_effect=OSError("spawn failed")),
+                patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T04:00:00+00:00")),
+            ):
+                result = store.retry_manual_recovery()
+            first = store.read("agent-1")
+            second = store.read("agent-2")
+
+        self.assertEqual(result.requeued_sessions, 0)
+        self.assertEqual(result.requeued_candidates, 0)
+        self.assertEqual(result.skipped_sessions, 0)
+        self.assertEqual(result.worker_action, "failed")
+        self.assertEqual(result.worker_error, "OSError: spawn failed")
+        for state, message in ((first, "first"), (second, "second")):
+            self.assertEqual(state.status, "needs_manual_recovery")
+            self.assertEqual(state.attempts, 2)
+            self.assertIsNone(state.next_retry_at)
+            self.assertEqual(state.error, "OSError: spawn failed")
+            self.assertEqual(state.last_error, "OSError: spawn failed")
+            self.assertEqual([job.message for job in state.pending], [message])
 
     def test_read_rejects_state_missing_required_identity_fields(self):
         with tempfile.TemporaryDirectory() as tempdir:

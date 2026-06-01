@@ -76,6 +76,7 @@ class AsyncUpdateRetryResult:
     skipped_sessions: int = 0
     worker_pid: int | None = None
     worker_action: str = "not started"
+    worker_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,7 @@ class AsyncUpdateStore:
         requeued_candidates = 0
         skipped_sessions = 0
         first_session_id: str | None = None
+        requeued_session_ids: list[str] = []
 
         for path in self._session_state_paths():
             session_id = path.stem
@@ -146,23 +148,34 @@ class AsyncUpdateStore:
                 self._write(session_id, next_state)
                 requeued_sessions += 1
                 requeued_candidates += len(retry_pending)
+                requeued_session_ids.append(session_id)
                 if first_session_id is None:
                     first_session_id = session_id
 
         worker_pid = None
         worker_action = "not started"
+        worker_error = None
         if first_session_id is not None:
             before_pid = self._active_worker_pid()
-            self._start_worker_if_needed(first_session_id)
-            worker_pid = self._active_worker_pid()
-            if worker_pid is not None:
-                worker_action = "woken" if before_pid is not None else "started"
+            try:
+                self._start_worker_if_needed(first_session_id)
+            except Exception as exc:
+                worker_error = f"{type(exc).__name__}: {exc}"
+                self._restore_manual_recovery(requeued_session_ids, worker_error)
+                requeued_sessions = 0
+                requeued_candidates = 0
+                worker_action = "failed"
+            else:
+                worker_pid = self._active_worker_pid()
+                if worker_pid is not None:
+                    worker_action = "woken" if before_pid is not None else "started"
         return AsyncUpdateRetryResult(
             requeued_sessions=requeued_sessions,
             requeued_candidates=requeued_candidates,
             skipped_sessions=skipped_sessions,
             worker_pid=worker_pid,
             worker_action=worker_action,
+            worker_error=worker_error,
         )
 
     def submit(self, session_id: str, message: str) -> AsyncUpdateState:
@@ -616,6 +629,18 @@ class AsyncUpdateStore:
     ) -> AsyncUpdateState:
         next_id = max(state.next_id, job.id + 1)
         next_flush_at = _format_time(now + timedelta(seconds=UPDATE_DEBOUNCE_SECONDS))
+        if state.status == "failed" and not state.current_batch and not state.pending:
+            return AsyncUpdateState(
+                status="running",
+                session_id=state.session_id,
+                role=self.role,
+                phase="waiting",
+                started_at=_format_time(now),
+                pid=worker_pid,
+                next_flush_at=next_flush_at,
+                pending=[job],
+                next_id=next_id,
+            )
         if state.status in {"failed", STATUS_MANUAL_RECOVERY}:
             pending = [*state.current_batch, *state.pending, job]
             return replace(
@@ -697,6 +722,28 @@ class AsyncUpdateStore:
         )
         self._write(session_id, next_state)
         return next_state
+
+    def _restore_manual_recovery(self, session_ids: list[str], error: str) -> None:
+        for session_id in session_ids:
+            with self._locked(session_id):
+                state = self._read_raw(session_id)
+                pending = [*state.current_batch, *state.pending]
+                if not pending:
+                    continue
+                next_state = replace(
+                    state,
+                    status=STATUS_MANUAL_RECOVERY,
+                    phase=None,
+                    finished_at=_now(),
+                    pid=os.getpid(),
+                    error=error,
+                    attempts=max(state.attempts, UPDATE_MAX_AUTOMATIC_ATTEMPTS),
+                    next_retry_at=None,
+                    last_error=error,
+                    current_batch=[],
+                    pending=pending,
+                )
+                self._write(session_id, next_state)
 
     def _state_path(self, session_id: str) -> Path:
         safe_id = _safe_session_id(session_id)
@@ -848,7 +895,9 @@ def format_retry_result(result: AsyncUpdateRetryResult) -> str:
         f"requeued candidates: {result.requeued_candidates}",
         f"skipped sessions: {result.skipped_sessions}",
     ]
-    if result.worker_pid is None:
+    if result.worker_error:
+        lines.append(f"worker: failed: {result.worker_error}")
+    elif result.worker_pid is None:
         lines.append("worker: not started")
     else:
         lines.append(f"worker: {result.worker_action} pid {result.worker_pid}")

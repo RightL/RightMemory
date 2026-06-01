@@ -1640,6 +1640,7 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("pending: 1", output)
         self.assertIn("CRITICAL: this async memory update session is blocked after 2 failed attempts.", output)
         self.assertIn("Agent: report this issue to the user", output)
+        popen.assert_not_called()
 
     def test_submit_is_only_supported_for_update_role(self):
         with patch("rightmemory.cli.load_config", return_value=object()):

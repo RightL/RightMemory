@@ -1025,7 +1025,7 @@ def _undo(memory_root, role: str, session_id: str, candidate_id: int) -> int:
 def _retry(memory_root, role: str) -> int:
     result = AsyncUpdateStore(memory_root, role).retry_manual_recovery()
     print(format_retry_result(result))
-    return 0
+    return 1 if result.worker_error else 0
 
 
 def _async_worker(
