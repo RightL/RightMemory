@@ -195,6 +195,7 @@ class InstallScriptTests(unittest.TestCase):
             result = self._install(memory_root, skills_target)
             orchestrator = (skills_target / "memory-orchestrator" / "SKILL.md").read_text(encoding="utf-8")
             install_stamp = (memory_root / ".runtime" / "install.stamp").read_text(encoding="utf-8")
+            wrapper = (root / "home" / ".local" / "bin" / "rightmemory").read_text(encoding="utf-8")
             curator_exists = (skills_target / "memory-curator").exists()
             dreamer_exists = (skills_target / "memory-dreamer").exists()
 
@@ -204,6 +205,9 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("mode=cli-agent", install_stamp)
         self.assertIn("rightmemory retrieve --session <stable-session-id>", orchestrator)
         self.assertIn("Open context questions", orchestrator)
+        self.assertIn('export RIGHTMEMORY_ROOT="', wrapper)
+        self.assertIn('exec "', wrapper)
+        self.assertIn(' -m rightmemory.cli "$@"', wrapper)
         self.assertNotIn("standalone mode", orchestrator)
         self.assertNotIn("standalone runtime", orchestrator)
         self.assertFalse(curator_exists)

@@ -121,6 +121,32 @@ CLI-agent mode delegates role execution to Codex CLI or Claude Code CLI while pr
 
 Fresh installs baseline the current semantic upgrade notes because the seeded memory already matches the current schema. Re-run the installer after pulling updates; existing real memory is preserved, the managed example block refreshes when present, and pending semantic upgrade notes are reported for the next dreamer cycle. Semantic upgrade notes are maintainer-authored prompts for dreamer to revisit older memory under the current schema and role model; install does not run dreamer or edit user memory to apply them.
 
+### Profiles
+
+The default memory root is still `~/.rightmemory`, or `RIGHTMEMORY_ROOT` when set.
+Named profiles let a project use a separate memory root:
+
+```bash
+rightmemory profile create my-project
+rightmemory --profile my-project retrieve --session <agent-session-id> "what do we know about this repo?"
+```
+
+Profile aliases live in `<default-memory-root>/profiles.toml`. New profile roots
+default to a sibling profile-root area, such as
+`~/.rightmemory-profiles/my-project` for the normal default root. Each profile
+root has its own `MEMORY.md`, `rightmemory.toml`, `.runtime/`, Git history,
+watcher state, async update queues, sessions, and insight logs.
+
+A project can opt into a local default profile by adding `.rightmemory-profile`
+with the profile name:
+
+```text
+my-project
+```
+
+Tracking or ignoring that file is a user/project decision. Use `--profile` when
+you want an explicit override for one command.
+
 ## Why Not Raw Notes Or A Vector DB?
 
 RightMemory is not trying to replace notes, search, or embeddings. It focuses on the part those systems often leave underspecified: how agents preserve structured context, who owns memory edits, how related facts stay connected across sessions, and how durable memory remains reviewable over time.
@@ -331,7 +357,7 @@ The runtime is intentionally small:
 - Standalone mode uses `pydantic_ai.Agent` as a chat-like agent loop.
 - CLI-agent mode delegates the same role turn to Codex CLI or Claude Code CLI and records the provider session under `<memory-root>/.runtime/agent_cli_sessions/`.
 - In standalone mode, retrieve uses Claude-shaped read-only tools (`read`, `grep`, `glob`) plus a restricted `read_command` for familiar forms such as `cat`, `sed -n`, `rg`, and read-only `git`; historian adds bounded Git history reads; write-capable roles also get exact `edit_file` replacements, file lifecycle tools, and narrow role-scoped git tools.
-- `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different location.
+- `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different no-profile root, or use `--profile <name>` / `.rightmemory-profile` for project-specific roots.
 - Retrieve, history, update, dreamer, insight, reviewer, pruner, and sync repair are separate runtime roles selected by command line, scanner, or watcher.
 - Role-specific executor settings are read from `<memory-root>/rightmemory.toml`.
 - Standalone one-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`; CLI-agent calls persist provider session mappings under `<memory-root>/.runtime/agent_cli_sessions/<role>/`.
@@ -466,6 +492,8 @@ rightmemory watch start
 rightmemory watch status
 rightmemory watch stop
 rightmemory watch restart
+rightmemory --profile my-project watch start
+rightmemory --profile my-project status
 ```
 
 By default these commands manage review, dreamer, insight, and pruner watchers, plus sync when `[sync].enabled` is true. Pass a target name when you want one role: `rightmemory watch start review`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.

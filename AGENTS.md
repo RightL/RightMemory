@@ -27,6 +27,9 @@
 
 ## Memory Runtime Rules
 - A memory root contains `MEMORY.md`, optional sibling `MEMORY_*.md` detail files, `insight_logs/`, `rightmemory.toml`, and `.runtime/`.
+- Named profiles are registered in `<default-memory-root>/profiles.toml`. `rightmemory profile create <name>` defaults new roots to a sibling profile area such as `~/.rightmemory-profiles/<name>` for the normal default root.
+- Runtime commands can select a profile with `--profile <name>`, or by a user-managed `.rightmemory-profile` file in the project tree. Tracking that file is a user/project choice.
+- Profile roots are ordinary memory roots with separate `MEMORY.md`, `rightmemory.toml`, `.runtime/`, Git history, watcher state, async queues, sessions, and insight logs.
 - The installer creates a memory-root `.gitignore` allowlist so git status normally shows `MEMORY.md`, `MEMORY_*.md`, and `insight_logs/*.md`.
 - Runtime/session/review state belongs under `.runtime/` and should not be committed.
 - Watcher locks, install refresh stamps, dreamer and insight trigger state, isolated temporary state, and isolated worktrees belong under `.runtime/`.
