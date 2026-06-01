@@ -39,3 +39,4 @@ packages = ["rightmemory"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "rightmemory/skills"
+"MEMORY.example.md" = "rightmemory/MEMORY.example.md"

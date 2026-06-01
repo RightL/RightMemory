@@ -1,3 +1,4 @@
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 from rightmemory.profiles import (
     Profile,
     ProfileError,
+    create_profile,
     default_profile_root,
     discover_project_profile,
     load_profiles,
@@ -107,6 +109,110 @@ class ProfileTests(unittest.TestCase):
 
         self.assertIn("profile not found: typo", str(caught.exception))
         self.assertIn("rightmemory profile create typo", str(caught.exception))
+
+    def test_create_profile_initializes_separate_memory_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_root = Path(tempdir) / "default"
+            default_root.mkdir()
+            profile = create_profile(default_root, "alpha")
+
+            memory_exists = (profile.root / "MEMORY.md").exists()
+            insight_exists = (profile.root / "insight_logs").is_dir()
+            runtime_gitignore = (profile.root / ".runtime" / ".gitignore").read_text(encoding="utf-8")
+            gitignore = (profile.root / ".gitignore").read_text(encoding="utf-8")
+            git_head = self._git(profile.root, "log", "--oneline", "-1")
+            profiles = load_profiles(default_root)
+
+        self.assertEqual(profile.root, Path(tempdir) / "default-profiles" / "alpha")
+        self.assertTrue(memory_exists)
+        self.assertTrue(insight_exists)
+        self.assertEqual(runtime_gitignore, "*\n")
+        self.assertIn("!MEMORY.md", gitignore)
+        self.assertIn("memory: initial baseline", git_head)
+        self.assertEqual(profiles["alpha"].root, profile.root)
+
+    def test_create_profile_registers_existing_memory_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_root = Path(tempdir) / "default"
+            existing = Path(tempdir) / "existing"
+            existing.mkdir()
+            (existing / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+            (existing / "insight_logs").mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=existing, check=True)
+
+            profile = create_profile(default_root, "existing", root=existing)
+            profiles = load_profiles(default_root)
+
+        self.assertEqual(profile.root, existing)
+        self.assertEqual(profiles["existing"].root, existing)
+
+    def test_create_profile_rejects_existing_non_memory_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_root = Path(tempdir) / "default"
+            existing = Path(tempdir) / "not-memory"
+            existing.mkdir()
+            (existing / "notes.txt").write_text("hello\n", encoding="utf-8")
+
+            with self.assertRaises(ProfileError) as caught:
+                create_profile(default_root, "bad", root=existing)
+
+        self.assertIn("does not look like a RightMemory root", str(caught.exception))
+
+    def test_seed_profile_config_copies_executors_and_disables_broad_review_and_sync(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_root = Path(tempdir) / "default"
+            default_root.mkdir()
+            (default_root / "rightmemory.toml").write_text(
+                """
+                [agent_cli]
+                provider = "codex"
+
+                [retrieve.agent_cli]
+                model = "gpt-5"
+
+                [update.agent_cli]
+                model = "gpt-5"
+
+                [update.async]
+                target_batch_candidates = 7
+
+                [dreamer.watch]
+                trigger_points = 25
+
+                [sync]
+                enabled = true
+
+                [[review.sources]]
+                kind = "codex"
+                path = "~/.codex/sessions"
+                """,
+                encoding="utf-8",
+            )
+
+            profile = create_profile(default_root, "alpha")
+            config_text = (profile.root / "rightmemory.toml").read_text(encoding="utf-8")
+
+        self.assertIn("[agent_cli]", config_text)
+        self.assertIn("[retrieve.agent_cli]", config_text)
+        self.assertIn("[update.async]", config_text)
+        self.assertIn("[dreamer.watch]", config_text)
+        self.assertIn("sources = []", config_text)
+        self.assertNotIn("[sync]", config_text)
+        self.assertNotIn("[[review.sources]]", config_text)
+
+    def _git(self, root: Path, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.fail(f"git {' '.join(args)} failed:\n{result.stderr}")
+        return result.stdout.strip()
 
 
 if __name__ == "__main__":
