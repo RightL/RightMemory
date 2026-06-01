@@ -16,8 +16,8 @@ from typing import Any, Callable
 
 from .async_update import AsyncUpdateStore, format_retry_result, format_state, manual_recovery_warning
 from .config import (
-    MEMORY_ROOT,
     ROLES,
+    default_memory_root,
     load_async_update_config,
     load_config,
     load_dreamer_watch_config,
@@ -29,6 +29,14 @@ from .config import (
 from .dreamer_trigger import DreamerTriggerStore
 from .doctor import format_doctor_report, run_agent_cli_doctor
 from .insight_trigger import InsightTriggerStore
+from .profiles import (
+    ProfileError,
+    create_profile,
+    load_profiles,
+    resolve_memory_root,
+    save_profiles,
+    validate_profile_name,
+)
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 from .session import MemoryWriteLock
@@ -81,26 +89,35 @@ def _watch_failure_limit_reached(label: str, failures: int) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] == "watch":
-        return _watch_manager_main(argv[1:])
-    if argv and argv[0] == "review":
-        return _review_main(argv[1:])
-    if argv and argv[0] == "sync":
-        return _sync_main(argv[1:])
-    if argv and argv[0] == "doctor":
-        return _doctor_main(argv[1:])
-    if argv and argv[0] == "status":
-        return _status_main(argv[1:])
-    if argv and argv[0] == "prune":
-        return _prune_main(argv[1:])
-    if argv and argv[0] == "history":
-        return _history_main(argv[1:])
-
-    parser = argparse.ArgumentParser(prog="rightmemory")
-    parser.add_argument("role", choices=tuple(sorted(ROLES)), help="RightMemory runtime role")
-    if not argv or argv[0] in {"-h", "--help"}:
-        parser.parse_args(argv)
+    profile_name, argv = _parse_global_args(argv)
+    if argv and argv[0] == "profile":
+        if profile_name is not None:
+            raise ValueError("--profile is for runtime commands, not profile management")
+        return _profile_main(argv[1:])
+    if not argv:
+        _top_level_parser().print_help()
         return 0
+    if argv[0] in {"-h", "--help"}:
+        _top_level_parser().parse_args(argv)
+        return 0
+    active = resolve_memory_root(profile_name=profile_name, cwd=Path.cwd(), default_root=default_memory_root())
+    memory_root = active.memory_root
+    if argv and argv[0] == "watch":
+        return _watch_manager_main(argv[1:], memory_root)
+    if argv and argv[0] == "review":
+        return _review_main(argv[1:], memory_root)
+    if argv and argv[0] == "sync":
+        return _sync_main(argv[1:], memory_root)
+    if argv and argv[0] == "doctor":
+        return _doctor_main(argv[1:], memory_root)
+    if argv and argv[0] == "status":
+        return _status_main(argv[1:], memory_root)
+    if argv and argv[0] == "prune":
+        return _prune_main(argv[1:], memory_root)
+    if argv and argv[0] == "history":
+        return _history_main(argv[1:], memory_root)
+
+    parser = _top_level_parser()
 
     args = parser.parse_args(argv[:1])
     remaining = argv[1:]
@@ -149,16 +166,16 @@ def main(argv: list[str] | None = None) -> int:
                 _dreamer_watch_parser().parse_args(remaining[1:])
                 return 0
             watch_args = _dreamer_watch_parser().parse_args(remaining[1:])
-            return _dreamer_watch(watch_args.interval, watch_args.session)
+            return _dreamer_watch(watch_args.interval, watch_args.session, memory_root)
         if args.role == "insight":
             if _is_help_request(remaining[1:]):
                 _insight_watch_parser().parse_args(remaining[1:])
                 return 0
             watch_args = _insight_watch_parser().parse_args(remaining[1:])
-            return _insight_watch(watch_args.interval, watch_args.session)
+            return _insight_watch(watch_args.interval, watch_args.session, memory_root)
         raise ValueError("watch is supported for dreamer and insight roles")
 
-    config = load_config(args.role)
+    config = load_config(args.role, memory_root=memory_root)
     if remaining and remaining[0] == "submit":
         submit_args = _submit_parser(args.role).parse_args(remaining[1:])
         return _submit(config.memory_root, args.role, submit_args.session, submit_args.message)
@@ -190,6 +207,61 @@ def main(argv: list[str] | None = None) -> int:
         runtime.cleanup()
 
 
+def _parse_global_args(argv: list[str]) -> tuple[str | None, list[str]]:
+    parser = argparse.ArgumentParser(prog="rightmemory", add_help=False)
+    parser.add_argument("--profile")
+    namespace, remaining = parser.parse_known_args(argv)
+    return namespace.profile, remaining
+
+
+def _top_level_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="rightmemory", description="RightMemory memory runtime")
+    parser.add_argument("--profile", help="named memory profile for runtime commands")
+    parser.add_argument("role", nargs="?", choices=tuple(sorted(ROLES)), help="RightMemory runtime role")
+    return parser
+
+
+def _profile_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="rightmemory profile")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("list")
+    create = subparsers.add_parser("create")
+    create.add_argument("name")
+    create.add_argument("--root", type=Path)
+    show = subparsers.add_parser("show")
+    show.add_argument("name")
+    remove = subparsers.add_parser("remove")
+    remove.add_argument("name")
+    args = parser.parse_args(argv)
+    home = default_memory_root()
+    if args.command == "list":
+        profiles = load_profiles(home)
+        for name in sorted(profiles):
+            print(f"{name}\t{profiles[name].root}")
+        return 0
+    if args.command == "create":
+        profile = create_profile(home, args.name, root=args.root)
+        print(f"{profile.name}\t{profile.root}")
+        return 0
+    if args.command == "show":
+        name = validate_profile_name(args.name)
+        profiles = load_profiles(home)
+        if name not in profiles:
+            raise ProfileError(f"profile not found: {name}. Create it with: rightmemory profile create {name}")
+        print(f"{name}\t{profiles[name].root}")
+        return 0
+    if args.command == "remove":
+        name = validate_profile_name(args.name)
+        profiles = load_profiles(home)
+        profile = profiles.pop(name, None)
+        if profile is None:
+            raise ProfileError(f"profile not found: {name}")
+        save_profiles(home, profiles)
+        print(f"removed {name}; memory root remains at {profile.root}")
+        return 0
+    raise ValueError(f"unknown profile command: {args.command}")
+
+
 def _is_help_request(args: list[str]) -> bool:
     return args == ["-h"] or args == ["--help"]
 
@@ -214,7 +286,7 @@ def _watch_stop_signal(label: str):
         signal.signal(signal.SIGTERM, previous)
 
 
-def _watch_manager_main(argv: list[str]) -> int:
+def _watch_manager_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory watch")
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("start", "status", "restart"):
@@ -226,33 +298,33 @@ def _watch_manager_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "start":
-        return _watch_start(args.target)
+        return _watch_start(args.target, memory_root)
     if args.command == "status":
-        return _watch_status(args.target)
+        return _watch_status(args.target, memory_root)
     if args.command == "stop":
-        return _watch_stop(args.target, args.timeout)
+        return _watch_stop(args.target, args.timeout, memory_root)
     if args.command == "restart":
-        stop_result = _watch_stop(args.target, 30)
+        stop_result = _watch_stop(args.target, 30, memory_root)
         if stop_result:
             return stop_result
-        return _watch_start(args.target)
+        return _watch_start(args.target, memory_root)
     raise ValueError(f"unknown watch command: {args.command}")
 
 
-def _watch_start(target: str) -> int:
+def _watch_start(target: str, memory_root: Path) -> int:
     failed = False
     for name in _watch_targets(target):
         try:
             if name == "sync":
-                sync_config = load_sync_config()
+                sync_config = load_sync_config(memory_root=memory_root)
                 if not sync_config.enabled:
                     print("sync: disabled")
                     continue
-                memory_root = sync_config.memory_root
+                target_root = sync_config.memory_root
             else:
-                config = load_config(_watch_role(name))
-                memory_root = config.memory_root
-            status = start_managed_watch(memory_root, name, sys.executable)
+                config = load_config(_watch_role(name), memory_root=memory_root)
+                target_root = config.memory_root
+            status = start_managed_watch(target_root, name, sys.executable)
             print(_format_watch_status(status))
         except Exception as exc:
             failed = True
@@ -260,11 +332,11 @@ def _watch_start(target: str) -> int:
     return 1 if failed else 0
 
 
-def _watch_stop(target: str, timeout: int) -> int:
+def _watch_stop(target: str, timeout: int, memory_root: Path) -> int:
     failed = False
     for name in _watch_targets(target):
         try:
-            result = stop_managed_watch(MEMORY_ROOT, name, timeout)
+            result = stop_managed_watch(memory_root, name, timeout)
             print(_format_stop_result(result))
             if result.state in {"external", "stopping"}:
                 failed = True
@@ -274,9 +346,9 @@ def _watch_stop(target: str, timeout: int) -> int:
     return 1 if failed else 0
 
 
-def _watch_status(target: str) -> int:
+def _watch_status(target: str, memory_root: Path) -> int:
     for name in _watch_targets(target):
-        print(_format_watch_status(managed_watch_status(MEMORY_ROOT, name)))
+        print(_format_watch_status(managed_watch_status(memory_root, name)))
     return 0
 
 
@@ -454,7 +526,7 @@ def _candidate_id(value: str) -> int:
     return parsed
 
 
-def _review_main(argv: list[str]) -> int:
+def _review_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory review")
     subparsers = parser.add_subparsers(dest="command", required=True)
     scan = subparsers.add_parser("scan", help="scan configured transcript sources")
@@ -479,42 +551,42 @@ def _review_main(argv: list[str]) -> int:
     if args.command == "scan":
         if not args.once:
             raise ValueError("review scan currently requires --once")
-        print(_run_review_scan(args.since_days).format())
+        print(_run_review_scan(args.since_days, memory_root=memory_root).format())
         return 0
     if args.command == "watch":
-        return _review_watch(args.interval, args.since_days)
+        return _review_watch(args.interval, args.since_days, memory_root)
     raise ValueError(f"unknown review command: {args.command}")
 
 
-def _status_main(argv: list[str]) -> int:
+def _status_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory status")
     parser.parse_args(argv)
-    print(format_status_dashboard(collect_status(MEMORY_ROOT)))
+    print(format_status_dashboard(collect_status(memory_root)))
     return 0
 
 
-def _prune_main(argv: list[str]) -> int:
+def _prune_main(argv: list[str], memory_root: Path) -> int:
     if argv and argv[0] == "watch":
         if _is_help_request(argv[1:]):
             _prune_watch_parser().parse_args(argv[1:])
             return 0
         watch_args = _prune_watch_parser().parse_args(argv[1:])
-        return _prune_watch(watch_args.interval, watch_args.session)
+        return _prune_watch(watch_args.interval, watch_args.session, memory_root)
     args = _prune_parser().parse_args(argv)
-    print(_run_prune_cycle(args.session))
+    print(_run_prune_cycle(args.session, memory_root=memory_root))
     return 0
 
 
-def _history_main(argv: list[str]) -> int:
+def _history_main(argv: list[str], memory_root: Path) -> int:
     args = _turn_parser("history").parse_args(argv)
-    runtime = RightMemoryRuntime(load_config("historian"))
+    runtime = RightMemoryRuntime(load_config("historian", memory_root=memory_root))
     try:
         return _session_turn(runtime, args.session, args.message)
     finally:
         runtime.cleanup()
 
 
-def _sync_main(argv: list[str]) -> int:
+def _sync_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory sync")
     subparsers = parser.add_subparsers(dest="command", required=True)
     watch = subparsers.add_parser("watch", help="keep local memory sync state alive")
@@ -527,25 +599,30 @@ def _sync_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "watch":
-        return _sync_watch(args.interval)
+        return _sync_watch(args.interval, memory_root)
     raise ValueError(f"unknown sync command: {args.command}")
 
 
-def _doctor_main(argv: list[str]) -> int:
+def _doctor_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory doctor")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("agent-cli", help="check Codex/Claude CLI-agent mode setup")
     args = parser.parse_args(argv)
 
     if args.command == "agent-cli":
-        checks = run_agent_cli_doctor()
+        checks = run_agent_cli_doctor(memory_root=memory_root)
         print(format_doctor_report(checks))
         return 0 if all(check.ok for check in checks) else 1
     raise ValueError(f"unknown doctor command: {args.command}")
 
 
-def _run_review_scan(since_days: int | None = None, *, require_full_batch: bool = False):
-    reviewer_config = load_config("reviewer")
+def _run_review_scan(
+    since_days: int | None = None,
+    *,
+    require_full_batch: bool = False,
+    memory_root: Path | None = None,
+):
+    reviewer_config = load_config("reviewer", memory_root=memory_root)
     return _run_review_scan_with_config(reviewer_config, since_days, require_full_batch=require_full_batch)
 
 
@@ -555,13 +632,13 @@ def _run_review_scan_with_config(
     *,
     require_full_batch: bool = False,
 ):
-    review_config = load_review_config()
+    review_config = load_review_config(memory_root=reviewer_config.memory_root)
     if since_days is not None:
         if since_days < 1:
             raise ValueError("--since-days must be a positive integer")
         review_config = replace(review_config, since_days=since_days)
-    dreamer_watch_config = load_dreamer_watch_config()
-    insight_watch_config = load_insight_watch_config()
+    dreamer_watch_config = load_dreamer_watch_config(memory_root=reviewer_config.memory_root)
+    insight_watch_config = load_insight_watch_config(memory_root=reviewer_config.memory_root)
     runtime = RightMemoryRuntime(reviewer_config)
     try:
         scanner = ReviewScanner(
@@ -583,10 +660,10 @@ def _run_review_scan_with_config(
         runtime.cleanup()
 
 
-def _review_watch(interval: int, since_days: int | None = None) -> int:
+def _review_watch(interval: int, since_days: int | None, memory_root: Path) -> int:
     if interval < 1:
         raise ValueError("--interval must be a positive integer")
-    reviewer_config = load_config("reviewer")
+    reviewer_config = load_config("reviewer", memory_root=memory_root)
     refresh = InstallStamp(reviewer_config.memory_root)
     consecutive_failures = 0
     exit_code = 0
@@ -625,8 +702,12 @@ def _review_watch(interval: int, since_days: int | None = None) -> int:
         return 130
 
 
-def _run_dream_cycle(session_id: str, dreamer_config: Any | None = None) -> str:
-    config = dreamer_config if dreamer_config is not None else load_config("dreamer")
+def _run_dream_cycle(
+    session_id: str,
+    dreamer_config: Any | None = None,
+    memory_root: Path | None = None,
+) -> str:
+    config = dreamer_config if dreamer_config is not None else load_config("dreamer", memory_root=memory_root)
     runtime = RightMemoryRuntime(config)
     try:
         return runtime.run_cycle(session_id)
@@ -653,13 +734,13 @@ def _dreamer_watch_once(watch_config: Any, session_id: str, run_cycle: Callable[
     return _DREAMER_WATCH_SUCCEEDED
 
 
-def _dreamer_watch(interval: int | None, session_id: str) -> int:
+def _dreamer_watch(interval: int | None, session_id: str, memory_root: Path) -> int:
     if interval is not None and interval < 1:
         raise ValueError("--interval must be a positive integer")
-    watch_config = load_dreamer_watch_config()
+    watch_config = load_dreamer_watch_config(memory_root=memory_root)
     if interval is not None:
         watch_config = replace(watch_config, check_interval_seconds=interval)
-    dreamer_config = load_config("dreamer")
+    dreamer_config = load_config("dreamer", memory_root=memory_root)
     refresh = InstallStamp(watch_config.memory_root)
     consecutive_failures = 0
     exit_code = 0
@@ -672,7 +753,7 @@ def _dreamer_watch(interval: int | None, session_id: str) -> int:
                 def run_cycle(current_session_id: str) -> str:
                     nonlocal next_config
                     if next_config is None:
-                        return _run_dream_cycle(current_session_id)
+                        return _run_dream_cycle(current_session_id, memory_root=memory_root)
                     output = _run_dream_cycle(current_session_id, next_config)
                     next_config = None
                     return output
@@ -700,8 +781,12 @@ def _dreamer_watch(interval: int | None, session_id: str) -> int:
         return 130
 
 
-def _run_insight_cycle(session_id: str, insight_config: Any | None = None) -> str:
-    config = insight_config if insight_config is not None else load_config("insight")
+def _run_insight_cycle(
+    session_id: str,
+    insight_config: Any | None = None,
+    memory_root: Path | None = None,
+) -> str:
+    config = insight_config if insight_config is not None else load_config("insight", memory_root=memory_root)
     runtime = RightMemoryRuntime(config)
     try:
         return runtime.run_cycle(session_id)
@@ -742,13 +827,13 @@ def _insight_log_fingerprints(memory_root: Path) -> dict[str, str]:
     return fingerprints
 
 
-def _insight_watch(interval: int | None, session_id: str) -> int:
+def _insight_watch(interval: int | None, session_id: str, memory_root: Path) -> int:
     if interval is not None and interval < 1:
         raise ValueError("--interval must be a positive integer")
-    watch_config = load_insight_watch_config()
+    watch_config = load_insight_watch_config(memory_root=memory_root)
     if interval is not None:
         watch_config = replace(watch_config, check_interval_seconds=interval)
-    insight_config = load_config("insight")
+    insight_config = load_config("insight", memory_root=memory_root)
     refresh = InstallStamp(watch_config.memory_root)
     consecutive_failures = 0
     exit_code = 0
@@ -761,7 +846,7 @@ def _insight_watch(interval: int | None, session_id: str) -> int:
                 def run_cycle(current_session_id: str) -> str:
                     nonlocal next_config
                     if next_config is None:
-                        return _run_insight_cycle(current_session_id)
+                        return _run_insight_cycle(current_session_id, memory_root=memory_root)
                     output = _run_insight_cycle(current_session_id, next_config)
                     next_config = None
                     return output
@@ -789,10 +874,15 @@ def _insight_watch(interval: int | None, session_id: str) -> int:
         return 130
 
 
-def _run_prune_cycle(session_id: str, pruner_config: Any | None = None, runtime_config: Any | None = None) -> str:
-    config = pruner_config if pruner_config is not None else load_pruner_config()
+def _run_prune_cycle(
+    session_id: str,
+    pruner_config: Any | None = None,
+    runtime_config: Any | None = None,
+    memory_root: Path | None = None,
+) -> str:
+    config = pruner_config if pruner_config is not None else load_pruner_config(memory_root=memory_root)
     runtime = RightMemoryRuntime(
-        runtime_config if runtime_config is not None else load_config("pruner")
+        runtime_config if runtime_config is not None else load_config("pruner", memory_root=memory_root)
     )
     try:
         return runtime.run_prune_turn(session_id, config)
@@ -800,11 +890,11 @@ def _run_prune_cycle(session_id: str, pruner_config: Any | None = None, runtime_
         runtime.cleanup()
 
 
-def _prune_watch(interval: int, session_id: str) -> int:
+def _prune_watch(interval: int, session_id: str, memory_root: Path) -> int:
     if interval < 1:
         raise ValueError("--interval must be a positive integer")
-    pruner_config = load_pruner_config()
-    runtime_config = load_config("pruner")
+    pruner_config = load_pruner_config(memory_root=memory_root)
+    runtime_config = load_config("pruner", memory_root=memory_root)
     refresh = InstallStamp(pruner_config.memory_root)
     consecutive_failures = 0
     exit_code = 0
@@ -817,7 +907,12 @@ def _prune_watch(interval: int, session_id: str) -> int:
                 timestamp = datetime.now(UTC).isoformat()
                 print(f"[{timestamp}] rightmemory prune check", flush=True)
                 try:
-                    output = _run_prune_cycle(session_id, next_pruner_config, next_runtime_config)
+                    output = _run_prune_cycle(
+                        session_id,
+                        next_pruner_config,
+                        next_runtime_config,
+                        memory_root=memory_root,
+                    )
                     next_pruner_config = None
                     next_runtime_config = None
                 except Exception as exc:
@@ -846,10 +941,10 @@ def _prune_watch(interval: int, session_id: str) -> int:
         return 130
 
 
-def _sync_watch(interval: int) -> int:
+def _sync_watch(interval: int, memory_root: Path) -> int:
     if interval < 1:
         raise ValueError("--interval must be a positive integer")
-    sync_config = load_sync_config()
+    sync_config = load_sync_config(memory_root=memory_root)
     if not sync_config.enabled:
         print("rightmemory sync watch disabled", file=sys.stderr)
         return 0
@@ -878,7 +973,7 @@ def _sync_watch(interval: int) -> int:
                     print(result.message, flush=True)
                     if result.status in {"conflict", "dirty"}:
                         try:
-                            _run_sync_reconciler(manager, result)
+                            _run_sync_reconciler(manager, result, sync_config.memory_root)
                         except Exception as exc:
                             print(
                                 f"rightmemory sync reconciler failed: {type(exc).__name__}: {exc}",
@@ -903,8 +998,8 @@ def _sync_watch(interval: int) -> int:
         return 130
 
 
-def _run_sync_reconciler(manager: SyncManager, result: Any) -> None:
-    reconciler_config = load_config("sync-reconciler")
+def _run_sync_reconciler(manager: SyncManager, result: Any, memory_root: Path | None = None) -> None:
+    reconciler_config = load_config("sync-reconciler", memory_root=memory_root)
     reconciler_root = Path(reconciler_config.memory_root)
     if reconciler_root != manager.memory_root:
         raise ValueError(
@@ -1033,9 +1128,9 @@ def _async_worker(
     memory_root,
     role: str,
 ) -> int:
-    dreamer_watch_config = load_dreamer_watch_config()
-    insight_watch_config = load_insight_watch_config()
-    async_update_config = load_async_update_config()
+    dreamer_watch_config = load_dreamer_watch_config(memory_root=memory_root)
+    insight_watch_config = load_insight_watch_config(memory_root=memory_root)
+    async_update_config = load_async_update_config(memory_root=memory_root)
     store = AsyncUpdateStore(memory_root, role)
     result = store.run_pending_batches(
         lambda batch_session_id, message: runtime.run_session_turn(batch_session_id, message),

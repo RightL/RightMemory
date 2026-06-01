@@ -117,7 +117,7 @@ class JsonRequestTests(unittest.TestCase):
     def test_main_loads_retrieve_role(self):
         roles = []
 
-        def fake_load_config(role):
+        def fake_load_config(role, **kwargs):
             roles.append(role)
             return object()
 
@@ -130,7 +130,7 @@ class JsonRequestTests(unittest.TestCase):
     def test_main_loads_dreamer_role(self):
         roles = []
 
-        def fake_load_config(role):
+        def fake_load_config(role, **kwargs):
             roles.append(role)
             return object()
 
@@ -143,7 +143,7 @@ class JsonRequestTests(unittest.TestCase):
     def test_main_loads_reviewer_role(self):
         roles = []
 
-        def fake_load_config(role):
+        def fake_load_config(role, **kwargs):
             roles.append(role)
             return object()
 
@@ -157,7 +157,7 @@ class JsonRequestTests(unittest.TestCase):
         roles = []
         stdout = io.StringIO()
 
-        def fake_load_config(role):
+        def fake_load_config(role, **kwargs):
             roles.append(role)
             return object()
 
@@ -171,6 +171,130 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(roles, ["historian"])
         self.assertIn("session hist-1: old context", stdout.getvalue())
+
+    def test_main_global_profile_selects_registered_root(self):
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_root = Path(tempdir) / "default"
+            profile_root = Path(tempdir) / "project-memory"
+            profile_root.mkdir(parents=True)
+            default_root.mkdir()
+            (default_root / "profiles.toml").write_text(
+                f'[profiles.alpha]\nroot = "{profile_root}"\n',
+                encoding="utf-8",
+            )
+
+            def fake_load_config(role, **kwargs):
+                self.assertEqual(kwargs.get("memory_root"), profile_root)
+                return type("Config", (), {"memory_root": profile_root})()
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=default_root),
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["--profile", "alpha", "retrieve", "--session", "s1", "hello"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("session s1: hello", stdout.getvalue())
+
+    def test_main_project_binding_selects_registered_root(self):
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_root = Path(tempdir) / "default"
+            profile_root = Path(tempdir) / "profile-root"
+            project = Path(tempdir) / "project"
+            project.mkdir()
+            default_root.mkdir()
+            (default_root / "profiles.toml").write_text(
+                f'[profiles.alpha]\nroot = "{profile_root}"\n',
+                encoding="utf-8",
+            )
+            (project / ".rightmemory-profile").write_text("alpha\n", encoding="utf-8")
+
+            def fake_load_config(role, **kwargs):
+                self.assertEqual(kwargs.get("memory_root"), profile_root)
+                return type("Config", (), {"memory_root": profile_root})()
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=default_root),
+                patch("rightmemory.cli.Path.cwd", return_value=project),
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.RightMemoryRuntime", FakeRuntime),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["retrieve", "--session", "s1", "hello"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("session s1: hello", stdout.getvalue())
+
+    def test_profile_list_ignores_project_binding(self):
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_root = Path(tempdir) / "default"
+            profile_root = Path(tempdir) / "profile-root"
+            project = Path(tempdir) / "project"
+            project.mkdir()
+            default_root.mkdir()
+            (project / ".rightmemory-profile").write_text("missing\n", encoding="utf-8")
+            (default_root / "profiles.toml").write_text(
+                f'[profiles.alpha]\nroot = "{profile_root}"\n',
+                encoding="utf-8",
+            )
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=default_root),
+                patch("rightmemory.cli.Path.cwd", return_value=project),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["profile", "list"])
+
+        self.assertEqual(result, 0)
+        self.assertIn(f"alpha\t{profile_root}", stdout.getvalue())
+
+    def test_profile_create_calls_create_profile(self):
+        stdout = io.StringIO()
+        profile = type("Profile", (), {"name": "alpha", "root": Path("/profiles/alpha")})()
+
+        with (
+            patch("rightmemory.cli.default_memory_root", return_value=Path("/default")),
+            patch("rightmemory.cli.create_profile", return_value=profile) as create_profile,
+            patch("sys.stdout", stdout),
+        ):
+            result = main(["profile", "create", "alpha", "--root", "/profiles/alpha"])
+
+        self.assertEqual(result, 0)
+        create_profile.assert_called_once_with(Path("/default"), "alpha", root=Path("/profiles/alpha"))
+        self.assertIn("alpha\t/profiles/alpha", stdout.getvalue())
+
+    def test_profile_command_rejects_global_profile_flag(self):
+        with self.assertRaises(ValueError) as caught:
+            main(["--profile", "alpha", "profile", "list"])
+
+        self.assertIn("--profile is for runtime commands", str(caught.exception))
+
+    def test_top_level_help_does_not_resolve_project_binding(self):
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            project = Path(tempdir) / "project"
+            project.mkdir()
+            (project / ".rightmemory-profile").write_text("missing\n", encoding="utf-8")
+
+            with (
+                patch("rightmemory.cli.Path.cwd", return_value=project),
+                patch("rightmemory.cli.resolve_memory_root", side_effect=AssertionError("root should not resolve")),
+                patch("sys.stdout", stdout),
+            ):
+                with self.assertRaises(SystemExit) as caught:
+                    main(["--help"])
+
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("RightMemory", stdout.getvalue())
 
     def test_prune_command_delegates_due_check_to_pruner_runtime(self):
         stdout = io.StringIO()
@@ -192,7 +316,7 @@ class JsonRequestTests(unittest.TestCase):
         pruner_config = type("PrunerConfig", (), {"memory_root": Path("/memory")})()
         roles = []
 
-        def fake_load_config(role):
+        def fake_load_config(role, **kwargs):
             roles.append(role)
             return object()
 
@@ -338,7 +462,7 @@ class JsonRequestTests(unittest.TestCase):
                 scan_flags.append(require_full_batch)
                 return FakeReviewResult("reviewed: 1", reviewed=1)
 
-        def fake_load_config(role):
+        def fake_load_config(role, **kwargs):
             roles.append(role)
             return type("Config", (), {"memory_root": memory_root})()
 
@@ -442,7 +566,7 @@ class JsonRequestTests(unittest.TestCase):
                     self.on_review_success(result.reviewed)
                 return result
 
-        def fake_load_config(role):
+        def fake_load_config(role, **kwargs):
             roles.append(role)
             return type("Config", (), {"memory_root": memory_root})()
 
@@ -593,11 +717,11 @@ class JsonRequestTests(unittest.TestCase):
             memory_root = Path(tempdir)
             roles = []
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 roles.append(role)
                 return type("Config", (), {"memory_root": memory_root})()
 
-            def fake_load_sync_config():
+            def fake_load_sync_config(**kwargs):
                 return type("SyncConfig", (), {"memory_root": memory_root, "enabled": False})()
 
             with (
@@ -640,10 +764,10 @@ class JsonRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
-            def fake_load_sync_config():
+            def fake_load_sync_config(**kwargs):
                 return type("SyncConfig", (), {"memory_root": memory_root, "enabled": True})()
 
             with (
@@ -675,10 +799,10 @@ class JsonRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
-            def fake_load_sync_config():
+            def fake_load_sync_config(**kwargs):
                 return type("SyncConfig", (), {"memory_root": memory_root, "enabled": False})()
 
             with (
@@ -709,13 +833,13 @@ class JsonRequestTests(unittest.TestCase):
             memory_root = Path(tempdir)
             roles = []
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 roles.append(role)
                 if role == "reviewer":
                     raise RuntimeError("review unavailable")
                 return type("Config", (), {"memory_root": memory_root})()
 
-            def fake_load_sync_config():
+            def fake_load_sync_config(**kwargs):
                 return type("SyncConfig", (), {"memory_root": memory_root, "enabled": True})()
 
             with (
@@ -772,10 +896,10 @@ class JsonRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
-            def fake_load_config(_role):
+            def fake_load_config(_role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
-            def fake_load_sync_config():
+            def fake_load_sync_config(**kwargs):
                 return type("SyncConfig", (), {"memory_root": memory_root, "enabled": True})()
 
             with (
@@ -820,7 +944,7 @@ class JsonRequestTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tempdir:
             with (
-                patch("rightmemory.cli.MEMORY_ROOT", Path(tempdir)),
+                patch("rightmemory.cli.default_memory_root", return_value=Path(tempdir)),
                 patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
                 patch("sys.stdout", stdout),
             ):
@@ -844,7 +968,7 @@ class JsonRequestTests(unittest.TestCase):
         dashboard = "RightMemory\n  root: /memory/root\n  git: clean on main @ abc1234"
 
         with (
-            patch("rightmemory.cli.MEMORY_ROOT", Path("/memory/root")),
+            patch("rightmemory.cli.default_memory_root", return_value=Path("/memory/root")),
             patch("rightmemory.cli.collect_status", return_value=object()) as collect_status,
             patch("rightmemory.cli.format_status_dashboard", return_value=dashboard),
             patch("sys.stdout", stdout),
@@ -869,7 +993,7 @@ class JsonRequestTests(unittest.TestCase):
         )()
 
         with (
-            patch("rightmemory.cli.MEMORY_ROOT", Path("/memory")),
+            patch("rightmemory.cli.default_memory_root", return_value=Path("/memory")),
             patch("rightmemory.cli.managed_watch_status", return_value=status),
             patch("sys.stdout", stdout),
         ):
@@ -1087,7 +1211,7 @@ class JsonRequestTests(unittest.TestCase):
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)
-        load_config.assert_called_with("sync-reconciler")
+        load_config.assert_called_with("sync-reconciler", memory_root=memory_root)
         self.assertEqual(calls, [("sync-watch", "resolve MEMORY.md")])
         self.assertEqual(cleanup_calls, ["cleanup"])
         self.assertEqual(events, ["lock_enter", "background_pull", "lock_exit", "reconciler"])
@@ -1170,7 +1294,7 @@ class JsonRequestTests(unittest.TestCase):
             pid_path.parent.mkdir(parents=True)
             pid_path.write_text("123\n", encoding="utf-8")
             with (
-                patch("rightmemory.cli.MEMORY_ROOT", memory_root),
+                patch("rightmemory.cli.default_memory_root", return_value=memory_root),
                 patch("rightmemory.watch._is_managed_watch_process", side_effect=[True, False]),
                 patch("rightmemory.watch.os.kill") as kill,
                 patch("sys.stdout", stdout),
@@ -1541,7 +1665,7 @@ class JsonRequestTests(unittest.TestCase):
         roles = []
         stdout = io.StringIO()
 
-        def fake_load_config(role):
+        def fake_load_config(role, **kwargs):
             roles.append(role)
             return object()
 
@@ -1580,7 +1704,7 @@ class JsonRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 roles.append(role)
                 return type("Config", (), {"memory_root": memory_root})()
 
@@ -1622,7 +1746,7 @@ class JsonRequestTests(unittest.TestCase):
                 ),
             )
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
             with (
@@ -1708,7 +1832,7 @@ class JsonRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
             with (
@@ -1740,7 +1864,7 @@ class JsonRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
             with (
@@ -1771,7 +1895,7 @@ class JsonRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
             with (
@@ -1791,7 +1915,7 @@ class JsonRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
             with (
@@ -1826,7 +1950,7 @@ class JsonRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
             with patch("rightmemory.cli.load_config", fake_load_config), patch("sys.stdout", stdout):
@@ -1872,7 +1996,7 @@ class JsonRequestTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
             with (
@@ -1902,7 +2026,7 @@ class JsonRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
             with (
@@ -1950,7 +2074,7 @@ class JsonRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
             with (
@@ -1997,7 +2121,7 @@ class JsonRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
             with (
@@ -2035,7 +2159,7 @@ class JsonRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
 
-            def fake_load_config(role):
+            def fake_load_config(role, **kwargs):
                 return type("Config", (), {"memory_root": memory_root})()
 
             with (

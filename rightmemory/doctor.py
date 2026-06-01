@@ -23,10 +23,10 @@ def format_doctor_report(checks: list[DoctorCheck]) -> str:
     return "\n".join(f"[{'ok' if check.ok else 'fail'}] {check.name} - {check.detail}" for check in checks)
 
 
-def run_agent_cli_doctor() -> list[DoctorCheck]:
+def run_agent_cli_doctor(memory_root: Path | None = None) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
     run_nonce = uuid4().hex
-    configs = _load_agent_cli_configs(checks)
+    configs = _load_agent_cli_configs(checks, memory_root=memory_root)
     if not configs:
         return checks
 
@@ -59,12 +59,12 @@ def run_agent_cli_doctor() -> list[DoctorCheck]:
     return checks
 
 
-def _load_agent_cli_configs(checks: list[DoctorCheck]) -> dict[str, RuntimeConfig]:
+def _load_agent_cli_configs(checks: list[DoctorCheck], *, memory_root: Path | None = None) -> dict[str, RuntimeConfig]:
     configs: dict[str, RuntimeConfig] = {}
     failures = []
     for role in sorted(ROLES):
         try:
-            config = load_config(role)
+            config = load_config(role, memory_root=memory_root)
         except Exception as exc:
             failures.append(f"{role}: {_exception_detail(exc)}")
             continue
