@@ -31,6 +31,57 @@ from rightmemory.sync import SyncResult
 
 
 class ConfigTests(unittest.TestCase):
+    def test_load_config_accepts_explicit_memory_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            (root / "rightmemory.toml").write_text(
+                """
+                [retrieve.model]
+                model_id = "openai/project"
+                """,
+                encoding="utf-8",
+            )
+
+            config = load_config("retrieve", memory_root=root)
+
+        self.assertEqual(config.memory_root, root)
+        self.assertEqual(config.state_root, root)
+        self.assertEqual(config.model_id, "openai/project")
+
+    def test_load_review_config_accepts_explicit_memory_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            (root / "rightmemory.toml").write_text(
+                """
+                [review]
+                sources = []
+                """,
+                encoding="utf-8",
+            )
+
+            config = load_review_config(memory_root=root)
+
+        self.assertEqual(config.memory_root, root)
+        self.assertEqual(config.sources, [])
+
+    def test_load_sync_config_accepts_explicit_memory_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            (root / "rightmemory.toml").write_text(
+                """
+                [sync]
+                enabled = true
+                stale_pull_after_hours = 8
+                """,
+                encoding="utf-8",
+            )
+
+            config = load_sync_config(memory_root=root)
+
+        self.assertEqual(config.memory_root, root)
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.stale_pull_after_hours, 8)
+
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_minimal_openai_compatible_config(self):
         config_path = self._write_config(

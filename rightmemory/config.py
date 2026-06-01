@@ -33,6 +33,20 @@ DEFAULT_INSIGHT_REVIEW_SESSION_POINTS = 1.5
 DEFAULT_INSIGHT_CHECK_INTERVAL_SECONDS = 3000
 
 
+def default_memory_root() -> Path:
+    return Path(os.environ.get(MEMORY_ROOT_ENV, "~/.rightmemory")).expanduser()
+
+
+def _active_memory_root(memory_root: Path | None) -> Path:
+    return MEMORY_ROOT if memory_root is None else Path(memory_root).expanduser()
+
+
+def _active_config_path(memory_root: Path | None) -> Path:
+    if memory_root is None:
+        return CONFIG_PATH
+    return Path(memory_root).expanduser() / "rightmemory.toml"
+
+
 @dataclass(frozen=True)
 class SyncConfig:
     memory_root: Path = MEMORY_ROOT
@@ -114,12 +128,13 @@ class RuntimeConfig:
             object.__setattr__(self, "state_root", self.memory_root)
 
 
-def load_config(role: str) -> RuntimeConfig:
+def load_config(role: str, memory_root: Path | None = None) -> RuntimeConfig:
     role = _role(role)
-    data = _load_raw_config()
+    root = _active_memory_root(memory_root)
+    data = _load_raw_config(memory_root)
 
-    if not MEMORY_ROOT.exists():
-        raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
+    if not root.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {root}")
 
     _reject_unknown_keys(data, _top_level_keys(), "top-level")
     role_section = _role_section(data, role)
@@ -138,9 +153,16 @@ def load_config(role: str) -> RuntimeConfig:
 
     model_section = role_section.get("model") if has_model else None
     if model_section is None:
-        return _agent_cli_runtime_config(role, data, role_section, executor_role=executor_role)
+        return _agent_cli_runtime_config(
+            role,
+            data,
+            role_section,
+            executor_role=executor_role,
+            memory_root=root,
+        )
     if not isinstance(model_section, dict):
-        raise ValueError(f"{CONFIG_PATH} must contain a [{executor_role}.model] table")
+        config_path = _active_config_path(memory_root)
+        raise ValueError(f"{config_path} must contain a [{executor_role}.model] table")
     _reject_unknown_keys(model_section, {"model_id", "api_base", "api_key", "kwargs"}, f"[{executor_role}.model]")
 
     model_id = _required_string(model_section, "model_id")
@@ -160,19 +182,20 @@ def load_config(role: str) -> RuntimeConfig:
         api_base=api_base,
         api_key=api_key,
         model_kwargs=model_kwargs,
-        memory_root=MEMORY_ROOT,
-        state_root=MEMORY_ROOT,
+        memory_root=root,
+        state_root=root,
         max_tool_retries=DEFAULT_MAX_TOOL_RETRIES,
         debug_trace=_debug_trace(data.get("debug", {})),
-        sync=_sync_config(data.get("sync", {})),
+        sync=_sync_config(data.get("sync", {}), memory_root=root),
     )
 
 
-def load_review_config() -> ReviewConfig:
-    data = _load_raw_config()
+def load_review_config(memory_root: Path | None = None) -> ReviewConfig:
+    root = _active_memory_root(memory_root)
+    data = _load_raw_config(memory_root)
 
-    if not MEMORY_ROOT.exists():
-        raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
+    if not root.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {root}")
 
     _reject_unknown_keys(data, _top_level_keys(), "top-level")
     section = data.get("review", {})
@@ -203,7 +226,7 @@ def load_review_config() -> ReviewConfig:
         sources = [_review_source(item) for item in raw_sources]
 
     return ReviewConfig(
-        memory_root=MEMORY_ROOT,
+        memory_root=root,
         idle_seconds=idle_seconds,
         since_days=since_days,
         batch_size=batch_size,
@@ -211,11 +234,12 @@ def load_review_config() -> ReviewConfig:
     )
 
 
-def load_async_update_config() -> AsyncUpdateConfig:
-    data = _load_raw_config()
+def load_async_update_config(memory_root: Path | None = None) -> AsyncUpdateConfig:
+    root = _active_memory_root(memory_root)
+    data = _load_raw_config(memory_root)
 
-    if not MEMORY_ROOT.exists():
-        raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
+    if not root.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {root}")
 
     _reject_unknown_keys(data, _top_level_keys(), "top-level")
     section = data.get("update", {})
@@ -233,7 +257,7 @@ def load_async_update_config() -> AsyncUpdateConfig:
     _reject_unknown_keys(async_section, {"target_batch_candidates", "max_wait_seconds"}, "[update.async]")
 
     return AsyncUpdateConfig(
-        memory_root=MEMORY_ROOT,
+        memory_root=root,
         target_batch_candidates=_positive_integer(
             async_section,
             "target_batch_candidates",
@@ -249,11 +273,12 @@ def load_async_update_config() -> AsyncUpdateConfig:
     )
 
 
-def load_dreamer_watch_config() -> DreamerWatchConfig:
-    data = _load_raw_config()
+def load_dreamer_watch_config(memory_root: Path | None = None) -> DreamerWatchConfig:
+    root = _active_memory_root(memory_root)
+    data = _load_raw_config(memory_root)
 
-    if not MEMORY_ROOT.exists():
-        raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
+    if not root.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {root}")
 
     _reject_unknown_keys(data, _top_level_keys(), "top-level")
     section = data.get("dreamer", {})
@@ -275,7 +300,7 @@ def load_dreamer_watch_config() -> DreamerWatchConfig:
     )
 
     return DreamerWatchConfig(
-        memory_root=MEMORY_ROOT,
+        memory_root=root,
         trigger_points=_positive_number(
             watch,
             "trigger_points",
@@ -303,11 +328,12 @@ def load_dreamer_watch_config() -> DreamerWatchConfig:
     )
 
 
-def load_insight_watch_config() -> InsightWatchConfig:
-    data = _load_raw_config()
+def load_insight_watch_config(memory_root: Path | None = None) -> InsightWatchConfig:
+    root = _active_memory_root(memory_root)
+    data = _load_raw_config(memory_root)
 
-    if not MEMORY_ROOT.exists():
-        raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
+    if not root.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {root}")
 
     _reject_unknown_keys(data, _top_level_keys(), "top-level")
     section = data.get("insight", {})
@@ -329,7 +355,7 @@ def load_insight_watch_config() -> InsightWatchConfig:
     )
 
     return InsightWatchConfig(
-        memory_root=MEMORY_ROOT,
+        memory_root=root,
         trigger_points=_positive_number(
             watch,
             "trigger_points",
@@ -357,11 +383,12 @@ def load_insight_watch_config() -> InsightWatchConfig:
     )
 
 
-def load_pruner_config() -> PrunerConfig:
-    data = _load_raw_config()
+def load_pruner_config(memory_root: Path | None = None) -> PrunerConfig:
+    root = _active_memory_root(memory_root)
+    data = _load_raw_config(memory_root)
 
-    if not MEMORY_ROOT.exists():
-        raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
+    if not root.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {root}")
 
     _reject_unknown_keys(data, _top_level_keys(), "top-level")
     section = data.get("pruner", {})
@@ -376,7 +403,7 @@ def load_pruner_config() -> PrunerConfig:
     )
 
     return PrunerConfig(
-        memory_root=MEMORY_ROOT,
+        memory_root=root,
         generation_commits=_positive_integer(
             section,
             "generation_commits",
@@ -392,17 +419,19 @@ def load_pruner_config() -> PrunerConfig:
     )
 
 
-def load_sync_config() -> SyncConfig:
-    data = _load_raw_config()
-    if not MEMORY_ROOT.exists():
-        raise FileNotFoundError(f"RightMemory memory root does not exist: {MEMORY_ROOT}")
+def load_sync_config(memory_root: Path | None = None) -> SyncConfig:
+    root = _active_memory_root(memory_root)
+    data = _load_raw_config(memory_root)
+    if not root.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {root}")
     _reject_unknown_keys(data, _top_level_keys(), "top-level")
-    return _sync_config(data.get("sync", {}))
+    return _sync_config(data.get("sync", {}), memory_root=root)
 
 
-def _load_raw_config() -> dict[str, object]:
-    if CONFIG_PATH.exists():
-        with CONFIG_PATH.open("rb") as handle:
+def _load_raw_config(memory_root: Path | None = None) -> dict[str, object]:
+    config_path = _active_config_path(memory_root)
+    if config_path.exists():
+        with config_path.open("rb") as handle:
             return tomllib.load(handle)
     return {}
 
@@ -495,6 +524,7 @@ def _agent_cli_runtime_config(
     role_section: dict[str, object],
     *,
     executor_role: str,
+    memory_root: Path,
 ) -> RuntimeConfig:
     global_section = data.get("agent_cli", {})
     if global_section is None:
@@ -523,11 +553,11 @@ def _agent_cli_runtime_config(
         model_id=None,
         runtime_mode="cli-agent",
         agent_cli=AgentCliConfig(provider=provider, model=model),
-        memory_root=MEMORY_ROOT,
-        state_root=MEMORY_ROOT,
+        memory_root=memory_root,
+        state_root=memory_root,
         max_tool_retries=DEFAULT_MAX_TOOL_RETRIES,
         debug_trace=_debug_trace(data.get("debug", {})),
-        sync=_sync_config(data.get("sync", {})),
+        sync=_sync_config(data.get("sync", {}), memory_root=memory_root),
     )
 
 
@@ -551,7 +581,7 @@ def _debug_trace(value: object) -> bool:
     return trace
 
 
-def _sync_config(section: object) -> SyncConfig:
+def _sync_config(section: object, *, memory_root: Path) -> SyncConfig:
     if section is None:
         section = {}
     if not isinstance(section, dict):
@@ -571,7 +601,7 @@ def _sync_config(section: object) -> SyncConfig:
         raise ValueError("[sync].stale_pull_after_hours must be a positive integer")
 
     return SyncConfig(
-        memory_root=MEMORY_ROOT,
+        memory_root=memory_root,
         enabled=enabled,
         stale_pull_after_hours=stale_pull_after_hours,
     )
