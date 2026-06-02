@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import unittest
@@ -34,6 +35,16 @@ class ProfileTests(unittest.TestCase):
             profiles = load_profiles(home)
 
         self.assertEqual(profiles["alpha"].root, root)
+
+    def test_registry_relative_root_is_resolved_from_registry_parent(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            home = Path(tempdir) / "memory"
+            home.mkdir()
+            (home / "profiles.toml").write_text('[profiles.alpha]\nroot = "profiles/alpha"\n', encoding="utf-8")
+
+            profiles = load_profiles(home)
+
+        self.assertEqual(profiles["alpha"].root, home / "profiles" / "alpha")
 
     def test_default_profile_root_is_sibling_area(self):
         home = Path("/tmp/rightmemory-home")
@@ -145,6 +156,22 @@ class ProfileTests(unittest.TestCase):
 
         self.assertEqual(profile.root, existing)
         self.assertEqual(profiles["existing"].root, existing)
+
+    def test_create_profile_normalizes_relative_root(self):
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tempdir:
+            try:
+                os.chdir(tempdir)
+                default_root = Path(tempdir) / "default"
+                expected_root = Path.cwd() / "profile-memory"
+
+                profile = create_profile(default_root, "relative", root=Path("profile-memory"))
+                profiles = load_profiles(default_root)
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertEqual(profile.root, expected_root)
+        self.assertEqual(profiles["relative"].root, expected_root)
 
     def test_create_profile_rejects_existing_non_memory_root(self):
         with tempfile.TemporaryDirectory() as tempdir:

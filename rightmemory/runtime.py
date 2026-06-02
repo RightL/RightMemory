@@ -377,7 +377,7 @@ class RightMemoryRuntime:
         return result.context_block()
 
     def _run_sync_reconciler(self, result) -> None:
-        reconciler_config = load_config("sync-reconciler")
+        reconciler_config = load_config("sync-reconciler", memory_root=self.config.memory_root)
         if reconciler_config.memory_root != self.config.memory_root:
             raise ValueError(
                 "sync-reconciler memory root mismatch: "

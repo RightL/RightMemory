@@ -83,7 +83,7 @@ def load_profiles(default_root: Path) -> dict[str, Profile]:
         raw_root = raw_entry.get("root")
         if not isinstance(raw_root, str) or not raw_root.strip():
             raise ProfileError(f"[profiles.{name}].root must be a non-empty string")
-        profiles[name] = Profile(name=name, root=Path(raw_root).expanduser())
+        profiles[name] = Profile(name=name, root=_normalize_profile_root(raw_root, base=registry.parent))
     return profiles
 
 
@@ -95,7 +95,7 @@ def save_profiles(default_root: Path, profiles: dict[str, Profile]) -> None:
         profile_name = validate_profile_name(name)
         profile = profiles[name]
         lines.append(f"[profiles.{profile_name}]")
-        lines.append(f"root = {_toml_string(str(profile.root))}")
+        lines.append(f"root = {_toml_string(str(_normalize_profile_root(profile.root)))}")
         lines.append("")
     _atomic_write_text(profile_registry_path(root), "\n".join(lines).rstrip() + "\n")
 
@@ -149,7 +149,7 @@ def resolve_memory_root(
 def create_profile(default_root: Path, name: str, root: Path | None = None) -> Profile:
     profile_name = validate_profile_name(name)
     home = Path(default_root).expanduser()
-    target_root = default_profile_root(home, profile_name) if root is None else Path(root).expanduser()
+    target_root = _normalize_profile_root(default_profile_root(home, profile_name) if root is None else root)
     profiles = load_profiles(home)
     if profile_name in profiles:
         raise ProfileError(f"profile already exists: {profile_name}")
@@ -179,6 +179,14 @@ def initialize_memory_root(memory_root: Path, *, source_root: Path) -> None:
 
 def _looks_like_memory_root(path: Path) -> bool:
     return (path / "MEMORY.md").is_file() and (path / "insight_logs").is_dir()
+
+
+def _normalize_profile_root(path: str | Path, *, base: Path | None = None) -> Path:
+    root = Path(path).expanduser()
+    if root.is_absolute():
+        return root.absolute()
+    parent = Path.cwd() if base is None else Path(base).expanduser()
+    return (parent / root).absolute()
 
 
 def _memory_example_text() -> str:

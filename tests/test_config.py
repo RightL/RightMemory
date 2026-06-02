@@ -1940,6 +1940,50 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.agent.calls[0]["message"], "remember one")
         self.assertEqual(repairs, ["dirty"])
 
+    def test_runtime_sync_reconciler_loads_selected_memory_root(self):
+        memory_root = Path(self.tempdir.name) / "profile-root"
+        memory_root.mkdir()
+        loaded_roots = []
+        nested_calls = []
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=memory_root,
+            sync=load_sync_config_for_test(memory_root, enabled=True),
+        )
+
+        def fake_load_config(role, memory_root=None):
+            loaded_roots.append((role, memory_root))
+            return RuntimeConfig(
+                role=role,
+                model_id="openai/test",
+                memory_root=memory_root,
+                sync=load_sync_config_for_test(memory_root, enabled=True),
+            )
+
+        class FakeNestedRuntime:
+            def __init__(self, runtime_config):
+                nested_calls.append(("init", runtime_config.memory_root))
+
+            def run_session_turn(self, session_id, message):
+                nested_calls.append(("turn", session_id, message))
+
+            def cleanup(self):
+                nested_calls.append(("cleanup",))
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+        with (
+            patch("rightmemory.runtime.load_config", side_effect=fake_load_config),
+            patch("rightmemory.runtime.RightMemoryRuntime", FakeNestedRuntime),
+        ):
+            runtime._run_sync_reconciler(SyncResult("dirty", "local memory is dirty", ["MEMORY.md"]))
+
+        self.assertEqual(loaded_roots, [("sync-reconciler", memory_root)])
+        self.assertEqual(nested_calls[0], ("init", memory_root))
+        self.assertEqual(nested_calls[-1], ("cleanup",))
+
     def test_prune_turn_checks_generation_after_sync_preflight(self):
         events = []
         memory_root = Path(self.tempdir.name)
