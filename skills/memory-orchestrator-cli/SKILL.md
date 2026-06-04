@@ -14,9 +14,10 @@ description: "Use when the user's request may depend on long-term context from e
 
 - For retrieval, call `rightmemory retrieve --session <stable-session-id> "<memory need>"`.
 - Describe the memory needed based on the user's intent instead of blindly forwarding the user's message verbatim.
-- Do not retrieve on every turn. Retrieve when the current conversation lacks the background needed to answer or work well.
-- Skip retrieval when the message is clearly self-contained and answerable from the conversation alone.
-- Retrieve preference-, workflow-, and behavior-related memory more frequently, especially when the work changes phase or topic, e.g. from discussion to implementation or from implementation to finishing or verification.
+- For factual, project, or domain context, do not retrieve on every turn. Retrieve when the current conversation lacks the background needed to answer or work well.
+- Skip this factual/context retrieval when the message is clearly self-contained and answerable from the conversation alone.
+- For preference-, workflow-, and behavior-related memory, retrieve proactively and very frequently when the agent is about to make choices that affect how it collaborates, implements, verifies, communicates, or finishes work.
+- Treat phase and topic changes as strong retrieval triggers for preference, workflow, and behavior memory, especially transitions between discussion, implementation, and finishing work.
 - When running retrieve, wait at least 3 minutes for the command before acting on memory. During that wait, do not explore files or advance the task independently.
 - The retriever skips items already returned in this session; ask explicitly if you need something again.
 - A returned `S#...` heading is a memory skill: reusable instruction backed by a separate skill body, not an ordinary memory fact.
