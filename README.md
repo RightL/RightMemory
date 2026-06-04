@@ -534,7 +534,7 @@ Add source presets to `<memory-root>/rightmemory.toml`:
 
 ```toml
 [review]
-idle_seconds = 3600
+idle_seconds = 21600
 since_days = 3
 batch_size = 3
 

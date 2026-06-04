@@ -467,7 +467,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.sources[0].kind, "codex")
         self.assertEqual(config.sources[0].path, Path("~/codex-history").expanduser())
 
-    def test_review_config_defaults_to_three_day_window(self):
+    def test_review_config_defaults_to_six_hour_idle_and_three_day_window(self):
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
             config_path = memory_root / "rightmemory.toml"
@@ -475,6 +475,7 @@ class ConfigTests(unittest.TestCase):
             with patch("rightmemory.config.MEMORY_ROOT", memory_root), patch("rightmemory.config.CONFIG_PATH", config_path):
                 config = load_review_config()
 
+        self.assertEqual(config.idle_seconds, 6 * 60 * 60)
         self.assertEqual(config.since_days, 3)
         self.assertEqual(config.batch_size, 3)
 
