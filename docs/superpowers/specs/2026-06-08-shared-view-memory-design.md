@@ -219,6 +219,14 @@ reach that provider. The next design pass needs a locator shape that can support
 local memory roots, Git remotes, and possible future service endpoints without
 putting path or transport details into the `M#` heading itself.
 
+The product-level object should be a shared view invitation rather than a
+hand-written locator. A colleague, project owner, or manager agent gives the
+recipient an invitation for a shared view. Accepting it should create or suggest
+a local `M#` heading and store whatever resolver details the system needs out
+of band. The user-facing choice is whether to accept the shared view and how to
+describe its local collaboration meaning; local path, Git remote, or future
+service endpoint mechanics belong behind the resolver.
+
 ### Shared View Storage
 
 Filtered Markdown views need a storage shape. They could live inside the
