@@ -199,13 +199,25 @@ The View Builder should treat privacy and relevance as part of view quality.
 A good shared view is not a mirror of private memory; it is a collaboration
 surface shaped for a receiver or purpose.
 
-## Open Questions
+## Open Questions And Current Decisions
 
 ### M# Resolution
 
-The design still needs a concrete way to resolve a local `M#` heading id to a
-provider memory root and shared view. Options include a local registry, metadata
-near the heading, a profile-like alias registry, or a combination.
+Resolution has a settled direction: the consumer root should keep a separate
+link registry that maps each local `M#` heading id to a provider identity and
+shared view id. The local `M#` heading stays readable memory; its body explains
+the collaboration meaning, while the registry stores resolution mechanics.
+
+The consumer-side registry should not decide how the shared view is backed. It
+should not contain a prompt-vs-Markdown mode flag. The provider root owns the
+shared view contract and decides whether that view answers through a
+view-specific retriever prompt, filtered `MEMORY*.md` files, or both.
+
+The remaining resolution question is provider location. A shared-view link
+should identify the provider and view separately from the transport used to
+reach that provider. The next design pass needs a locator shape that can support
+local memory roots, Git remotes, and possible future service endpoints without
+putting path or transport details into the `M#` heading itself.
 
 ### Shared View Storage
 
