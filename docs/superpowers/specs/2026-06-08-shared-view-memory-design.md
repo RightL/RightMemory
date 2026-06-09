@@ -163,6 +163,43 @@ The provider root decides whether that answer is produced through
 policy-guided retrieve, filtered shared Markdown, or a built/updated shared
 view.
 
+## Transport Model
+
+Transport describes how a consumer reaches a provider shared view. It is
+separate from backing, which describes how the provider creates or stores the
+view content.
+
+The product model has three transport families:
+
+- **Hub transport:** the natural team-collaboration path. A team or company hub
+  handles identity, access, invitations, retrieve calls, interactions, and
+  audit. The hub can relay requests to an online provider agent/service, or it
+  can host/cache published shared views so the provider does not need to be
+  online.
+- **Export transport:** the lightweight no-hub path. The provider exports a
+  filtered shared memory surface and the consumer imports or syncs it. Git can
+  be one export carrier, but export can also use local folders, archives, file
+  sync, or other distribution mechanisms. Export is read-friendly and
+  asynchronous; it should not assume the consumer can write back to the
+  provider's repository.
+- **Local transport:** the same-machine or same-owner path. A consumer can
+  reach another local root through local commands or daemon calls. This fits
+  personal multi-root use, development, and testing.
+
+Transport and backing are related but not identical:
+
+- hub + retriever prompt is natural;
+- hub + filtered Markdown is natural;
+- export + filtered Markdown is natural;
+- export + retriever prompt is awkward unless it can call back to a provider;
+- local + retriever prompt is natural;
+- local + filtered Markdown is natural.
+
+Git branch visibility should not be treated as a privacy boundary for sharing
+filtered memory from a private root. When Git is used for export, the safer
+shape is a separate shared repository or exported package containing only the
+filtered shared memory surface.
+
 ## Natural-Language Interaction
 
 Shared views should support communication as well as retrieval. A collaborator
@@ -213,11 +250,11 @@ should not contain a prompt-vs-Markdown mode flag. The provider root owns the
 shared view contract and decides whether that view answers through a
 view-specific retriever prompt, filtered `MEMORY*.md` files, or both.
 
-The remaining resolution question is provider location. A shared-view link
+The remaining resolution question is provider reachability. A shared-view link
 should identify the provider and view separately from the transport used to
-reach that provider. The next design pass needs a locator shape that can support
-local memory roots, Git remotes, and possible future service endpoints without
-putting path or transport details into the `M#` heading itself.
+reach that provider. The next design pass should focus on shared view
+invitations and transport setup rather than asking users to hand-write local
+paths, Git remotes, or service endpoints into memory prose.
 
 The product-level object should be a shared view invitation rather than a
 hand-written locator. A colleague, project owner, or manager agent gives the
