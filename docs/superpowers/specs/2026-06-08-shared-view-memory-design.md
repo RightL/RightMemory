@@ -200,6 +200,43 @@ filtered memory from a private root. When Git is used for export, the safer
 shape is a separate shared repository or exported package containing only the
 filtered shared memory surface.
 
+## Minimal Hub
+
+The hub should stay small in the product model. It is not a full chat system,
+task tracker, or organization-management platform.
+
+Its minimal registry records shared view identity and meaning:
+
+```text
+provider
+view
+description
+```
+
+The registry answers "who provides which shared view, and what is it for?" It
+does not need user-facing fields for how to retrieve, how to interact, or
+whether the provider is currently online. Those are hub runtime concerns.
+
+Hub retrieve can work in two ways:
+
+- **Relay:** the hub forwards a retrieve request to an online provider
+  agent/service.
+- **Hosted:** the hub answers from a published or cached filtered Markdown
+  shared view.
+
+The consumer should not need to know which path answered the request.
+
+Hub interaction is intentionally lightweight: a collaborator leaves a note on a
+shared view. The hub records the note, notifies or exposes it to the provider,
+and lets the provider reply, update the shared view, or close it. The minimal
+model should not require a full thread system, task state machine, or explicit
+intent form.
+
+Publishing to the hub follows the View Builder model: the provider creates a
+shared view, publishes it to the hub, and the hub registers the provider, view,
+and description. A published view may be hosted as filtered Markdown or served
+through relay to the provider.
+
 ## Natural-Language Interaction
 
 Shared views should support communication as well as retrieval. A collaborator
