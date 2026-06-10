@@ -75,7 +75,8 @@ def save_connections(memory_root: Path, connections: dict[str, SharedViewConnect
         _validate_heading_id(connection.heading_id)
         if heading_id != connection.heading_id:
             raise ValueError(f"connection key `{heading_id}` does not match heading id `{connection.heading_id}`")
-        lines.append(f"[connections.{heading_id}]")
+        table_key = _toml_key(heading_id)
+        lines.append(f"[connections.{table_key}]")
         lines.append(f"ref = {_toml_string(connection.ref)}")
         lines.append(f"relationship = {_toml_string(connection.relationship)}")
         if connection.maintainer:
@@ -86,7 +87,7 @@ def save_connections(memory_root: Path, connections: dict[str, SharedViewConnect
             lines.append(f"accepted_from = {_toml_string(connection.accepted_from)}")
         if connection.target.kind != "none" or connection.target.path:
             lines.append("")
-            lines.append(f"[connections.{heading_id}.target]")
+            lines.append(f"[connections.{table_key}.target]")
             lines.append(f"kind = {_toml_string(connection.target.kind)}")
             if connection.target.path:
                 lines.append(f"path = {_toml_string(connection.target.path)}")
@@ -145,6 +146,10 @@ def _resolve_under_root(root: Path, raw_path: str) -> Path:
 
 def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def _toml_key(value: str) -> str:
+    return _toml_string(value)
 
 
 def _atomic_write_text(path: Path, text: str) -> None:

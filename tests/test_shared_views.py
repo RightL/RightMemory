@@ -32,6 +32,22 @@ class SharedViewRegistryTests(unittest.TestCase):
 
         self.assertEqual(loaded["alice-auth-api"], connection)
 
+    def test_save_and_load_connection_with_dotted_heading_id(self):
+        connection = SharedViewConnection(
+            heading_id="team.auth-api",
+            ref="rightmemory://view/team.auth-api",
+            relationship="team-space",
+            maintainer="Auth Team",
+            description="Team auth API collaboration context",
+            target=SharedViewTarget(kind="local_markdown", path=".runtime/shared_views/imports/team.auth-api"),
+        )
+
+        save_connections(self.root, {"team.auth-api": connection})
+        loaded = load_connections(self.root)
+
+        self.assertIn("team.auth-api", loaded)
+        self.assertEqual(loaded["team.auth-api"], connection)
+
     def test_load_connections_rejects_unknown_relationship(self):
         (self.root / "shared_views.toml").write_text(
             """
