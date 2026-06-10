@@ -175,11 +175,18 @@ Accepting a shared view creates two things:
 - an out-of-band resolver entry that binds the local heading id to a stable
   shared view reference.
 
+Accepting a shared view also establishes the relationship manners for that
+connection. A colleague's view, a user's own agent view, and a team-space view
+can all use the same `M#` shape while behaving differently for interactions,
+caching, and automatic notes. The user-facing act should feel like accepting a
+collaboration relationship, not filling out transport configuration.
+
 The local memory should stay focused on meaning. Resolver mechanics belong in a
 separate registry/cache that can expand the stable reference into whatever
 reachability metadata the runtime needs. The registry may keep the invitation
-that created the connection for traceability, but the durable consumer-side
-concept is "this local heading points to that shared view."
+that created the connection for traceability and relationship manners, but the
+durable consumer-side concept is "this local heading points to that shared
+view."
 
 ## Retrieve Behavior
 
@@ -223,6 +230,13 @@ The endpoint behavior can support:
 Those are shared-view capabilities, not separate local heading types. `M#`
 remains the local connection node.
 
+Shared view retrieval also defines a boundary for transitive references. If
+Alice's shared view mentions Bob's shared view, the consumer may use the content
+Alice intentionally exposed through her view, but it should not automatically
+traverse into Bob's view. The system can suggest accepting another shared view
+when it looks relevant; crossing into that view should create its own
+connection.
+
 ## Availability And Freshness
 
 Shared views should be useful even when the provider side is temporarily
@@ -243,6 +257,12 @@ bypassed with stale cached content unless that retention behavior was part of
 the accepted relationship. When a shared view is unavailable, local retrieve
 should still return relevant local memory rather than failing the whole request.
 
+Cache retention follows the relationship and the terms of the shared view.
+Cached shared context is useful working state, not local memory and not a
+hidden permanent copy of the provider's view. A cache record can preserve
+source, freshness, and usability state while keeping the consumer memory
+focused on the `M#` relationship.
+
 ## Lifecycle
 
 The core lifecycle is on demand:
@@ -259,6 +279,13 @@ The base product model does not need notification streams or periodic refresh.
 Provider updates become visible the next time the consumer retrieves from the
 shared view. Managed team spaces or owned agent clusters may later add more
 automation, but the shared view concept should work without background sync.
+
+The stable shared view reference should survive owner changes. A view can move
+from Alice to a backend team, or from a person to a project root, without
+forcing consumers to replace their `M#` headings. Provenance can say who
+currently maintains the view and who originally shared it. The consumer memory
+may later refine the heading body, but the relationship should not break just
+because ownership moved.
 
 ## Transport Model
 
@@ -311,17 +338,19 @@ the collaboration source of truth.
 The hub should stay small in the product model. It is not a full chat system,
 task tracker, or organization-management platform.
 
-Its minimal registry records shared view identity and meaning:
+Its minimal registry records shared view identity, current maintainership, and
+meaning:
 
 ```text
-provider
-view
+view reference
+maintainer
 description
 ```
 
-The registry answers "who provides which shared view, and what is it for?" It
-does not need user-facing fields for how to retrieve, how to interact, or
-whether the provider is currently online. Those are hub runtime concerns.
+The registry answers "what shared view is this, who currently maintains it, and
+what is it for?" It does not need user-facing fields for how to retrieve, how
+to interact, or whether the provider is currently online. Those are hub runtime
+concerns.
 
 Hub retrieve can work in two ways:
 
@@ -374,6 +403,17 @@ fields.
 The default experience should make reading smooth and leaving traces
 intentional. Retrieve can be quiet. Interaction should respect whether the
 connection represents another person, a trusted agent system, or a team space.
+
+Automatic interaction should stay tied to an active task context. Owned agent
+groups can send notes without repeated confirmation, but that should not become
+background chatter or an autonomous synchronization loop. The user should be
+able to understand which task caused an automatic note.
+
+When a shared view is stale, incomplete, or unhelpful, the natural repair path
+is feedback to the shared view rather than consumer-side editing of provider
+content. A human-owned view may ask before sending the feedback. An owned agent
+view can route the feedback directly to its builder. The provider side then
+decides whether to update the view, answer directly, or keep the issue open.
 
 ## Local Memory Boundary
 
@@ -431,6 +471,10 @@ to store the stable reference, invitation provenance, resolved transport
 metadata, cache freshness, and revoked/denied state without making those fields
 part of memory prose.
 
+The registry/cache also needs to preserve relationship manners and current
+maintainer metadata so interaction behavior and owner changes do not require
+rewriting the local `M#` heading.
+
 ### Shared View Storage
 
 The current storage direction is provider-owned view definitions plus separate
@@ -461,6 +505,11 @@ without making every interaction a memory node.
 The interaction record should also preserve relationship manners: whether the
 note was sent after human confirmation, automatically by an owned agent, or
 under team-space policy.
+
+Interaction records should connect feedback to the shared view lifecycle. A
+note can become evidence for rebuilding a view, answering a collaborator, or
+closing a stale shared-view issue, without turning the consumer root into the
+owner of provider content.
 
 ### Schema Integration
 
