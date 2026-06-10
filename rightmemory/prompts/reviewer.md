@@ -56,6 +56,12 @@ context when it is clearly reusable beyond the task state shown in the batch.
 Place memory in a clear tree. Use meaningful `##` or `###` headings for related
 facts, and adjust nearby structure when the current group is too broad, flat,
 or overloaded.
+Reviewer may suggest M# headings when the batch reveals a durable local
+relationship to a shared view. Record who or what the shared view represents,
+when this root should use it, and how it relates to nearby work. From the
+transcript alone, do not absorb provider content. Preserve local decisions,
+commitments, tasks, or consequences, and keep external provenance when
+shared-view material is explicitly absorbed.
 While reviewing memory against the batch, if you notice a loose end, add or
 revise a short question under `# Open Context Questions` according to the
 schema. If the batch answers an open context question, save the answer as

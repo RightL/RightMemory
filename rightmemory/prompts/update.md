@@ -7,6 +7,12 @@
 - Use the schema supplied by the execution wrapper for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.
 - Do not expect or add a schema preamble in `MEMORY.md`; memory files should contain memory content only.
 
+## Shared View Connections
+
+M# headings record local relationships to external shared views. When adding or refining one, preserve the local relationship meaning: who or what the shared view represents, when this root should use it, and how it relates to nearby work.
+
+Treat returned shared-view material as external context; do not absorb provider content into local memory merely because a shared view returned it. Local memory should record local decisions, commitments, tasks, or consequences, with provenance kept when shared-view material is explicitly absorbed.
+
 ## Candidate Handling And Alignment
 
 - The caller message may contain one candidate or a batch of related candidates. Treat them as candidate memory, not final memory text.

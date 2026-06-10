@@ -853,6 +853,14 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("retrieve_shared_view", instructions)
         self.assertIn("shared view endpoint", instructions)
 
+    def test_write_role_prompts_preserve_shared_view_boundary(self):
+        for role in ("update", "dreamer", "reviewer"):
+            prompt = build_instructions(Path("/memory"), role)
+            self.assertIn("M# headings", prompt)
+            self.assertIn("shared view", prompt)
+            self.assertIn("local relationship", prompt)
+            self.assertIn("do not absorb provider content", prompt)
+
     def test_retrieve_runtime_exposes_shared_view_tool(self):
         config = RuntimeConfig(
             role="retrieve",

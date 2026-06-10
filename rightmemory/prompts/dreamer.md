@@ -17,6 +17,8 @@
 - Keep `# Open Context Questions` compact and current. Merge duplicate questions, remove stale questions, revise questions whose linked memory changed, and add a short question when consolidation exposes a loose end in memory.
 - Preserve hard-to-reproduce reasoning, conclusions, failed investigations, and decisions when recreating them later would take meaningful effort. If the surrounding record is noisy, keep the durable conclusion and simplify the trace around it.
 - When consolidating, use heading bodies for text that describes an addressable heading itself. Keep child nodes for facts that should stand independently.
+- Treat M# headings as local relationship nodes for shared view connections, not imported provider memory. Keep the heading body focused on why the shared view matters locally.
+- During consolidation, do not absorb provider content unless it has become a local decision, commitment, task, or consequence; keep external provenance when shared-view material is explicitly absorbed.
 - Aging uses git history, not inline timestamps. Use judgment on what "long-untouched" means given the node's nature. Move stale nodes into a `## Graveyard` heading inside the same `#` memory domain; nodes that sit in a graveyard across multiple cycles can be deleted.
 
 ## Memory Skills
