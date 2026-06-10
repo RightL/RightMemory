@@ -241,12 +241,37 @@ def _ensure_memory_heading(root: Path, *, heading_id: str, title: str, body: str
     title_text = _normalize_heading_title(title, heading_id)
     body_text = body.strip()
     section = "# Shared Views"
-    addition = f"\n\n### {title_text} {{M#{heading_id}}}\n"
+    entry = f"### {title_text} {{M#{heading_id}}}\n"
     if body_text:
-        addition += f"\n{body_text}\n"
-    if section not in text:
-        addition = f"\n\n{section}{addition}"
-    memory.write_text(text.rstrip() + addition, encoding="utf-8")
+        entry += f"\n{body_text}\n"
+    memory.write_text(_insert_shared_view_heading(text, section=section, entry=entry), encoding="utf-8")
+
+
+def _insert_shared_view_heading(text: str, *, section: str, entry: str) -> str:
+    lines = text.splitlines(keepends=True)
+    section_index = next(
+        (index for index, line in enumerate(lines) if line.startswith("# ") and line.strip() == section),
+        None,
+    )
+    entry_text = entry.rstrip()
+
+    if section_index is None:
+        base = text.rstrip()
+        addition = f"{section}\n\n{entry_text}\n"
+        return f"{base}\n\n{addition}" if base else addition
+
+    insert_index = len(lines)
+    for index in range(section_index + 1, len(lines)):
+        if lines[index].startswith("# "):
+            insert_index = index
+            break
+
+    before = "".join(lines[:insert_index]).rstrip()
+    after = "".join(lines[insert_index:]).lstrip("\n")
+    updated = f"{before}\n\n{entry_text}\n"
+    if after:
+        updated += f"\n{after}"
+    return updated
 
 
 def _validate_connections_for_save(root: Path, connections: dict[str, SharedViewConnection]) -> None:
@@ -293,8 +318,15 @@ def _active_memory_files(root: Path) -> list[Path]:
 
 def _collect_local_markdown_cache(target: Path) -> _SharedViewCache:
     source_lines: list[_SharedViewSourceLine] = []
+    target_root = target.resolve()
     for memory_file in sorted(target.glob("MEMORY*.md")):
-        if not memory_file.is_file():
+        if memory_file.is_symlink():
+            continue
+        try:
+            resolved = memory_file.resolve()
+        except OSError:
+            continue
+        if target_root not in (resolved, *resolved.parents) or not memory_file.is_file():
             continue
         relative = memory_file.relative_to(target).as_posix()
         for line_number, line in enumerate(memory_file.read_text(encoding="utf-8").splitlines(), start=1):

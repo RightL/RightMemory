@@ -312,20 +312,21 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
         print(record_shared_view_note(memory_root, args.heading_id, message, confirmed=args.confirm, actor=args.actor))
         return 0
     if args.command == "accept":
-        print(
-            accept_shared_view(
-                memory_root,
-                heading_id=args.heading_id,
-                title=args.title,
-                body=args.body,
-                ref=args.ref,
-                relationship=args.relationship,
-                maintainer=args.maintainer,
-                description=args.description,
-                accepted_from=args.accepted_from,
-                target_path=args.target,
+        with MemoryWriteLock(memory_root):
+            print(
+                accept_shared_view(
+                    memory_root,
+                    heading_id=args.heading_id,
+                    title=args.title,
+                    body=args.body,
+                    ref=args.ref,
+                    relationship=args.relationship,
+                    maintainer=args.maintainer,
+                    description=args.description,
+                    accepted_from=args.accepted_from,
+                    target_path=args.target,
+                )
             )
-        )
         return 0
     raise ValueError(f"unknown shared-view command: {args.command}")
 

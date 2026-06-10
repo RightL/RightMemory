@@ -325,6 +325,25 @@ class SharedViewAcceptTests(unittest.TestCase):
         self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
         self.assertNotIn("{M#bad}", memory)
 
+    def test_accept_shared_view_inserts_into_existing_shared_views_section(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Shared Views\n\nExisting shared context.\n\n# Work Context\n\nWork notes stay here.\n",
+            encoding="utf-8",
+        )
+
+        accept_shared_view(
+            self.root,
+            heading_id="alice-auth-api",
+            title="Alice Auth API",
+            body="Alice owns auth API collaboration context.",
+            ref="rightmemory://view/alice-auth-api",
+        )
+
+        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+
+        self.assertLess(memory.index("### Alice Auth API {M#alice-auth-api}"), memory.index("# Work Context"))
+        self.assertTrue(memory.rstrip().endswith("Work notes stay here."))
+
 
 class SharedViewInteractionTests(unittest.TestCase):
     def setUp(self):
@@ -471,6 +490,38 @@ class SharedViewRetrieveTests(unittest.TestCase):
 
         self.assertIn("Status: fresh", result)
         self.assertIn("- MEMORY.md:3: Token expiry metadata includes token_expires_at.", result)
+
+    def test_retrieve_shared_view_skips_symlinked_markdown_files(self):
+        target = self.root / ".runtime/shared_views/imports/alice-auth-api"
+        target.mkdir(parents=True)
+        (target / "MEMORY.md").write_text("# Alice Auth API\n\nPublic shared note.\n", encoding="utf-8")
+        outside_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_dir.cleanup)
+        outside_file = Path(outside_dir.name) / "MEMORY_leak_source.md"
+        outside_file.write_text("Outside root secret phrase should not be imported.\n", encoding="utf-8")
+        try:
+            (target / "MEMORY_leak.md").symlink_to(outside_file)
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+        save_connections(
+            self.root,
+            {
+                "alice-auth-api": SharedViewConnection(
+                    heading_id="alice-auth-api",
+                    ref="rightmemory://view/alice-auth-api",
+                    target=SharedViewTarget(
+                        kind="local_markdown",
+                        path=".runtime/shared_views/imports/alice-auth-api",
+                    ),
+                )
+            },
+        )
+
+        result = retrieve_shared_view(self.root, "alice-auth-api", "outside secret phrase")
+
+        self.assertIn("Status: fresh", result)
+        self.assertIn("- no strong match in published shared memory", result)
+        self.assertNotIn("Outside root secret phrase", result)
 
     def test_retrieve_shared_view_uses_cache_when_target_disappears(self):
         target = self.root / ".runtime/shared_views/imports/alice-auth-api"

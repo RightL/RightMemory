@@ -269,6 +269,57 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("accepted shared view alice-auth-api", stdout.getvalue())
         self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
 
+    def test_shared_view_accept_cli_uses_memory_write_lock(self):
+        stdout = io.StringIO()
+        events = []
+
+        class FakeMemoryWriteLock:
+            def __init__(self, memory_root):
+                self.memory_root = memory_root
+
+            def __enter__(self):
+                events.append(("lock_enter", self.memory_root))
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                events.append(("lock_exit", exc_type))
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+
+            def fake_accept_shared_view(memory_root, **kwargs):
+                events.append(("accept", memory_root, kwargs["heading_id"]))
+                return f"accepted shared view {kwargs['heading_id']}"
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli.MemoryWriteLock", FakeMemoryWriteLock),
+                patch("rightmemory.cli.accept_shared_view", side_effect=fake_accept_shared_view),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(
+                    [
+                        "shared-view",
+                        "accept",
+                        "alice-auth-api",
+                        "--title",
+                        "Alice Auth API",
+                        "--ref",
+                        "rightmemory://view/alice-auth-api",
+                    ]
+                )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            events,
+            [
+                ("lock_enter", root),
+                ("accept", root, "alice-auth-api"),
+                ("lock_exit", None),
+            ],
+        )
+        self.assertIn("accepted shared view alice-auth-api", stdout.getvalue())
+
     def test_shared_view_list_cli_prints_connections(self):
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as tempdir:
