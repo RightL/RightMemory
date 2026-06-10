@@ -231,6 +231,44 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("session s1: hello", stdout.getvalue())
 
+    def test_shared_view_accept_cli_uses_active_memory_root(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            (root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(
+                    [
+                        "shared-view",
+                        "accept",
+                        "alice-auth-api",
+                        "--title",
+                        "Alice Auth API",
+                        "--body",
+                        "Alice owns auth API collaboration context.",
+                        "--ref",
+                        "rightmemory://view/alice-auth-api",
+                        "--relationship",
+                        "human",
+                        "--maintainer",
+                        "Alice",
+                        "--description",
+                        "Auth API collaboration context",
+                        "--target",
+                        ".runtime/shared_views/imports/alice-auth-api",
+                    ]
+                )
+
+            memory = (root / "MEMORY.md").read_text(encoding="utf-8")
+
+        self.assertEqual(result, 0)
+        self.assertIn("accepted shared view alice-auth-api", stdout.getvalue())
+        self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
+
     def test_profile_list_ignores_project_binding(self):
         stdout = io.StringIO()
 

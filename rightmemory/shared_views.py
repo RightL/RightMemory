@@ -98,6 +98,60 @@ def save_connections(memory_root: Path, connections: dict[str, SharedViewConnect
     _atomic_write_text(root / REGISTRY_FILE, "\n".join(lines).rstrip() + "\n")
 
 
+def accept_shared_view(
+    memory_root: Path,
+    *,
+    heading_id: str,
+    title: str,
+    body: str,
+    ref: str,
+    relationship: str = "human",
+    maintainer: str | None = None,
+    description: str | None = None,
+    accepted_from: str | None = None,
+    target_path: str | None = None,
+) -> str:
+    root = Path(memory_root).expanduser()
+    heading_id = _validate_heading_id(heading_id)
+    if relationship not in RELATIONSHIPS:
+        raise ValueError(f"unknown shared view relationship `{relationship}`")
+    target = SharedViewTarget("local_markdown", target_path) if target_path else SharedViewTarget()
+    if target.path:
+        _resolve_under_root(root, target.path)
+    connection = SharedViewConnection(
+        heading_id=heading_id,
+        ref=ref.strip(),
+        relationship=relationship,
+        maintainer=maintainer.strip() if maintainer else None,
+        description=description.strip() if description else None,
+        accepted_from=accepted_from.strip() if accepted_from else None,
+        target=target,
+    )
+    connections = load_connections(root)
+    connections[heading_id] = connection
+    _ensure_memory_heading(root, heading_id=heading_id, title=title, body=body)
+    save_connections(root, connections)
+    return f"accepted shared view {heading_id}"
+
+
+def _ensure_memory_heading(root: Path, *, heading_id: str, title: str, body: str) -> None:
+    memory = root / "MEMORY.md"
+    if not memory.exists():
+        memory.write_text("# Shared Views\n", encoding="utf-8")
+    text = memory.read_text(encoding="utf-8")
+    if f"{{M#{heading_id}}}" in text:
+        return
+    title_text = title.strip() or heading_id
+    body_text = body.strip()
+    section = "# Shared Views"
+    addition = f"\n\n### {title_text} {{M#{heading_id}}}\n"
+    if body_text:
+        addition += f"\n{body_text}\n"
+    if section not in text:
+        addition = f"\n\n{section}\n{addition}"
+    memory.write_text(text.rstrip() + addition, encoding="utf-8")
+
+
 def _load_target(root: Path, heading_id: str, raw_target: object) -> SharedViewTarget:
     if raw_target in ({}, None):
         return SharedViewTarget()

@@ -40,6 +40,7 @@ from .profiles import (
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 from .session import MemoryWriteLock
+from .shared_views import accept_shared_view, load_connections
 from .status import collect_status, format_status_dashboard
 from .sync import SyncManager
 from .watch import (
@@ -94,6 +95,9 @@ def main(argv: list[str] | None = None) -> int:
         if profile_name is not None:
             raise ValueError("--profile is for runtime commands, not profile management")
         return _profile_main(argv[1:])
+    if argv and argv[0] == "shared-view":
+        active = resolve_memory_root(profile_name=profile_name, cwd=Path.cwd(), default_root=default_memory_root())
+        return _shared_view_main(argv[1:], active.memory_root)
     if not argv:
         _top_level_parser().print_help()
         return 0
@@ -260,6 +264,46 @@ def _profile_main(argv: list[str]) -> int:
         print(f"removed {name}; memory root remains at {profile.root}")
         return 0
     raise ValueError(f"unknown profile command: {args.command}")
+
+
+def _shared_view_main(argv: list[str], memory_root: Path) -> int:
+    parser = argparse.ArgumentParser(prog="rightmemory shared-view")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("list")
+    accept = subparsers.add_parser("accept")
+    accept.add_argument("heading_id")
+    accept.add_argument("--title", required=True)
+    accept.add_argument("--body", default="")
+    accept.add_argument("--ref", required=True)
+    accept.add_argument("--relationship", choices=("human", "owned-agent", "team-space", "external"), default="human")
+    accept.add_argument("--maintainer")
+    accept.add_argument("--description")
+    accept.add_argument("--accepted-from")
+    accept.add_argument("--target")
+    args = parser.parse_args(argv)
+    if args.command == "list":
+        for heading_id, connection in sorted(load_connections(memory_root).items()):
+            maintainer = connection.maintainer or "-"
+            description = connection.description or "-"
+            print(f"{heading_id}\t{connection.relationship}\t{maintainer}\t{description}")
+        return 0
+    if args.command == "accept":
+        print(
+            accept_shared_view(
+                memory_root,
+                heading_id=args.heading_id,
+                title=args.title,
+                body=args.body,
+                ref=args.ref,
+                relationship=args.relationship,
+                maintainer=args.maintainer,
+                description=args.description,
+                accepted_from=args.accepted_from,
+                target_path=args.target,
+            )
+        )
+        return 0
+    raise ValueError(f"unknown shared-view command: {args.command}")
 
 
 def _is_help_request(args: list[str]) -> bool:
