@@ -18,6 +18,7 @@ def build_cli_agent_instructions(
         raise ValueError(f"role must be one of: {_role_list()}")
     schema = _read_prompt_file("skills/rightmemory-schema.md")
     role_guidance = _read_prompt_file(f"prompts/{role}.md")
+    cli_agent_guidance = _cli_agent_guidance(role)
     semantic_guidance = _semantic_upgrade_guidance(role, semantic_upgrades)
 
     return f"""You are RightMemory {role} mode.
@@ -31,6 +32,7 @@ Memory store:
 
 Follow the canonical role instructions below. Use the embedded schema as the schema source of truth.
 Return a concise final reply.
+{cli_agent_guidance}
 
 RightMemory schema:
 {schema}
@@ -96,6 +98,16 @@ def _semantic_upgrade_guidance(role: str, semantic_upgrades: SemanticUpgradeCont
     if not rendered:
         return ""
     return f"\nSemantic upgrade context:\n{rendered}\n"
+
+
+def _cli_agent_guidance(role: str) -> str:
+    if role == "retrieve":
+        return (
+            "\nCLI-agent adaptation:\n"
+            "- For a strongly relevant `M#` heading, retrieve external shared context with "
+            "`rightmemory shared-view retrieve <heading-id> <query>` using the local heading id and caller query.\n"
+        )
+    return ""
 
 
 def _command_guidance(role: str) -> str:

@@ -2610,10 +2610,19 @@ class PromptTests(unittest.TestCase):
             self.assertNotIn("Command-selected behavior", prompt)
             self.assertNotIn("Standalone adaptation", prompt)
             self.assertNotIn("validate_memory", prompt)
+            self.assertNotIn("retrieve_shared_view", prompt)
             self.assertNotIn("git_discard", prompt)
             self.assertNotIn("sync_push", prompt)
             self.assertNotIn("{{MEMORY_ROOT}}", prompt)
             self.assertNotIn("{{SKILLS_ROOT}}", prompt)
+
+    def test_cli_agent_retrieve_prompt_uses_shared_view_cli_command(self):
+        prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), "retrieve")
+
+        self.assertIn("M# headings", prompt)
+        self.assertIn("shared-view endpoint", prompt)
+        self.assertIn("rightmemory shared-view retrieve <heading-id> <query>", prompt)
+        self.assertNotIn("retrieve_shared_view", prompt)
 
     def test_cli_agent_prompt_rejects_unknown_role(self):
         with self.assertRaises(ValueError) as caught:
