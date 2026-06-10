@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .session import _fsync_directory
+from .session import _ensure_runtime_gitignore, _fsync_directory
 
 
 REGISTRY_FILE = "shared_views.toml"
@@ -21,6 +21,7 @@ RELATIONSHIPS = {"human", "owned-agent", "team-space", "external"}
 TARGET_KINDS = {"none", "local_markdown", "revoked"}
 QUERY_TERM_RE = re.compile(r"[A-Za-z0-9_]{3,}")
 COMMON_QUERY_WORDS = {"the", "and", "for"}
+CACHE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,19 @@ class SharedViewConnection:
     description: str | None = None
     accepted_from: str | None = None
     target: SharedViewTarget = SharedViewTarget()
+
+
+@dataclass(frozen=True)
+class _SharedViewSourceLine:
+    relative: str
+    line_number: int
+    line: str
+
+
+@dataclass(frozen=True)
+class _SharedViewCache:
+    freshness: str
+    source_lines: list[_SharedViewSourceLine]
 
 
 class SharedViewTools:
@@ -166,14 +180,16 @@ def retrieve_shared_view(memory_root: Path, heading_id: str, query: str) -> str:
     if connection.target.kind == "local_markdown" and connection.target.path:
         target = _resolve_under_root(root, connection.target.path)
         if target.exists():
-            matches = _retrieve_local_markdown_matches(target, stripped_query)
-            result = _format_shared_view_result(connection, matches)
-            _write_shared_view_cache(root, heading_id, result)
+            cache = _collect_local_markdown_cache(target)
+            matches = _match_local_markdown_lines(cache.source_lines, stripped_query)
+            result = _format_shared_view_result(connection, "fresh", cache.freshness, matches)
+            _write_shared_view_cache(root, heading_id, cache)
             return result
 
     cached = _read_shared_view_cache(root, heading_id)
     if cached is not None:
-        return cached.replace("Status: fresh", "Status: cached", 1)
+        matches = _match_local_markdown_lines(cached.source_lines, stripped_query)
+        return _format_shared_view_result(connection, "cached", cached.freshness, matches)
 
     return _format_unavailable_shared_view(connection.heading_id, "no shared view content is available")
 
@@ -238,31 +254,49 @@ def _active_memory_files(root: Path) -> list[Path]:
     return files
 
 
-def _retrieve_local_markdown_matches(target: Path, query: str) -> list[str]:
+def _collect_local_markdown_cache(target: Path) -> _SharedViewCache:
+    source_lines: list[_SharedViewSourceLine] = []
+    for memory_file in sorted(target.glob("MEMORY*.md")):
+        if not memory_file.is_file():
+            continue
+        relative = memory_file.relative_to(target).as_posix()
+        for line_number, line in enumerate(memory_file.read_text(encoding="utf-8").splitlines(), start=1):
+            source_lines.append(_SharedViewSourceLine(relative, line_number, line))
+    return _SharedViewCache(
+        freshness=datetime.now(UTC).replace(microsecond=0).isoformat(),
+        source_lines=source_lines,
+    )
+
+
+def _match_local_markdown_lines(source_lines: list[_SharedViewSourceLine], query: str) -> list[str]:
     terms = _query_terms(query)
     matches: list[str] = []
-    if terms:
-        for memory_file in sorted(target.glob("MEMORY*.md")):
-            if not memory_file.is_file():
-                continue
-            relative = memory_file.relative_to(target).as_posix()
-            for line_number, line in enumerate(memory_file.read_text(encoding="utf-8").splitlines(), start=1):
-                lowered = line.lower()
-                if any(term in lowered for term in terms):
-                    matches.append(f"- {relative}:{line_number}: {line}")
-                    if len(matches) >= 12:
-                        return matches
+    for source_line in source_lines:
+        lowered = source_line.line.lower()
+        if any(term in lowered for term in terms):
+            matches.append(f"- {source_line.relative}:{source_line.line_number}: {source_line.line}")
+            if len(matches) >= 12:
+                return matches
     return matches or ["- no strong match in published shared memory"]
 
 
 def _query_terms(query: str) -> list[str]:
-    return [term.lower() for term in QUERY_TERM_RE.findall(query) if term.lower() not in COMMON_QUERY_WORDS]
+    terms = [term.lower() for term in QUERY_TERM_RE.findall(query) if term.lower() not in COMMON_QUERY_WORDS]
+    if terms:
+        return terms
+    fallback = query.strip().lower()
+    return [fallback] if fallback else []
 
 
-def _format_shared_view_result(connection: SharedViewConnection, matches: list[str]) -> str:
+def _format_shared_view_result(
+    connection: SharedViewConnection,
+    status: str,
+    freshness: str,
+    matches: list[str],
+) -> str:
     lines = [
         f"Shared view: {connection.heading_id}",
-        "Status: fresh",
+        f"Status: {status}",
         f"Ref: {connection.ref}",
     ]
     if connection.maintainer:
@@ -271,7 +305,7 @@ def _format_shared_view_result(connection: SharedViewConnection, matches: list[s
         lines.append(f"Description: {connection.description}")
     lines.extend(
         [
-            f"Freshness: {datetime.now(UTC).replace(microsecond=0).isoformat()}",
+            f"Freshness: {freshness}",
             "Matches:",
             *matches,
         ]
@@ -293,29 +327,51 @@ def _shared_view_cache_path(root: Path, heading_id: str) -> Path:
     return root / RUNTIME_DIR / "cache" / f"{heading_id}.txt"
 
 
-def _read_shared_view_cache(root: Path, heading_id: str) -> str | None:
+def _read_shared_view_cache(root: Path, heading_id: str) -> _SharedViewCache | None:
     cache_path = _shared_view_cache_path(root, heading_id)
     if not cache_path.is_file():
         return None
-    return cache_path.read_text(encoding="utf-8")
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or data.get("version") != CACHE_VERSION:
+        return None
+    freshness = data.get("freshness")
+    raw_source_lines = data.get("source_lines")
+    if not isinstance(freshness, str) or not isinstance(raw_source_lines, list):
+        return None
+    source_lines: list[_SharedViewSourceLine] = []
+    for raw_source_line in raw_source_lines:
+        if not isinstance(raw_source_line, dict):
+            return None
+        relative = raw_source_line.get("relative")
+        line_number = raw_source_line.get("line_number")
+        line = raw_source_line.get("line")
+        if not isinstance(relative, str) or not isinstance(line_number, int) or not isinstance(line, str):
+            return None
+        source_lines.append(_SharedViewSourceLine(relative, line_number, line))
+    return _SharedViewCache(freshness=freshness, source_lines=source_lines)
 
 
-def _write_shared_view_cache(root: Path, heading_id: str, text: str) -> None:
-    _ensure_runtime_gitignore(root)
-    _atomic_write_text(_shared_view_cache_path(root, heading_id), text)
-
-
-def _ensure_runtime_gitignore(root: Path) -> None:
-    gitignore = root / ".runtime" / ".gitignore"
-    desired = ["*", "!.gitignore"]
-    if not gitignore.exists():
-        _atomic_write_text(gitignore, "\n".join(desired) + "\n")
-        return
-    text = gitignore.read_text(encoding="utf-8")
-    existing = set(text.splitlines())
-    additions = [line for line in desired if line not in existing]
-    if additions:
-        _atomic_write_text(gitignore, text.rstrip() + "\n" + "\n".join(additions) + "\n")
+def _write_shared_view_cache(root: Path, heading_id: str, cache: _SharedViewCache) -> None:
+    _ensure_runtime_gitignore(root / ".runtime")
+    data = {
+        "version": CACHE_VERSION,
+        "freshness": cache.freshness,
+        "source_lines": [
+            {
+                "relative": source_line.relative,
+                "line_number": source_line.line_number,
+                "line": source_line.line,
+            }
+            for source_line in cache.source_lines
+        ],
+    }
+    _atomic_write_text(
+        _shared_view_cache_path(root, heading_id),
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+    )
 
 
 def _normalize_heading_title(title: str, heading_id: str) -> str:
