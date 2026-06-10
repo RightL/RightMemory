@@ -11,7 +11,6 @@ from .session import _fsync_directory
 
 
 REGISTRY_FILE = "shared_views.toml"
-RUNTIME_DIR = ".runtime/shared_views"
 CONNECTION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 RELATIONSHIPS = {"human", "owned-agent", "team-space", "external"}
 TARGET_KINDS = {"none", "local_markdown", "revoked"}
@@ -68,6 +67,9 @@ def load_connections(memory_root: Path) -> dict[str, SharedViewConnection]:
 
 def save_connections(memory_root: Path, connections: dict[str, SharedViewConnection]) -> None:
     root = Path(memory_root).expanduser()
+    for heading_id in sorted(connections):
+        _validate_connection_for_save(root, heading_id, connections[heading_id])
+
     root.mkdir(parents=True, exist_ok=True)
     lines = ["# RightMemory shared view registry", ""]
     for heading_id in sorted(connections):
@@ -100,10 +102,28 @@ def _load_target(root: Path, heading_id: str, raw_target: object) -> SharedViewT
         return SharedViewTarget()
     if not isinstance(raw_target, dict):
         raise ValueError(f"[connections.{heading_id}.target] must be a TOML table")
-    kind = str(raw_target.get("kind", "none")).strip()
+    return _validate_target(root, heading_id, raw_target.get("kind", "none"), raw_target.get("path"))
+
+
+def _validate_connection_for_save(root: Path, heading_id: str, connection: SharedViewConnection) -> None:
+    validated_heading_id = _validate_heading_id(connection.heading_id)
+    if heading_id != validated_heading_id:
+        raise ValueError(f"connection key `{heading_id}` does not match heading id `{connection.heading_id}`")
+    _required_string({"ref": connection.ref}, "ref", validated_heading_id)
+    relationship = str(connection.relationship).strip()
+    if relationship not in RELATIONSHIPS:
+        raise ValueError(f"unknown shared view relationship `{relationship}` for {validated_heading_id}")
+    _optional_string(connection.maintainer)
+    _optional_string(connection.description)
+    _optional_string(connection.accepted_from)
+    _validate_target(root, validated_heading_id, connection.target.kind, connection.target.path)
+
+
+def _validate_target(root: Path, heading_id: str, raw_kind: object, raw_path: object) -> SharedViewTarget:
+    kind = str(raw_kind).strip()
     if kind not in TARGET_KINDS:
         raise ValueError(f"unknown shared view target kind `{kind}` for {heading_id}")
-    path = _optional_string(raw_target.get("path"))
+    path = _optional_string(raw_path)
     if kind == "local_markdown" and not path:
         raise ValueError(f"local_markdown shared view target requires path for {heading_id}")
     if path:

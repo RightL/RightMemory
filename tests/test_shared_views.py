@@ -48,6 +48,57 @@ class SharedViewRegistryTests(unittest.TestCase):
         self.assertIn("team.auth-api", loaded)
         self.assertEqual(loaded["team.auth-api"], connection)
 
+    def test_save_connections_rejects_unknown_relationship(self):
+        connection = SharedViewConnection(
+            heading_id="alice-auth-api",
+            ref="rightmemory://view/alice-auth-api",
+            relationship="mystery",
+        )
+
+        with self.assertRaises(ValueError) as caught:
+            save_connections(self.root, {"alice-auth-api": connection})
+
+        self.assertIn("unknown shared view relationship", str(caught.exception))
+
+    def test_save_connections_rejects_unknown_target_kind(self):
+        connection = SharedViewConnection(
+            heading_id="alice-auth-api",
+            ref="rightmemory://view/alice-auth-api",
+            target=SharedViewTarget(kind="remote_cache"),
+        )
+
+        with self.assertRaises(ValueError) as caught:
+            save_connections(self.root, {"alice-auth-api": connection})
+
+        self.assertIn("unknown shared view target kind", str(caught.exception))
+
+    def test_save_connections_rejects_local_markdown_without_path(self):
+        connection = SharedViewConnection(
+            heading_id="alice-auth-api",
+            ref="rightmemory://view/alice-auth-api",
+            target=SharedViewTarget(kind="local_markdown"),
+        )
+
+        with self.assertRaises(ValueError) as caught:
+            save_connections(self.root, {"alice-auth-api": connection})
+
+        self.assertIn("local_markdown shared view target requires path", str(caught.exception))
+
+    def test_save_connections_rejects_target_paths_outside_memory_root(self):
+        paths = [str(self.root.parent / "outside"), "../outside"]
+        for path in paths:
+            with self.subTest(path=path):
+                connection = SharedViewConnection(
+                    heading_id="alice-auth-api",
+                    ref="rightmemory://view/alice-auth-api",
+                    target=SharedViewTarget(kind="local_markdown", path=path),
+                )
+
+                with self.assertRaises(ValueError) as caught:
+                    save_connections(self.root, {"alice-auth-api": connection})
+
+                self.assertIn("shared view target path must stay under the memory root", str(caught.exception))
+
     def test_load_connections_rejects_unknown_relationship(self):
         (self.root / "shared_views.toml").write_text(
             """
