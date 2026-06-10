@@ -183,7 +183,11 @@ def _active_memory_files(root: Path) -> list[Path]:
     memory = root / "MEMORY.md"
     if memory.is_file():
         files.append(memory)
-    files.extend(path for path in sorted(root.glob("MEMORY_*.md")) if path.is_file())
+    files.extend(
+        path
+        for path in sorted(root.glob("MEMORY_*.md"))
+        if path.is_file() and not path.name.startswith("MEMORY_SKILL_")
+    )
     return files
 
 

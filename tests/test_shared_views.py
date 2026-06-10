@@ -234,6 +234,37 @@ class SharedViewAcceptTests(unittest.TestCase):
         self.assertIn("MEMORY_ALICE.md", str(caught.exception))
         self.assertIn("{S#alice-auth-api}", str(caught.exception))
 
+    def test_accept_shared_view_ignores_conflicting_graph_id_in_skill_file(self):
+        (self.root / "MEMORY_SKILL_auth.md").write_text("## Freeform Skill {#alice-auth-api}\n", encoding="utf-8")
+
+        result = accept_shared_view(
+            self.root,
+            heading_id="alice-auth-api",
+            title="Alice Auth API",
+            body="Alice owns auth API collaboration context.",
+            ref="rightmemory://view/alice-auth-api",
+        )
+
+        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+
+        self.assertIn("accepted shared view alice-auth-api", result)
+        self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
+
+    def test_accept_shared_view_ignores_m_marker_in_skill_file(self):
+        (self.root / "MEMORY_SKILL_auth.md").write_text("## Freeform Skill {M#alice-auth-api}\n", encoding="utf-8")
+
+        accept_shared_view(
+            self.root,
+            heading_id="alice-auth-api",
+            title="Alice Auth API",
+            body="Alice owns auth API collaboration context.",
+            ref="rightmemory://view/alice-auth-api",
+        )
+
+        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+
+        self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
+
     def test_rejected_accept_leaves_memory_unchanged(self):
         before = (self.root / "MEMORY.md").read_text(encoding="utf-8")
         cases = (
