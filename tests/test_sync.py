@@ -113,6 +113,21 @@ class SyncManagerTests(unittest.TestCase):
         self.assertIn("local dirty", memory)
         self.assertNotIn("remote only", memory)
 
+    def test_preflight_reports_dirty_shared_view_registry_and_ignores_runtime_shared_views(self):
+        runtime_cache = self.device / ".runtime" / "shared_views" / "cache" / "alice-auth-api.txt"
+        runtime_cache.parent.mkdir(parents=True)
+        runtime_cache.write_text("runtime cache\n", encoding="utf-8")
+        registry = self.device / "shared_views.toml"
+        registry.write_text('[connections.alice-auth-api]\nref = "rightmemory://view/current"\n', encoding="utf-8")
+
+        dirty = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        registry.unlink()
+        clean = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+        self.assertEqual(dirty.status, "dirty")
+        self.assertEqual(dirty.files, ["shared_views.toml"])
+        self.assertEqual(clean.status, "synced")
+
     def test_push_merges_remote_change_and_reports_conflict(self):
         (self.other / "MEMORY.md").write_text("# Domain\n\n- `one` remote → []\n", encoding="utf-8")
         self._git(self.other, "add", "MEMORY.md")

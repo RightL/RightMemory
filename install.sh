@@ -511,9 +511,13 @@ ensure_memory_initial_commit() {
   (
     cd "$MEMORY_ROOT"
     shopt -s nullglob
-    files=(MEMORY.md MEMORY_*.md insight_logs/*.md)
-    if [ "${#files[@]}" -gt 0 ]; then
-      git add -- "${files[@]}"
+    files=(MEMORY.md MEMORY_*.md shared_views.toml insight_logs/*.md)
+    existing_files=()
+    for file in "${files[@]}"; do
+      [ -e "$file" ] && existing_files+=("$file")
+    done
+    if [ "${#existing_files[@]}" -gt 0 ]; then
+      git add -- "${existing_files[@]}"
     fi
   )
 
@@ -523,7 +527,7 @@ ensure_memory_initial_commit() {
     [ -n "$staged_memory_file" ] && staged_memory_files+=("$staged_memory_file")
   done < <(
     cd "$MEMORY_ROOT" &&
-      git diff --cached --name-only -- MEMORY.md 'MEMORY_*.md' 'insight_logs/*.md'
+      git diff --cached --name-only -- MEMORY.md 'MEMORY_*.md' shared_views.toml 'insight_logs/*.md'
   )
   if [ "${#staged_memory_files[@]}" -eq 0 ]; then
     echo "  [skip]    no memory files to baseline commit"

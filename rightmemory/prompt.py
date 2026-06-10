@@ -219,8 +219,6 @@ def _tool_guidance(role: str) -> str:
         "and make it large enough to identify the intended occurrence.\n"
         "- Use `create_file`, `delete_file`, and `rename_file` for file lifecycle changes instead of encoding "
         "those operations as textual replacements.\n"
-        "- Commit tools are scoped to `MEMORY.md` and `MEMORY_*.md`; keep unrelated "
-        "untracked files out of memory commits unless the caller explicitly asks about them.\n"
         "- Choose the edit shape that makes memory clearer; create, move, split, merge, or rewrite structure "
         "when that improves the tree or graph."
     )
@@ -231,8 +229,16 @@ def _tool_guidance(role: str) -> str:
         )
     if role == "sync-reconciler":
         guidance += (
-            "\n- `git_discard(paths)` is destructive. Use it for invalid, partial, or unsafe memory-owned "
+            "\n- Commit and edit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `shared_views.toml`, "
+            "and `insight_logs/*.md` for sync repair; keep unrelated untracked files out of repair commits "
+            "unless the caller explicitly asks about them.\n"
+            "- `git_discard(paths)` is destructive. Use it for invalid, partial, or unsafe memory-owned "
             "changes after inspecting the diff."
+        )
+    else:
+        guidance += (
+            "\n- Commit tools are scoped to `MEMORY.md` and `MEMORY_*.md`; keep unrelated "
+            "untracked files out of memory commits unless the caller explicitly asks about them."
         )
     return guidance
 

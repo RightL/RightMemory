@@ -2657,6 +2657,15 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("validate_memory", prompt)
         self.assertNotIn("dream_logs", prompt)
 
+    def test_sync_reconciler_standalone_prompt_includes_registry_tool_scope(self):
+        prompt = build_instructions(Path("/memory"), "sync-reconciler")
+
+        self.assertIn("Commit and edit tools are scoped", prompt)
+        self.assertIn("shared_views.toml", prompt)
+        self.assertIn("insight_logs/*.md", prompt)
+        self.assertIn("git_discard", prompt)
+        self.assertNotIn("Commit tools are scoped to `MEMORY.md` and `MEMORY_*.md`", prompt)
+
     def test_standalone_prompt_does_not_embed_memory_root_path(self):
         first = build_instructions(Path("/home/example/.rightmemory/.runtime/worktrees/update-111"), "update")
         second = build_instructions(Path("/home/example/.rightmemory/.runtime/worktrees/update-222"), "update")
