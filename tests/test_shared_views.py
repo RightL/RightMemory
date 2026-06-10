@@ -437,7 +437,7 @@ class SharedViewRetrieveTests(unittest.TestCase):
         self.assertIn("- MEMORY.md:4: Beta rollback note.", cached)
         self.assertNotIn("Alpha deployment note.", cached)
 
-    def test_retrieve_shared_view_matches_short_query(self):
+    def test_retrieve_shared_view_termless_query_has_no_strong_match(self):
         target = self.root / ".runtime/shared_views/imports/alice-auth-api"
         target.mkdir(parents=True)
         (target / "MEMORY.md").write_text(
@@ -461,7 +461,8 @@ class SharedViewRetrieveTests(unittest.TestCase):
         result = retrieve_shared_view(self.root, "alice-auth-api", "UI")
 
         self.assertIn("Status: fresh", result)
-        self.assertIn("- MEMORY.md:3: UI layout decisions live in the shared view.", result)
+        self.assertIn("- no strong match in published shared memory", result)
+        self.assertNotIn("- MEMORY.md:3: UI layout decisions live in the shared view.", result)
 
     def test_retrieve_shared_view_does_not_use_cache_after_revocation(self):
         target = self.root / ".runtime/shared_views/imports/alice-auth-api"

@@ -281,11 +281,7 @@ def _match_local_markdown_lines(source_lines: list[_SharedViewSourceLine], query
 
 
 def _query_terms(query: str) -> list[str]:
-    terms = [term.lower() for term in QUERY_TERM_RE.findall(query) if term.lower() not in COMMON_QUERY_WORDS]
-    if terms:
-        return terms
-    fallback = query.strip().lower()
-    return [fallback] if fallback else []
+    return [term.lower() for term in QUERY_TERM_RE.findall(query) if term.lower() not in COMMON_QUERY_WORDS]
 
 
 def _format_shared_view_result(
