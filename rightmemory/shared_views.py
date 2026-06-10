@@ -11,6 +11,7 @@ from .session import _fsync_directory
 
 
 REGISTRY_FILE = "shared_views.toml"
+RUNTIME_DIR = ".runtime/shared_views"
 CONNECTION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 RELATIONSHIPS = {"human", "owned-agent", "team-space", "external"}
 TARGET_KINDS = {"none", "local_markdown", "revoked"}
