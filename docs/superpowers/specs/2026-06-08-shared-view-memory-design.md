@@ -161,24 +161,104 @@ When an existing view is not enough, either side can ask a provider or manager
 agent to build a better view. The reusable work is not "discover every root"; it
 is "build the right shared view for this collaboration."
 
+## Reference And Resolver
+
+The shared view link a collaborator receives should behave like an invitation
+or stable reference, not like a hand-written transport URL. A user or agent can
+accept a reference and record it as an `M#` heading without deciding whether the
+view is backed by a hub call, exported Markdown, local files, or a future
+transport.
+
+Accepting a shared view creates two things:
+
+- a local `M#` heading whose body explains the collaboration meaning;
+- an out-of-band resolver entry that binds the local heading id to a stable
+  shared view reference.
+
+The local memory should stay focused on meaning. Resolver mechanics belong in a
+separate registry/cache that can expand the stable reference into whatever
+reachability metadata the runtime needs. The registry may keep the invitation
+that created the connection for traceability, but the durable consumer-side
+concept is "this local heading points to that shared view."
+
 ## Retrieve Behavior
 
-When a consumer uses an `M#` heading, the runtime should route the request to
-the provider's shared view rather than reading the provider's private memory
-files directly.
+`retrieve` and `interaction` are separate behaviors. Retrieve gets context from
+a shared view. Interaction leaves information for the shared view owner or asks
+the owner side to react.
+
+RightMemory retrieve is currently a read-only role that reads local
+`MEMORY.md`/`MEMORY_*.md` files and uses judgment over headings, nodes, detail
+pointers, and graph context. The `M#` extension should fit that model without
+turning the local retriever into a transport planner.
 
 Conceptual flow:
 
 ```text
 consumer root
-  -> local M# heading
-  -> provider shared view
-  -> shared-view answer
+  -> local retrieve finds that an M# shared view is relevant
+  -> retrieve_shared_view(ref, query)
+  -> shared view endpoint returns context with provenance
+  -> local retrieve combines local memory and shared context
 ```
 
-The provider root decides whether that answer is produced through
-policy-guided retrieve, filtered shared Markdown, or a built/updated shared
-view.
+The local retriever should not inspect whether the shared view is backed by a
+view-specific retriever prompt, filtered Markdown, or both. It calls a
+read-only shared view endpoint with the stable reference and query. The endpoint
+answers from its own backing and returns compact context with provenance, such
+as "Alice Auth API shared view, refreshed today."
+
+Even when a shared view is backed by filtered `MEMORY*.md`, the consumer
+retriever should not receive a path and read those files as if they were local
+memory. The shared view endpoint owns that retrieval step. This keeps external
+content labeled as external, preserves provider policy, and leaves room for the
+provider to change backing without changing the consumer's `M#` heading.
+
+The endpoint behavior can support:
+
+- a document surface backed by published filtered memory;
+- a question surface backed by a provider-side retriever or agent;
+- a combined surface that decides how to answer from both.
+
+Those are shared-view capabilities, not separate local heading types. `M#`
+remains the local connection node.
+
+## Availability And Freshness
+
+Shared views should be useful even when the provider side is temporarily
+unavailable, while still respecting freshness and access boundaries.
+
+The retrieve endpoint can return three product states:
+
+- **Fresh:** the endpoint reached the current shared view and returned current
+  context.
+- **Cached:** the endpoint could not refresh, but a previously trusted shared
+  view result or published snapshot is available. The response should label the
+  source and freshness.
+- **Unavailable:** no usable shared context is available, or access is denied.
+
+Offline and timeout failures can use cached context when the connection's
+relationship permits it. Revoked access or explicit denial should not be
+bypassed with stale cached content unless that retention behavior was part of
+the accepted relationship. When a shared view is unavailable, local retrieve
+should still return relevant local memory rather than failing the whole request.
+
+## Lifecycle
+
+The core lifecycle is on demand:
+
+```text
+provider creates or updates a view
+consumer accepts a reference
+consumer records an M# heading
+retrieve refreshes the shared view when it is used
+interaction sends a note when there is something to say
+```
+
+The base product model does not need notification streams or periodic refresh.
+Provider updates become visible the next time the consumer retrieves from the
+shared view. Managed team spaces or owned agent clusters may later add more
+automation, but the shared view concept should work without background sync.
 
 ## Transport Model
 
@@ -284,6 +364,31 @@ follow-up request.
 The provider root then decides how to handle it: answer, keep talking, update
 the shared view, update private memory, create follow-up work, or close it.
 
+Interaction manners should come from the relationship, not from the transport.
+A shared view owned by a human collaborator normally asks before sending a note.
+A shared view owned by the user's own agent group can send notes automatically.
+A managed team space can follow workspace norms. The product should express
+this as social distance or relationship, not as a user-facing pile of policy
+fields.
+
+The default experience should make reading smooth and leaving traces
+intentional. Retrieve can be quiet. Interaction should respect whether the
+connection represents another person, a trusted agent system, or a team space.
+
+## Local Memory Boundary
+
+The consumer root should not copy shared view content into local memory by
+default. The local `M#` heading records the relationship and local
+collaboration meaning. Cache stores retrieved shared context. Local memory
+stores local consequences: decisions, commitments, tasks, or facts that belong
+to the consumer root.
+
+For example, if Alice's shared view says a token field changed, the consumer
+root may record "frontend decided to use Alice's v2 contract" when that becomes
+local project state. It should not silently absorb Alice's API details as if
+they were local memory. Explicit absorption is still possible when a user or
+agent asks for it, and absorbed content should keep provenance.
+
 ## Privacy And Trust Boundary
 
 An `M#` heading does not grant access to a provider root. It records a local
@@ -304,28 +409,27 @@ surface shaped for a receiver or purpose.
 ### M# Resolution
 
 Resolution has a settled direction: the consumer root should keep a separate
-link registry that maps each local `M#` heading id to a provider identity and
-shared view id. The local `M#` heading stays readable memory; its body explains
-the collaboration meaning, while the registry stores resolution mechanics.
+link registry that maps each local `M#` heading id to a stable shared view
+reference. The local `M#` heading stays readable memory; its body explains the
+collaboration meaning, while the registry stores resolution mechanics.
 
 The consumer-side registry should not decide how the shared view is backed. It
-should not contain a prompt-vs-Markdown mode flag. The provider root owns the
-shared view contract and decides whether that view answers through a
-view-specific retriever prompt, filtered `MEMORY*.md` files, or both.
+should not contain a prompt-vs-Markdown mode flag, and local memory should not
+store transport locators in prose. The provider root owns the shared view
+contract and decides whether that view answers through a view-specific
+retriever prompt, filtered `MEMORY*.md` files, or both.
 
-The remaining resolution question is provider reachability. A shared-view link
-should identify the provider and view separately from the transport used to
-reach that provider. The next design pass should focus on shared view
-invitations and transport setup rather than asking users to hand-write local
-paths, Git remotes, or service endpoints into memory prose.
-
-The product-level object should be a shared view invitation rather than a
+The product-level object is a shared view invitation or reference rather than a
 hand-written locator. A colleague, project owner, or manager agent gives the
 recipient an invitation for a shared view. Accepting it should create or suggest
-a local `M#` heading and store whatever resolver details the system needs out
-of band. The user-facing choice is whether to accept the shared view and how to
-describe its local collaboration meaning; local path, Git remote, or future
-service endpoint mechanics belong behind the resolver.
+a local `M#` heading and store resolver details out of band. The user-facing
+choice is whether to accept the shared view and how to describe its local
+collaboration meaning.
+
+The remaining implementation question is the exact registry/cache shape: how
+to store the stable reference, invitation provenance, resolved transport
+metadata, cache freshness, and revoked/denied state without making those fields
+part of memory prose.
 
 ### Shared View Storage
 
@@ -343,15 +447,20 @@ builder output as the shared memory artifact.
 
 ### Retriever Prompt Storage
 
-View-specific retriever prompts need a storage and loading model. They may
-belong with the provider root's shared-view metadata rather than in the
-consumer root.
+View-specific retriever prompts belong with the provider root's shared-view
+metadata, not in the consumer root. The implementation still needs to define
+how a shared view endpoint loads the prompt alongside `view.md`, filtered
+Markdown, and publishing metadata.
 
 ### Interaction Records
 
 Natural-language interactions need a durable place if they are more than
 ephemeral messages. The record should support review, absorption, and closure
 without making every interaction a memory node.
+
+The interaction record should also preserve relationship manners: whether the
+note was sent after human confirmation, automatically by an owned agent, or
+under team-space policy.
 
 ### Schema Integration
 
@@ -370,8 +479,12 @@ prose:
 - prompt assembly teaches retrieve/update roles the `M#` meaning;
 - consumer memory can record `M#` headings without provider private memory
   access;
-- View Builder outputs produce either retriever prompt backing, filtered
+- local retrieve calls a shared view endpoint instead of reading provider
+  private memory or external filtered files directly;
+- shared view endpoints can answer from retriever prompt backing, filtered
   Markdown backing, or both;
+- shared view results preserve provenance and freshness labels;
+- unavailable shared views do not fail local retrieve when local matches exist;
 - interaction handling stays separate from direct provider memory writes.
 
 ## Upgrade Impact
