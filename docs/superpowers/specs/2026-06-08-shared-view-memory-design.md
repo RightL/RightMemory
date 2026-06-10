@@ -120,6 +120,23 @@ A shared view may use a retriever prompt, filtered Markdown, or both. The
 consumer root should not need to know the backing mode when it records or uses
 the local `M#` heading.
 
+For provider-owned view definitions, a natural storage shape is:
+
+```text
+shared_views/<view-id>/
+  view.md
+  retriever.md
+  export.toml
+  dist/
+```
+
+`view.md` describes the shared view contract, audience, and collaboration
+meaning. `retriever.md` stores the view-specific retrieve instructions when the
+view uses policy-guided retrieve. `export.toml` stores publishing settings for
+hub, export, or local targets. `dist/` is the builder's local generated output:
+useful for previewing, staging, and publishing filtered Markdown, but not the
+canonical source of the shared view inside the provider's private root.
+
 ## Connection Formation
 
 The practical connection flow is link exchange, not global search.
@@ -199,6 +216,15 @@ Git branch visibility should not be treated as a privacy boundary for sharing
 filtered memory from a private root. When Git is used for export, the safer
 shape is a separate shared repository or exported package containing only the
 filtered shared memory surface.
+
+The provider root can keep build output local. By default, `dist/` under a
+private provider root should be treated as generated state and ignored by the
+provider root's normal Git history. The published target is where the filtered
+`MEMORY*.md` surface becomes durable: a hub-hosted view, an export repository,
+an exported package, or a local shared package. Teams that want auditability can
+commit the published target or store build metadata such as source view id,
+builder version, and checksum, without turning the private root's `dist/` into
+the collaboration source of truth.
 
 ## Minimal Hub
 
@@ -303,9 +329,17 @@ service endpoint mechanics belong behind the resolver.
 
 ### Shared View Storage
 
-Filtered Markdown views need a storage shape. They could live inside the
-provider root, in a sibling shared-view root, or in a generated area that has
-clear Git and privacy behavior.
+The current storage direction is provider-owned view definitions plus separate
+published targets. The provider root can keep `shared_views/<view-id>/` as the
+source of the shared view contract and builder settings. Generated filtered
+Markdown can appear in that view's `dist/` for preview or publishing, but the
+durable collaboration artifact should live in the publish target: hub storage,
+an export repository, an exported package, or a local shared package.
+
+The private provider root's `dist/` should default to ignored generated state.
+If a team wants reviewable history, it is cleaner to review and commit the
+published filtered surface or a build record than to treat provider-local
+builder output as the shared memory artifact.
 
 ### Retriever Prompt Storage
 
