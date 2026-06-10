@@ -94,11 +94,14 @@ class SemanticUpgradeParserTests(unittest.TestCase):
         self.assertIn("open-context-questions", notes_by_id)
         self.assertIn("uncertain-memory-marker", notes_by_id)
         self.assertIn("schema-level-memory-skills", notes_by_id)
+        self.assertIn("shared-view-headings", notes_by_id)
         self.assertIn("# Open Context Questions {#open-context-questions}", notes_by_id["open-context-questions"].body)
         self.assertIn("not declarative memory facts", notes_by_id["open-context-questions"].body)
         self.assertIn("Uncertain:", notes_by_id["uncertain-memory-marker"].body)
         self.assertIn("S#slug", notes_by_id["schema-level-memory-skills"].body)
         self.assertIn("reusable instruction assets", notes_by_id["schema-level-memory-skills"].body)
+        self.assertIn("M#slug", notes_by_id["shared-view-headings"].body)
+        self.assertIn("shared view", notes_by_id["shared-view-headings"].body)
         self.assertEqual([], result.warnings)
 
 
@@ -291,6 +294,7 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
                         "uncertain-memory-marker",
                         "schema-level-memory-skills",
                         "future-facing-behavior-memory",
+                        "shared-view-headings",
                     ],
                 )
             ],
@@ -300,6 +304,7 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
         self.assertIn("uncertain-memory-marker", state["absorbed"])
         self.assertIn("schema-level-memory-skills", state["absorbed"])
         self.assertIn("future-facing-behavior-memory", state["absorbed"])
+        self.assertIn("shared-view-headings", state["absorbed"])
 
     def test_dreamer_success_marks_semantic_upgrades_absorbed_under_state_root(self):
         class FakeDreamerExecutor:

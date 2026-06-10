@@ -205,6 +205,12 @@ Any `#`, `##`, or `###` heading can use its slug as a detail-file target by writ
 
 Move child content into a detail file when a heading becomes too dense, especially past about 15 direct node lines. Count only direct node lines, not child headings or `####` pointers. After moving content out, keep only the `F#` heading line and any heading body paragraphs in the parent file.
 
+### Shared Views
+
+Shared views connect one memory root to collaboration context owned somewhere else: another person, team space, project, or agent memory root. In local memory, a `#`, `##`, or `###` heading can use `{M#slug}` to record the local relationship to that external shared view.
+
+The heading body should explain the collaboration meaning: who or what the view represents, when this root should use it, and how it relates to local work. Resolver details live in `shared_views.toml`, while runtime cache files and interaction records live under `.runtime/shared_views/`.
+
 ### Edges
 
 Use the most specific edge type that fits:
@@ -326,6 +332,9 @@ rightmemory insight watch
 rightmemory prune
 rightmemory prune watch
 rightmemory history --session <agent-session-id> "find pruned memory about the old setup"
+rightmemory shared-view accept alice-auth-api --title "Alice Auth API" --body "Alice owns auth API collaboration context." --ref rightmemory://view/alice-auth-api --relationship human --maintainer Alice --description "Auth API collaboration context" --target .runtime/shared_views/imports/alice-auth-api
+rightmemory shared-view retrieve alice-auth-api "token expiry"
+rightmemory shared-view note alice-auth-api --confirm "Docs are stale"
 rightmemory status
 rightmemory watch start
 rightmemory watch status

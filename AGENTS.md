@@ -15,6 +15,7 @@
 - `uv` is available on PATH. Use `uv --version` if you need to check it before running the installer.
 - Useful review commands are `rightmemory review scan --once`, `rightmemory review watch`, and `rightmemory review normalize --source <codex|claude> --path <file>`.
 - Use `rightmemory prune` to run generation-based active memory pruning, and `rightmemory history --session <id> <query>` for explicit retrieval from pruned memory.
+- Use `rightmemory shared-view list|accept|retrieve|note` when debugging shared-view connections.
 - Use `rightmemory watch start|status|stop|restart` to manage background review, dreamer, insight, pruner, and sync watchers. Use `rightmemory dreamer watch`, `rightmemory insight watch`, or `rightmemory prune watch` directly when debugging lower-level loops.
 - Use `rightmemory doctor agent-cli` after configuring cli-agent mode to check provider commands, role config, and basic read/write probes.
 - Semantic upgrade notes are Markdown files under `rightmemory/semantic_upgrades/`; validate them with `python -m unittest discover -s tests -p 'test_semantic_upgrades.py'`.
@@ -26,12 +27,13 @@
 - Keep it concise enough to stay useful in Codex project instructions. Prefer scoped nested `AGENTS.md` files if a subdirectory needs special rules.
 
 ## Memory Runtime Rules
-- A memory root contains `MEMORY.md`, optional sibling `MEMORY_*.md` detail files, `insight_logs/`, `rightmemory.toml`, and `.runtime/`.
+- A memory root contains `MEMORY.md`, optional sibling `MEMORY_*.md` detail files, `shared_views.toml`, `insight_logs/`, `rightmemory.toml`, and `.runtime/`.
 - Named profiles are registered in `<default-memory-root>/profiles.toml`. `rightmemory profile create <name>` defaults new roots to a sibling profile area such as `~/.rightmemory-profiles/<name>` for the normal default root.
 - Runtime commands can select a profile with `--profile <name>`, or by a user-managed `.rightmemory-profile` file in the project tree. Tracking that file is a user/project choice.
 - Profile roots are ordinary memory roots with separate `MEMORY.md`, `rightmemory.toml`, `.runtime/`, Git history, watcher state, async queues, sessions, and insight logs.
-- The installer creates a memory-root `.gitignore` allowlist so git status normally shows `MEMORY.md`, `MEMORY_*.md`, and `insight_logs/*.md`.
+- The installer creates a memory-root `.gitignore` allowlist so git status normally shows `MEMORY.md`, `MEMORY_*.md`, `shared_views.toml`, and `insight_logs/*.md`.
 - Runtime/session/review state belongs under `.runtime/` and should not be committed.
+- Shared view connections use `M#` headings in memory prose and `shared_views.toml` for resolver metadata; cache and interaction records live under `.runtime/shared_views/` and should not be committed.
 - Watcher locks, install refresh stamps, dreamer and insight trigger state, isolated temporary state, and isolated worktrees belong under `.runtime/`.
 - Semantic upgrade absorption state belongs under `.runtime/semantic-upgrades.json`. Fresh installs baseline current semantic upgrade notes because the seeded memory already matches the current schema. Existing memory roots may report pending semantic upgrade notes; dreamer is responsible for applying them during consolidation.
 - Reviewer scans process one time-adjacent batch of eligible provider sessions per bounded scan. `scan --once` may review a partial batch; `watch` waits for a full `[review].batch_size` batch. Review state remains session-level: once a provider session has been reviewed, later changes or resumed turns with the same source/session id are skipped unless the review state is cleared.
