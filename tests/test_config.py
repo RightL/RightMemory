@@ -846,6 +846,28 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.model_id, "openai/reconciler")
         self.assertTrue(config.sync.enabled)
 
+    def test_retrieve_prompt_includes_shared_view_endpoint_guidance(self):
+        instructions = build_instructions(Path("/memory"), "retrieve")
+
+        self.assertIn("M# headings", instructions)
+        self.assertIn("retrieve_shared_view", instructions)
+        self.assertIn("shared view endpoint", instructions)
+
+    def test_retrieve_runtime_exposes_shared_view_tool(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="standalone",
+            model_id="openai/test",
+            memory_root=Path("/memory"),
+            state_root=Path("/memory"),
+        )
+
+        with patch.object(RightMemoryRuntime, "_build_agent", return_value=object()):
+            runtime = RightMemoryRuntime(config)
+
+        tool_names = {tool.__name__ for tool in runtime._agent_tools()}
+        self.assertIn("retrieve_shared_view", tool_names)
+
     def _write_config(self, content: str) -> Path:
         handle = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
         with handle:

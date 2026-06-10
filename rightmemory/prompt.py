@@ -173,7 +173,11 @@ def _tool_guidance(role: str) -> str:
     if role == "retrieve":
         return (
             "- Use the provided read-only tools for `read`, `grep`, `glob`, restricted `read_command`, outline, "
-            "and validation.\n"
+            "validation, and `retrieve_shared_view`.\n"
+            "- Use `retrieve_shared_view(heading_id, query)` when a relevant `M#` heading points to an external "
+            "shared view endpoint. Pass the local heading id and the caller's query.\n"
+            "- Treat shared-view results as external context with their own provenance and freshness. Do not read "
+            "external shared-view Markdown as local memory.\n"
             "- `read_command` accepts common read-only shell forms such as `cat path`, `sed -n 'X,Yp' path`, "
             "`rg pattern`, `rg --files`, `git status --short`, and `git diff`. It does not run a general shell."
         )

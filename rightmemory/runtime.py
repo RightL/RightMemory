@@ -26,6 +26,7 @@ from .recent_submitted import (
 )
 from .semantic_upgrades import SemanticUpgradeContext, mark_absorbed, pending_context
 from .session import MemoryWriteLock, MessageSessionStore, _ensure_runtime_gitignore, _fsync_directory
+from .shared_views import SharedViewTools
 from .sync import SyncManager, SyncResult
 from .tools import MemoryTools
 
@@ -63,6 +64,7 @@ class RightMemoryRuntime:
             raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
         self.config = config
         self.tools = MemoryTools(config.memory_root, role=config.role)
+        self.shared_view_tools = SharedViewTools(config.memory_root)
         self.sessions = MessageSessionStore(config.state_root, config.role)
         self.recent_submitted_delivery = RecentSubmittedMemoryDeliveryStore(config.state_root)
         self._message_history: list[Any] = []
@@ -488,6 +490,8 @@ class RightMemoryRuntime:
                     self._agent_tool(self.tools.git_show_file),
                 ]
             )
+        if self.config.role == "retrieve":
+            read_tools.append(self._agent_tool(self.shared_view_tools.retrieve_shared_view))
         if self.config.role in {"historian", "retrieve"}:
             return read_tools
         write_tools = [

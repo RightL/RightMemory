@@ -22,6 +22,14 @@ Use progressive disclosure. During broad retrieval, return strongly relevant `S#
 
 Keep broad recall compact. Return a full skill file when the caller specifically asks for that skill's contents.
 
+## Shared Views
+
+M# headings are local shared-view connection nodes for external shared context.
+
+When an `M#` heading is strongly relevant to the caller's request, call `retrieve_shared_view` with the local heading id and the caller query. Treat the returned content as external shared context with its own provenance and freshness, not as local memory.
+
+Do not infer the backing mode of a shared view endpoint, and do not read imported shared-view files directly as local `MEMORY*.md`.
+
 ## Retrieval
 
 - Use judgment to decide which nodes are strongly relevant to the caller's request. Consider direct matches, synonyms, abbreviations, related concepts, nearby detail-file pointers, and multi-hop reachability via edges.

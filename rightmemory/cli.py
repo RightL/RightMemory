@@ -40,7 +40,7 @@ from .profiles import (
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 from .session import MemoryWriteLock
-from .shared_views import accept_shared_view, load_connections
+from .shared_views import accept_shared_view, load_connections, retrieve_shared_view
 from .status import collect_status, format_status_dashboard
 from .sync import SyncManager
 from .watch import (
@@ -270,6 +270,9 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory shared-view")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("list")
+    retrieve = subparsers.add_parser("retrieve")
+    retrieve.add_argument("heading_id")
+    retrieve.add_argument("query", nargs=argparse.REMAINDER)
     accept = subparsers.add_parser("accept")
     accept.add_argument("heading_id")
     accept.add_argument("--title", required=True)
@@ -286,6 +289,12 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
             maintainer = connection.maintainer or "-"
             description = connection.description or "-"
             print(f"{heading_id}\t{connection.relationship}\t{maintainer}\t{description}")
+        return 0
+    if args.command == "retrieve":
+        query = " ".join(args.query).strip()
+        if not query:
+            raise ValueError("shared-view retrieve requires a query")
+        print(retrieve_shared_view(memory_root, args.heading_id, query), end="")
         return 0
     if args.command == "accept":
         print(

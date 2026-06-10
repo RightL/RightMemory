@@ -303,6 +303,39 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(stdout.getvalue().strip(), "alice-auth-api\thuman\tAlice\tAuth API collaboration context")
 
+    def test_shared_view_retrieve_cli_returns_endpoint_context(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            target = root / ".runtime/shared_views/imports/alice-auth-api"
+            target.mkdir(parents=True)
+            (target / "MEMORY.md").write_text(
+                "# Alice Auth API\n\ntoken_expires_at is returned with auth token expiry metadata.\n",
+                encoding="utf-8",
+            )
+            (root / "shared_views.toml").write_text(
+                """
+                [connections."alice-auth-api"]
+                ref = "rightmemory://view/alice-auth-api"
+                relationship = "human"
+
+                [connections."alice-auth-api".target]
+                kind = "local_markdown"
+                path = ".runtime/shared_views/imports/alice-auth-api"
+                """,
+                encoding="utf-8",
+            )
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["shared-view", "retrieve", "alice-auth-api", "token", "expiry"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("Status: fresh", stdout.getvalue())
+        self.assertIn("token_expires_at", stdout.getvalue())
+
     def test_profile_list_ignores_project_binding(self):
         stdout = io.StringIO()
 
