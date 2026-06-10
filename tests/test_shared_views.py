@@ -234,6 +234,25 @@ class SharedViewAcceptTests(unittest.TestCase):
         self.assertIn("MEMORY_ALICE.md", str(caught.exception))
         self.assertIn("{S#alice-auth-api}", str(caught.exception))
 
+    def test_accept_shared_view_rejects_conflicting_bullet_node_id(self):
+        before = "# Project {#project}\n\n- `alice-auth-api` existing node\n"
+        (self.root / "MEMORY.md").write_text(before, encoding="utf-8")
+
+        with self.assertRaises(ValueError) as caught:
+            accept_shared_view(
+                self.root,
+                heading_id="alice-auth-api",
+                title="Alice Auth API",
+                body="Invalid duplicate graph id.",
+                ref="rightmemory://view/alice-auth-api",
+            )
+
+        after = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+
+        self.assertIn("bullet node `alice-auth-api`", str(caught.exception))
+        self.assertEqual(after, before)
+        self.assertFalse((self.root / "shared_views.toml").exists())
+
     def test_accept_shared_view_ignores_conflicting_graph_id_in_skill_file(self):
         (self.root / "MEMORY_SKILL_auth.md").write_text("## Freeform Skill {#alice-auth-api}\n", encoding="utf-8")
 

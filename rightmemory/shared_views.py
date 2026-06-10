@@ -14,6 +14,7 @@ REGISTRY_FILE = "shared_views.toml"
 RUNTIME_DIR = ".runtime/shared_views"
 CONNECTION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{(F#|S#|M#|#)([A-Za-z0-9_.-]+)\}")
+NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*$")
 TITLE_MARKER_RE = re.compile(r"\{[^{}]*\}")
 RELATIONSHIPS = {"human", "owned-agent", "team-space", "external"}
 TARGET_KINDS = {"none", "local_markdown", "revoked"}
@@ -165,16 +166,21 @@ def _has_existing_shared_view_heading(root: Path, heading_id: str) -> bool:
         relative_path = memory_file.relative_to(root)
         for line_number, line in enumerate(memory_file.read_text(encoding="utf-8").splitlines(), start=1):
             anchor = ANCHOR_KIND_RE.match(line)
-            if anchor is None or anchor.group(3) != heading_id:
-                continue
-            kind = anchor.group(2)
-            if kind == "M#":
-                found_shared_view = True
-                continue
-            raise ValueError(
-                f"shared view graph id `{heading_id}` already exists as "
-                f"`{{{kind}{heading_id}}}` in {relative_path}:{line_number}"
-            )
+            if anchor is not None and anchor.group(3) == heading_id:
+                kind = anchor.group(2)
+                if kind == "M#":
+                    found_shared_view = True
+                    continue
+                raise ValueError(
+                    f"shared view graph id `{heading_id}` already exists as "
+                    f"`{{{kind}{heading_id}}}` in {relative_path}:{line_number}"
+                )
+            node = NODE_RE.match(line)
+            if node is not None and node.group(1) == heading_id:
+                raise ValueError(
+                    f"shared view graph id `{heading_id}` already exists as "
+                    f"bullet node `{heading_id}` in {relative_path}:{line_number}"
+                )
     return found_shared_view
 
 
