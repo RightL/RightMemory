@@ -211,6 +211,20 @@ Shared views connect one memory root to collaboration context owned somewhere el
 
 The heading body should explain the collaboration meaning: who or what the view represents, when this root should use it, and how it relates to local work. Resolver details live in `shared_views.toml`, while runtime cache files and interaction records live under `.runtime/shared_views/`.
 
+```bash
+rightmemory shared-view accept alice-auth-api \
+  --title "Alice Auth API" \
+  --body "Alice owns auth API collaboration context." \
+  --ref rightmemory://view/alice-auth-api \
+  --relationship human \
+  --maintainer Alice \
+  --description "Auth API collaboration context" \
+  --target .runtime/shared_views/imports/alice-auth-api
+
+rightmemory shared-view retrieve alice-auth-api "token expiry"
+rightmemory shared-view note alice-auth-api --confirm "Docs are stale"
+```
+
 ### Edges
 
 Use the most specific edge type that fits:
@@ -332,9 +346,7 @@ rightmemory insight watch
 rightmemory prune
 rightmemory prune watch
 rightmemory history --session <agent-session-id> "find pruned memory about the old setup"
-rightmemory shared-view accept alice-auth-api --title "Alice Auth API" --body "Alice owns auth API collaboration context." --ref rightmemory://view/alice-auth-api --relationship human --maintainer Alice --description "Auth API collaboration context" --target .runtime/shared_views/imports/alice-auth-api
-rightmemory shared-view retrieve alice-auth-api "token expiry"
-rightmemory shared-view note alice-auth-api --confirm "Docs are stale"
+rightmemory shared-view list
 rightmemory status
 rightmemory watch start
 rightmemory watch status
@@ -372,7 +384,7 @@ The runtime is intentionally small:
 - Standalone one-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`; CLI-agent calls persist provider session mappings under `<memory-root>/.runtime/agent_cli_sessions/<role>/`.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - Use `rightmemory status` for a read-only operational dashboard across the configured memory root. It summarizes Git state, managed watches, Dreamer and Insight trigger progress, async update queues, bounded last-message previews, and file paths for full logs or state. Use `rightmemory watch status` when you need the lower-level managed-watch process view.
-- The installer creates a root `.gitignore` allowlist so git status surfaces `MEMORY.md`, `MEMORY_*.md`, and `insight_logs/*.md`.
+- The installer creates a root `.gitignore` allowlist so git status surfaces `MEMORY.md`, `MEMORY_*.md`, `shared_views.toml`, and `insight_logs/*.md`.
 - Async `update submit` calls for the same `--session` still accumulate as pending candidates and reset that session's one-hour quiet period. A single global async update worker scans all eligible session queues, batches whole session queues until it reaches `[update.async].target_batch_candidates` candidates by default, and falls back after `[update.async].max_wait_seconds`. `pull` and `undo` remain per-session. While submissions are waiting or being processed, retrieve can see newly submitted unconsolidated memory as `Recent submitted memory` so fresh context is available before the updater writes it.
 - Automatic `update`, `reviewer`, `dreamer`, `insight`, and `pruner` turns run in isolated Git worktrees when they operate on the main state root. The role still commits normally; runtime validates and lands successful role-owned commits back into the main memory repo.
 - Standalone daemon context is preserved with Pydantic AI message history.
