@@ -2621,6 +2621,7 @@ class PromptTests(unittest.TestCase):
 
         self.assertIn("M# headings", prompt)
         self.assertIn("shared-view endpoint", prompt)
+        self.assertIn("RIGHTMEMORY_ROOT=/home/example/.rightmemory", prompt)
         self.assertIn("rightmemory shared-view retrieve <heading-id> <query>", prompt)
         self.assertNotIn("retrieve_shared_view", prompt)
 

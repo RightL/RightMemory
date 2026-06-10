@@ -183,7 +183,10 @@ def retrieve_shared_view(memory_root: Path, heading_id: str, query: str) -> str:
             cache = _collect_local_markdown_cache(target)
             matches = _match_local_markdown_lines(cache.source_lines, stripped_query)
             result = _format_shared_view_result(connection, "fresh", cache.freshness, matches)
-            _write_shared_view_cache(root, heading_id, cache)
+            try:
+                _write_shared_view_cache(root, heading_id, cache)
+            except OSError:
+                pass
             return result
 
     cached = _read_shared_view_cache(root, heading_id)

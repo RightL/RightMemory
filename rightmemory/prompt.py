@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from importlib import resources
 from pathlib import Path
+from shlex import quote
 
+from .config import MEMORY_ROOT_ENV
 from .semantic_upgrades import SemanticUpgradeContext, render_prompt_context
 
 
@@ -18,7 +20,7 @@ def build_cli_agent_instructions(
         raise ValueError(f"role must be one of: {_role_list()}")
     schema = _read_prompt_file("skills/rightmemory-schema.md")
     role_guidance = _read_prompt_file(f"prompts/{role}.md")
-    cli_agent_guidance = _cli_agent_guidance(role)
+    cli_agent_guidance = _cli_agent_guidance(memory_root, role)
     semantic_guidance = _semantic_upgrade_guidance(role, semantic_upgrades)
 
     return f"""You are RightMemory {role} mode.
@@ -100,12 +102,13 @@ def _semantic_upgrade_guidance(role: str, semantic_upgrades: SemanticUpgradeCont
     return f"\nSemantic upgrade context:\n{rendered}\n"
 
 
-def _cli_agent_guidance(role: str) -> str:
+def _cli_agent_guidance(memory_root: Path, role: str) -> str:
     if role == "retrieve":
+        root_env = f"{MEMORY_ROOT_ENV}={quote(str(memory_root))}"
         return (
             "\nCLI-agent adaptation:\n"
             "- For a strongly relevant `M#` heading, retrieve external shared context with "
-            "`rightmemory shared-view retrieve <heading-id> <query>` using the local heading id and caller query.\n"
+            f"`{root_env} rightmemory shared-view retrieve <heading-id> <query>` using the local heading id and caller query.\n"
         )
     return ""
 

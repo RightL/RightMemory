@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rightmemory.shared_views import (
     SharedViewConnection,
@@ -373,6 +374,33 @@ class SharedViewRetrieveTests(unittest.TestCase):
         self.assertTrue(cache.exists())
         self.assertIn("Auth API accepts signed tokens.", cache.read_text(encoding="utf-8"))
         self.assertEqual((self.root / ".runtime/.gitignore").read_text(encoding="utf-8"), "*\n")
+
+    def test_retrieve_shared_view_returns_fresh_when_cache_write_fails(self):
+        target = self.root / ".runtime/shared_views/imports/alice-auth-api"
+        target.mkdir(parents=True)
+        (target / "MEMORY.md").write_text(
+            "# Alice Auth API\n\nToken expiry metadata includes token_expires_at.\n",
+            encoding="utf-8",
+        )
+        save_connections(
+            self.root,
+            {
+                "alice-auth-api": SharedViewConnection(
+                    heading_id="alice-auth-api",
+                    ref="rightmemory://view/alice-auth-api",
+                    target=SharedViewTarget(
+                        kind="local_markdown",
+                        path=".runtime/shared_views/imports/alice-auth-api",
+                    ),
+                )
+            },
+        )
+
+        with patch("rightmemory.shared_views._write_shared_view_cache", side_effect=PermissionError("read-only")):
+            result = retrieve_shared_view(self.root, "alice-auth-api", "token expiry")
+
+        self.assertIn("Status: fresh", result)
+        self.assertIn("- MEMORY.md:3: Token expiry metadata includes token_expires_at.", result)
 
     def test_retrieve_shared_view_uses_cache_when_target_disappears(self):
         target = self.root / ".runtime/shared_views/imports/alice-auth-api"
