@@ -37,8 +37,8 @@ MAX_CLOSE_MATCHES = 3
 MAX_EDIT_MATCH_LINES = 8
 MAX_MATCH_PREVIEW_CHARS = 180
 
-ANCHOR_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|S#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
-ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{(F#|S#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
+ANCHOR_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|S#|M#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
+ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{(F#|S#|M#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
 POINTER_HEADING_KINDS = {"F#", "S#"}
 ANY_HEADING_RE = re.compile(r"^(#+)\s+(.+?)\s*$")
 HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$")

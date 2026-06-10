@@ -10,6 +10,7 @@ Addressable headings use:
 ### Human Title {#heading-id} → [edge1, edge2, ...]
 ### File-Backed Title {F#heading-id} → [edge1, edge2, ...]
 ### Skill Title {S#heading-id} → [edge1, edge2, ...]
+### Shared View Title {M#heading-id} → [edge1, edge2, ...]
 ```
 
 Plain tree headings without graph edges may omit the anchor and edge list.
@@ -25,6 +26,7 @@ Nodes use:
 - `heading-id` and `node-id` share one namespace; do not reuse an id between a heading and a node.
 - `F#` marks a heading as backed by an ordinary detail file. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:F#heading-id`.
 - `S#` marks a heading as backed by a memory skill file. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:S#heading-id`.
+- `M#` marks a local heading as a shared-view connection. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:M#heading-id`. The heading body records the local relationship and collaboration meaning; resolver details live outside memory prose.
 - `S#heading-id` maps to sibling skill file `MEMORY_SKILL_heading-id.md`.
 - Edges may connect heading to heading, heading to node, node to heading, or node to node.
 - Node lines with no edges write `→ []`; heading lines with no edges may omit `→ []`.
@@ -93,6 +95,7 @@ Written edges may be one-way or reciprocal [stored on both records so either sid
 - `#`, `##`, and `###` may have `{#short-slug}` anchors and edges when the whole subtree is a graph target.
 - A file-backed `#`, `##`, or `###` heading uses `{F#short-slug}` and maps to sibling detail file `MEMORY_<short-slug>.md`.
 - A skill-backed `#`, `##`, or `###` heading uses `{S#short-slug}` and maps to sibling skill file `MEMORY_SKILL_<short-slug>.md`.
+- A shared-view `#`, `##`, or `###` heading uses `{M#short-slug}` and points to an external shared view through an out-of-band resolver entry. Do not use `M#` on `####` pointers.
 - When a heading's child content moves into its detail file, keep only the heading line and any heading body paragraphs in the current file. Do not leave child node lines or child headings under that heading in the current file.
 - `#### Human Title {F#short-slug}` is the deepest heading level allowed in a memory file and points to sibling detail file `MEMORY_<short-slug>.md`.
 - `#### Human Title {S#short-slug}` is also allowed as a skill pointer under an existing `###` topic and points to sibling skill file `MEMORY_SKILL_<short-slug>.md`.

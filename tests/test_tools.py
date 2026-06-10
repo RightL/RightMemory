@@ -814,6 +814,19 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertIn("validation passed", result)
 
+    def test_validate_memory_accepts_shared_view_heading_marker(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Project {#project}\n\n"
+            "## Alice Auth API {M#alice-auth-api} → [rel:project]\n\n"
+            "Alice owns auth API collaboration context.\n\n"
+            "- `frontend-login` Frontend login work uses Alice's shared view. → [rel:alice-auth-api]\n",
+            encoding="utf-8",
+        )
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("validation passed: 3 ids", result)
+
     def test_validate_memory_requires_skill_backing_file(self):
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
@@ -861,6 +874,19 @@ class MemoryToolsTests(unittest.TestCase):
         result = self.tools.validate_memory()
 
         self.assertIn("validation passed", result)
+
+    def test_validate_memory_rejects_four_hash_shared_view_pointer(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Project {#project}\n\n"
+            "### Integrations\n\n"
+            "#### Alice Auth API {M#alice-auth-api}\n\n"
+            "This should be a normal #/##/### shared-view heading, not a pointer.\n",
+            encoding="utf-8",
+        )
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("#### pointer must use `{F#slug}` or `{S#slug}`", result)
 
     def test_validate_memory_catches_self_and_duplicate_edges(self):
         (self.root / "MEMORY.md").write_text(
