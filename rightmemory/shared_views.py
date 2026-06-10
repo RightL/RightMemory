@@ -5,6 +5,7 @@ import os
 import re
 import tomllib
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .session import _fsync_directory
@@ -18,6 +19,8 @@ NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*$")
 TITLE_MARKER_RE = re.compile(r"\{[^{}]*\}")
 RELATIONSHIPS = {"human", "owned-agent", "team-space", "external"}
 TARGET_KINDS = {"none", "local_markdown", "revoked"}
+QUERY_TERM_RE = re.compile(r"[A-Za-z0-9_]{3,}")
+COMMON_QUERY_WORDS = {"the", "and", "for"}
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,15 @@ class SharedViewConnection:
     description: str | None = None
     accepted_from: str | None = None
     target: SharedViewTarget = SharedViewTarget()
+
+
+class SharedViewTools:
+    def __init__(self, memory_root: Path):
+        self.memory_root = Path(memory_root).expanduser()
+
+    def retrieve_shared_view(self, heading_id: str, query: str) -> str:
+        """Retrieve context from a shared view by local M# heading id."""
+        return retrieve_shared_view(self.memory_root, heading_id, query)
 
 
 def load_connections(memory_root: Path) -> dict[str, SharedViewConnection]:
@@ -137,6 +149,35 @@ def accept_shared_view(
     return f"accepted shared view {heading_id}"
 
 
+def retrieve_shared_view(memory_root: Path, heading_id: str, query: str) -> str:
+    root = Path(memory_root).expanduser()
+    heading_id = _validate_heading_id(heading_id)
+    stripped_query = query.strip()
+    if not stripped_query:
+        raise ValueError("shared view query must not be empty")
+
+    connections = load_connections(root)
+    connection = connections.get(heading_id)
+    if connection is None:
+        return _format_unavailable_shared_view(heading_id, "no shared view connection is registered")
+    if connection.target.kind == "revoked":
+        return _format_unavailable_shared_view(connection.heading_id, "access revoked")
+
+    if connection.target.kind == "local_markdown" and connection.target.path:
+        target = _resolve_under_root(root, connection.target.path)
+        if target.exists():
+            matches = _retrieve_local_markdown_matches(target, stripped_query)
+            result = _format_shared_view_result(connection, matches)
+            _write_shared_view_cache(root, heading_id, result)
+            return result
+
+    cached = _read_shared_view_cache(root, heading_id)
+    if cached is not None:
+        return cached.replace("Status: fresh", "Status: cached", 1)
+
+    return _format_unavailable_shared_view(connection.heading_id, "no shared view content is available")
+
+
 def _ensure_memory_heading(root: Path, *, heading_id: str, title: str, body: str) -> None:
     memory = root / "MEMORY.md"
     if _has_existing_shared_view_heading(root, heading_id):
@@ -195,6 +236,86 @@ def _active_memory_files(root: Path) -> list[Path]:
         if path.is_file() and not path.name.startswith("MEMORY_SKILL_")
     )
     return files
+
+
+def _retrieve_local_markdown_matches(target: Path, query: str) -> list[str]:
+    terms = _query_terms(query)
+    matches: list[str] = []
+    if terms:
+        for memory_file in sorted(target.glob("MEMORY*.md")):
+            if not memory_file.is_file():
+                continue
+            relative = memory_file.relative_to(target).as_posix()
+            for line_number, line in enumerate(memory_file.read_text(encoding="utf-8").splitlines(), start=1):
+                lowered = line.lower()
+                if any(term in lowered for term in terms):
+                    matches.append(f"- {relative}:{line_number}: {line}")
+                    if len(matches) >= 12:
+                        return matches
+    return matches or ["- no strong match in published shared memory"]
+
+
+def _query_terms(query: str) -> list[str]:
+    return [term.lower() for term in QUERY_TERM_RE.findall(query) if term.lower() not in COMMON_QUERY_WORDS]
+
+
+def _format_shared_view_result(connection: SharedViewConnection, matches: list[str]) -> str:
+    lines = [
+        f"Shared view: {connection.heading_id}",
+        "Status: fresh",
+        f"Ref: {connection.ref}",
+    ]
+    if connection.maintainer:
+        lines.append(f"Maintainer: {connection.maintainer}")
+    if connection.description:
+        lines.append(f"Description: {connection.description}")
+    lines.extend(
+        [
+            f"Freshness: {datetime.now(UTC).replace(microsecond=0).isoformat()}",
+            "Matches:",
+            *matches,
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _format_unavailable_shared_view(heading_id: str, reason: str) -> str:
+    return "\n".join(
+        [
+            f"Shared view: {heading_id}",
+            "Status: unavailable",
+            f"Reason: {reason}",
+        ]
+    ) + "\n"
+
+
+def _shared_view_cache_path(root: Path, heading_id: str) -> Path:
+    return root / RUNTIME_DIR / "cache" / f"{heading_id}.txt"
+
+
+def _read_shared_view_cache(root: Path, heading_id: str) -> str | None:
+    cache_path = _shared_view_cache_path(root, heading_id)
+    if not cache_path.is_file():
+        return None
+    return cache_path.read_text(encoding="utf-8")
+
+
+def _write_shared_view_cache(root: Path, heading_id: str, text: str) -> None:
+    _ensure_runtime_gitignore(root)
+    _atomic_write_text(_shared_view_cache_path(root, heading_id), text)
+
+
+def _ensure_runtime_gitignore(root: Path) -> None:
+    gitignore = root / ".runtime" / ".gitignore"
+    desired = ["*", "!.gitignore"]
+    if not gitignore.exists():
+        _atomic_write_text(gitignore, "\n".join(desired) + "\n")
+        return
+    text = gitignore.read_text(encoding="utf-8")
+    existing = set(text.splitlines())
+    additions = [line for line in desired if line not in existing]
+    if additions:
+        _atomic_write_text(gitignore, text.rstrip() + "\n" + "\n".join(additions) + "\n")
 
 
 def _normalize_heading_title(title: str, heading_id: str) -> str:

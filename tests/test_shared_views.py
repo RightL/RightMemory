@@ -7,6 +7,7 @@ from rightmemory.shared_views import (
     SharedViewTarget,
     accept_shared_view,
     load_connections,
+    retrieve_shared_view,
     save_connections,
 )
 
@@ -320,3 +321,125 @@ class SharedViewAcceptTests(unittest.TestCase):
 
         self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
         self.assertNotIn("{M#bad}", memory)
+
+
+class SharedViewRetrieveTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+
+    def test_retrieve_shared_view_returns_fresh_markdown_matches(self):
+        target = self.root / ".runtime/shared_views/imports/alice-auth-api"
+        target.mkdir(parents=True)
+        (target / "MEMORY.md").write_text(
+            "# Alice Auth API\n\nAuth API accepts signed tokens.\nAn unrelated note.\n",
+            encoding="utf-8",
+        )
+        (target / "MEMORY_EXTRA.md").write_text(
+            "Token rotation happens monthly.\n",
+            encoding="utf-8",
+        )
+        save_connections(
+            self.root,
+            {
+                "alice-auth-api": SharedViewConnection(
+                    heading_id="alice-auth-api",
+                    ref="rightmemory://view/alice-auth-api",
+                    maintainer="Alice",
+                    description="Auth collaboration context",
+                    target=SharedViewTarget(
+                        kind="local_markdown",
+                        path=".runtime/shared_views/imports/alice-auth-api",
+                    ),
+                )
+            },
+        )
+
+        result = retrieve_shared_view(self.root, "alice-auth-api", "the auth token")
+
+        self.assertIn("Shared view: alice-auth-api", result)
+        self.assertIn("Status: fresh", result)
+        self.assertIn("Ref: rightmemory://view/alice-auth-api", result)
+        self.assertIn("Maintainer: Alice", result)
+        self.assertIn("Description: Auth collaboration context", result)
+        self.assertIn("Freshness:", result)
+        self.assertIn("Matches:", result)
+        self.assertIn("- MEMORY.md:3: Auth API accepts signed tokens.", result)
+        self.assertIn("- MEMORY_EXTRA.md:1: Token rotation happens monthly.", result)
+        self.assertNotIn("An unrelated note.", result)
+
+        cache = self.root / ".runtime/shared_views/cache/alice-auth-api.txt"
+        self.assertTrue(cache.exists())
+        self.assertIn("Status: fresh", cache.read_text(encoding="utf-8"))
+
+    def test_retrieve_shared_view_uses_cache_when_target_disappears(self):
+        target = self.root / ".runtime/shared_views/imports/alice-auth-api"
+        target.mkdir(parents=True)
+        (target / "MEMORY.md").write_text(
+            "# Alice Auth API\n\nDurable cache phrase lives here.\n",
+            encoding="utf-8",
+        )
+        save_connections(
+            self.root,
+            {
+                "alice-auth-api": SharedViewConnection(
+                    heading_id="alice-auth-api",
+                    ref="rightmemory://view/alice-auth-api",
+                    target=SharedViewTarget(
+                        kind="local_markdown",
+                        path=".runtime/shared_views/imports/alice-auth-api",
+                    ),
+                )
+            },
+        )
+        retrieve_shared_view(self.root, "alice-auth-api", "durable cache")
+        (target / "MEMORY.md").unlink()
+        target.rmdir()
+
+        result = retrieve_shared_view(self.root, "alice-auth-api", "durable cache")
+
+        self.assertIn("Shared view: alice-auth-api", result)
+        self.assertIn("Status: cached", result)
+        self.assertNotIn("Status: fresh", result)
+        self.assertIn("- MEMORY.md:3: Durable cache phrase lives here.", result)
+
+    def test_retrieve_shared_view_does_not_use_cache_after_revocation(self):
+        target = self.root / ".runtime/shared_views/imports/alice-auth-api"
+        target.mkdir(parents=True)
+        (target / "MEMORY.md").write_text(
+            "# Alice Auth API\n\nRevoked cache phrase should disappear.\n",
+            encoding="utf-8",
+        )
+        save_connections(
+            self.root,
+            {
+                "alice-auth-api": SharedViewConnection(
+                    heading_id="alice-auth-api",
+                    ref="rightmemory://view/alice-auth-api",
+                    target=SharedViewTarget(
+                        kind="local_markdown",
+                        path=".runtime/shared_views/imports/alice-auth-api",
+                    ),
+                )
+            },
+        )
+        retrieve_shared_view(self.root, "alice-auth-api", "revoked cache")
+        save_connections(
+            self.root,
+            {
+                "alice-auth-api": SharedViewConnection(
+                    heading_id="alice-auth-api",
+                    ref="rightmemory://view/alice-auth-api",
+                    target=SharedViewTarget(kind="revoked"),
+                )
+            },
+        )
+
+        result = retrieve_shared_view(self.root, "alice-auth-api", "revoked cache")
+
+        self.assertIn("Shared view: alice-auth-api", result)
+        self.assertIn("Status: unavailable", result)
+        self.assertIn("Reason: access revoked", result)
+        self.assertNotIn("Status: cached", result)
+        self.assertNotIn("Revoked cache phrase should disappear.", result)
