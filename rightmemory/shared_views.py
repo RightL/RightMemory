@@ -13,6 +13,8 @@ from .session import _fsync_directory
 REGISTRY_FILE = "shared_views.toml"
 RUNTIME_DIR = ".runtime/shared_views"
 CONNECTION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{(F#|S#|M#|#)([A-Za-z0-9_.-]+)\}")
+TITLE_MARKER_RE = re.compile(r"\{[^{}]*\}")
 RELATIONSHIPS = {"human", "owned-agent", "team-space", "external"}
 TARGET_KINDS = {"none", "local_markdown", "revoked"}
 
@@ -68,8 +70,7 @@ def load_connections(memory_root: Path) -> dict[str, SharedViewConnection]:
 
 def save_connections(memory_root: Path, connections: dict[str, SharedViewConnection]) -> None:
     root = Path(memory_root).expanduser()
-    for heading_id in sorted(connections):
-        _validate_connection_for_save(root, heading_id, connections[heading_id])
+    _validate_connections_for_save(root, connections)
 
     root.mkdir(parents=True, exist_ok=True)
     lines = ["# RightMemory shared view registry", ""]
@@ -129,6 +130,7 @@ def accept_shared_view(
     )
     connections = load_connections(root)
     connections[heading_id] = connection
+    _validate_connections_for_save(root, connections)
     _ensure_memory_heading(root, heading_id=heading_id, title=title, body=body)
     save_connections(root, connections)
     return f"accepted shared view {heading_id}"
@@ -136,20 +138,59 @@ def accept_shared_view(
 
 def _ensure_memory_heading(root: Path, *, heading_id: str, title: str, body: str) -> None:
     memory = root / "MEMORY.md"
+    if _has_existing_shared_view_heading(root, heading_id):
+        return
     if not memory.exists():
         memory.write_text("# Shared Views\n", encoding="utf-8")
     text = memory.read_text(encoding="utf-8")
-    if f"{{M#{heading_id}}}" in text:
-        return
-    title_text = title.strip() or heading_id
+    title_text = _normalize_heading_title(title, heading_id)
     body_text = body.strip()
     section = "# Shared Views"
     addition = f"\n\n### {title_text} {{M#{heading_id}}}\n"
     if body_text:
         addition += f"\n{body_text}\n"
     if section not in text:
-        addition = f"\n\n{section}\n{addition}"
+        addition = f"\n\n{section}{addition}"
     memory.write_text(text.rstrip() + addition, encoding="utf-8")
+
+
+def _validate_connections_for_save(root: Path, connections: dict[str, SharedViewConnection]) -> None:
+    for heading_id in sorted(connections):
+        _validate_connection_for_save(root, heading_id, connections[heading_id])
+
+
+def _has_existing_shared_view_heading(root: Path, heading_id: str) -> bool:
+    found_shared_view = False
+    for memory_file in _active_memory_files(root):
+        relative_path = memory_file.relative_to(root)
+        for line_number, line in enumerate(memory_file.read_text(encoding="utf-8").splitlines(), start=1):
+            anchor = ANCHOR_KIND_RE.match(line)
+            if anchor is None or anchor.group(3) != heading_id:
+                continue
+            kind = anchor.group(2)
+            if kind == "M#":
+                found_shared_view = True
+                continue
+            raise ValueError(
+                f"shared view graph id `{heading_id}` already exists as "
+                f"`{{{kind}{heading_id}}}` in {relative_path}:{line_number}"
+            )
+    return found_shared_view
+
+
+def _active_memory_files(root: Path) -> list[Path]:
+    files = []
+    memory = root / "MEMORY.md"
+    if memory.is_file():
+        files.append(memory)
+    files.extend(path for path in sorted(root.glob("MEMORY_*.md")) if path.is_file())
+    return files
+
+
+def _normalize_heading_title(title: str, heading_id: str) -> str:
+    title_text = TITLE_MARKER_RE.sub(" ", title)
+    title_text = " ".join(title_text.split())
+    return title_text or heading_id
 
 
 def _load_target(root: Path, heading_id: str, raw_target: object) -> SharedViewTarget:

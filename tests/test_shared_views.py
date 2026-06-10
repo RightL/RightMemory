@@ -183,3 +183,90 @@ class SharedViewAcceptTests(unittest.TestCase):
         memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
 
         self.assertEqual(memory.count("{M#alice-auth-api}"), 1)
+
+    def test_accept_shared_view_uses_existing_m_heading_in_detail_file(self):
+        (self.root / "MEMORY_ALICE.md").write_text("## Existing Alice View {M#alice-auth-api}\n", encoding="utf-8")
+
+        result = accept_shared_view(
+            self.root,
+            heading_id="alice-auth-api",
+            title="Alice Auth API",
+            body="Alice owns auth API collaboration context.",
+            ref="rightmemory://view/alice-auth-api",
+        )
+
+        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+        detail = (self.root / "MEMORY_ALICE.md").read_text(encoding="utf-8")
+
+        self.assertIn("accepted shared view alice-auth-api", result)
+        self.assertNotIn("### Alice Auth API {M#alice-auth-api}", memory)
+        self.assertEqual(detail.count("{M#alice-auth-api}"), 1)
+
+    def test_accept_shared_view_rejects_conflicting_graph_id(self):
+        before = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+
+        with self.assertRaises(ValueError) as caught:
+            accept_shared_view(
+                self.root,
+                heading_id="project",
+                title="Project Shared View",
+                body="Invalid duplicate graph id.",
+                ref="rightmemory://view/project",
+            )
+
+        after = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+
+        self.assertIn("graph id `project` already exists", str(caught.exception))
+        self.assertEqual(after, before)
+
+    def test_accept_shared_view_rejects_conflicting_graph_id_in_detail_file(self):
+        (self.root / "MEMORY_ALICE.md").write_text("## Alice Skill {S#alice-auth-api}\n", encoding="utf-8")
+
+        with self.assertRaises(ValueError) as caught:
+            accept_shared_view(
+                self.root,
+                heading_id="alice-auth-api",
+                title="Alice Auth API",
+                body="Invalid duplicate graph id.",
+                ref="rightmemory://view/alice-auth-api",
+            )
+
+        self.assertIn("MEMORY_ALICE.md", str(caught.exception))
+        self.assertIn("{S#alice-auth-api}", str(caught.exception))
+
+    def test_rejected_accept_leaves_memory_unchanged(self):
+        before = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+        cases = (
+            {"ref": "   "},
+            {"ref": "rightmemory://view/alice-auth-api", "target_path": "   "},
+        )
+
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    accept_shared_view(
+                        self.root,
+                        heading_id="alice-auth-api",
+                        title="Alice Auth API",
+                        body="Alice owns auth API collaboration context.",
+                        **kwargs,
+                    )
+
+                after = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+
+                self.assertEqual(after, before)
+                self.assertFalse((self.root / "shared_views.toml").exists())
+
+    def test_accept_shared_view_normalizes_generated_title(self):
+        accept_shared_view(
+            self.root,
+            heading_id="alice-auth-api",
+            title="Alice\n{#project} Auth   API {M#bad}",
+            body="Alice owns auth API collaboration context.",
+            ref="rightmemory://view/alice-auth-api",
+        )
+
+        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+
+        self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
+        self.assertNotIn("{M#bad}", memory)
