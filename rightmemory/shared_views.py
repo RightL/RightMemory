@@ -197,6 +197,40 @@ def retrieve_shared_view(memory_root: Path, heading_id: str, query: str) -> str:
     return _format_unavailable_shared_view(connection.heading_id, "no shared view content is available")
 
 
+def record_shared_view_note(
+    memory_root: Path,
+    heading_id: str,
+    message: str,
+    *,
+    confirmed: bool = False,
+    actor: str = "user",
+) -> str:
+    root = Path(memory_root).expanduser()
+    heading_id = _validate_heading_id(heading_id)
+    message = message.strip()
+    if not message:
+        raise ValueError("shared view note message must not be empty")
+    connections = load_connections(root)
+    connection = connections.get(heading_id)
+    if connection is None:
+        return f"shared view {heading_id} is not registered"
+    if connection.relationship in {"human", "external"} and not confirmed:
+        maintainer = f" for {connection.maintainer}" if connection.maintainer else ""
+        return f"confirmation required before sending note{maintainer}: {message}"
+    record = {
+        "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
+        "heading_id": heading_id,
+        "ref": connection.ref,
+        "relationship": connection.relationship,
+        "maintainer": connection.maintainer,
+        "actor": actor,
+        "status": "sent",
+        "message": message,
+    }
+    _append_interaction_record(root, heading_id, record)
+    return f"recorded shared view note for {heading_id}"
+
+
 def _ensure_memory_heading(root: Path, *, heading_id: str, title: str, body: str) -> None:
     memory = root / "MEMORY.md"
     if _has_existing_shared_view_heading(root, heading_id):
@@ -371,6 +405,17 @@ def _write_shared_view_cache(root: Path, heading_id: str, cache: _SharedViewCach
         _shared_view_cache_path(root, heading_id),
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
     )
+
+
+def _append_interaction_record(root: Path, heading_id: str, record: dict[str, object]) -> None:
+    _ensure_runtime_gitignore(root / ".runtime")
+    path = root / RUNTIME_DIR / "interactions" / f"{heading_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    _fsync_directory(path.parent)
 
 
 def _normalize_heading_title(title: str, heading_id: str) -> str:

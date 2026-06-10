@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from rightmemory.shared_views import (
     SharedViewTarget,
     accept_shared_view,
     load_connections,
+    record_shared_view_note,
     retrieve_shared_view,
     save_connections,
 )
@@ -322,6 +324,74 @@ class SharedViewAcceptTests(unittest.TestCase):
 
         self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
         self.assertNotIn("{M#bad}", memory)
+
+
+class SharedViewInteractionTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+
+    def test_human_connection_requires_confirmation_before_note(self):
+        save_connections(
+            self.root,
+            {
+                "alice-auth-api": SharedViewConnection(
+                    heading_id="alice-auth-api",
+                    ref="rightmemory://view/alice-auth-api",
+                    relationship="human",
+                    maintainer="Alice",
+                )
+            },
+        )
+
+        result = record_shared_view_note(self.root, "alice-auth-api", "Docs are stale")
+
+        self.assertIn("confirmation required", result)
+        self.assertFalse((self.root / ".runtime/shared_views/interactions").exists())
+
+    def test_owned_agent_connection_records_note_without_confirmation(self):
+        save_connections(
+            self.root,
+            {
+                "auth-agent": SharedViewConnection(
+                    heading_id="auth-agent",
+                    ref="rightmemory://view/auth-agent",
+                    relationship="owned-agent",
+                )
+            },
+        )
+
+        result = record_shared_view_note(self.root, "auth-agent", "Sync docs need a refresh")
+
+        interaction_path = self.root / ".runtime/shared_views/interactions/auth-agent.jsonl"
+        records = [json.loads(line) for line in interaction_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["relationship"], "owned-agent")
+        self.assertEqual(records[0]["status"], "sent")
+        self.assertEqual(records[0]["message"], "Sync docs need a refresh")
+        self.assertIn("recorded shared view note", result)
+
+    def test_confirmed_human_note_is_recorded(self):
+        save_connections(
+            self.root,
+            {
+                "alice-auth-api": SharedViewConnection(
+                    heading_id="alice-auth-api",
+                    ref="rightmemory://view/alice-auth-api",
+                    relationship="human",
+                    maintainer="Alice",
+                )
+            },
+        )
+
+        result = record_shared_view_note(self.root, "alice-auth-api", "Confirmed docs update", confirmed=True)
+
+        interaction_path = self.root / ".runtime/shared_views/interactions/alice-auth-api.jsonl"
+        records = [json.loads(line) for line in interaction_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(records[0]["relationship"], "human")
+        self.assertEqual(records[0]["message"], "Confirmed docs update")
+        self.assertIn("recorded shared view note", result)
 
 
 class SharedViewRetrieveTests(unittest.TestCase):

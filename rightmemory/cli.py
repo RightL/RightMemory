@@ -40,7 +40,7 @@ from .profiles import (
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 from .session import MemoryWriteLock
-from .shared_views import accept_shared_view, load_connections, retrieve_shared_view
+from .shared_views import accept_shared_view, load_connections, record_shared_view_note, retrieve_shared_view
 from .status import collect_status, format_status_dashboard
 from .sync import SyncManager
 from .watch import (
@@ -273,6 +273,11 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     retrieve = subparsers.add_parser("retrieve")
     retrieve.add_argument("heading_id")
     retrieve.add_argument("query", nargs=argparse.REMAINDER)
+    note = subparsers.add_parser("note")
+    note.add_argument("heading_id")
+    note.add_argument("--confirm", action="store_true")
+    note.add_argument("--actor", default="user")
+    note.add_argument("message", nargs=argparse.REMAINDER)
     accept = subparsers.add_parser("accept")
     accept.add_argument("heading_id")
     accept.add_argument("--title", required=True)
@@ -295,6 +300,12 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
         if not query:
             raise ValueError("shared-view retrieve requires a query")
         print(retrieve_shared_view(memory_root, args.heading_id, query), end="")
+        return 0
+    if args.command == "note":
+        message = " ".join(args.message).strip()
+        if not message:
+            raise ValueError("shared-view note requires a message")
+        print(record_shared_view_note(memory_root, args.heading_id, message, confirmed=args.confirm, actor=args.actor))
         return 0
     if args.command == "accept":
         print(

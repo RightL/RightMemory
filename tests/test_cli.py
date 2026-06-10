@@ -336,6 +336,29 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("Status: fresh", stdout.getvalue())
         self.assertIn("token_expires_at", stdout.getvalue())
 
+    def test_shared_view_note_cli_requires_confirmation_for_human_connection(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            (root / "shared_views.toml").write_text(
+                """
+                [connections."alice-auth-api"]
+                ref = "rightmemory://view/alice-auth-api"
+                relationship = "human"
+                maintainer = "Alice"
+                """,
+                encoding="utf-8",
+            )
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["shared-view", "note", "alice-auth-api", "Docs", "are", "stale"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("confirmation required", stdout.getvalue())
+
     def test_profile_list_ignores_project_binding(self):
         stdout = io.StringIO()
 
