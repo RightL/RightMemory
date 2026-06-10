@@ -552,6 +552,7 @@ cat > "$MEMORY_ROOT/.gitignore" <<'EOF'
 *
 !MEMORY.md
 !MEMORY_*.md
+!shared_views.toml
 !insight_logs/
 !insight_logs/*.md
 EOF

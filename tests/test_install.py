@@ -183,7 +183,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             gitignore,
-            "*\n!MEMORY.md\n!MEMORY_*.md\n!insight_logs/\n!insight_logs/*.md\n",
+            "*\n!MEMORY.md\n!MEMORY_*.md\n!shared_views.toml\n!insight_logs/\n!insight_logs/*.md\n",
         )
 
     def test_cli_agent_installs_command_backed_orchestrator_without_role_skills(self):

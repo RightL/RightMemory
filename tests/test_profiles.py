@@ -138,7 +138,10 @@ class ProfileTests(unittest.TestCase):
         self.assertTrue(memory_exists)
         self.assertTrue(insight_exists)
         self.assertEqual(runtime_gitignore, "*\n")
-        self.assertIn("!MEMORY.md", gitignore)
+        self.assertEqual(
+            gitignore,
+            "*\n!MEMORY.md\n!MEMORY_*.md\n!shared_views.toml\n!insight_logs/\n!insight_logs/*.md\n",
+        )
         self.assertIn("memory: initial baseline", git_head)
         self.assertEqual(profiles["alpha"].root, profile.root)
 

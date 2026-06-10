@@ -39,6 +39,11 @@ class SyncManagerTests(unittest.TestCase):
         self.assertEqual(result.status, "disabled")
         self.assertIn("disabled", result.message)
 
+    def test_sync_paths_include_shared_view_registry(self):
+        from rightmemory.sync import MEMORY_SYNC_PATHS
+
+        self.assertIn("shared_views.toml", MEMORY_SYNC_PATHS)
+
     def test_preflight_rejects_memory_root_nested_in_outer_git_repo(self):
         outer_remote = self.root / "outer.git"
         outer = self.root / "outer"

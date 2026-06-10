@@ -298,8 +298,26 @@ class MemoryToolsTests(unittest.TestCase):
         result = tools.git_add(["MEMORY.md", "insight_logs/2026-05-30-143012.md"])
 
         self.assertEqual(result, "staged: MEMORY.md, insight_logs/2026-05-30-143012.md")
-        with self.assertRaisesRegex(ValueError, r"MEMORY.md, MEMORY_\*\.md, or insight_logs/\*\.md"):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"MEMORY.md, MEMORY_\*\.md, shared_views\.toml, or insight_logs/\*\.md",
+        ):
             tools.git_add(["rightmemory.toml"])
+
+    def test_sync_reconciler_can_repair_shared_view_registry(self):
+        self._git("init")
+        registry = self.root / "shared_views.toml"
+        registry.write_text('[connections.alice-auth-api]\nref = "rightmemory://view/old"\n', encoding="utf-8")
+        tools = MemoryTools(self.root, role="sync-reconciler")
+        tools.read_file("shared_views.toml")
+        edit_result = tools.edit_file(
+            "shared_views.toml",
+            'ref = "rightmemory://view/old"',
+            'ref = "rightmemory://view/new"',
+        )
+        add_result = tools.git_add(["shared_views.toml"])
+        self.assertEqual(edit_result, "edited shared_views.toml: replaced 1 occurrence")
+        self.assertEqual(add_result, "staged: shared_views.toml")
 
     def test_insight_read_tools_are_limited_to_active_memory_and_insight_logs(self):
         (self.root / "MEMORY.md").write_text("# Domain\n\nmemory beta\n", encoding="utf-8")
