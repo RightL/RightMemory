@@ -277,7 +277,7 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     note.add_argument("heading_id")
     note.add_argument("--confirm", action="store_true")
     note.add_argument("--actor", default="user")
-    note.add_argument("message", nargs=argparse.REMAINDER)
+    note.add_argument("message", nargs="*")
     accept = subparsers.add_parser("accept")
     accept.add_argument("heading_id")
     accept.add_argument("--title", required=True)
@@ -288,7 +288,11 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     accept.add_argument("--description")
     accept.add_argument("--accepted-from")
     accept.add_argument("--target")
-    args = parser.parse_args(argv)
+    if argv[:1] == ["note"]:
+        args = note.parse_intermixed_args(argv[1:])
+        args.command = "note"
+    else:
+        args = parser.parse_args(argv)
     if args.command == "list":
         for heading_id, connection in sorted(load_connections(memory_root).items()):
             maintainer = connection.maintainer or "-"

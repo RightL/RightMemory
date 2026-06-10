@@ -359,6 +359,61 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("confirmation required", stdout.getvalue())
 
+    def test_shared_view_note_cli_confirm_after_heading_records_human_note(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            (root / "shared_views.toml").write_text(
+                """
+                [connections."alice-auth-api"]
+                ref = "rightmemory://view/alice-auth-api"
+                relationship = "human"
+                maintainer = "Alice"
+                """,
+                encoding="utf-8",
+            )
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["shared-view", "note", "alice-auth-api", "--confirm", "Docs", "are", "stale"])
+
+            interaction_path = root / ".runtime/shared_views/interactions/alice-auth-api.jsonl"
+            records = [json.loads(line) for line in interaction_path.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(result, 0)
+        self.assertIn("recorded shared view note", stdout.getvalue())
+        self.assertEqual(records[0]["relationship"], "human")
+        self.assertEqual(records[0]["message"], "Docs are stale")
+
+    def test_shared_view_note_cli_actor_after_heading_is_recorded(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            (root / "shared_views.toml").write_text(
+                """
+                [connections."auth-agent"]
+                ref = "rightmemory://view/auth-agent"
+                relationship = "owned-agent"
+                """,
+                encoding="utf-8",
+            )
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["shared-view", "note", "auth-agent", "--actor", "assistant", "Docs", "are", "stale"])
+
+            interaction_path = root / ".runtime/shared_views/interactions/auth-agent.jsonl"
+            records = [json.loads(line) for line in interaction_path.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(result, 0)
+        self.assertIn("recorded shared view note", stdout.getvalue())
+        self.assertEqual(records[0]["actor"], "assistant")
+        self.assertEqual(records[0]["message"], "Docs are stale")
+
     def test_profile_list_ignores_project_binding(self):
         stdout = io.StringIO()
 
