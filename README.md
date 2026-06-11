@@ -209,6 +209,8 @@ Move child content into a detail file when a heading becomes too dense, especial
 
 Shared views connect one memory root to collaboration context owned somewhere else: another person, team space, project, or agent memory root. In local memory, a `#`, `##`, or `###` heading can use `{M#slug}` to record the local relationship to that external shared view.
 
+For a practical provider/consumer walkthrough, see [docs/shared-views-usage.md](docs/shared-views-usage.md).
+
 The provider owns the shared-view source under `shared_views/<view-id>/`: `view.md` describes the contract, `retriever.md` can hold view-specific retrieval policy, and `export.toml` stores builder/export settings. Generated `dist/` output is preview or publishing output. The consumer records resolver details in `shared_views.toml`, keeps cache and interaction records under `.runtime/shared_views/`, and stores local consequences in ordinary memory when they become durable.
 
 ```bash
