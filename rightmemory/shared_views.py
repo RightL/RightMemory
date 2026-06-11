@@ -349,7 +349,7 @@ def accept_shared_view(
         raise ValueError(f"unknown shared view relationship `{relationship}`")
     if target is not None and target_path is not None:
         raise ValueError("provide either target or target_path, not both")
-    resolved_target = target or (SharedViewTarget("local_markdown", target_path) if target_path else SharedViewTarget())
+    resolved_target = target or (SharedViewTarget("package", target_path) if target_path else SharedViewTarget())
     resolved_target = _validate_target(root, heading_id, resolved_target.kind, resolved_target.path, resolved_target.view_id)
     connection = SharedViewConnection(
         heading_id=heading_id,
@@ -1286,7 +1286,8 @@ def _validate_target(
         _resolve_external_path(root, path)
     if kind in {"none", "revoked"} and path:
         raise ValueError(f"{kind} shared view target must not set path for {heading_id}")
-    return SharedViewTarget(kind=kind, path=path, view_id=view_id)
+    stored_kind = "package" if kind == "local_markdown" else kind
+    return SharedViewTarget(kind=stored_kind, path=path, view_id=view_id)
 
 
 def _validate_heading_id(value: str) -> str:

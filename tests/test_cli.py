@@ -371,7 +371,7 @@ class JsonRequestTests(unittest.TestCase):
                 relationship = "human"
 
                 [connections."alice-auth-api".target]
-                kind = "local_markdown"
+                kind = "package"
                 path = ".runtime/shared_views/imports/alice-auth-api"
                 """,
                 encoding="utf-8",

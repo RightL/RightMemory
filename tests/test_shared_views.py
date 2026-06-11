@@ -35,7 +35,7 @@ class SharedViewRegistryTests(unittest.TestCase):
             maintainer="Alice",
             description="Auth API collaboration context",
             accepted_from="rightmemory://view/invite/abc123",
-            target=SharedViewTarget(kind="local_markdown", path=".runtime/shared_views/imports/alice-auth-api"),
+            target=SharedViewTarget(kind="package", path=".runtime/shared_views/imports/alice-auth-api"),
         )
 
         save_connections(self.root, {"alice-auth-api": connection})
@@ -50,7 +50,7 @@ class SharedViewRegistryTests(unittest.TestCase):
             relationship="team-space",
             maintainer="Auth Team",
             description="Team auth API collaboration context",
-            target=SharedViewTarget(kind="local_markdown", path=".runtime/shared_views/imports/team.auth-api"),
+            target=SharedViewTarget(kind="package", path=".runtime/shared_views/imports/team.auth-api"),
         )
 
         save_connections(self.root, {"team.auth-api": connection})
@@ -83,17 +83,17 @@ class SharedViewRegistryTests(unittest.TestCase):
 
         self.assertIn("unknown shared view target kind", str(caught.exception))
 
-    def test_save_connections_rejects_local_markdown_without_path(self):
+    def test_save_connections_rejects_package_without_path(self):
         connection = SharedViewConnection(
             heading_id="alice-auth-api",
             ref="rightmemory://view/alice-auth-api",
-            target=SharedViewTarget(kind="local_markdown"),
+            target=SharedViewTarget(kind="package"),
         )
 
         with self.assertRaises(ValueError) as caught:
             save_connections(self.root, {"alice-auth-api": connection})
 
-        self.assertIn("local_markdown shared view target requires path", str(caught.exception))
+        self.assertIn("package shared view target requires path", str(caught.exception))
 
     def test_save_connections_rejects_target_paths_outside_memory_root(self):
         paths = [str(self.root.parent / "outside"), "../outside"]
@@ -124,6 +124,25 @@ class SharedViewRegistryTests(unittest.TestCase):
             load_connections(self.root)
 
         self.assertIn("unknown shared view relationship", str(caught.exception))
+
+    def test_load_connections_normalizes_old_local_markdown_target_to_package(self):
+        (self.root / ".runtime/shared_views/imports/alice-auth-api").mkdir(parents=True)
+        (self.root / "shared_views.toml").write_text(
+            """
+            [connections.alice-auth-api]
+            ref = "rightmemory://view/alice-auth-api"
+            relationship = "human"
+
+            [connections.alice-auth-api.target]
+            kind = "local_markdown"
+            path = ".runtime/shared_views/imports/alice-auth-api"
+            """,
+            encoding="utf-8",
+        )
+
+        loaded = load_connections(self.root)
+
+        self.assertEqual(loaded["alice-auth-api"].target.kind, "package")
 
     def test_load_connections_rejects_target_outside_memory_root(self):
         (self.root / "shared_views.toml").write_text(
@@ -613,7 +632,7 @@ class SharedViewRetrieveTests(unittest.TestCase):
                     maintainer="Alice",
                     description="Auth collaboration context",
                     target=SharedViewTarget(
-                        kind="local_markdown",
+                        kind="package",
                         path=".runtime/shared_views/imports/alice-auth-api",
                     ),
                 )
@@ -652,7 +671,7 @@ class SharedViewRetrieveTests(unittest.TestCase):
                     heading_id="alice-auth-api",
                     ref="rightmemory://view/alice-auth-api",
                     target=SharedViewTarget(
-                        kind="local_markdown",
+                        kind="package",
                         path=".runtime/shared_views/imports/alice-auth-api",
                     ),
                 )
@@ -684,7 +703,7 @@ class SharedViewRetrieveTests(unittest.TestCase):
                     heading_id="alice-auth-api",
                     ref="rightmemory://view/alice-auth-api",
                     target=SharedViewTarget(
-                        kind="local_markdown",
+                        kind="package",
                         path=".runtime/shared_views/imports/alice-auth-api",
                     ),
                 )
@@ -711,7 +730,7 @@ class SharedViewRetrieveTests(unittest.TestCase):
                     heading_id="alice-auth-api",
                     ref="rightmemory://view/alice-auth-api",
                     target=SharedViewTarget(
-                        kind="local_markdown",
+                        kind="package",
                         path=".runtime/shared_views/imports/alice-auth-api",
                     ),
                 )
@@ -742,7 +761,7 @@ class SharedViewRetrieveTests(unittest.TestCase):
                     heading_id="alice-auth-api",
                     ref="rightmemory://view/alice-auth-api",
                     target=SharedViewTarget(
-                        kind="local_markdown",
+                        kind="package",
                         path=".runtime/shared_views/imports/alice-auth-api",
                     ),
                 )
@@ -774,7 +793,7 @@ class SharedViewRetrieveTests(unittest.TestCase):
                     heading_id="alice-auth-api",
                     ref="rightmemory://view/alice-auth-api",
                     target=SharedViewTarget(
-                        kind="local_markdown",
+                        kind="package",
                         path=".runtime/shared_views/imports/alice-auth-api",
                     ),
                 )
@@ -801,7 +820,7 @@ class SharedViewRetrieveTests(unittest.TestCase):
                     heading_id="alice-auth-api",
                     ref="rightmemory://view/alice-auth-api",
                     target=SharedViewTarget(
-                        kind="local_markdown",
+                        kind="package",
                         path=".runtime/shared_views/imports/alice-auth-api",
                     ),
                 )
