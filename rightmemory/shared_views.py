@@ -165,8 +165,7 @@ def export_shared_view(
     root = Path(memory_root).expanduser()
     definition = load_shared_view_definition(root, view_id)
     view_dir = _provider_view_dir(root, definition.view_id)
-    if not (view_dir / "dist" / "MEMORY.md").exists():
-        build_shared_view(root, definition.view_id)
+    build_shared_view(root, definition.view_id)
 
     target = Path(target_path).expanduser()
     _prepare_output_directory(target, replace=replace)

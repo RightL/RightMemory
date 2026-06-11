@@ -224,6 +224,24 @@ class SharedViewBuilderTests(unittest.TestCase):
         self.assertIn('view_id = "alice-auth-api"', invitation)
         self.assertIn('kind = "package"', invitation)
 
+    def test_export_shared_view_rebuilds_stale_dist(self):
+        define_shared_view(
+            self.root,
+            view_id="alice-auth-api",
+            title="Alice Auth API",
+            filter_terms=["auth"],
+        )
+        view_dir = self.root / "shared_views" / "alice-auth-api"
+        (view_dir / "dist").mkdir()
+        (view_dir / "dist" / "MEMORY.md").write_text("stale generated output\n", encoding="utf-8")
+        target = self.root / "exported-auth-view"
+
+        export_shared_view(self.root, "alice-auth-api", target)
+
+        exported = (target / "dist" / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("Auth API accepts signed tokens.", exported)
+        self.assertNotIn("stale generated output", exported)
+
     def test_publish_shared_view_writes_minimal_hub_registry(self):
         define_shared_view(
             self.root,
