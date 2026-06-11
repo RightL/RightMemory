@@ -11,6 +11,7 @@ from rightmemory.config import DreamerWatchConfig, InsightWatchConfig
 from rightmemory.dreamer_trigger import DreamerTriggerStore
 from rightmemory.doctor import DoctorCheck
 from rightmemory.insight_trigger import InsightTriggerStore
+from rightmemory.shared_views import load_connections
 from rightmemory.watch import MANAGED_WATCH_TARGETS, WATCH_COMMANDS, _process_command
 
 
@@ -264,10 +265,15 @@ class JsonRequestTests(unittest.TestCase):
                 )
 
             memory = (root / "MEMORY.md").read_text(encoding="utf-8")
+            connection = load_connections(root)["alice-auth-api"]
 
         self.assertEqual(result, 0)
         self.assertIn("accepted shared view alice-auth-api", stdout.getvalue())
         self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
+        self.assertEqual(
+            connection.target.path,
+            str((Path.cwd() / ".runtime/shared_views/imports/alice-auth-api").resolve()),
+        )
 
     def test_shared_view_accept_cli_uses_memory_write_lock(self):
         stdout = io.StringIO()

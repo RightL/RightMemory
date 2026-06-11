@@ -597,7 +597,7 @@ def _load_definition_metadata(path: Path) -> SharedViewDefinition:
         maintainer=_optional_string(data.get("maintainer")),
         source_globs=_normalize_source_globs(data.get("source_globs")),
         filter_terms=_normalize_terms(data.get("filter_terms")),
-        include_all=bool(data.get("include_all", False)),
+        include_all=_optional_bool(data.get("include_all", False), "include_all"),
     )
 
 
@@ -1442,6 +1442,12 @@ def _optional_string(value: object) -> str | None:
         raise ValueError("optional shared view string fields must be strings")
     stripped = value.strip()
     return stripped or None
+
+
+def _optional_bool(value: object, key: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"shared view {key} must be a boolean")
 
 
 def _resolve_under_root(root: Path, raw_path: str) -> Path:

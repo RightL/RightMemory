@@ -457,11 +457,11 @@ def _shared_view_accept_target(args: argparse.Namespace) -> SharedViewTarget | N
     if len(selected) > 1:
         raise ValueError("shared-view accept target must use one of --package, --provider-root, or --hub")
     if args.package is not None:
-        return SharedViewTarget(kind="package", path=args.package, view_id=args.heading_id)
+        return SharedViewTarget(kind="package", path=str(Path(args.package).expanduser().resolve()), view_id=args.heading_id)
     if args.provider_root is not None:
-        return SharedViewTarget(kind="local", path=str(args.provider_root), view_id=args.heading_id)
+        return SharedViewTarget(kind="local", path=str(args.provider_root.expanduser().resolve()), view_id=args.heading_id)
     if args.hub is not None:
-        return SharedViewTarget(kind="hub", path=str(args.hub.resolve()), view_id=args.heading_id)
+        return SharedViewTarget(kind="hub", path=str(args.hub.expanduser().resolve()), view_id=args.heading_id)
     return None
 
 

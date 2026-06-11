@@ -14,6 +14,7 @@ from rightmemory.shared_views import (
     export_shared_view,
     list_shared_view_inbox,
     load_connections,
+    load_shared_view_definition,
     publish_shared_view,
     record_shared_view_note,
     retrieve_shared_view,
@@ -249,6 +250,25 @@ class SharedViewBuilderTests(unittest.TestCase):
         exported = self.root / "shared_views" / "full-onboarding" / "dist" / "MEMORY.md"
         self.assertIn("built shared view full-onboarding", result)
         self.assertIn("Private payroll note should stay internal.", exported.read_text(encoding="utf-8"))
+
+    def test_load_shared_view_definition_rejects_string_include_all(self):
+        view_dir = self.root / "shared_views" / "full-onboarding"
+        view_dir.mkdir(parents=True)
+        (view_dir / "export.toml").write_text(
+            """
+            version = 1
+            view_id = "full-onboarding"
+            ref = "rightmemory://view/full-onboarding"
+            title = "Full Onboarding"
+            include_all = "false"
+            """,
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(ValueError) as caught:
+            load_shared_view_definition(self.root, "full-onboarding")
+
+        self.assertIn("include_all must be a boolean", str(caught.exception))
 
     def test_export_shared_view_rebuilds_stale_dist(self):
         define_shared_view(
