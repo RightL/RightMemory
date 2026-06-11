@@ -693,6 +693,52 @@ class SharedViewAcceptTests(unittest.TestCase):
         self.assertIn("Status: fresh", result)
         self.assertNotIn("Outside secret should not be imported.", result)
 
+    def test_accept_package_invitation_ignores_symlinked_dist_directory(self):
+        consumer = self.root / "consumer"
+        consumer.mkdir()
+        (consumer / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
+        package = self.root / "package"
+        package.mkdir()
+        (package / "view.md").write_text("# Alice Auth API\n", encoding="utf-8")
+        (package / "export.toml").write_text(
+            """
+            version = 1
+            view_id = "alice-auth-api"
+            ref = "rightmemory://view/alice-auth-api"
+            title = "Alice Auth API"
+            """,
+            encoding="utf-8",
+        )
+        (package / "rightmemory-shared-view.toml").write_text(
+            """
+            version = 1
+            view_id = "alice-auth-api"
+            ref = "rightmemory://view/alice-auth-api"
+            title = "Alice Auth API"
+
+            [transport]
+            kind = "package"
+            path = "."
+            view_id = "alice-auth-api"
+            """,
+            encoding="utf-8",
+        )
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "MEMORY.md").write_text("Outside dist secret should not be imported.\n", encoding="utf-8")
+        try:
+            (package / "dist").symlink_to(outside, target_is_directory=True)
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+
+        accept_shared_view_invitation(consumer, package)
+        result = retrieve_shared_view(consumer, "alice-auth-api", "outside dist secret")
+
+        imported_dist = consumer / ".runtime" / "shared_views" / "imports" / "alice-auth-api" / "dist"
+        self.assertTrue(imported_dist.is_symlink())
+        self.assertIn("Status: fresh", result)
+        self.assertNotIn("Outside dist secret should not be imported.", result)
+
 
 class SharedViewInteractionTests(unittest.TestCase):
     def setUp(self):

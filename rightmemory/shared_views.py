@@ -990,7 +990,7 @@ def _collect_package_cache(
     metadata = _read_package_metadata(package_root)
     provenance = metadata.get("title") or connection.description or connection.heading_id
     backing_parts = []
-    if (memory_root / "MEMORY.md").exists() or list(memory_root.glob("MEMORY_*.md")):
+    if cache.source_lines:
         backing_parts.append("filtered Markdown")
     if (package_root / "retriever.md").exists():
         backing_parts.append("retriever prompt")
@@ -1227,6 +1227,11 @@ def _active_memory_files(root: Path) -> list[Path]:
 
 def _collect_local_markdown_cache(target: Path) -> _SharedViewCache:
     source_lines: list[_SharedViewSourceLine] = []
+    if target.is_symlink():
+        return _SharedViewCache(
+            freshness=datetime.now(UTC).replace(microsecond=0).isoformat(),
+            source_lines=source_lines,
+        )
     target_root = target.resolve()
     for memory_file in sorted(target.glob("MEMORY*.md")):
         if memory_file.is_symlink():
