@@ -899,7 +899,7 @@ def _retrieve_provider_view(provider_root: Path, view_id: str, query: str) -> _S
         )
         backing_parts.append("filtered Markdown")
     retriever = view_dir / "retriever.md"
-    if retriever.exists():
+    if retriever.exists() and definition.filter_terms:
         terms = list(definition.filter_terms)
         terms.extend(_query_terms(query))
         source_lines.extend(
@@ -913,6 +913,8 @@ def _retrieve_provider_view(provider_root: Path, view_id: str, query: str) -> _S
             )
         )
         backing_parts.append("retriever prompt")
+    elif retriever.exists():
+        backing_parts.append("retriever prompt without filter scope")
     if not source_lines:
         return None
     return _SharedViewCache(
@@ -963,14 +965,16 @@ def _deliver_interaction_record(
         if provider_root.exists():
             _append_provider_inbox_record(provider_root, view_id, record)
             return "sent"
+        return "queued"
     if target.kind == "hub" and target.path:
         hub = _resolve_external_path(root, target.path)
         if hub.exists():
             _append_hub_interaction_record(hub, view_id, record)
             return "sent"
+        return "queued"
     if target.kind in {"package", "local_markdown"}:
         return "queued"
-    return "sent"
+    return "queued"
 
 
 def _append_provider_inbox_record(provider_root: Path, view_id: str, record: dict[str, object]) -> None:

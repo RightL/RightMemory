@@ -23,6 +23,17 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.tools.list_files("../*.md")
 
+    def test_read_tools_exclude_runtime_shared_view_content(self):
+        runtime_import = self.root / ".runtime" / "shared_views" / "imports" / "alice-auth-api"
+        runtime_import.mkdir(parents=True)
+        (runtime_import / "MEMORY.md").write_text("external shared context\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="retrieve")
+
+        with self.assertRaises(ValueError):
+            tools.read(".runtime/shared_views/imports/alice-auth-api/MEMORY.md")
+
+        self.assertNotIn(".runtime/shared_views/imports/alice-auth-api/MEMORY.md", tools.glob("**/*"))
+
     def test_read_file_truncates_large_full_reads(self):
         memory = self.root / "MEMORY.md"
         memory.write_text("\n".join(f"line {index}" for index in range(250)), encoding="utf-8")

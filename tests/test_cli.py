@@ -434,8 +434,9 @@ class JsonRequestTests(unittest.TestCase):
             records = [json.loads(line) for line in interaction_path.read_text(encoding="utf-8").splitlines()]
 
         self.assertEqual(result, 0)
-        self.assertIn("recorded shared view note", stdout.getvalue())
+        self.assertIn("queued shared view note", stdout.getvalue())
         self.assertEqual(records[0]["relationship"], "human")
+        self.assertEqual(records[0]["status"], "queued")
         self.assertEqual(records[0]["message"], "Docs are stale")
 
     def test_shared_view_note_cli_actor_after_heading_is_recorded(self):
@@ -461,8 +462,9 @@ class JsonRequestTests(unittest.TestCase):
             records = [json.loads(line) for line in interaction_path.read_text(encoding="utf-8").splitlines()]
 
         self.assertEqual(result, 0)
-        self.assertIn("recorded shared view note", stdout.getvalue())
+        self.assertIn("queued shared view note", stdout.getvalue())
         self.assertEqual(records[0]["actor"], "assistant")
+        self.assertEqual(records[0]["status"], "queued")
         self.assertEqual(records[0]["message"], "Docs are stale")
 
     def test_shared_view_define_build_and_export_cli(self):

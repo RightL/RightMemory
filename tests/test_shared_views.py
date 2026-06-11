@@ -543,9 +543,9 @@ class SharedViewInteractionTests(unittest.TestCase):
         records = [json.loads(line) for line in interaction_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["relationship"], "owned-agent")
-        self.assertEqual(records[0]["status"], "sent")
+        self.assertEqual(records[0]["status"], "queued")
         self.assertEqual(records[0]["message"], "Sync docs need a refresh")
-        self.assertIn("recorded shared view note", result)
+        self.assertIn("queued shared view note", result)
 
     def test_confirmed_human_note_is_recorded(self):
         save_connections(
@@ -565,8 +565,9 @@ class SharedViewInteractionTests(unittest.TestCase):
         interaction_path = self.root / ".runtime/shared_views/interactions/alice-auth-api.jsonl"
         records = [json.loads(line) for line in interaction_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(records[0]["relationship"], "human")
+        self.assertEqual(records[0]["status"], "queued")
         self.assertEqual(records[0]["message"], "Confirmed docs update")
-        self.assertIn("recorded shared view note", result)
+        self.assertIn("queued shared view note", result)
 
     def test_local_provider_connection_delivers_confirmed_note_to_provider_inbox(self):
         provider = self.root / "provider"
@@ -937,6 +938,38 @@ class SharedViewRetrieveTests(unittest.TestCase):
         self.assertIn("Status: fresh", result)
         self.assertIn("Backing: retriever prompt", result)
         self.assertIn("Auth API returns token_expires_at", result)
+        self.assertNotIn("Payroll API returns salary bands", result)
+
+    def test_retrieve_shared_view_does_not_scan_provider_memory_without_filter_scope(self):
+        provider = self.root / "provider"
+        consumer = self.root / "consumer"
+        provider.mkdir()
+        consumer.mkdir()
+        (provider / "MEMORY.md").write_text(
+            "# Provider\n\n"
+            "Payroll API returns salary bands.\n",
+            encoding="utf-8",
+        )
+        define_shared_view(
+            provider,
+            view_id="alice-auth-api",
+            title="Alice Auth API",
+            retriever_instructions="Answer only auth API collaboration context.",
+        )
+        save_connections(
+            consumer,
+            {
+                "alice-auth-api": SharedViewConnection(
+                    heading_id="alice-auth-api",
+                    ref="rightmemory://view/alice-auth-api",
+                    target=SharedViewTarget(kind="local", path=str(provider), view_id="alice-auth-api"),
+                )
+            },
+        )
+
+        result = retrieve_shared_view(consumer, "alice-auth-api", "salary")
+
+        self.assertIn("Status: unavailable", result)
         self.assertNotIn("Payroll API returns salary bands", result)
 
     def test_retrieve_shared_view_uses_hub_hosted_package(self):
