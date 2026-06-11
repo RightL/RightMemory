@@ -511,7 +511,16 @@ ensure_memory_initial_commit() {
   (
     cd "$MEMORY_ROOT"
     shopt -s nullglob
-    files=(MEMORY.md MEMORY_*.md shared_views.toml insight_logs/*.md)
+    files=(
+      MEMORY.md
+      MEMORY_*.md
+      shared_views.toml
+      shared_views/*/view.md
+      shared_views/*/retriever.md
+      shared_views/*/export.toml
+      shared_views/*/.gitignore
+      insight_logs/*.md
+    )
     existing_files=()
     for file in "${files[@]}"; do
       [ -e "$file" ] && existing_files+=("$file")
@@ -527,7 +536,15 @@ ensure_memory_initial_commit() {
     [ -n "$staged_memory_file" ] && staged_memory_files+=("$staged_memory_file")
   done < <(
     cd "$MEMORY_ROOT" &&
-      git diff --cached --name-only -- MEMORY.md 'MEMORY_*.md' shared_views.toml 'insight_logs/*.md'
+      git diff --cached --name-only -- \
+        MEMORY.md \
+        'MEMORY_*.md' \
+        shared_views.toml \
+        'shared_views/*/view.md' \
+        'shared_views/*/retriever.md' \
+        'shared_views/*/export.toml' \
+        'shared_views/*/.gitignore' \
+        'insight_logs/*.md'
   )
   if [ "${#staged_memory_files[@]}" -eq 0 ]; then
     echo "  [skip]    no memory files to baseline commit"
@@ -557,6 +574,12 @@ cat > "$MEMORY_ROOT/.gitignore" <<'EOF'
 !MEMORY.md
 !MEMORY_*.md
 !shared_views.toml
+!shared_views/
+!shared_views/*/
+!shared_views/*/view.md
+!shared_views/*/retriever.md
+!shared_views/*/export.toml
+!shared_views/*/.gitignore
 !insight_logs/
 !insight_logs/*.md
 EOF

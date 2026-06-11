@@ -465,6 +465,92 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(records[0]["actor"], "assistant")
         self.assertEqual(records[0]["message"], "Docs are stale")
 
+    def test_shared_view_define_build_and_export_cli(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            package = root / "package"
+            (root / "MEMORY.md").write_text(
+                "# Provider\n\nAuth API accepts signed tokens.\nPrivate payroll note.\n",
+                encoding="utf-8",
+            )
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("sys.stdout", stdout),
+            ):
+                define_result = main(
+                    [
+                        "shared-view",
+                        "define",
+                        "alice-auth-api",
+                        "--title",
+                        "Alice Auth API",
+                        "--description",
+                        "Auth API collaboration context.",
+                        "--maintainer",
+                        "Alice",
+                        "--instructions",
+                        "Answer from auth API context.",
+                        "--term",
+                        "auth",
+                    ]
+                )
+                build_result = main(["shared-view", "build", "alice-auth-api", "--context-lines", "0"])
+                export_result = main(["shared-view", "export", "alice-auth-api", "--target", str(package)])
+
+            exported = (package / "dist" / "MEMORY.md").read_text(encoding="utf-8")
+
+        self.assertEqual(define_result, 0)
+        self.assertEqual(build_result, 0)
+        self.assertEqual(export_result, 0)
+        self.assertIn("defined shared view alice-auth-api", stdout.getvalue())
+        self.assertIn("built shared view alice-auth-api", stdout.getvalue())
+        self.assertIn("exported shared view alice-auth-api", stdout.getvalue())
+        self.assertIn("Auth API accepts signed tokens.", exported)
+        self.assertNotIn("Private payroll note.", exported)
+
+    def test_shared_view_accept_invite_cli_records_package_connection(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            provider = Path(tempdir) / "provider"
+            consumer = Path(tempdir) / "consumer"
+            package = Path(tempdir) / "package"
+            provider.mkdir()
+            consumer.mkdir()
+            (provider / "MEMORY.md").write_text("# Provider\n\nAuth API accepts signed tokens.\n", encoding="utf-8")
+            (consumer / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
+
+            with patch("rightmemory.cli.default_memory_root", return_value=provider), patch("sys.stdout", io.StringIO()):
+                main(
+                    [
+                        "shared-view",
+                        "define",
+                        "alice-auth-api",
+                        "--title",
+                        "Alice Auth API",
+                        "--description",
+                        "Auth API collaboration context.",
+                        "--term",
+                        "auth",
+                    ]
+                )
+                main(["shared-view", "export", "alice-auth-api", "--target", str(package)])
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=consumer),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["shared-view", "accept-invite", str(package)])
+
+            memory = (consumer / "MEMORY.md").read_text(encoding="utf-8")
+            registry = (consumer / "shared_views.toml").read_text(encoding="utf-8")
+
+        self.assertEqual(result, 0)
+        self.assertIn("accepted shared view alice-auth-api", stdout.getvalue())
+        self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
+        self.assertIn('kind = "package"', registry)
+
     def test_profile_list_ignores_project_binding(self):
         stdout = io.StringIO()
 

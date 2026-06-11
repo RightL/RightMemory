@@ -40,7 +40,19 @@ from .profiles import (
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 from .session import MemoryWriteLock
-from .shared_views import accept_shared_view, load_connections, record_shared_view_note, retrieve_shared_view
+from .shared_views import (
+    accept_shared_view,
+    accept_shared_view_invitation,
+    build_shared_view,
+    define_shared_view,
+    export_shared_view,
+    list_shared_view_inbox,
+    list_shared_view_notes,
+    load_connections,
+    publish_shared_view,
+    record_shared_view_note,
+    retrieve_shared_view,
+)
 from .status import collect_status, format_status_dashboard
 from .sync import SyncManager
 from .watch import (
@@ -270,6 +282,29 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory shared-view")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("list")
+    define = subparsers.add_parser("define")
+    define.add_argument("view_id")
+    define.add_argument("--title", required=True)
+    define.add_argument("--description")
+    define.add_argument("--audience")
+    define.add_argument("--maintainer")
+    define.add_argument("--ref")
+    define.add_argument("--instructions")
+    define.add_argument("--source", action="append", dest="sources")
+    define.add_argument("--term", action="append", dest="terms")
+    build = subparsers.add_parser("build")
+    build.add_argument("view_id")
+    build.add_argument("--query", default="")
+    build.add_argument("--context-lines", type=int, default=1)
+    build.add_argument("--limit", type=int, default=200)
+    export = subparsers.add_parser("export")
+    export.add_argument("view_id")
+    export.add_argument("--target", required=True, type=Path)
+    export.add_argument("--replace", action="store_true")
+    publish = subparsers.add_parser("publish")
+    publish.add_argument("view_id")
+    publish.add_argument("--hub", required=True, type=Path)
+    publish.add_argument("--replace", action="store_true")
     retrieve = subparsers.add_parser("retrieve")
     retrieve.add_argument("heading_id")
     retrieve.add_argument("query", nargs=argparse.REMAINDER)
@@ -277,7 +312,12 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     note.add_argument("heading_id")
     note.add_argument("--confirm", action="store_true")
     note.add_argument("--actor", default="user")
+    note.add_argument("--task")
     note.add_argument("message", nargs="*")
+    notes = subparsers.add_parser("notes")
+    notes.add_argument("heading_id", nargs="?")
+    inbox = subparsers.add_parser("inbox")
+    inbox.add_argument("view_id", nargs="?")
     accept = subparsers.add_parser("accept")
     accept.add_argument("heading_id")
     accept.add_argument("--title", required=True)
@@ -288,6 +328,13 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     accept.add_argument("--description")
     accept.add_argument("--accepted-from")
     accept.add_argument("--target")
+    accept_invite = subparsers.add_parser("accept-invite")
+    accept_invite.add_argument("invitation", type=Path)
+    accept_invite.add_argument("--heading-id")
+    accept_invite.add_argument("--title")
+    accept_invite.add_argument("--body")
+    accept_invite.add_argument("--relationship", choices=("human", "owned-agent", "team-space", "external"))
+    accept_invite.add_argument("--no-copy-package", action="store_true")
     if argv[:1] == ["note"]:
         args = note.parse_intermixed_args(argv[1:])
         args.command = "note"
@@ -299,6 +346,39 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
             description = connection.description or "-"
             print(f"{heading_id}\t{connection.relationship}\t{maintainer}\t{description}")
         return 0
+    if args.command == "define":
+        print(
+            define_shared_view(
+                memory_root,
+                view_id=args.view_id,
+                title=args.title,
+                description=args.description,
+                audience=args.audience,
+                maintainer=args.maintainer,
+                retriever_instructions=args.instructions,
+                source_globs=args.sources,
+                filter_terms=args.terms,
+                ref=args.ref,
+            )
+        )
+        return 0
+    if args.command == "build":
+        print(
+            build_shared_view(
+                memory_root,
+                args.view_id,
+                query=args.query,
+                context_lines=args.context_lines,
+                limit=args.limit,
+            )
+        )
+        return 0
+    if args.command == "export":
+        print(export_shared_view(memory_root, args.view_id, args.target, replace=args.replace))
+        return 0
+    if args.command == "publish":
+        print(publish_shared_view(memory_root, args.view_id, args.hub, replace=args.replace))
+        return 0
     if args.command == "retrieve":
         query = " ".join(args.query).strip()
         if not query:
@@ -309,7 +389,24 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
         message = " ".join(args.message).strip()
         if not message:
             raise ValueError("shared-view note requires a message")
-        print(record_shared_view_note(memory_root, args.heading_id, message, confirmed=args.confirm, actor=args.actor))
+        print(
+            record_shared_view_note(
+                memory_root,
+                args.heading_id,
+                message,
+                confirmed=args.confirm,
+                actor=args.actor,
+                task_context=args.task,
+            )
+        )
+        return 0
+    if args.command == "notes":
+        for record in list_shared_view_notes(memory_root, args.heading_id):
+            print(json.dumps(record, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "inbox":
+        for record in list_shared_view_inbox(memory_root, args.view_id):
+            print(json.dumps(record, ensure_ascii=False, sort_keys=True))
         return 0
     if args.command == "accept":
         with MemoryWriteLock(memory_root):
@@ -325,6 +422,20 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
                     description=args.description,
                     accepted_from=args.accepted_from,
                     target_path=args.target,
+                )
+            )
+        return 0
+    if args.command == "accept-invite":
+        with MemoryWriteLock(memory_root):
+            print(
+                accept_shared_view_invitation(
+                    memory_root,
+                    args.invitation,
+                    heading_id=args.heading_id,
+                    title=args.title,
+                    body=args.body,
+                    relationship=args.relationship,
+                    copy_package=not args.no_copy_package,
                 )
             )
         return 0

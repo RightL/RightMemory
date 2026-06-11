@@ -118,7 +118,20 @@ def _fsync_directory(path: Path) -> None:
 def _ensure_memory_gitignore(memory_root: Path) -> None:
     _write_gitignore_if_missing(
         memory_root,
-        b"*\n!MEMORY.md\n!MEMORY_*.md\n!shared_views.toml\n!insight_logs/\n!insight_logs/*.md\n",
+        (
+            b"*\n"
+            b"!MEMORY.md\n"
+            b"!MEMORY_*.md\n"
+            b"!shared_views.toml\n"
+            b"!shared_views/\n"
+            b"!shared_views/*/\n"
+            b"!shared_views/*/view.md\n"
+            b"!shared_views/*/retriever.md\n"
+            b"!shared_views/*/export.toml\n"
+            b"!shared_views/*/.gitignore\n"
+            b"!insight_logs/\n"
+            b"!insight_logs/*.md\n"
+        ),
     )
 
 

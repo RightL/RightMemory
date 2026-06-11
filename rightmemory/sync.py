@@ -11,7 +11,16 @@ from .config import SyncConfig
 from .session import _ensure_runtime_gitignore, _fsync_directory
 
 
-MEMORY_SYNC_PATHS = ("MEMORY.md", "MEMORY_*.md", "shared_views.toml", "insight_logs/*.md")
+MEMORY_SYNC_PATHS = (
+    "MEMORY.md",
+    "MEMORY_*.md",
+    "shared_views.toml",
+    "shared_views/*/view.md",
+    "shared_views/*/retriever.md",
+    "shared_views/*/export.toml",
+    "shared_views/*/.gitignore",
+    "insight_logs/*.md",
+)
 GIT_TIMEOUT_SECONDS = 30
 
 

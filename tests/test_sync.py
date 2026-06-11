@@ -39,10 +39,13 @@ class SyncManagerTests(unittest.TestCase):
         self.assertEqual(result.status, "disabled")
         self.assertIn("disabled", result.message)
 
-    def test_sync_paths_include_shared_view_registry(self):
+    def test_sync_paths_include_shared_view_registry_and_provider_definitions(self):
         from rightmemory.sync import MEMORY_SYNC_PATHS
 
         self.assertIn("shared_views.toml", MEMORY_SYNC_PATHS)
+        self.assertIn("shared_views/*/view.md", MEMORY_SYNC_PATHS)
+        self.assertIn("shared_views/*/retriever.md", MEMORY_SYNC_PATHS)
+        self.assertIn("shared_views/*/export.toml", MEMORY_SYNC_PATHS)
 
     def test_preflight_rejects_memory_root_nested_in_outer_git_repo(self):
         outer_remote = self.root / "outer.git"
@@ -126,6 +129,22 @@ class SyncManagerTests(unittest.TestCase):
 
         self.assertEqual(dirty.status, "dirty")
         self.assertEqual(dirty.files, ["shared_views.toml"])
+        self.assertEqual(clean.status, "synced")
+
+    def test_preflight_reports_dirty_provider_shared_view_source_and_ignores_dist(self):
+        view_dir = self.device / "shared_views" / "alice-auth-api"
+        view_dir.mkdir(parents=True)
+        (view_dir / "view.md").write_text("# Alice Auth API\n", encoding="utf-8")
+        dist = view_dir / "dist"
+        dist.mkdir()
+        (dist / "MEMORY.md").write_text("# Generated shared surface\n", encoding="utf-8")
+
+        dirty = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        (view_dir / "view.md").unlink()
+        clean = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+        self.assertEqual(dirty.status, "dirty")
+        self.assertEqual(dirty.files, ["shared_views/alice-auth-api/view.md"])
         self.assertEqual(clean.status, "synced")
 
     def test_push_merges_remote_change_and_reports_conflict(self):

@@ -48,6 +48,9 @@ MEMORY_DETAIL_FILE_RE = re.compile(r"^MEMORY_[A-Za-z0-9_.-]+\.md$")
 MEMORY_SKILL_FILE_RE = re.compile(r"^MEMORY_SKILL_[A-Za-z0-9_.-]+\.md$")
 INSIGHT_LOG_FILE_RE = re.compile(r"^insight_logs/[A-Za-z0-9_.-]+\.md$")
 SHARED_VIEW_REGISTRY_PATH = "shared_views.toml"
+SHARED_VIEW_DEFINITION_FILE_RE = re.compile(
+    r"^shared_views/[A-Za-z0-9_.-]+/(?:view\.md|retriever\.md|export\.toml|\.gitignore)$"
+)
 GIT_REVISION_RE = re.compile(r"^[A-Za-z0-9_.^~/-]+$")
 PRUNE_SUBJECT_PREFIX = "prune:"
 ACTIVE_MEMORY_ROLES = {"dreamer", "pruner", "reviewer", "sync-reconciler", "update"}
@@ -1020,7 +1023,7 @@ class MemoryTools:
         if self.role in INSIGHT_ROLES:
             return "insight_logs/*.md"
         if self.role in SYNC_RECONCILER_ROLES:
-            return "MEMORY.md, MEMORY_*.md, shared_views.toml, or insight_logs/*.md"
+            return "MEMORY.md, MEMORY_*.md, shared_views.toml, shared_views/<id> source files, or insight_logs/*.md"
         return "MEMORY.md or MEMORY_*.md"
 
     def _is_allowed_write_path(self, relative_path: str) -> bool:
@@ -1030,6 +1033,7 @@ class MemoryTools:
             return (
                 self._is_active_memory_path(relative_path)
                 or relative_path == SHARED_VIEW_REGISTRY_PATH
+                or self._is_shared_view_definition_path(relative_path)
                 or self._is_insight_log_path(relative_path)
             )
         return self._is_active_memory_path(relative_path)
@@ -1129,6 +1133,9 @@ class MemoryTools:
 
     def _is_insight_log_path(self, relative_path: str) -> bool:
         return bool(INSIGHT_LOG_FILE_RE.fullmatch(relative_path))
+
+    def _is_shared_view_definition_path(self, relative_path: str) -> bool:
+        return bool(SHARED_VIEW_DEFINITION_FILE_RE.fullmatch(relative_path))
 
     def _is_memory_skill_file(self, path: Path) -> bool:
         relative_path = path.relative_to(self.memory_root).as_posix()
