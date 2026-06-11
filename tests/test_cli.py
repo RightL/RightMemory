@@ -258,7 +258,7 @@ class JsonRequestTests(unittest.TestCase):
                         "Alice",
                         "--description",
                         "Auth API collaboration context",
-                        "--target",
+                        "--package",
                         ".runtime/shared_views/imports/alice-auth-api",
                     ]
                 )

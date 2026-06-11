@@ -41,6 +41,7 @@ from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 from .session import MemoryWriteLock
 from .shared_views import (
+    SharedViewTarget,
     accept_shared_view,
     accept_shared_view_invitation,
     build_shared_view,
@@ -292,6 +293,7 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     define.add_argument("--instructions")
     define.add_argument("--source", action="append", dest="sources")
     define.add_argument("--term", action="append", dest="terms")
+    define.add_argument("--include-all", action="store_true")
     build = subparsers.add_parser("build")
     build.add_argument("view_id")
     build.add_argument("--query", default="")
@@ -327,7 +329,9 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     accept.add_argument("--maintainer")
     accept.add_argument("--description")
     accept.add_argument("--accepted-from")
-    accept.add_argument("--target")
+    accept.add_argument("--package")
+    accept.add_argument("--provider-root", type=Path)
+    accept.add_argument("--hub", type=Path)
     accept_invite = subparsers.add_parser("accept-invite")
     accept_invite.add_argument("invitation", type=Path)
     accept_invite.add_argument("--heading-id")
@@ -358,6 +362,7 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
                 retriever_instructions=args.instructions,
                 source_globs=args.sources,
                 filter_terms=args.terms,
+                include_all=args.include_all,
                 ref=args.ref,
             )
         )
@@ -409,6 +414,7 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
             print(json.dumps(record, ensure_ascii=False, sort_keys=True))
         return 0
     if args.command == "accept":
+        target = _shared_view_accept_target(args)
         with MemoryWriteLock(memory_root):
             print(
                 accept_shared_view(
@@ -421,7 +427,7 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
                     maintainer=args.maintainer,
                     description=args.description,
                     accepted_from=args.accepted_from,
-                    target_path=args.target,
+                    target=target,
                 )
             )
         return 0
@@ -440,6 +446,23 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
             )
         return 0
     raise ValueError(f"unknown shared-view command: {args.command}")
+
+
+def _shared_view_accept_target(args: argparse.Namespace) -> SharedViewTarget | None:
+    selected = [
+        name
+        for name in ("package", "provider_root", "hub")
+        if getattr(args, name) is not None
+    ]
+    if len(selected) > 1:
+        raise ValueError("shared-view accept target must use one of --package, --provider-root, or --hub")
+    if args.package is not None:
+        return SharedViewTarget(kind="package", path=args.package, view_id=args.heading_id)
+    if args.provider_root is not None:
+        return SharedViewTarget(kind="local", path=str(args.provider_root), view_id=args.heading_id)
+    if args.hub is not None:
+        return SharedViewTarget(kind="hub", path=str(args.hub.resolve()), view_id=args.heading_id)
+    return None
 
 
 def _is_help_request(args: list[str]) -> bool:

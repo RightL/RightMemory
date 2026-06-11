@@ -224,6 +224,32 @@ class SharedViewBuilderTests(unittest.TestCase):
         self.assertIn('view_id = "alice-auth-api"', invitation)
         self.assertIn('kind = "package"', invitation)
 
+    def test_build_shared_view_requires_explicit_scope_or_include_all(self):
+        define_shared_view(
+            self.root,
+            view_id="alice-auth-api",
+            title="Alice Auth API",
+        )
+
+        with self.assertRaises(ValueError) as caught:
+            build_shared_view(self.root, "alice-auth-api")
+
+        self.assertIn("requires at least one --term", str(caught.exception))
+
+    def test_define_shared_view_include_all_allows_broad_export(self):
+        define_shared_view(
+            self.root,
+            view_id="full-onboarding",
+            title="Full Onboarding",
+            include_all=True,
+        )
+
+        result = build_shared_view(self.root, "full-onboarding")
+
+        exported = self.root / "shared_views" / "full-onboarding" / "dist" / "MEMORY.md"
+        self.assertIn("built shared view full-onboarding", result)
+        self.assertIn("Private payroll note should stay internal.", exported.read_text(encoding="utf-8"))
+
     def test_export_shared_view_rebuilds_stale_dist(self):
         define_shared_view(
             self.root,
@@ -241,6 +267,40 @@ class SharedViewBuilderTests(unittest.TestCase):
         exported = (target / "dist" / "MEMORY.md").read_text(encoding="utf-8")
         self.assertIn("Auth API accepts signed tokens.", exported)
         self.assertNotIn("stale generated output", exported)
+
+    def test_export_replace_refuses_non_package_directory(self):
+        define_shared_view(
+            self.root,
+            view_id="alice-auth-api",
+            title="Alice Auth API",
+            filter_terms=["auth"],
+        )
+        target = self.root / "not-a-package"
+        target.mkdir()
+        (target / "notes.txt").write_text("real work\n", encoding="utf-8")
+
+        with self.assertRaises(ValueError) as caught:
+            export_shared_view(self.root, "alice-auth-api", target, replace=True)
+
+        self.assertIn("requires an existing shared-view package", str(caught.exception))
+        self.assertEqual((target / "notes.txt").read_text(encoding="utf-8"), "real work\n")
+
+    def test_export_replace_refreshes_existing_package(self):
+        define_shared_view(
+            self.root,
+            view_id="alice-auth-api",
+            title="Alice Auth API",
+            filter_terms=["auth"],
+        )
+        target = self.root / "exported-auth-view"
+        export_shared_view(self.root, "alice-auth-api", target)
+        (target / "dist" / "MEMORY.md").write_text("stale package\n", encoding="utf-8")
+
+        export_shared_view(self.root, "alice-auth-api", target, replace=True)
+
+        exported = (target / "dist" / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("Auth API accepts signed tokens.", exported)
+        self.assertNotIn("stale package", exported)
 
     def test_publish_shared_view_writes_minimal_hub_registry(self):
         define_shared_view(
@@ -260,7 +320,9 @@ class SharedViewBuilderTests(unittest.TestCase):
         self.assertIn('[views."alice-auth-api"]', registry)
         self.assertIn('package_path = "views/alice-auth-api"', registry)
         self.assertTrue((hub / "views" / "alice-auth-api" / "dist" / "MEMORY.md").exists())
-        self.assertIn('kind = "hub"', (hub / "invitations" / "alice-auth-api.toml").read_text(encoding="utf-8"))
+        invitation = (hub / "invitations" / "alice-auth-api.toml").read_text(encoding="utf-8")
+        self.assertIn('kind = "hub"', invitation)
+        self.assertIn(f'path = "{hub.resolve()}"', invitation)
 
 
 class SharedViewAcceptTests(unittest.TestCase):
@@ -499,6 +561,31 @@ class SharedViewAcceptTests(unittest.TestCase):
         self.assertEqual(connections["alice-auth-api"].target.kind, "package")
         self.assertEqual(connections["alice-auth-api"].target.view_id, "alice-auth-api")
         self.assertTrue((imported / "rightmemory-shared-view.toml").exists())
+
+    def test_reaccept_package_invitation_preserves_existing_import_when_copy_fails(self):
+        provider = self.root / "provider"
+        consumer = self.root / "consumer"
+        provider.mkdir()
+        consumer.mkdir()
+        (provider / "MEMORY.md").write_text("# Provider\n\nAuth API accepts signed tokens.\n", encoding="utf-8")
+        (consumer / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
+        define_shared_view(
+            provider,
+            view_id="alice-auth-api",
+            title="Alice Auth API",
+            filter_terms=["auth"],
+        )
+        package = self.root / "package"
+        export_shared_view(provider, "alice-auth-api", package)
+        accept_shared_view_invitation(consumer, package)
+        imported_memory = consumer / ".runtime" / "shared_views" / "imports" / "alice-auth-api" / "dist" / "MEMORY.md"
+        imported_memory.write_text("existing imported package\n", encoding="utf-8")
+
+        with patch("rightmemory.shared_views.shutil.copytree", side_effect=PermissionError("copy failed")):
+            with self.assertRaises(PermissionError):
+                accept_shared_view_invitation(consumer, package)
+
+        self.assertEqual(imported_memory.read_text(encoding="utf-8"), "existing imported package\n")
 
 
 class SharedViewInteractionTests(unittest.TestCase):

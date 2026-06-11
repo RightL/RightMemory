@@ -77,6 +77,7 @@ class SharedViewDefinition:
     maintainer: str | None = None
     source_globs: tuple[str, ...] = DEFAULT_SOURCE_GLOBS
     filter_terms: tuple[str, ...] = ()
+    include_all: bool = False
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,7 @@ def define_shared_view(
     retriever_instructions: str | None = None,
     source_globs: list[str] | tuple[str, ...] | None = None,
     filter_terms: list[str] | tuple[str, ...] | None = None,
+    include_all: bool = False,
     ref: str | None = None,
 ) -> str:
     """Create or update provider-owned shared-view source files."""
@@ -127,6 +129,7 @@ def define_shared_view(
         maintainer=_optional_string(maintainer),
         source_globs=_normalize_source_globs(source_globs),
         filter_terms=tuple(_query_terms(" ".join(filter_terms or ()))) if filter_terms else (),
+        include_all=bool(include_all),
     )
     _required_plain_string(definition.ref, "shared view ref")
 
@@ -160,6 +163,8 @@ def build_shared_view(
     terms = list(definition.filter_terms)
     if query:
         terms.extend(_query_terms(query))
+    if not terms and not definition.include_all:
+        raise ValueError("shared view build requires at least one --term, --query, or explicit include_all")
     source_lines = _filtered_provider_source_lines(root, definition, terms, context_lines, limit)
     rendered = _render_filtered_memory(definition, source_lines)
     dist = _provider_view_dir(root, definition.view_id) / "dist"
@@ -186,16 +191,17 @@ def export_shared_view(
     build_shared_view(root, definition.view_id)
 
     target = Path(target_path).expanduser()
-    _prepare_output_directory(target, replace=replace)
-    _copy_if_exists(view_dir / "view.md", target / "view.md")
-    _copy_if_exists(view_dir / "retriever.md", target / "retriever.md")
-    _copy_if_exists(view_dir / VIEW_METADATA_FILE, target / VIEW_METADATA_FILE)
+    temp_target = _prepare_export_output_directory(root, target, replace=replace)
+    _copy_if_exists(view_dir / "view.md", temp_target / "view.md")
+    _copy_if_exists(view_dir / "retriever.md", temp_target / "retriever.md")
+    _copy_if_exists(view_dir / VIEW_METADATA_FILE, temp_target / VIEW_METADATA_FILE)
     if (view_dir / "dist").is_dir():
-        shutil.copytree(view_dir / "dist", target / "dist", dirs_exist_ok=True)
+        shutil.copytree(view_dir / "dist", temp_target / "dist", dirs_exist_ok=True)
     _atomic_write_text(
-        target / INVITATION_FILE,
+        temp_target / INVITATION_FILE,
         _render_invitation(definition, transport_kind="package", transport_path="."),
     )
+    _finish_export_output_directory(temp_target, target)
     return f"exported shared view {definition.view_id} to {target}"
 
 
@@ -209,7 +215,7 @@ def publish_shared_view(
     """Publish a shared view package into a small local hub directory."""
     root = Path(memory_root).expanduser()
     definition = load_shared_view_definition(root, view_id)
-    hub = Path(hub_path).expanduser()
+    hub = Path(hub_path).expanduser().resolve()
     package_path = hub / "views" / definition.view_id
     export_shared_view(root, definition.view_id, package_path, replace=replace)
     registry = _load_hub_registry(hub)
@@ -550,6 +556,8 @@ def _render_view_markdown(definition: SharedViewDefinition) -> str:
     )
     if definition.filter_terms:
         lines.extend(["", "Filter terms:", *[f"- `{term}`" for term in definition.filter_terms]])
+    if definition.include_all:
+        lines.extend(["", "Scope:", "", "This view intentionally includes all configured source lines."])
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -569,6 +577,8 @@ def _write_definition_metadata(path: Path, definition: SharedViewDefinition) -> 
     lines.append(f"source_globs = {_toml_array(definition.source_globs)}")
     if definition.filter_terms:
         lines.append(f"filter_terms = {_toml_array(definition.filter_terms)}")
+    if definition.include_all:
+        lines.append("include_all = true")
     _atomic_write_text(path, "\n".join(lines) + "\n")
 
 
@@ -587,6 +597,7 @@ def _load_definition_metadata(path: Path) -> SharedViewDefinition:
         maintainer=_optional_string(data.get("maintainer")),
         source_globs=_normalize_source_globs(data.get("source_globs")),
         filter_terms=_normalize_terms(data.get("filter_terms")),
+        include_all=bool(data.get("include_all", False)),
     )
 
 
@@ -715,15 +726,61 @@ def _render_view_manifest(definition: SharedViewDefinition, rendered_memory: str
     return "\n".join(lines) + "\n"
 
 
-def _prepare_output_directory(path: Path, *, replace: bool) -> None:
-    if path.exists():
-        if not path.is_dir():
-            raise ValueError(f"shared view output target is not a directory: {path}")
-        if any(path.iterdir()):
-            if not replace:
-                raise ValueError(f"shared view output target is not empty: {path}")
-            shutil.rmtree(path)
-    path.mkdir(parents=True, exist_ok=True)
+def _prepare_export_output_directory(memory_root: Path, target: Path, *, replace: bool) -> Path:
+    target = target.resolve()
+    if target.exists() and not target.is_dir():
+        raise ValueError(f"shared view output target is not a directory: {target}")
+    if target.exists() and any(target.iterdir()):
+        if not replace:
+            raise ValueError(f"shared view output target is not empty: {target}")
+        _validate_safe_export_replace_target(memory_root, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_target = target.parent / f".{target.name}.tmp-{os.getpid()}"
+    if temp_target.exists():
+        shutil.rmtree(temp_target)
+    temp_target.mkdir()
+    return temp_target
+
+
+def _finish_export_output_directory(temp_target: Path, target: Path) -> None:
+    target = target.resolve()
+    if target.exists() and any(target.iterdir()):
+        backup = target.parent / f".{target.name}.old-{os.getpid()}"
+        if backup.exists():
+            shutil.rmtree(backup)
+        target.rename(backup)
+        try:
+            temp_target.rename(target)
+        except BaseException:
+            if not target.exists() and backup.exists():
+                backup.rename(target)
+            raise
+        shutil.rmtree(backup)
+        _fsync_directory(target.parent)
+        return
+    if target.exists():
+        target.rmdir()
+    temp_target.rename(target)
+    _fsync_directory(target.parent)
+
+
+def _validate_safe_export_replace_target(memory_root: Path, target: Path) -> None:
+    resolved = target.resolve()
+    dangerous = {memory_root.resolve(), Path.cwd().resolve(), Path.home().resolve()}
+    if resolved in dangerous or (resolved / ".git").exists():
+        raise ValueError(f"refusing to replace dangerous shared view export target: {target}")
+    if not _looks_like_shared_view_package(resolved):
+        raise ValueError(
+            "shared view export --replace requires an existing shared-view package target"
+        )
+
+
+def _looks_like_shared_view_package(path: Path) -> bool:
+    return (
+        (path / INVITATION_FILE).is_file()
+        and (path / "view.md").is_file()
+        and (path / VIEW_METADATA_FILE).is_file()
+    )
 
 
 def _copy_if_exists(source: Path, destination: Path) -> None:
@@ -818,10 +875,7 @@ def _target_from_invitation(
         package_dir = invitation_file.parent if path in (None, ".") else (invitation_file.parent / path)
         package_dir = package_dir.resolve()
         if copy_package:
-            target_dir = root / RUNTIME_DIR / "imports" / heading_id
-            if target_dir.exists():
-                shutil.rmtree(target_dir)
-            shutil.copytree(package_dir, target_dir)
+            target_dir = _copy_package_import_atomically(root, heading_id, package_dir)
             return SharedViewTarget(kind="package", path=target_dir.relative_to(root).as_posix(), view_id=transport_view_id)
         return SharedViewTarget(kind="package", path=str(package_dir), view_id=transport_view_id)
     if kind == "local":
@@ -833,6 +887,32 @@ def _target_from_invitation(
             raise ValueError("hub shared-view invitations require transport.path")
         return SharedViewTarget(kind="hub", path=path, view_id=transport_view_id)
     raise ValueError(f"unknown shared-view invitation transport `{kind}`")
+
+
+def _copy_package_import_atomically(root: Path, heading_id: str, package_dir: Path) -> Path:
+    if not _looks_like_shared_view_package(package_dir):
+        raise ValueError(f"shared-view package is missing required files: {package_dir}")
+    imports_dir = root / RUNTIME_DIR / "imports"
+    imports_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = imports_dir / heading_id
+    temp_dir = imports_dir / f".{heading_id}.tmp-{os.getpid()}"
+    backup_dir = imports_dir / f".{heading_id}.old-{os.getpid()}"
+    for stale in (temp_dir, backup_dir):
+        if stale.exists():
+            shutil.rmtree(stale)
+    shutil.copytree(package_dir, temp_dir)
+    try:
+        if target_dir.exists():
+            target_dir.rename(backup_dir)
+        temp_dir.rename(target_dir)
+    except BaseException:
+        if not target_dir.exists() and backup_dir.exists():
+            backup_dir.rename(target_dir)
+        raise
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+    _fsync_directory(imports_dir)
+    return target_dir
 
 
 def _default_invitation_body(invitation: dict[str, object]) -> str:
