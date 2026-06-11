@@ -233,7 +233,7 @@ rightmemory shared-view inbox alice-auth-api
 
 For a small local team hub, publish the provider view with `rightmemory shared-view publish alice-auth-api --hub <hub-dir>` and share the generated invitation from `<hub-dir>/invitations/`. Hub interactions are recorded under the hub directory; local-provider interactions are delivered to the provider root's `.runtime/shared_views/inbox/`.
 
-The builder requires explicit scope before publishing filtered Markdown: use one or more `--term` values, a build-time `--query`, or `--include-all` when the view is intentionally broad. For manual connections, prefer `accept-invite`; when wiring an existing reachable target yourself, use `rightmemory shared-view accept <heading-id> --package <package-dir>`, `--provider-root <root>`, or `--hub <hub-dir>` so the resolver behavior is clear.
+The builder requires explicit scope before publishing filtered Markdown: use one or more `--term` values, pass `--query` to `build`, `export`, or `publish`, or use `--include-all` when the view is intentionally broad. For manual connections, prefer `accept-invite`; when wiring an existing reachable target yourself, use `rightmemory shared-view accept <heading-id> --package <package-dir>`, `--provider-root <root>`, or `--hub <hub-dir>` so the resolver behavior is clear.
 
 ### Edges
 

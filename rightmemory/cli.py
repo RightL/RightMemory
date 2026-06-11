@@ -302,10 +302,12 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     export = subparsers.add_parser("export")
     export.add_argument("view_id")
     export.add_argument("--target", required=True, type=Path)
+    export.add_argument("--query", default="")
     export.add_argument("--replace", action="store_true")
     publish = subparsers.add_parser("publish")
     publish.add_argument("view_id")
     publish.add_argument("--hub", required=True, type=Path)
+    publish.add_argument("--query", default="")
     publish.add_argument("--replace", action="store_true")
     retrieve = subparsers.add_parser("retrieve")
     retrieve.add_argument("heading_id")
@@ -379,10 +381,10 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
         )
         return 0
     if args.command == "export":
-        print(export_shared_view(memory_root, args.view_id, args.target, replace=args.replace))
+        print(export_shared_view(memory_root, args.view_id, args.target, replace=args.replace, query=args.query))
         return 0
     if args.command == "publish":
-        print(publish_shared_view(memory_root, args.view_id, args.hub, replace=args.replace))
+        print(publish_shared_view(memory_root, args.view_id, args.hub, replace=args.replace, query=args.query))
         return 0
     if args.command == "retrieve":
         query = " ".join(args.query).strip()

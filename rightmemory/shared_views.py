@@ -167,13 +167,15 @@ def build_shared_view(
         raise ValueError("shared view build requires at least one --term, --query, or explicit include_all")
     source_lines = _filtered_provider_source_lines(root, definition, terms, context_lines, limit)
     rendered = _render_filtered_memory(definition, source_lines)
-    dist = _provider_view_dir(root, definition.view_id) / "dist"
-    dist.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(dist / "MEMORY.md", rendered)
+    view_dir = _provider_view_dir(root, definition.view_id)
+    dist = view_dir / "dist"
+    temp_dist = _prepare_temp_directory(view_dir, "dist")
+    _atomic_write_text(temp_dist / "MEMORY.md", rendered)
     _atomic_write_text(
-        dist / VIEW_MANIFEST_FILE,
+        temp_dist / VIEW_MANIFEST_FILE,
         _render_view_manifest(definition, rendered, len(source_lines)),
     )
+    _atomic_replace_directory(temp_dist, dist)
     return f"built shared view {definition.view_id}: {len(source_lines)} exported lines"
 
 
@@ -183,12 +185,13 @@ def export_shared_view(
     target_path: Path,
     *,
     replace: bool = False,
+    query: str | None = None,
 ) -> str:
     """Export a provider shared view as a shareable package with an invitation."""
     root = Path(memory_root).expanduser()
     definition = load_shared_view_definition(root, view_id)
     view_dir = _provider_view_dir(root, definition.view_id)
-    build_shared_view(root, definition.view_id)
+    build_shared_view(root, definition.view_id, query=query)
 
     target = Path(target_path).expanduser()
     temp_target = _prepare_export_output_directory(root, target, replace=replace)
@@ -211,13 +214,14 @@ def publish_shared_view(
     hub_path: Path,
     *,
     replace: bool = False,
+    query: str | None = None,
 ) -> str:
     """Publish a shared view package into a small local hub directory."""
     root = Path(memory_root).expanduser()
     definition = load_shared_view_definition(root, view_id)
     hub = Path(hub_path).expanduser().resolve()
     package_path = hub / "views" / definition.view_id
-    export_shared_view(root, definition.view_id, package_path, replace=replace)
+    export_shared_view(root, definition.view_id, package_path, replace=replace, query=query)
     registry = _load_hub_registry(hub)
     registry[definition.view_id] = {
         "ref": definition.ref,
@@ -742,6 +746,32 @@ def _prepare_export_output_directory(memory_root: Path, target: Path, *, replace
     return temp_target
 
 
+def _prepare_temp_directory(parent: Path, name: str) -> Path:
+    parent.mkdir(parents=True, exist_ok=True)
+    temp_dir = parent / f".{name}.tmp-{os.getpid()}"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+    temp_dir.mkdir()
+    return temp_dir
+
+
+def _atomic_replace_directory(temp_dir: Path, target: Path) -> None:
+    backup = target.parent / f".{target.name}.old-{os.getpid()}"
+    if backup.exists():
+        shutil.rmtree(backup)
+    if target.exists():
+        target.rename(backup)
+    try:
+        temp_dir.rename(target)
+    except BaseException:
+        if not target.exists() and backup.exists():
+            backup.rename(target)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup)
+    _fsync_directory(target.parent)
+
+
 def _finish_export_output_directory(temp_target: Path, target: Path) -> None:
     target = target.resolve()
     if target.exists() and any(target.iterdir()):
@@ -900,7 +930,7 @@ def _copy_package_import_atomically(root: Path, heading_id: str, package_dir: Pa
     for stale in (temp_dir, backup_dir):
         if stale.exists():
             shutil.rmtree(stale)
-    shutil.copytree(package_dir, temp_dir)
+    shutil.copytree(package_dir, temp_dir, symlinks=True)
     try:
         if target_dir.exists():
             target_dir.rename(backup_dir)
@@ -1118,7 +1148,7 @@ def _ensure_memory_heading(root: Path, *, heading_id: str, title: str, body: str
         memory.write_text("# Shared Views\n", encoding="utf-8")
     text = memory.read_text(encoding="utf-8")
     title_text = _normalize_heading_title(title, heading_id)
-    body_text = body.strip()
+    body_text = _normalize_heading_body(body)
     section = "# Shared Views"
     entry = f"### {title_text} {{M#{heading_id}}}\n"
     if body_text:
@@ -1353,6 +1383,19 @@ def _normalize_heading_title(title: str, heading_id: str) -> str:
     title_text = TITLE_MARKER_RE.sub(" ", title)
     title_text = " ".join(title_text.split())
     return title_text or heading_id
+
+
+def _normalize_heading_body(body: str) -> str:
+    cleaned_lines: list[str] = []
+    for line in body.splitlines():
+        line = TITLE_MARKER_RE.sub(" ", line)
+        line = re.sub(r"^\s{0,3}#{1,6}\s+", "", line)
+        line = re.sub(r"^\s*-\s+`[^`]+`\s*", "", line)
+        line = re.sub(r"\s*→\s*\[[^\]]*\]\s*$", "", line)
+        line = line.strip()
+        if line:
+            cleaned_lines.append(line)
+    return " ".join(" ".join(cleaned_lines).split())
 
 
 def _load_target(root: Path, heading_id: str, raw_target: object) -> SharedViewTarget:

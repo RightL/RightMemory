@@ -280,6 +280,7 @@ class SharedViewBuilderTests(unittest.TestCase):
         view_dir = self.root / "shared_views" / "alice-auth-api"
         (view_dir / "dist").mkdir()
         (view_dir / "dist" / "MEMORY.md").write_text("stale generated output\n", encoding="utf-8")
+        (view_dir / "dist" / "MEMORY_EXTRA.md").write_text("stale extra output\n", encoding="utf-8")
         target = self.root / "exported-auth-view"
 
         export_shared_view(self.root, "alice-auth-api", target)
@@ -287,6 +288,21 @@ class SharedViewBuilderTests(unittest.TestCase):
         exported = (target / "dist" / "MEMORY.md").read_text(encoding="utf-8")
         self.assertIn("Auth API accepts signed tokens.", exported)
         self.assertNotIn("stale generated output", exported)
+        self.assertFalse((target / "dist" / "MEMORY_EXTRA.md").exists())
+
+    def test_export_shared_view_accepts_query_scope_without_definition_terms(self):
+        define_shared_view(
+            self.root,
+            view_id="alice-auth-api",
+            title="Alice Auth API",
+        )
+        target = self.root / "exported-auth-view"
+
+        export_shared_view(self.root, "alice-auth-api", target, query="token")
+
+        exported = (target / "dist" / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("Token rotation happens monthly.", exported)
+        self.assertNotIn("Private payroll note", exported)
 
     def test_export_replace_refuses_non_package_directory(self):
         define_shared_view(
@@ -582,6 +598,31 @@ class SharedViewAcceptTests(unittest.TestCase):
         self.assertEqual(connections["alice-auth-api"].target.view_id, "alice-auth-api")
         self.assertTrue((imported / "rightmemory-shared-view.toml").exists())
 
+    def test_accept_shared_view_invitation_sanitizes_body_as_plain_prose(self):
+        provider = self.root / "provider"
+        consumer = self.root / "consumer"
+        provider.mkdir()
+        consumer.mkdir()
+        (provider / "MEMORY.md").write_text("# Provider\n\nAuth API accepts signed tokens.\n", encoding="utf-8")
+        (consumer / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
+        define_shared_view(
+            provider,
+            view_id="alice-auth-api",
+            title="Alice Auth API",
+            description="### Injected {#bad}\n- `bad-node` do not create me. → []",
+            filter_terms=["auth"],
+        )
+        package = self.root / "package"
+        export_shared_view(provider, "alice-auth-api", package)
+
+        accept_shared_view_invitation(consumer, package)
+
+        memory = (consumer / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertNotIn("### Injected", memory)
+        self.assertNotIn("{#bad}", memory)
+        self.assertNotIn("- `bad-node`", memory)
+        self.assertIn("Injected do not create me.", memory)
+
     def test_reaccept_package_invitation_preserves_existing_import_when_copy_fails(self):
         provider = self.root / "provider"
         consumer = self.root / "consumer"
@@ -606,6 +647,51 @@ class SharedViewAcceptTests(unittest.TestCase):
                 accept_shared_view_invitation(consumer, package)
 
         self.assertEqual(imported_memory.read_text(encoding="utf-8"), "existing imported package\n")
+
+    def test_accept_package_invitation_preserves_symlinked_markdown_for_retrieval_skip(self):
+        consumer = self.root / "consumer"
+        consumer.mkdir()
+        (consumer / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
+        package = self.root / "package"
+        (package / "dist").mkdir(parents=True)
+        (package / "view.md").write_text("# Alice Auth API\n", encoding="utf-8")
+        (package / "export.toml").write_text(
+            """
+            version = 1
+            view_id = "alice-auth-api"
+            ref = "rightmemory://view/alice-auth-api"
+            title = "Alice Auth API"
+            """,
+            encoding="utf-8",
+        )
+        (package / "rightmemory-shared-view.toml").write_text(
+            """
+            version = 1
+            view_id = "alice-auth-api"
+            ref = "rightmemory://view/alice-auth-api"
+            title = "Alice Auth API"
+
+            [transport]
+            kind = "package"
+            path = "."
+            view_id = "alice-auth-api"
+            """,
+            encoding="utf-8",
+        )
+        outside = self.root / "outside.md"
+        outside.write_text("Outside secret should not be imported.\n", encoding="utf-8")
+        try:
+            (package / "dist" / "MEMORY.md").symlink_to(outside)
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+
+        accept_shared_view_invitation(consumer, package)
+        result = retrieve_shared_view(consumer, "alice-auth-api", "outside secret")
+
+        imported = consumer / ".runtime" / "shared_views" / "imports" / "alice-auth-api" / "dist" / "MEMORY.md"
+        self.assertTrue(imported.is_symlink())
+        self.assertIn("Status: fresh", result)
+        self.assertNotIn("Outside secret should not be imported.", result)
 
 
 class SharedViewInteractionTests(unittest.TestCase):
