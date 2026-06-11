@@ -129,7 +129,7 @@ def build_shared_view(
     view_id: str,
     *,
     query: str | None = None,
-    context_lines: int = 1,
+    context_lines: int = 0,
     limit: int = 200,
 ) -> str:
     """Materialize a filtered Markdown preview/export surface for a provider view."""

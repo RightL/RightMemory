@@ -169,7 +169,7 @@ class SharedViewBuilderTests(unittest.TestCase):
             retriever_instructions="Answer with API contract facts and omit unrelated private notes.",
             filter_terms=["auth", "token"],
         )
-        build_result = build_shared_view(self.root, "alice-auth-api", context_lines=0)
+        build_result = build_shared_view(self.root, "alice-auth-api")
 
         view_dir = self.root / "shared_views" / "alice-auth-api"
         exported = (view_dir / "dist" / "MEMORY.md").read_text(encoding="utf-8")

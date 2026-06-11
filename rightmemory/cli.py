@@ -295,7 +295,7 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     build = subparsers.add_parser("build")
     build.add_argument("view_id")
     build.add_argument("--query", default="")
-    build.add_argument("--context-lines", type=int, default=1)
+    build.add_argument("--context-lines", type=int, default=0)
     build.add_argument("--limit", type=int, default=200)
     export = subparsers.add_parser("export")
     export.add_argument("view_id")
