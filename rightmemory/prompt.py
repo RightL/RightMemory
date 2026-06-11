@@ -30,6 +30,8 @@ Work in the configured memory root. The configured memory root is {memory_root}.
 Memory store:
 - MEMORY.md
 - MEMORY_*.md
+- shared_views.toml
+- shared_views/<view-id>/view.md, retriever.md, export.toml
 - insight_logs/
 
 Follow the canonical role instructions below. Use the embedded schema as the schema source of truth.
@@ -78,6 +80,8 @@ Memory source of truth:
 - The root file is MEMORY.md.
 - Optional detail files are named MEMORY_<slug>.md.
 - Insight logs are stored under insight_logs/.
+- Shared-view resolver metadata is stored in shared_views.toml.
+- Provider-owned shared-view source files live under shared_views/<view-id>/; dist/ output there is generated preview or publishing output, not active memory.
 - MEMORY.md is normal memory, not a routing-only index.
 
 RightMemory schema:
@@ -230,7 +234,8 @@ def _tool_guidance(role: str) -> str:
     if role == "sync-reconciler":
         guidance += (
             "\n- Commit and edit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `shared_views.toml`, "
-            "and `insight_logs/*.md` for sync repair; keep unrelated untracked files out of repair commits "
+            "`shared_views/<view-id>/view.md`, `shared_views/<view-id>/retriever.md`, "
+            "`shared_views/<view-id>/export.toml`, and `insight_logs/*.md` for sync repair; keep unrelated untracked files out of repair commits "
             "unless the caller explicitly asks about them.\n"
             "- `git_discard(paths)` is destructive. Use it for invalid, partial, or unsafe memory-owned "
             "changes after inspecting the diff."

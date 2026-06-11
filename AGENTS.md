@@ -15,7 +15,7 @@
 - `uv` is available on PATH. Use `uv --version` if you need to check it before running the installer.
 - Useful review commands are `rightmemory review scan --once`, `rightmemory review watch`, and `rightmemory review normalize --source <codex|claude> --path <file>`.
 - Use `rightmemory prune` to run generation-based active memory pruning, and `rightmemory history --session <id> <query>` for explicit retrieval from pruned memory.
-- Use `rightmemory shared-view list|accept|retrieve|note` when debugging shared-view connections.
+- Use `rightmemory shared-view list|define|build|export|publish|accept|accept-invite|retrieve|note|notes|inbox` when debugging shared-view connections, provider views, exported packages, local hubs, or interaction records.
 - Use `rightmemory watch start|status|stop|restart` to manage background review, dreamer, insight, pruner, and sync watchers. Use `rightmemory dreamer watch`, `rightmemory insight watch`, or `rightmemory prune watch` directly when debugging lower-level loops.
 - Use `rightmemory doctor agent-cli` after configuring cli-agent mode to check provider commands, role config, and basic read/write probes.
 - Semantic upgrade notes are Markdown files under `rightmemory/semantic_upgrades/`; validate them with `python -m unittest discover -s tests -p 'test_semantic_upgrades.py'`.
@@ -27,13 +27,13 @@
 - Keep it concise enough to stay useful in Codex project instructions. Prefer scoped nested `AGENTS.md` files if a subdirectory needs special rules.
 
 ## Memory Runtime Rules
-- A memory root contains `MEMORY.md`, optional sibling `MEMORY_*.md` detail files, `shared_views.toml`, `insight_logs/`, `rightmemory.toml`, and `.runtime/`.
+- A memory root contains `MEMORY.md`, optional sibling `MEMORY_*.md` detail files, `shared_views.toml`, optional provider-owned `shared_views/<view-id>/` source files, `insight_logs/`, `rightmemory.toml`, and `.runtime/`.
 - Named profiles are registered in `<default-memory-root>/profiles.toml`. `rightmemory profile create <name>` defaults new roots to a sibling profile area such as `~/.rightmemory-profiles/<name>` for the normal default root.
 - Runtime commands can select a profile with `--profile <name>`, or by a user-managed `.rightmemory-profile` file in the project tree. Tracking that file is a user/project choice.
 - Profile roots are ordinary memory roots with separate `MEMORY.md`, `rightmemory.toml`, `.runtime/`, Git history, watcher state, async queues, sessions, and insight logs.
-- The installer creates a memory-root `.gitignore` allowlist so git status normally shows `MEMORY.md`, `MEMORY_*.md`, `shared_views.toml`, and `insight_logs/*.md`.
+- The installer creates a memory-root `.gitignore` allowlist so git status normally shows `MEMORY.md`, `MEMORY_*.md`, `shared_views.toml`, provider view source files under `shared_views/<view-id>/`, and `insight_logs/*.md`.
 - Runtime/session/review state belongs under `.runtime/` and should not be committed.
-- Shared view connections use `M#` headings in memory prose and `shared_views.toml` for resolver metadata; cache and interaction records live under `.runtime/shared_views/` and should not be committed.
+- Shared view connections use `M#` headings in memory prose and `shared_views.toml` for resolver metadata. Provider view source files live under `shared_views/<view-id>/`; generated `dist/`, cache, imports, inboxes, and interaction records live under generated or runtime locations and should not be committed unless the user intentionally publishes them elsewhere.
 - Watcher locks, install refresh stamps, dreamer and insight trigger state, isolated temporary state, and isolated worktrees belong under `.runtime/`.
 - Semantic upgrade absorption state belongs under `.runtime/semantic-upgrades.json`. Fresh installs baseline current semantic upgrade notes because the seeded memory already matches the current schema. Existing memory roots may report pending semantic upgrade notes; dreamer is responsible for applying them during consolidation.
 - Reviewer scans process one time-adjacent batch of eligible provider sessions per bounded scan. `scan --once` may review a partial batch; `watch` waits for a full `[review].batch_size` batch. Review state remains session-level: once a provider session has been reviewed, later changes or resumed turns with the same source/session id are skipped unless the review state is cleared.
@@ -43,7 +43,7 @@
 - Dreamer watch reads `.runtime/dreamer/trigger-state.json` and runs when accumulated points reach `[dreamer.watch].trigger_points`. Defaults are trigger `50`, update candidate `1.0`, reviewed provider session `1.5`, and check interval `3000` seconds. `rightmemory dreamer watch --interval <seconds>` changes the trigger-check cadence for that process.
 - Insight watch reads `.runtime/insight/trigger-state.json` and runs when accumulated points reach `[insight.watch].trigger_points`. Defaults are trigger `150`, update candidate `1.0`, reviewed provider session `1.5`, and check interval `3000` seconds. `rightmemory insight watch --interval <seconds>` changes the trigger-check cadence for that process.
 - Automatic `update`, `reviewer`, `dreamer`, `insight`, and `pruner` session turns that operate on the main state root run in isolated `.runtime/worktrees/` checkouts on `rightmemory-isolated-<role>-<uuid>` branches. The role commits normally; runtime validates and lands successful role-owned commits back to the main memory repo, then promotes temporary session/provider state. CLI-agent isolated turns use a fresh provider session for speculative work and promote the new provider record after success.
-- Dirty main memory files block automatic semantic writes, but runtime gives `sync-reconciler` one bounded chance to repair local dirty state before failing the automatic write. Runtime commits for memory-editing roles are limited to `MEMORY.md` and `MEMORY_*.md`; Insight commits are limited to `insight_logs/*.md`; active memory commits must keep `MEMORY.md` as a regular file. Failed isolated work is discarded and retried from the original source state.
+- Dirty sync-owned memory files block automatic semantic writes, but runtime gives `sync-reconciler` one bounded chance to repair local dirty state before failing the automatic write. Active memory role commits are limited to `MEMORY.md` and `MEMORY_*.md`; sync repair may also cover `shared_views.toml`, provider view source files, and `insight_logs/*.md`. Active memory commits keep `MEMORY.md` as a regular file. Failed isolated work is discarded and retried from the original source state.
 - Stale isolated cleanup is role-scoped for review/dreamer/insight/pruner watcher startup and skips sync. Cleanup removes matching temporary branches and worktrees, not dirty files in the main memory repo.
 
 ## Upgrade Safety
@@ -56,7 +56,7 @@
 - Keep changes scoped. Do not revert or clean up user changes unless explicitly asked.
 - Ignore unrelated untracked files such as `.DS_Store` and `tmp/`.
 - When committing code changes, stage only intended repo files.
-- Runtime memory commits for memory-editing roles are limited to `MEMORY.md` and `MEMORY_*.md`; Insight commits are limited to `insight_logs/*.md`. The tool layer enforces this, but prompts should stay aligned.
+- Runtime memory commits for active memory-editing roles are limited to `MEMORY.md` and `MEMORY_*.md`; sync repair may also commit `shared_views.toml`, provider view source files, and `insight_logs/*.md`. The tool layer enforces this, but prompts should stay aligned.
 - If a change touches prompt behavior, config shape, transcript review state, or git/memory safety, add or update focused tests.
 - Avoid tests that pin role prompt prose by exact sentence or wording. Prompt tests should cover assembly boundaries and durable invariants, such as the right role/schema being included, placeholders not leaking, and standalone-only tool names not appearing in cli-agent prompts.
 

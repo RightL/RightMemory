@@ -2681,6 +2681,7 @@ class PromptTests(unittest.TestCase):
 
         self.assertIn("Commit and edit tools are scoped", prompt)
         self.assertIn("shared_views.toml", prompt)
+        self.assertIn("shared_views/<view-id>/view.md", prompt)
         self.assertIn("insight_logs/*.md", prompt)
         self.assertIn("git_discard", prompt)
         self.assertNotIn("Commit tools are scoped to `MEMORY.md` and `MEMORY_*.md`", prompt)

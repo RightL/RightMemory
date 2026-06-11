@@ -59,6 +59,22 @@ Put graph ids, edges, and placement context on the `S#` heading or nearby
 ordinary memory. Inside `MEMORY_SKILL_<slug>.md`, Markdown headings, bullets, and
 backticked labels are treated as instructional text rather than memory nodes.
 
+## Shared Views
+
+Shared views connect a local memory root to collaboration context owned by another person, project, team space, or agent root. Use an `M#` heading when this root needs a durable local relationship to that external shared view. The heading body should explain the relationship in local terms: what the view represents, when to retrieve it, and how it relates to nearby work. Store resolver details in `shared_views.toml`, not in memory prose.
+
+A provider root may define views under `shared_views/<view-id>/`:
+
+```text
+shared_views/<view-id>/
+  view.md
+  retriever.md
+  export.toml
+  dist/
+```
+
+`view.md`, `retriever.md`, and `export.toml` are provider-owned shared-view source files. They describe the view contract, policy-guided retrieval instructions, and builder/export settings. The generated `dist/` directory is preview or publishing output; do not treat it as active memory or a consumer's local memory source. Consumers retrieve through the shared-view endpoint and record local consequences in their own memory when those consequences become durable.
+
 ## Memory Domains
 
 Memory domains are ordinary headings. Use `# User Context` for durable context about the user as a person with an ongoing life, work, and direction: relevant background, active pursuits, longer-term goals, important responsibilities or life/work circumstances, and why those things matter. It is a compact context profile grounded in evidence.
