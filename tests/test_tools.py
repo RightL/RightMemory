@@ -33,9 +33,12 @@ class MemoryToolsTests(unittest.TestCase):
             tools.read(".runtime/shared_views/imports/alice-auth-api/MEMORY.md")
         with self.assertRaises(ValueError):
             tools.read_command("rg external .runtime/shared_views/imports/alice-auth-api/MEMORY.md")
+        with self.assertRaises(ValueError):
+            tools.read_command("rg external --glob .runtime/shared_views/**")
 
         self.assertNotIn(".runtime/shared_views/imports/alice-auth-api/MEMORY.md", tools.glob("**/*"))
         self.assertEqual(tools.read_command("rg external"), "no matches")
+        self.assertNotIn(".runtime/shared_views/imports/alice-auth-api/MEMORY.md", tools.read_command("rg --files"))
 
     def test_read_file_truncates_large_full_reads(self):
         memory = self.root / "MEMORY.md"

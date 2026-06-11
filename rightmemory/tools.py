@@ -637,6 +637,7 @@ class MemoryTools:
         return self._read_raw_file(args[3], start, end)
 
     def _read_command_rg(self, args: list[str]) -> str:
+        self._reject_runtime_shared_view_rg_globs(args)
         args, explicit_path_count, expanded_path_count = self._expand_rg_path_globs(args)
         if explicit_path_count and expanded_path_count == 0:
             return "no matches"
@@ -669,6 +670,7 @@ class MemoryTools:
                 return "no matches"
             raise RuntimeError(f"rg command failed: {detail}")
         output = process.stdout.strip()
+        output = self._filter_runtime_shared_view_rg_output(output)
         return self._cap_command_output(output) if output else "no matches"
 
     def _expand_rg_path_globs(self, args: list[str]) -> tuple[list[str], int, int]:
@@ -803,8 +805,44 @@ class MemoryTools:
             if self._has_role_read_scope():
                 self._check_allowed_read_command_path(token)
 
+    def _reject_runtime_shared_view_rg_globs(self, args: list[str]) -> None:
+        glob_options = {"-g", "--glob", "--iglob"}
+        skip_next = False
+        for index, token in enumerate(args[1:], start=1):
+            if skip_next:
+                skip_next = False
+                continue
+            if token in glob_options:
+                if index + 1 < len(args):
+                    self._reject_runtime_shared_view_glob(args[index + 1])
+                    skip_next = True
+                continue
+            for prefix in ("--glob=", "--iglob="):
+                if token.startswith(prefix):
+                    self._reject_runtime_shared_view_glob(token.split("=", 1)[1])
+                    break
+            else:
+                if len(token) > 2 and token[:2] == "-g":
+                    self._reject_runtime_shared_view_glob(token[2:])
+
+    def _reject_runtime_shared_view_glob(self, pattern: str) -> None:
+        normalized = pattern[1:] if pattern.startswith("!") else pattern
+        if normalized.startswith(RUNTIME_SHARED_VIEW_PATH_PREFIX) or f"/{RUNTIME_SHARED_VIEW_PATH_PREFIX}" in normalized:
+            raise ValueError("read commands must use retrieve_shared_view for runtime shared-view content")
+
     def _exclude_runtime_shared_view_rg_paths(self, args: list[str]) -> list[str]:
-        return [args[0], "--glob", f"!{RUNTIME_SHARED_VIEW_PATH_PREFIX}**", *args[1:]]
+        insert_at = args.index("--") if "--" in args else len(args)
+        return [*args[:insert_at], "--glob", f"!{RUNTIME_SHARED_VIEW_PATH_PREFIX}**", *args[insert_at:]]
+
+    def _filter_runtime_shared_view_rg_output(self, output: str) -> str:
+        if not output:
+            return output
+        kept = [
+            line
+            for line in output.splitlines()
+            if not line.startswith(RUNTIME_SHARED_VIEW_PATH_PREFIX)
+        ]
+        return "\n".join(kept)
 
     def _expand_role_read_command_dirs(self, args: list[str], path_indices: set[int]) -> tuple[list[str], set[int]]:
         expanded: list[str] = []
