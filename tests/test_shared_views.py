@@ -972,6 +972,41 @@ class SharedViewRetrieveTests(unittest.TestCase):
         self.assertIn("Status: unavailable", result)
         self.assertNotIn("Payroll API returns salary bands", result)
 
+    def test_retrieve_shared_view_infers_prompt_scope_without_explicit_filter_terms(self):
+        provider = self.root / "provider"
+        consumer = self.root / "consumer"
+        provider.mkdir()
+        consumer.mkdir()
+        (provider / "MEMORY.md").write_text(
+            "# Provider\n\n"
+            "Auth API returns token_expires_at in login responses.\n"
+            "Payroll API returns salary bands.\n",
+            encoding="utf-8",
+        )
+        define_shared_view(
+            provider,
+            view_id="alice-auth-api",
+            title="Alice Auth API",
+            retriever_instructions="Answer only auth API collaboration context.",
+        )
+        save_connections(
+            consumer,
+            {
+                "alice-auth-api": SharedViewConnection(
+                    heading_id="alice-auth-api",
+                    ref="rightmemory://view/alice-auth-api",
+                    target=SharedViewTarget(kind="local", path=str(provider), view_id="alice-auth-api"),
+                )
+            },
+        )
+
+        result = retrieve_shared_view(consumer, "alice-auth-api", "token salary")
+
+        self.assertIn("Status: fresh", result)
+        self.assertIn("Backing: retriever prompt with inferred scope", result)
+        self.assertIn("Auth API returns token_expires_at", result)
+        self.assertNotIn("Payroll API returns salary bands", result)
+
     def test_retrieve_shared_view_uses_hub_hosted_package(self):
         provider = self.root / "provider"
         consumer = self.root / "consumer"

@@ -27,6 +27,24 @@ RELATIONSHIPS = {"human", "owned-agent", "team-space", "external"}
 TARGET_KINDS = {"none", "local_markdown", "package", "local", "hub", "revoked"}
 QUERY_TERM_RE = re.compile(r"[A-Za-z0-9_]{3,}")
 COMMON_QUERY_WORDS = {"the", "and", "for"}
+SCOPE_STOP_WORDS = COMMON_QUERY_WORDS | {
+    "api",
+    "answer",
+    "answers",
+    "collaboration",
+    "context",
+    "from",
+    "memory",
+    "only",
+    "project",
+    "root",
+    "shared",
+    "team",
+    "that",
+    "this",
+    "view",
+    "with",
+}
 CACHE_VERSION = 1
 DEFAULT_SOURCE_GLOBS = ("MEMORY.md", "MEMORY_*.md")
 
@@ -899,8 +917,13 @@ def _retrieve_provider_view(provider_root: Path, view_id: str, query: str) -> _S
         )
         backing_parts.append("filtered Markdown")
     retriever = view_dir / "retriever.md"
-    if retriever.exists() and definition.filter_terms:
-        terms = list(definition.filter_terms)
+    if retriever.exists():
+        retriever_text = retriever.read_text(encoding="utf-8")
+        scope_terms = definition.filter_terms or _infer_prompt_scope_terms(definition, retriever_text)
+    else:
+        scope_terms = ()
+    if retriever.exists() and scope_terms:
+        terms = list(scope_terms)
         terms.extend(_query_terms(query))
         source_lines.extend(
             _filtered_provider_source_lines(
@@ -909,10 +932,13 @@ def _retrieve_provider_view(provider_root: Path, view_id: str, query: str) -> _S
                 terms,
                 0,
                 200,
-                required_terms=definition.filter_terms,
+                required_terms=scope_terms,
             )
         )
-        backing_parts.append("retriever prompt")
+        backing = "retriever prompt"
+        if not definition.filter_terms:
+            backing += " with inferred scope"
+        backing_parts.append(backing)
     elif retriever.exists():
         backing_parts.append("retriever prompt without filter scope")
     if not source_lines:
@@ -951,6 +977,22 @@ def _retrieve_hub_view(hub: Path, view_id: str, query: str) -> _SharedViewCache 
     if provider_root:
         return _retrieve_provider_view(_resolve_external_path(hub, provider_root), view_id, query)
     return None
+
+
+def _infer_prompt_scope_terms(definition: SharedViewDefinition, retriever_text: str) -> tuple[str, ...]:
+    raw_scope = " ".join(
+        value
+        for value in (
+            definition.view_id.replace("-", " ").replace("_", " ").replace(".", " "),
+            definition.title,
+            definition.description or "",
+            definition.audience or "",
+            retriever_text,
+        )
+        if value
+    )
+    terms = [term for term in _query_terms(raw_scope) if term not in SCOPE_STOP_WORDS]
+    return tuple(dict.fromkeys(terms))
 
 
 def _deliver_interaction_record(

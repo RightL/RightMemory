@@ -653,6 +653,7 @@ class MemoryTools:
             if not path_indices:
                 return "no matches"
         self._validate_read_command_path_tokens(args, path_indices)
+        args = self._exclude_runtime_shared_view_rg_paths(args)
         if "--files" not in args and "--with-filename" not in args and "--no-filename" not in args:
             args = [args[0], "--with-filename", *args[1:]]
         process = subprocess.run(
@@ -664,6 +665,8 @@ class MemoryTools:
         )
         if process.returncode not in {0, 1}:
             detail = process.stderr.strip() or process.stdout.strip()
+            if process.returncode == 2 and "No files were searched" in detail:
+                return "no matches"
             raise RuntimeError(f"rg command failed: {detail}")
         output = process.stdout.strip()
         return self._cap_command_output(output) if output else "no matches"
@@ -793,8 +796,15 @@ class MemoryTools:
                 resolved = self._resolve_path(token)
                 if not self._is_under_root(resolved):
                     raise ValueError("read command paths must stay under the RightMemory root")
+            resolved = self._resolve_path(token)
+            relative_path = resolved.relative_to(self.memory_root).as_posix()
+            if self._is_runtime_shared_view_path(relative_path):
+                raise ValueError("read commands must use retrieve_shared_view for runtime shared-view content")
             if self._has_role_read_scope():
                 self._check_allowed_read_command_path(token)
+
+    def _exclude_runtime_shared_view_rg_paths(self, args: list[str]) -> list[str]:
+        return [args[0], "--glob", f"!{RUNTIME_SHARED_VIEW_PATH_PREFIX}**", *args[1:]]
 
     def _expand_role_read_command_dirs(self, args: list[str], path_indices: set[int]) -> tuple[list[str], set[int]]:
         expanded: list[str] = []
