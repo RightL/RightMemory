@@ -21,6 +21,8 @@ REQUIRED_PACKAGE_FILES = (
 )
 DEFAULT_MAX_PACKAGE_BYTES = 10 * 1024 * 1024
 _ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+QUERY_TERM_RE = re.compile(r"[A-Za-z0-9_]{3,}")
+COMMON_QUERY_WORDS = {"the", "and", "for"}
 
 
 class PackageValidationError(ValueError):
@@ -88,6 +90,33 @@ def copy_package_version(
         version_id=clean_version_id,
         manifest=replace(manifest, source_root=final_path),
     )
+
+
+def retrieve_memory_snippets(
+    package_root: Path,
+    query: str,
+    *,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    clean_limit = max(1, min(int(limit), 25))
+    terms = _query_terms(query)
+    memory_path = Path(package_root).expanduser() / "dist" / "MEMORY.md"
+    if not memory_path.is_file():
+        raise PackageValidationError("published package is missing dist/MEMORY.md")
+    snippets: list[dict[str, Any]] = []
+    for line_number, line in enumerate(memory_path.read_text(encoding="utf-8").splitlines(), start=1):
+        lowered = line.lower()
+        if terms and any(term in lowered for term in terms):
+            snippets.append(
+                {
+                    "path": "dist/MEMORY.md",
+                    "line": line_number,
+                    "text": line,
+                }
+            )
+            if len(snippets) >= clean_limit:
+                break
+    return snippets
 
 
 def _package_snapshot(
@@ -256,3 +285,7 @@ def _validate_hub_id(value: str, label: str) -> str:
     if clean in {".", ".."} or not _ID_RE.fullmatch(clean):
         raise PackageValidationError(f"{label} contains invalid characters: {value!r}")
     return clean
+
+
+def _query_terms(query: str) -> list[str]:
+    return [term.lower() for term in QUERY_TERM_RE.findall(query) if term.lower() not in COMMON_QUERY_WORDS]
