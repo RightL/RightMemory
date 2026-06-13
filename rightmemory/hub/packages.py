@@ -5,7 +5,7 @@ import re
 import secrets
 import shutil
 import tomllib
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -27,20 +27,23 @@ class PackageValidationError(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class _PackageSnapshot:
+    manifest: HubPackageManifest
+    files: tuple[tuple[str, bytes], ...]
+
+
 def load_package_manifest(
     package_root: Path,
     *,
     expected_view_id: str | None = None,
     max_package_bytes: int = DEFAULT_MAX_PACKAGE_BYTES,
 ) -> HubPackageManifest:
-    source_root = Path(package_root).expanduser()
-    entries = _package_file_entries(source_root)
-    return _manifest_from_entries(
-        source_root,
-        entries,
+    return _package_snapshot(
+        Path(package_root).expanduser(),
         expected_view_id=expected_view_id,
         max_package_bytes=max_package_bytes,
-    )
+    ).manifest
 
 
 def copy_package_version(
@@ -53,12 +56,12 @@ def copy_package_version(
 ) -> HubStoredPackage:
     clean_view_id = _validate_hub_id(view_id, "view_id")
     clean_version_id = _validate_hub_id(version_id, "version_id")
-    manifest = load_package_manifest(
-        package_root,
+    snapshot = _package_snapshot(
+        Path(package_root).expanduser(),
         expected_view_id=clean_view_id,
         max_package_bytes=max_package_bytes,
     )
-    entries = tuple((relative, manifest.source_root / relative) for relative in manifest.files)
+    manifest = snapshot.manifest
 
     versions_root = Path(storage_root).expanduser() / "views" / clean_view_id / "versions"
     final_path = versions_root / clean_version_id
@@ -70,10 +73,10 @@ def copy_package_version(
         shutil.rmtree(temp_path)
     temp_path.mkdir()
     try:
-        for relative, path in entries:
+        for relative, content in snapshot.files:
             target = temp_path / validate_package_relative_path(relative)
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, target, follow_symlinks=True)
+            target.write_bytes(content)
         temp_path.rename(final_path)
     except BaseException:
         if temp_path.exists():
@@ -87,13 +90,27 @@ def copy_package_version(
     )
 
 
-def _manifest_from_entries(
+def _package_snapshot(
+    source_root: Path,
+    *,
+    expected_view_id: str | None,
+    max_package_bytes: int,
+) -> _PackageSnapshot:
+    return _package_snapshot_from_entries(
+        source_root,
+        _package_file_entries(source_root),
+        expected_view_id=expected_view_id,
+        max_package_bytes=max_package_bytes,
+    )
+
+
+def _package_snapshot_from_entries(
     source_root: Path,
     entries: tuple[tuple[str, Path], ...],
     *,
     expected_view_id: str | None,
     max_package_bytes: int,
-) -> HubPackageManifest:
+) -> _PackageSnapshot:
     files = tuple(relative for relative, _path in entries)
     file_set = set(files)
     for required in REQUIRED_PACKAGE_FILES:
@@ -102,8 +119,10 @@ def _manifest_from_entries(
 
     size_bytes = 0
     package_digest = sha256()
+    file_bytes: list[tuple[str, bytes]] = []
     for relative, path in entries:
         content = path.read_bytes()
+        file_bytes.append((relative, content))
         size_bytes += len(content)
         if max_package_bytes is not None and size_bytes > max_package_bytes:
             raise PackageValidationError(
@@ -114,8 +133,12 @@ def _manifest_from_entries(
         package_digest.update(content)
         package_digest.update(b"\0")
 
-    export_metadata = _load_toml(source_root / "export.toml", "export.toml")
-    invitation_metadata = _load_toml(source_root / "rightmemory-shared-view.toml", "rightmemory-shared-view.toml")
+    content_by_path = dict(file_bytes)
+    export_metadata = _load_toml_bytes(content_by_path["export.toml"], "export.toml")
+    invitation_metadata = _load_toml_bytes(
+        content_by_path["rightmemory-shared-view.toml"],
+        "rightmemory-shared-view.toml",
+    )
     view_id = _package_view_id(export_metadata, invitation_metadata)
     if expected_view_id is not None:
         clean_expected = _validate_hub_id(expected_view_id, "publish target view_id")
@@ -124,24 +147,27 @@ def _manifest_from_entries(
                 f"package view_id {view_id!r} does not match publish target {clean_expected!r}"
             )
 
-    return HubPackageManifest(
-        source_root=source_root.resolve(),
-        view_id=view_id,
-        title=_metadata_string(export_metadata, "title")
-        or _metadata_string(invitation_metadata, "title")
-        or view_id,
-        ref=_metadata_string(export_metadata, "ref")
-        or _metadata_string(invitation_metadata, "ref")
-        or f"rightmemory://view/{view_id}",
-        description=_metadata_string(export_metadata, "description")
-        or _metadata_string(invitation_metadata, "description"),
-        maintainer=_metadata_string(export_metadata, "maintainer")
-        or _metadata_string(invitation_metadata, "maintainer"),
-        files=files,
-        size_bytes=size_bytes,
-        package_hash=package_digest.hexdigest(),
-        export_metadata=export_metadata,
-        invitation_metadata=invitation_metadata,
+    return _PackageSnapshot(
+        manifest=HubPackageManifest(
+            source_root=source_root.resolve(),
+            view_id=view_id,
+            title=_metadata_string(export_metadata, "title")
+            or _metadata_string(invitation_metadata, "title")
+            or view_id,
+            ref=_metadata_string(export_metadata, "ref")
+            or _metadata_string(invitation_metadata, "ref")
+            or f"rightmemory://view/{view_id}",
+            description=_metadata_string(export_metadata, "description")
+            or _metadata_string(invitation_metadata, "description"),
+            maintainer=_metadata_string(export_metadata, "maintainer")
+            or _metadata_string(invitation_metadata, "maintainer"),
+            files=files,
+            size_bytes=size_bytes,
+            package_hash=package_digest.hexdigest(),
+            export_metadata=export_metadata,
+            invitation_metadata=invitation_metadata,
+        ),
+        files=tuple(file_bytes),
     )
 
 
@@ -181,6 +207,18 @@ def _load_toml(path: Path, label: str) -> dict[str, Any]:
     try:
         with path.open("rb") as handle:
             data = tomllib.load(handle)
+    except tomllib.TOMLDecodeError as exc:
+        raise PackageValidationError(f"invalid {label}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise PackageValidationError(f"{label} must contain a TOML table")
+    return data
+
+
+def _load_toml_bytes(content: bytes, label: str) -> dict[str, Any]:
+    try:
+        data = tomllib.loads(content.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise PackageValidationError(f"invalid {label}: not utf-8") from exc
     except tomllib.TOMLDecodeError as exc:
         raise PackageValidationError(f"invalid {label}: {exc}") from exc
     if not isinstance(data, dict):

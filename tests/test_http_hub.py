@@ -2,6 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from rightmemory.hub.models import HubPackageManifest
@@ -131,7 +132,12 @@ class HubPackageTests(unittest.TestCase):
             package_hash="0" * 64,
         )
 
-        with patch("rightmemory.hub.packages.load_package_manifest", return_value=malicious_manifest):
+        malicious_snapshot = SimpleNamespace(
+            manifest=malicious_manifest,
+            files=(("../escape.md", b"escape"),),
+        )
+
+        with patch("rightmemory.hub.packages._package_snapshot", return_value=malicious_snapshot):
             with self.assertRaises(PackageValidationError) as caught:
                 copy_package_version(
                     package,
@@ -142,6 +148,35 @@ class HubPackageTests(unittest.TestCase):
 
         self.assertIn("package path traversal entry", str(caught.exception))
         self.assertFalse((self.root / "hub" / "storage" / "escape.md").exists())
+
+    def test_copy_writes_the_validated_package_byte_snapshot(self):
+        package = self.root / "package"
+        _write_package(package)
+        snapshot_manifest = HubPackageManifest(
+            source_root=package,
+            view_id="alice-auth-api",
+            title="Alice Auth API",
+            ref="rightmemory://view/alice-auth-api",
+            files=("dist/MEMORY.md",),
+            size_bytes=len(b"snapshot bytes\n"),
+            package_hash="1" * 64,
+        )
+        snapshot = SimpleNamespace(
+            manifest=snapshot_manifest,
+            files=(("dist/MEMORY.md", b"snapshot bytes\n"),),
+        )
+        (package / "dist" / "MEMORY.md").write_text("changed after snapshot\n", encoding="utf-8")
+
+        with patch("rightmemory.hub.packages._package_snapshot", return_value=snapshot):
+            copied = copy_package_version(
+                package,
+                self.root / "hub" / "storage",
+                view_id="alice-auth-api",
+                version_id="v1",
+            )
+
+        self.assertEqual((copied.path / "dist" / "MEMORY.md").read_bytes(), b"snapshot bytes\n")
+        self.assertEqual(copied.manifest.package_hash, "1" * 64)
 
     def test_symlinked_file_that_escapes_package_root_is_rejected(self):
         package = self.root / "package"
@@ -214,7 +249,5 @@ def _write_package(package: Path, *, view_id: str = "alice-auth-api", memory_tex
         memory_text or "# Alice Auth API Shared View\n\nTokens rotate monthly.\n",
         encoding="utf-8",
     )
-
-
 if __name__ == "__main__":
     unittest.main()
