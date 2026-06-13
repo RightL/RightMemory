@@ -27,6 +27,7 @@ class WebSession:
     session_id: str
     csrf_token: str
     created_at: str
+    active_root: str
 
 
 def web_runtime_dir(memory_root: Path) -> Path:
@@ -67,17 +68,25 @@ def verify_operator_token(memory_root: Path, token: str) -> bool:
     return hmac.compare_digest(expected, _hash_token(token))
 
 
-def create_session_cookie(memory_root: Path) -> tuple[str, WebSession]:
+def create_session_cookie(
+    memory_root: Path,
+    *,
+    active_root: Path | str | None = None,
+    session_id: str | None = None,
+    csrf_token: str | None = None,
+) -> tuple[str, WebSession]:
     ensure_web_auth_files(memory_root)
     session = WebSession(
-        session_id=secrets.token_urlsafe(24),
-        csrf_token=secrets.token_urlsafe(24),
+        session_id=session_id or secrets.token_urlsafe(24),
+        csrf_token=csrf_token or secrets.token_urlsafe(24),
         created_at=datetime.now(UTC).replace(microsecond=0).isoformat(),
+        active_root=str(Path(active_root).expanduser() if active_root is not None else Path(memory_root).expanduser()),
     )
     payload = {
         "sid": session.session_id,
         "csrf": session.csrf_token,
         "created_at": session.created_at,
+        "active_root": session.active_root,
     }
     return _sign_payload(memory_root, payload), session
 
@@ -106,9 +115,15 @@ def read_session(memory_root: Path, request: Request) -> WebSession | None:
         session_id = _required_payload_str(payload, "sid")
         csrf_token = _required_payload_str(payload, "csrf")
         created_at = _required_payload_str(payload, "created_at")
+        active_root = _required_payload_str(payload, "active_root")
     except (OSError, ValueError):
         return None
-    return WebSession(session_id=session_id, csrf_token=csrf_token, created_at=created_at)
+    return WebSession(
+        session_id=session_id,
+        csrf_token=csrf_token,
+        created_at=created_at,
+        active_root=active_root,
+    )
 
 
 def require_session(memory_root: Path, request: Request) -> WebSession:

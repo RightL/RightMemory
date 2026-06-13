@@ -21,6 +21,7 @@ class WebServiceStatus:
     host: str | None
     port: int | None
     log_path: Path
+    generated_operator_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ def start_web_service(
         return status
     if status.state == "stale":
         web_pid_path(root).unlink(missing_ok=True)
-    ensure_web_auth_files(root)
+    generated_operator_token = ensure_web_auth_files(root)
     runtime_dir = root / WEB_RUNTIME_DIR
     _ensure_runtime_gitignore(root / ".runtime")
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -100,7 +101,7 @@ def start_web_service(
             env=env,
         )
     _write_pid(web_pid_path(root), process.pid)
-    return WebServiceStatus("running", process.pid, host, port, log_path)
+    return WebServiceStatus("running", process.pid, host, port, log_path, generated_operator_token)
 
 
 def stop_web_service(memory_root: Path, timeout_seconds: int = 30) -> StopWebResult:
@@ -123,7 +124,10 @@ def stop_web_service(memory_root: Path, timeout_seconds: int = 30) -> StopWebRes
 
 def format_web_status(status: WebServiceStatus) -> str:
     if status.state == "running" and status.pid is not None:
-        return f"web: running pid {status.pid}, url http://{status.host}:{status.port}/, log {status.log_path}"
+        message = f"web: running pid {status.pid}, url http://{status.host}:{status.port}/, log {status.log_path}"
+        if status.generated_operator_token:
+            message += f", operator token {status.generated_operator_token}"
+        return message
     if status.state == "stale" and status.pid is not None:
         return f"web: stale pid {status.pid}"
     return "web: stopped"

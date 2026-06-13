@@ -25,13 +25,15 @@ from .service import WebStudioService
 def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> FastAPI:
     root = Path(memory_root).expanduser()
     ensure_web_auth_files(root, operator_token=operator_token)
-    service = WebStudioService(root)
     app = FastAPI(title="RightMemory Web Studio")
     static_root = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=static_root), name="static")
 
     def current_session(request: Request):
-        return require_session(service.memory_root, request)
+        return require_session(root, request)
+
+    def current_service(session=Depends(current_session)):
+        return WebStudioService(Path(session.active_root))
 
     @app.get("/")
     def index():
@@ -39,21 +41,23 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
 
     @app.get("/api/session")
     def session(request: Request):
-        existing = read_session(service.memory_root, request)
-        return service.session_data(
-            authenticated=existing is not None,
-            csrf_token=existing.csrf_token if existing else None,
+        existing = read_session(root, request)
+        if existing is None:
+            return WebStudioService(root).session_data(authenticated=False)
+        return WebStudioService(Path(existing.active_root)).session_data(
+            authenticated=True,
+            csrf_token=existing.csrf_token,
         )
 
     @app.post("/api/login")
     def login(response: Response, payload: dict[str, str] = Body(...)):
         token = payload.get("token", "")
-        if not verify_operator_token(service.memory_root, token):
+        if not verify_operator_token(root, token):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=error_detail("invalid operator token"),
             )
-        cookie, session_info = create_session_cookie(service.memory_root)
+        cookie, session_info = create_session_cookie(root, active_root=root)
         set_session_cookie(response, cookie)
         return ok_response("logged in", {"csrf_token": session_info.csrf_token})
 
@@ -63,57 +67,58 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         return ok_response("logged out")
 
     @app.get("/api/overview")
-    def overview(_session=Depends(current_session)):
+    def overview(service=Depends(current_service)):
         return ok_response("overview loaded", service.overview())
 
     @app.get("/api/status")
-    def status_api(_session=Depends(current_session)):
+    def status_api(service=Depends(current_service)):
         return ok_response("status loaded", service.status())
 
     @app.get("/api/memory/files")
-    def memory_files(_session=Depends(current_session)):
+    def memory_files(service=Depends(current_service)):
         return ok_response("memory files loaded", service.memory_files())
 
     @app.get("/api/memory/files/{file_id}")
-    def memory_file(file_id: str, _session=Depends(current_session)):
+    def memory_file(file_id: str, service=Depends(current_service)):
         data = service.memory_file(file_id)
         if data is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=error_detail("memory file not found"))
         return ok_response("memory file loaded", data)
 
     @app.get("/api/insights")
-    def insights(_session=Depends(current_session)):
+    def insights(service=Depends(current_service)):
         return ok_response("insights loaded", service.insights())
 
     @app.get("/api/insights/{insight_id}")
-    def insight(insight_id: str, _session=Depends(current_session)):
+    def insight(insight_id: str, service=Depends(current_service)):
         data = service.insight(insight_id)
         if data is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=error_detail("insight not found"))
         return ok_response("insight loaded", data)
 
     @app.get("/api/logs")
-    def logs(_session=Depends(current_session)):
+    def logs(service=Depends(current_service)):
         return ok_response("logs loaded", service.logs())
 
     @app.get("/api/logs/{log_id}")
-    def log(log_id: str, _session=Depends(current_session)):
+    def log(log_id: str, service=Depends(current_service)):
         data = service.log(log_id)
         if data is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=error_detail("log not found"))
         return ok_response("log loaded", data)
 
     @app.get("/api/share/views")
-    def shared_views(_session=Depends(current_session)):
+    def shared_views(service=Depends(current_service)):
         return ok_response("shared views loaded", service.shared_views())
 
     @app.post("/api/share/views")
     def define_view(
         request: Request,
         payload: dict[str, object] = Body(...),
-        _session=Depends(current_session),
+        session=Depends(current_session),
     ):
-        require_csrf(service.memory_root, request, request.headers.get("x-csrf-token"))
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = WebStudioService(Path(session.active_root))
         try:
             message = service.define_view(payload)
         except Exception as exc:
@@ -128,9 +133,10 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         view_id: str,
         request: Request,
         payload: dict[str, object] | None = Body(default=None),
-        _session=Depends(current_session),
+        session=Depends(current_session),
     ):
-        require_csrf(service.memory_root, request, request.headers.get("x-csrf-token"))
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = WebStudioService(Path(session.active_root))
         try:
             message = service.build_view(view_id, payload or {})
         except Exception as exc:
@@ -145,9 +151,10 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         view_id: str,
         request: Request,
         payload: dict[str, object] = Body(...),
-        _session=Depends(current_session),
+        session=Depends(current_session),
     ):
-        require_csrf(service.memory_root, request, request.headers.get("x-csrf-token"))
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = WebStudioService(Path(session.active_root))
         try:
             message = service.export_view(view_id, payload)
         except Exception as exc:
@@ -162,9 +169,10 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         view_id: str,
         request: Request,
         payload: dict[str, object] = Body(...),
-        _session=Depends(current_session),
+        session=Depends(current_session),
     ):
-        require_csrf(service.memory_root, request, request.headers.get("x-csrf-token"))
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = WebStudioService(Path(session.active_root))
         try:
             message = service.publish_view(view_id, payload)
         except Exception as exc:
@@ -178,9 +186,10 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
     def accept_invite(
         request: Request,
         payload: dict[str, object] = Body(...),
-        _session=Depends(current_session),
+        session=Depends(current_session),
     ):
-        require_csrf(service.memory_root, request, request.headers.get("x-csrf-token"))
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = WebStudioService(Path(session.active_root))
         try:
             message = service.accept_invite(payload)
         except Exception as exc:
@@ -195,9 +204,10 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         heading_id: str,
         request: Request,
         payload: dict[str, object] = Body(...),
-        _session=Depends(current_session),
+        session=Depends(current_session),
     ):
-        require_csrf(service.memory_root, request, request.headers.get("x-csrf-token"))
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = WebStudioService(Path(session.active_root))
         try:
             text = service.retrieve_connection(heading_id, payload)
         except Exception as exc:
@@ -212,9 +222,10 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         heading_id: str,
         request: Request,
         payload: dict[str, object] = Body(...),
-        _session=Depends(current_session),
+        session=Depends(current_session),
     ):
-        require_csrf(service.memory_root, request, request.headers.get("x-csrf-token"))
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = WebStudioService(Path(session.active_root))
         try:
             message = service.note_connection(heading_id, payload)
         except Exception as exc:
@@ -225,17 +236,23 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         return ok_response(message)
 
     @app.get("/api/use/connections/{heading_id}/notes")
-    def connection_notes(heading_id: str, _session=Depends(current_session)):
+    def connection_notes(heading_id: str, service=Depends(current_service)):
         return ok_response("shared-view notes loaded", service.notes(heading_id))
+
+    @app.get("/api/activity")
+    def activity(service=Depends(current_service)):
+        return ok_response("activity loaded", service.activity())
 
     @app.post("/api/active-root")
     def active_root(
         request: Request,
+        response: Response,
         payload: dict[str, str] = Body(...),
-        _session=Depends(current_session),
+        session=Depends(current_session),
     ):
         x_csrf_token = request.headers.get("x-csrf-token")
-        require_csrf(service.memory_root, request, x_csrf_token)
+        require_csrf(root, request, x_csrf_token)
+        service = WebStudioService(Path(session.active_root))
         try:
             data = service.set_active_root(Path(payload.get("root", "")))
         except ValueError as exc:
@@ -243,6 +260,9 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=error_detail("invalid active root", technical=str(exc)),
             ) from exc
+        cookie, updated_session = create_session_cookie(root, active_root=data["active_root"], session_id=session.session_id)
+        set_session_cookie(response, cookie)
+        data["csrf_token"] = updated_session.csrf_token
         return ok_response("active root updated", data)
 
     return app

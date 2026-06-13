@@ -35,6 +35,8 @@ class WebStudioReadApiTests(unittest.TestCase):
         self.assertEqual(overview.status_code, 200)
         self.assertEqual(status.status_code, 200)
         self.assertEqual(overview.json()["data"]["active_root"], str(self.root))
+        self.assertEqual(overview.json()["data"]["shared_views"]["provider_view_count"], 0)
+        self.assertEqual(overview.json()["data"]["shared_views"]["connection_count"], 0)
         self.assertIn("git", status.json()["data"])
         self.assertIn("watches", status.json()["data"])
 
@@ -77,6 +79,13 @@ class WebStudioReadApiTests(unittest.TestCase):
         self.assertIn("recent review message", detail.json()["data"]["text"])
         self.assertEqual(rejected.status_code, 404)
 
+    def test_missing_known_log_returns_structured_missing_result(self):
+        detail = self.client.get("/api/logs/watch:dreamer")
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertTrue(detail.json()["data"]["missing"])
+        self.assertEqual(detail.json()["data"]["text"], "")
+
 
 class WebStudioStaticTests(unittest.TestCase):
     def test_static_shell_loads_assets(self):
@@ -94,6 +103,7 @@ class WebStudioStaticTests(unittest.TestCase):
         self.assertEqual(style.status_code, 200)
         self.assertIn("/static/app.js", index.text)
         self.assertIn("/static/styles.css", index.text)
+        self.assertNotIn("ready for the next Web Studio API slice", script.text)
 
 
 class WebStudioSharedViewApiTests(unittest.TestCase):

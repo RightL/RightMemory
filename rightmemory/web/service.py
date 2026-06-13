@@ -10,6 +10,7 @@ from ..shared_views import (
     build_shared_view,
     define_shared_view,
     export_shared_view,
+    list_shared_view_inbox,
     list_shared_view_notes,
     load_connections,
     load_shared_view_definition,
@@ -42,6 +43,9 @@ class WebStudioService:
 
     def overview(self) -> dict[str, Any]:
         status = collect_status(self.memory_root)
+        shared_views = self.shared_views()
+        notes = list_shared_view_notes(self.memory_root)
+        inbox = list_shared_view_inbox(self.memory_root)
         return {
             "active_root": str(self.memory_root),
             "git": _json_safe(status.git),
@@ -49,6 +53,12 @@ class WebStudioService:
             "dreamer": _json_safe(status.dreamer),
             "insight": _json_safe(status.insight),
             "update": _json_safe(status.update),
+            "shared_views": {
+                "provider_view_count": len(shared_views["provider_views"]),
+                "connection_count": len(shared_views["connections"]),
+                "note_count": len(notes),
+                "inbox_count": len(inbox),
+            },
             "issues": list(status.issues),
         }
 
@@ -84,7 +94,11 @@ class WebStudioService:
         artifact = resolve_artifact(list_log_artifacts(self.memory_root), log_id)
         if artifact is None:
             return None
-        return {**artifact.summary(self.memory_root), "text": read_artifact_text(artifact)}
+        summary = artifact.summary(self.memory_root)
+        try:
+            return {**summary, "missing": False, "text": read_artifact_text(artifact)}
+        except FileNotFoundError:
+            return {**summary, "missing": True, "text": ""}
 
     def shared_views(self) -> dict[str, Any]:
         provider_views = []
@@ -178,12 +192,17 @@ class WebStudioService:
     def notes(self, heading_id: str) -> dict[str, Any]:
         return {"notes": list_shared_view_notes(self.memory_root, heading_id)}
 
+    def activity(self) -> dict[str, Any]:
+        return {
+            "notes": list_shared_view_notes(self.memory_root),
+            "inbox": list_shared_view_inbox(self.memory_root),
+        }
+
     def set_active_root(self, root: Path) -> dict[str, Any]:
         resolved = Path(root).expanduser()
         if not resolved.exists():
             raise ValueError(f"active root does not exist: {resolved}")
-        self.memory_root = resolved
-        return {"active_root": str(self.memory_root)}
+        return {"active_root": str(resolved)}
 
 
 def _json_safe(value: Any) -> Any:

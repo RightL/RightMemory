@@ -49,6 +49,7 @@ class WebCliTests(unittest.TestCase):
         self.assertIn("8766", settings)
         self.assertIn("rightmemory.web.app", command)
         self.assertIn("web: running pid 12345", stdout.getvalue())
+        self.assertIn("operator token", stdout.getvalue())
 
     def test_web_stop_removes_stale_pid(self):
         stdout = io.StringIO()
