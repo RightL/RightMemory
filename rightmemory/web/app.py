@@ -62,7 +62,8 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         return ok_response("logged in", {"csrf_token": session_info.csrf_token})
 
     @app.post("/api/logout")
-    def logout(response: Response, _session=Depends(current_session)):
+    def logout(request: Request, response: Response, _session=Depends(current_session)):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
         clear_session_cookie(response)
         return ok_response("logged out")
 

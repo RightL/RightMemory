@@ -67,6 +67,16 @@ class WebStudioAuthTests(unittest.TestCase):
         self.assertEqual(accepted.status_code, 200)
         self.assertEqual(accepted.json()["data"]["active_root"], str(self.root))
 
+    def test_logout_requires_csrf(self):
+        login = self.client.post("/api/login", json={"token": "secret-token"})
+        csrf = login.json()["data"]["csrf_token"]
+
+        missing = self.client.post("/api/logout")
+        accepted = self.client.post("/api/logout", headers={"x-csrf-token": csrf})
+
+        self.assertEqual(missing.status_code, 403)
+        self.assertEqual(accepted.status_code, 200)
+
     def test_active_root_switch_is_scoped_to_browser_session(self):
         other_root = self.root / "other"
         other_root.mkdir()
