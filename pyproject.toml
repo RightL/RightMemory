@@ -28,7 +28,9 @@ classifiers = [
   "Topic :: Software Development",
 ]
 dependencies = [
+  "fastapi>=0.115.0",
   "pydantic-ai>=1.0.0",
+  "uvicorn>=0.30.0",
 ]
 
 [project.scripts]
