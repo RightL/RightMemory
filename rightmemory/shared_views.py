@@ -9,7 +9,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from urllib.parse import urlparse
 
+from .hub.client import HubClient, HubClientError
 from .session import _ensure_runtime_gitignore, _fsync_directory
 
 
@@ -24,7 +26,7 @@ ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{(F#|S#|M#|#)([A-Za-z0-9_.-]+)\}")
 NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*$")
 TITLE_MARKER_RE = re.compile(r"\{[^{}]*\}")
 RELATIONSHIPS = {"human", "owned-agent", "team-space", "external"}
-TARGET_KINDS = {"none", "local_markdown", "package", "local", "hub", "revoked"}
+TARGET_KINDS = {"none", "local_markdown", "package", "local", "hub", "http", "revoked"}
 QUERY_TERM_RE = re.compile(r"[A-Za-z0-9_]{3,}")
 COMMON_QUERY_WORDS = {"the", "and", "for"}
 SCOPE_STOP_WORDS = COMMON_QUERY_WORDS | {
@@ -54,6 +56,10 @@ class SharedViewTarget:
     kind: str = "none"
     path: str | None = None
     view_id: str | None = None
+    base_url: str | None = None
+    credential_id: str | None = None
+    version_id: str | None = None
+    accepted_from_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -282,6 +288,52 @@ def accept_shared_view_invitation(
     )
 
 
+def accept_http_shared_view_invitation(
+    memory_root: Path,
+    invitation_url: str,
+    *,
+    heading_id: str | None = None,
+    title: str | None = None,
+    body: str | None = None,
+    relationship: str | None = None,
+    credential_id: str | None = None,
+    consumer_label: str | None = None,
+) -> str:
+    root = Path(memory_root).expanduser()
+    base_url, invite_token = _parse_http_invitation_url(invitation_url)
+    client = HubClient(base_url)
+    view_info = client.get_invitation_view(invite_token)
+    accepted = client.accept_invitation(invite_token, consumer_label=consumer_label)
+    view_id = _validate_heading_id(str(accepted.get("view_id") or view_info.get("view_id")))
+    local_heading_id = _validate_heading_id(heading_id or view_id)
+    local_credential_id = _validate_heading_id(credential_id or f"http-{local_heading_id}")
+    token = accepted.get("connection_token")
+    if not isinstance(token, str) or not token:
+        raise ValueError("HTTP shared-view invitation did not return a connection token")
+    save_shared_view_credential(root, local_credential_id, kind="http-connection", token=token)
+    local_title = title or str(view_info.get("title") or view_id)
+    local_body = body if body is not None else _default_http_invitation_body(view_info)
+    return accept_shared_view(
+        root,
+        heading_id=local_heading_id,
+        title=local_title,
+        body=local_body,
+        ref=str(view_info.get("ref") or f"rightmemory://view/{view_id}"),
+        relationship=relationship or "human",
+        maintainer=_optional_string(view_info.get("provider_id")),
+        description=_optional_string(view_info.get("description")),
+        accepted_from=invitation_url,
+        target=SharedViewTarget(
+            kind="http",
+            base_url=base_url,
+            view_id=view_id,
+            credential_id=local_credential_id,
+            version_id=_optional_string(view_info.get("current_version_id")),
+            accepted_from_url=invitation_url,
+        ),
+    )
+
+
 def load_shared_view_definition(memory_root: Path, view_id: str) -> SharedViewDefinition:
     root = Path(memory_root).expanduser()
     clean_view_id = _validate_heading_id(view_id)
@@ -352,8 +404,58 @@ def save_connections(memory_root: Path, connections: dict[str, SharedViewConnect
                 lines.append(f"path = {_toml_string(connection.target.path)}")
             if connection.target.view_id:
                 lines.append(f"view_id = {_toml_string(connection.target.view_id)}")
+            if connection.target.base_url:
+                lines.append(f"base_url = {_toml_string(connection.target.base_url)}")
+            if connection.target.credential_id:
+                lines.append(f"credential_id = {_toml_string(connection.target.credential_id)}")
+            if connection.target.version_id:
+                lines.append(f"version_id = {_toml_string(connection.target.version_id)}")
+            if connection.target.accepted_from_url:
+                lines.append(f"accepted_from_url = {_toml_string(connection.target.accepted_from_url)}")
         lines.append("")
     _atomic_write_text(root / REGISTRY_FILE, "\n".join(lines).rstrip() + "\n")
+
+
+def save_shared_view_credential(
+    memory_root: Path,
+    credential_id: str,
+    *,
+    kind: str,
+    token: str,
+) -> None:
+    root = Path(memory_root).expanduser()
+    clean_id = _validate_heading_id(credential_id)
+    if not isinstance(kind, str) or not kind.strip():
+        raise ValueError("shared view credential kind must be a non-empty string")
+    if not isinstance(token, str) or not token:
+        raise ValueError("shared view credential token must be a non-empty string")
+    data = _load_credentials(root)
+    credentials = data.setdefault("credentials", {})
+    if not isinstance(credentials, dict):
+        raise ValueError("shared view credential store is invalid")
+    credentials[clean_id] = {
+        "kind": kind.strip(),
+        "token": token,
+        "created_at": _now_iso(),
+    }
+    _write_credentials(root, data)
+
+
+def load_shared_view_credential(memory_root: Path, credential_id: str) -> dict[str, str]:
+    root = Path(memory_root).expanduser()
+    clean_id = _validate_heading_id(credential_id)
+    data = _load_credentials(root)
+    credentials = data.get("credentials", {})
+    if not isinstance(credentials, dict):
+        raise ValueError("shared view credential store is invalid")
+    raw = credentials.get(clean_id)
+    if not isinstance(raw, dict):
+        raise KeyError(f"shared view credential not found: {clean_id}")
+    kind = raw.get("kind")
+    token = raw.get("token")
+    if not isinstance(kind, str) or not isinstance(token, str):
+        raise ValueError(f"shared view credential is invalid: {clean_id}")
+    return {key: value for key, value in raw.items() if isinstance(key, str) and isinstance(value, str)}
 
 
 def accept_shared_view(
@@ -377,7 +479,17 @@ def accept_shared_view(
     if target is not None and target_path is not None:
         raise ValueError("provide either target or target_path, not both")
     resolved_target = target or (SharedViewTarget("package", target_path) if target_path else SharedViewTarget())
-    resolved_target = _validate_target(root, heading_id, resolved_target.kind, resolved_target.path, resolved_target.view_id)
+    resolved_target = _validate_target(
+        root,
+        heading_id,
+        resolved_target.kind,
+        resolved_target.path,
+        resolved_target.view_id,
+        base_url=resolved_target.base_url,
+        credential_id=resolved_target.credential_id,
+        version_id=resolved_target.version_id,
+        accepted_from_url=resolved_target.accepted_from_url,
+    )
     connection = SharedViewConnection(
         heading_id=heading_id,
         ref=ref.strip(),
@@ -916,6 +1028,12 @@ def _target_from_invitation(
         if not path:
             raise ValueError("hub shared-view invitations require transport.path")
         return SharedViewTarget(kind="hub", path=path, view_id=transport_view_id)
+    if kind == "http":
+        base_url = _optional_string(transport.get("base_url")) or path
+        credential_id = _optional_string(transport.get("credential_id"))
+        if not base_url or not credential_id:
+            raise ValueError("http shared-view invitations require base_url and credential_id")
+        return SharedViewTarget(kind="http", base_url=base_url, credential_id=credential_id, view_id=transport_view_id)
     raise ValueError(f"unknown shared-view invitation transport `{kind}`")
 
 
@@ -957,6 +1075,18 @@ def _default_invitation_body(invitation: dict[str, object]) -> str:
     return "Accepted shared view relationship."
 
 
+def _default_http_invitation_body(view_info: dict[str, object]) -> str:
+    description = _optional_string(view_info.get("description"))
+    provider = _optional_string(view_info.get("provider_id"))
+    if description and provider:
+        return f"{description} Provided by {provider}."
+    if description:
+        return description
+    if provider:
+        return f"HTTP shared view provided by {provider}."
+    return "Accepted HTTP shared view relationship."
+
+
 def _retrieve_fresh_shared_view(
     root: Path,
     connection: SharedViewConnection,
@@ -977,6 +1107,8 @@ def _retrieve_fresh_shared_view(
         view_id = target.view_id or _view_id_from_ref(connection.ref) or connection.heading_id
         if hub.exists():
             return _retrieve_hub_view(hub, view_id, query)
+    if target.kind == "http":
+        return _retrieve_http_view(root, connection, query)
     return None
 
 
@@ -1089,6 +1221,42 @@ def _retrieve_hub_view(hub: Path, view_id: str, query: str) -> _SharedViewCache 
     return None
 
 
+def _retrieve_http_view(root: Path, connection: SharedViewConnection, query: str) -> _SharedViewCache | None:
+    target = connection.target
+    if not target.base_url or not target.credential_id:
+        return None
+    credential = load_shared_view_credential(root, target.credential_id)
+    client = HubClient(target.base_url, credential["token"])
+    view_id = target.view_id or _view_id_from_ref(connection.ref) or connection.heading_id
+    response = client.retrieve_view(view_id, query, limit=12)
+    snippets = response.get("snippets", [])
+    source_lines: list[_SharedViewSourceLine] = []
+    if isinstance(snippets, list):
+        for snippet in snippets:
+            if not isinstance(snippet, dict):
+                continue
+            path = snippet.get("path")
+            line = snippet.get("line")
+            text = snippet.get("text")
+            if isinstance(path, str) and isinstance(line, int) and isinstance(text, str):
+                source_lines.append(_SharedViewSourceLine(path, line, text))
+    provenance = None
+    raw_provenance = response.get("provenance")
+    if isinstance(raw_provenance, dict):
+        title = raw_provenance.get("title")
+        package_hash = raw_provenance.get("package_hash")
+        provenance = str(title or package_hash or view_id)
+    freshness = response.get("freshness")
+    if not isinstance(freshness, str) or not freshness:
+        freshness = _now_iso()
+    return _SharedViewCache(
+        freshness=freshness,
+        source_lines=source_lines,
+        provenance=provenance or view_id,
+        backing=f"HTTP hub {target.base_url}",
+    )
+
+
 def _infer_prompt_scope_terms(definition: SharedViewDefinition, retriever_text: str) -> tuple[str, ...]:
     raw_scope = " ".join(
         value
@@ -1124,6 +1292,16 @@ def _deliver_interaction_record(
             _append_hub_interaction_record(hub, view_id, record)
             return "sent"
         return "queued"
+    if target.kind == "http" and target.base_url and target.credential_id:
+        credential = load_shared_view_credential(root, target.credential_id)
+        payload = {
+            "actor": record.get("actor") or "user",
+            "message": record.get("message") or "",
+        }
+        if record.get("task_context"):
+            payload["task_context"] = record["task_context"]
+        HubClient(target.base_url, credential["token"]).post_interaction(view_id, payload)
+        return "sent"
     if target.kind in {"package", "local_markdown"}:
         return "queued"
     return "queued"
@@ -1313,6 +1491,35 @@ def _shared_view_cache_path(root: Path, heading_id: str) -> Path:
     return root / RUNTIME_DIR / "cache" / f"{heading_id}.txt"
 
 
+def _credentials_path(root: Path) -> Path:
+    return root / RUNTIME_DIR / "credentials.json"
+
+
+def _load_credentials(root: Path) -> dict[str, object]:
+    path = _credentials_path(root)
+    if not path.exists():
+        return {"credentials": {}}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("shared view credential store must be a JSON object")
+    return data
+
+
+def _write_credentials(root: Path, data: dict[str, object]) -> None:
+    _ensure_runtime_gitignore(root / ".runtime")
+    path = _credentials_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    _fsync_directory(path.parent)
+
+
 def _read_shared_view_cache(root: Path, heading_id: str) -> _SharedViewCache | None:
     cache_path = _shared_view_cache_path(root, heading_id)
     if not cache_path.is_file():
@@ -1414,6 +1621,10 @@ def _load_target(root: Path, heading_id: str, raw_target: object) -> SharedViewT
         raw_target.get("kind", "none"),
         raw_target.get("path"),
         raw_target.get("view_id"),
+        base_url=raw_target.get("base_url"),
+        credential_id=raw_target.get("credential_id"),
+        version_id=raw_target.get("version_id"),
+        accepted_from_url=raw_target.get("accepted_from_url"),
     )
 
 
@@ -1434,6 +1645,10 @@ def _validate_connection_for_save(root: Path, heading_id: str, connection: Share
         connection.target.kind,
         connection.target.path,
         connection.target.view_id,
+        base_url=connection.target.base_url,
+        credential_id=connection.target.credential_id,
+        version_id=connection.target.version_id,
+        accepted_from_url=connection.target.accepted_from_url,
     )
 
 
@@ -1443,24 +1658,49 @@ def _validate_target(
     raw_kind: object,
     raw_path: object,
     raw_view_id: object = None,
+    *,
+    base_url: object = None,
+    credential_id: object = None,
+    version_id: object = None,
+    accepted_from_url: object = None,
 ) -> SharedViewTarget:
     kind = str(raw_kind).strip()
     if kind not in TARGET_KINDS:
         raise ValueError(f"unknown shared view target kind `{kind}` for {heading_id}")
     path = _optional_string(raw_path)
     view_id = _optional_string(raw_view_id)
+    target_base_url = _optional_string(base_url)
+    target_credential_id = _optional_string(credential_id)
+    target_version_id = _optional_string(version_id)
+    target_accepted_from_url = _optional_string(accepted_from_url)
     if view_id:
         view_id = _validate_heading_id(view_id)
+    if target_credential_id:
+        target_credential_id = _validate_heading_id(target_credential_id)
     if kind in {"local_markdown", "package", "local", "hub"} and not path:
         raise ValueError(f"{kind} shared view target requires path for {heading_id}")
+    if kind == "http":
+        if path:
+            raise ValueError(f"http shared view target must not set path for {heading_id}")
+        if not target_base_url or not view_id or not target_credential_id:
+            raise ValueError(f"http shared view target requires base_url, view_id, and credential_id for {heading_id}")
+        _validate_http_base_url(target_base_url)
     if kind == "local_markdown" and path:
         _resolve_under_root(root, path)
     elif kind in {"package", "local", "hub"} and path:
         _resolve_external_path(root, path)
-    if kind in {"none", "revoked"} and path:
-        raise ValueError(f"{kind} shared view target must not set path for {heading_id}")
+    if kind in {"none", "revoked"} and (path or target_base_url or target_credential_id):
+        raise ValueError(f"{kind} shared view target must not set resolver metadata for {heading_id}")
     stored_kind = "package" if kind == "local_markdown" else kind
-    return SharedViewTarget(kind=stored_kind, path=path, view_id=view_id)
+    return SharedViewTarget(
+        kind=stored_kind,
+        path=path,
+        view_id=view_id,
+        base_url=target_base_url,
+        credential_id=target_credential_id,
+        version_id=target_version_id,
+        accepted_from_url=target_accepted_from_url,
+    )
 
 
 def _validate_heading_id(value: str) -> str:
@@ -1468,6 +1708,24 @@ def _validate_heading_id(value: str) -> str:
     if not heading_id or CONNECTION_ID_RE.fullmatch(heading_id) is None:
         raise ValueError(f"shared view heading id must contain letters, numbers, '.', '_', or '-': {value!r}")
     return heading_id
+
+
+def _parse_http_invitation_url(invitation_url: str) -> tuple[str, str]:
+    parsed = urlparse(invitation_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("HTTP shared-view invitation must be an http(s) URL")
+    prefix = "/i/"
+    if not parsed.path.startswith(prefix) or len(parsed.path) <= len(prefix):
+        raise ValueError("HTTP shared-view invitation URL must contain /i/<token>")
+    token = parsed.path[len(prefix) :].split("/", 1)[0]
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+    return base_url, token
+
+
+def _validate_http_base_url(base_url: str) -> None:
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("http shared view target base_url must be an http(s) URL")
 
 
 def _required_string(entry: dict[str, object], key: str, heading_id: str) -> str:
