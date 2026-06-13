@@ -4,7 +4,7 @@
 
 HTTP Shared View Hub is the clean network transport for RightMemory shared views. It lets provider roots publish hosted shared-view snapshots to a self-hosted hub, lets consumer roots accept and retrieve those views through stable HTTP invitations, and stores notes/interactions in per-view inboxes for providers to review later.
 
-The hub is the target product form for team and internet-capable shared-view collaboration. Package export remains useful for one-off handoff. Mounted-folder hubs can remain as a local compatibility path, but they should not define the long-term product architecture.
+The hub is the target product form for team and internet-capable shared-view collaboration. Package export remains useful for one-off handoff. Mounted-folder hubs can remain as a local compatibility path, while the long-term product architecture centers on the HTTP hub.
 
 ## Scope
 
@@ -15,7 +15,7 @@ In scope:
 - provider registration and provider-scoped publish tokens;
 - hosted snapshot publishing for shared-view packages;
 - immutable view versions with a current-version pointer;
-- per-view invitation tokens and stable invitation URLs;
+- per-view invitation tokens, accepted-connection tokens, and stable invitation URLs;
 - retrieval from hub-hosted snapshots;
 - per-view interaction/inbox records;
 - token rotation and revocation;
@@ -44,7 +44,8 @@ Core concepts:
 - **Provider**: an entity allowed to publish one or more views.
 - **View**: a named shared-view surface with maintainer, description, audience, and current version metadata.
 - **View Version**: an immutable published snapshot of a view package.
-- **Invitation**: a token-scoped URL that allows a consumer to accept and retrieve one view.
+- **Invitation**: a token-scoped URL that lets a consumer create a local connection to one view.
+- **Accepted Connection**: the consumer-side credential and provenance created from an invitation.
 - **Interaction**: a note or feedback record posted by a consumer to a view inbox.
 - **Audit Event**: a durable operational/security event.
 
@@ -86,6 +87,7 @@ providers
 views
 view_versions
 invitations
+connections
 tokens
 interactions
 audit_events
@@ -128,8 +130,9 @@ POST /api/views/{view_id}/invitations
 GET  /i/{invite_token}
 
 GET  /api/invitations/{invite_token}/view
-POST /api/invitations/{invite_token}/retrieve
-POST /api/invitations/{invite_token}/interactions
+POST /api/invitations/{invite_token}/accept
+POST /api/connections/{connection_id}/retrieve
+POST /api/connections/{connection_id}/interactions
 
 GET  /api/views/{view_id}/inbox
 PATCH /api/views/{view_id}/inbox/{interaction_id}
@@ -151,17 +154,18 @@ Invitation and consumer use:
 
 1. Provider or admin creates or rotates a per-view invitation token.
 2. Consumer accepts an invitation URL into local RightMemory.
-3. Consumer memory records a local `M#` heading and resolver metadata.
-4. Consumer retrieves from the hub-hosted snapshot through the HTTP adapter.
-5. Hub returns bounded, provenance-labeled shared-view context.
+3. Hub exchanges the invitation token for an accepted-connection token scoped to that view.
+4. Consumer memory records a local `M#` heading and non-secret resolver metadata; local credential storage records the accepted-connection token.
+5. Consumer retrieves from the hub-hosted snapshot through the HTTP adapter.
+6. Hub returns bounded, provenance-labeled shared-view context.
 
 Interaction:
 
-1. Consumer posts a note/interaction to the hub through the accepted connection.
+1. Consumer posts a note/interaction to the hub through the accepted connection token.
 2. Hub stores the interaction under the target view inbox and writes an audit event.
 3. Provider reads and marks inbox items through Web Studio or CLI.
 
-Provider roots do not need to be online for consumers to retrieve or post notes.
+Consumers can retrieve or post notes while provider roots are offline.
 
 ## Auth And Security
 
@@ -171,7 +175,8 @@ Token types:
 
 - **Admin/operator token**: hub setup, provider management, view management, token management, audit access.
 - **Provider publish token**: publish versions for allowed providers/views.
-- **Invitation token**: accept/retrieve one shared view and post interactions for that view.
+- **Invitation token**: bootstrap a local accepted connection for one shared view.
+- **Accepted-connection token**: retrieve one shared view and post interactions for that view.
 - **Inbox access**: provider token scope, or a dedicated inbox token if implementation needs a separate boundary.
 
 Security behavior:
@@ -180,13 +185,27 @@ Security behavior:
 - Show raw tokens once at creation.
 - Support token rotation and revocation.
 - Scope tokens by provider, view, and action.
-- Audit publish, invite creation, retrieve, interaction, inbox read/update, token creation, token revocation, and failed auth.
+- Allow invitations to be revoked without invalidating every already accepted connection, and allow individual accepted connections to be revoked without rotating the public invitation URL.
+- Audit publish, invite creation, invitation acceptance, retrieve, interaction, inbox read/update, token creation, token revocation, and failed auth.
 - Enforce package size limits, request size limits, and bounded retrieve responses.
 - Validate package manifests before storing versions.
 - Protect package extraction and file serving from path traversal.
 - Treat HTTPS as required for internet exposure; self-hosted docs can explain reverse-proxy TLS rather than adding certificate management to v1.
 
 The absence of live provider relay is a security and reliability choice: public consumers interact with the hub-hosted snapshot and hub inbox, not arbitrary provider machines.
+
+## Retrieval Semantics
+
+V1 retrieval uses deterministic hub-side retrieval over the hosted snapshot. It avoids model calls and provider-root relay.
+
+The retrieval endpoint should:
+
+- search the current or requested immutable view version;
+- return bounded snippets with file/path/line provenance and view/version freshness;
+- use stable lexical or structured matching that can be tested without external services;
+- preserve room for richer retrieval ranking later by keeping the response shape explicit about matches, provenance, and freshness.
+
+Clients may cache hub responses locally, but the hub remains the source for hosted snapshot retrieval.
 
 ## RightMemory Integration
 
@@ -198,7 +217,7 @@ Conceptual config:
 [shared_view_hubs.work]
 kind = "http"
 base_url = "https://hub.example.com"
-token = "..."
+credential_id = "work-publisher"
 ```
 
 Provider workflow:
@@ -225,9 +244,32 @@ Web Studio consumer flow:
 Views I Use -> Accept Invitation URL
 ```
 
-Retrieve and note behavior stay the same at the product level. The local `M#` heading records relationship meaning, `shared_views.toml` records resolver metadata, and the resolver target is `kind = "http"` with base URL, token, view id, and version/freshness provenance.
+Retrieve and note behavior stay the same at the product level. The local `M#` heading records relationship meaning, `shared_views.toml` records safe resolver metadata, and the resolver target is `kind = "http"` with base URL, credential reference id, view id, and version/freshness provenance.
+
+Bearer credentials stay out of `shared_views.toml` and other synced memory files. The synced resolver metadata stores safe fields such as hub id, base URL, view id, accepted-from URL, version provenance, and a local credential reference. Provider publish tokens and accepted-connection tokens belong in local runtime/secret storage.
 
 The HTTP adapter becomes the product target. Package export and mounted-folder hubs remain useful for offline/local compatibility, import/export, and migration.
+
+## Service Lifecycle
+
+The hub needs its own service lifecycle rather than piggybacking on a memory root.
+
+Representative commands:
+
+```bash
+rightmemory hub init <hub-root>
+rightmemory hub serve <hub-root> --host 127.0.0.1 --port 8765
+rightmemory hub status <hub-root>
+rightmemory hub token create --provider <provider-id>
+```
+
+The exact CLI can evolve, but the implementation plan should define:
+
+- hub root layout for `hub.db`, package storage, config, logs, and secret bootstrap material;
+- database migration command or startup migration policy;
+- development startup for local testing;
+- self-hosted deployment guidance for reverse-proxy HTTPS;
+- backup/export guidance for SQLite metadata and package storage.
 
 ## Migration And Import
 
@@ -252,7 +294,9 @@ Hub service tests should cover:
 
 - publish creates immutable versions and updates the current pointer;
 - invalid package manifests and unsafe paths are rejected;
-- invitation tokens retrieve the intended view and cannot access other views;
+- invitation tokens describe or accept the intended view and cannot create unrelated connections;
+- invitation acceptance creates scoped accepted-connection credentials;
+- accepted-connection tokens retrieve the intended view and cannot access other views;
 - provider tokens can publish allowed views and cannot publish unrelated views;
 - interactions are stored per view and visible through provider inbox;
 - token hashes, rotation, revocation, and failed-auth audit events behave correctly;
@@ -264,6 +308,7 @@ RightMemory adapter tests should cover:
 - Web Studio and CLI can publish a local shared-view package to the HTTP Hub;
 - `accept-invite` handles HTTP invitation URLs;
 - retrieve and note work through accepted HTTP hub connections;
+- synced connection metadata does not contain bearer tokens;
 - connection metadata records hub provenance and version/freshness;
 - mounted-folder hub behavior remains separate and compatible.
 

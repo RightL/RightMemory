@@ -10,9 +10,9 @@ The product center is a status-first RightMemory workspace:
 - browse active memory files, shared-view source files, and Insight artifacts from the browser;
 - inspect recent agent messages, role outputs, and logs where RightMemory already records them;
 - define, build, export, publish, accept, retrieve, and note against shared views;
-- configure mounted-folder hubs and web access settings.
+- configure shared-view hubs and web access settings.
 
-This design covers the first coherent web UI and service boundary. A future HTTP Shared View Hub can be designed separately if mounted-folder hubs become limiting.
+This design covers the first coherent web UI and service boundary. Mounted-folder hubs are the local compatibility adapter for the first Web Studio release. HTTP Shared View Hub is the network product target and should fit the same adapter boundary when it lands.
 
 ## Scope
 
@@ -27,7 +27,7 @@ The first release covers a useful RightMemory web workspace, with shared views a
 - root/profile switching inside one managed web service;
 - settings for host, port, operator token, actor name, saved hub paths, default export location, and display preferences.
 
-This release excludes a remote HTTP hub service, account system, per-user permission model, global discovery, full memory editor, model/config editor, and replacement chat client for retrieve/update/dreamer/insight roles. Ordinary memory edits continue through existing RightMemory role workflows; the browser can inspect memory files but does not become a general prose editor in this slice.
+This release excludes implementing the remote HTTP hub service itself, an account system, per-user permission model, global discovery, full memory editor, model/config editor, and replacement chat client for retrieve/update/dreamer/insight roles. Ordinary memory edits continue through existing RightMemory role workflows; the browser can inspect memory files but does not become a general prose editor in this slice.
 
 ## Product Model
 
@@ -71,10 +71,10 @@ Web Studio service
   -> package adapter
   -> local provider-root adapter
   -> mounted-folder hub adapter
-  -> future HTTP hub adapter
+  -> HTTP hub adapter, once the hub service exists
 ```
 
-The current mounted-folder hub is the first hub adapter, not the whole hub concept. It supports the existing path-based hub structure:
+The mounted-folder hub is the local compatibility adapter for the first Web Studio release, not the whole hub concept. It supports the existing path-based hub structure:
 
 ```text
 <hub>/registry.toml
@@ -83,7 +83,7 @@ The current mounted-folder hub is the first hub adapter, not the whole hub conce
 <hub>/interactions/<view-id>.jsonl
 ```
 
-A later HTTP hub can implement the same conceptual operations through network APIs without changing the Web Studio product model.
+The HTTP hub implements the same conceptual operations through network APIs and becomes the preferred network adapter once available.
 
 ## Process Management
 
@@ -187,11 +187,11 @@ Activity and log viewing should include bounded previews from:
 - shared-view interactions, inbox records, notes, cache freshness, and queued/sent state;
 - recent role outputs/messages where they are stored in RightMemory runtime state or watch logs.
 
-Readers should be allowlisted and bounded. The web service should not expose arbitrary filesystem reads through path parameters. Use stable file/log identifiers resolved server-side to known RightMemory locations.
+Readers should be allowlisted and bounded. The web service uses stable file/log identifiers resolved server-side to known RightMemory locations, keeping arbitrary filesystem paths out of the browser API.
 
 ## Hub Support
 
-V1 supports mounted-folder hubs through the formal hub adapter. The GUI should make mounted-folder hubs feel intentional rather than exposing raw path mechanics everywhere.
+V1 supports mounted-folder hubs through the formal hub adapter, while the service boundary is shaped for the HTTP hub adapter described in the separate HTTP Shared View Hub spec. The GUI should make mounted-folder hubs feel intentional rather than exposing raw path mechanics everywhere, but it should label them as local/mounted hubs rather than as the final network hub form.
 
 Hub features:
 
@@ -203,6 +203,30 @@ Hub features:
 - show package, hub, or local-provider transport details inside connection detail panels.
 
 Mounted-folder hubs can be hosted on another LAN computer when the folder is mounted locally through SMB, NFS, or a similar filesystem mechanism. Different machines may use different local mount paths; the GUI should let each machine save its own path for the same conceptual hub.
+
+When the HTTP hub adapter exists, Web Studio should present it as the normal network sharing target. Mounted-folder hubs remain useful for local teams, offline workflows, import/export, and compatibility.
+
+## Credential And Local State Boundaries
+
+Web Studio will touch settings with different durability and secrecy requirements. Keep these stores separate:
+
+- Durable memory files keep collaboration meaning and non-secret shared-view references.
+- `shared_views.toml` records resolver metadata that is safe to sync, such as target kind, view id, base URL, provider/maintainer metadata, accepted-from provenance, and credential reference ids.
+- Local runtime or secret storage keeps operator tokens, HTTP hub tokens, connection tokens, CSRF/session secrets, and other bearer credentials.
+- Web UI display preferences and local hub mount paths live in local runtime/config state because they are machine-specific.
+
+HTTP shared-view connections keep bearer tokens out of `shared_views.toml`. The registry points to a local credential id, and retrieval/note operations resolve that credential at runtime.
+
+## Delivery Phases
+
+The product shape is broader than the first implementation pass, so the plan should land it in coherent phases:
+
+1. Web service shell: FastAPI app, login/session/CSRF, root/profile switching, static UI shell, and process management.
+2. Observability: overview/status, memory browser, Insight browser, bounded log/message readers, and read allowlists.
+3. Shared-view management: provider and consumer workflows over the existing package, local provider, and mounted-folder adapters.
+4. Activity polish: interaction timelines, inbox ergonomics, warning states, and cross-links between status, logs, memory files, and shared views.
+
+Each phase should leave the UI usable rather than exposing a half-wired navigation tree.
 
 ## Safety And Auth
 
@@ -241,6 +265,7 @@ Test coverage should include:
 
 - auth flow: unauthenticated requests blocked, token login works, write APIs require CSRF;
 - profile/root switching: actions resolve the active root and do not leak state across profiles;
+- credential boundaries: synced registries contain credential references rather than bearer tokens;
 - overview/status: Git state, managed watches, async update state, Insight status, and recent issue summaries render through API responses;
 - memory browsing: active memory files, shared-view source files, generated previews, and imported snapshots are readable through allowlisted identifiers;
 - insight browsing: `insight_logs/*.md` list and preview correctly;
