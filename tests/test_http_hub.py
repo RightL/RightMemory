@@ -2,7 +2,9 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import rightmemory.hub.packages as hub_packages
 from rightmemory.hub.packages import (
     PackageValidationError,
     copy_package_version,
@@ -115,6 +117,24 @@ class HubPackageTests(unittest.TestCase):
 
         self.assertIn("path traversal", str(caught.exception))
         self.assertFalse((self.root / "hub" / "storage" / "views" / "alice-auth-api" / "escape").exists())
+
+    def test_copy_rejects_path_traversal_package_entries(self):
+        package = self.root / "package"
+        _write_package(package)
+        valid_entries = hub_packages._package_file_entries(package)
+        malicious_entries = valid_entries + (("../escape.md", package / "view.md"),)
+
+        with patch("rightmemory.hub.packages._package_file_entries", side_effect=[valid_entries, malicious_entries]):
+            with self.assertRaises(PackageValidationError) as caught:
+                copy_package_version(
+                    package,
+                    self.root / "hub" / "storage",
+                    view_id="alice-auth-api",
+                    version_id="v1",
+                )
+
+        self.assertIn("package path traversal entry", str(caught.exception))
+        self.assertFalse((self.root / "hub" / "storage" / "escape.md").exists())
 
     def test_symlinked_file_that_escapes_package_root_is_rejected(self):
         package = self.root / "package"
