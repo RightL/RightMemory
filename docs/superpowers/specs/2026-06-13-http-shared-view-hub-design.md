@@ -214,16 +214,18 @@ RightMemory should talk to the HTTP Hub through a first-class adapter.
 Conceptual config:
 
 ```toml
-[shared_view_hubs.work]
+[connections."alice-auth-api".target]
 kind = "http"
 base_url = "https://hub.example.com"
+view_id = "alice-auth-api"
 credential_id = "work-publisher"
 ```
 
 Provider workflow:
 
 ```bash
-rightmemory shared-view publish-http <view-id> --hub work
+rightmemory shared-view credential set work-publisher --kind http-publish --token <raw-token>
+rightmemory shared-view publish-http <view-id> --hub-url https://hub.example.com --credential-id work-publisher
 ```
 
 Web Studio provider flow:
@@ -260,7 +262,8 @@ Representative commands:
 rightmemory hub init <hub-root>
 rightmemory hub serve <hub-root> --host 127.0.0.1 --port 8765
 rightmemory hub status <hub-root>
-rightmemory hub token create --provider <provider-id>
+rightmemory hub token create <hub-root> --provider <provider-id>
+rightmemory hub token revoke <hub-root> <token-id>
 ```
 
 The exact CLI can evolve, but the implementation plan should define:

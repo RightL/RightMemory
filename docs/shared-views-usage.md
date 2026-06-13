@@ -113,6 +113,34 @@ The package is published under `/shared/rightmemory-hub/views/alice-auth-api`, a
 
 Notes sent through a hub are written under the hub's `interactions/` directory. Provider-local `shared-view inbox` reads the provider root's `.runtime/shared_views/inbox/`, so hub records may need a separate team process until a hub inbox command exists.
 
+### 5. Publish To An HTTP Hub
+
+Use the HTTP hub when the shared view needs a network URL rather than a mounted folder. The hub root is separate infrastructure, while provider and consumer memory roots keep their own `MEMORY.md`, `shared_views.toml`, and runtime credential state.
+
+```bash
+rightmemory hub init /srv/rightmemory-hub --public-base-url http://hub.local:8765
+rightmemory hub token create /srv/rightmemory-hub --provider alice --label publish
+rightmemory hub serve /srv/rightmemory-hub --host 0.0.0.0 --port 8765
+```
+
+Store the printed provider token in the provider memory root, then publish by credential id:
+
+```bash
+rightmemory --profile alice shared-view credential set alice-publish \
+  --kind http-publish \
+  --token <raw-token>
+
+rightmemory --profile alice shared-view publish-http alice-auth-api \
+  --hub-url http://hub.local:8765 \
+  --credential-id alice-publish
+```
+
+HTTP invitations are accepted with the normal invitation command:
+
+```bash
+rightmemory --profile frontend shared-view accept-invite http://hub.local:8765/i/<invite-token>
+```
+
 ## Consumer Workflow
 
 ### 1. Accept An Invitation
@@ -260,7 +288,10 @@ rightmemory shared-view define <view-id> --title "View Title" --term keyword
 rightmemory shared-view build <view-id> [--query "..."] [--context-lines N] [--limit N]
 rightmemory shared-view export <view-id> --target <package-dir> [--query "..."] [--replace]
 rightmemory shared-view publish <view-id> --hub <hub-dir> [--query "..."] [--replace]
+rightmemory shared-view credential set <credential-id> --kind http-publish --token <raw-token>
+rightmemory shared-view publish-http <view-id> --hub-url <url> --credential-id <credential-id> [--query "..."]
 rightmemory shared-view accept-invite <package-or-invitation>
+rightmemory shared-view accept-invite <http-invitation-url>
 rightmemory shared-view accept <heading-id> --title "Title" --body "..." --ref <ref> --package <package-dir>
 rightmemory shared-view accept <heading-id> --title "Title" --body "..." --ref <ref> --provider-root <root>
 rightmemory shared-view accept <heading-id> --title "Title" --body "..." --ref <ref> --hub <hub-dir>
@@ -268,4 +299,11 @@ rightmemory shared-view retrieve <heading-id> "query"
 rightmemory shared-view note <heading-id> [--confirm] [--task "..."] "message"
 rightmemory shared-view notes [heading-id]
 rightmemory shared-view inbox [view-id]
+rightmemory shared-view inbox-http --hub-url <url> --credential-id <credential-id> --provider <provider-id>
+
+rightmemory hub init <hub-root> [--admin-token <token>] [--public-base-url <url>]
+rightmemory hub status <hub-root>
+rightmemory hub token create <hub-root> --provider <provider-id> [--label <label>]
+rightmemory hub token revoke <hub-root> <token-id>
+rightmemory hub serve <hub-root> [--host 127.0.0.1] [--port 8765]
 ```

@@ -60,6 +60,32 @@ class HubClient:
                 bearer=True,
             )
 
+    def create_invitation(
+        self,
+        view_id: str,
+        *,
+        label: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if label:
+            payload["label"] = label
+        if expires_at:
+            payload["expires_at"] = expires_at
+        return self._request(
+            "POST",
+            f"/api/views/{urllib.parse.quote(view_id)}/invitations",
+            json_body=payload,
+            bearer=True,
+        )
+
+    def provider_inbox(self, provider_id: str) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/api/providers/{urllib.parse.quote(provider_id)}/inbox",
+            bearer=True,
+        )
+
     def _request(
         self,
         method: str,

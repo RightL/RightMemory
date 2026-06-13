@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlparse
 
-from .hub.client import HubClient, HubClientError
+from .hub.client import HubClient
 from .session import _ensure_runtime_gitignore, _fsync_directory
 
 
@@ -248,6 +249,58 @@ def publish_shared_view(
         ),
     )
     return f"published shared view {definition.view_id} to hub {hub}"
+
+
+def publish_http_shared_view(
+    memory_root: Path,
+    view_id: str,
+    *,
+    hub_url: str,
+    credential_id: str,
+    query: str | None = None,
+    invitation_label: str | None = None,
+    expires_at: str | None = None,
+) -> str:
+    """Publish a shared view package to an HTTP hub using a local runtime credential."""
+    root = Path(memory_root).expanduser()
+    clean_view_id = _validate_heading_id(view_id)
+    clean_credential_id = _validate_heading_id(credential_id)
+    base_url = str(hub_url).strip().rstrip("/")
+    _validate_http_base_url(base_url)
+    credential = load_shared_view_credential(root, clean_credential_id)
+    client = HubClient(base_url, credential["token"])
+    with TemporaryDirectory() as tempdir:
+        package_path = Path(tempdir) / clean_view_id
+        export_shared_view(root, clean_view_id, package_path, query=query)
+        response = client.publish_package(clean_view_id, package_path)
+    invitation = client.create_invitation(clean_view_id, label=invitation_label, expires_at=expires_at)
+    version_id = response.get("version_id")
+    suffix = f" version {version_id}" if isinstance(version_id, str) and version_id else ""
+    message = f"published shared view {clean_view_id} to HTTP hub {base_url}{suffix}"
+    invitation_url = invitation.get("invitation_url")
+    if isinstance(invitation_url, str) and invitation_url:
+        message += f"\ninvitation_url\t{invitation_url}"
+    return message
+
+
+def list_http_shared_view_inbox(
+    memory_root: Path,
+    *,
+    hub_url: str,
+    credential_id: str,
+    provider_id: str,
+) -> list[dict[str, object]]:
+    root = Path(memory_root).expanduser()
+    clean_credential_id = _validate_heading_id(credential_id)
+    clean_provider_id = _validate_heading_id(provider_id)
+    base_url = str(hub_url).strip().rstrip("/")
+    _validate_http_base_url(base_url)
+    credential = load_shared_view_credential(root, clean_credential_id)
+    response = HubClient(base_url, credential["token"]).provider_inbox(clean_provider_id)
+    interactions = response.get("interactions", [])
+    if not isinstance(interactions, list):
+        raise ValueError("HTTP hub inbox response must contain an interactions list")
+    return [item for item in interactions if isinstance(item, dict)]
 
 
 def accept_shared_view_invitation(

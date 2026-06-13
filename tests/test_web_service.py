@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -158,6 +159,48 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
         self.assertTrue((hub / "registry.toml").exists())
         self.assertEqual(listing.status_code, 200)
         self.assertEqual(listing.json()["data"]["provider_views"][0]["view_id"], "alice-auth-api")
+
+    def test_provider_publish_dispatches_http_hub(self):
+        calls = []
+
+        def fake_publish_http(memory_root, view_id, *, hub_url, credential_id, query=None):
+            calls.append((memory_root, view_id, hub_url, credential_id, query))
+            return f"published shared view {view_id} to HTTP hub {hub_url}"
+
+        with patch("rightmemory.web.service.publish_http_shared_view", side_effect=fake_publish_http):
+            response = self.client.post(
+                "/api/share/views/alice-auth-api/publish",
+                json={
+                    "kind": "http",
+                    "hub_url": "https://hub.example.test",
+                    "credential_id": "alice-publish",
+                    "query": "auth",
+                },
+                headers={"x-csrf-token": self.csrf},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, [(self.root, "alice-auth-api", "https://hub.example.test", "alice-publish", "auth")])
+
+    def test_accept_invite_dispatches_http_urls(self):
+        calls = []
+
+        def fake_accept_http(memory_root, invitation_url, **kwargs):
+            calls.append((memory_root, invitation_url, kwargs["heading_id"]))
+            return "accepted shared view remote-auth"
+
+        with patch("rightmemory.web.service.accept_http_shared_view_invitation", side_effect=fake_accept_http):
+            response = self.client.post(
+                "/api/use/accept-invite",
+                json={
+                    "invitation": "https://hub.example.test/i/invite-token",
+                    "heading_id": "remote-auth",
+                },
+                headers={"x-csrf-token": self.csrf},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, [(self.root, "https://hub.example.test/i/invite-token", "remote-auth")])
 
     def test_accept_retrieve_note_and_notes(self):
         package = self.root / "package"

@@ -6,6 +6,7 @@ from typing import Any
 
 from ..session import MemoryWriteLock
 from ..shared_views import (
+    accept_http_shared_view_invitation,
     accept_shared_view_invitation,
     build_shared_view,
     define_shared_view,
@@ -14,6 +15,7 @@ from ..shared_views import (
     list_shared_view_notes,
     load_connections,
     load_shared_view_definition,
+    publish_http_shared_view,
     publish_shared_view,
     record_shared_view_note,
     retrieve_shared_view,
@@ -154,6 +156,14 @@ class WebStudioService:
 
     def publish_view(self, view_id: str, payload: dict[str, Any]) -> str:
         kind = _optional_payload_str(payload, "kind") or "mounted"
+        if kind == "http":
+            return publish_http_shared_view(
+                self.memory_root,
+                view_id,
+                hub_url=_required_payload_str(payload, "hub_url"),
+                credential_id=_required_payload_str(payload, "credential_id"),
+                query=_optional_payload_str(payload, "query"),
+            )
         if kind != "mounted":
             raise ValueError(f"unsupported shared-view publish target for this server: {kind}")
         return publish_shared_view(
@@ -165,10 +175,20 @@ class WebStudioService:
         )
 
     def accept_invite(self, payload: dict[str, Any]) -> str:
+        invitation = _required_payload_str(payload, "invitation")
         with MemoryWriteLock(self.memory_root):
+            if _is_http_url(invitation):
+                return accept_http_shared_view_invitation(
+                    self.memory_root,
+                    invitation,
+                    heading_id=_optional_payload_str(payload, "heading_id"),
+                    title=_optional_payload_str(payload, "title"),
+                    body=_optional_payload_str(payload, "body"),
+                    relationship=_optional_payload_str(payload, "relationship"),
+                )
             return accept_shared_view_invitation(
                 self.memory_root,
-                Path(_required_payload_str(payload, "invitation")),
+                Path(invitation),
                 heading_id=_optional_payload_str(payload, "heading_id"),
                 title=_optional_payload_str(payload, "title"),
                 body=_optional_payload_str(payload, "body"),
@@ -203,6 +223,10 @@ class WebStudioService:
         if not resolved.exists():
             raise ValueError(f"active root does not exist: {resolved}")
         return {"active_root": str(resolved)}
+
+
+def _is_http_url(value: str) -> bool:
+    return value.startswith("http://") or value.startswith("https://")
 
 
 def _json_safe(value: Any) -> Any:

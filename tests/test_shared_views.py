@@ -13,9 +13,11 @@ from rightmemory.shared_views import (
     build_shared_view,
     define_shared_view,
     export_shared_view,
+    list_http_shared_view_inbox,
     list_shared_view_inbox,
     load_connections,
     load_shared_view_definition,
+    publish_http_shared_view,
     publish_shared_view,
     record_shared_view_note,
     retrieve_shared_view,
@@ -314,6 +316,69 @@ class SharedViewHttpAdapterTests(unittest.TestCase):
         fake = clients[0]
         self.assertEqual(fake.accepted_tokens, ["invite-token"])
 
+    def test_publish_http_view_exports_package_and_uses_publish_credential(self):
+        clients = []
+        (self.root / "MEMORY.md").write_text(
+            "# Provider\n\nAuth API accepts signed tokens.\nPrivate payroll note.\n",
+            encoding="utf-8",
+        )
+        define_shared_view(
+            self.root,
+            view_id="alice-auth-api",
+            title="Alice Auth API",
+            description="Auth API collaboration context.",
+            filter_terms=["auth"],
+        )
+        save_shared_view_credential(
+            self.root,
+            "alice-publish",
+            kind="http-publish",
+            token="publish-token",
+        )
+
+        with patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)):
+            result = publish_http_shared_view(
+                self.root,
+                "alice-auth-api",
+                hub_url="https://hub.example.test/",
+                credential_id="alice-publish",
+                query="auth",
+            )
+
+        fake = clients[0]
+        self.assertIn("published shared view alice-auth-api to HTTP hub https://hub.example.test version ver_http", result)
+        self.assertEqual(fake.base_url, "https://hub.example.test")
+        self.assertEqual(fake.token, "publish-token")
+        self.assertEqual(fake.publish_calls[0]["view_id"], "alice-auth-api")
+        self.assertEqual(fake.invitation_calls, [("alice-auth-api", None, None)])
+        self.assertIn("invitation_url\thttps://hub.example.test/i/invite-token", result)
+        self.assertIn("rightmemory-shared-view.toml", fake.publish_calls[0]["files"])
+        self.assertIn("dist/MEMORY.md", fake.publish_calls[0]["files"])
+        self.assertIn("Auth API accepts signed tokens.", fake.publish_calls[0]["memory"])
+
+    def test_list_http_inbox_uses_publish_credential(self):
+        clients = []
+        save_shared_view_credential(
+            self.root,
+            "alice-publish",
+            kind="http-publish",
+            token="publish-token",
+        )
+
+        with patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)):
+            records = list_http_shared_view_inbox(
+                self.root,
+                hub_url="https://hub.example.test/",
+                credential_id="alice-publish",
+                provider_id="alice",
+            )
+
+        fake = clients[0]
+        self.assertEqual(fake.base_url, "https://hub.example.test")
+        self.assertEqual(fake.token, "publish-token")
+        self.assertEqual(fake.provider_inbox_calls, ["alice"])
+        self.assertEqual(records[0]["payload"]["message"], "Docs are stale")
+
 
 class _FakeHubClient:
     def __init__(self, base_url: str = "", token: str | None = None):
@@ -322,6 +387,9 @@ class _FakeHubClient:
         self.retrieve_calls = []
         self.interactions = []
         self.accepted_tokens = []
+        self.publish_calls = []
+        self.invitation_calls = []
+        self.provider_inbox_calls = []
 
     def retrieve_view(self, view_id: str, query: str, *, limit: int = 12):
         self.retrieve_calls.append((view_id, query, limit))
@@ -356,6 +424,28 @@ class _FakeHubClient:
             "connection_token": "accepted-token",
             "view_id": "alice-auth-api",
             "consumer_label": consumer_label,
+        }
+
+    def publish_package(self, view_id: str, package_root: Path):
+        files = sorted(path.relative_to(package_root).as_posix() for path in package_root.rglob("*") if path.is_file())
+        memory = (package_root / "dist" / "MEMORY.md").read_text(encoding="utf-8")
+        self.publish_calls.append({"view_id": view_id, "files": files, "memory": memory})
+        return {"version_id": "ver_http"}
+
+    def create_invitation(self, view_id: str, *, label: str | None = None, expires_at: str | None = None):
+        self.invitation_calls.append((view_id, label, expires_at))
+        return {"invitation_url": f"{self.base_url}/i/invite-token"}
+
+    def provider_inbox(self, provider_id: str):
+        self.provider_inbox_calls.append(provider_id)
+        return {
+            "provider_id": provider_id,
+            "interactions": [
+                {
+                    "view_id": "alice-auth-api",
+                    "payload": {"message": "Docs are stale"},
+                }
+            ],
         }
 
 

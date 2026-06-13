@@ -235,6 +235,27 @@ rightmemory shared-view inbox alice-auth-api
 
 For a small local team hub, publish the provider view with `rightmemory shared-view publish alice-auth-api --hub <hub-dir>` and share the generated invitation from `<hub-dir>/invitations/`. Hub interactions are recorded under the hub directory; local-provider interactions are delivered to the provider root's `.runtime/shared_views/inbox/`.
 
+For a network-capable hub, initialize and serve a separate hub root, create a provider token, store that token as a local runtime credential in the provider memory root, then publish through HTTP:
+
+```bash
+rightmemory hub init ./rightmemory-hub --public-base-url http://127.0.0.1:8765
+rightmemory hub token create ./rightmemory-hub --provider alice --label publish
+rightmemory hub serve ./rightmemory-hub --host 127.0.0.1 --port 8765
+
+rightmemory shared-view credential set alice-publish --kind http-publish --token <raw-token>
+rightmemory shared-view publish-http alice-auth-api \
+  --hub-url http://127.0.0.1:8765 \
+  --credential-id alice-publish
+```
+
+Consumers accept HTTP invitations with the same `accept-invite` command used for package invitations:
+
+```bash
+rightmemory shared-view accept-invite http://127.0.0.1:8765/i/<invite-token>
+```
+
+The synced `shared_views.toml` stores the hub URL and credential id; bearer tokens stay under `.runtime/shared_views/credentials.json`.
+
 The builder requires explicit scope before publishing filtered Markdown: use one or more `--term` values, pass `--query` to `build`, `export`, or `publish`, or use `--include-all` when the view is intentionally broad. For manual connections, prefer `accept-invite`; when wiring an existing reachable target yourself, use `rightmemory shared-view accept <heading-id> --package <package-dir>`, `--provider-root <root>`, or `--hub <hub-dir>` so the resolver behavior is clear.
 
 ### Edges
