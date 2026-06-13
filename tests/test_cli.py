@@ -617,6 +617,7 @@ class JsonRequestTests(unittest.TestCase):
             with (
                 patch("rightmemory.cli.default_memory_root", return_value=root),
                 patch("sys.stdout", stdout),
+                patch("sys.stdin", io.StringIO("secret-token\n")),
             ):
                 result = main(
                     [
@@ -626,8 +627,11 @@ class JsonRequestTests(unittest.TestCase):
                         "alice-publish",
                         "--kind",
                         "http-publish",
-                        "--token",
-                        "secret-token",
+                        "--hub-url",
+                        "https://hub.example.test",
+                        "--provider",
+                        "alice",
+                        "--token-stdin",
                     ]
                 )
 
@@ -636,6 +640,40 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(credential["kind"], "http-publish")
         self.assertEqual(credential["token"], "secret-token")
+        self.assertEqual(credential["base_url"], "https://hub.example.test")
+        self.assertEqual(credential["provider_id"], "alice")
+        self.assertIn("saved shared view credential alice-publish", stdout.getvalue())
+
+    def test_shared_view_credential_set_can_read_token_from_prompt(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli.getpass.getpass", return_value="prompt-token"),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(
+                    [
+                        "shared-view",
+                        "credential",
+                        "set",
+                        "alice-publish",
+                        "--kind",
+                        "http-publish",
+                        "--hub-url",
+                        "https://hub.example.test",
+                        "--provider",
+                        "alice",
+                        "--token-prompt",
+                    ]
+                )
+
+            credential = load_shared_view_credential(root, "alice-publish")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(credential["token"], "prompt-token")
         self.assertIn("saved shared view credential alice-publish", stdout.getvalue())
 
     def test_shared_view_publish_http_cli_uses_active_memory_root(self):

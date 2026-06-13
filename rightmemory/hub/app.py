@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
 import tempfile
 import zipfile
@@ -13,6 +12,10 @@ from fastapi import Body, FastAPI, HTTPException, Request, status
 
 from .packages import PackageValidationError, retrieve_memory_snippets, validate_package_relative_path
 from .store import HubStore
+
+
+MAX_ZIP_ENTRIES = 2048
+ZIP_ENTRY_OVERHEAD_BYTES = 256
 
 
 def create_hub_app(hub_root: Path) -> FastAPI:
@@ -33,7 +36,8 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         actor = _require_token(store, request, action="publish")
         _require_actor_provider(actor.provider_id)
         _ensure_view_provider_scope(store, view_id, actor.provider_id)
-        package_root, cleanup = await _request_package_root(request)
+        config = store.load_config()
+        package_root, cleanup = await _request_package_root(request, max_package_bytes=config.max_package_bytes)
         try:
             stored = store.store_package_version(
                 package_root,
@@ -80,6 +84,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         invitation_url = f"{config.public_base_url.rstrip('/')}/i/{invitation['raw_token']}"
         return {
             "invitation_id": invitation["invitation_id"],
+            "token_id": invitation["token_id"],
             "view_id": invitation["view_id"],
             "invitation_url": invitation_url,
             "expires_at": invitation["expires_at"],
@@ -120,6 +125,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invitation not found")
         return {
             "connection_id": accepted["connection_id"],
+            "token_id": accepted["token_id"],
             "connection_token": accepted["connection_token"],
             "view_id": accepted["view_id"],
             "consumer_label": accepted["consumer_label"],
@@ -245,40 +251,53 @@ def _ensure_view_provider_scope(store: HubStore, view_id: str, provider_id: str)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="token cannot manage this view")
 
 
-async def _request_package_root(request: Request) -> tuple[Path, Callable[[], None]]:
+async def _request_package_root(request: Request, *, max_package_bytes: int) -> tuple[Path, Callable[[], None]]:
     content_type = request.headers.get("content-type", "")
-    if "application/json" in content_type:
-        try:
-            payload = await request.json()
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid JSON body") from exc
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="publish body must be a JSON object")
-        package_path = payload.get("package_path")
-        if not isinstance(package_path, str) or not package_path.strip():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="package_path is required")
-        return Path(package_path).expanduser(), _noop_cleanup
-
-    body = await request.body()
+    if "application/zip" not in content_type:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="publish body must be application/zip")
+    body = await _read_limited_body(request, max_bytes=max_package_bytes)
     if not body:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="publish body is required")
     tempdir = tempfile.TemporaryDirectory()
     package_root = Path(tempdir.name)
     try:
-        extracted = _extract_zip_package(body, package_root)
+        extracted = _extract_zip_package(body, package_root, max_uncompressed_bytes=max_package_bytes)
+    except HTTPException:
+        tempdir.cleanup()
+        raise
     except (OSError, zipfile.BadZipFile, PackageValidationError) as exc:
         tempdir.cleanup()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return extracted, tempdir.cleanup
 
 
-def _extract_zip_package(body: bytes, target_root: Path) -> Path:
+async def _read_limited_body(request: Request, *, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="package upload is too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _extract_zip_package(body: bytes, target_root: Path, *, max_uncompressed_bytes: int) -> Path:
     archive_path = target_root / "package.zip"
     archive_path.write_bytes(body)
     extract_root = target_root / "package"
     extract_root.mkdir()
+    total_cost = 0
+    entry_count = 0
     with zipfile.ZipFile(archive_path) as archive:
         for info in archive.infolist():
+            entry_count += 1
+            total_cost += ZIP_ENTRY_OVERHEAD_BYTES
+            if entry_count > MAX_ZIP_ENTRIES or total_cost > max_uncompressed_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                    detail="package archive has too many entries",
+                )
             relative = validate_package_relative_path(info.filename)
             if info.is_dir():
                 (extract_root / relative).mkdir(parents=True, exist_ok=True)
@@ -286,7 +305,17 @@ def _extract_zip_package(body: bytes, target_root: Path) -> Path:
             target = extract_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(info) as source, target.open("wb") as destination:
-                shutil.copyfileobj(source, destination)
+                while True:
+                    chunk = source.read(64 * 1024)
+                    if not chunk:
+                        break
+                    total_cost += len(chunk)
+                    if total_cost > max_uncompressed_bytes:
+                        raise HTTPException(
+                            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                            detail="package exceeds configured maximum size",
+                        )
+                    destination.write(chunk)
     archive_path.unlink()
     extracted = target_root / "extracted"
     extract_root.rename(extracted)

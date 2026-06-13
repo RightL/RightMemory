@@ -241,8 +241,16 @@ For a network-capable hub, initialize and serve a separate hub root, create a pr
 rightmemory hub init ./rightmemory-hub --public-base-url http://127.0.0.1:8765
 rightmemory hub token create ./rightmemory-hub --provider alice --label publish
 rightmemory hub serve ./rightmemory-hub --host 127.0.0.1 --port 8765
+```
 
-rightmemory shared-view credential set alice-publish --kind http-publish --token <raw-token>
+Then store the printed provider token through a hidden prompt, so it does not need to appear in shell history:
+
+```bash
+rightmemory shared-view credential set alice-publish \
+  --kind http-publish \
+  --hub-url http://127.0.0.1:8765 \
+  --provider alice \
+  --token-prompt
 rightmemory shared-view publish-http alice-auth-api \
   --hub-url http://127.0.0.1:8765 \
   --credential-id alice-publish

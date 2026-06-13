@@ -31,14 +31,16 @@ from .readers import (
 
 
 class WebStudioService:
-    def __init__(self, memory_root: Path):
-        self.memory_root = Path(memory_root).expanduser()
+    def __init__(self, memory_root: Path, *, allowed_root: Path | None = None):
+        self.memory_root = Path(memory_root).expanduser().resolve()
+        self.allowed_root = Path(allowed_root).expanduser().resolve() if allowed_root is not None else self.memory_root
 
     def session_data(self, *, authenticated: bool, csrf_token: str | None = None) -> dict[str, Any]:
         data: dict[str, Any] = {
             "authenticated": authenticated,
-            "active_root": str(self.memory_root),
         }
+        if authenticated:
+            data["active_root"] = str(self.memory_root)
         if csrf_token:
             data["csrf_token"] = csrf_token
         return data
@@ -219,10 +221,22 @@ class WebStudioService:
         }
 
     def set_active_root(self, root: Path) -> dict[str, Any]:
-        resolved = Path(root).expanduser()
-        if not resolved.exists():
-            raise ValueError(f"active root does not exist: {resolved}")
+        resolved = resolve_allowed_memory_root(self.allowed_root, root)
         return {"active_root": str(resolved)}
+
+
+def resolve_allowed_memory_root(allowed_root: Path, candidate: Path | str) -> Path:
+    base = Path(allowed_root).expanduser().resolve()
+    resolved = Path(candidate).expanduser().resolve()
+    if not resolved.exists():
+        raise ValueError(f"active root does not exist: {resolved}")
+    try:
+        resolved.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(f"active root is outside the configured Web Studio root: {resolved}") from exc
+    if not (resolved / "MEMORY.md").is_file():
+        raise ValueError(f"active root must contain MEMORY.md: {resolved}")
+    return resolved
 
 
 def _is_http_url(value: str) -> bool:

@@ -35,7 +35,7 @@ class WebStudioReadApiTests(unittest.TestCase):
 
         self.assertEqual(overview.status_code, 200)
         self.assertEqual(status.status_code, 200)
-        self.assertEqual(overview.json()["data"]["active_root"], str(self.root))
+        self.assertEqual(overview.json()["data"]["active_root"], str(self.root.resolve()))
         self.assertEqual(overview.json()["data"]["shared_views"]["provider_view_count"], 0)
         self.assertEqual(overview.json()["data"]["shared_views"]["connection_count"], 0)
         self.assertIn("git", status.json()["data"])
@@ -105,6 +105,8 @@ class WebStudioStaticTests(unittest.TestCase):
         self.assertIn("/static/app.js", index.text)
         self.assertIn("/static/styles.css", index.text)
         self.assertNotIn("ready for the next Web Studio API slice", script.text)
+        self.assertIn("define-view-form", script.text)
+        self.assertIn("accept-invite-form", script.text)
 
 
 class WebStudioSharedViewApiTests(unittest.TestCase):
@@ -180,7 +182,10 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(calls, [(self.root, "alice-auth-api", "https://hub.example.test", "alice-publish", "auth")])
+        self.assertEqual(
+            calls,
+            [(self.root.resolve(), "alice-auth-api", "https://hub.example.test", "alice-publish", "auth")],
+        )
 
     def test_accept_invite_dispatches_http_urls(self):
         calls = []
@@ -200,7 +205,7 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(calls, [(self.root, "https://hub.example.test/i/invite-token", "remote-auth")])
+        self.assertEqual(calls, [(self.root.resolve(), "https://hub.example.test/i/invite-token", "remote-auth")])
 
     def test_accept_retrieve_note_and_notes(self):
         package = self.root / "package"

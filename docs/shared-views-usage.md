@@ -123,12 +123,14 @@ rightmemory hub token create /srv/rightmemory-hub --provider alice --label publi
 rightmemory hub serve /srv/rightmemory-hub --host 0.0.0.0 --port 8765
 ```
 
-Store the printed provider token in the provider memory root, then publish by credential id:
+Store the printed provider token in the provider memory root through a hidden prompt, then publish by credential id:
 
 ```bash
 rightmemory --profile alice shared-view credential set alice-publish \
   --kind http-publish \
-  --token <raw-token>
+  --hub-url http://hub.local:8765 \
+  --provider alice \
+  --token-prompt
 
 rightmemory --profile alice shared-view publish-http alice-auth-api \
   --hub-url http://hub.local:8765 \
@@ -288,7 +290,8 @@ rightmemory shared-view define <view-id> --title "View Title" --term keyword
 rightmemory shared-view build <view-id> [--query "..."] [--context-lines N] [--limit N]
 rightmemory shared-view export <view-id> --target <package-dir> [--query "..."] [--replace]
 rightmemory shared-view publish <view-id> --hub <hub-dir> [--query "..."] [--replace]
-rightmemory shared-view credential set <credential-id> --kind http-publish --token <raw-token>
+rightmemory shared-view credential set <credential-id> --kind http-publish --hub-url <url> --provider <provider-id> --token-prompt
+rightmemory shared-view credential set <credential-id> --kind http-publish --hub-url <url> --provider <provider-id> --token-stdin
 rightmemory shared-view publish-http <view-id> --hub-url <url> --credential-id <credential-id> [--query "..."]
 rightmemory shared-view accept-invite <package-or-invitation>
 rightmemory shared-view accept-invite <http-invitation-url>

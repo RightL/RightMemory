@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import math
 import os
@@ -441,7 +442,13 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     credential_set = credential_subparsers.add_parser("set")
     credential_set.add_argument("credential_id")
     credential_set.add_argument("--kind", default="http-publish")
-    credential_set.add_argument("--token", required=True)
+    token_source = credential_set.add_mutually_exclusive_group(required=True)
+    token_source.add_argument("--token")
+    token_source.add_argument("--token-stdin", action="store_true")
+    token_source.add_argument("--token-prompt", action="store_true")
+    credential_set.add_argument("--hub-url", required=True)
+    credential_set.add_argument("--view-id")
+    credential_set.add_argument("--provider")
     retrieve = subparsers.add_parser("retrieve")
     retrieve.add_argument("heading_id")
     retrieve.add_argument("query", nargs=argparse.REMAINDER)
@@ -542,7 +549,10 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
                 memory_root,
                 args.credential_id,
                 kind=args.kind,
-                token=args.token,
+                token=_shared_view_credential_token(args),
+                base_url=args.hub_url,
+                view_id=args.view_id,
+                provider_id=args.provider,
             )
             print(f"saved shared view credential {args.credential_id}")
             return 0
@@ -648,6 +658,18 @@ def _accept_shared_view_invitation_from_cli(
         relationship=relationship,
         copy_package=copy_package,
     )
+
+
+def _shared_view_credential_token(args: argparse.Namespace) -> str:
+    if getattr(args, "token_prompt", False):
+        token = getpass.getpass("Hub token: ").strip()
+    elif getattr(args, "token_stdin", False):
+        token = sys.stdin.read().strip()
+    else:
+        token = str(args.token or "").strip()
+    if not token:
+        raise ValueError("shared-view credential token must not be empty")
+    return token
 
 
 def _is_http_url(value: str) -> bool:

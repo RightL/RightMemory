@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from rightmemory.web.app import create_web_app
-from rightmemory.web.auth import operator_token_hash_path
+from rightmemory.web.auth import SESSION_COOKIE, create_session_cookie, operator_token_hash_path
 
 
 class WebStudioAuthTests(unittest.TestCase):
@@ -21,6 +21,7 @@ class WebStudioAuthTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["authenticated"], False)
+        self.assertNotIn("active_root", response.json())
 
     def test_protected_read_requires_login(self):
         response = self.client.get("/api/overview")
@@ -65,7 +66,7 @@ class WebStudioAuthTests(unittest.TestCase):
         self.assertEqual(missing.status_code, 403)
         self.assertEqual(wrong.status_code, 403)
         self.assertEqual(accepted.status_code, 200)
-        self.assertEqual(accepted.json()["data"]["active_root"], str(self.root))
+        self.assertEqual(accepted.json()["data"]["active_root"], str(self.root.resolve()))
 
     def test_logout_requires_csrf(self):
         login = self.client.post("/api/login", json={"token": "secret-token"})
@@ -96,10 +97,49 @@ class WebStudioAuthTests(unittest.TestCase):
         second_session = second.get("/api/session")
 
         self.assertEqual(switched.status_code, 200)
-        self.assertEqual(first_session.json()["active_root"], str(other_root))
-        self.assertEqual(second_session.json()["active_root"], str(self.root))
+        self.assertEqual(first_session.json()["active_root"], str(other_root.resolve()))
+        self.assertEqual(second_session.json()["active_root"], str(self.root.resolve()))
         self.assertTrue(switched.json()["data"]["csrf_token"])
         self.assertTrue(second_login.json()["data"]["csrf_token"])
+
+    def test_active_root_switch_rejects_paths_outside_configured_root(self):
+        with tempfile.TemporaryDirectory() as outside_temp:
+            outside_root = Path(outside_temp)
+            (outside_root / "MEMORY.md").write_text("# Outside {#outside}\n", encoding="utf-8")
+            login = self.client.post("/api/login", json={"token": "secret-token"})
+
+            response = self.client.post(
+                "/api/active-root",
+                json={"root": str(outside_root)},
+                headers={"x-csrf-token": login.json()["data"]["csrf_token"]},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("outside", response.json()["detail"]["technical"])
+
+    def test_expired_session_cookie_is_rejected(self):
+        cookie, _session = create_session_cookie(
+            self.root,
+            active_root=self.root,
+            created_at="2000-01-01T00:00:00+00:00",
+        )
+        self.client.cookies.set(SESSION_COOKIE, cookie)
+
+        response = self.client.get("/api/overview")
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_logout_revokes_copied_session_cookie(self):
+        login = self.client.post("/api/login", json={"token": "secret-token"})
+        copied_cookie = self.client.cookies.get(SESSION_COOKIE)
+
+        logout = self.client.post("/api/logout", headers={"x-csrf-token": login.json()["data"]["csrf_token"]})
+        attacker = TestClient(create_web_app(self.root))
+        attacker.cookies.set(SESSION_COOKIE, copied_cookie)
+        response = attacker.get("/api/overview")
+
+        self.assertEqual(logout.status_code, 200)
+        self.assertEqual(response.status_code, 401)
 
     def test_cors_headers_are_closed_by_default(self):
         response = self.client.get("/api/session")

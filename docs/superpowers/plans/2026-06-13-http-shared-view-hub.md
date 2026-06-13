@@ -275,7 +275,7 @@ Add:
 
 ```text
 rightmemory shared-view publish-http <view-id> --hub-url <url> --credential-id <id>
-rightmemory shared-view inbox-http --hub-url <url> --credential-id <id> --view-id <view-id>
+rightmemory shared-view inbox-http --hub-url <url> --credential-id <id> --provider <provider-id>
 ```
 
 Extend `accept-invite` so HTTP/HTTPS invitation URLs use the HTTP adapter path while local filesystem paths keep the existing package behavior.

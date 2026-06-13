@@ -95,12 +95,45 @@ async function renderSharedViews() {
       <section class="panel">
         <h2>Views I Share</h2>
         ${renderItems(providerViews.map((view) => ({ label: view.title || view.view_id || view.error })))}
+        <form id="define-view-form" class="settings-form">
+          <input name="view_id" placeholder="view-id">
+          <input name="title" placeholder="Title">
+          <input name="filter_terms" placeholder="terms, comma separated">
+          <button type="submit">Define</button>
+        </form>
+        <form id="provider-view-form" class="settings-form">
+          <input name="view_id" placeholder="view-id">
+          <input name="target" placeholder="export path or hub path">
+          <input name="hub_url" placeholder="HTTP hub URL">
+          <input name="credential_id" placeholder="credential id">
+          <button name="action" value="build" type="submit">Build</button>
+          <button name="action" value="export" type="submit">Export</button>
+          <button name="action" value="publish-mounted" type="submit">Publish</button>
+          <button name="action" value="publish-http" type="submit">Publish HTTP</button>
+        </form>
       </section>
       <section class="panel">
         <h2>Views I Use</h2>
         ${renderItems(connections.map((connection) => ({ label: `${connection.heading_id} (${connection.relationship})` })))}
+        <form id="accept-invite-form" class="settings-form">
+          <input name="invitation" placeholder="package path or invitation URL">
+          <input name="heading_id" placeholder="heading id">
+          <button type="submit">Accept</button>
+        </form>
+        <form id="consumer-view-form" class="settings-form">
+          <input name="heading_id" placeholder="heading id">
+          <input name="query" placeholder="retrieve query">
+          <input name="message" placeholder="note message">
+          <label class="inline-choice"><input name="confirmed" type="checkbox"> Confirm</label>
+          <button name="action" value="retrieve" type="submit">Retrieve</button>
+          <button name="action" value="note" type="submit">Note</button>
+        </form>
       </section>
     </div>
+    <section class="panel wide" id="shared-view-result" hidden>
+      <h2>Result</h2>
+      <pre></pre>
+    </section>
   `;
 }
 
@@ -233,6 +266,114 @@ document.querySelectorAll(".nav-item").forEach((button) => {
 });
 
 function attachPanelHandlers() {
+  const defineViewForm = document.querySelector("#define-view-form");
+  if (defineViewForm) {
+    defineViewForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const terms = String(form.get("filter_terms") || "")
+          .split(",")
+          .map((term) => term.trim())
+          .filter(Boolean);
+        const payload = await fetchJson("/api/share/views", {
+          method: "POST",
+          body: JSON.stringify({
+            view_id: form.get("view_id"),
+            title: form.get("title"),
+            filter_terms: terms,
+          }),
+        });
+        setMessage(payload.message);
+        await loadPanel();
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const providerViewForm = document.querySelector("#provider-view-form");
+  if (providerViewForm) {
+    providerViewForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const action = event.submitter?.value;
+        const viewId = String(form.get("view_id") || "").trim();
+        let path = `/api/share/views/${encodeURIComponent(viewId)}/build`;
+        let body = {};
+        if (action === "export") {
+          path = `/api/share/views/${encodeURIComponent(viewId)}/export`;
+          body = { target: form.get("target"), replace: true };
+        } else if (action === "publish-mounted") {
+          path = `/api/share/views/${encodeURIComponent(viewId)}/publish`;
+          body = { kind: "mounted", hub: form.get("target"), replace: true };
+        } else if (action === "publish-http") {
+          path = `/api/share/views/${encodeURIComponent(viewId)}/publish`;
+          body = {
+            kind: "http",
+            hub_url: form.get("hub_url"),
+            credential_id: form.get("credential_id"),
+          };
+        }
+        const payload = await fetchJson(path, { method: "POST", body: JSON.stringify(body) });
+        setMessage(payload.message);
+        await loadPanel();
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const acceptInviteForm = document.querySelector("#accept-invite-form");
+  if (acceptInviteForm) {
+    acceptInviteForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const payload = await fetchJson("/api/use/accept-invite", {
+          method: "POST",
+          body: JSON.stringify({
+            invitation: form.get("invitation"),
+            heading_id: form.get("heading_id"),
+          }),
+        });
+        setMessage(payload.message);
+        await loadPanel();
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const consumerViewForm = document.querySelector("#consumer-view-form");
+  if (consumerViewForm) {
+    consumerViewForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const action = event.submitter?.value;
+        const headingId = String(form.get("heading_id") || "").trim();
+        const path =
+          action === "note"
+            ? `/api/use/connections/${encodeURIComponent(headingId)}/note`
+            : `/api/use/connections/${encodeURIComponent(headingId)}/retrieve`;
+        const body =
+          action === "note"
+            ? {
+                message: form.get("message"),
+                confirmed: form.get("confirmed") === "on",
+              }
+            : { query: form.get("query") };
+        const payload = await fetchJson(path, { method: "POST", body: JSON.stringify(body) });
+        showSharedViewResult(payload.data?.text || payload.message);
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
   const activeRootForm = document.querySelector("#active-root-form");
   if (activeRootForm) {
     activeRootForm.addEventListener("submit", async (event) => {
@@ -251,6 +392,15 @@ function attachPanelHandlers() {
       }
     });
   }
+}
+
+function showSharedViewResult(text) {
+  const panel = document.querySelector("#shared-view-result");
+  if (!panel) {
+    return;
+  }
+  panel.hidden = false;
+  panel.querySelector("pre").textContent = text || "";
 }
 
 loadSession().catch((error) => {

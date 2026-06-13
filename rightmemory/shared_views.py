@@ -12,7 +12,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlparse
 
-from .hub.client import HubClient
+from .hub.client import HubClient, HubClientError
 from .session import _ensure_runtime_gitignore, _fsync_directory
 
 
@@ -267,7 +267,13 @@ def publish_http_shared_view(
     clean_credential_id = _validate_heading_id(credential_id)
     base_url = str(hub_url).strip().rstrip("/")
     _validate_http_base_url(base_url)
-    credential = load_shared_view_credential(root, clean_credential_id)
+    credential = _load_scoped_http_credential(
+        root,
+        clean_credential_id,
+        kind="http-publish",
+        base_url=base_url,
+        view_id=None,
+    )
     client = HubClient(base_url, credential["token"])
     with TemporaryDirectory() as tempdir:
         package_path = Path(tempdir) / clean_view_id
@@ -295,7 +301,13 @@ def list_http_shared_view_inbox(
     clean_provider_id = _validate_heading_id(provider_id)
     base_url = str(hub_url).strip().rstrip("/")
     _validate_http_base_url(base_url)
-    credential = load_shared_view_credential(root, clean_credential_id)
+    credential = _load_scoped_http_credential(
+        root,
+        clean_credential_id,
+        kind="http-publish",
+        base_url=base_url,
+        provider_id=clean_provider_id,
+    )
     response = HubClient(base_url, credential["token"]).provider_inbox(clean_provider_id)
     interactions = response.get("interactions", [])
     if not isinstance(interactions, list):
@@ -356,14 +368,24 @@ def accept_http_shared_view_invitation(
     base_url, invite_token = _parse_http_invitation_url(invitation_url)
     client = HubClient(base_url)
     view_info = client.get_invitation_view(invite_token)
-    accepted = client.accept_invitation(invite_token, consumer_label=consumer_label)
-    view_id = _validate_heading_id(str(accepted.get("view_id") or view_info.get("view_id")))
+    view_id = _validate_heading_id(str(view_info.get("view_id")))
     local_heading_id = _validate_heading_id(heading_id or view_id)
     local_credential_id = _validate_heading_id(credential_id or f"http-{local_heading_id}")
+    if _shared_view_credential_exists(root, local_credential_id):
+        raise ValueError(f"shared view credential already exists: {local_credential_id}")
+    accepted = client.accept_invitation(invite_token, consumer_label=consumer_label)
+    view_id = _validate_heading_id(str(accepted.get("view_id") or view_id))
     token = accepted.get("connection_token")
     if not isinstance(token, str) or not token:
         raise ValueError("HTTP shared-view invitation did not return a connection token")
-    save_shared_view_credential(root, local_credential_id, kind="http-connection", token=token)
+    save_shared_view_credential(
+        root,
+        local_credential_id,
+        kind="http-connection",
+        token=token,
+        base_url=base_url,
+        view_id=view_id,
+    )
     local_title = title or str(view_info.get("title") or view_id)
     local_body = body if body is not None else _default_http_invitation_body(view_info)
     return accept_shared_view(
@@ -475,6 +497,9 @@ def save_shared_view_credential(
     *,
     kind: str,
     token: str,
+    base_url: str | None = None,
+    view_id: str | None = None,
+    provider_id: str | None = None,
 ) -> None:
     root = Path(memory_root).expanduser()
     clean_id = _validate_heading_id(credential_id)
@@ -482,15 +507,28 @@ def save_shared_view_credential(
         raise ValueError("shared view credential kind must be a non-empty string")
     if not isinstance(token, str) or not token:
         raise ValueError("shared view credential token must be a non-empty string")
+    clean_base_url = _optional_string(base_url)
+    if clean_base_url:
+        clean_base_url = clean_base_url.rstrip("/")
+        _validate_http_base_url(clean_base_url)
+    clean_view_id = _validate_heading_id(view_id) if view_id else None
+    clean_provider_id = _validate_heading_id(provider_id) if provider_id else None
     data = _load_credentials(root)
     credentials = data.setdefault("credentials", {})
     if not isinstance(credentials, dict):
         raise ValueError("shared view credential store is invalid")
-    credentials[clean_id] = {
+    entry = {
         "kind": kind.strip(),
         "token": token,
         "created_at": _now_iso(),
     }
+    if clean_base_url:
+        entry["base_url"] = clean_base_url
+    if clean_view_id:
+        entry["view_id"] = clean_view_id
+    if clean_provider_id:
+        entry["provider_id"] = clean_provider_id
+    credentials[clean_id] = entry
     _write_credentials(root, data)
 
 
@@ -509,6 +547,36 @@ def load_shared_view_credential(memory_root: Path, credential_id: str) -> dict[s
     if not isinstance(kind, str) or not isinstance(token, str):
         raise ValueError(f"shared view credential is invalid: {clean_id}")
     return {key: value for key, value in raw.items() if isinstance(key, str) and isinstance(value, str)}
+
+
+def _shared_view_credential_exists(memory_root: Path, credential_id: str) -> bool:
+    try:
+        load_shared_view_credential(memory_root, credential_id)
+    except KeyError:
+        return False
+    return True
+
+
+def _load_scoped_http_credential(
+    memory_root: Path,
+    credential_id: str,
+    *,
+    kind: str,
+    base_url: str,
+    view_id: str | None = None,
+    provider_id: str | None = None,
+) -> dict[str, str]:
+    credential = load_shared_view_credential(memory_root, credential_id)
+    if credential.get("kind") != kind:
+        raise ValueError(f"shared view credential {credential_id} is not a {kind} credential")
+    expected_base_url = base_url.rstrip("/")
+    if credential.get("base_url") != expected_base_url:
+        raise ValueError(f"shared view credential {credential_id} is scoped to a different hub")
+    if view_id is not None and credential.get("view_id") != view_id:
+        raise ValueError(f"shared view credential {credential_id} is scoped to a different view")
+    if provider_id is not None and credential.get("provider_id") != provider_id:
+        raise ValueError(f"shared view credential {credential_id} is scoped to a different provider")
+    return credential
 
 
 def accept_shared_view(
@@ -1278,10 +1346,18 @@ def _retrieve_http_view(root: Path, connection: SharedViewConnection, query: str
     target = connection.target
     if not target.base_url or not target.credential_id:
         return None
-    credential = load_shared_view_credential(root, target.credential_id)
-    client = HubClient(target.base_url, credential["token"])
     view_id = target.view_id or _view_id_from_ref(connection.ref) or connection.heading_id
-    response = client.retrieve_view(view_id, query, limit=12)
+    try:
+        credential = _load_scoped_http_credential(
+            root,
+            target.credential_id,
+            kind="http-connection",
+            base_url=target.base_url,
+            view_id=view_id,
+        )
+        response = HubClient(target.base_url, credential["token"]).retrieve_view(view_id, query, limit=12)
+    except (KeyError, ValueError, OSError, HubClientError):
+        return None
     snippets = response.get("snippets", [])
     source_lines: list[_SharedViewSourceLine] = []
     if isinstance(snippets, list):
@@ -1346,15 +1422,24 @@ def _deliver_interaction_record(
             return "sent"
         return "queued"
     if target.kind == "http" and target.base_url and target.credential_id:
-        credential = load_shared_view_credential(root, target.credential_id)
-        payload = {
-            "actor": record.get("actor") or "user",
-            "message": record.get("message") or "",
-        }
-        if record.get("task_context"):
-            payload["task_context"] = record["task_context"]
-        HubClient(target.base_url, credential["token"]).post_interaction(view_id, payload)
-        return "sent"
+        try:
+            credential = _load_scoped_http_credential(
+                root,
+                target.credential_id,
+                kind="http-connection",
+                base_url=target.base_url,
+                view_id=view_id,
+            )
+            payload = {
+                "actor": record.get("actor") or "user",
+                "message": record.get("message") or "",
+            }
+            if record.get("task_context"):
+                payload["task_context"] = record["task_context"]
+            HubClient(target.base_url, credential["token"]).post_interaction(view_id, payload)
+            return "sent"
+        except (KeyError, ValueError, OSError, HubClientError):
+            return "queued"
     if target.kind in {"package", "local_markdown"}:
         return "queued"
     return "queued"
@@ -1767,11 +1852,13 @@ def _parse_http_invitation_url(invitation_url: str) -> tuple[str, str]:
     parsed = urlparse(invitation_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("HTTP shared-view invitation must be an http(s) URL")
-    prefix = "/i/"
-    if not parsed.path.startswith(prefix) or len(parsed.path) <= len(prefix):
+    marker = "/i/"
+    marker_index = parsed.path.rfind(marker)
+    if marker_index < 0 or len(parsed.path) <= marker_index + len(marker):
         raise ValueError("HTTP shared-view invitation URL must contain /i/<token>")
-    token = parsed.path[len(prefix) :].split("/", 1)[0]
-    base_url = f"{parsed.scheme}://{parsed.netloc}"
+    token = parsed.path[marker_index + len(marker) :].split("/", 1)[0]
+    path_prefix = parsed.path[:marker_index].rstrip("/")
+    base_url = f"{parsed.scheme}://{parsed.netloc}{path_prefix}"
     return base_url, token
 
 

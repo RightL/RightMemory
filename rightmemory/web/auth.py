@@ -7,7 +7,7 @@ import json
 import os
 import secrets
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ from .models import error_detail
 SESSION_COOKIE = "rightmemory_session"
 CSRF_HEADER = "x-csrf-token"
 WEB_RUNTIME_DIR = ".runtime/web"
+SESSION_TTL_SECONDS = 12 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -74,12 +75,13 @@ def create_session_cookie(
     active_root: Path | str | None = None,
     session_id: str | None = None,
     csrf_token: str | None = None,
+    created_at: str | None = None,
 ) -> tuple[str, WebSession]:
     ensure_web_auth_files(memory_root)
     session = WebSession(
         session_id=session_id or secrets.token_urlsafe(24),
         csrf_token=csrf_token or secrets.token_urlsafe(24),
-        created_at=datetime.now(UTC).replace(microsecond=0).isoformat(),
+        created_at=created_at or datetime.now(UTC).replace(microsecond=0).isoformat(),
         active_root=str(Path(active_root).expanduser() if active_root is not None else Path(memory_root).expanduser()),
     )
     payload = {
@@ -118,6 +120,8 @@ def read_session(memory_root: Path, request: Request) -> WebSession | None:
         active_root = _required_payload_str(payload, "active_root")
     except (OSError, ValueError):
         return None
+    if _session_is_expired(created_at) or _session_is_revoked(memory_root, session_id):
+        return None
     return WebSession(
         session_id=session_id,
         csrf_token=csrf_token,
@@ -144,8 +148,57 @@ def require_csrf(
     return session
 
 
+def revoke_session(memory_root: Path, session_id: str) -> None:
+    clean_session_id = _required_payload_str({"sid": session_id}, "sid")
+    runtime = web_runtime_dir(memory_root)
+    runtime.mkdir(parents=True, exist_ok=True)
+    path = runtime / "revoked-sessions.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    sessions = data.setdefault("sessions", {})
+    if not isinstance(sessions, dict):
+        sessions = {}
+        data["sessions"] = sessions
+    sessions[clean_session_id] = datetime.now(UTC).replace(microsecond=0).isoformat()
+    _atomic_write_secret(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _session_is_expired(created_at: str) -> bool:
+    try:
+        parsed = _parse_session_datetime(created_at)
+    except ValueError:
+        return True
+    return parsed + timedelta(seconds=SESSION_TTL_SECONDS) <= datetime.now(UTC)
+
+
+def _session_is_revoked(memory_root: Path, session_id: str) -> bool:
+    path = web_runtime_dir(memory_root) / "revoked-sessions.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    sessions = data.get("sessions", {})
+    return isinstance(sessions, dict) and session_id in sessions
+
+
+def _parse_session_datetime(value: str) -> datetime:
+    clean = value.strip()
+    if clean.endswith("Z"):
+        clean = f"{clean[:-1]}+00:00"
+    parsed = datetime.fromisoformat(clean)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _secret(memory_root: Path) -> bytes:

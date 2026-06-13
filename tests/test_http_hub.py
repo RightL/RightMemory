@@ -1,6 +1,8 @@
 import sqlite3
 import tempfile
 import unittest
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -285,13 +287,13 @@ class HubApiTests(unittest.TestCase):
 
         first_publish = self.client.post(
             "/api/views/alice-auth-api/versions",
-            headers=_auth(self.provider_token.raw_token),
-            json={"package_path": str(first_package)},
+            content=_zip_package(first_package),
+            headers={**_auth(self.provider_token.raw_token), "content-type": "application/zip"},
         )
         second_publish = self.client.post(
             "/api/views/alice-auth-api/versions",
-            headers=_auth(self.provider_token.raw_token),
-            json={"package_path": str(second_package)},
+            content=_zip_package(second_package),
+            headers={**_auth(self.provider_token.raw_token), "content-type": "application/zip"},
         )
 
         self.assertEqual(first_publish.status_code, 201)
@@ -348,6 +350,7 @@ class HubApiTests(unittest.TestCase):
         accepted_body = accepted.json()
         self.assertEqual(accepted_body["view_id"], "alice-auth-api")
         self.assertTrue(accepted_body["connection_id"])
+        self.assertTrue(accepted_body["token_id"])
         connection_token = accepted_body["connection_token"]
         self.assertTrue(connection_token)
 
@@ -369,8 +372,8 @@ class HubApiTests(unittest.TestCase):
         _write_package(other_package, view_id="alice-billing-api", memory_text="# Billing\n\nInvoices are separate.\n")
         other_publish = self.client.post(
             "/api/views/alice-billing-api/versions",
-            headers=_auth(self.provider_token.raw_token),
-            json={"package_path": str(other_package)},
+            content=_zip_package(other_package),
+            headers={**_auth(self.provider_token.raw_token), "content-type": "application/zip"},
         )
         self.assertEqual(other_publish.status_code, 201)
 
@@ -420,8 +423,8 @@ class HubApiTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/views/alice-auth-api/versions",
-            headers=_auth("wrong-secret-token"),
-            json={"package_path": str(package)},
+            content=_zip_package(package),
+            headers={**_auth("wrong-secret-token"), "content-type": "application/zip"},
         )
 
         self.assertEqual(response.status_code, 401)
@@ -429,9 +432,79 @@ class HubApiTests(unittest.TestCase):
         self.assertIn("publish", audit_blob)
         self.assertNotIn("wrong-secret-token", audit_blob)
 
+    def test_publish_rejects_server_side_package_paths(self):
+        package = self.root / "package"
+        _write_package(package)
+
+        response = self.client.post(
+            "/api/views/alice-auth-api/versions",
+            headers=_auth(self.provider_token.raw_token),
+            json={"package_path": str(package)},
+        )
+
+        self.assertEqual(response.status_code, 415)
+
+    def test_publish_rejects_large_upload_before_snapshot(self):
+        small_root = self.root / "small-hub"
+        small_store = HubStore(small_root)
+        small_store.initialize(admin_token="admin-secret", max_package_bytes=512)
+        provider_token = small_store.create_provider_token("alice", label="publish")
+        client = TestClient(create_hub_app(small_root))
+        package = self.root / "large-package"
+        _write_package(package, memory_text="# Alice Auth API Shared View\n\n" + ("A" * 4096))
+
+        response = client.post(
+            "/api/views/alice-auth-api/versions",
+            content=_zip_package(package),
+            headers={**_auth(provider_token.raw_token), "content-type": "application/zip"},
+        )
+
+        self.assertEqual(response.status_code, 413)
+
+    def test_publish_rejects_zip_with_too_many_entries(self):
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for index in range(2100):
+                archive.writestr(f"empty-{index}.txt", "")
+
+        response = self.client.post(
+            "/api/views/alice-auth-api/versions",
+            content=buffer.getvalue(),
+            headers={**_auth(self.provider_token.raw_token), "content-type": "application/zip"},
+        )
+
+        self.assertEqual(response.status_code, 413)
+
+    def test_invitation_expiry_must_be_iso_datetime(self):
+        package = self.root / "package"
+        _write_package(package)
+        publish = self.client.post(
+            "/api/views/alice-auth-api/versions",
+            content=_zip_package(package),
+            headers={**_auth(self.provider_token.raw_token), "content-type": "application/zip"},
+        )
+        self.assertEqual(publish.status_code, 201)
+
+        response = self.client.post(
+            "/api/views/alice-auth-api/invitations",
+            headers=_auth(self.provider_token.raw_token),
+            json={"expires_at": "tomorrow"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _zip_package(package: Path) -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(package.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(package).as_posix())
+    return buffer.getvalue()
 
 
 if __name__ == "__main__":

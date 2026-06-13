@@ -15,7 +15,7 @@
 - `uv` is available on PATH. Use `uv --version` if you need to check it before running the installer.
 - Useful review commands are `rightmemory review scan --once`, `rightmemory review watch`, and `rightmemory review normalize --source <codex|claude> --path <file>`.
 - Use `rightmemory prune` to run generation-based active memory pruning, and `rightmemory history --session <id> <query>` for explicit retrieval from pruned memory.
-- Use `rightmemory shared-view list|define|build|export|publish|publish-http|credential|accept|accept-invite|retrieve|note|notes|inbox` when debugging shared-view connections, provider views, exported packages, local/HTTP hubs, credentials, or interaction records.
+- Use `rightmemory shared-view list|define|build|export|publish|publish-http|credential|accept|accept-invite|retrieve|note|notes|inbox|inbox-http` when debugging shared-view connections, provider views, exported packages, local/HTTP hubs, credentials, or interaction records.
 - Use `rightmemory hub init|status|token|serve` when debugging self-hosted HTTP shared-view hubs.
 - Use `rightmemory watch start|status|stop|restart` to manage background review, dreamer, insight, pruner, and sync watchers. Use `rightmemory dreamer watch`, `rightmemory insight watch`, or `rightmemory prune watch` directly when debugging lower-level loops.
 - Use `rightmemory doctor agent-cli` after configuring cli-agent mode to check provider commands, role config, and basic read/write probes.

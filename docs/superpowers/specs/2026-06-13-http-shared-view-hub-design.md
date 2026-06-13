@@ -224,7 +224,11 @@ credential_id = "work-publisher"
 Provider workflow:
 
 ```bash
-rightmemory shared-view credential set work-publisher --kind http-publish --token <raw-token>
+rightmemory shared-view credential set work-publisher \
+  --kind http-publish \
+  --hub-url https://hub.example.com \
+  --provider alice \
+  --token-prompt
 rightmemory shared-view publish-http <view-id> --hub-url https://hub.example.com --credential-id work-publisher
 ```
 

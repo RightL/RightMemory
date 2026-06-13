@@ -144,6 +144,25 @@ p {
   padding-left: 18px;
 }
 
+.settings-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.settings-form button {
+  padding: 0 10px;
+}
+
+.inline-choice {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
 .login-panel {
   max-width: 520px;
   margin: 10vh auto 0;
@@ -186,6 +205,10 @@ input {
   }
 
   .summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-form {
     grid-template-columns: 1fr;
   }
 

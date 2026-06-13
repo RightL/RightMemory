@@ -285,7 +285,7 @@ class HubStore:
         clean_view_id = _validate_hub_id(view_id, "view_id")
         clean_actor_id = _validate_hub_id(actor_id, "actor_id") if actor_id else None
         clean_label = _optional_string(label)
-        clean_expires_at = _optional_string(expires_at)
+        clean_expires_at = _normalize_optional_datetime(expires_at, "expires_at")
         with self._connect() as connection:
             self._apply_migrations(connection)
             view = connection.execute(
@@ -888,7 +888,34 @@ def _interaction_from_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _is_expired(expires_at: str | None) -> bool:
-    return bool(expires_at and expires_at <= _now_iso())
+    if not expires_at:
+        return False
+    try:
+        expires = _parse_datetime(expires_at)
+    except ValueError:
+        return True
+    return expires <= datetime.now(UTC)
+
+
+def _normalize_optional_datetime(value: object, label: str) -> str | None:
+    clean = _optional_string(value)
+    if clean is None:
+        return None
+    try:
+        parsed = _parse_datetime(clean)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be an ISO datetime") from exc
+    return parsed.astimezone(UTC).replace(microsecond=0).isoformat()
+
+
+def _parse_datetime(value: str) -> datetime:
+    clean = value.strip()
+    if clean.endswith("Z"):
+        clean = f"{clean[:-1]}+00:00"
+    parsed = datetime.fromisoformat(clean)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _validate_action(action: str) -> str:

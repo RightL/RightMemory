@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from rightmemory.hub.client import HubClientError
 from rightmemory.shared_views import (
     SharedViewConnection,
     SharedViewTarget,
@@ -14,6 +15,7 @@ from rightmemory.shared_views import (
     define_shared_view,
     export_shared_view,
     list_http_shared_view_inbox,
+    list_shared_view_notes,
     list_shared_view_inbox,
     load_connections,
     load_shared_view_definition,
@@ -132,6 +134,8 @@ class SharedViewRegistryTests(unittest.TestCase):
             "conn-alice-auth-api",
             kind="http-connection",
             token="secret-token",
+            base_url="https://hub.example.test",
+            view_id="alice-auth-api",
         )
         save_connections(
             self.root,
@@ -236,6 +240,8 @@ class SharedViewHttpAdapterTests(unittest.TestCase):
             "conn-alice-auth-api",
             kind="http-connection",
             token="accepted-token",
+            base_url="https://hub.example.test",
+            view_id="alice-auth-api",
         )
         save_connections(
             self.root,
@@ -298,7 +304,7 @@ class SharedViewHttpAdapterTests(unittest.TestCase):
         with patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)):
             result = accept_http_shared_view_invitation(
                 self.root,
-                "https://hub.example.test/i/invite-token",
+                "https://hub.example.test/rightmemory/i/invite-token",
                 heading_id="alice-auth-api",
             )
 
@@ -309,12 +315,50 @@ class SharedViewHttpAdapterTests(unittest.TestCase):
         self.assertEqual(result, "accepted shared view alice-auth-api")
         self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
         self.assertEqual(registry.target.kind, "http")
-        self.assertEqual(registry.target.base_url, "https://hub.example.test")
+        self.assertEqual(registry.target.base_url, "https://hub.example.test/rightmemory")
         self.assertEqual(registry.target.view_id, "alice-auth-api")
-        self.assertEqual(registry.target.accepted_from_url, "https://hub.example.test/i/invite-token")
+        self.assertEqual(registry.target.accepted_from_url, "https://hub.example.test/rightmemory/i/invite-token")
         self.assertEqual(credential["token"], "accepted-token")
+        self.assertEqual(credential["base_url"], "https://hub.example.test/rightmemory")
         fake = clients[0]
+        self.assertEqual(fake.base_url, "https://hub.example.test/rightmemory")
         self.assertEqual(fake.accepted_tokens, ["invite-token"])
+
+    def test_accept_http_invitation_does_not_overwrite_existing_credential(self):
+        clients = []
+        with (
+            patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)),
+            self.assertRaises(ValueError) as caught,
+        ):
+            accept_http_shared_view_invitation(
+                self.root,
+                "https://hub.example.test/i/invite-token",
+                heading_id="alice-auth-api",
+                credential_id="conn-alice-auth-api",
+            )
+
+        self.assertIn("shared view credential already exists", str(caught.exception))
+        self.assertEqual(clients[0].accepted_tokens, [])
+
+    def test_accept_http_invitation_saves_credential_if_local_accept_fails(self):
+        clients = []
+
+        with (
+            patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)),
+            patch("rightmemory.shared_views.accept_shared_view", side_effect=ValueError("local registry broken")),
+            self.assertRaises(ValueError),
+        ):
+            accept_http_shared_view_invitation(
+                self.root,
+                "https://hub.example.test/i/invite-token",
+                heading_id="new-auth-api",
+            )
+
+        credential = load_shared_view_credential(self.root, "http-new-auth-api")
+        self.assertEqual(clients[0].accepted_tokens, ["invite-token"])
+        self.assertEqual(credential["token"], "accepted-token")
+        self.assertEqual(credential["base_url"], "https://hub.example.test")
+        self.assertEqual(credential["view_id"], "alice-auth-api")
 
     def test_publish_http_view_exports_package_and_uses_publish_credential(self):
         clients = []
@@ -334,6 +378,8 @@ class SharedViewHttpAdapterTests(unittest.TestCase):
             "alice-publish",
             kind="http-publish",
             token="publish-token",
+            base_url="https://hub.example.test",
+            provider_id="alice",
         )
 
         with patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)):
@@ -363,6 +409,8 @@ class SharedViewHttpAdapterTests(unittest.TestCase):
             "alice-publish",
             kind="http-publish",
             token="publish-token",
+            base_url="https://hub.example.test",
+            provider_id="alice",
         )
 
         with patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)):
@@ -379,6 +427,66 @@ class SharedViewHttpAdapterTests(unittest.TestCase):
         self.assertEqual(fake.provider_inbox_calls, ["alice"])
         self.assertEqual(records[0]["payload"]["message"], "Docs are stale")
 
+    def test_http_target_cannot_redirect_local_credential_to_another_hub(self):
+        save_connections(
+            self.root,
+            {
+                "alice-auth-api": SharedViewConnection(
+                    heading_id="alice-auth-api",
+                    ref="rightmemory://view/alice-auth-api",
+                    relationship="human",
+                    maintainer="Alice",
+                    target=SharedViewTarget(
+                        kind="http",
+                        base_url="https://evil.example.test",
+                        view_id="alice-auth-api",
+                        credential_id="conn-alice-auth-api",
+                    ),
+                )
+            },
+        )
+
+        with patch("rightmemory.shared_views.HubClient", side_effect=AssertionError("credential leaked")):
+            result = retrieve_shared_view(self.root, "alice-auth-api", "token expiry")
+
+        self.assertIn("Status: unavailable", result)
+
+    def test_http_retrieve_falls_back_to_cache_when_hub_fails(self):
+        clients = []
+        with patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)):
+            retrieve_shared_view(self.root, "alice-auth-api", "token expiry")
+
+        def failing_client(*args):
+            client = _record_fake_client(clients, *args)
+            client.fail_retrieve = True
+            return client
+
+        with patch("rightmemory.shared_views.HubClient", side_effect=failing_client):
+            result = retrieve_shared_view(self.root, "alice-auth-api", "token expiry")
+
+        self.assertIn("Status: cached", result)
+        self.assertIn("token_expires_at", result)
+
+    def test_http_note_is_queued_when_hub_delivery_fails(self):
+        clients = []
+
+        def failing_client(*args):
+            client = _record_fake_client(clients, *args)
+            client.fail_interaction = True
+            return client
+
+        with patch("rightmemory.shared_views.HubClient", side_effect=failing_client):
+            result = record_shared_view_note(
+                self.root,
+                "alice-auth-api",
+                "Docs are stale",
+                confirmed=True,
+            )
+
+        notes = list_shared_view_notes(self.root, "alice-auth-api")
+        self.assertEqual(result, "queued shared view note for alice-auth-api")
+        self.assertEqual(notes[0]["status"], "queued")
+
 
 class _FakeHubClient:
     def __init__(self, base_url: str = "", token: str | None = None):
@@ -390,8 +498,12 @@ class _FakeHubClient:
         self.publish_calls = []
         self.invitation_calls = []
         self.provider_inbox_calls = []
+        self.fail_retrieve = False
+        self.fail_interaction = False
 
     def retrieve_view(self, view_id: str, query: str, *, limit: int = 12):
+        if self.fail_retrieve:
+            raise HubClientError("hub unavailable")
         self.retrieve_calls.append((view_id, query, limit))
         return {
             "view_id": view_id,
@@ -404,6 +516,8 @@ class _FakeHubClient:
         }
 
     def post_interaction(self, view_id: str, payload: dict[str, object]):
+        if self.fail_interaction:
+            raise HubClientError("hub unavailable")
         self.interactions.append({"view_id": view_id, "payload": payload})
         return {"status": "recorded", "interaction_id": "int_1"}
 
