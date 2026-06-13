@@ -35,6 +35,65 @@ def load_package_manifest(
 ) -> HubPackageManifest:
     source_root = Path(package_root).expanduser()
     entries = _package_file_entries(source_root)
+    return _manifest_from_entries(
+        source_root,
+        entries,
+        expected_view_id=expected_view_id,
+        max_package_bytes=max_package_bytes,
+    )
+
+
+def copy_package_version(
+    package_root: Path,
+    storage_root: Path,
+    *,
+    view_id: str,
+    version_id: str,
+    max_package_bytes: int = DEFAULT_MAX_PACKAGE_BYTES,
+) -> HubStoredPackage:
+    clean_view_id = _validate_hub_id(view_id, "view_id")
+    clean_version_id = _validate_hub_id(version_id, "version_id")
+    manifest = load_package_manifest(
+        package_root,
+        expected_view_id=clean_view_id,
+        max_package_bytes=max_package_bytes,
+    )
+    entries = tuple((relative, manifest.source_root / relative) for relative in manifest.files)
+
+    versions_root = Path(storage_root).expanduser() / "views" / clean_view_id / "versions"
+    final_path = versions_root / clean_version_id
+    if final_path.exists():
+        raise PackageValidationError(f"view version already exists: {clean_view_id}/{clean_version_id}")
+    versions_root.mkdir(parents=True, exist_ok=True)
+    temp_path = versions_root / f".{clean_version_id}.tmp-{os.getpid()}-{secrets.token_hex(8)}"
+    if temp_path.exists():
+        shutil.rmtree(temp_path)
+    temp_path.mkdir()
+    try:
+        for relative, path in entries:
+            target = temp_path / validate_package_relative_path(relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target, follow_symlinks=True)
+        temp_path.rename(final_path)
+    except BaseException:
+        if temp_path.exists():
+            shutil.rmtree(temp_path)
+        raise
+
+    return HubStoredPackage(
+        path=final_path,
+        version_id=clean_version_id,
+        manifest=replace(manifest, source_root=final_path),
+    )
+
+
+def _manifest_from_entries(
+    source_root: Path,
+    entries: tuple[tuple[str, Path], ...],
+    *,
+    expected_view_id: str | None,
+    max_package_bytes: int,
+) -> HubPackageManifest:
     files = tuple(relative for relative, _path in entries)
     file_set = set(files)
     for required in REQUIRED_PACKAGE_FILES:
@@ -83,50 +142,6 @@ def load_package_manifest(
         package_hash=package_digest.hexdigest(),
         export_metadata=export_metadata,
         invitation_metadata=invitation_metadata,
-    )
-
-
-def copy_package_version(
-    package_root: Path,
-    storage_root: Path,
-    *,
-    view_id: str,
-    version_id: str,
-    max_package_bytes: int = DEFAULT_MAX_PACKAGE_BYTES,
-) -> HubStoredPackage:
-    clean_view_id = _validate_hub_id(view_id, "view_id")
-    clean_version_id = _validate_hub_id(version_id, "version_id")
-    manifest = load_package_manifest(
-        package_root,
-        expected_view_id=clean_view_id,
-        max_package_bytes=max_package_bytes,
-    )
-    entries = _package_file_entries(Path(package_root).expanduser())
-
-    versions_root = Path(storage_root).expanduser() / "views" / clean_view_id / "versions"
-    final_path = versions_root / clean_version_id
-    if final_path.exists():
-        raise PackageValidationError(f"view version already exists: {clean_view_id}/{clean_version_id}")
-    versions_root.mkdir(parents=True, exist_ok=True)
-    temp_path = versions_root / f".{clean_version_id}.tmp-{os.getpid()}-{secrets.token_hex(8)}"
-    if temp_path.exists():
-        shutil.rmtree(temp_path)
-    temp_path.mkdir()
-    try:
-        for relative, path in entries:
-            target = temp_path / validate_package_relative_path(relative)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, target, follow_symlinks=True)
-        temp_path.rename(final_path)
-    except BaseException:
-        if temp_path.exists():
-            shutil.rmtree(temp_path)
-        raise
-
-    return HubStoredPackage(
-        path=final_path,
-        version_id=clean_version_id,
-        manifest=replace(manifest, source_root=final_path),
     )
 
 

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import rightmemory.hub.packages as hub_packages
+from rightmemory.hub.models import HubPackageManifest
 from rightmemory.hub.packages import (
     PackageValidationError,
     copy_package_version,
@@ -121,10 +121,17 @@ class HubPackageTests(unittest.TestCase):
     def test_copy_rejects_path_traversal_package_entries(self):
         package = self.root / "package"
         _write_package(package)
-        valid_entries = hub_packages._package_file_entries(package)
-        malicious_entries = valid_entries + (("../escape.md", package / "view.md"),)
+        malicious_manifest = HubPackageManifest(
+            source_root=package,
+            view_id="alice-auth-api",
+            title="Alice Auth API",
+            ref="rightmemory://view/alice-auth-api",
+            files=("../escape.md",),
+            size_bytes=1,
+            package_hash="0" * 64,
+        )
 
-        with patch("rightmemory.hub.packages._package_file_entries", side_effect=[valid_entries, malicious_entries]):
+        with patch("rightmemory.hub.packages.load_package_manifest", return_value=malicious_manifest):
             with self.assertRaises(PackageValidationError) as caught:
                 copy_package_version(
                     package,
