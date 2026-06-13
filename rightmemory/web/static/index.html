@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RightMemory Web Studio</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">RightMemory</div>
+        <nav aria-label="Main">
+          <button class="nav-item active" data-panel="overview">Overview</button>
+          <button class="nav-item" data-panel="shared">Shared Views</button>
+          <button class="nav-item" data-panel="memory">Memory</button>
+          <button class="nav-item" data-panel="insights">Insights</button>
+          <button class="nav-item" data-panel="activity">Activity</button>
+          <button class="nav-item" data-panel="status">Status</button>
+          <button class="nav-item" data-panel="settings">Settings</button>
+        </nav>
+      </aside>
+      <main class="workspace">
+        <section id="login-panel" class="login-panel" hidden>
+          <form id="login-form" class="login-form">
+            <label for="operator-token">Operator token</label>
+            <div class="login-row">
+              <input id="operator-token" name="token" type="password" autocomplete="current-password">
+              <button type="submit">Log In</button>
+            </div>
+          </form>
+        </section>
+        <section id="app-panel">
+          <header class="topbar">
+            <div>
+              <h1 id="panel-title">Overview</h1>
+              <p id="active-root"></p>
+            </div>
+            <button id="refresh-button" type="button">Refresh</button>
+          </header>
+          <div id="message" class="message" role="status"></div>
+          <section id="content" class="content"></section>
+        </section>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

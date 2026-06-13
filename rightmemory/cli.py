@@ -66,6 +66,13 @@ from .watch import (
     start_managed_watch,
     stop_managed_watch,
 )
+from .web.process import (
+    format_stop_result as format_web_stop_result,
+    format_web_status,
+    start_web_service,
+    stop_web_service,
+    web_service_status,
+)
 
 DEFAULT_REVIEW_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 DEFAULT_REVIEW_WATCH_RETRY_SECONDS = 60
@@ -121,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     memory_root = active.memory_root
     if argv and argv[0] == "watch":
         return _watch_manager_main(argv[1:], memory_root)
+    if argv and argv[0] == "web":
+        return _web_main(argv[1:], memory_root)
     if argv and argv[0] == "review":
         return _review_main(argv[1:], memory_root)
     if argv and argv[0] == "sync":
@@ -465,6 +474,39 @@ def _shared_view_accept_target(args: argparse.Namespace) -> SharedViewTarget | N
     if args.hub is not None:
         return SharedViewTarget(kind="hub", path=str(args.hub.expanduser().resolve()), view_id=args.heading_id)
     return None
+
+
+def _web_main(argv: list[str], memory_root: Path) -> int:
+    parser = argparse.ArgumentParser(prog="rightmemory web")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    start = subparsers.add_parser("start")
+    start.add_argument("--host", default="127.0.0.1")
+    start.add_argument("--port", type=int, default=8766)
+    subparsers.add_parser("status")
+    stop = subparsers.add_parser("stop")
+    stop.add_argument("--timeout", type=int, default=30)
+    restart = subparsers.add_parser("restart")
+    restart.add_argument("--host", default="127.0.0.1")
+    restart.add_argument("--port", type=int, default=8766)
+    restart.add_argument("--timeout", type=int, default=30)
+    args = parser.parse_args(argv)
+    if args.command == "start":
+        print(format_web_status(start_web_service(memory_root, host=args.host, port=args.port)))
+        return 0
+    if args.command == "status":
+        print(format_web_status(web_service_status(memory_root)))
+        return 0
+    if args.command == "stop":
+        print(format_web_stop_result(stop_web_service(memory_root, args.timeout)))
+        return 0
+    if args.command == "restart":
+        stop_result = stop_web_service(memory_root, args.timeout)
+        if stop_result.state == "stopping":
+            print(format_web_stop_result(stop_result))
+            return 1
+        print(format_web_status(start_web_service(memory_root, host=args.host, port=args.port)))
+        return 0
+    raise ValueError(f"unknown web command: {args.command}")
 
 
 def _is_help_request(args: list[str]) -> bool:
