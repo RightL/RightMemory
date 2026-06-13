@@ -179,6 +179,18 @@ function renderSettings() {
         <button type="submit">Save</button>
       </form>
     </section>
+    <section class="panel wide">
+      <h2>HTTP Hub Credential</h2>
+      <form id="credential-form" class="settings-form">
+        <input name="credential_id" placeholder="credential id">
+        <input name="hub_url" placeholder="hub URL">
+        <input name="provider_id" placeholder="provider id">
+        <input name="view_id" placeholder="view id">
+        <input name="kind" value="http-publish">
+        <input name="token" type="password" placeholder="token">
+        <button type="submit">Save</button>
+      </form>
+    </section>
   `;
 }
 
@@ -386,6 +398,31 @@ function attachPanelHandlers() {
         });
         state.csrfToken = payload.data.csrf_token || state.csrfToken;
         document.querySelector("#active-root").textContent = payload.data.active_root || "";
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const credentialForm = document.querySelector("#credential-form");
+  if (credentialForm) {
+    credentialForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const payload = await fetchJson("/api/share/credentials", {
+          method: "POST",
+          body: JSON.stringify({
+            credential_id: form.get("credential_id"),
+            kind: form.get("kind"),
+            hub_url: form.get("hub_url"),
+            provider_id: form.get("provider_id"),
+            view_id: form.get("view_id"),
+            token: form.get("token"),
+          }),
+        });
+        event.currentTarget.reset();
         setMessage(payload.message);
       } catch (error) {
         setMessage(error.message);

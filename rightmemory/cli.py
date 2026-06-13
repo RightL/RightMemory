@@ -313,6 +313,8 @@ def _hub_main(argv: list[str]) -> int:
     status.add_argument("hub_root", type=Path)
     token = subparsers.add_parser("token")
     token_subparsers = token.add_subparsers(dest="token_command", required=True)
+    token_list = token_subparsers.add_parser("list")
+    token_list.add_argument("hub_root", type=Path)
     token_create = token_subparsers.add_parser("create")
     token_create.add_argument("hub_root", type=Path)
     token_create.add_argument("--provider", required=True)
@@ -370,6 +372,26 @@ def _hub_token_main(args: argparse.Namespace) -> int:
             print(f"label\t{token.label}")
         print(f"raw_token\t{token.raw_token}")
         return 0
+    if args.token_command == "list":
+        for token in store.list_tokens():
+            revoked = token["revoked_at"] or "-"
+            provider = token["provider_id"] or "-"
+            view = token["view_id"] or "-"
+            label = token["label"] or "-"
+            print(
+                "\t".join(
+                    [
+                        token["token_id"],
+                        token["action"],
+                        provider,
+                        view,
+                        label,
+                        token["created_at"],
+                        revoked,
+                    ]
+                )
+            )
+        return 0
     if args.token_command == "revoke":
         if store.revoke_token(args.token_id):
             print(f"revoked\t{args.token_id}")
@@ -391,7 +413,10 @@ def _format_hub_status(hub_root: Path) -> str:
     ]
     if initialized:
         config = store.load_config()
+        tokens = store.list_tokens()
         lines.append(f"public_base_url\t{config.public_base_url}")
+        lines.append(f"tokens\t{len(tokens)}")
+        lines.append(f"active_tokens\t{sum(1 for token in tokens if not token['revoked_at'])}")
         lines.append(f"audit_events\t{len(store.list_audit_events())}")
     return "\n".join(lines)
 

@@ -68,6 +68,21 @@ class HubStoreTests(unittest.TestCase):
 
         self.assertFalse(store.verify_token(provider_token.raw_token, action="publish", provider_id="alice"))
 
+    def test_list_tokens_exposes_revocation_handles_without_secret_material(self):
+        store = HubStore(self.root)
+        store.initialize(admin_token="admin-secret")
+        provider_token = store.create_provider_token("alice", label="publish")
+        store.revoke_token(provider_token.token_id)
+
+        tokens = store.list_tokens()
+        token_ids = {token["token_id"] for token in tokens}
+        rendered = " ".join(str(token) for token in tokens)
+
+        self.assertIn(provider_token.token_id, token_ids)
+        self.assertIn("revoked_at", tokens[0])
+        self.assertNotIn(provider_token.raw_token, rendered)
+        self.assertNotIn("admin-secret", rendered)
+
 
 class HubPackageTests(unittest.TestCase):
     def setUp(self):

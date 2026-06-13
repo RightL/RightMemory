@@ -137,6 +137,8 @@ rightmemory --profile alice shared-view publish-http alice-auth-api \
   --credential-id alice-publish
 ```
 
+The same provider flow is available in Web Studio: save the HTTP hub credential in Settings, then publish from the Shared Views panel with the credential id.
+
 HTTP invitations are accepted with the normal invitation command:
 
 ```bash
@@ -306,6 +308,7 @@ rightmemory shared-view inbox-http --hub-url <url> --credential-id <credential-i
 
 rightmemory hub init <hub-root> [--admin-token <token>] [--public-base-url <url>]
 rightmemory hub status <hub-root>
+rightmemory hub token list <hub-root>
 rightmemory hub token create <hub-root> --provider <provider-id> [--label <label>]
 rightmemory hub token revoke <hub-root> <token-id>
 rightmemory hub serve <hub-root> [--host 127.0.0.1] [--port 8765]

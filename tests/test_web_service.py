@@ -6,6 +6,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from rightmemory.web.app import create_web_app
+from rightmemory.shared_views import load_shared_view_credential
 
 
 class WebStudioReadApiTests(unittest.TestCase):
@@ -107,6 +108,7 @@ class WebStudioStaticTests(unittest.TestCase):
         self.assertNotIn("ready for the next Web Studio API slice", script.text)
         self.assertIn("define-view-form", script.text)
         self.assertIn("accept-invite-form", script.text)
+        self.assertIn("credential-form", script.text)
 
 
 class WebStudioSharedViewApiTests(unittest.TestCase):
@@ -186,6 +188,27 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
             calls,
             [(self.root.resolve(), "alice-auth-api", "https://hub.example.test", "alice-publish", "auth")],
         )
+
+    def test_save_http_publish_credential_from_web_studio(self):
+        response = self.client.post(
+            "/api/share/credentials",
+            json={
+                "credential_id": "alice-publish",
+                "kind": "http-publish",
+                "hub_url": "https://hub.example.test",
+                "provider_id": "alice",
+                "token": "secret-token",
+            },
+            headers={"x-csrf-token": self.csrf},
+        )
+
+        credential = load_shared_view_credential(self.root, "alice-publish")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(credential["kind"], "http-publish")
+        self.assertEqual(credential["base_url"], "https://hub.example.test")
+        self.assertEqual(credential["provider_id"], "alice")
+        self.assertEqual(credential["token"], "secret-token")
 
     def test_accept_invite_dispatches_http_urls(self):
         calls = []

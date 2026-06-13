@@ -810,6 +810,25 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("public_base_url\thttps://hub.example.test", stdout.getvalue())
         self.assertIn("admin_token\tunchanged", stdout.getvalue())
 
+    def test_hub_token_list_prints_revocation_handles_without_raw_tokens(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            hub_root = Path(tempdir) / "hub"
+            store = HubStore(hub_root)
+            store.initialize(admin_token="admin-secret")
+            provider_token = store.create_provider_token("alice", label="publish")
+
+            with patch("sys.stdout", stdout):
+                result = main(["hub", "token", "list", str(hub_root)])
+
+        output = stdout.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn(provider_token.token_id, output)
+        self.assertIn("publish", output)
+        self.assertIn("alice", output)
+        self.assertNotIn(provider_token.raw_token, output)
+        self.assertNotIn("admin-secret", output)
+
     def test_hub_serve_runs_uvicorn_app(self):
         with tempfile.TemporaryDirectory() as tempdir:
             hub_root = Path(tempdir) / "hub"

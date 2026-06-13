@@ -256,6 +256,8 @@ rightmemory shared-view publish-http alice-auth-api \
   --credential-id alice-publish
 ```
 
+In Web Studio, use Settings -> HTTP Hub Credential to save the provider token locally, then use Shared Views -> Publish HTTP with the saved credential id.
+
 Consumers accept HTTP invitations with the same `accept-invite` command used for package invitations:
 
 ```bash

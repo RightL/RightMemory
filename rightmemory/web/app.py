@@ -189,6 +189,23 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
             ) from exc
         return ok_response(message)
 
+    @app.post("/api/share/credentials")
+    def save_credential(
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        try:
+            message = service.save_credential(payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_detail("could not save shared-view credential", technical=str(exc)),
+            ) from exc
+        return ok_response(message)
+
     @app.post("/api/use/accept-invite")
     def accept_invite(
         request: Request,

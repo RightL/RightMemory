@@ -286,6 +286,9 @@ def publish_http_shared_view(
     invitation_url = invitation.get("invitation_url")
     if isinstance(invitation_url, str) and invitation_url:
         message += f"\ninvitation_url\t{invitation_url}"
+    invitation_token_id = invitation.get("token_id")
+    if isinstance(invitation_token_id, str) and invitation_token_id:
+        message += f"\ninvitation_token_id\t{invitation_token_id}"
     return message
 
 

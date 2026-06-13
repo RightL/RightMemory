@@ -19,6 +19,7 @@ from ..shared_views import (
     publish_shared_view,
     record_shared_view_note,
     retrieve_shared_view,
+    save_shared_view_credential,
 )
 from ..status import collect_status
 from .readers import (
@@ -175,6 +176,19 @@ class WebStudioService:
             replace=bool(payload.get("replace", False)),
             query=_optional_payload_str(payload, "query"),
         )
+
+    def save_credential(self, payload: dict[str, Any]) -> str:
+        credential_id = _required_payload_str(payload, "credential_id")
+        save_shared_view_credential(
+            self.memory_root,
+            credential_id,
+            kind=_optional_payload_str(payload, "kind") or "http-publish",
+            token=_required_payload_str(payload, "token"),
+            base_url=_required_payload_str(payload, "hub_url"),
+            view_id=_optional_payload_str(payload, "view_id"),
+            provider_id=_optional_payload_str(payload, "provider_id"),
+        )
+        return f"saved shared view credential {credential_id}"
 
     def accept_invite(self, payload: dict[str, Any]) -> str:
         invitation = _required_payload_str(payload, "invitation")

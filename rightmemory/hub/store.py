@@ -215,6 +215,29 @@ class HubStore:
             )
             return True
 
+    def list_tokens(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            rows = connection.execute(
+                """
+                SELECT id, action, provider_id, view_id, label, created_at, revoked_at
+                FROM tokens
+                ORDER BY created_at, id
+                """
+            ).fetchall()
+        return [
+            {
+                "token_id": row["id"],
+                "action": row["action"],
+                "provider_id": row["provider_id"],
+                "view_id": row["view_id"],
+                "label": row["label"],
+                "created_at": row["created_at"],
+                "revoked_at": row["revoked_at"],
+            }
+            for row in rows
+        ]
+
     def list_audit_events(self) -> list[AuditEvent]:
         with self._connect() as connection:
             self._apply_migrations(connection)
