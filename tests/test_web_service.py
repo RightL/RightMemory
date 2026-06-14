@@ -88,6 +88,25 @@ class WebStudioReadApiTests(unittest.TestCase):
         self.assertTrue(detail.json()["data"]["missing"])
         self.assertEqual(detail.json()["data"]["text"], "")
 
+    def test_settings_summary_reports_runtime_without_secrets(self):
+        (self.root / "rightmemory.toml").write_text(
+            "[agent_cli]\nprovider = \"codex\"\n\n[sync]\nenabled = true\n",
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/settings")
+        data = response.json()["data"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(data["config_exists"])
+        self.assertEqual(data["active_root"], str(self.root.resolve()))
+        self.assertTrue(data["runtime"]["sync"]["ok"])
+        self.assertTrue(data["runtime"]["sync"]["value"]["enabled"])
+        retrieve = next(role for role in data["roles"] if role["role"] == "retrieve")
+        self.assertTrue(retrieve["ok"])
+        self.assertEqual(retrieve["executor"]["mode"], "cli-agent")
+        self.assertNotIn("secret-token", response.text)
+
 
 class WebStudioStaticTests(unittest.TestCase):
     def test_static_shell_loads_assets(self):

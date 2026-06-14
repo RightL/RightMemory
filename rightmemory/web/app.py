@@ -81,6 +81,10 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
     def status_api(service=Depends(current_service)):
         return ok_response("status loaded", service.status())
 
+    @app.get("/api/settings")
+    def settings_api(service=Depends(current_service)):
+        return ok_response("settings loaded", service.settings())
+
     @app.get("/api/memory/files")
     def memory_files(service=Depends(current_service)):
         return ok_response("memory files loaded", service.memory_files())

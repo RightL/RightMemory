@@ -4,6 +4,16 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from ..config import (
+    ROLES,
+    load_async_update_config,
+    load_config,
+    load_dreamer_watch_config,
+    load_insight_watch_config,
+    load_pruner_config,
+    load_review_config,
+    load_sync_config,
+)
 from ..session import MemoryWriteLock
 from ..shared_views import (
     accept_http_shared_view_invitation,
@@ -70,6 +80,23 @@ class WebStudioService:
     def status(self) -> dict[str, Any]:
         status = collect_status(self.memory_root)
         return _json_safe(status)
+
+    def settings(self) -> dict[str, Any]:
+        config_path = self.memory_root / "rightmemory.toml"
+        return {
+            "active_root": str(self.memory_root),
+            "config_path": str(config_path),
+            "config_exists": config_path.is_file(),
+            "runtime": {
+                "review": _settings_loader(load_review_config, self.memory_root),
+                "update": _settings_loader(load_async_update_config, self.memory_root),
+                "dreamer_watch": _settings_loader(load_dreamer_watch_config, self.memory_root),
+                "insight_watch": _settings_loader(load_insight_watch_config, self.memory_root),
+                "pruner": _settings_loader(load_pruner_config, self.memory_root),
+                "sync": _settings_loader(load_sync_config, self.memory_root),
+            },
+            "roles": [_role_settings(role, self.memory_root) for role in sorted(ROLES)],
+        }
 
     def memory_files(self) -> dict[str, Any]:
         artifacts = list_memory_artifacts(self.memory_root)
@@ -269,6 +296,40 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
     return value
+
+
+def _settings_loader(loader, memory_root: Path) -> dict[str, Any]:
+    try:
+        return {"ok": True, "value": _json_safe(loader(memory_root))}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _role_settings(role: str, memory_root: Path) -> dict[str, Any]:
+    try:
+        config = load_config(role, memory_root=memory_root)
+    except Exception as exc:
+        return {"role": role, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    if config.runtime_mode == "standalone":
+        executor = {
+            "mode": "standalone",
+            "model_id": config.model_id,
+            "api_base": config.api_base,
+            "api_key": "configured" if config.api_key else "not configured",
+        }
+    else:
+        executor = {
+            "mode": "cli-agent",
+            "provider": config.agent_cli.provider if config.agent_cli else None,
+            "model": config.agent_cli.model if config.agent_cli else None,
+        }
+    return {
+        "role": role,
+        "ok": True,
+        "executor": executor,
+        "debug_trace": config.debug_trace,
+        "max_tool_retries": config.max_tool_retries,
+    }
 
 
 def _required_payload_str(payload: dict[str, Any], key: str) -> str:
