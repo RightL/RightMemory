@@ -135,6 +135,36 @@ records, revocation workflows, immutable published versions, and server-side
 hosted retrieval. Encrypted Git transport would likely trade those richer hub
 semantics for simpler deployment and should be evaluated honestly if revisited.
 
+## 2026-06-16 Shared View Redesign Brainstorm
+
+Context: The user reviewed the current shared-view design and concluded that it
+conflates file sharing, provider-root filesystem access, hosted retrieval, and
+provider-side questions. The accepted direction is to split shared views into
+HTTP-only mirrored file views and provider question views, with no direct
+provider-root reads.
+
+### Deferred
+
+#### Bidirectional shared-view interactions
+
+Proposal: Turn shared-view interactions into a bidirectional conversation or
+threading system so providers can reply to consumer notes and consumers can
+track follow-up state.
+
+Decision: Deferred. Do not implement bidirectional interactions as part of the
+`MF#` / `MQ#` redesign.
+
+Rationale: The redesigned model separates live provider answers from async
+feedback. `MQ#` handles synchronous provider questions, while `shared-view note`
+remains explicit one-way consumer-to-provider feedback. Adding replies,
+threads, or queued answers would blur that boundary and move RightMemory toward
+a chat/task system before the basic shared-view split is clean.
+
+Design note: Revisit this later as its own product design. The open question is
+whether provider responses should be modeled as threaded interactions, ordinary
+provider view updates, explicit follow-up notes, or a separate collaboration
+surface.
+
 ## 2026-06-04 Brainstorm
 
 Context: A GPT-5.5 xhigh subagent was asked to brainstorm ways to push
