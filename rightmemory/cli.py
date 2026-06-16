@@ -48,7 +48,7 @@ from .runtime import RightMemoryRuntime
 from .session import MemoryWriteLock
 from .shared_view_builder import run_file_view_builder, run_question_view_builder
 from .shared_view_files import approve_file_view, pull_all_file_views, pull_file_view
-from .shared_view_questions import approve_question_view, ask_question_view
+from .shared_view_questions import approve_question_view, ask_question_view, publish_question_view
 from .shared_views import (
     accept_http_shared_view_invitation,
     accept_shared_view_invitation,
@@ -435,6 +435,13 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     build_question.add_argument("view_id")
     build_question.add_argument("intent", nargs="+")
     build_question.add_argument("--title", required=True)
+    publish_question = subparsers.add_parser("publish-question")
+    publish_question.add_argument("view_id")
+    publish_question.add_argument("--hub-url", required=True)
+    publish_question.add_argument("--credential-id", required=True)
+    publish_question.add_argument("--question-base-url", required=True)
+    publish_question.add_argument("--label")
+    publish_question.add_argument("--expires-at")
     approve = subparsers.add_parser("approve")
     approve.add_argument("view_id")
     approve.add_argument("--type", choices=("file", "question"), required=True)
@@ -513,6 +520,19 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
                 view_id=args.view_id,
                 title=args.title,
                 intent=intent,
+            )
+        )
+        return 0
+    if args.command == "publish-question":
+        print(
+            publish_question_view(
+                memory_root,
+                args.view_id,
+                hub_url=args.hub_url,
+                credential_id=args.credential_id,
+                question_base_url=args.question_base_url,
+                label=args.label,
+                expires_at=args.expires_at,
             )
         )
         return 0

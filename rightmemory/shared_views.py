@@ -37,11 +37,13 @@ def accept_http_shared_view_invitation(
     base_url, invite_token = _parse_http_invitation_url(invitation_url)
     client = HubClient(base_url)
     view_info = client.get_invitation_view(invite_token)
+    view_type = _view_type_from_invitation(view_info)
+    target_kind = "http-file" if view_type == "file" else "http-question"
+    question_base_url = _question_base_url_from_invitation(view_info) if view_type == "question" else None
     accepted = client.accept_invitation(invite_token, consumer_label=consumer_label)
     remote_view_id = validate_heading_id(str(accepted.get("view_id") or view_info.get("view_id")))
     local_heading_id = validate_heading_id(heading_id or remote_view_id)
     local_credential_id = validate_heading_id(credential_id or f"http-{local_heading_id}")
-    view_type = _view_type_from_invitation(view_info)
     connection_token = accepted.get("connection_token")
     if not isinstance(connection_token, str) or not connection_token:
         raise ValueError("HTTP shared-view invitation did not return a connection_token")
@@ -53,10 +55,6 @@ def accept_http_shared_view_invitation(
             raise ValueError("HTTP shared-view invitation did not return a question_token")
         question_token = raw_question_token
         question_credential_id = validate_heading_id(f"{local_credential_id}-question")
-    target_kind = "http-file" if view_type == "file" else "http-question"
-    question_base_url = None
-    if view_type == "question":
-        question_base_url = _question_base_url_from_invitation(view_info)
     save_shared_view_credential(
         root,
         local_credential_id,

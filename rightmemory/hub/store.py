@@ -353,6 +353,118 @@ class HubStore:
             "created_at": now,
         }
 
+    def register_question_view(
+        self,
+        view_id: str,
+        *,
+        provider_id: str,
+        title: str,
+        description: str,
+        question_base_url: str,
+        question_token: str,
+        created_by_token_id: str | None = None,
+    ) -> dict[str, Any]:
+        clean_view_id = _validate_hub_id(view_id, "view_id")
+        clean_provider_id = _validate_hub_id(provider_id, "provider_id")
+        clean_title = _required_string(title, "title")
+        clean_description = _optional_string(description)
+        clean_question_base_url = _required_string(question_base_url, "question_base_url")
+        clean_question_token = _required_string(question_token, "question_token")
+        clean_created_by = _validate_hub_id(created_by_token_id, "created_by_token_id") if created_by_token_id else None
+        version_id = _new_id("ver")
+        ref = f"rightmemory://mq/{clean_view_id}"
+        manifest = _question_manifest_json(
+            view_id=clean_view_id,
+            version_id=version_id,
+            title=clean_title,
+            ref=ref,
+            description=clean_description,
+            question_base_url=clean_question_base_url,
+            question_token=clean_question_token,
+        )
+        manifest_json = json.dumps(manifest, sort_keys=True)
+        package_hash = sha256(manifest_json.encode("utf-8")).hexdigest()
+        storage_path = self.storage_root / "views" / clean_view_id / "questions" / version_id
+        relative_storage_path = storage_path.relative_to(self.root).as_posix()
+        now = _now_iso()
+        try:
+            storage_path.mkdir(parents=True, exist_ok=False)
+            _atomic_write_text(storage_path / "manifest.json", manifest_json + "\n")
+            with self._connect() as connection:
+                self._apply_migrations(connection)
+                connection.execute(
+                    """
+                    INSERT INTO providers(id, label, created_at, updated_at)
+                    VALUES(?, NULL, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at
+                    """,
+                    (clean_provider_id, now, now),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO views(
+                        id, provider_id, title, ref, description, current_version_id, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        provider_id = COALESCE(views.provider_id, excluded.provider_id),
+                        title = excluded.title,
+                        ref = excluded.ref,
+                        description = excluded.description,
+                        current_version_id = excluded.current_version_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        clean_view_id,
+                        clean_provider_id,
+                        clean_title,
+                        ref,
+                        clean_description,
+                        version_id,
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO view_versions(
+                        id, view_id, package_hash, storage_path, manifest_json, created_at, created_by_token_id
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        version_id,
+                        clean_view_id,
+                        package_hash,
+                        relative_storage_path,
+                        manifest_json,
+                        now,
+                        clean_created_by,
+                    ),
+                )
+                self._append_audit_event(
+                    connection,
+                    "question_view.registered",
+                    actor_id=clean_created_by,
+                    provider_id=clean_provider_id,
+                    view_id=clean_view_id,
+                    details={"version_id": version_id},
+                )
+        except BaseException:
+            if storage_path.exists():
+                shutil.rmtree(storage_path)
+            raise
+        return {
+            "view_id": clean_view_id,
+            "provider_id": clean_provider_id,
+            "version_id": version_id,
+            "current_version_id": version_id,
+            "package_hash": package_hash,
+            "title": clean_title,
+            "ref": ref,
+            "description": clean_description,
+        }
+
     def describe_invitation(self, raw_token: str) -> dict[str, Any] | None:
         token_row = self._find_token(raw_token, action="invite", provider_id=None, view_id=None)
         if token_row is None:
@@ -811,6 +923,34 @@ def _manifest_json(stored: HubStoredPackage) -> dict[str, Any]:
     }
 
 
+def _question_manifest_json(
+    *,
+    view_id: str,
+    version_id: str,
+    title: str,
+    ref: str,
+    description: str | None,
+    question_base_url: str,
+    question_token: str,
+) -> dict[str, Any]:
+    return {
+        "view_id": view_id,
+        "title": title,
+        "ref": ref,
+        "description": description,
+        "maintainer": None,
+        "files": [],
+        "size_bytes": 0,
+        "package_hash": "",
+        "version_id": version_id,
+        "invitation_metadata": {
+            "kind": "question",
+            "question_base_url": question_base_url,
+            "question_token": question_token,
+        },
+    }
+
+
 def _hash_token(raw_token: str, nonce: str) -> str:
     return sha256(f"{nonce}:{raw_token}".encode("utf-8")).hexdigest()
 
@@ -1018,6 +1158,13 @@ def _optional_string(value: object) -> str | None:
         raise ValueError("optional hub string fields must be strings")
     value = value.strip()
     return value or None
+
+
+def _required_string(value: object, label: str) -> str:
+    clean = _optional_string(value)
+    if clean is None:
+        raise ValueError(f"{label} must be a non-empty string")
+    return clean
 
 
 def _new_id(prefix: str) -> str:

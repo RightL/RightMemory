@@ -839,6 +839,8 @@ class MemoryTools:
                 raise ValueError("runtime shared-view imports are only readable by retrieve")
 
     def _exclude_runtime_shared_view_rg_paths(self, args: list[str]) -> list[str]:
+        if self.role == "retrieve":
+            return args
         insert_at = args.index("--") if "--" in args else len(args)
         return [*args[:insert_at], "--glob", f"!{RUNTIME_SHARED_VIEW_PATH_PREFIX}**", *args[insert_at:]]
 
@@ -849,6 +851,7 @@ class MemoryTools:
             line
             for line in output.splitlines()
             if not line.startswith(RUNTIME_SHARED_VIEW_PATH_PREFIX)
+            or (self.role == "retrieve" and line.startswith(RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX))
         ]
         return "\n".join(kept)
 
@@ -863,6 +866,11 @@ class MemoryTools:
             if not resolved.is_dir():
                 expanded_path_indices.add(len(expanded))
                 expanded.append(token)
+                continue
+            relative_path = resolved.relative_to(self.memory_root).as_posix()
+            if self.role == "retrieve" and self._is_runtime_shared_view_import_path(relative_path):
+                expanded_path_indices.add(len(expanded))
+                expanded.append(relative_path)
                 continue
             self._check_allowed_read_search_dir(resolved, token)
             for relative_path in self._existing_role_read_paths_under(resolved):

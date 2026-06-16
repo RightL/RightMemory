@@ -34,6 +34,10 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertIn("Tokens expire after one hour.", result)
         self.assertIn("MEMORY.md", grep_result)
+        if shutil.which("rg") is not None:
+            rg_result = tools.read_command("rg Tokens .runtime/shared_views/imports/auth-api-files")
+            self.assertIn(".runtime/shared_views/imports/auth-api-files/dist/MEMORY.md", rg_result)
+            self.assertIn("Tokens expire after one hour.", rg_result)
 
     def test_update_role_cannot_read_mf_import_files(self):
         imported = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"

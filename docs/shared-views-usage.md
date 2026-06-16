@@ -64,6 +64,17 @@ rightmemory --profile alice shared-view approve auth-api-ask --type question
 Remote asks require a provider-approved bearer token. `question.toml` stores token hashes in `access_token_hashes`; invitation accept responses deliver the raw `question_token` to the consumer credential store.
 The consumer keeps the hub connection token for notes separate from the provider question token used for live asks.
 
+Publish an approved question view to the hub and create an invitation:
+
+```bash
+rightmemory --profile alice shared-view publish-question auth-api-ask \
+  --hub-url http://127.0.0.1:8765 \
+  --credential-id alice-publish \
+  --question-base-url http://127.0.0.1:8765
+```
+
+The command registers `MQ#` metadata with the hub, generates a question token, stores only its hash in `question.toml`, and prints an invitation URL.
+
 ## HTTP Hub Setup For `MF#`
 
 Initialize and serve a hub:
@@ -84,7 +95,7 @@ rightmemory --profile alice shared-view credential set alice-publish \
   --token-prompt
 ```
 
-The file-view recipe stores the hub URL and credential id. Tokens stay in `.runtime/shared_views/credentials.json`.
+The file-view recipe stores the hub URL and credential id. Tokens stay in `.runtime/shared_views/credentials.toml`.
 
 ## Consumer: Accept And Use `MF#`
 
@@ -169,7 +180,7 @@ shared_views.toml
 Do not commit runtime state:
 
 ```text
-.runtime/shared_views/credentials.json
+.runtime/shared_views/credentials.toml
 .runtime/shared_views/imports/
 .runtime/shared_views/notes/
 .runtime/shared_views/inbox/

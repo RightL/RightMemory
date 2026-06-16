@@ -44,6 +44,27 @@ class HubClient:
             bearer=True,
         )
 
+    def register_question_view(
+        self,
+        view_id: str,
+        *,
+        title: str,
+        description: str,
+        question_base_url: str,
+        question_token: str,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/views/{urllib.parse.quote(view_id)}/question",
+            json_body={
+                "title": title,
+                "description": description,
+                "question_base_url": question_base_url,
+                "question_token": question_token,
+            },
+            bearer=True,
+        )
+
     def post_interaction(self, view_id: str, payload: dict[str, object]) -> dict[str, Any]:
         return self._request(
             "POST",

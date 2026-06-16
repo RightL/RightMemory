@@ -60,6 +60,30 @@ def create_hub_app(hub_root: Path) -> FastAPI:
             "title": stored.manifest.title,
         }
 
+    @app.post("/api/views/{view_id}/question", status_code=status.HTTP_201_CREATED)
+    def register_question_view(
+        view_id: str,
+        request: Request,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any]:
+        actor = _require_token(store, request, action="publish")
+        _require_actor_provider(actor.provider_id)
+        _ensure_view_provider_scope(store, view_id, actor.provider_id)
+        data = payload or {}
+        try:
+            registered = store.register_question_view(
+                view_id,
+                provider_id=actor.provider_id,
+                title=_required_payload_str(data, "title"),
+                description=_optional_payload_str(data, "description") or "",
+                question_base_url=_required_payload_str(data, "question_base_url"),
+                question_token=_required_payload_str(data, "question_token"),
+                created_by_token_id=actor.token_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        return registered
+
     @app.post("/api/views/{view_id}/invitations", status_code=status.HTTP_201_CREATED)
     def create_invitation(
         view_id: str,

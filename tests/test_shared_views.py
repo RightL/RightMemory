@@ -1,4 +1,5 @@
 import io
+import json
 import threading
 import tempfile
 import unittest
@@ -10,10 +11,12 @@ from rightmemory.hub.client import HubClientError
 from rightmemory.shared_view_builder import run_file_view_builder
 from rightmemory.shared_view_files import (
     FileViewPullResult,
+    FileViewPublishResult,
     approve_file_view,
     export_file_view_package,
     publish_approved_file_views,
     pull_file_view,
+    record_file_view_publish_results,
     render_file_view,
     write_file_view_recipe,
 )
@@ -26,8 +29,10 @@ from rightmemory.shared_view_models import (
     validate_connection,
 )
 from rightmemory.shared_view_questions import (
+    _run_provider_question,
     answer_question_view,
     ask_question_view,
+    publish_question_view,
     question_token_hash,
     verify_question_view_token,
     write_question_view,
@@ -159,6 +164,7 @@ class SharedViewModelTests(unittest.TestCase):
                 accept_http_shared_view_invitation(self.root, "https://hub.example.test/i/invite-token")
 
         self.assertIn("question_base_url", str(caught.exception))
+        client.accept_invitation.assert_not_called()
 
     def test_accept_http_question_invitation_requires_question_token(self):
         with patch("rightmemory.shared_views.HubClient") as client_type:
@@ -216,6 +222,37 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         self.assertIn("Tokens expire after one hour.", exported.read_text(encoding="utf-8"))
         self.assertNotIn("Payroll details", exported.read_text(encoding="utf-8"))
         self.assertIn('kind = "file"', recipe.read_text(encoding="utf-8"))
+
+    def test_file_recipe_excludes_nested_heading_subtree(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Project {#project}\n\n"
+            "## Auth API {#auth-api}\n\n"
+            "Public auth context.\n\n"
+            "### Internal Tokens {#internal-tokens}\n\n"
+            "- `secret-token` Private token shape. -> [rel:internal-tokens]\n\n"
+            "### Public Tokens {#public-tokens}\n\n"
+            "- `token-expiry` Tokens expire after one hour. -> [rel:public-tokens]\n",
+            encoding="utf-8",
+        )
+        write_file_view_recipe(
+            self.root,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_headings=["auth-api"],
+            exclude_ids=["internal-tokens"],
+            approved=True,
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
+        )
+
+        render_file_view(self.root, "auth-api-files")
+
+        exported = (self.root / "shared_views" / "auth-api-files" / "dist" / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("Public auth context.", exported)
+        self.assertIn("Tokens expire after one hour.", exported)
+        self.assertNotIn("Internal Tokens", exported)
+        self.assertNotIn("Private token shape", exported)
 
     def test_file_package_does_not_include_retriever_prompt(self):
         write_file_view_recipe(
@@ -385,6 +422,20 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
         self.assertEqual(clients[0].base_url, "https://hub.example.test")
         self.assertIn("dist/MEMORY.md", clients[0].publish_calls[0]["files"])
 
+    def test_record_file_view_publish_results_logs_failures(self):
+        record_file_view_publish_results(
+            self.root,
+            [FileViewPublishResult("auth-api-files", "failed", "hub offline")],
+            trigger="update-write",
+        )
+
+        path = self.root / ".runtime" / "shared_views" / "publish-events.jsonl"
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(records[0]["view_id"], "auth-api-files")
+        self.assertEqual(records[0]["status"], "failed")
+        self.assertEqual(records[0]["message"], "hub offline")
+        self.assertEqual(records[0]["trigger"], "update-write")
+
 
 class SharedQuestionViewTests(unittest.TestCase):
     def setUp(self):
@@ -412,6 +463,83 @@ class SharedQuestionViewTests(unittest.TestCase):
         self.assertIn(question_token_hash("question-token"), question_toml)
         self.assertTrue(verify_question_view_token(self.root, "auth-api-ask", "question-token"))
         self.assertFalse(verify_question_view_token(self.root, "auth-api-ask", "wrong-token"))
+
+    def test_publish_question_view_registers_question_metadata_and_hashes_token(self):
+        write_question_view(
+            self.root,
+            view_id="auth-api-ask",
+            title="Auth API Questions",
+            intent="Let frontend agents ask auth API questions.",
+            retriever_instructions="Answer only from auth API memory.",
+            approved=True,
+        )
+        save_shared_view_credential(
+            self.root,
+            "alice-publish",
+            kind="http-publish",
+            token="publish-token",
+            base_url="https://hub.example.test",
+            provider_id="alice",
+        )
+        clients = []
+
+        with patch("rightmemory.shared_view_questions.HubClient", side_effect=lambda base_url, token: _record_fake_client(clients, base_url, token)):
+            result = publish_question_view(
+                self.root,
+                "auth-api-ask",
+                hub_url="https://hub.example.test",
+                credential_id="alice-publish",
+                question_base_url="https://provider.example.test",
+                label="frontend",
+                expires_at="2026-07-01T00:00:00+00:00",
+            )
+
+        client = clients[0]
+        question_token = client.question_registrations[0]["question_token"]
+        question_toml = (self.root / "shared_views" / "auth-api-ask" / "question.toml").read_text(encoding="utf-8")
+        self.assertIn("published question view auth-api-ask", result)
+        self.assertIn("invitation_url\thttps://hub.example.test/i/invite-token", result)
+        self.assertEqual(client.base_url, "https://hub.example.test")
+        self.assertEqual(client.token, "publish-token")
+        self.assertEqual(client.question_registrations[0]["view_id"], "auth-api-ask")
+        self.assertEqual(client.question_registrations[0]["question_base_url"], "https://provider.example.test")
+        self.assertEqual(client.invitation_calls[0]["label"], "frontend")
+        self.assertEqual(client.invitation_calls[0]["expires_at"], "2026-07-01T00:00:00+00:00")
+        self.assertIn(question_token_hash(question_token), question_toml)
+        self.assertNotIn(question_token, question_toml)
+
+    def test_run_provider_question_sets_started_from_runtime_callback(self):
+        started = threading.Event()
+        observations = []
+
+        class FakeRuntime:
+            def __init__(self, config):
+                self.config = config
+
+            def run_session_turn(self, session_id, prompt, *, on_started=None):
+                observations.append(started.is_set())
+                if on_started is not None:
+                    on_started()
+                observations.append(started.is_set())
+                return "Use token_expires_at."
+
+            def cleanup(self):
+                observations.append("cleanup")
+
+        with (
+            patch("rightmemory.config.load_config", return_value=object()),
+            patch("rightmemory.runtime.RightMemoryRuntime", FakeRuntime),
+        ):
+            answer = _run_provider_question(
+                self.root,
+                "retrieve",
+                "auth-api-ask",
+                "Provider question:\nHow do tokens refresh?",
+                started,
+            )
+
+        self.assertEqual(answer, "Use token_expires_at.")
+        self.assertEqual(observations, [False, True, "cleanup"])
 
     def test_ask_question_view_returns_unavailable_when_provider_does_not_start(self):
         save_connections(
@@ -692,6 +820,8 @@ class _FakeHubClient:
         self.base_url = base_url
         self.token = token
         self.publish_calls = []
+        self.question_registrations = []
+        self.invitation_calls = []
 
     def publish_package(self, view_id: str, package_root: Path):
         self.publish_calls.append(
@@ -701,6 +831,14 @@ class _FakeHubClient:
             }
         )
         return {"version_id": "ver_1"}
+
+    def register_question_view(self, view_id: str, **kwargs):
+        self.question_registrations.append({"view_id": view_id, **kwargs})
+        return {"version_id": "ver_1", "view_id": view_id}
+
+    def create_invitation(self, view_id: str, *, label: str | None = None, expires_at: str | None = None):
+        self.invitation_calls.append({"view_id": view_id, "label": label, "expires_at": expires_at})
+        return {"invitation_url": "https://hub.example.test/i/invite-token"}
 
 
 def _record_fake_client(clients: list[_FakeHubClient], base_url: str, token: str) -> _FakeHubClient:

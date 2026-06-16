@@ -8,6 +8,7 @@ import shutil
 import tomllib
 import zipfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 
@@ -231,6 +232,35 @@ def publish_approved_file_views(memory_root: Path) -> list[FileViewPublishResult
     return results
 
 
+def record_file_view_publish_results(
+    memory_root: Path,
+    results: list[FileViewPublishResult],
+    *,
+    trigger: str = "manual",
+) -> None:
+    if not results:
+        return
+    root = Path(memory_root).expanduser()
+    path = root / ".runtime" / "shared_views" / "publish-events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+    with path.open("a", encoding="utf-8") as handle:
+        for result in results:
+            handle.write(
+                json.dumps(
+                    {
+                        "created_at": created_at,
+                        "view_id": result.view_id,
+                        "status": result.status,
+                        "message": result.message,
+                        "trigger": trigger,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+
+
 def _download_file_view_archive(root: Path, connection: SharedViewConnection) -> bytes:
     target = connection.target
     if target.kind != "http-file":
@@ -294,20 +324,30 @@ def _render_selected_memory(root: Path, recipe: FileViewRecipe) -> str:
 def _selected_lines_from_source(lines: list[str], recipe: FileViewRecipe, excluded: set[str]) -> list[str]:
     output: list[str] = []
     heading_depth: int | None = None
+    excluded_subtree_depth: int | None = None
     include_subtree = False
     for line in lines:
         heading_match = HEADING_ID_RE.match(line)
         if heading_match:
             depth = len(heading_match.group(1))
             item_id = heading_match.group(2)
+            if excluded_subtree_depth is not None:
+                if depth > excluded_subtree_depth:
+                    continue
+                excluded_subtree_depth = None
             if heading_depth is not None and depth <= heading_depth:
                 include_subtree = False
                 heading_depth = None
+            if item_id in excluded:
+                excluded_subtree_depth = depth
+                continue
             if item_id in recipe.include_headings and item_id not in excluded:
                 include_subtree = True
                 heading_depth = depth
                 output.append(line)
                 continue
+        elif excluded_subtree_depth is not None:
+            continue
         node_match = NODE_ID_RE.match(line)
         if node_match and node_match.group(1) in excluded:
             continue

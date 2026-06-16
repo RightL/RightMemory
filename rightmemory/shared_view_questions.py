@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from hashlib import sha256
 import json
+import secrets
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -110,6 +111,52 @@ def approve_question_view(memory_root: Path, view_id: str) -> str:
     return f"approved question view {config.view_id}"
 
 
+def publish_question_view(
+    memory_root: Path,
+    view_id: str,
+    *,
+    hub_url: str,
+    credential_id: str,
+    question_base_url: str,
+    label: str | None = None,
+    expires_at: str | None = None,
+) -> str:
+    root = Path(memory_root).expanduser()
+    config = load_question_view(root, view_id)
+    if not config.approved:
+        raise ValueError(f"question view is not approved: {config.view_id}")
+    clean_hub_url = _required_text(hub_url, "hub_url")
+    clean_credential_id = validate_heading_id(credential_id)
+    clean_question_base_url = _required_text(question_base_url, "question_base_url")
+    credential = load_shared_view_credential(root, clean_credential_id)
+    question_token = secrets.token_urlsafe(32)
+    updated_hashes = tuple(dict.fromkeys((*config.access_token_hashes, question_token_hash(question_token))))
+    updated_config = QuestionViewConfig(
+        view_id=config.view_id,
+        title=config.title,
+        intent=config.intent,
+        approved=config.approved,
+        start_timeout_seconds=config.start_timeout_seconds,
+        answer_timeout_seconds=config.answer_timeout_seconds,
+        provider_role=config.provider_role,
+        access_token_hashes=updated_hashes,
+    )
+    _write_text(root / PROVIDER_VIEWS_DIR / config.view_id / "question.toml", _render_question_toml(updated_config))
+    client = HubClient(clean_hub_url, credential["token"])
+    client.register_question_view(
+        config.view_id,
+        title=config.title,
+        description=config.intent,
+        question_base_url=clean_question_base_url,
+        question_token=question_token,
+    )
+    invitation = client.create_invitation(config.view_id, label=label, expires_at=expires_at)
+    invitation_url = invitation.get("invitation_url")
+    if not isinstance(invitation_url, str) or not invitation_url:
+        raise ValueError("hub did not return an invitation_url")
+    return f"published question view {config.view_id}\ninvitation_url\t{invitation_url}"
+
+
 def ask_question_view(memory_root: Path, heading_id: str, question: str) -> str:
     root = Path(memory_root).expanduser()
     clean_heading_id = validate_heading_id(heading_id)
@@ -214,8 +261,7 @@ def _run_provider_question(root: Path, provider_role: str, view_id: str, prompt:
 
     runtime = RightMemoryRuntime(load_config(provider_role, memory_root=root))
     try:
-        started.set()
-        return runtime.run_session_turn(f"shared-view-question-{view_id}", prompt)
+        return runtime.run_session_turn(f"shared-view-question-{view_id}", prompt, on_started=started.set)
     finally:
         runtime.cleanup()
 

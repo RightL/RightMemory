@@ -27,6 +27,7 @@ from rightmemory.provider_sessions import ProviderSessionStore
 from rightmemory.prune import PruneDueStatus
 from rightmemory.runtime import RightMemoryRuntime, build_model
 from rightmemory.semantic_upgrades import SemanticUpgradeContext, SemanticUpgradeNote
+from rightmemory.shared_view_files import FileViewPublishResult
 from rightmemory.sync import SyncResult
 
 
@@ -1009,10 +1010,17 @@ class RuntimeTests(unittest.TestCase):
             with (
                 patch.object(RightMemoryRuntime, "_should_isolate_write_turn", return_value=False),
                 patch("rightmemory.runtime.publish_approved_file_views") as publish,
+                patch("rightmemory.runtime.record_file_view_publish_results") as record,
             ):
+                publish.return_value = [FileViewPublishResult("auth-api-files", "failed", "hub offline")]
                 runtime.run_session_turn("agent-session", "remember this")
 
         publish.assert_called_once_with(root)
+        record.assert_called_once_with(
+            root,
+            [FileViewPublishResult("auth-api-files", "failed", "hub offline")],
+            trigger="update-write",
+        )
 
     def test_write_role_session_turn_uses_isolated_runner(self):
         cases = [

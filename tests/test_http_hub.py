@@ -90,20 +90,20 @@ class HubStoreTests(unittest.TestCase):
     def test_question_invitation_metadata_is_described_and_question_token_only_on_accept(self):
         store = HubStore(self.root)
         store.initialize(admin_token="admin-secret")
-        package = self.root / "package"
-        _write_package(
-            package,
-            kind="question",
-            ref="rightmemory://mq/alice-auth-api",
+        registered = store.register_question_view(
+            "alice-auth-api",
+            provider_id="alice",
+            title="Alice Auth API",
+            description="Public auth facts.",
             question_base_url="https://provider.example.test",
             question_token="question-token",
         )
-        store.store_package_version(package, view_id="alice-auth-api", provider_id="alice")
         invitation = store.create_invitation("alice-auth-api", label="frontend")
 
         described = store.describe_invitation(invitation["raw_token"])
         accepted = store.accept_invitation(invitation["raw_token"], consumer_label="frontend")
 
+        self.assertEqual(registered["provider_id"], "alice")
         self.assertIsNotNone(described)
         self.assertEqual(described["kind"], "question")
         self.assertEqual(described["question_base_url"], "https://provider.example.test")
@@ -342,6 +342,37 @@ class HubApiTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "ok")
         self.assertTrue(response.json()["initialized"])
 
+    def test_register_question_view_invite_and_accept_flow(self):
+        registered = self.client.post(
+            "/api/views/alice-auth-api/question",
+            headers=_auth(self.provider_token.raw_token),
+            json={
+                "title": "Alice Auth API",
+                "description": "Public auth facts.",
+                "question_base_url": "https://provider.example.test",
+                "question_token": "question-token",
+            },
+        )
+        invitation = self.client.post(
+            "/api/views/alice-auth-api/invitations",
+            headers=_auth(self.provider_token.raw_token),
+            json={"label": "frontend agent"},
+        )
+
+        self.assertEqual(registered.status_code, 201)
+        self.assertEqual(registered.json()["provider_id"], "alice")
+        self.assertEqual(invitation.status_code, 201)
+        invitation_token = invitation.json()["invitation_url"].rsplit("/i/", 1)[1]
+        described = self.client.get(f"/api/invitations/{invitation_token}/view")
+        accepted = self.client.post(f"/api/invitations/{invitation_token}/accept")
+
+        self.assertEqual(described.status_code, 200)
+        self.assertEqual(described.json()["kind"], "question")
+        self.assertEqual(described.json()["question_base_url"], "https://provider.example.test")
+        self.assertNotIn("question_token", described.json())
+        self.assertEqual(accepted.status_code, 201)
+        self.assertEqual(accepted.json()["question_token"], "question-token")
+
     def test_publish_invite_accept_pull_interact_and_inbox_flow(self):
         first_package = self.root / "package-v1"
         _write_package(
@@ -485,20 +516,17 @@ class HubApiTests(unittest.TestCase):
             self.assertEqual(records[0]["payload"]["actor"], "assistant")
 
     def test_question_invitation_api_accept_response_includes_question_token(self):
-        package = self.root / "question-package"
-        _write_package(
-            package,
-            kind="question",
-            ref="rightmemory://mq/alice-auth-api",
-            question_base_url="https://provider.example.test",
-            question_token="question-token",
+        registered = self.client.post(
+            "/api/views/alice-auth-api/question",
+            headers=_auth(self.provider_token.raw_token),
+            json={
+                "title": "Alice Auth API",
+                "description": "Public auth facts.",
+                "question_base_url": "https://provider.example.test",
+                "question_token": "question-token",
+            },
         )
-        publish = self.client.post(
-            "/api/views/alice-auth-api/versions",
-            content=_zip_package(package),
-            headers={**_auth(self.provider_token.raw_token), "content-type": "application/zip"},
-        )
-        self.assertEqual(publish.status_code, 201)
+        self.assertEqual(registered.status_code, 201)
         invitation = self.client.post(
             "/api/views/alice-auth-api/invitations",
             headers=_auth(self.provider_token.raw_token),

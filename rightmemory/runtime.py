@@ -26,7 +26,7 @@ from .recent_submitted import (
 )
 from .semantic_upgrades import SemanticUpgradeContext, mark_absorbed, pending_context
 from .session import MemoryWriteLock, MessageSessionStore, _ensure_runtime_gitignore, _fsync_directory
-from .shared_view_files import publish_approved_file_views, pull_all_file_views
+from .shared_view_files import publish_approved_file_views, pull_all_file_views, record_file_view_publish_results
 from .sync import SyncManager, SyncResult
 from .tools import MemoryTools
 
@@ -106,7 +106,7 @@ class RightMemoryRuntime:
         self._mark_semantic_upgrades_absorbed()
         return self._result_output(result)
 
-    def run_session_turn(self, session_id: str, message: str) -> str:
+    def run_session_turn(self, session_id: str, message: str, *, on_started: Callable[[], None] | None = None) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
         if session_id == NO_SESSION_RIGHTMEMORY_SESSION_ID:
@@ -125,10 +125,20 @@ class RightMemoryRuntime:
                     if self.config.runtime_mode == "cli-agent"
                     else self._run_session_model
                 )
-                if isolate_write:
-                    run_callback = lambda: self._run_session_turn_isolated(session_id, message)
+                if on_started is None:
+                    direct_callback = lambda: run_session(session_id, message)
+                    isolated_callback = lambda: self._run_session_turn_isolated(session_id, message)
                 else:
-                    run_callback = lambda: run_session(session_id, message)
+                    direct_callback = lambda: run_session(session_id, message, on_started=on_started)
+                    isolated_callback = lambda: self._run_session_turn_isolated(
+                        session_id,
+                        message,
+                        on_started=on_started,
+                    )
+                if isolate_write:
+                    run_callback = isolated_callback
+                else:
+                    run_callback = direct_callback
                 result, post_sync = self._run_locked_turn(run_callback, isolate_write=isolate_write)
             except Exception as exc:
                 self._trace("run_failed", error_type=type(exc).__name__, error=str(exc))
@@ -184,13 +194,15 @@ class RightMemoryRuntime:
             self._trace("run_finished", output=output)
         return output
 
-    def _run_session_model(self, session_id: str, message: str):
+    def _run_session_model(self, session_id: str, message: str, *, on_started: Callable[[], None] | None = None):
         with self.sessions.locked(session_id) as session:
             self._pull_file_views_for_retrieve()
             prepared_message, recent_submitted_entries = self._prepare_retrieve_message(session_id, message)
             history_json = session.load_json()
             history = self._load_message_history(history_json) if history_json is not None else None
             self._trace("history_loaded", message_count=len(history or []))
+            if on_started is not None:
+                on_started()
             self._trace("model_started")
             result = self.agent.run_sync(
                 prepared_message,
@@ -204,10 +216,12 @@ class RightMemoryRuntime:
             self._record_recent_submitted_delivery(session_id, recent_submitted_entries)
             return result
 
-    def _run_session_cli_agent(self, session_id: str, message: str) -> str:
+    def _run_session_cli_agent(self, session_id: str, message: str, *, on_started: Callable[[], None] | None = None) -> str:
         with self.sessions.locked(session_id):
             self._pull_file_views_for_retrieve()
             prepared_message, recent_submitted_entries = self._prepare_retrieve_message(session_id, message)
+            if on_started is not None:
+                on_started()
             self._trace("model_started")
             result = self.agent.run_session_turn(session_id, prepared_message)
             self._trace("model_finished", output=str(result))
@@ -226,7 +240,13 @@ class RightMemoryRuntime:
             return self._run_session_cli_agent(session_id, message)
         return self._run_session_model(session_id, message)
 
-    def _run_session_turn_isolated(self, session_id: str, message: str):
+    def _run_session_turn_isolated(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        on_started: Callable[[], None] | None = None,
+    ):
         supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
         state = _IsolatedStateOverlay(
             self.config.state_root,
@@ -237,8 +257,23 @@ class RightMemoryRuntime:
         with self.sessions.locked(session_id):
             with state as state_root:
                 try:
+                    if on_started is None:
+                        run_in_worktree = lambda worktree: self._run_session_turn_in_worktree(
+                            worktree,
+                            state_root,
+                            session_id,
+                            message,
+                        )
+                    else:
+                        run_in_worktree = lambda worktree: self._run_session_turn_in_worktree(
+                            worktree,
+                            state_root,
+                            session_id,
+                            message,
+                            on_started=on_started,
+                        )
                     result = supervisor.run(
-                        lambda worktree: self._run_session_turn_in_worktree(worktree, state_root, session_id, message)
+                        run_in_worktree
                     )
                     state.promote()
                     return result.output
@@ -283,7 +318,15 @@ class RightMemoryRuntime:
             return status.message
         return self._run_session_turn_in_worktree(worktree, state_root, session_id, build_pruner_message(status))
 
-    def _run_session_turn_in_worktree(self, worktree: Path, state_root: Path, session_id: str, message: str):
+    def _run_session_turn_in_worktree(
+        self,
+        worktree: Path,
+        state_root: Path,
+        session_id: str,
+        message: str,
+        *,
+        on_started: Callable[[], None] | None = None,
+    ):
         nested_config = replace(
             self.config,
             memory_root=worktree,
@@ -295,11 +338,19 @@ class RightMemoryRuntime:
         nested._active_trace = self._active_trace
         try:
             if nested.config.runtime_mode == "cli-agent":
+                if on_started is None:
+                    run_cli = lambda: nested._run_session_cli_agent(session_id, message)
+                else:
+                    run_cli = lambda: nested._run_session_cli_agent(session_id, message, on_started=on_started)
                 result, _post_sync = nested._run_locked_turn(
-                    lambda: nested._run_session_cli_agent(session_id, message)
+                    run_cli
                 )
                 return result
-            result, _post_sync = nested._run_locked_turn(lambda: nested._run_session_model(session_id, message))
+            if on_started is None:
+                run_model = lambda: nested._run_session_model(session_id, message)
+            else:
+                run_model = lambda: nested._run_session_model(session_id, message, on_started=on_started)
+            result, _post_sync = nested._run_locked_turn(run_model)
             return result
         finally:
             nested.cleanup()
@@ -441,7 +492,8 @@ class RightMemoryRuntime:
     def _publish_file_views_after_write(self) -> None:
         if self.config.role not in AUTOMATIC_WRITE_ROLES:
             return
-        publish_approved_file_views(self.config.memory_root)
+        results = publish_approved_file_views(self.config.memory_root)
+        record_file_view_publish_results(self.config.memory_root, results, trigger=f"{self.config.role}-write")
 
     def _semantic_upgrade_context(self) -> SemanticUpgradeContext | None:
         if self.config.role != "dreamer":

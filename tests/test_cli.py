@@ -377,6 +377,48 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(calls[0], (root, "auth-api-ask", "How do tokens refresh?"))
         self.assertIn("Status: answered", stdout.getvalue())
 
+    def test_shared_view_publish_question_cli_dispatches_question_publisher(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch(
+                    "rightmemory.cli.publish_question_view",
+                    return_value="published question view auth-api-ask\ninvitation_url\thttps://hub.example.test/i/invite-token",
+                ) as publish,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(
+                    [
+                        "shared-view",
+                        "publish-question",
+                        "auth-api-ask",
+                        "--hub-url",
+                        "https://hub.example.test",
+                        "--credential-id",
+                        "alice-publish",
+                        "--question-base-url",
+                        "https://provider.example.test",
+                        "--label",
+                        "frontend",
+                        "--expires-at",
+                        "2026-07-01T00:00:00+00:00",
+                    ]
+                )
+
+        self.assertEqual(result, 0)
+        publish.assert_called_once_with(
+            root,
+            "auth-api-ask",
+            hub_url="https://hub.example.test",
+            credential_id="alice-publish",
+            question_base_url="https://provider.example.test",
+            label="frontend",
+            expires_at="2026-07-01T00:00:00+00:00",
+        )
+        self.assertIn("invitation_url", stdout.getvalue())
+
     def test_shared_view_legacy_commands_are_removed(self):
         for command in ("define", "build", "export", "publish", "publish-http", "retrieve", "accept"):
             with self.subTest(command=command):
