@@ -16,6 +16,37 @@ Add entries after the user has made a decision. Keep speculative brainstorms out
 of this file until they have been accepted, rejected, or replaced by a smaller
 decision.
 
+## 2026-06-16 Hub Transport Brainstorm
+
+Context: The user questioned whether the planned HTTP Shared View Hub is needed
+if Git cannot make only selected branches visible, and proposed using encrypted
+Git branches or encrypted Git-hosted artifacts as a way to reuse GitHub, GitLab,
+or similar widely available public-network infrastructure.
+
+### Deferred
+
+#### Encrypted Git branch transport for shared views
+
+Proposal: Publish encrypted shared-view snapshots through a normal Git remote,
+potentially using a branch, tag, or artifact-style commit as the transport. A
+consumer would accept an invitation containing the Git location plus decryption
+material or a local key reference, fetch the encrypted snapshot, decrypt it
+locally, and retrieve from the local decrypted cache.
+
+Decision: Deferred by the user. Do not implement this yet.
+
+Rationale: GitHub, GitLab, and similar Git hosts are already public-network
+infrastructure that many users can access without running a VPS, reverse proxy,
+HTTPS setup, or always-on provider machine. This makes encrypted Git transport
+appealing as a low-friction internet-capable mode.
+
+Design note: Treat this as a possible shared-view transport adapter, not as a
+settled replacement for the HTTP Shared View Hub. The HTTP hub still covers
+stable invitations, accepted-connection tokens, inbox interactions, audit
+records, revocation workflows, immutable published versions, and server-side
+hosted retrieval. Encrypted Git transport would likely trade those richer hub
+semantics for simpler deployment and should be evaluated honestly if revisited.
+
 ## 2026-06-04 Brainstorm
 
 Context: A GPT-5.5 xhigh subagent was asked to brainstorm ways to push
