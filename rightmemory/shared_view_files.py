@@ -1,0 +1,412 @@
+from __future__ import annotations
+
+import json
+import io
+import os
+import re
+import shutil
+import tomllib
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
+
+from .hub.client import HubClient, HubClientError
+from .shared_view_models import (
+    PROVIDER_VIEWS_DIR,
+    SharedViewConnection,
+    load_connections,
+    load_shared_view_credential,
+    validate_heading_id,
+)
+
+
+HEADING_ID_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|S#|MF#|MQ#|#)([A-Za-z0-9_.-]+)\}")
+NODE_ID_RE = re.compile(r"^\s*-\s+`([^`]+)`")
+
+
+@dataclass(frozen=True)
+class FileViewRecipe:
+    view_id: str
+    title: str
+    intent: str
+    include_headings: tuple[str, ...] = ()
+    include_nodes: tuple[str, ...] = ()
+    include_files: tuple[str, ...] = ()
+    exclude_ids: tuple[str, ...] = ()
+    approved: bool = False
+    publish_hub_url: str | None = None
+    publish_credential_id: str | None = None
+
+
+@dataclass(frozen=True)
+class FileViewPullResult:
+    heading_id: str
+    status: str
+    message: str
+
+
+@dataclass(frozen=True)
+class FileViewPublishResult:
+    view_id: str
+    status: str
+    message: str
+
+
+def write_file_view_recipe(
+    memory_root: Path,
+    *,
+    view_id: str,
+    title: str,
+    intent: str,
+    include_headings: list[str] | tuple[str, ...] = (),
+    include_nodes: list[str] | tuple[str, ...] = (),
+    include_files: list[str] | tuple[str, ...] = (),
+    exclude_ids: list[str] | tuple[str, ...] = (),
+    approved: bool = False,
+    publish_hub_url: str | None = None,
+    publish_credential_id: str | None = None,
+) -> str:
+    root = Path(memory_root).expanduser()
+    recipe = FileViewRecipe(
+        view_id=validate_heading_id(view_id),
+        title=_required_text(title, "title"),
+        intent=_required_text(intent, "intent"),
+        include_headings=tuple(validate_heading_id(item) for item in include_headings),
+        include_nodes=tuple(validate_heading_id(item) for item in include_nodes),
+        include_files=tuple(_validate_memory_source_file(item) for item in include_files),
+        exclude_ids=tuple(validate_heading_id(item) for item in exclude_ids),
+        approved=bool(approved),
+        publish_hub_url=_optional_text(publish_hub_url),
+        publish_credential_id=validate_heading_id(publish_credential_id) if publish_credential_id else None,
+    )
+    view_dir = _view_dir(root, recipe.view_id)
+    view_dir.mkdir(parents=True, exist_ok=True)
+    _write_text(view_dir / ".gitignore", "dist/\n")
+    _write_text(view_dir / "view.md", f"# {recipe.title}\n\n{recipe.intent}\n")
+    _write_text(view_dir / "recipe.toml", _render_recipe_toml(recipe))
+    return f"wrote file view recipe {recipe.view_id}"
+
+
+def load_file_view_recipe(memory_root: Path, view_id: str) -> FileViewRecipe:
+    root = Path(memory_root).expanduser()
+    clean_view_id = validate_heading_id(view_id)
+    path = _view_dir(root, clean_view_id) / "recipe.toml"
+    if not path.is_file():
+        raise FileNotFoundError(f"file view recipe not found: shared_views/{clean_view_id}/recipe.toml")
+    with path.open("rb") as handle:
+        data = tomllib.load(handle)
+    if data.get("kind") != "file":
+        raise ValueError(f"shared_views/{clean_view_id}/recipe.toml is not a file view recipe")
+    publish = data.get("publish", {})
+    if publish is None:
+        publish = {}
+    if not isinstance(publish, dict):
+        raise ValueError("file view recipe [publish] must be a TOML table")
+    return FileViewRecipe(
+        view_id=validate_heading_id(str(data.get("view_id", clean_view_id))),
+        title=str(data.get("title") or clean_view_id),
+        intent=str(data.get("intent") or ""),
+        include_headings=tuple(validate_heading_id(str(item)) for item in data.get("include_headings", []) if isinstance(item, str)),
+        include_nodes=tuple(validate_heading_id(str(item)) for item in data.get("include_nodes", []) if isinstance(item, str)),
+        include_files=tuple(_validate_memory_source_file(item) for item in data.get("include_files", []) if isinstance(item, str)),
+        exclude_ids=tuple(validate_heading_id(str(item)) for item in data.get("exclude_ids", []) if isinstance(item, str)),
+        approved=bool(data.get("approved", False)),
+        publish_hub_url=str(publish.get("hub_url")).strip() if publish.get("hub_url") else None,
+        publish_credential_id=validate_heading_id(str(publish.get("credential_id"))) if publish.get("credential_id") else None,
+    )
+
+
+def load_all_file_view_recipes(memory_root: Path) -> list[FileViewRecipe]:
+    root = Path(memory_root).expanduser()
+    views_root = root / PROVIDER_VIEWS_DIR
+    if not views_root.is_dir():
+        return []
+    recipes: list[FileViewRecipe] = []
+    for recipe_path in sorted(views_root.glob("*/recipe.toml")):
+        recipes.append(load_file_view_recipe(root, recipe_path.parent.name))
+    return recipes
+
+
+def render_file_view(memory_root: Path, view_id: str) -> str:
+    root = Path(memory_root).expanduser()
+    recipe = load_file_view_recipe(root, view_id)
+    rendered = _render_selected_memory(root, recipe)
+    view_dir = _view_dir(root, recipe.view_id)
+    temp = view_dir / f".dist.tmp-{os.getpid()}"
+    if temp.exists():
+        shutil.rmtree(temp)
+    temp.mkdir(parents=True)
+    _write_text(temp / "MEMORY.md", rendered)
+    _write_text(temp / "manifest.toml", f'version = 1\nview_id = "{recipe.view_id}"\n')
+    final = view_dir / "dist"
+    if final.exists():
+        shutil.rmtree(final)
+    temp.rename(final)
+    return f"rendered file view {recipe.view_id}"
+
+
+def export_file_view_package(memory_root: Path, view_id: str, target_path: Path) -> str:
+    root = Path(memory_root).expanduser()
+    recipe = load_file_view_recipe(root, view_id)
+    render_file_view(root, recipe.view_id)
+    source = _view_dir(root, recipe.view_id)
+    target = Path(target_path).expanduser()
+    if target.exists():
+        if not target.is_dir():
+            raise ValueError(f"file view package target is not a directory: {target}")
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+    shutil.copy2(source / "view.md", target / "view.md")
+    shutil.copy2(source / "recipe.toml", target / "recipe.toml")
+    shutil.copytree(source / "dist", target / "dist")
+    _write_text(
+        target / "rightmemory-shared-view.toml",
+        "\n".join(
+            [
+                "version = 1",
+                f'view_id = "{recipe.view_id}"',
+                'kind = "file"',
+                f'ref = "rightmemory://mf/{recipe.view_id}"',
+                f"title = {_toml_string(recipe.title)}",
+                f"description = {_toml_string(recipe.intent)}",
+                "",
+            ]
+        ),
+    )
+    return f"exported file view {recipe.view_id} to {target}"
+
+
+def approve_file_view(memory_root: Path, view_id: str) -> str:
+    root = Path(memory_root).expanduser()
+    recipe = load_file_view_recipe(root, view_id)
+    _write_text(_view_dir(root, recipe.view_id) / "recipe.toml", _render_recipe_toml(_replace_recipe(recipe, approved=True)))
+    return f"approved file view {recipe.view_id}"
+
+
+def pull_file_view(memory_root: Path, heading_id: str) -> FileViewPullResult:
+    root = Path(memory_root).expanduser()
+    clean_heading_id = validate_heading_id(heading_id)
+    connection = load_connections(root).get(clean_heading_id)
+    if connection is None or connection.view_type != "file":
+        return FileViewPullResult(clean_heading_id, "unavailable", "file view connection not found")
+    try:
+        archive = _download_file_view_archive(root, connection)
+        _replace_import_from_zip(root, clean_heading_id, archive)
+        return FileViewPullResult(clean_heading_id, "pulled", "file view pulled")
+    except (KeyError, ValueError, OSError, HubClientError, zipfile.BadZipFile) as exc:
+        if _import_exists(root, clean_heading_id):
+            return FileViewPullResult(clean_heading_id, "stale", f"using stale file view import: {exc}")
+        return FileViewPullResult(clean_heading_id, "unavailable", f"file view unavailable: {exc}")
+
+
+def pull_all_file_views(memory_root: Path) -> list[FileViewPullResult]:
+    root = Path(memory_root).expanduser()
+    return [
+        pull_file_view(root, connection.heading_id)
+        for connection in load_connections(root).values()
+        if connection.view_type == "file"
+    ]
+
+
+def publish_approved_file_views(memory_root: Path) -> list[FileViewPublishResult]:
+    root = Path(memory_root).expanduser()
+    results: list[FileViewPublishResult] = []
+    for recipe in load_all_file_view_recipes(root):
+        if not recipe.approved:
+            continue
+        if not recipe.publish_hub_url or not recipe.publish_credential_id:
+            results.append(FileViewPublishResult(recipe.view_id, "skipped", "approved recipe has no publish target"))
+            continue
+        try:
+            with TemporaryDirectory() as tempdir:
+                package = Path(tempdir) / recipe.view_id
+                export_file_view_package(root, recipe.view_id, package)
+                credential = load_shared_view_credential(root, recipe.publish_credential_id)
+                client = HubClient(recipe.publish_hub_url, credential["token"])
+                client.publish_package(recipe.view_id, package)
+            results.append(FileViewPublishResult(recipe.view_id, "published", "file view published"))
+        except (KeyError, ValueError, OSError, HubClientError) as exc:
+            results.append(FileViewPublishResult(recipe.view_id, "failed", str(exc)))
+    return results
+
+
+def _download_file_view_archive(root: Path, connection: SharedViewConnection) -> bytes:
+    target = connection.target
+    if target.kind != "http-file":
+        raise ValueError("file view connection does not have an HTTP file target")
+    if not target.base_url or not target.credential_id:
+        raise ValueError("HTTP file target is missing base_url or credential_id")
+    credential = load_shared_view_credential(root, target.credential_id)
+    client = HubClient(target.base_url, credential["token"])
+    return client.download_package(target.view_id or connection.heading_id)
+
+
+def _replace_import_from_zip(root: Path, heading_id: str, archive_bytes: bytes) -> None:
+    imports_root = root / ".runtime" / "shared_views" / "imports"
+    imports_root.mkdir(parents=True, exist_ok=True)
+    final = imports_root / heading_id
+    temp = imports_root / f".{heading_id}.tmp-{os.getpid()}"
+    if temp.exists():
+        shutil.rmtree(temp)
+    temp.mkdir()
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+            names = archive.namelist()
+            required = {"view.md", "recipe.toml", "rightmemory-shared-view.toml", "dist/MEMORY.md", "dist/manifest.toml"}
+            missing = sorted(required - set(names))
+            if missing:
+                raise ValueError(f"file view package missing required files: {', '.join(missing)}")
+            for name in names:
+                relative = _validate_package_relative_path(name)
+                if relative.endswith("/"):
+                    continue
+                target = temp / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(archive.read(name))
+        if final.exists():
+            shutil.rmtree(final)
+        temp.rename(final)
+    except BaseException:
+        if temp.exists():
+            shutil.rmtree(temp)
+        raise
+
+def _import_exists(root: Path, heading_id: str) -> bool:
+    return (root / ".runtime" / "shared_views" / "imports" / heading_id / "dist" / "MEMORY.md").is_file()
+
+
+def _render_selected_memory(root: Path, recipe: FileViewRecipe) -> str:
+    sections = [f"# {recipe.title} Shared View", "", recipe.intent, "", "## Published Context", ""]
+    excluded = set(recipe.exclude_ids)
+    for relative in recipe.include_files:
+        path = root / relative
+        if path.is_file():
+            sections.extend([f"### {relative}", "", path.read_text(encoding="utf-8").rstrip(), ""])
+    sources = sorted(root.glob("MEMORY*.md"))
+    for source in sources:
+        lines = source.read_text(encoding="utf-8").splitlines()
+        sections.extend(_selected_lines_from_source(lines, recipe, excluded))
+    rendered = "\n".join(line for line in sections).rstrip() + "\n"
+    return rendered
+
+
+def _selected_lines_from_source(lines: list[str], recipe: FileViewRecipe, excluded: set[str]) -> list[str]:
+    output: list[str] = []
+    heading_depth: int | None = None
+    include_subtree = False
+    for line in lines:
+        heading_match = HEADING_ID_RE.match(line)
+        if heading_match:
+            depth = len(heading_match.group(1))
+            item_id = heading_match.group(2)
+            if heading_depth is not None and depth <= heading_depth:
+                include_subtree = False
+                heading_depth = None
+            if item_id in recipe.include_headings and item_id not in excluded:
+                include_subtree = True
+                heading_depth = depth
+                output.append(line)
+                continue
+        node_match = NODE_ID_RE.match(line)
+        if node_match and node_match.group(1) in excluded:
+            continue
+        if node_match and node_match.group(1) in recipe.include_nodes:
+            output.append(line)
+            continue
+        if include_subtree:
+            output.append(line)
+    if output and output[-1] != "":
+        output.append("")
+    return output
+
+
+def _render_recipe_toml(recipe: FileViewRecipe) -> str:
+    lines = [
+        "version = 1",
+        f'view_id = "{recipe.view_id}"',
+        'kind = "file"',
+        f"title = {_toml_string(recipe.title)}",
+        f"approved = {str(recipe.approved).lower()}",
+        f"intent = {_toml_string(recipe.intent)}",
+        'render = "expanded-heading-subtrees"',
+        "",
+        f"include_headings = {_toml_array(recipe.include_headings)}",
+        f"include_nodes = {_toml_array(recipe.include_nodes)}",
+        f"include_files = {_toml_array(recipe.include_files)}",
+        f"exclude_ids = {_toml_array(recipe.exclude_ids)}",
+    ]
+    if recipe.publish_hub_url or recipe.publish_credential_id:
+        lines.extend(
+            [
+                "",
+                "[publish]",
+                "enabled = true",
+                f"hub_url = {_toml_string(recipe.publish_hub_url or '')}",
+                f"credential_id = {_toml_string(recipe.publish_credential_id or '')}",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _replace_recipe(recipe: FileViewRecipe, *, approved: bool) -> FileViewRecipe:
+    return FileViewRecipe(
+        view_id=recipe.view_id,
+        title=recipe.title,
+        intent=recipe.intent,
+        include_headings=recipe.include_headings,
+        include_nodes=recipe.include_nodes,
+        include_files=recipe.include_files,
+        exclude_ids=recipe.exclude_ids,
+        approved=approved,
+        publish_hub_url=recipe.publish_hub_url,
+        publish_credential_id=recipe.publish_credential_id,
+    )
+
+
+def _validate_package_relative_path(relative_path: str) -> str:
+    path = PurePosixPath(relative_path)
+    if "\\" in relative_path or path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"package path traversal entry: {relative_path}")
+    if not relative_path or relative_path == ".":
+        raise ValueError("package path must not be empty")
+    return path.as_posix()
+
+
+def _view_dir(root: Path, view_id: str) -> Path:
+    return root / PROVIDER_VIEWS_DIR / validate_heading_id(view_id)
+
+
+def _validate_memory_source_file(value: str) -> str:
+    path = Path(value)
+    text = path.as_posix()
+    if path.is_absolute() or ".." in path.parts or not re.fullmatch(r"MEMORY(?:_[A-Za-z0-9_.-]+)?\.md", text):
+        raise ValueError(f"file view include_files entry must be a memory file: {value}")
+    return text
+
+
+def _required_text(value: str, label: str) -> str:
+    clean = str(value).strip()
+    if not clean:
+        raise ValueError(f"file view {label} must not be empty")
+    return clean
+
+
+def _optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    clean = str(value).strip()
+    return clean or None
+
+
+def _toml_array(values: tuple[str, ...]) -> str:
+    return "[" + ", ".join(_toml_string(value) for value in values) + "]"
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value)
+
+
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")

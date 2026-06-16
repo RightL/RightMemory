@@ -148,7 +148,8 @@ class ProfileTests(unittest.TestCase):
             "!shared_views/*/\n"
             "!shared_views/*/view.md\n"
             "!shared_views/*/retriever.md\n"
-            "!shared_views/*/export.toml\n"
+            "!shared_views/*/recipe.toml\n"
+            "!shared_views/*/question.toml\n"
             "!shared_views/*/.gitignore\n"
             "!insight_logs/\n"
             "!insight_logs/*.md\n",

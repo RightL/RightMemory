@@ -1,3 +1,4 @@
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,10 @@ from rightmemory.web.app import create_web_app
 from rightmemory.web.auth import SESSION_COOKIE, create_session_cookie, operator_token_hash_path
 
 
+HTTPX2_AVAILABLE = importlib.util.find_spec("httpx2") is not None
+
+
+@unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")
 class WebStudioAuthTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()

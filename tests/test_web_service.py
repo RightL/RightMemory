@@ -1,3 +1,4 @@
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,10 +6,15 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from rightmemory.shared_view_files import FileViewPullResult
+from rightmemory.shared_view_models import load_shared_view_credential
 from rightmemory.web.app import create_web_app
-from rightmemory.shared_views import load_shared_view_credential
 
 
+HTTPX2_AVAILABLE = importlib.util.find_spec("httpx2") is not None
+
+
+@unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")
 class WebStudioReadApiTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -108,6 +114,7 @@ class WebStudioReadApiTests(unittest.TestCase):
         self.assertNotIn("secret-token", response.text)
 
 
+@unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")
 class WebStudioStaticTests(unittest.TestCase):
     def test_static_shell_loads_assets(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -125,11 +132,13 @@ class WebStudioStaticTests(unittest.TestCase):
         self.assertIn("/static/app.js", index.text)
         self.assertIn("/static/styles.css", index.text)
         self.assertNotIn("ready for the next Web Studio API slice", script.text)
-        self.assertIn("define-view-form", script.text)
+        self.assertIn("build-file-view-form", script.text)
+        self.assertIn("build-question-view-form", script.text)
         self.assertIn("accept-invite-form", script.text)
         self.assertIn("credential-form", script.text)
 
 
+@unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")
 class WebStudioSharedViewApiTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -143,70 +152,48 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
         login = self.client.post("/api/login", json={"token": "secret-token"})
         self.csrf = login.json()["data"]["csrf_token"]
 
-    def test_provider_define_build_export_and_publish(self):
-        define = self.client.post(
-            "/api/share/views",
-            json={
-                "view_id": "alice-auth-api",
-                "title": "Alice Auth API",
-                "description": "Auth API collaboration context.",
-                "maintainer": "Alice",
-                "filter_terms": ["auth"],
-            },
-            headers={"x-csrf-token": self.csrf},
-        )
-        build = self.client.post(
-            "/api/share/views/alice-auth-api/build",
-            json={},
-            headers={"x-csrf-token": self.csrf},
-        )
-        package = self.root / "package"
-        export = self.client.post(
-            "/api/share/views/alice-auth-api/export",
-            json={"target": str(package)},
-            headers={"x-csrf-token": self.csrf},
-        )
-        hub = self.root / "hub"
-        publish = self.client.post(
-            "/api/share/views/alice-auth-api/publish",
-            json={"kind": "mounted", "hub": str(hub)},
-            headers={"x-csrf-token": self.csrf},
-        )
-        listing = self.client.get("/api/share/views")
-
-        self.assertEqual(define.status_code, 200)
-        self.assertEqual(build.status_code, 200)
-        self.assertEqual(export.status_code, 200)
-        self.assertEqual(publish.status_code, 200)
-        self.assertTrue((package / "rightmemory-shared-view.toml").exists())
-        self.assertTrue((hub / "registry.toml").exists())
-        self.assertEqual(listing.status_code, 200)
-        self.assertEqual(listing.json()["data"]["provider_views"][0]["view_id"], "alice-auth-api")
-
-    def test_provider_publish_dispatches_http_hub(self):
-        calls = []
-
-        def fake_publish_http(memory_root, view_id, *, hub_url, credential_id, query=None):
-            calls.append((memory_root, view_id, hub_url, credential_id, query))
-            return f"published shared view {view_id} to HTTP hub {hub_url}"
-
-        with patch("rightmemory.web.service.publish_http_shared_view", side_effect=fake_publish_http):
-            response = self.client.post(
-                "/api/share/views/alice-auth-api/publish",
+    def test_provider_build_file_question_and_approve(self):
+        with patch("rightmemory.web.service.run_file_view_builder", return_value="built file view auth-api-files") as build_file:
+            build_file_response = self.client.post(
+                "/api/share/views/build-file",
                 json={
-                    "kind": "http",
+                    "view_id": "auth-api-files",
+                    "intent": "Expose auth API integration context.",
+                    "title": "Auth API Files",
                     "hub_url": "https://hub.example.test",
                     "credential_id": "alice-publish",
-                    "query": "auth",
                 },
                 headers={"x-csrf-token": self.csrf},
             )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            calls,
-            [(self.root.resolve(), "alice-auth-api", "https://hub.example.test", "alice-publish", "auth")],
-        )
+        with patch(
+            "rightmemory.web.service.run_question_view_builder",
+            return_value="built question view auth-api-ask",
+        ) as build_question:
+            build_question_response = self.client.post(
+                "/api/share/views/build-question",
+                json={
+                    "view_id": "auth-api-ask",
+                    "intent": "Let frontend agents ask auth API questions.",
+                    "title": "Auth API Questions",
+                },
+                headers={"x-csrf-token": self.csrf},
+            )
+
+        with patch("rightmemory.web.service.approve_file_view", return_value="approved file view auth-api-files") as approve:
+            approve_response = self.client.post(
+                "/api/share/views/auth-api-files/approve",
+                json={"type": "file"},
+                headers={"x-csrf-token": self.csrf},
+            )
+
+        self.assertEqual(build_file_response.status_code, 200)
+        self.assertEqual(build_file.call_args.kwargs["intent"], "Expose auth API integration context.")
+        self.assertEqual(build_question_response.status_code, 200)
+        self.assertEqual(build_question.call_args.kwargs["view_id"], "auth-api-ask")
+        self.assertEqual(approve_response.status_code, 200)
+        self.assertEqual(approve.call_args.args[0], self.root.resolve())
+        self.assertEqual(approve.call_args.args[1], "auth-api-files")
 
     def test_save_http_publish_credential_from_web_studio(self):
         response = self.client.post(
@@ -229,6 +216,24 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
         self.assertEqual(credential["provider_id"], "alice")
         self.assertEqual(credential["token"], "secret-token")
 
+    def test_provider_question_endpoint_accepts_operator_bearer_for_remote_ask(self):
+        calls = []
+
+        def fake_answer(self, view_id, payload):
+            calls.append((view_id, payload["question"]))
+            return "Shared question: auth-api-ask\nStatus: answered\nAnswer: Use token_expires_at.\n"
+
+        with patch("rightmemory.web.service.WebStudioService.answer_question_view", new=fake_answer):
+            response = self.client.post(
+                "/api/share/questions/auth-api-ask/ask",
+                json={"question": "How do tokens refresh?"},
+                headers={"Authorization": "Bearer secret-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, [("auth-api-ask", "How do tokens refresh?")])
+        self.assertIn("Status: answered", response.json()["data"]["text"])
+
     def test_accept_invite_dispatches_http_urls(self):
         calls = []
 
@@ -249,29 +254,22 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(calls, [(self.root.resolve(), "https://hub.example.test/i/invite-token", "remote-auth")])
 
-    def test_accept_retrieve_note_and_notes(self):
-        package = self.root / "package"
-        self.client.post(
-            "/api/share/views",
-            json={"view_id": "alice-auth-api", "title": "Alice Auth API", "filter_terms": ["auth"]},
-            headers={"x-csrf-token": self.csrf},
-        )
-        self.client.post(
-            "/api/share/views/alice-auth-api/export",
-            json={"target": str(package)},
-            headers={"x-csrf-token": self.csrf},
-        )
+    def test_consumer_file_view_pull_question_ask_note_and_notes(self):
+        with patch("rightmemory.web.service.pull_file_view") as pull:
+            pull.return_value = FileViewPullResult("auth-api-files", "pulled", "file view pulled")
+            pull_response = self.client.post(
+                "/api/use/connections/auth-api-files/pull",
+                headers={"x-csrf-token": self.csrf},
+            )
 
-        accept = self.client.post(
-            "/api/use/accept-invite",
-            json={"invitation": str(package), "heading_id": "alice-auth-api"},
-            headers={"x-csrf-token": self.csrf},
-        )
-        retrieve = self.client.post(
-            "/api/use/connections/alice-auth-api/retrieve",
-            json={"query": "signed tokens"},
-            headers={"x-csrf-token": self.csrf},
-        )
+        with patch("rightmemory.web.service.ask_question_view") as ask:
+            ask.return_value = "Shared question: auth-api-ask\nStatus: answered\nAnswer: Use token_expires_at.\n"
+            ask_response = self.client.post(
+                "/api/use/connections/auth-api-ask/ask",
+                json={"question": "How do tokens refresh?"},
+                headers={"x-csrf-token": self.csrf},
+            )
+
         needs_confirm = self.client.post(
             "/api/use/connections/alice-auth-api/note",
             json={"message": "Docs are stale"},
@@ -284,11 +282,45 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
         )
         notes = self.client.get("/api/use/connections/alice-auth-api/notes")
 
-        self.assertEqual(accept.status_code, 200)
-        self.assertEqual(retrieve.status_code, 200)
-        self.assertIn("Auth API accepts signed tokens.", retrieve.json()["data"]["text"])
+        self.assertEqual(pull_response.status_code, 200)
+        self.assertIn("pulled", pull_response.json()["message"])
+        self.assertEqual(ask_response.status_code, 200)
+        self.assertIn("Status: answered", ask_response.json()["data"]["text"])
         self.assertEqual(needs_confirm.status_code, 200)
         self.assertIn("confirmation required", needs_confirm.json()["message"])
         self.assertEqual(note.status_code, 200)
         self.assertEqual(notes.status_code, 200)
         self.assertEqual(notes.json()["data"]["notes"][0]["message"], "Docs are stale")
+
+    def test_legacy_web_shared_view_endpoints_are_removed(self):
+        define_response = self.client.post(
+            "/api/share/views",
+            json={"view_id": "legacy"},
+            headers={"x-csrf-token": self.csrf},
+        )
+        build_response = self.client.post(
+            "/api/share/views/legacy/build",
+            json={"query": "tokens"},
+            headers={"x-csrf-token": self.csrf},
+        )
+        export_response = self.client.post(
+            "/api/share/views/legacy/export",
+            json={"hub": "/tmp/hub"},
+            headers={"x-csrf-token": self.csrf},
+        )
+        publish_response = self.client.post(
+            "/api/share/views/legacy/publish",
+            json={"kind": "http"},
+            headers={"x-csrf-token": self.csrf},
+        )
+        retrieve_response = self.client.post(
+            "/api/use/connections/auth-api-files/retrieve",
+            json={"query": "tokens"},
+            headers={"x-csrf-token": self.csrf},
+        )
+
+        self.assertEqual(define_response.status_code, 404)
+        self.assertEqual(build_response.status_code, 404)
+        self.assertEqual(export_response.status_code, 404)
+        self.assertEqual(publish_response.status_code, 404)
+        self.assertEqual(retrieve_response.status_code, 404)

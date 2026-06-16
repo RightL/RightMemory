@@ -103,13 +103,13 @@ async function renderSharedViews() {
   const providerOptions = renderOptions(
     providerViews.map((view) => ({
       value: view.view_id,
-      label: view.title ? `${view.title} (${view.view_id})` : view.view_id || view.error,
+      label: `${view.view_id || view.error} (${view.type || "view"}${view.approved ? ", approved" : ""})`,
     })),
   );
   const connectionOptions = renderOptions(
     connections.map((connection) => ({
       value: connection.heading_id,
-      label: `${connection.heading_id} (${connection.relationship || "shared view"})`,
+      label: `${connection.heading_id} (${connection.type || connection.view_type || "shared view"})`,
     })),
   );
 
@@ -119,44 +119,32 @@ async function renderSharedViews() {
         <div class="section-heading">
           <span class="step-badge">1</span>
           <div>
-            <h2>Create a View</h2>
-            <p>Name the collaboration surface and describe what memory should be included.</p>
+            <h2>Build File View</h2>
           </div>
         </div>
-        <form id="define-view-form" class="guided-form">
+        <form id="build-file-view-form" class="guided-form">
           <label>
-            View name
-            <input name="title" placeholder="Auth API with Alice" required>
+            View id
+            <input name="view_id" placeholder="auth-api-files" required>
           </label>
           <label>
-            Memory focus
-            <textarea name="filter_terms" placeholder="auth, tokens, oauth"></textarea>
+            Title
+            <input name="title" placeholder="Auth API Files" required>
           </label>
-          <label class="inline-choice">
-            <input name="include_all" type="checkbox">
-            Include broad memory when the focus is intentionally open
+          <label>
+            Intent
+            <textarea name="intent" placeholder="Expose auth API integration context" required></textarea>
           </label>
-          <details class="advanced">
-            <summary>Naming and audience</summary>
-            <label>
-              View id
-              <input name="view_id" placeholder="auto from name">
-            </label>
-            <label>
-              Audience
-              <input name="audience" placeholder="Alice, team, external collaborator">
-            </label>
-            <label>
-              Description
-              <textarea name="description" placeholder="What this view is for"></textarea>
-            </label>
-            <label>
-              Source globs
-              <textarea name="source_globs" placeholder="shared_views/auth/*.md"></textarea>
-            </label>
-          </details>
+          <label>
+            HTTP hub URL
+            <input name="hub_url" placeholder="https://hub.example.test" required>
+          </label>
+          <label>
+            Credential id
+            <input name="credential_id" placeholder="alice-publish" required>
+          </label>
           <div class="button-row">
-            <button class="primary" type="submit">Create View</button>
+            <button class="primary" type="submit">Build File View</button>
           </div>
         </form>
       </section>
@@ -165,44 +153,25 @@ async function renderSharedViews() {
         <div class="section-heading">
           <span class="step-badge">2</span>
           <div>
-            <h2>Publish or Refresh</h2>
-            <p>Pick an existing view, then build or publish it without retyping the view id.</p>
+            <h2>Build Question View</h2>
           </div>
         </div>
-        <form id="provider-view-form" class="guided-form">
+        <form id="build-question-view-form" class="guided-form">
           <label>
-            View
-            <select name="view_id">${providerOptions}</select>
+            View id
+            <input name="view_id" placeholder="auth-api-ask" required>
           </label>
           <label>
-            Focus query
-            <input name="query" placeholder="optional query for this build">
+            Title
+            <input name="title" placeholder="Auth API Questions" required>
+          </label>
+          <label>
+            Intent
+            <textarea name="intent" placeholder="Let frontend agents ask auth API questions" required></textarea>
           </label>
           <div class="button-row">
-            <button class="primary" name="action" value="build" type="submit"${providerViews.length ? "" : " disabled"}>Build</button>
+            <button class="primary" type="submit">Build Question View</button>
           </div>
-          <details class="advanced">
-            <summary>Publish targets</summary>
-            <label>
-              Local hub folder
-              <input name="target" placeholder="/path/to/shared hub or package folder">
-            </label>
-            <div class="button-row">
-              <button name="action" value="export" type="submit"${providerViews.length ? "" : " disabled"}>Export Package</button>
-              <button name="action" value="publish-mounted" type="submit"${providerViews.length ? "" : " disabled"}>Publish Local</button>
-            </div>
-            <label>
-              HTTP hub URL
-              <input name="hub_url" placeholder="https://hub.example.test">
-            </label>
-            <label>
-              Credential id
-              <input name="credential_id" placeholder="auto from view id">
-            </label>
-            <div class="button-row">
-              <button name="action" value="publish-http" type="submit"${providerViews.length ? "" : " disabled"}>Publish HTTP</button>
-            </div>
-          </details>
         </form>
       </section>
 
@@ -210,14 +179,38 @@ async function renderSharedViews() {
         <div class="section-heading">
           <span class="step-badge">3</span>
           <div>
+            <h2>Approve View</h2>
+          </div>
+        </div>
+        <form id="approve-view-form" class="guided-form">
+          <label>
+            View
+            <select name="view_id">${providerOptions}</select>
+          </label>
+          <label>
+            Type
+            <select name="type">
+              <option value="file">File</option>
+              <option value="question">Question</option>
+            </select>
+          </label>
+          <div class="button-row">
+            <button class="primary" type="submit"${providerViews.length ? "" : " disabled"}>Approve</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel flow-panel">
+        <div class="section-heading">
+          <span class="step-badge">4</span>
+          <div>
             <h2>Accept a View</h2>
-            <p>Paste an invitation URL or package folder. RightMemory can infer the rest in ordinary cases.</p>
           </div>
         </div>
         <form id="accept-invite-form" class="guided-form">
           <label>
             Invitation
-            <textarea name="invitation" placeholder="https://.../i/token or /path/to/package" required></textarea>
+            <textarea name="invitation" placeholder="https://.../i/token" required></textarea>
           </label>
           <details class="advanced">
             <summary>Connection naming</summary>
@@ -242,10 +235,9 @@ async function renderSharedViews() {
 
       <section class="panel flow-panel">
         <div class="section-heading">
-          <span class="step-badge">4</span>
+          <span class="step-badge">5</span>
           <div>
             <h2>Use a Connected View</h2>
-            <p>Retrieve context or send feedback from a selected connection.</p>
           </div>
         </div>
         <form id="consumer-view-form" class="guided-form">
@@ -254,11 +246,12 @@ async function renderSharedViews() {
             <select name="heading_id">${connectionOptions}</select>
           </label>
           <label>
-            Ask the view
-            <input name="query" placeholder="What context do I need?">
+            Question
+            <input name="question" placeholder="How do tokens refresh?">
           </label>
           <div class="button-row">
-            <button class="primary" name="action" value="retrieve" type="submit"${connections.length ? "" : " disabled"}>Retrieve</button>
+            <button class="primary" name="action" value="pull" type="submit"${connections.length ? "" : " disabled"}>Pull</button>
+            <button name="action" value="ask" type="submit"${connections.length ? "" : " disabled"}>Ask</button>
           </div>
           <details class="advanced">
             <summary>Send a note</summary>
@@ -616,22 +609,6 @@ function escapeHtml(value) {
   }[char]));
 }
 
-function splitTerms(value) {
-  return String(value || "")
-    .split(/[\n,]/)
-    .map((term) => term.trim())
-    .filter(Boolean);
-}
-
-function slugify(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-}
-
 document.querySelector("#login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -678,24 +655,20 @@ function attachPanelHandlers() {
 }
 
 function attachSharedViewHandlers() {
-  const defineViewForm = document.querySelector("#define-view-form");
-  if (defineViewForm) {
-    defineViewForm.addEventListener("submit", async (event) => {
+  const buildFileViewForm = document.querySelector("#build-file-view-form");
+  if (buildFileViewForm) {
+    buildFileViewForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
         const form = new FormData(event.currentTarget);
-        const title = String(form.get("title") || "").trim();
-        const viewId = String(form.get("view_id") || "").trim() || slugify(title);
-        const payload = await fetchJson("/api/share/views", {
+        const payload = await fetchJson("/api/share/views/build-file", {
           method: "POST",
           body: JSON.stringify({
-            view_id: viewId,
-            title,
-            description: form.get("description"),
-            audience: form.get("audience"),
-            source_globs: splitTerms(form.get("source_globs")),
-            filter_terms: splitTerms(form.get("filter_terms")),
-            include_all: form.get("include_all") === "on",
+            view_id: form.get("view_id"),
+            title: form.get("title"),
+            intent: form.get("intent"),
+            hub_url: form.get("hub_url"),
+            credential_id: form.get("credential_id"),
           }),
         });
         setMessage(payload.message);
@@ -706,37 +679,43 @@ function attachSharedViewHandlers() {
     });
   }
 
-  const providerViewForm = document.querySelector("#provider-view-form");
-  if (providerViewForm) {
-    providerViewForm.addEventListener("submit", async (event) => {
+  const buildQuestionViewForm = document.querySelector("#build-question-view-form");
+  if (buildQuestionViewForm) {
+    buildQuestionViewForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
         const form = new FormData(event.currentTarget);
-        const action = event.submitter?.value;
-        const viewId = String(form.get("view_id") || "").trim();
-        const query = String(form.get("query") || "").trim();
-        let path = `/api/share/views/${encodeURIComponent(viewId)}/build`;
-        let body = query ? { query } : {};
-        if (action === "export") {
-          path = `/api/share/views/${encodeURIComponent(viewId)}/export`;
-          body = { target: form.get("target"), replace: true, ...(query ? { query } : {}) };
-        } else if (action === "publish-mounted") {
-          path = `/api/share/views/${encodeURIComponent(viewId)}/publish`;
-          body = { kind: "mounted", hub: form.get("target"), replace: true, ...(query ? { query } : {}) };
-        } else if (action === "publish-http") {
-          path = `/api/share/views/${encodeURIComponent(viewId)}/publish`;
-          body = {
-            kind: "http",
-            hub_url: form.get("hub_url"),
-            credential_id: String(form.get("credential_id") || "").trim() || `${viewId}-publish`,
-            ...(query ? { query } : {}),
-          };
-        }
-        const payload = await fetchJson(path, { method: "POST", body: JSON.stringify(body) });
+        const payload = await fetchJson("/api/share/views/build-question", {
+          method: "POST",
+          body: JSON.stringify({
+            view_id: form.get("view_id"),
+            title: form.get("title"),
+            intent: form.get("intent"),
+          }),
+        });
         setMessage(payload.message);
-        if (action === "build") {
-          await loadPanel();
-        }
+        await loadPanel();
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const approveViewForm = document.querySelector("#approve-view-form");
+  if (approveViewForm) {
+    approveViewForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const viewId = String(form.get("view_id") || "").trim();
+        const payload = await fetchJson(`/api/share/views/${encodeURIComponent(viewId)}/approve`, {
+          method: "POST",
+          body: JSON.stringify({
+            type: form.get("type"),
+          }),
+        });
+        setMessage(payload.message);
+        await loadPanel();
       } catch (error) {
         setMessage(error.message);
       }
@@ -774,17 +753,18 @@ function attachSharedViewHandlers() {
         const form = new FormData(event.currentTarget);
         const action = event.submitter?.value;
         const headingId = String(form.get("heading_id") || "").trim();
-        const path =
-          action === "note"
-            ? `/api/use/connections/${encodeURIComponent(headingId)}/note`
-            : `/api/use/connections/${encodeURIComponent(headingId)}/retrieve`;
-        const body =
-          action === "note"
-            ? {
-                message: form.get("message"),
-                confirmed: form.get("confirmed") === "on",
-              }
-            : { query: form.get("query") };
+        let path = `/api/use/connections/${encodeURIComponent(headingId)}/pull`;
+        let body = {};
+        if (action === "ask") {
+          path = `/api/use/connections/${encodeURIComponent(headingId)}/ask`;
+          body = { question: form.get("question") };
+        } else if (action === "note") {
+          path = `/api/use/connections/${encodeURIComponent(headingId)}/note`;
+          body = {
+            message: form.get("message"),
+            confirmed: form.get("confirmed") === "on",
+          };
+        }
         const payload = await fetchJson(path, { method: "POST", body: JSON.stringify(body) });
         showSharedViewResult(payload.data?.text || payload.message);
         setMessage(payload.message);

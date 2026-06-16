@@ -1,0 +1,209 @@
+from __future__ import annotations
+
+import json
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+
+from .hub.client import HubClient, HubClientError
+from .shared_view_models import (
+    PROVIDER_VIEWS_DIR,
+    load_connections,
+    load_shared_view_credential,
+    validate_heading_id,
+)
+
+
+DEFAULT_START_TIMEOUT_SECONDS = 10
+DEFAULT_ANSWER_TIMEOUT_SECONDS = 180
+
+
+@dataclass(frozen=True)
+class QuestionViewConfig:
+    view_id: str
+    title: str
+    intent: str
+    approved: bool = False
+    start_timeout_seconds: int = DEFAULT_START_TIMEOUT_SECONDS
+    answer_timeout_seconds: int = DEFAULT_ANSWER_TIMEOUT_SECONDS
+    provider_role: str = "retrieve"
+
+
+def write_question_view(
+    memory_root: Path,
+    *,
+    view_id: str,
+    title: str,
+    intent: str,
+    retriever_instructions: str,
+    approved: bool = False,
+    start_timeout_seconds: int = DEFAULT_START_TIMEOUT_SECONDS,
+    answer_timeout_seconds: int = DEFAULT_ANSWER_TIMEOUT_SECONDS,
+) -> str:
+    root = Path(memory_root).expanduser()
+    clean_view_id = validate_heading_id(view_id)
+    clean_title = _required_text(title, "title")
+    clean_intent = _required_text(intent, "intent")
+    clean_instructions = _required_text(retriever_instructions, "retriever_instructions")
+    view_dir = root / PROVIDER_VIEWS_DIR / clean_view_id
+    view_dir.mkdir(parents=True, exist_ok=True)
+    _write_text(view_dir / "view.md", f"# {clean_title}\n\n{clean_intent}\n")
+    _write_text(view_dir / "retriever.md", clean_instructions.rstrip() + "\n")
+    _write_text(
+        view_dir / "question.toml",
+        _render_question_toml(
+            QuestionViewConfig(
+                view_id=clean_view_id,
+                title=clean_title,
+                intent=clean_intent,
+                approved=approved,
+                start_timeout_seconds=start_timeout_seconds,
+                answer_timeout_seconds=answer_timeout_seconds,
+            )
+        ),
+    )
+    return f"wrote question view {clean_view_id}"
+
+
+def load_question_view(memory_root: Path, view_id: str) -> QuestionViewConfig:
+    root = Path(memory_root).expanduser()
+    clean_view_id = validate_heading_id(view_id)
+    path = root / PROVIDER_VIEWS_DIR / clean_view_id / "question.toml"
+    if not path.is_file():
+        raise FileNotFoundError(f"question view config not found: shared_views/{clean_view_id}/question.toml")
+    with path.open("rb") as handle:
+        data = tomllib.load(handle)
+    if data.get("kind") != "question":
+        raise ValueError(f"shared_views/{clean_view_id}/question.toml is not a question view")
+    return QuestionViewConfig(
+        view_id=validate_heading_id(str(data.get("view_id", clean_view_id))),
+        title=str(data.get("title") or clean_view_id),
+        intent=str(data.get("intent") or ""),
+        approved=bool(data.get("approved", False)),
+        start_timeout_seconds=_positive_int(data.get("start_timeout_seconds"), DEFAULT_START_TIMEOUT_SECONDS),
+        answer_timeout_seconds=_positive_int(data.get("answer_timeout_seconds"), DEFAULT_ANSWER_TIMEOUT_SECONDS),
+        provider_role=str(data.get("provider_role") or "retrieve"),
+    )
+
+
+def approve_question_view(memory_root: Path, view_id: str) -> str:
+    root = Path(memory_root).expanduser()
+    config = load_question_view(root, view_id)
+    approved = QuestionViewConfig(
+        view_id=config.view_id,
+        title=config.title,
+        intent=config.intent,
+        approved=True,
+        start_timeout_seconds=config.start_timeout_seconds,
+        answer_timeout_seconds=config.answer_timeout_seconds,
+        provider_role=config.provider_role,
+    )
+    _write_text(root / PROVIDER_VIEWS_DIR / config.view_id / "question.toml", _render_question_toml(approved))
+    return f"approved question view {config.view_id}"
+
+
+def ask_question_view(memory_root: Path, heading_id: str, question: str) -> str:
+    root = Path(memory_root).expanduser()
+    clean_heading_id = validate_heading_id(heading_id)
+    clean_question = _required_text(question, "question")
+    connection = load_connections(root).get(clean_heading_id)
+    if connection is None or connection.view_type != "question":
+        return _format_unavailable(clean_heading_id, "question view connection not found")
+    target = connection.target
+    if target.kind != "http-question" or not target.base_url or not target.credential_id:
+        return _format_unavailable(clean_heading_id, "question view does not have an HTTP question target")
+    try:
+        credential = load_shared_view_credential(root, target.credential_id)
+        response = HubClient(target.base_url, credential["token"], timeout=DEFAULT_ANSWER_TIMEOUT_SECONDS + DEFAULT_START_TIMEOUT_SECONDS).ask_question(
+            target.view_id or clean_heading_id,
+            clean_question,
+        )
+    except (KeyError, ValueError, HubClientError) as exc:
+        return _format_unavailable(clean_heading_id, str(exc))
+    status = str(response.get("status") or "answered")
+    if status != "answered":
+        return _format_unavailable(clean_heading_id, str(response.get("reason") or status))
+    answer = response.get("answer")
+    if answer is None and isinstance(response.get("data"), dict):
+        answer = response["data"].get("answer") or response["data"].get("text")
+    return f"Shared question: {clean_heading_id}\nStatus: answered\nAnswer:\n{str(answer or '').strip()}\n"
+
+
+def answer_question_view(memory_root: Path, view_id: str, question: str) -> str:
+    root = Path(memory_root).expanduser()
+    clean_view_id = validate_heading_id(view_id)
+    clean_question = _required_text(question, "question")
+    config = load_question_view(root, clean_view_id)
+    if not config.approved:
+        return _format_unavailable(clean_view_id, "question view is not approved")
+    retriever = root / PROVIDER_VIEWS_DIR / clean_view_id / "retriever.md"
+    if not retriever.is_file():
+        return _format_unavailable(clean_view_id, "question view retriever prompt is missing")
+    prompt = "\n".join(
+        [
+            retriever.read_text(encoding="utf-8").strip(),
+            "",
+            "Provider question:",
+            clean_question,
+        ]
+    )
+    try:
+        from .config import load_config
+        from .runtime import RightMemoryRuntime
+
+        runtime = RightMemoryRuntime(load_config(config.provider_role, memory_root=root))
+        try:
+            answer = runtime.run_session_turn(f"shared-view-question-{clean_view_id}", prompt)
+        finally:
+            runtime.cleanup()
+    except Exception as exc:
+        return _format_unavailable(clean_view_id, str(exc))
+    return f"Shared question: {clean_view_id}\nStatus: answered\nAnswer:\n{answer.strip()}\n"
+
+
+def _format_unavailable(heading_id: str, reason: str) -> str:
+    return f"Shared question: {heading_id}\nStatus: unavailable\nReason: {reason}\n"
+
+
+def _render_question_toml(config: QuestionViewConfig) -> str:
+    return "\n".join(
+        [
+            "version = 1",
+            f'view_id = "{config.view_id}"',
+            'kind = "question"',
+            f"title = {_toml_string(config.title)}",
+            f"approved = {str(config.approved).lower()}",
+            f"intent = {_toml_string(config.intent)}",
+            f"start_timeout_seconds = {int(config.start_timeout_seconds)}",
+            f"answer_timeout_seconds = {int(config.answer_timeout_seconds)}",
+            f"provider_role = {_toml_string(config.provider_role)}",
+            "",
+        ]
+    )
+
+
+def _positive_int(value: object, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ValueError("question view timeout must be a positive integer")
+    result = int(value)
+    if result < 1:
+        raise ValueError("question view timeout must be a positive integer")
+    return result
+
+
+def _required_text(value: str, label: str) -> str:
+    clean = str(value).strip()
+    if not clean:
+        raise ValueError(f"question view {label} must not be empty")
+    return clean
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value)
+
+
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")

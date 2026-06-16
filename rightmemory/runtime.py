@@ -26,7 +26,7 @@ from .recent_submitted import (
 )
 from .semantic_upgrades import SemanticUpgradeContext, mark_absorbed, pending_context
 from .session import MemoryWriteLock, MessageSessionStore, _ensure_runtime_gitignore, _fsync_directory
-from .shared_views import SharedViewTools
+from .shared_view_files import publish_approved_file_views, pull_all_file_views
 from .sync import SyncManager, SyncResult
 from .tools import MemoryTools
 
@@ -64,7 +64,6 @@ class RightMemoryRuntime:
             raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
         self.config = config
         self.tools = MemoryTools(config.memory_root, role=config.role)
-        self.shared_view_tools = SharedViewTools(config.memory_root)
         self.sessions = MessageSessionStore(config.state_root, config.role)
         self.recent_submitted_delivery = RecentSubmittedMemoryDeliveryStore(config.state_root)
         self._message_history: list[Any] = []
@@ -83,8 +82,10 @@ class RightMemoryRuntime:
             )
             if post_sync is not None:
                 self._run_sync_reconciler(post_sync)
+            self._publish_file_views_after_write()
             self._mark_semantic_upgrades_absorbed()
             return str(result)
+        self._pull_file_views_for_retrieve()
         prepared_message, recent_submitted_entries = self._prepare_retrieve_message(
             NO_SESSION_RIGHTMEMORY_SESSION_ID,
             message,
@@ -101,6 +102,7 @@ class RightMemoryRuntime:
         self._record_recent_submitted_delivery(NO_SESSION_RIGHTMEMORY_SESSION_ID, recent_submitted_entries)
         if post_sync is not None:
             self._run_sync_reconciler(post_sync)
+        self._publish_file_views_after_write()
         self._mark_semantic_upgrades_absorbed()
         return self._result_output(result)
 
@@ -133,6 +135,7 @@ class RightMemoryRuntime:
                 raise
             if post_sync is not None:
                 self._run_sync_reconciler(post_sync)
+            self._publish_file_views_after_write()
             self._mark_semantic_upgrades_absorbed()
             output = self._result_output(result)
             self._trace("run_finished", output=output)
@@ -176,12 +179,14 @@ class RightMemoryRuntime:
                 raise
             if post_sync is not None:
                 self._run_sync_reconciler(post_sync)
+            self._publish_file_views_after_write()
             output = self._result_output(result)
             self._trace("run_finished", output=output)
         return output
 
     def _run_session_model(self, session_id: str, message: str):
         with self.sessions.locked(session_id) as session:
+            self._pull_file_views_for_retrieve()
             prepared_message, recent_submitted_entries = self._prepare_retrieve_message(session_id, message)
             history_json = session.load_json()
             history = self._load_message_history(history_json) if history_json is not None else None
@@ -201,6 +206,7 @@ class RightMemoryRuntime:
 
     def _run_session_cli_agent(self, session_id: str, message: str) -> str:
         with self.sessions.locked(session_id):
+            self._pull_file_views_for_retrieve()
             prepared_message, recent_submitted_entries = self._prepare_retrieve_message(session_id, message)
             self._trace("model_started")
             result = self.agent.run_session_turn(session_id, prepared_message)
@@ -426,6 +432,17 @@ class RightMemoryRuntime:
             return
         self.recent_submitted_delivery.record_delivered(session_id, entries)
 
+    def _pull_file_views_for_retrieve(self) -> None:
+        if self.config.role != "retrieve":
+            return
+        with MemoryWriteLock(self.config.memory_root):
+            pull_all_file_views(self.config.memory_root)
+
+    def _publish_file_views_after_write(self) -> None:
+        if self.config.role not in AUTOMATIC_WRITE_ROLES:
+            return
+        publish_approved_file_views(self.config.memory_root)
+
     def _semantic_upgrade_context(self) -> SemanticUpgradeContext | None:
         if self.config.role != "dreamer":
             return None
@@ -491,8 +508,8 @@ class RightMemoryRuntime:
                 ]
             )
         if self.config.role == "retrieve":
-            read_tools.append(self._agent_tool(self.shared_view_tools.retrieve_shared_view))
-        if self.config.role in {"historian", "retrieve"}:
+            return read_tools
+        if self.config.role == "historian":
             return read_tools
         write_tools = [
             *read_tools,

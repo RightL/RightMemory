@@ -9,7 +9,7 @@
 
 ## Shared View Connections
 
-M# headings record local relationships to external shared views. When adding or refining one, preserve the local relationship meaning: who or what the shared view represents, when this root should use it, and how it relates to nearby work.
+Shared-view relationships use schema-defined `MF#` and `MQ#` headings. Keep heading bodies focused on local meaning and do not absorb provider content unless it became a local decision, task, or consequence.
 
 Treat returned shared-view material as external context; do not absorb provider content into local memory merely because a shared view returned it. Local memory should record local decisions, commitments, tasks, or consequences, with provenance kept when shared-view material is explicitly absorbed.
 

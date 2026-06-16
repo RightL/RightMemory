@@ -1,315 +1,173 @@
-# Shared Views Usage Guide
+# Shared Views Usage
 
-Shared views let one RightMemory root expose a scoped collaboration surface to another root. Use them when a teammate, project, team space, or agent root owns context that your local memory should be able to retrieve without treating the provider's private memory as local files.
+Shared views let one RightMemory root use collaboration context owned by another root without treating the provider's private memory as local memory. The current model has two explicit kinds:
 
-The provider owns the view. The consumer records a local `M#` heading that explains why that view matters in the consumer's own work.
+- `MF#`: mirrored file view. The provider publishes a scoped file package over HTTP. The consumer syncs that package into `.runtime/shared_views/imports/<mf-id>/`, and ordinary retrieve reads it with normal file tools.
+- `MQ#`: provider question view. The consumer asks a live provider-side question over HTTP. This is synchronous ask-or-unavailable, not a queued note flow.
 
-## Before You Start
+All normal transport is HTTP, even when provider and consumer are on the same machine. Direct provider filesystem access and mounted-folder hub flows are not part of the current product path.
 
-Decide which memory root is the provider and which one is the consumer. If you use profiles, pass `--profile <name>` on each command. If the current project has a `.rightmemory-profile`, the command can use that profile automatically.
+## Provider: Build an `MF#` File View
 
-Pick a stable view id, such as `alice-auth-api`. The same id normally becomes the provider view id, the exported package name, and the consumer's local `M#` heading id.
-
-## Quick Start
-
-Provider root:
+Create a file-view recipe from natural language:
 
 ```bash
-rightmemory --profile alice shared-view define alice-auth-api \
-  --title "Alice Auth API" \
-  --description "Auth API collaboration context" \
-  --maintainer Alice \
-  --audience "frontend agents integrating login" \
-  --instructions "Answer API contract questions from this view. Keep unrelated private notes out." \
-  --term auth \
-  --term token
-
-rightmemory --profile alice shared-view build alice-auth-api
-rightmemory --profile alice shared-view export alice-auth-api --target /tmp/alice-auth-api-view
+rightmemory --profile alice shared-view build-file auth-api-files \
+  "Expose auth API integration context for frontend agents" \
+  --title "Auth API Files" \
+  --hub-url http://127.0.0.1:8765 \
+  --credential-id alice-publish
 ```
 
-Consumer root:
-
-```bash
-rightmemory --profile frontend shared-view accept-invite /tmp/alice-auth-api-view
-rightmemory --profile frontend shared-view retrieve alice-auth-api "When does the auth token expire?"
-rightmemory --profile frontend shared-view note alice-auth-api --confirm --task "login migration" \
-  "The shared view answers token expiry but not refresh behavior."
-```
-
-That creates a local `M#` heading in the consumer's `MEMORY.md`, records resolver metadata in `shared_views.toml`, and stores cache and interaction records under `.runtime/shared_views/`.
-
-## Provider Workflow
-
-### 1. Define The View
-
-`define` creates provider-owned files under `shared_views/<view-id>/`:
+The builder writes:
 
 ```text
-shared_views/<view-id>/
+shared_views/auth-api-files/
+  view.md
+  recipe.toml
+  .gitignore
+```
+
+Review the files, then approve:
+
+```bash
+rightmemory --profile alice shared-view approve auth-api-files --type file
+```
+
+Approved file views rebuild and publish automatically after successful memory-write roles. Generated `dist/` output is not committed.
+
+## Provider: Build an `MQ#` Question View
+
+Create a question-view endpoint from natural language:
+
+```bash
+rightmemory --profile alice shared-view build-question auth-api-ask \
+  "Let frontend agents ask temporary auth API questions" \
+  --title "Auth API Questions"
+```
+
+The builder writes:
+
+```text
+shared_views/auth-api-ask/
   view.md
   retriever.md
-  export.toml
-  dist/
+  question.toml
 ```
 
-Use `--term` to name the scope that may be exported from `MEMORY*.md`. Add `--instructions` when the view needs policy-guided retrieval behavior.
+`retriever.md` is provider-side only. It is the prompt used when the provider receives a live question. Approve the question view after review:
 
 ```bash
-rightmemory --profile alice shared-view define alice-auth-api \
-  --title "Alice Auth API" \
-  --description "Auth API handoff context for frontend login work" \
-  --maintainer Alice \
-  --instructions "Focus on auth API contracts, test fixtures, and integration risks." \
-  --term auth \
-  --term token
+rightmemory --profile alice shared-view approve auth-api-ask --type question
 ```
 
-By default, the builder reads active `MEMORY*.md` files, excluding skill files. Use `--source <glob>` if this view should use a narrower source set. Use `--include-all` for a deliberately broad view.
+## HTTP Hub Setup For `MF#`
 
-### 2. Build And Inspect
-
-`build` materializes a filtered Markdown preview in `shared_views/<view-id>/dist/`.
+Initialize and serve a hub:
 
 ```bash
-rightmemory --profile alice shared-view build alice-auth-api
+rightmemory hub init ./rightmemory-hub --public-base-url http://127.0.0.1:8765
+rightmemory hub token create ./rightmemory-hub --provider alice --label publish
+rightmemory hub serve ./rightmemory-hub --host 127.0.0.1 --port 8765
 ```
 
-For a one-off export scope, add a query:
-
-```bash
-rightmemory --profile alice shared-view build alice-auth-api --query "refresh token expiry"
-```
-
-If the build says it requires `--term`, `--query`, or `--include-all`, add explicit scope before publishing. That guard exists so broad private memory does not get exported by accident.
-
-### 3. Export A Package
-
-Use package export when you want to send a folder to another person or agent.
-
-```bash
-rightmemory --profile alice shared-view export alice-auth-api --target /tmp/alice-auth-api-view
-```
-
-The package contains `view.md`, optional `retriever.md`, `export.toml`, generated `dist/`, and `rightmemory-shared-view.toml`. The consumer can accept either the package directory or the invitation TOML inside it.
-
-When refreshing an existing package, use `--replace`:
-
-```bash
-rightmemory --profile alice shared-view export alice-auth-api --target /tmp/alice-auth-api-view --replace
-```
-
-`--replace` is guarded so it works for an existing shared-view package target and refuses dangerous targets such as a repository root.
-
-### 4. Publish To A Local Hub
-
-Use a hub when a local team wants a shared directory of view packages and invitations.
-
-```bash
-rightmemory --profile alice shared-view publish alice-auth-api --hub /shared/rightmemory-hub --replace
-```
-
-The package is published under `/shared/rightmemory-hub/views/alice-auth-api`, and the invitation appears at `/shared/rightmemory-hub/invitations/alice-auth-api.toml`.
-
-Notes sent through a hub are written under the hub's `interactions/` directory. Provider-local `shared-view inbox` reads the provider root's `.runtime/shared_views/inbox/`, so hub records may need a separate team process until a hub inbox command exists.
-
-### 5. Publish To An HTTP Hub
-
-Use the HTTP hub when the shared view needs a network URL rather than a mounted folder. The hub root is separate infrastructure, while provider and consumer memory roots keep their own `MEMORY.md`, `shared_views.toml`, and runtime credential state.
-
-```bash
-rightmemory hub init /srv/rightmemory-hub --public-base-url http://hub.local:8765
-rightmemory hub token create /srv/rightmemory-hub --provider alice --label publish
-rightmemory hub serve /srv/rightmemory-hub --host 0.0.0.0 --port 8765
-```
-
-Store the printed provider token in the provider memory root through a hidden prompt, then publish by credential id:
+Store the printed provider token in the provider memory root:
 
 ```bash
 rightmemory --profile alice shared-view credential set alice-publish \
   --kind http-publish \
-  --hub-url http://hub.local:8765 \
+  --hub-url http://127.0.0.1:8765 \
   --provider alice \
   --token-prompt
-
-rightmemory --profile alice shared-view publish-http alice-auth-api \
-  --hub-url http://hub.local:8765 \
-  --credential-id alice-publish
 ```
 
-The same provider flow is available in Web Studio: save the HTTP hub credential in Settings, then publish from the Shared Views panel with the credential id.
+The file-view recipe stores the hub URL and credential id. Tokens stay in `.runtime/shared_views/credentials.json`.
 
-HTTP invitations are accepted with the normal invitation command:
+## Consumer: Accept And Use `MF#`
+
+Accept an HTTP invitation:
 
 ```bash
-rightmemory --profile frontend shared-view accept-invite http://hub.local:8765/i/<invite-token>
+rightmemory --profile frontend shared-view accept-invite http://127.0.0.1:8765/i/<invite-token>
 ```
 
-## Consumer Workflow
-
-### 1. Accept An Invitation
-
-Accept a package directory:
+This creates an `MF#` heading in `MEMORY.md` and stores resolver metadata in `shared_views.toml`. Pull manually when you want to inspect the mirror immediately:
 
 ```bash
-rightmemory --profile frontend shared-view accept-invite /tmp/alice-auth-api-view
+rightmemory --profile frontend shared-view pull auth-api-files
 ```
 
-Accept an invitation file:
+Ordinary retrieve also pulls accepted `MF#` views before the retrieve agent starts:
 
 ```bash
-rightmemory --profile frontend shared-view accept-invite /tmp/alice-auth-api-view/rightmemory-shared-view.toml
+rightmemory --profile frontend retrieve --session codex-frontend \
+  "Find auth API context for login token expiry"
 ```
 
-Accepting a package copies it into the consumer's `.runtime/shared_views/imports/<heading-id>/` by default. That gives the consumer a local snapshot and keeps the transport details out of `MEMORY.md`.
+The sync result is intentionally not added to retrieve session history, which keeps cache hits stable.
 
-Use overrides when the local heading should differ from the provider id:
+## Consumer: Ask `MQ#`
+
+When retrieve reports relevant provider-question context, the main agent can ask the provider explicitly:
 
 ```bash
-rightmemory --profile frontend shared-view accept-invite /tmp/alice-auth-api-view \
-  --heading-id auth-api \
-  --title "Backend Auth API" \
-  --body "Use this before changing frontend login or token refresh behavior."
+rightmemory --profile frontend shared-view ask auth-api-ask \
+  "How should login refresh tokens work?"
 ```
 
-### 2. Retrieve From The View
+The ask command returns either an answer or an unavailable result. It does not create a queued note automatically.
 
-Pass the local heading id and a concrete query:
+## Notes And Inbox
+
+Notes are explicit, one-way interactions and can target either `MF#` or `MQ#` connections:
 
 ```bash
-rightmemory --profile frontend shared-view retrieve alice-auth-api "How should login refresh tokens work?"
+rightmemory --profile frontend shared-view note auth-api-files \
+  --confirm \
+  --task "frontend login migration" \
+  "Docs are missing token_expires_at."
+
+rightmemory --profile alice shared-view inbox-http \
+  --hub-url http://127.0.0.1:8765 \
+  --credential-id alice-publish \
+  --provider alice
 ```
 
-The result reports whether it used fresh backing or cache, where the view came from, and the matching shared-view lines. The consumer retrieves through the shared-view endpoint; it does not inspect the provider's private memory root.
+Failed `MQ#` asks do not become notes. Send a note only when the user or agent intentionally wants to tell the provider something.
 
-### 3. Leave A Note
+## Web Studio
 
-Use notes for handoff questions, stale docs, or collaboration feedback.
+Web Studio exposes the same flow:
 
-```bash
-rightmemory --profile frontend shared-view note alice-auth-api --confirm --task "login migration" \
-  "The shared view does not mention refresh token rotation."
+- Build File View
+- Build Question View
+- Approve View
+- Accept HTTP Invitation
+- Pull `MF#`
+- Ask `MQ#`
+- Send Note
+
+The UI does not expose generic shared-view retrieval, direct provider filesystem access, local package invitations, or mounted-folder publication.
+
+## File Ownership
+
+Commit source files:
+
+```text
+shared_views/<view-id>/view.md
+shared_views/<view-id>/recipe.toml
+shared_views/<view-id>/question.toml
+shared_views/<view-id>/retriever.md
+shared_views/<view-id>/.gitignore
+shared_views.toml
 ```
 
-For human or external relationships, the first call without `--confirm` returns a confirmation prompt instead of sending. Re-run with `--confirm` once the message is intentional.
+Do not commit runtime state:
 
-Check local note records:
-
-```bash
-rightmemory --profile frontend shared-view notes alice-auth-api
-```
-
-A note to a package snapshot is queued locally because a static package has no live inbox. Notes to a local provider root are delivered to the provider root's inbox when that root is reachable.
-
-### 4. List Connections
-
-```bash
-rightmemory --profile frontend shared-view list
-```
-
-This shows the consumer's accepted shared-view headings, relationship type, maintainer, and description.
-
-## Manual Connections
-
-`accept-invite` is the normal path. Use manual `accept` when you already know the target and want to wire it directly.
-
-Package target:
-
-```bash
-rightmemory --profile frontend shared-view accept alice-auth-api \
-  --title "Alice Auth API" \
-  --body "Use this for auth API handoff context." \
-  --ref rightmemory://view/alice-auth-api \
-  --package /tmp/alice-auth-api-view
-```
-
-Reachable provider root:
-
-```bash
-rightmemory --profile frontend shared-view accept alice-auth-api \
-  --title "Alice Auth API" \
-  --body "Use this for auth API handoff context." \
-  --ref rightmemory://view/alice-auth-api \
-  --provider-root /Users/alice/.rightmemory
-```
-
-Hub target:
-
-```bash
-rightmemory --profile frontend shared-view accept alice-auth-api \
-  --title "Alice Auth API" \
-  --body "Use this for auth API handoff context." \
-  --ref rightmemory://view/alice-auth-api \
-  --hub /shared/rightmemory-hub
-```
-
-Choose one target option: `--package`, `--provider-root`, or `--hub`.
-
-## Updating A Shared View
-
-Provider updates usually follow this rhythm:
-
-```bash
-rightmemory --profile alice shared-view build alice-auth-api
-rightmemory --profile alice shared-view export alice-auth-api --target /tmp/alice-auth-api-view --replace
-```
-
-Consumers that accepted a copied package can accept the refreshed package again:
-
-```bash
-rightmemory --profile frontend shared-view accept-invite /tmp/alice-auth-api-view
-```
-
-The local `M#` heading stays focused on collaboration meaning. The refreshed package replaces the imported runtime copy.
-
-## Troubleshooting
-
-Build requires explicit scope:
-
-Add `--term` when defining the view, pass `--query` to `build`, `export`, or `publish`, or use `--include-all` when the view is intentionally broad.
-
-Retrieve says a query is required:
-
-`retrieve` needs a concrete question after the heading id.
-
-Note says confirmation is required:
-
-For human and external relationships, repeat the note command with `--confirm` after checking the message.
-
-Note is queued:
-
-The target is a static package, missing, or not reachable. The local note record still exists under `.runtime/shared_views/interactions/`.
-
-Consumer sees stale package content:
-
-Re-export from the provider with `--replace`, then accept the refreshed package again from the consumer.
-
-## Command Reference
-
-```bash
-rightmemory shared-view list
-rightmemory shared-view define <view-id> --title "View Title" --term keyword
-rightmemory shared-view build <view-id> [--query "..."] [--context-lines N] [--limit N]
-rightmemory shared-view export <view-id> --target <package-dir> [--query "..."] [--replace]
-rightmemory shared-view publish <view-id> --hub <hub-dir> [--query "..."] [--replace]
-rightmemory shared-view credential set <credential-id> --kind http-publish --hub-url <url> --provider <provider-id> --token-prompt
-rightmemory shared-view credential set <credential-id> --kind http-publish --hub-url <url> --provider <provider-id> --token-stdin
-rightmemory shared-view publish-http <view-id> --hub-url <url> --credential-id <credential-id> [--query "..."]
-rightmemory shared-view accept-invite <package-or-invitation>
-rightmemory shared-view accept-invite <http-invitation-url>
-rightmemory shared-view accept <heading-id> --title "Title" --body "..." --ref <ref> --package <package-dir>
-rightmemory shared-view accept <heading-id> --title "Title" --body "..." --ref <ref> --provider-root <root>
-rightmemory shared-view accept <heading-id> --title "Title" --body "..." --ref <ref> --hub <hub-dir>
-rightmemory shared-view retrieve <heading-id> "query"
-rightmemory shared-view note <heading-id> [--confirm] [--task "..."] "message"
-rightmemory shared-view notes [heading-id]
-rightmemory shared-view inbox [view-id]
-rightmemory shared-view inbox-http --hub-url <url> --credential-id <credential-id> --provider <provider-id>
-
-rightmemory hub init <hub-root> [--admin-token <token>] [--public-base-url <url>]
-rightmemory hub status <hub-root>
-rightmemory hub token list <hub-root>
-rightmemory hub token create <hub-root> --provider <provider-id> [--label <label>]
-rightmemory hub token revoke <hub-root> <token-id>
-rightmemory hub serve <hub-root> [--host 127.0.0.1] [--port 8765]
+```text
+.runtime/shared_views/credentials.json
+.runtime/shared_views/imports/
+.runtime/shared_views/notes/
+.runtime/shared_views/inbox/
+shared_views/<view-id>/dist/
 ```

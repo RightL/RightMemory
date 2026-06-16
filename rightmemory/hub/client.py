@@ -29,11 +29,18 @@ class HubClient:
             payload["consumer_label"] = consumer_label
         return self._request("POST", f"/api/invitations/{urllib.parse.quote(invite_token)}/accept", json_body=payload)
 
-    def retrieve_view(self, view_id: str, query: str, *, limit: int = 12) -> dict[str, Any]:
+    def download_package(self, view_id: str) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/api/views/{urllib.parse.quote(view_id)}/package",
+            bearer=True,
+        )
+
+    def ask_question(self, view_id: str, question: str) -> dict[str, Any]:
         return self._request(
             "POST",
-            f"/api/views/{urllib.parse.quote(view_id)}/retrieve",
-            json_body={"query": query, "limit": limit},
+            f"/api/share/questions/{urllib.parse.quote(view_id)}/ask",
+            json_body={"question": question},
             bearer=True,
         )
 
@@ -126,3 +133,34 @@ class HubClient:
         if not isinstance(decoded, dict):
             raise HubClientError("hub response must be a JSON object")
         return decoded
+
+    def _request_bytes(
+        self,
+        method: str,
+        path: str,
+        *,
+        data: bytes | None = None,
+        content_type: str | None = None,
+        bearer: bool = False,
+    ) -> bytes:
+        headers: dict[str, str] = {}
+        if content_type:
+            headers["Content-Type"] = content_type
+        if bearer:
+            if not self.token:
+                raise HubClientError("hub token is required")
+            headers["Authorization"] = f"Bearer {self.token}"
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=data,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise HubClientError(f"hub request failed: HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise HubClientError(f"hub request failed: {exc.reason}") from exc

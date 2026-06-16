@@ -15,20 +15,17 @@ from ..config import (
     load_sync_config,
 )
 from ..session import MemoryWriteLock
+from ..shared_view_builder import run_file_view_builder, run_question_view_builder
+from ..shared_view_files import approve_file_view, pull_file_view
+from ..shared_view_questions import answer_question_view, approve_question_view, ask_question_view
 from ..shared_views import (
     accept_http_shared_view_invitation,
     accept_shared_view_invitation,
-    build_shared_view,
-    define_shared_view,
-    export_shared_view,
     list_shared_view_inbox,
     list_shared_view_notes,
     load_connections,
-    load_shared_view_definition,
-    publish_http_shared_view,
-    publish_shared_view,
+    provider_view_summaries,
     record_shared_view_note,
-    retrieve_shared_view,
     save_shared_view_credential,
 )
 from ..status import collect_status
@@ -133,76 +130,36 @@ class WebStudioService:
             return {**summary, "missing": True, "text": ""}
 
     def shared_views(self) -> dict[str, Any]:
-        provider_views = []
-        provider_root = self.memory_root / "shared_views"
-        if provider_root.is_dir():
-            for metadata in sorted(provider_root.glob("*/export.toml")):
-                try:
-                    provider_views.append(_json_safe(load_shared_view_definition(self.memory_root, metadata.parent.name)))
-                except Exception as exc:
-                    provider_views.append(
-                        {
-                            "view_id": metadata.parent.name,
-                            "error": f"{type(exc).__name__}: {exc}",
-                        }
-                    )
         return {
-            "provider_views": provider_views,
+            "provider_views": provider_view_summaries(self.memory_root),
             "connections": [_json_safe(connection) for connection in load_connections(self.memory_root).values()],
         }
 
-    def define_view(self, payload: dict[str, Any]) -> str:
-        return define_shared_view(
+    def build_file_view(self, payload: dict[str, Any]) -> str:
+        return run_file_view_builder(
             self.memory_root,
             view_id=_required_payload_str(payload, "view_id"),
             title=_required_payload_str(payload, "title"),
-            description=_optional_payload_str(payload, "description"),
-            audience=_optional_payload_str(payload, "audience"),
-            maintainer=_optional_payload_str(payload, "maintainer"),
-            retriever_instructions=_optional_payload_str(payload, "instructions"),
-            source_globs=_optional_payload_str_list(payload, "source_globs"),
-            filter_terms=_optional_payload_str_list(payload, "filter_terms"),
-            include_all=bool(payload.get("include_all", False)),
-            ref=_optional_payload_str(payload, "ref"),
+            intent=_required_payload_str(payload, "intent"),
+            hub_url=_required_payload_str(payload, "hub_url"),
+            credential_id=_required_payload_str(payload, "credential_id"),
         )
 
-    def build_view(self, view_id: str, payload: dict[str, Any]) -> str:
-        return build_shared_view(
+    def build_question_view(self, payload: dict[str, Any]) -> str:
+        return run_question_view_builder(
             self.memory_root,
-            view_id,
-            query=_optional_payload_str(payload, "query"),
-            context_lines=_optional_payload_int(payload, "context_lines", 0),
-            limit=_optional_payload_int(payload, "limit", 200),
+            view_id=_required_payload_str(payload, "view_id"),
+            title=_required_payload_str(payload, "title"),
+            intent=_required_payload_str(payload, "intent"),
         )
 
-    def export_view(self, view_id: str, payload: dict[str, Any]) -> str:
-        return export_shared_view(
-            self.memory_root,
-            view_id,
-            Path(_required_payload_str(payload, "target")),
-            replace=bool(payload.get("replace", False)),
-            query=_optional_payload_str(payload, "query"),
-        )
-
-    def publish_view(self, view_id: str, payload: dict[str, Any]) -> str:
-        kind = _optional_payload_str(payload, "kind") or "mounted"
-        if kind == "http":
-            return publish_http_shared_view(
-                self.memory_root,
-                view_id,
-                hub_url=_required_payload_str(payload, "hub_url"),
-                credential_id=_required_payload_str(payload, "credential_id"),
-                query=_optional_payload_str(payload, "query"),
-            )
-        if kind != "mounted":
-            raise ValueError(f"unsupported shared-view publish target for this server: {kind}")
-        return publish_shared_view(
-            self.memory_root,
-            view_id,
-            Path(_required_payload_str(payload, "hub")),
-            replace=bool(payload.get("replace", False)),
-            query=_optional_payload_str(payload, "query"),
-        )
+    def approve_view(self, view_id: str, payload: dict[str, Any]) -> str:
+        view_type = _required_payload_str(payload, "type")
+        if view_type == "file":
+            return approve_file_view(self.memory_root, view_id)
+        if view_type == "question":
+            return approve_question_view(self.memory_root, view_id)
+        raise ValueError("shared view approve type must be file or question")
 
     def save_credential(self, payload: dict[str, Any]) -> str:
         credential_id = _required_payload_str(payload, "credential_id")
@@ -232,15 +189,17 @@ class WebStudioService:
             return accept_shared_view_invitation(
                 self.memory_root,
                 Path(invitation),
-                heading_id=_optional_payload_str(payload, "heading_id"),
-                title=_optional_payload_str(payload, "title"),
-                body=_optional_payload_str(payload, "body"),
-                relationship=_optional_payload_str(payload, "relationship"),
-                copy_package=not bool(payload.get("no_copy_package", False)),
             )
 
-    def retrieve_connection(self, heading_id: str, payload: dict[str, Any]) -> str:
-        return retrieve_shared_view(self.memory_root, heading_id, _required_payload_str(payload, "query"))
+    def pull_connection(self, heading_id: str) -> str:
+        result = pull_file_view(self.memory_root, heading_id)
+        return result.message
+
+    def ask_connection(self, heading_id: str, payload: dict[str, Any]) -> str:
+        return ask_question_view(self.memory_root, heading_id, _required_payload_str(payload, "question"))
+
+    def answer_question_view(self, view_id: str, payload: dict[str, Any]) -> str:
+        return answer_question_view(self.memory_root, view_id, _required_payload_str(payload, "question"))
 
     def note_connection(self, heading_id: str, payload: dict[str, Any]) -> str:
         return record_shared_view_note(

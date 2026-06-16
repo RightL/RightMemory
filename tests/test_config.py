@@ -846,22 +846,23 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.model_id, "openai/reconciler")
         self.assertTrue(config.sync.enabled)
 
-    def test_retrieve_prompt_includes_shared_view_endpoint_guidance(self):
+    def test_retrieve_prompt_uses_mf_mq_schema_without_endpoint_tool(self):
         instructions = build_instructions(Path("/memory"), "retrieve")
 
-        self.assertIn("M# headings", instructions)
-        self.assertIn("retrieve_shared_view", instructions)
-        self.assertIn("shared view endpoint", instructions)
+        self.assertIn("MF#", instructions)
+        self.assertIn("MQ#", instructions)
+        self.assertIn("provider-question context", instructions)
+        self.assertNotIn("M# headings", instructions)
+        self.assertNotIn("retrieve_shared_view", instructions)
 
     def test_write_role_prompts_preserve_shared_view_boundary(self):
         for role in ("update", "dreamer", "reviewer"):
             prompt = build_instructions(Path("/memory"), role)
-            self.assertIn("M# headings", prompt)
-            self.assertIn("shared view", prompt)
-            self.assertIn("local relationship", prompt)
+            self.assertIn("MF#", prompt)
+            self.assertIn("MQ#", prompt)
             self.assertIn("do not absorb provider content", prompt)
 
-    def test_retrieve_runtime_exposes_shared_view_tool(self):
+    def test_retrieve_runtime_does_not_expose_shared_view_tool(self):
         config = RuntimeConfig(
             role="retrieve",
             runtime_mode="standalone",
@@ -874,7 +875,17 @@ class ConfigTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
 
         tool_names = {tool.__name__ for tool in runtime._agent_tools()}
-        self.assertIn("retrieve_shared_view", tool_names)
+        self.assertNotIn("retrieve_shared_view", tool_names)
+        self.assertIn("read", tool_names)
+        self.assertIn("grep", tool_names)
+
+    def test_shared_view_builder_role_loads_prompt(self):
+        instructions = build_instructions(Path("/memory"), "shared-view-builder")
+
+        self.assertIn("shared-view builder", instructions)
+        self.assertIn("recipe.toml", instructions)
+        self.assertIn("question.toml", instructions)
+        self.assertIn("Do not edit provider private memory", instructions)
 
     def _write_config(self, content: str) -> Path:
         handle = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
@@ -950,7 +961,58 @@ class RuntimeTests(unittest.TestCase):
             state_root=Path(self.tempdir.name),
             fresh_provider_session=False,
         )
-        executor_class.return_value.run_session_turn.assert_called_once_with("agent-session", "remember one")
+
+    def test_retrieve_pulls_mf_views_before_model_without_prompt_pollution(self):
+        root = Path(self.tempdir.name)
+        (root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
+        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=root)
+        captured: dict[str, str] = {}
+
+        class FakeResult:
+            output = "answer"
+
+            def all_messages_json(self):
+                return b"[]"
+
+        class FakeAgent:
+            def run_sync(self, message, **kwargs):
+                captured["message"] = message
+                return FakeResult()
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            with patch.object(RightMemoryRuntime, "_build_agent", return_value=FakeAgent()):
+                runtime = RightMemoryRuntime(config)
+            with patch("rightmemory.runtime.pull_all_file_views", return_value=[]):
+                output = runtime.run_session_turn("agent-session", "what do we know?")
+
+        self.assertEqual(output, "answer")
+        self.assertEqual(captured["message"], "what do we know?")
+
+    def test_update_turn_publishes_approved_file_views_after_success(self):
+        root = Path(self.tempdir.name)
+        (root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
+
+        class FakeResult:
+            output = "updated"
+
+            def all_messages_json(self):
+                return b"[]"
+
+        class FakeAgent:
+            def run_sync(self, message, **kwargs):
+                return FakeResult()
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            with patch.object(RightMemoryRuntime, "_build_agent", return_value=FakeAgent()):
+                runtime = RightMemoryRuntime(config)
+            with (
+                patch.object(RightMemoryRuntime, "_should_isolate_write_turn", return_value=False),
+                patch("rightmemory.runtime.publish_approved_file_views") as publish,
+            ):
+                runtime.run_session_turn("agent-session", "remember this")
+
+        publish.assert_called_once_with(root)
 
     def test_write_role_session_turn_uses_isolated_runner(self):
         cases = [
@@ -1732,20 +1794,20 @@ class RuntimeTests(unittest.TestCase):
             "!shared_views/*/\n"
             "!shared_views/*/view.md\n"
             "!shared_views/*/retriever.md\n"
-            "!shared_views/*/export.toml\n"
+            "!shared_views/*/recipe.toml\n"
+            "!shared_views/*/question.toml\n"
             "!shared_views/*/.gitignore\n"
             "!insight_logs/\n"
             "!insight_logs/*.md\n",
         )
 
-    def test_retrieve_role_does_not_create_memory_lock(self):
+    def test_retrieve_role_does_not_record_recent_submitted_state_without_entries(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
             runtime.run_session_turn("agent-session", "find one")
 
-        self.assertFalse((Path(self.tempdir.name) / ".runtime" / "memory.lock").exists())
         self.assertFalse((Path(self.tempdir.name) / ".runtime" / "recent_submitted").exists())
 
     def test_update_turn_runs_sync_preflight_without_exposing_context(self):
@@ -2620,7 +2682,17 @@ class RuntimeTests(unittest.TestCase):
 
 class PromptTests(unittest.TestCase):
     def test_cli_agent_prompt_assembles_without_standalone_tools(self):
-        for role in ("dreamer", "historian", "insight", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"):
+        for role in (
+            "dreamer",
+            "historian",
+            "insight",
+            "pruner",
+            "retrieve",
+            "reviewer",
+            "shared-view-builder",
+            "sync-reconciler",
+            "update",
+        ):
             prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), role)
 
             self.assertIn("The configured memory root is /home/example/.rightmemory.", prompt)
@@ -2635,13 +2707,14 @@ class PromptTests(unittest.TestCase):
             self.assertNotIn("{{MEMORY_ROOT}}", prompt)
             self.assertNotIn("{{SKILLS_ROOT}}", prompt)
 
-    def test_cli_agent_retrieve_prompt_uses_shared_view_cli_command(self):
+    def test_cli_agent_retrieve_prompt_mentions_mq_recommendation_without_ask_command(self):
         prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), "retrieve")
 
-        self.assertIn("M# headings", prompt)
-        self.assertIn("shared-view endpoint", prompt)
-        self.assertIn("RIGHTMEMORY_ROOT=/home/example/.rightmemory", prompt)
-        self.assertIn("rightmemory shared-view retrieve <heading-id> <query>", prompt)
+        self.assertIn("MF#", prompt)
+        self.assertIn("MQ#", prompt)
+        self.assertIn("provider-question context", prompt)
+        self.assertNotIn("rightmemory shared-view retrieve", prompt)
+        self.assertNotIn("rightmemory shared-view ask", prompt)
         self.assertNotIn("retrieve_shared_view", prompt)
 
     def test_cli_agent_prompt_rejects_unknown_role(self):

@@ -1,3 +1,4 @@
+import importlib.util
 import sqlite3
 import tempfile
 import unittest
@@ -17,6 +18,9 @@ from rightmemory.hub.packages import (
     load_package_manifest,
 )
 from rightmemory.hub.store import HubStore
+
+
+HTTPX2_AVAILABLE = importlib.util.find_spec("httpx2") is not None
 
 
 class HubStoreTests(unittest.TestCase):
@@ -146,7 +150,7 @@ class HubPackageTests(unittest.TestCase):
             source_root=package,
             view_id="alice-auth-api",
             title="Alice Auth API",
-            ref="rightmemory://view/alice-auth-api",
+            ref="rightmemory://mf/alice-auth-api",
             files=("../escape.md",),
             size_bytes=1,
             package_hash="0" * 64,
@@ -176,7 +180,7 @@ class HubPackageTests(unittest.TestCase):
             source_root=package,
             view_id="alice-auth-api",
             title="Alice Auth API",
-            ref="rightmemory://view/alice-auth-api",
+            ref="rightmemory://mf/alice-auth-api",
             files=("dist/MEMORY.md",),
             size_bytes=len(b"snapshot bytes\n"),
             package_hash="1" * 64,
@@ -242,20 +246,22 @@ def _write_package(package: Path, *, view_id: str = "alice-auth-api", memory_tex
     (package / "dist").mkdir()
     title = "Alice Auth API" if view_id == "alice-auth-api" else view_id
     (package / "view.md").write_text(f"# {title}\n", encoding="utf-8")
-    (package / "export.toml").write_text(
+    (package / "recipe.toml").write_text(
         f"""
         version = 1
         view_id = "{view_id}"
-        ref = "rightmemory://view/{view_id}"
+        ref = "rightmemory://mf/{view_id}"
         title = "{title}"
+        approved = true
         """,
         encoding="utf-8",
     )
     (package / "rightmemory-shared-view.toml").write_text(
         f"""
         version = 1
+        kind = "file"
         view_id = "{view_id}"
-        ref = "rightmemory://view/{view_id}"
+        ref = "rightmemory://mf/{view_id}"
         title = "{title}"
 
         [transport]
@@ -269,8 +275,16 @@ def _write_package(package: Path, *, view_id: str = "alice-auth-api", memory_tex
         memory_text or "# Alice Auth API Shared View\n\nTokens rotate monthly.\n",
         encoding="utf-8",
     )
+    (package / "dist" / "manifest.toml").write_text(
+        f"""
+        version = 1
+        view_id = "{view_id}"
+        """,
+        encoding="utf-8",
+    )
 
 
+@unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")
 class HubApiTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -288,7 +302,7 @@ class HubApiTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "ok")
         self.assertTrue(response.json()["initialized"])
 
-    def test_publish_invite_accept_retrieve_interact_and_inbox_flow(self):
+    def test_publish_invite_accept_pull_interact_and_inbox_flow(self):
         first_package = self.root / "package-v1"
         _write_package(
             first_package,
@@ -369,19 +383,18 @@ class HubApiTests(unittest.TestCase):
         connection_token = accepted_body["connection_token"]
         self.assertTrue(connection_token)
 
-        retrieval = self.client.post(
-            "/api/views/alice-auth-api/retrieve",
+        package_download = self.client.get(
+            "/api/views/alice-auth-api/package",
             headers=_auth(connection_token),
-            json={"query": "refresh token rotation", "limit": 4},
         )
 
-        self.assertEqual(retrieval.status_code, 200)
-        retrieval_body = retrieval.json()
-        self.assertEqual(retrieval_body["view_id"], "alice-auth-api")
-        self.assertEqual(retrieval_body["version_id"], second_version_id)
-        self.assertTrue(retrieval_body["freshness"])
-        self.assertEqual(retrieval_body["provenance"]["title"], "Alice Auth API")
-        self.assertIn("Refresh tokens rotate monthly", retrieval_body["snippets"][0]["text"])
+        self.assertEqual(package_download.status_code, 200)
+        with zipfile.ZipFile(BytesIO(package_download.content)) as archive:
+            names = set(archive.namelist())
+            pulled_memory = archive.read("dist/MEMORY.md").decode("utf-8")
+        self.assertIn("recipe.toml", names)
+        self.assertIn("dist/manifest.toml", names)
+        self.assertIn("Refresh tokens rotate monthly", pulled_memory)
 
         other_package = self.root / "package-other"
         _write_package(other_package, view_id="alice-billing-api", memory_text="# Billing\n\nInvoices are separate.\n")
@@ -392,10 +405,9 @@ class HubApiTests(unittest.TestCase):
         )
         self.assertEqual(other_publish.status_code, 201)
 
-        wrong_view = self.client.post(
-            "/api/views/alice-billing-api/retrieve",
+        wrong_view = self.client.get(
+            "/api/views/alice-billing-api/package",
             headers=_auth(connection_token),
-            json={"query": "invoices"},
         )
 
         self.assertEqual(wrong_view.status_code, 403)

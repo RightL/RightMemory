@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 import uvicorn
-from fastapi import Body, FastAPI, HTTPException, Request, status
+from fastapi import Body, FastAPI, HTTPException, Request, Response, status
 
-from .packages import PackageValidationError, retrieve_memory_snippets, validate_package_relative_path
+from .packages import PackageValidationError, validate_package_relative_path
 from .store import HubStore
 
 
@@ -131,35 +131,19 @@ def create_hub_app(hub_root: Path) -> FastAPI:
             "consumer_label": accepted["consumer_label"],
         }
 
-    @app.post("/api/views/{view_id}/retrieve")
-    def retrieve_view(
-        view_id: str,
-        request: Request,
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any]:
+    @app.get("/api/views/{view_id}/package")
+    def download_package(view_id: str, request: Request) -> Response:
         _require_connection_actor(store, request, view_id)
-        body = payload or {}
-        query = _required_payload_str(body, "query")
-        limit = _payload_limit(body.get("limit"))
         current = store.get_current_view_version(view_id)
         if current is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="view not found")
-        try:
-            snippets = retrieve_memory_snippets(current["path"], query, limit=limit)
-        except PackageValidationError as exc:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-        return {
-            "view_id": current["view_id"],
-            "version_id": current["version_id"],
-            "freshness": current["version_created_at"],
-            "provenance": {
-                "title": current["title"],
-                "ref": current["ref"],
-                "provider_id": current["provider_id"],
-                "package_hash": current["package_hash"],
-            },
-            "snippets": snippets,
-        }
+        with tempfile.TemporaryDirectory() as tempdir:
+            archive_path = Path(tempdir) / "package.zip"
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for path in sorted(Path(current["path"]).rglob("*")):
+                    if path.is_file() and not path.is_symlink():
+                        archive.write(path, path.relative_to(current["path"]).as_posix())
+            return Response(content=archive_path.read_bytes(), media_type="application/zip")
 
     @app.post("/api/views/{view_id}/interactions", status_code=status.HTTP_201_CREATED)
     def post_interaction(
