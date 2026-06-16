@@ -46,12 +46,15 @@ def accept_http_shared_view_invitation(
         raise ValueError("HTTP shared-view invitation did not return a connection token")
     view_type = _view_type_from_invitation(view_info)
     target_kind = "http-file" if view_type == "file" else "http-question"
+    target_base_url = base_url
+    if view_type == "question":
+        target_base_url = _question_base_url_from_invitation(view_info)
     save_shared_view_credential(
         root,
         local_credential_id,
         kind="http-connection",
         token=token,
-        base_url=base_url,
+        base_url=target_base_url,
         view_id=remote_view_id,
     )
     return accept_shared_view(
@@ -67,7 +70,7 @@ def accept_http_shared_view_invitation(
         accepted_from=invitation_url,
         target=SharedViewTarget(
             kind=target_kind,
-            base_url=base_url,
+            base_url=target_base_url,
             view_id=remote_view_id,
             credential_id=local_credential_id,
             version_id=_optional_string(view_info.get("current_version_id")),
@@ -163,12 +166,12 @@ def record_shared_view_note(
         )
         status = str(response.get("status") or "recorded")
     except (KeyError, ValueError, HubClientError) as exc:
-        status = "queued"
+        status = "failed"
         record["error"] = str(exc)
     record["status"] = status
     _append_jsonl(_notes_path(root, clean_heading_id), record)
-    if status == "queued":
-        return f"queued shared view note for {clean_heading_id}"
+    if status == "failed":
+        return f"failed to send shared view note for {clean_heading_id}"
     return f"recorded shared view note for {clean_heading_id}"
 
 
@@ -248,6 +251,32 @@ def provider_view_summaries(memory_root: Path) -> list[dict[str, object]]:
     return summaries
 
 
+def shared_view_connection_status(memory_root: Path, heading_id: str) -> dict[str, object]:
+    root = Path(memory_root).expanduser()
+    clean_heading_id = validate_heading_id(heading_id)
+    connection = load_connections(root).get(clean_heading_id)
+    if connection is None:
+        return {"heading_id": clean_heading_id, "status": "unavailable", "message": "shared view connection not found"}
+    status: dict[str, object] = {
+        "heading_id": clean_heading_id,
+        "type": connection.view_type,
+        "target": connection.target.kind,
+        "status": "configured",
+    }
+    if connection.target.base_url:
+        status["base_url"] = connection.target.base_url
+    if connection.target.view_id:
+        status["remote_view_id"] = connection.target.view_id
+    if connection.view_type == "file":
+        import_path = root / RUNTIME_DIR / "imports" / clean_heading_id / "dist" / "MEMORY.md"
+        status["imported"] = import_path.is_file()
+        status["status"] = "imported" if import_path.is_file() else "not_pulled"
+        status["message"] = "file view import is available" if import_path.is_file() else "file view has not been pulled"
+    else:
+        status["message"] = "question view endpoint is configured"
+    return status
+
+
 def _provider_view_approved(view_dir: Path, view_type: str) -> bool:
     metadata = view_dir / ("recipe.toml" if view_type == "file" else "question.toml")
     if not metadata.is_file():
@@ -279,6 +308,20 @@ def _view_type_from_invitation(view_info: dict[str, object]) -> str:
     if isinstance(ref, str) and ref.startswith("rightmemory://mq/"):
         return "question"
     return "file"
+
+
+def _question_base_url_from_invitation(view_info: dict[str, object]) -> str:
+    value = (
+        _optional_string(view_info.get("question_base_url"))
+        or _optional_string(view_info.get("question_url"))
+        or _optional_string(view_info.get("ask_base_url"))
+    )
+    if not value:
+        raise ValueError("HTTP question shared-view invitations must include question_base_url")
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("HTTP question shared-view endpoint must be an http(s) URL")
+    return value.rstrip("/")
 
 
 def _default_http_invitation_body(view_info: dict[str, object], view_type: str) -> str:

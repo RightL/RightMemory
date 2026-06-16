@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import json
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 
 from .hub.client import HubClient, HubClientError
 from .shared_view_models import (
@@ -114,18 +116,26 @@ def ask_question_view(memory_root: Path, heading_id: str, question: str) -> str:
         return _format_unavailable(clean_heading_id, "question view does not have an HTTP question target")
     try:
         credential = load_shared_view_credential(root, target.credential_id)
-        response = HubClient(target.base_url, credential["token"], timeout=DEFAULT_ANSWER_TIMEOUT_SECONDS + DEFAULT_START_TIMEOUT_SECONDS).ask_question(
+        response = HubClient(
+            target.base_url,
+            credential["token"],
+            timeout=DEFAULT_ANSWER_TIMEOUT_SECONDS + DEFAULT_START_TIMEOUT_SECONDS,
+        ).ask_question(
             target.view_id or clean_heading_id,
             clean_question,
         )
     except (KeyError, ValueError, HubClientError) as exc:
         return _format_unavailable(clean_heading_id, str(exc))
-    status = str(response.get("status") or "answered")
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    text = data.get("text") if isinstance(data.get("text"), str) else None
+    if text and _formatted_status(text) == "unavailable":
+        return _format_unavailable(clean_heading_id, _formatted_reason(text) or "provider question unavailable")
+    if text and _formatted_status(text) == "answered":
+        return _relabel_formatted_answer(text, clean_heading_id)
+    status = str(data.get("status") or response.get("status") or "answered")
     if status != "answered":
-        return _format_unavailable(clean_heading_id, str(response.get("reason") or status))
-    answer = response.get("answer")
-    if answer is None and isinstance(response.get("data"), dict):
-        answer = response["data"].get("answer") or response["data"].get("text")
+        return _format_unavailable(clean_heading_id, str(response.get("reason") or data.get("reason") or status))
+    answer = response.get("answer") or data.get("answer") or text
     return f"Shared question: {clean_heading_id}\nStatus: answered\nAnswer:\n{str(answer or '').strip()}\n"
 
 
@@ -147,22 +157,89 @@ def answer_question_view(memory_root: Path, view_id: str, question: str) -> str:
             clean_question,
         ]
     )
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"rightmemory-mq-{clean_view_id}")
+    started = Event()
+    future = executor.submit(_run_provider_question, root, config.provider_role, clean_view_id, prompt, started)
     try:
-        from .config import load_config
-        from .runtime import RightMemoryRuntime
-
-        runtime = RightMemoryRuntime(load_config(config.provider_role, memory_root=root))
-        try:
-            answer = runtime.run_session_turn(f"shared-view-question-{clean_view_id}", prompt)
-        finally:
-            runtime.cleanup()
+        if not started.wait(timeout=config.start_timeout_seconds):
+            if future.done():
+                future.result(timeout=0)
+            executor.shutdown(wait=False, cancel_futures=True)
+            return _format_unavailable(
+                clean_view_id,
+                f"provider did not start within {config.start_timeout_seconds} seconds",
+            )
+        answer = future.result(timeout=config.answer_timeout_seconds)
+    except TimeoutError:
+        executor.shutdown(wait=False, cancel_futures=True)
+        return _format_unavailable(
+            clean_view_id,
+            f"provider answer timed out after {config.answer_timeout_seconds} seconds",
+        )
     except Exception as exc:
+        executor.shutdown(wait=False, cancel_futures=True)
         return _format_unavailable(clean_view_id, str(exc))
+    executor.shutdown(wait=True)
     return f"Shared question: {clean_view_id}\nStatus: answered\nAnswer:\n{answer.strip()}\n"
 
 
 def _format_unavailable(heading_id: str, reason: str) -> str:
     return f"Shared question: {heading_id}\nStatus: unavailable\nReason: {reason}\n"
+
+
+def _run_provider_question(root: Path, provider_role: str, view_id: str, prompt: str, started: Event) -> str:
+    from .config import load_config
+    from .runtime import RightMemoryRuntime
+
+    runtime = RightMemoryRuntime(load_config(provider_role, memory_root=root))
+    try:
+        started.set()
+        return runtime.run_session_turn(f"shared-view-question-{view_id}", prompt)
+    finally:
+        runtime.cleanup()
+
+
+def question_response_payload(text: str) -> dict[str, str]:
+    status = _formatted_status(text)
+    if status == "unavailable":
+        return {
+            "status": "unavailable",
+            "reason": _formatted_reason(text) or "provider question unavailable",
+            "text": text,
+        }
+    return {
+        "status": "answered",
+        "answer": _formatted_answer(text) or text.strip(),
+        "text": text,
+    }
+
+
+def _formatted_status(text: str) -> str | None:
+    for line in text.splitlines():
+        if line.startswith("Status:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def _formatted_reason(text: str) -> str | None:
+    for line in text.splitlines():
+        if line.startswith("Reason:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def _formatted_answer(text: str) -> str | None:
+    marker = "\nAnswer:\n"
+    if marker not in text:
+        return None
+    return text.split(marker, 1)[1].strip()
+
+
+def _relabel_formatted_answer(text: str, heading_id: str) -> str:
+    lines = text.splitlines()
+    if lines and lines[0].startswith("Shared question:"):
+        lines[0] = f"Shared question: {heading_id}"
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _render_question_toml(config: QuestionViewConfig) -> str:

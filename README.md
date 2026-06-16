@@ -231,6 +231,7 @@ rightmemory shared-view approve auth-api-ask --type question
 
 rightmemory shared-view accept-invite http://127.0.0.1:8765/i/<invite-token>
 rightmemory shared-view pull auth-api-files
+rightmemory shared-view status auth-api-files
 rightmemory shared-view ask auth-api-ask "How do tokens refresh?"
 rightmemory shared-view note alice-auth-api --confirm --task "frontend login migration" \
   "Docs are missing token_expires_at."
@@ -263,7 +264,7 @@ Consumers accept HTTP invitations with the same `accept-invite` command used for
 rightmemory shared-view accept-invite http://127.0.0.1:8765/i/<invite-token>
 ```
 
-The synced `shared_views.toml` stores the hub URL and credential id; bearer tokens stay under `.runtime/shared_views/credentials.json`.
+For `MF#`, the synced `shared_views.toml` stores the hub URL and credential id. For `MQ#`, the invitation must provide the provider Web Studio question endpoint; the ask command sends the accepted bearer token there. Bearer tokens stay under `.runtime/shared_views/credentials.json`.
 
 Web Studio exposes the same guided flows: build file view, build question view, approve, accept HTTP invitation, pull `MF#`, ask `MQ#`, and send explicit notes. Direct provider filesystem reads, mounted folder hubs, generic shared-view retrieval, and legacy single-marker shared-view headings are not part of the current product path.
 
@@ -394,6 +395,7 @@ rightmemory shared-view build-question <view-id> "intent" --title "View Title"
 rightmemory shared-view approve <view-id> --type file
 rightmemory shared-view accept-invite <http-invitation>
 rightmemory shared-view pull <mf-id>
+rightmemory shared-view status <id>
 rightmemory shared-view ask <mq-id> "question"
 rightmemory status
 rightmemory watch start

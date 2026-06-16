@@ -58,6 +58,7 @@ from .shared_views import (
     load_connections,
     record_shared_view_note,
     save_shared_view_credential,
+    shared_view_connection_status,
 )
 from .status import collect_status, format_status_dashboard
 from .sync import SyncManager
@@ -439,7 +440,8 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     approve.add_argument("--type", choices=("file", "question"), required=True)
     pull = subparsers.add_parser("pull")
     pull.add_argument("heading_id", nargs="?")
-    subparsers.add_parser("status")
+    status_parser = subparsers.add_parser("status")
+    status_parser.add_argument("heading_id", nargs="?")
     ask = subparsers.add_parser("ask")
     ask.add_argument("heading_id")
     ask.add_argument("question", nargs=argparse.REMAINDER)
@@ -532,9 +534,12 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
                 exit_code = 1
         return exit_code
     if args.command == "status":
-        for heading_id, connection in sorted(load_connections(memory_root).items()):
-            target = connection.target.kind
-            print(f"{heading_id}\t{connection.view_type}\t{target}")
+        if args.heading_id:
+            item = shared_view_connection_status(memory_root, args.heading_id)
+            print(_format_shared_view_status(item))
+            return 0 if item.get("status") != "unavailable" else 1
+        for heading_id in sorted(load_connections(memory_root)):
+            print(_format_shared_view_status(shared_view_connection_status(memory_root, heading_id)))
         return 0
     if args.command == "ask":
         question = " ".join(args.question).strip()
@@ -623,6 +628,17 @@ def _accept_shared_view_invitation_from_cli(
             relationship=relationship,
         )
     return accept_shared_view_invitation(memory_root, Path(invitation))
+
+
+def _format_shared_view_status(item: dict[str, object]) -> str:
+    fields = [
+        str(item.get("heading_id") or "-"),
+        str(item.get("type") or "-"),
+        str(item.get("target") or "-"),
+        str(item.get("status") or "-"),
+        str(item.get("message") or "-"),
+    ]
+    return "\t".join(fields)
 
 
 def _shared_view_credential_token(args: argparse.Namespace) -> str:

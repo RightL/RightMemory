@@ -95,6 +95,7 @@ This creates an `MF#` heading in `MEMORY.md` and stores resolver metadata in `sh
 
 ```bash
 rightmemory --profile frontend shared-view pull auth-api-files
+rightmemory --profile frontend shared-view status auth-api-files
 ```
 
 Ordinary retrieve also pulls accepted `MF#` views before the retrieve agent starts:
@@ -108,7 +109,7 @@ The sync result is intentionally not added to retrieve session history, which ke
 
 ## Consumer: Ask `MQ#`
 
-When retrieve reports relevant provider-question context, the main agent can ask the provider explicitly:
+An `MQ#` invitation must point at the provider's Web Studio question endpoint, not at a file-package hub. When retrieve reports relevant provider-question context, the main agent can ask the provider explicitly:
 
 ```bash
 rightmemory --profile frontend shared-view ask auth-api-ask \

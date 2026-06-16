@@ -134,6 +134,9 @@ class WebStudioStaticTests(unittest.TestCase):
         self.assertNotIn("ready for the next Web Studio API slice", script.text)
         self.assertIn("build-file-view-form", script.text)
         self.assertIn("build-question-view-form", script.text)
+        self.assertIn("file-connection-form", script.text)
+        self.assertIn("question-connection-form", script.text)
+        self.assertNotIn("consumer-view-form", script.text)
         self.assertIn("accept-invite-form", script.text)
         self.assertIn("credential-form", script.text)
 
@@ -216,7 +219,7 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
         self.assertEqual(credential["provider_id"], "alice")
         self.assertEqual(credential["token"], "secret-token")
 
-    def test_provider_question_endpoint_accepts_operator_bearer_for_remote_ask(self):
+    def test_provider_question_endpoint_accepts_connection_bearer_for_remote_ask(self):
         calls = []
 
         def fake_answer(self, view_id, payload):
@@ -227,11 +230,12 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
             response = self.client.post(
                 "/api/share/questions/auth-api-ask/ask",
                 json={"question": "How do tokens refresh?"},
-                headers={"Authorization": "Bearer secret-token"},
+                headers={"Authorization": "Bearer connection-token"},
             )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(calls, [("auth-api-ask", "How do tokens refresh?")])
+        self.assertEqual(response.json()["data"]["status"], "answered")
         self.assertIn("Status: answered", response.json()["data"]["text"])
 
     def test_accept_invite_dispatches_http_urls(self):
@@ -262,6 +266,16 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
                 headers={"x-csrf-token": self.csrf},
             )
 
+        with patch("rightmemory.web.service.shared_view_connection_status") as connection_status:
+            connection_status.return_value = {
+                "heading_id": "auth-api-files",
+                "type": "file",
+                "target": "http-file",
+                "status": "imported",
+                "message": "file view import is available",
+            }
+            status_response = self.client.get("/api/use/connections/auth-api-files/status")
+
         with patch("rightmemory.web.service.ask_question_view") as ask:
             ask.return_value = "Shared question: auth-api-ask\nStatus: answered\nAnswer: Use token_expires_at.\n"
             ask_response = self.client.post(
@@ -284,7 +298,10 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
 
         self.assertEqual(pull_response.status_code, 200)
         self.assertIn("pulled", pull_response.json()["message"])
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.json()["data"]["status"], "imported")
         self.assertEqual(ask_response.status_code, 200)
+        self.assertEqual(ask_response.json()["data"]["status"], "answered")
         self.assertIn("Status: answered", ask_response.json()["data"]["text"])
         self.assertEqual(needs_confirm.status_code, 200)
         self.assertIn("confirmation required", needs_confirm.json()["message"])

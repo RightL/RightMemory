@@ -27,6 +27,7 @@ from ..shared_views import (
     provider_view_summaries,
     record_shared_view_note,
     save_shared_view_credential,
+    shared_view_connection_status,
 )
 from ..status import collect_status
 from .readers import (
@@ -194,6 +195,9 @@ class WebStudioService:
     def pull_connection(self, heading_id: str) -> str:
         result = pull_file_view(self.memory_root, heading_id)
         return result.message
+
+    def connection_status(self, heading_id: str) -> dict[str, Any]:
+        return shared_view_connection_status(self.memory_root, heading_id)
 
     def ask_connection(self, heading_id: str, payload: dict[str, Any]) -> str:
         return ask_question_view(self.memory_root, heading_id, _required_payload_str(payload, "question"))

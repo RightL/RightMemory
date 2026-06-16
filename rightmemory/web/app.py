@@ -21,6 +21,7 @@ from .auth import (
 )
 from .models import error_detail, ok_response
 from .service import WebStudioService, resolve_allowed_memory_root
+from ..shared_view_questions import question_response_payload
 
 
 def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> FastAPI:
@@ -184,7 +185,7 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         if session is not None:
             require_csrf(root, request, request.headers.get("x-csrf-token"))
             service = service_for_active_root(session.active_root)
-        elif _verify_bearer_operator(root, request):
+        elif _has_bearer_token(request):
             service = WebStudioService(root, allowed_root=root)
         else:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=error_detail("login required"))
@@ -195,7 +196,9 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=error_detail("could not answer shared-view question", technical=str(exc)),
             ) from exc
-        return ok_response("shared view question answered", {"text": text})
+        payload = question_response_payload(text)
+        message = "shared view question answered" if payload["status"] == "answered" else "shared view question unavailable"
+        return ok_response(message, payload)
 
     @app.post("/api/share/credentials")
     def save_credential(
@@ -248,6 +251,10 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
             ) from exc
         return ok_response(message)
 
+    @app.get("/api/use/connections/{heading_id}/status")
+    def connection_status(heading_id: str, service=Depends(current_service)):
+        return ok_response("shared view status loaded", service.connection_status(heading_id))
+
     @app.post("/api/use/connections/{heading_id}/ask")
     def ask_connection(
         heading_id: str,
@@ -264,7 +271,9 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=error_detail("could not ask shared view", technical=str(exc)),
             ) from exc
-        return ok_response("shared view question answered", {"text": text})
+        payload = question_response_payload(text)
+        message = "shared view question answered" if payload["status"] == "answered" else "shared view question unavailable"
+        return ok_response(message, payload)
 
     @app.post("/api/use/connections/{heading_id}/note")
     def note_connection(
@@ -317,10 +326,10 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
     return app
 
 
-def _verify_bearer_operator(root: Path, request: Request) -> bool:
+def _has_bearer_token(request: Request) -> bool:
     authorization = request.headers.get("authorization", "")
     scheme, separator, token = authorization.partition(" ")
-    return bool(separator and scheme.lower() == "bearer" and verify_operator_token(root, token.strip()))
+    return bool(separator and scheme.lower() == "bearer" and token.strip())
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,4 +1,5 @@
 import io
+import threading
 import tempfile
 import unittest
 import zipfile
@@ -6,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.hub.client import HubClientError
+from rightmemory.shared_view_builder import run_file_view_builder
 from rightmemory.shared_view_files import (
     FileViewPullResult,
     approve_file_view,
@@ -19,17 +21,21 @@ from rightmemory.shared_view_models import (
     SharedViewConnection,
     SharedViewTarget,
     load_connections,
+    load_shared_view_credential,
     save_connections,
     validate_connection,
 )
 from rightmemory.shared_view_questions import (
+    answer_question_view,
     ask_question_view,
     write_question_view,
 )
 from rightmemory.shared_views import (
+    accept_http_shared_view_invitation,
     list_shared_view_notes,
     record_shared_view_note,
     save_shared_view_credential,
+    shared_view_connection_status,
 )
 
 
@@ -89,6 +95,50 @@ class SharedViewModelTests(unittest.TestCase):
             )
 
         self.assertIn("unknown shared view target kind `local`", str(caught.exception))
+
+    def test_accept_http_question_invitation_uses_direct_provider_endpoint(self):
+        with patch("rightmemory.shared_views.HubClient") as client_type:
+            client = client_type.return_value
+            client.get_invitation_view.return_value = {
+                "view_id": "auth-api-ask",
+                "kind": "question",
+                "title": "Auth API Questions",
+                "ref": "rightmemory://mq/auth-api-ask",
+                "question_base_url": "https://provider.example.test",
+            }
+            client.accept_invitation.return_value = {
+                "view_id": "auth-api-ask",
+                "connection_token": "connection-token",
+            }
+            result = accept_http_shared_view_invitation(self.root, "https://hub.example.test/i/invite-token")
+
+        connection = load_connections(self.root)["auth-api-ask"]
+        credential = load_shared_view_credential(self.root, "http-auth-api-ask")
+        self.assertEqual(result, "accepted shared view auth-api-ask")
+        self.assertEqual(connection.view_type, "question")
+        self.assertEqual(connection.target.kind, "http-question")
+        self.assertEqual(connection.target.base_url, "https://provider.example.test")
+        self.assertEqual(credential["base_url"], "https://provider.example.test")
+        self.assertIn("{MQ#auth-api-ask}", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
+
+    def test_accept_http_question_invitation_requires_question_endpoint(self):
+        with patch("rightmemory.shared_views.HubClient") as client_type:
+            client = client_type.return_value
+            client.get_invitation_view.return_value = {
+                "view_id": "auth-api-ask",
+                "kind": "question",
+                "title": "Auth API Questions",
+                "ref": "rightmemory://mq/auth-api-ask",
+            }
+            client.accept_invitation.return_value = {
+                "view_id": "auth-api-ask",
+                "connection_token": "connection-token",
+            }
+
+            with self.assertRaises(ValueError) as caught:
+                accept_http_shared_view_invitation(self.root, "https://hub.example.test/i/invite-token")
+
+        self.assertIn("question_base_url", str(caught.exception))
 
 
 class SharedFileViewRecipeTests(unittest.TestCase):
@@ -164,6 +214,35 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         self.assertIn("approved file view auth-api-files", result)
         recipe = (self.root / "shared_views" / "auth-api-files" / "recipe.toml").read_text(encoding="utf-8")
         self.assertIn("approved = true", recipe)
+
+    def test_file_view_builder_renders_generated_dist_preview(self):
+        def fake_builder(memory_root, view_id, message):
+            write_file_view_recipe(
+                memory_root,
+                view_id=view_id,
+                title="Auth API Files",
+                intent="Expose auth API integration context.",
+                include_headings=["auth-api"],
+                approved=False,
+                publish_hub_url="https://hub.example.test",
+                publish_credential_id="alice-publish",
+            )
+            return "built file view auth-api-files"
+
+        with patch("rightmemory.shared_view_builder._run_builder", side_effect=fake_builder):
+            result = run_file_view_builder(
+                self.root,
+                view_id="auth-api-files",
+                title="Auth API Files",
+                intent="Expose auth API integration context.",
+                hub_url="https://hub.example.test",
+                credential_id="alice-publish",
+            )
+
+        preview = self.root / "shared_views" / "auth-api-files" / "dist" / "MEMORY.md"
+        self.assertEqual(result, "built file view auth-api-files")
+        self.assertTrue(preview.is_file())
+        self.assertIn("Tokens expire after one hour.", preview.read_text(encoding="utf-8"))
 
 
 class SharedFileViewPullTests(unittest.TestCase):
@@ -322,6 +401,133 @@ class SharedQuestionViewTests(unittest.TestCase):
         self.assertIn("Status: unavailable", result)
         self.assertIn("provider did not start", result)
 
+    def test_ask_question_view_preserves_provider_unavailable_payload(self):
+        save_connections(
+            self.root,
+            {
+                "auth-api-ask": SharedViewConnection(
+                    heading_id="auth-api-ask",
+                    view_type="question",
+                    ref="rightmemory://mq/auth-api-ask",
+                    target=SharedViewTarget(
+                        kind="http-question",
+                        base_url="https://provider.example.test",
+                        view_id="remote-auth-api-ask",
+                        credential_id="http-auth-api-ask",
+                    ),
+                )
+            },
+        )
+        save_shared_view_credential(
+            self.root,
+            "http-auth-api-ask",
+            kind="http-connection",
+            token="connection-token",
+            base_url="https://provider.example.test",
+            view_id="remote-auth-api-ask",
+        )
+        provider_text = "Shared question: remote-auth-api-ask\nStatus: unavailable\nReason: provider is busy\n"
+
+        with patch("rightmemory.shared_view_questions.HubClient") as client_type:
+            client_type.return_value.ask_question.return_value = {
+                "status": "ok",
+                "data": {
+                    "status": "unavailable",
+                    "reason": "provider is busy",
+                    "text": provider_text,
+                },
+            }
+            result = ask_question_view(self.root, "auth-api-ask", "How do tokens refresh?")
+
+        self.assertIn("Shared question: auth-api-ask", result)
+        self.assertIn("Status: unavailable", result)
+        self.assertIn("provider is busy", result)
+
+    def test_answer_question_view_times_out_when_provider_does_not_start(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        write_question_view(
+            self.root,
+            view_id="auth-api-ask",
+            title="Auth API Questions",
+            intent="Let frontend agents ask auth API questions.",
+            retriever_instructions="Answer only from auth API memory.",
+            approved=True,
+            start_timeout_seconds=1,
+            answer_timeout_seconds=1,
+        )
+
+        def blocked_start(root, provider_role, view_id, prompt, started):
+            release.wait(5)
+            return "too late"
+
+        with patch("rightmemory.shared_view_questions._run_provider_question", side_effect=blocked_start):
+            result = answer_question_view(self.root, "auth-api-ask", "How do tokens refresh?")
+
+        self.assertIn("Status: unavailable", result)
+        self.assertIn("provider did not start within 1 seconds", result)
+
+    def test_answer_question_view_times_out_after_provider_starts(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        write_question_view(
+            self.root,
+            view_id="auth-api-ask",
+            title="Auth API Questions",
+            intent="Let frontend agents ask auth API questions.",
+            retriever_instructions="Answer only from auth API memory.",
+            approved=True,
+            start_timeout_seconds=1,
+            answer_timeout_seconds=1,
+        )
+
+        def slow_answer(root, provider_role, view_id, prompt, started):
+            started.set()
+            release.wait(5)
+            return "too late"
+
+        with patch("rightmemory.shared_view_questions._run_provider_question", side_effect=slow_answer):
+            result = answer_question_view(self.root, "auth-api-ask", "How do tokens refresh?")
+
+        self.assertIn("Status: unavailable", result)
+        self.assertIn("provider answer timed out after 1 seconds", result)
+
+    def test_connection_status_reports_file_imports_and_question_targets(self):
+        save_connections(
+            self.root,
+            {
+                "auth-api-files": SharedViewConnection(
+                    heading_id="auth-api-files",
+                    view_type="file",
+                    ref="rightmemory://mf/auth-api-files",
+                    target=SharedViewTarget(
+                        kind="http-file",
+                        base_url="https://hub.example.test",
+                        credential_id="http-auth-api-files",
+                    ),
+                ),
+                "auth-api-ask": SharedViewConnection(
+                    heading_id="auth-api-ask",
+                    view_type="question",
+                    ref="rightmemory://mq/auth-api-ask",
+                    target=SharedViewTarget(
+                        kind="http-question",
+                        base_url="https://provider.example.test",
+                        credential_id="http-auth-api-ask",
+                    ),
+                ),
+            },
+        )
+        imported = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"
+        imported.mkdir(parents=True)
+        (imported / "MEMORY.md").write_text("published context\n", encoding="utf-8")
+
+        file_status = shared_view_connection_status(self.root, "auth-api-files")
+        question_status = shared_view_connection_status(self.root, "auth-api-ask")
+
+        self.assertEqual(file_status["status"], "imported")
+        self.assertEqual(question_status["status"], "configured")
+
 
 class SharedViewInteractionTests(unittest.TestCase):
     def setUp(self):
@@ -382,6 +588,41 @@ class SharedViewInteractionTests(unittest.TestCase):
 
             self.assertIn("recorded shared view note", result)
             self.assertEqual(len(list_shared_view_notes(self.root, heading_id)), 1)
+
+    def test_note_http_failure_is_recorded_as_failed_not_queued(self):
+        save_connections(
+            self.root,
+            {
+                "auth-api-files": SharedViewConnection(
+                    heading_id="auth-api-files",
+                    view_type="file",
+                    ref="rightmemory://mf/auth-api-files",
+                    target=SharedViewTarget(
+                        kind="http-file",
+                        base_url="https://hub.example.test",
+                        view_id="auth-api-files",
+                        credential_id="http-auth-api-files",
+                    ),
+                )
+            },
+        )
+        save_shared_view_credential(
+            self.root,
+            "http-auth-api-files",
+            kind="http-connection",
+            token="connection-token",
+            base_url="https://hub.example.test",
+            view_id="auth-api-files",
+        )
+
+        with patch("rightmemory.shared_views.HubClient") as client_type:
+            client_type.return_value.post_interaction.side_effect = HubClientError("offline")
+            result = record_shared_view_note(self.root, "auth-api-files", "Docs are stale.", confirmed=True)
+
+        notes = list_shared_view_notes(self.root, "auth-api-files")
+        self.assertEqual(result, "failed to send shared view note for auth-api-files")
+        self.assertEqual(notes[0]["status"], "failed")
+        self.assertNotEqual(notes[0]["status"], "queued")
 
 
 class _FakeHubClient:

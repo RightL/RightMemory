@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .config import load_config
 from .runtime import RightMemoryRuntime
+from .shared_view_files import render_file_view
 from .shared_view_models import validate_heading_id
 
 
@@ -32,6 +33,7 @@ def run_file_view_builder(
     output = _run_builder(memory_root, clean_view_id, message)
     _require_artifact(memory_root, clean_view_id, "view.md")
     _require_artifact(memory_root, clean_view_id, "recipe.toml")
+    render_file_view(memory_root, clean_view_id)
     return output
 
 

@@ -13,7 +13,7 @@ from rightmemory.doctor import DoctorCheck
 from rightmemory.hub.store import HubStore
 from rightmemory.insight_trigger import InsightTriggerStore
 from rightmemory.shared_view_files import FileViewPullResult
-from rightmemory.shared_view_models import SharedViewConnection, load_shared_view_credential, save_connections
+from rightmemory.shared_view_models import SharedViewConnection, SharedViewTarget, load_shared_view_credential, save_connections
 from rightmemory.watch import MANAGED_WATCH_TARGETS, WATCH_COMMANDS, _process_command
 
 
@@ -321,6 +321,41 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         pull.assert_called_once_with(root, "auth-api-files")
         self.assertIn("file view pulled", stdout.getvalue())
+
+    def test_shared_view_status_cli_reports_file_import_state(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            save_connections(
+                root,
+                {
+                    "auth-api-files": SharedViewConnection(
+                        heading_id="auth-api-files",
+                        view_type="file",
+                        ref="rightmemory://mf/auth-api-files",
+                        target=SharedViewTarget(
+                            kind="http-file",
+                            base_url="https://hub.example.test",
+                            credential_id="http-auth-api-files",
+                        ),
+                    )
+                },
+            )
+            imported = root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"
+            imported.mkdir(parents=True)
+            (imported / "MEMORY.md").write_text("published context\n", encoding="utf-8")
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["shared-view", "status", "auth-api-files"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            stdout.getvalue().strip(),
+            "auth-api-files\tfile\thttp-file\timported\tfile view import is available",
+        )
 
     def test_shared_view_ask_cli_dispatches_question_view(self):
         calls = []

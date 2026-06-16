@@ -112,6 +112,24 @@ async function renderSharedViews() {
       label: `${connection.heading_id} (${connection.type || connection.view_type || "shared view"})`,
     })),
   );
+  const fileConnectionOptions = renderOptions(
+    connections
+      .filter((connection) => (connection.type || connection.view_type) === "file")
+      .map((connection) => ({
+        value: connection.heading_id,
+        label: connection.heading_id,
+      })),
+  );
+  const questionConnectionOptions = renderOptions(
+    connections
+      .filter((connection) => (connection.type || connection.view_type) === "question")
+      .map((connection) => ({
+        value: connection.heading_id,
+        label: connection.heading_id,
+      })),
+  );
+  const hasFileConnections = connections.some((connection) => (connection.type || connection.view_type) === "file");
+  const hasQuestionConnections = connections.some((connection) => (connection.type || connection.view_type) === "question");
 
   return `
     <div class="flow-layout">
@@ -240,21 +258,36 @@ async function renderSharedViews() {
             <h2>Use a Connected View</h2>
           </div>
         </div>
-        <form id="consumer-view-form" class="guided-form">
+        <form id="file-connection-form" class="guided-form">
           <label>
-            Connection
-            <select name="heading_id">${connectionOptions}</select>
+            File connection
+            <select name="heading_id">${fileConnectionOptions}</select>
+          </label>
+          <div class="button-row">
+            <button class="primary" name="action" value="pull" type="submit"${hasFileConnections ? "" : " disabled"}>Pull</button>
+            <button name="action" value="status" type="submit"${hasFileConnections ? "" : " disabled"}>Status</button>
+          </div>
+        </form>
+        <form id="question-connection-form" class="guided-form">
+          <label>
+            Question connection
+            <select name="heading_id">${questionConnectionOptions}</select>
           </label>
           <label>
             Question
             <input name="question" placeholder="How do tokens refresh?">
           </label>
           <div class="button-row">
-            <button class="primary" name="action" value="pull" type="submit"${connections.length ? "" : " disabled"}>Pull</button>
-            <button name="action" value="ask" type="submit"${connections.length ? "" : " disabled"}>Ask</button>
+            <button class="primary" type="submit"${hasQuestionConnections ? "" : " disabled"}>Ask</button>
           </div>
+        </form>
+        <form id="consumer-note-form" class="guided-form">
           <details class="advanced">
             <summary>Send a note</summary>
+            <label>
+              Connection
+              <select name="heading_id">${connectionOptions}</select>
+            </label>
             <label>
               Message
               <textarea name="message" placeholder="What should the provider know?"></textarea>
@@ -264,7 +297,7 @@ async function renderSharedViews() {
               Confirm provider-visible note
             </label>
             <div class="button-row">
-              <button name="action" value="note" type="submit"${connections.length ? "" : " disabled"}>Send Note</button>
+              <button type="submit"${connections.length ? "" : " disabled"}>Send Note</button>
             </div>
           </details>
         </form>
@@ -745,28 +778,61 @@ function attachSharedViewHandlers() {
     });
   }
 
-  const consumerViewForm = document.querySelector("#consumer-view-form");
-  if (consumerViewForm) {
-    consumerViewForm.addEventListener("submit", async (event) => {
+  const fileConnectionForm = document.querySelector("#file-connection-form");
+  if (fileConnectionForm) {
+    fileConnectionForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
         const form = new FormData(event.currentTarget);
         const action = event.submitter?.value;
         const headingId = String(form.get("heading_id") || "").trim();
-        let path = `/api/use/connections/${encodeURIComponent(headingId)}/pull`;
-        let body = {};
-        if (action === "ask") {
-          path = `/api/use/connections/${encodeURIComponent(headingId)}/ask`;
-          body = { question: form.get("question") };
-        } else if (action === "note") {
-          path = `/api/use/connections/${encodeURIComponent(headingId)}/note`;
-          body = {
+        const path =
+          action === "status"
+            ? `/api/use/connections/${encodeURIComponent(headingId)}/status`
+            : `/api/use/connections/${encodeURIComponent(headingId)}/pull`;
+        const payload = await fetchJson(path, { method: action === "status" ? "GET" : "POST" });
+        showSharedViewResult(action === "status" ? JSON.stringify(payload.data, null, 2) : payload.message);
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const questionConnectionForm = document.querySelector("#question-connection-form");
+  if (questionConnectionForm) {
+    questionConnectionForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const headingId = String(form.get("heading_id") || "").trim();
+        const payload = await fetchJson(`/api/use/connections/${encodeURIComponent(headingId)}/ask`, {
+          method: "POST",
+          body: JSON.stringify({ question: form.get("question") }),
+        });
+        showSharedViewResult(payload.data?.text || payload.message);
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const consumerNoteForm = document.querySelector("#consumer-note-form");
+  if (consumerNoteForm) {
+    consumerNoteForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const headingId = String(form.get("heading_id") || "").trim();
+        const payload = await fetchJson(`/api/use/connections/${encodeURIComponent(headingId)}/note`, {
+          method: "POST",
+          body: JSON.stringify({
             message: form.get("message"),
             confirmed: form.get("confirmed") === "on",
-          };
-        }
-        const payload = await fetchJson(path, { method: "POST", body: JSON.stringify(body) });
-        showSharedViewResult(payload.data?.text || payload.message);
+          }),
+        });
+        showSharedViewResult(payload.message);
         setMessage(payload.message);
       } catch (error) {
         setMessage(error.message);
