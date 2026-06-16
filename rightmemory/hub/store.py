@@ -373,9 +373,11 @@ class HubStore:
                     v.title AS title,
                     v.ref AS ref,
                     v.description AS description,
-                    v.current_version_id AS current_version_id
+                    v.current_version_id AS current_version_id,
+                    vv.manifest_json AS manifest_json
                 FROM invitations i
                 JOIN views v ON v.id = i.view_id
+                LEFT JOIN view_versions vv ON vv.id = v.current_version_id
                 WHERE i.token_id = ?
                 """,
                 (token_row["id"],),
@@ -398,9 +400,11 @@ class HubStore:
                     i.view_id AS view_id,
                     i.expires_at AS expires_at,
                     i.revoked_at AS invitation_revoked_at,
-                    v.provider_id AS provider_id
+                    v.provider_id AS provider_id,
+                    vv.manifest_json AS manifest_json
                 FROM invitations i
                 JOIN views v ON v.id = i.view_id
+                LEFT JOIN view_versions vv ON vv.id = v.current_version_id
                 WHERE i.token_id = ?
                 """,
                 (token_row["id"],),
@@ -459,6 +463,7 @@ class HubStore:
             "view_id": invitation["view_id"],
             "consumer_label": clean_consumer_label,
             "created_at": now,
+            **_accepted_invitation_metadata(invitation["manifest_json"]),
         }
 
     def record_interaction(
@@ -802,6 +807,7 @@ def _manifest_json(stored: HubStoredPackage) -> dict[str, Any]:
         "size_bytes": manifest.size_bytes,
         "package_hash": manifest.package_hash,
         "version_id": stored.version_id,
+        "invitation_metadata": _selected_invitation_metadata(manifest.invitation_metadata),
     }
 
 
@@ -876,8 +882,49 @@ def _current_view_version_from_row(root: Path, row: sqlite3.Row) -> dict[str, An
     }
 
 
+def _selected_invitation_metadata(data: dict[str, Any]) -> dict[str, str]:
+    selected: dict[str, str] = {}
+    for key in ("kind", "question_base_url", "question_url", "ask_base_url", "question_token"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            selected[key] = value.strip()
+    return selected
+
+
+def _invitation_metadata_from_json(value: object) -> dict[str, str]:
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        manifest = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(manifest, dict):
+        return {}
+    metadata = manifest.get("invitation_metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    return _selected_invitation_metadata(metadata)
+
+
+def _accepted_invitation_metadata(value: object) -> dict[str, str]:
+    metadata = _invitation_metadata_from_json(value)
+    token = _optional_string(metadata.get("question_token"))
+    if token:
+        return {"question_token": token}
+    return {}
+
+
+def _kind_from_ref(ref: str | None) -> str | None:
+    if isinstance(ref, str) and ref.startswith("rightmemory://mq/"):
+        return "question"
+    if isinstance(ref, str) and ref.startswith("rightmemory://mf/"):
+        return "file"
+    return None
+
+
 def _invitation_from_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    metadata = _invitation_metadata_from_json(row["manifest_json"])
+    invitation = {
         "invitation_id": row["invitation_id"],
         "view_id": row["view_id"],
         "provider_id": row["provider_id"],
@@ -890,6 +937,14 @@ def _invitation_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "accepted_count": row["accepted_count"],
         "created_at": row["invitation_created_at"],
     }
+    kind = _optional_string(metadata.get("kind")) or _kind_from_ref(row["ref"])
+    if kind:
+        invitation["kind"] = kind
+    for key in ("question_base_url", "question_url", "ask_base_url"):
+        value = _optional_string(metadata.get(key))
+        if value:
+            invitation[key] = value
+    return invitation
 
 
 def _interaction_from_row(row: sqlite3.Row) -> dict[str, Any]:

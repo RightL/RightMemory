@@ -21,7 +21,7 @@ from .auth import (
 )
 from .models import error_detail, ok_response
 from .service import WebStudioService, resolve_allowed_memory_root
-from ..shared_view_questions import question_response_payload
+from ..shared_view_questions import question_response_payload, verify_question_view_token
 
 
 def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> FastAPI:
@@ -185,7 +185,7 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         if session is not None:
             require_csrf(root, request, request.headers.get("x-csrf-token"))
             service = service_for_active_root(session.active_root)
-        elif _has_bearer_token(request):
+        elif _verify_question_bearer(root, view_id, request):
             service = WebStudioService(root, allowed_root=root)
         else:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=error_detail("login required"))
@@ -326,10 +326,14 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
     return app
 
 
-def _has_bearer_token(request: Request) -> bool:
+def _verify_question_bearer(root: Path, view_id: str, request: Request) -> bool:
     authorization = request.headers.get("authorization", "")
     scheme, separator, token = authorization.partition(" ")
-    return bool(separator and scheme.lower() == "bearer" and token.strip())
+    return bool(
+        separator
+        and scheme.lower() == "bearer"
+        and verify_question_view_token(root, view_id, token.strip())
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

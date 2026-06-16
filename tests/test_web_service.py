@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from rightmemory.shared_view_files import FileViewPullResult
 from rightmemory.shared_view_models import load_shared_view_credential
+from rightmemory.shared_view_questions import write_question_view
 from rightmemory.web.app import create_web_app
 
 
@@ -221,13 +222,23 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
 
     def test_provider_question_endpoint_accepts_connection_bearer_for_remote_ask(self):
         calls = []
+        write_question_view(
+            self.root,
+            view_id="auth-api-ask",
+            title="Auth API Questions",
+            intent="Let frontend agents ask auth API questions.",
+            retriever_instructions="Answer only from auth API memory.",
+            approved=True,
+            access_tokens=["connection-token"],
+        )
 
         def fake_answer(self, view_id, payload):
             calls.append((view_id, payload["question"]))
             return "Shared question: auth-api-ask\nStatus: answered\nAnswer: Use token_expires_at.\n"
 
+        remote_client = TestClient(create_web_app(self.root, operator_token="secret-token"))
         with patch("rightmemory.web.service.WebStudioService.answer_question_view", new=fake_answer):
-            response = self.client.post(
+            response = remote_client.post(
                 "/api/share/questions/auth-api-ask/ask",
                 json={"question": "How do tokens refresh?"},
                 headers={"Authorization": "Bearer connection-token"},
@@ -237,6 +248,28 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
         self.assertEqual(calls, [("auth-api-ask", "How do tokens refresh?")])
         self.assertEqual(response.json()["data"]["status"], "answered")
         self.assertIn("Status: answered", response.json()["data"]["text"])
+
+    def test_provider_question_endpoint_rejects_wrong_connection_bearer(self):
+        write_question_view(
+            self.root,
+            view_id="auth-api-ask",
+            title="Auth API Questions",
+            intent="Let frontend agents ask auth API questions.",
+            retriever_instructions="Answer only from auth API memory.",
+            approved=True,
+            access_tokens=["connection-token"],
+        )
+
+        remote_client = TestClient(create_web_app(self.root, operator_token="secret-token"))
+        with patch("rightmemory.web.service.WebStudioService.answer_question_view") as answer:
+            response = remote_client.post(
+                "/api/share/questions/auth-api-ask/ask",
+                json={"question": "How do tokens refresh?"},
+                headers={"Authorization": "Bearer wrong-token"},
+            )
+
+        self.assertEqual(response.status_code, 401)
+        answer.assert_not_called()
 
     def test_accept_invite_dispatches_http_urls(self):
         calls = []

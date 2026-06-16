@@ -24,6 +24,7 @@ shared_views/<view-id>/question.toml
 ```
 
 `question.toml` must use `kind = "question"`, `approved = false`,
-`start_timeout_seconds = 10`, and `answer_timeout_seconds = 180`.
+`start_timeout_seconds = 10`, `answer_timeout_seconds = 180`, and
+`access_token_hashes = []` until the provider configures approved ask tokens.
 
 Return a concise summary of the artifacts written and the ids selected.

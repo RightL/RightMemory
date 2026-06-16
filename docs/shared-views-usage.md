@@ -61,6 +61,9 @@ shared_views/auth-api-ask/
 rightmemory --profile alice shared-view approve auth-api-ask --type question
 ```
 
+Remote asks require a provider-approved bearer token. `question.toml` stores token hashes in `access_token_hashes`; invitation accept responses deliver the raw `question_token` to the consumer credential store.
+The consumer keeps the hub connection token for notes separate from the provider question token used for live asks.
+
 ## HTTP Hub Setup For `MF#`
 
 Initialize and serve a hub:

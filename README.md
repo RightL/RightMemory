@@ -264,7 +264,7 @@ Consumers accept HTTP invitations with the same `accept-invite` command used for
 rightmemory shared-view accept-invite http://127.0.0.1:8765/i/<invite-token>
 ```
 
-For `MF#`, the synced `shared_views.toml` stores the hub URL and credential id. For `MQ#`, the invitation must provide the provider Web Studio question endpoint; the ask command sends the accepted bearer token there. Bearer tokens stay under `.runtime/shared_views/credentials.json`.
+For `MF#`, the synced `shared_views.toml` stores the hub URL and credential id. For `MQ#`, the invitation must provide the provider Web Studio question endpoint and an accepted `question_token`; the ask command sends that bearer token, and the provider validates it against `question.toml` token hashes. Bearer tokens stay under `.runtime/shared_views/credentials.json`.
 
 Web Studio exposes the same guided flows: build file view, build question view, approve, accept HTTP invitation, pull `MF#`, ask `MQ#`, and send explicit notes. Direct provider filesystem reads, mounted folder hubs, generic shared-view retrieval, and legacy single-marker shared-view headings are not part of the current product path.
 

@@ -87,6 +87,30 @@ class HubStoreTests(unittest.TestCase):
         self.assertNotIn(provider_token.raw_token, rendered)
         self.assertNotIn("admin-secret", rendered)
 
+    def test_question_invitation_metadata_is_described_and_question_token_only_on_accept(self):
+        store = HubStore(self.root)
+        store.initialize(admin_token="admin-secret")
+        package = self.root / "package"
+        _write_package(
+            package,
+            kind="question",
+            ref="rightmemory://mq/alice-auth-api",
+            question_base_url="https://provider.example.test",
+            question_token="question-token",
+        )
+        store.store_package_version(package, view_id="alice-auth-api", provider_id="alice")
+        invitation = store.create_invitation("alice-auth-api", label="frontend")
+
+        described = store.describe_invitation(invitation["raw_token"])
+        accepted = store.accept_invitation(invitation["raw_token"], consumer_label="frontend")
+
+        self.assertIsNotNone(described)
+        self.assertEqual(described["kind"], "question")
+        self.assertEqual(described["question_base_url"], "https://provider.example.test")
+        self.assertNotIn("question_token", described)
+        self.assertIsNotNone(accepted)
+        self.assertEqual(accepted["question_token"], "question-token")
+
 
 class HubPackageTests(unittest.TestCase):
     def setUp(self):
@@ -241,16 +265,26 @@ class HubPackageTests(unittest.TestCase):
         self.assertIn("does not match publish target", str(caught.exception))
 
 
-def _write_package(package: Path, *, view_id: str = "alice-auth-api", memory_text: str | None = None) -> None:
+def _write_package(
+    package: Path,
+    *,
+    view_id: str = "alice-auth-api",
+    memory_text: str | None = None,
+    kind: str = "file",
+    ref: str | None = None,
+    question_base_url: str | None = None,
+    question_token: str | None = None,
+) -> None:
     package.mkdir(parents=True)
     (package / "dist").mkdir()
     title = "Alice Auth API" if view_id == "alice-auth-api" else view_id
+    resolved_ref = ref or f"rightmemory://mf/{view_id}"
     (package / "view.md").write_text(f"# {title}\n", encoding="utf-8")
     (package / "recipe.toml").write_text(
         f"""
         version = 1
         view_id = "{view_id}"
-        ref = "rightmemory://mf/{view_id}"
+        ref = "{resolved_ref}"
         title = "{title}"
         approved = true
         """,
@@ -259,10 +293,12 @@ def _write_package(package: Path, *, view_id: str = "alice-auth-api", memory_tex
     (package / "rightmemory-shared-view.toml").write_text(
         f"""
         version = 1
-        kind = "file"
+        kind = "{kind}"
         view_id = "{view_id}"
-        ref = "rightmemory://mf/{view_id}"
+        ref = "{resolved_ref}"
         title = "{title}"
+        {_optional_toml_line("question_base_url", question_base_url)}
+        {_optional_toml_line("question_token", question_token)}
 
         [transport]
         kind = "package"
@@ -282,6 +318,10 @@ def _write_package(package: Path, *, view_id: str = "alice-auth-api", memory_tex
         """,
         encoding="utf-8",
     )
+
+
+def _optional_toml_line(key: str, value: str | None) -> str:
+    return f'{key} = "{value}"' if value else ""
 
 
 @unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")
@@ -443,6 +483,41 @@ class HubApiTests(unittest.TestCase):
             self.assertEqual(records[0]["payload"]["message"], "Docs are missing token_expires_at.")
             self.assertEqual(records[0]["payload"]["task_context"], "frontend login migration")
             self.assertEqual(records[0]["payload"]["actor"], "assistant")
+
+    def test_question_invitation_api_accept_response_includes_question_token(self):
+        package = self.root / "question-package"
+        _write_package(
+            package,
+            kind="question",
+            ref="rightmemory://mq/alice-auth-api",
+            question_base_url="https://provider.example.test",
+            question_token="question-token",
+        )
+        publish = self.client.post(
+            "/api/views/alice-auth-api/versions",
+            content=_zip_package(package),
+            headers={**_auth(self.provider_token.raw_token), "content-type": "application/zip"},
+        )
+        self.assertEqual(publish.status_code, 201)
+        invitation = self.client.post(
+            "/api/views/alice-auth-api/invitations",
+            headers=_auth(self.provider_token.raw_token),
+            json={"label": "frontend agent"},
+        )
+        invitation_token = invitation.json()["invitation_url"].rsplit("/i/", 1)[1]
+
+        described = self.client.get(f"/api/invitations/{invitation_token}/view")
+        accepted = self.client.post(
+            f"/api/invitations/{invitation_token}/accept",
+            json={"consumer_label": "frontend"},
+        )
+
+        self.assertEqual(described.status_code, 200)
+        self.assertEqual(described.json()["kind"], "question")
+        self.assertEqual(described.json()["question_base_url"], "https://provider.example.test")
+        self.assertNotIn("question_token", described.json())
+        self.assertEqual(accepted.status_code, 201)
+        self.assertEqual(accepted.json()["question_token"], "question-token")
 
     def test_failed_auth_is_audited_without_raw_token_material(self):
         package = self.root / "package"

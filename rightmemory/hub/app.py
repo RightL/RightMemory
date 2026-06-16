@@ -123,13 +123,17 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         )
         if accepted is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invitation not found")
-        return {
+        response = {
             "connection_id": accepted["connection_id"],
             "token_id": accepted["token_id"],
             "connection_token": accepted["connection_token"],
             "view_id": accepted["view_id"],
             "consumer_label": accepted["consumer_label"],
         }
+        question_token = accepted.get("question_token")
+        if isinstance(question_token, str) and question_token:
+            response["question_token"] = question_token
+        return response
 
     @app.get("/api/views/{view_id}/package")
     def download_package(view_id: str, request: Request) -> Response:

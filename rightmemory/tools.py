@@ -1129,7 +1129,9 @@ class MemoryTools:
 
     def _is_allowed_read_file(self, path: Path) -> bool:
         relative_path = path.relative_to(self.memory_root).as_posix()
-        if self._is_runtime_shared_view_path(relative_path) and not self._is_runtime_shared_view_import_path(relative_path):
+        if self._is_runtime_shared_view_path(relative_path):
+            if self._is_runtime_shared_view_import_path(relative_path):
+                return self.role == "retrieve"
             return False
         if not self._has_role_read_scope():
             return True

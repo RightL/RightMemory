@@ -179,7 +179,14 @@ shared_views/<view-id>/
 
 `view.md` is public. `retriever.md` is provider-private and is used only by the
 provider-side answering agent. `question.toml` stores question endpoint policy,
-such as allowed consumers, provider agent settings, and timeout behavior.
+such as allowed consumer token hashes, provider agent settings, and timeout
+behavior. HTTP invitations for `MQ#` expose the provider question endpoint in
+the public invitation metadata and return the accepted raw `question_token` only
+from the accept response; the provider validates asks against the stored token
+hashes before spending tokens.
+Consumer resolver metadata keeps the hub `connection_token` for explicit notes
+and inbox records separate from the provider question endpoint and
+`question_token` used for live asks.
 
 Consumer ask:
 

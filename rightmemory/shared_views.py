@@ -41,22 +41,39 @@ def accept_http_shared_view_invitation(
     remote_view_id = validate_heading_id(str(accepted.get("view_id") or view_info.get("view_id")))
     local_heading_id = validate_heading_id(heading_id or remote_view_id)
     local_credential_id = validate_heading_id(credential_id or f"http-{local_heading_id}")
-    token = accepted.get("connection_token")
-    if not isinstance(token, str) or not token:
-        raise ValueError("HTTP shared-view invitation did not return a connection token")
     view_type = _view_type_from_invitation(view_info)
-    target_kind = "http-file" if view_type == "file" else "http-question"
-    target_base_url = base_url
+    connection_token = accepted.get("connection_token")
+    if not isinstance(connection_token, str) or not connection_token:
+        raise ValueError("HTTP shared-view invitation did not return a connection_token")
+    question_token: str | None = None
+    question_credential_id: str | None = None
     if view_type == "question":
-        target_base_url = _question_base_url_from_invitation(view_info)
+        raw_question_token = accepted.get("question_token")
+        if not isinstance(raw_question_token, str) or not raw_question_token:
+            raise ValueError("HTTP shared-view invitation did not return a question_token")
+        question_token = raw_question_token
+        question_credential_id = validate_heading_id(f"{local_credential_id}-question")
+    target_kind = "http-file" if view_type == "file" else "http-question"
+    question_base_url = None
+    if view_type == "question":
+        question_base_url = _question_base_url_from_invitation(view_info)
     save_shared_view_credential(
         root,
         local_credential_id,
         kind="http-connection",
-        token=token,
-        base_url=target_base_url,
+        token=connection_token,
+        base_url=base_url,
         view_id=remote_view_id,
     )
+    if question_token and question_credential_id and question_base_url:
+        save_shared_view_credential(
+            root,
+            question_credential_id,
+            kind="http-question",
+            token=question_token,
+            base_url=question_base_url,
+            view_id=remote_view_id,
+        )
     return accept_shared_view(
         root,
         heading_id=local_heading_id,
@@ -70,9 +87,11 @@ def accept_http_shared_view_invitation(
         accepted_from=invitation_url,
         target=SharedViewTarget(
             kind=target_kind,
-            base_url=target_base_url,
+            base_url=base_url,
             view_id=remote_view_id,
             credential_id=local_credential_id,
+            question_base_url=question_base_url,
+            question_credential_id=question_credential_id,
             version_id=_optional_string(view_info.get("current_version_id")),
             accepted_from_url=invitation_url,
         ),
@@ -265,6 +284,8 @@ def shared_view_connection_status(memory_root: Path, heading_id: str) -> dict[st
     }
     if connection.target.base_url:
         status["base_url"] = connection.target.base_url
+    if connection.target.question_base_url:
+        status["question_base_url"] = connection.target.question_base_url
     if connection.target.view_id:
         status["remote_view_id"] = connection.target.view_id
     if connection.view_type == "file":

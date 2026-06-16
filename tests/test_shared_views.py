@@ -28,6 +28,8 @@ from rightmemory.shared_view_models import (
 from rightmemory.shared_view_questions import (
     answer_question_view,
     ask_question_view,
+    question_token_hash,
+    verify_question_view_token,
     write_question_view,
 )
 from rightmemory.shared_views import (
@@ -66,9 +68,11 @@ class SharedViewModelTests(unittest.TestCase):
                     ref="rightmemory://mq/auth-api-ask",
                     target=SharedViewTarget(
                         kind="http-question",
-                        base_url="https://provider.example.test",
+                        base_url="https://hub.example.test",
                         view_id="auth-api-ask",
                         credential_id="http-auth-api-ask",
+                        question_base_url="https://provider.example.test",
+                        question_credential_id="http-auth-api-ask-question",
                     ),
                 ),
             },
@@ -109,6 +113,7 @@ class SharedViewModelTests(unittest.TestCase):
             client.accept_invitation.return_value = {
                 "view_id": "auth-api-ask",
                 "connection_token": "connection-token",
+                "question_token": "question-token",
             }
             result = accept_http_shared_view_invitation(self.root, "https://hub.example.test/i/invite-token")
 
@@ -117,9 +122,23 @@ class SharedViewModelTests(unittest.TestCase):
         self.assertEqual(result, "accepted shared view auth-api-ask")
         self.assertEqual(connection.view_type, "question")
         self.assertEqual(connection.target.kind, "http-question")
-        self.assertEqual(connection.target.base_url, "https://provider.example.test")
-        self.assertEqual(credential["base_url"], "https://provider.example.test")
+        self.assertEqual(connection.target.base_url, "https://hub.example.test")
+        self.assertEqual(connection.target.question_base_url, "https://provider.example.test")
+        self.assertEqual(connection.target.credential_id, "http-auth-api-ask")
+        self.assertEqual(connection.target.question_credential_id, "http-auth-api-ask-question")
+        question_credential = load_shared_view_credential(self.root, "http-auth-api-ask-question")
+        self.assertEqual(credential["base_url"], "https://hub.example.test")
+        self.assertEqual(credential["token"], "connection-token")
+        self.assertEqual(question_credential["base_url"], "https://provider.example.test")
+        self.assertEqual(question_credential["token"], "question-token")
         self.assertIn("{MQ#auth-api-ask}", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
+
+        with patch("rightmemory.shared_views.HubClient") as note_client_type:
+            note_client_type.return_value.post_interaction.return_value = {"status": "recorded"}
+            note_result = record_shared_view_note(self.root, "auth-api-ask", "Docs are stale.", confirmed=True)
+
+        self.assertIn("recorded shared view note", note_result)
+        self.assertEqual(note_client_type.call_args.args, ("https://hub.example.test", "connection-token"))
 
     def test_accept_http_question_invitation_requires_question_endpoint(self):
         with patch("rightmemory.shared_views.HubClient") as client_type:
@@ -133,12 +152,33 @@ class SharedViewModelTests(unittest.TestCase):
             client.accept_invitation.return_value = {
                 "view_id": "auth-api-ask",
                 "connection_token": "connection-token",
+                "question_token": "question-token",
             }
 
             with self.assertRaises(ValueError) as caught:
                 accept_http_shared_view_invitation(self.root, "https://hub.example.test/i/invite-token")
 
         self.assertIn("question_base_url", str(caught.exception))
+
+    def test_accept_http_question_invitation_requires_question_token(self):
+        with patch("rightmemory.shared_views.HubClient") as client_type:
+            client = client_type.return_value
+            client.get_invitation_view.return_value = {
+                "view_id": "auth-api-ask",
+                "kind": "question",
+                "title": "Auth API Questions",
+                "ref": "rightmemory://mq/auth-api-ask",
+                "question_base_url": "https://provider.example.test",
+            }
+            client.accept_invitation.return_value = {
+                "view_id": "auth-api-ask",
+                "connection_token": "connection-token",
+            }
+
+            with self.assertRaises(ValueError) as caught:
+                accept_http_shared_view_invitation(self.root, "https://hub.example.test/i/invite-token")
+
+        self.assertIn("question_token", str(caught.exception))
 
 
 class SharedFileViewRecipeTests(unittest.TestCase):
@@ -360,13 +400,18 @@ class SharedQuestionViewTests(unittest.TestCase):
             intent="Let frontend agents ask auth API questions.",
             retriever_instructions="Answer only from auth API memory.",
             approved=True,
+            access_tokens=["question-token"],
         )
 
         view_dir = self.root / "shared_views" / "auth-api-ask"
         self.assertIn("wrote question view auth-api-ask", result)
         self.assertTrue((view_dir / "view.md").exists())
         self.assertTrue((view_dir / "retriever.md").exists())
-        self.assertIn('kind = "question"', (view_dir / "question.toml").read_text(encoding="utf-8"))
+        question_toml = (view_dir / "question.toml").read_text(encoding="utf-8")
+        self.assertIn('kind = "question"', question_toml)
+        self.assertIn(question_token_hash("question-token"), question_toml)
+        self.assertTrue(verify_question_view_token(self.root, "auth-api-ask", "question-token"))
+        self.assertFalse(verify_question_view_token(self.root, "auth-api-ask", "wrong-token"))
 
     def test_ask_question_view_returns_unavailable_when_provider_does_not_start(self):
         save_connections(
@@ -378,18 +423,20 @@ class SharedQuestionViewTests(unittest.TestCase):
                     ref="rightmemory://mq/auth-api-ask",
                     target=SharedViewTarget(
                         kind="http-question",
-                        base_url="https://provider.example.test",
+                        base_url="https://hub.example.test",
                         view_id="auth-api-ask",
                         credential_id="http-auth-api-ask",
+                        question_base_url="https://provider.example.test",
+                        question_credential_id="http-auth-api-ask-question",
                     ),
                 )
             },
         )
         save_shared_view_credential(
             self.root,
-            "http-auth-api-ask",
-            kind="http-connection",
-            token="connection-token",
+            "http-auth-api-ask-question",
+            kind="http-question",
+            token="question-token",
             base_url="https://provider.example.test",
             view_id="auth-api-ask",
         )
@@ -411,18 +458,20 @@ class SharedQuestionViewTests(unittest.TestCase):
                     ref="rightmemory://mq/auth-api-ask",
                     target=SharedViewTarget(
                         kind="http-question",
-                        base_url="https://provider.example.test",
+                        base_url="https://hub.example.test",
                         view_id="remote-auth-api-ask",
                         credential_id="http-auth-api-ask",
+                        question_base_url="https://provider.example.test",
+                        question_credential_id="http-auth-api-ask-question",
                     ),
                 )
             },
         )
         save_shared_view_credential(
             self.root,
-            "http-auth-api-ask",
-            kind="http-connection",
-            token="connection-token",
+            "http-auth-api-ask-question",
+            kind="http-question",
+            token="question-token",
             base_url="https://provider.example.test",
             view_id="remote-auth-api-ask",
         )
@@ -512,8 +561,10 @@ class SharedQuestionViewTests(unittest.TestCase):
                     ref="rightmemory://mq/auth-api-ask",
                     target=SharedViewTarget(
                         kind="http-question",
-                        base_url="https://provider.example.test",
+                        base_url="https://hub.example.test",
                         credential_id="http-auth-api-ask",
+                        question_base_url="https://provider.example.test",
+                        question_credential_id="http-auth-api-ask-question",
                     ),
                 ),
             },
@@ -557,6 +608,21 @@ class SharedViewInteractionTests(unittest.TestCase):
             ("file", "http-file", "auth-api-files", "rightmemory://mf/auth-api-files"),
             ("question", "http-question", "auth-api-ask", "rightmemory://mq/auth-api-ask"),
         ):
+            target = SharedViewTarget(
+                kind=target_kind,
+                base_url="https://hub.example.test",
+                view_id=heading_id,
+                credential_id=f"http-{heading_id}",
+            )
+            if view_type == "question":
+                target = SharedViewTarget(
+                    kind=target_kind,
+                    base_url="https://hub.example.test",
+                    view_id=heading_id,
+                    credential_id=f"http-{heading_id}",
+                    question_base_url="https://provider.example.test",
+                    question_credential_id=f"http-{heading_id}-question",
+                )
             save_connections(
                 self.root,
                 {
@@ -564,12 +630,7 @@ class SharedViewInteractionTests(unittest.TestCase):
                         heading_id=heading_id,
                         view_type=view_type,
                         ref=ref,
-                        target=SharedViewTarget(
-                            kind=target_kind,
-                            base_url="https://hub.example.test",
-                            view_id=heading_id,
-                            credential_id=f"http-{heading_id}",
-                        ),
+                        target=target,
                     )
                 },
             )
@@ -587,6 +648,7 @@ class SharedViewInteractionTests(unittest.TestCase):
                 result = record_shared_view_note(self.root, heading_id, "Docs are stale.", confirmed=True)
 
             self.assertIn("recorded shared view note", result)
+            self.assertEqual(client_type.call_args.args, ("https://hub.example.test", "connection-token"))
             self.assertEqual(len(list_shared_view_notes(self.root, heading_id)), 1)
 
     def test_note_http_failure_is_recorded_as_failed_not_queued(self):

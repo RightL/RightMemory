@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from hashlib import sha256
 import json
 import tomllib
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ class QuestionViewConfig:
     start_timeout_seconds: int = DEFAULT_START_TIMEOUT_SECONDS
     answer_timeout_seconds: int = DEFAULT_ANSWER_TIMEOUT_SECONDS
     provider_role: str = "retrieve"
+    access_token_hashes: tuple[str, ...] = ()
 
 
 def write_question_view(
@@ -41,6 +43,7 @@ def write_question_view(
     approved: bool = False,
     start_timeout_seconds: int = DEFAULT_START_TIMEOUT_SECONDS,
     answer_timeout_seconds: int = DEFAULT_ANSWER_TIMEOUT_SECONDS,
+    access_tokens: list[str] | tuple[str, ...] = (),
 ) -> str:
     root = Path(memory_root).expanduser()
     clean_view_id = validate_heading_id(view_id)
@@ -61,6 +64,7 @@ def write_question_view(
                 approved=approved,
                 start_timeout_seconds=start_timeout_seconds,
                 answer_timeout_seconds=answer_timeout_seconds,
+                access_token_hashes=tuple(question_token_hash(token) for token in access_tokens if token.strip()),
             )
         ),
     )
@@ -85,6 +89,7 @@ def load_question_view(memory_root: Path, view_id: str) -> QuestionViewConfig:
         start_timeout_seconds=_positive_int(data.get("start_timeout_seconds"), DEFAULT_START_TIMEOUT_SECONDS),
         answer_timeout_seconds=_positive_int(data.get("answer_timeout_seconds"), DEFAULT_ANSWER_TIMEOUT_SECONDS),
         provider_role=str(data.get("provider_role") or "retrieve"),
+        access_token_hashes=_token_hashes(data.get("access_token_hashes", ())),
     )
 
 
@@ -99,6 +104,7 @@ def approve_question_view(memory_root: Path, view_id: str) -> str:
         start_timeout_seconds=config.start_timeout_seconds,
         answer_timeout_seconds=config.answer_timeout_seconds,
         provider_role=config.provider_role,
+        access_token_hashes=config.access_token_hashes,
     )
     _write_text(root / PROVIDER_VIEWS_DIR / config.view_id / "question.toml", _render_question_toml(approved))
     return f"approved question view {config.view_id}"
@@ -112,12 +118,12 @@ def ask_question_view(memory_root: Path, heading_id: str, question: str) -> str:
     if connection is None or connection.view_type != "question":
         return _format_unavailable(clean_heading_id, "question view connection not found")
     target = connection.target
-    if target.kind != "http-question" or not target.base_url or not target.credential_id:
+    if target.kind != "http-question" or not target.question_base_url or not target.question_credential_id:
         return _format_unavailable(clean_heading_id, "question view does not have an HTTP question target")
     try:
-        credential = load_shared_view_credential(root, target.credential_id)
+        credential = load_shared_view_credential(root, target.question_credential_id)
         response = HubClient(
-            target.base_url,
+            target.question_base_url,
             credential["token"],
             timeout=DEFAULT_ANSWER_TIMEOUT_SECONDS + DEFAULT_START_TIMEOUT_SECONDS,
         ).ask_question(
@@ -181,6 +187,21 @@ def answer_question_view(memory_root: Path, view_id: str, question: str) -> str:
         return _format_unavailable(clean_view_id, str(exc))
     executor.shutdown(wait=True)
     return f"Shared question: {clean_view_id}\nStatus: answered\nAnswer:\n{answer.strip()}\n"
+
+
+def verify_question_view_token(memory_root: Path, view_id: str, token: str) -> bool:
+    clean_token = token.strip()
+    if not clean_token:
+        return False
+    try:
+        config = load_question_view(memory_root, view_id)
+    except (FileNotFoundError, ValueError):
+        return False
+    return config.approved and question_token_hash(clean_token) in set(config.access_token_hashes)
+
+
+def question_token_hash(token: str) -> str:
+    return sha256(token.strip().encode("utf-8")).hexdigest()
 
 
 def _format_unavailable(heading_id: str, reason: str) -> str:
@@ -254,6 +275,7 @@ def _render_question_toml(config: QuestionViewConfig) -> str:
             f"start_timeout_seconds = {int(config.start_timeout_seconds)}",
             f"answer_timeout_seconds = {int(config.answer_timeout_seconds)}",
             f"provider_role = {_toml_string(config.provider_role)}",
+            f"access_token_hashes = {_toml_string_array(config.access_token_hashes)}",
             "",
         ]
     )
@@ -270,6 +292,19 @@ def _positive_int(value: object, default: int) -> int:
     return result
 
 
+def _token_hashes(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("question view access_token_hashes must be a TOML array")
+    hashes: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("question view access_token_hashes entries must be non-empty strings")
+        hashes.append(item.strip())
+    return tuple(hashes)
+
+
 def _required_text(value: str, label: str) -> str:
     clean = str(value).strip()
     if not clean:
@@ -279,6 +314,10 @@ def _required_text(value: str, label: str) -> str:
 
 def _toml_string(value: str) -> str:
     return json.dumps(value)
+
+
+def _toml_string_array(values: tuple[str, ...]) -> str:
+    return "[" + ", ".join(_toml_string(value) for value in values) + "]"
 
 
 def _write_text(path: Path, text: str) -> None:

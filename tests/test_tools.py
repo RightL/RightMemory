@@ -45,6 +45,12 @@ class MemoryToolsTests(unittest.TestCase):
             tools.read(".runtime/shared_views/imports/auth-api-files/dist/MEMORY.md")
 
         self.assertIn("runtime shared-view imports are only readable by retrieve", str(caught.exception))
+        self.assertEqual(tools.list_files(".runtime/shared_views/imports/**/*.md"), [])
+        self.assertNotIn(".runtime/shared_views/imports", "\n".join(tools.glob("**/*.md")))
+        self.assertEqual(tools.grep("External", glob=".runtime/shared_views/imports/**/*.md"), "no matches")
+        with self.assertRaises(ValueError) as grep_error:
+            tools.grep("External", ".runtime/shared_views/imports/auth-api-files")
+        self.assertIn("runtime shared-view imports are only readable by retrieve", str(grep_error.exception))
 
     def test_read_file_truncates_large_full_reads(self):
         memory = self.root / "MEMORY.md"

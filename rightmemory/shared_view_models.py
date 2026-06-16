@@ -24,6 +24,8 @@ class SharedViewTarget:
     view_id: str | None = None
     base_url: str | None = None
     credential_id: str | None = None
+    question_base_url: str | None = None
+    question_credential_id: str | None = None
     version_id: str | None = None
     accepted_from_url: str | None = None
 
@@ -68,6 +70,10 @@ def validate_connection(root: Path, key: str, connection: SharedViewConnection) 
         if not target.base_url or not target.credential_id:
             raise ValueError(f"{target.kind} target requires base_url and credential_id for {heading_id}")
         _validate_http_base_url(target.base_url)
+    if target.kind == "http-question":
+        if not target.question_base_url or not target.question_credential_id:
+            raise ValueError(f"http-question target requires question_base_url and question_credential_id for {heading_id}")
+        _validate_http_base_url(target.question_base_url)
     return connection
 
 
@@ -128,6 +134,10 @@ def save_connections(memory_root: Path, connections: dict[str, SharedViewConnect
                 lines.append(f"base_url = {_toml_string(connection.target.base_url)}")
             if connection.target.credential_id:
                 lines.append(f"credential_id = {_toml_string(connection.target.credential_id)}")
+            if connection.target.question_base_url:
+                lines.append(f"question_base_url = {_toml_string(connection.target.question_base_url)}")
+            if connection.target.question_credential_id:
+                lines.append(f"question_credential_id = {_toml_string(connection.target.question_credential_id)}")
             if connection.target.version_id:
                 lines.append(f"version_id = {_toml_string(connection.target.version_id)}")
             if connection.target.accepted_from_url:
@@ -202,6 +212,8 @@ def _load_target(raw_target: object) -> SharedViewTarget:
         view_id=_optional_heading_id(raw_target.get("view_id")),
         base_url=_optional_string(raw_target.get("base_url")),
         credential_id=_optional_heading_id(raw_target.get("credential_id")),
+        question_base_url=_optional_string(raw_target.get("question_base_url")),
+        question_credential_id=_optional_heading_id(raw_target.get("question_credential_id")),
         version_id=_optional_heading_id(raw_target.get("version_id")),
         accepted_from_url=_optional_string(raw_target.get("accepted_from_url")),
     )
