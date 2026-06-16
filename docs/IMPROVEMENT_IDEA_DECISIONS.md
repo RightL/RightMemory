@@ -16,6 +16,94 @@ Add entries after the user has made a decision. Keep speculative brainstorms out
 of this file until they have been accepted, rejected, or replaced by a smaller
 decision.
 
+## 2026-06-16 Memory Cleanup Brainstorm
+
+Context: The user inspected `~/.rightmemory` and observed that active memory
+contains too much low-value material: generated artifact inventories, transient
+experiment rows, git-history breadcrumbs, stale runtime state, duplicated
+project documentation, over-specific preferences, and reflection logs that are
+not active operating memory. The discussion focused on whether this is a
+Dreamer problem, a missing Cleaner role, or an intake-routing problem.
+
+### Deferred
+
+#### New Cleaner role
+
+Proposal: Add a separate `cleaner` role that would specialize in removing,
+compressing, or relocating low-value active memory, leaving Dreamer to focus on
+organization and consolidation.
+
+Decision: Deferred. Do not implement a new Cleaner role yet.
+
+Rationale: A separate role sounds clean, but it risks splitting responsibility
+too finely. Dreamer would organize memory, Cleaner would judge memory quality,
+Pruner would age memory out, and the boundaries could become fuzzy. The
+discussion did not establish that a new role is the main missing piece.
+
+Preferred direction if revisited: first try making Dreamer more staged and
+cleanup-aware before adding another role.
+
+#### Dreamer staged cleanup
+
+Proposal: Keep one Dreamer role, but make its cleanup process more explicit and
+progressive:
+
+1. Organize pass: improve readability, merge duplicates, move large detail into
+   `MEMORY_<slug>.md`, fix graph edges, and compress long traces.
+2. Triage pass: classify suspicious active memory as keep-global,
+   compress-to-pointer, likely project-local, graveyard, delete-later, or open
+   question.
+3. Cleanup pass: apply safe actions directly and move borderline material into
+   a graveyard before deletion.
+
+Decision: Deferred, but this is the favored cleanup direction over creating a
+new Cleaner role.
+
+Rationale: The user chose a conservative cleanup stance first, then noted that
+having a graveyard makes automatic cleanup safer and allows Dreamer to be more
+assertive without requiring a manual operator hint for every cleanup cycle. The
+important behavior is not dramatic deletion; it is shrinking and clarifying the
+active surface over time while preserving a reversible path.
+
+Design notes for later:
+
+- Dreamer should clean existing accumulated noise. It should not inspect project
+  folders or decide where to write project-local documentation.
+- Direct deletion should stay narrow: duplicate graph junk, exact duplicate
+  memory, or clearly obsolete material.
+- Low-value but nontrivial material should usually be compressed or moved to a
+  graveyard first.
+- Project-local-looking memory can be compressed to a pointer or marked as a
+  locality issue, but Dreamer should not try to move it into project files.
+- Actual removal from graveyard can be handled later by a repeat-cycle rule,
+  pruner interaction, or explicit future design.
+
+#### Memory locality and intake policy
+
+Proposal: Strengthen `memory-orchestrator` so intake decides whether a fact
+belongs in global RightMemory, a project-local file, a project profile, or
+nowhere. This would prevent future low-value project-discoverable facts from
+being submitted to global memory.
+
+Decision: Deferred as a separate, more complex problem.
+
+Rationale: The user identified this as important but explicitly scoped it out
+of the current cleanup discussion. The current focus is existing accumulated
+noise, not the future intake-routing policy.
+
+Design notes for later:
+
+- Some memories are easy to rediscover by exploring the project folder, reading
+  repo docs, or checking git history. Those should usually not become global
+  RightMemory updates.
+- Some memories are hard to rediscover because they encode user preference,
+  cross-project behavior, subtle local pitfalls, or hard-won conclusions. Those
+  are better global-memory candidates.
+- The orchestrator-side policy may eventually route information to project docs,
+  project profiles, global memory, or no durable storage.
+- Dreamer should only clean active memory. Intake locality belongs to
+  `memory-orchestrator` and later update-routing design.
+
 ## 2026-06-16 Hub Transport Brainstorm
 
 Context: The user questioned whether the planned HTTP Shared View Hub is needed
