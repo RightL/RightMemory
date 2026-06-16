@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 import tempfile
@@ -704,6 +705,47 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
         self.assertEqual(result.status, "idle")
         self.assertEqual(calls, 2)
+
+    def test_worker_exits_without_processing_when_leader_lock_is_held(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    pending=[_job(1, "queued")],
+                    next_id=2,
+                ),
+            )
+            store.worker_root.mkdir(parents=True, exist_ok=True)
+            lock_path = store.worker_root / "leader.lock"
+            calls = []
+
+            with lock_path.open("a+", encoding="utf-8") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    result = store.run_pending_batches(
+                        lambda batch_session_id, message: calls.append((batch_session_id, message)) or "processed",
+                        target_batch_candidates=15,
+                        max_wait_seconds=86400,
+                    )
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            state = store.read("agent-1")
+
+        self.assertEqual(result.status, "idle")
+        self.assertEqual(result.processed, 0)
+        self.assertFalse(result.failed)
+        self.assertEqual(calls, [])
+        self.assertEqual(state.status, "running")
+        self.assertEqual(state.phase, "waiting")
+        self.assertEqual([job.id for job in state.pending], [1])
+        self.assertEqual(state.current_batch, [])
+        self.assertIsNone(state.error)
 
     def test_retryable_failed_session_runs_below_target_without_waiting(self):
         calls = []

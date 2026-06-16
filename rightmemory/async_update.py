@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TextIO
 
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
 
@@ -200,6 +201,9 @@ class AsyncUpdateStore:
         sleep_until: Callable[[datetime], None] | None = None,
         on_batch_success: Callable[[int], None] | None = None,
     ) -> AsyncUpdateWorkerResult:
+        leader_handle = self._try_acquire_worker_leader()
+        if leader_handle is None:
+            return AsyncUpdateWorkerResult(status="idle")
         sleep_until = _sleep_until if sleep_until is None else sleep_until
         with self._worker_locked():
             self._write_worker_locked(
@@ -288,9 +292,13 @@ class AsyncUpdateStore:
                     if on_batch_success is not None:
                         on_batch_success(accepted_count)
         finally:
-            if not worker_state_cleared:
-                with self._worker_locked():
-                    self._clear_current_worker_locked()
+            try:
+                if not worker_state_cleared:
+                    with self._worker_locked():
+                        self._clear_current_worker_locked()
+            finally:
+                fcntl.flock(leader_handle.fileno(), fcntl.LOCK_UN)
+                leader_handle.close()
 
     def _next_batch(
         self,
@@ -451,6 +459,20 @@ class AsyncUpdateStore:
 
     def _worker_wake_path(self) -> Path:
         return self.worker_root / "wake.json"
+
+    def _worker_leader_lock_path(self) -> Path:
+        return self.worker_root / "leader.lock"
+
+    def _try_acquire_worker_leader(self) -> TextIO | None:
+        _ensure_runtime_gitignore(self.memory_root / ".runtime")
+        self.worker_root.mkdir(parents=True, exist_ok=True)
+        handle = self._worker_leader_lock_path().open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            return None
+        return handle
 
     @contextmanager
     def _worker_locked(self):
