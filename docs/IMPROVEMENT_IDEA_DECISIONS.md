@@ -25,6 +25,47 @@ project documentation, over-specific preferences, and reflection logs that are
 not active operating memory. The discussion focused on whether this is a
 Dreamer problem, a missing Cleaner role, or an intake-routing problem.
 
+### Observed Current Memory Problems
+
+The inspection found several recurring classes of low-value active memory:
+
+- Generated artifact inventories: entries that mainly list GLB folders,
+  `results/`, `outputs/`, manifests, contact sheets, checkpoint files, log
+  folders, stopped container names, hashes, or other generated artifacts. These
+  are usually better kept in run manifests, output directories, or project docs.
+- Git-history breadcrumbs: entries that mainly record commit hashes, branch
+  names, worktree names, verification before a commit, or implementation
+  chronology that normal Git history already stores.
+- Raw experiment rows and parameter sweeps: entries that preserve exact
+  settings, timings, counts, and intermediate ablation rows. These should
+  usually compress into the durable conclusion, current best setting, rejected
+  direction, and a pointer to the project report.
+- Over-detailed rejected-experiment graveyards: negative results are useful,
+  but many entries keep too much tactical detail. A better active-memory shape
+  is the rejected family, the reason it failed, and a report pointer.
+- Transient environment and runtime state: cache presence, one-time Docker
+  states, stopped containers, stale worker details, uninstalled tools, or
+  current branch cleanliness can become wrong quickly. Keep only reusable
+  troubleshooting patterns or current invariants.
+- Duplicated project documentation: memory repeats README, runbook,
+  `DESIGN_NOTES.md`, specs, or project-local workflow details that are easy to
+  rediscover by inspecting the repo. Global memory should keep at most the
+  durable decision or pointer.
+- Over-specific preference memories: some entries preserve one incident in too
+  much detail when a broader principle already exists. These should merge into
+  principle-level preferences when possible.
+- Insight-style essays in the active recall surface: reflective logs can be
+  valuable, but they should not behave like ordinary operational memory unless
+  they were explicitly distilled into a durable rule, risk, or decision.
+- Stale open questions: unresolved questions can remain after they become
+  answered, obsolete, or too speculative. Dreamer should keep this section
+  compact and current.
+
+The general diagnosis is that RightMemory is being used as active memory,
+experiment notebook, artifact index, git log, project documentation mirror, and
+reflection journal at the same time. Cleanup should separate those functions
+without losing hard-to-reproduce conclusions.
+
 ### Deferred
 
 #### New Cleaner role
