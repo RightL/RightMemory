@@ -241,10 +241,12 @@ rightmemory shared-view inbox alice-auth-api
 All normal sharing goes through HTTP, even on one machine. Initialize and serve a separate hub root, create a provider token, and store that token as a local runtime credential in the provider memory root:
 
 ```bash
-rightmemory hub init ./rightmemory-hub --public-base-url http://127.0.0.1:8765
-rightmemory hub token create ./rightmemory-hub --provider alice --label publish
-rightmemory hub serve ./rightmemory-hub --host 127.0.0.1 --port 8765
+rightmemory hub init --public-base-url http://127.0.0.1:8765
+rightmemory hub token create --provider alice --label publish
+rightmemory hub serve --host 127.0.0.1 --port 8765
 ```
+
+After the hub is running, open `http://127.0.0.1:8765/console` and enter the admin token printed by `rightmemory hub init`. The console is for hub administration: providers, tokens, views, invitations, connections, inbox, and audit.
 
 Then store the printed provider token through a hidden prompt, so it does not need to appear in shell history:
 

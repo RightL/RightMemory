@@ -28,9 +28,9 @@ rightmemory --profile frontend ...
 They also use an HTTP hub for invitations and file packages:
 
 ```bash
-rightmemory hub init ./rightmemory-hub --public-base-url http://127.0.0.1:8765
-rightmemory hub token create ./rightmemory-hub --provider alice --label publish
-rightmemory hub serve ./rightmemory-hub --host 127.0.0.1 --port 8765
+rightmemory hub init --public-base-url http://127.0.0.1:8765
+rightmemory hub token create --provider alice --label publish
+rightmemory hub serve --host 127.0.0.1 --port 8765
 ```
 
 Alice stores the printed provider token in her memory root:
@@ -204,6 +204,12 @@ rightmemory --profile alice shared-view inbox
 
 ## Operational Checks
 
+Check the default hub root:
+
+```bash
+rightmemory hub status
+```
+
 List accepted shared-view connections:
 
 ```bash
@@ -246,7 +252,9 @@ Web Studio exposes the main provider and consumer flow:
 - Provider Inbox: read the provider HTTP inbox for the active provider root;
 - Auto-Publish Events: inspect recent `MF#` auto-publish events.
 
-Web Studio does not initialize or serve the hub, create global provider hub tokens, manage every provider on a hub, revoke invitations or accepted connections, show the full hub audit log, or expose generic shared-view retrieval. Use the CLI commands above for bootstrap operations. Treat a future Hub Console as the right place for hub-wide runtime administration.
+Web Studio does not initialize or serve the hub, create global provider hub tokens, manage every provider on a hub, revoke invitations or accepted connections, show the full hub audit log, or expose generic shared-view retrieval. Use the CLI commands above for bootstrap operations. Use Hub Console for hub-wide runtime administration.
+
+Hub Console is available at `/console` on the running hub service. It is the admin/operator surface for runtime hub state: health, providers, tokens, views, invitations, accepted connections, inbox records, and audit events. It does not build shared views or edit memory roots; use Web Studio for provider and consumer workflows.
 
 ## File Ownership
 
