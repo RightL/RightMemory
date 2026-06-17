@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.async_update import AsyncUpdateState, AsyncUpdateStore
-from rightmemory.cli import _daemon_stdio_json, _dreamer_watch_once, _handle_json_request, _insight_watch_once, main
+from rightmemory.cli import _daemon_stdio_json, _dreamer_watch_once, _handle_json_request, _insight_watch_once, cli_main, main
 from rightmemory.config import DreamerWatchConfig, InsightWatchConfig
 from rightmemory.dreamer_trigger import DreamerTriggerStore
 from rightmemory.doctor import DoctorCheck
@@ -39,6 +39,18 @@ class FakeRuntime:
 
     def cleanup(self):
         pass
+
+
+class CliEntrypointTests(unittest.TestCase):
+    def test_cli_main_reports_expected_errors_without_traceback(self):
+        stderr = io.StringIO()
+
+        with patch("rightmemory.cli.main", side_effect=ValueError("hub request failed: HTTP 404")), patch("sys.stderr", stderr):
+            result = cli_main(["shared-view", "accept-invite", "https://hub.example.test/i/revoked"])
+
+        self.assertEqual(result, 1)
+        self.assertEqual(stderr.getvalue(), "error: hub request failed: HTTP 404\n")
+        self.assertNotIn("Traceback", stderr.getvalue())
 
 
 class FakeReviewResult:
@@ -695,6 +707,36 @@ class JsonRequestTests(unittest.TestCase):
                 )
                 status_result = main(["hub", "status", str(hub_root)])
                 second_init_result = main(["hub", "init", str(hub_root)])
+                same_url_init_result = main(
+                    [
+                        "hub",
+                        "init",
+                        str(hub_root),
+                        "--public-base-url",
+                        "https://hub.example.test",
+                    ]
+                )
+                same_admin_init_result = main(
+                    [
+                        "hub",
+                        "init",
+                        str(hub_root),
+                        "--admin-token",
+                        "admin-secret",
+                    ]
+                )
+                with self.assertRaises(ValueError) as public_url_error:
+                    main(
+                        [
+                            "hub",
+                            "init",
+                            str(hub_root),
+                            "--public-base-url",
+                            "https://other.example.test",
+                        ]
+                    )
+                with self.assertRaises(ValueError) as admin_token_error:
+                    main(["hub", "init", str(hub_root), "--admin-token", "other-secret"])
 
             lines = stdout.getvalue().splitlines()
             token_id = next(line.split("\t", 1)[1] for line in lines if line.startswith("token_id\t"))
@@ -710,12 +752,19 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(create_result, 0)
         self.assertEqual(status_result, 0)
         self.assertEqual(second_init_result, 0)
+        self.assertEqual(same_url_init_result, 0)
+        self.assertEqual(same_admin_init_result, 0)
         self.assertEqual(revoke_result, 0)
         self.assertTrue(admin_ok)
         self.assertFalse(provider_token_ok)
         self.assertIn("initialized\tyes", stdout.getvalue())
         self.assertIn("public_base_url\thttps://hub.example.test", stdout.getvalue())
         self.assertIn("admin_token\tunchanged", stdout.getvalue())
+        self.assertIn(
+            "already initialized with public_base_url https://hub.example.test",
+            str(public_url_error.exception),
+        )
+        self.assertIn("token rotation is not supported by hub init", str(admin_token_error.exception))
 
     def test_hub_token_list_prints_revocation_handles_without_raw_tokens(self):
         stdout = io.StringIO()

@@ -33,14 +33,15 @@ from .config import (
 from .dreamer_trigger import DreamerTriggerStore
 from .doctor import format_doctor_report, run_agent_cli_doctor
 from .hub.app import create_hub_app
+from .hub.client import HubClientError
 from .hub.store import DEFAULT_PUBLIC_BASE_URL, HubStore
 from .insight_trigger import InsightTriggerStore
 from .profiles import (
     ProfileError,
     create_profile,
     load_profiles,
+    remove_profile,
     resolve_memory_root,
-    save_profiles,
     validate_profile_name,
 )
 from .review import ReviewScanner, normalize_transcript
@@ -288,13 +289,8 @@ def _profile_main(argv: list[str]) -> int:
         print(f"{name}\t{profiles[name].root}")
         return 0
     if args.command == "remove":
-        name = validate_profile_name(args.name)
-        profiles = load_profiles(home)
-        profile = profiles.pop(name, None)
-        if profile is None:
-            raise ProfileError(f"profile not found: {name}")
-        save_profiles(home, profiles)
-        print(f"removed {name}; memory root remains at {profile.root}")
+        profile = remove_profile(home, args.name)
+        print(f"removed {profile.name}; memory root remains at {profile.root}")
         return 0
     raise ValueError(f"unknown profile command: {args.command}")
 
@@ -321,7 +317,7 @@ def _hub_main(argv: list[str]) -> int:
     init = subparsers.add_parser("init")
     init.add_argument("hub_root", nargs="?", type=Path)
     init.add_argument("--admin-token")
-    init.add_argument("--public-base-url", default=DEFAULT_PUBLIC_BASE_URL)
+    init.add_argument("--public-base-url")
     status = subparsers.add_parser("status")
     status.add_argument("hub_root", nargs="?", type=Path)
     token = subparsers.add_parser("token")
@@ -344,11 +340,27 @@ def _hub_main(argv: list[str]) -> int:
     if args.command == "init":
         hub_root = _resolve_hub_root(args.hub_root)
         store = HubStore(hub_root)
-        admin_token = args.admin_token or (None if _hub_initialized(store) else secrets.token_urlsafe(32))
-        store.initialize(admin_token=admin_token, public_base_url=args.public_base_url)
-        if admin_token and not store.verify_token(admin_token, action="admin"):
-            raise ValueError("admin token was not installed because a bootstrap admin token already exists")
-        config = store.load_config()
+        requested_public_base_url = args.public_base_url or DEFAULT_PUBLIC_BASE_URL
+        initialized = _hub_initialized(store)
+        if initialized:
+            config = store.load_config()
+            if args.public_base_url is not None and args.public_base_url != config.public_base_url:
+                raise ValueError(
+                    "hub is already initialized with public_base_url "
+                    f"{config.public_base_url}; requested {args.public_base_url}. Use a new hub root."
+                )
+            if args.admin_token and not store.verify_token(args.admin_token, action="admin"):
+                raise ValueError(
+                    "hub is already initialized with a different bootstrap admin token; "
+                    "token rotation is not supported by hub init"
+                )
+            admin_token = None
+        else:
+            admin_token = args.admin_token or secrets.token_urlsafe(32)
+            store.initialize(admin_token=admin_token, public_base_url=requested_public_base_url)
+            config = store.load_config()
+            if not store.verify_token(admin_token, action="admin"):
+                raise ValueError("admin token was not installed")
         print(f"hub_root\t{hub_root}")
         print("initialized\tyes")
         print(f"public_base_url\t{config.public_base_url}")
@@ -747,6 +759,17 @@ def _web_main(argv: list[str], memory_root: Path) -> int:
         print(format_web_status(start_web_service(memory_root, host=args.host, port=args.port)))
         return 0
     raise ValueError(f"unknown web command: {args.command}")
+
+
+def cli_main(argv: list[str] | None = None) -> int:
+    try:
+        return main(argv)
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
+    except (ValueError, ProfileError, HubClientError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 def _is_help_request(args: list[str]) -> bool:
@@ -1680,4 +1703,4 @@ def _insight_trigger_incrementer(memory_root: Path, points_per_item: float) -> C
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli_main())

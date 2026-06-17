@@ -285,6 +285,35 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         self.assertNotIn("Internal Tokens", exported)
         self.assertNotIn("Private token shape", exported)
 
+    def test_file_recipe_excludes_managed_example_template_block(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Alice Auth API {#alice-auth-api}\n\n"
+            "## Session Model {#alice-session-model}\n\n"
+            "- `token-expiry` Tokens expire after one hour. -> [rel:alice-session-model]\n\n"
+            "---\n\n"
+            "> Starter template. <!-- rightmemory:example:start -->\n\n"
+            "# Sample Project Graph {#sample-project-graph}\n\n"
+            "- `sample-node` This is example content, not user memory. -> []\n\n"
+            "<!-- rightmemory:example:end -->\n",
+            encoding="utf-8",
+        )
+        write_file_view_recipe(
+            self.root,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_headings=["alice-auth-api"],
+            approved=True,
+        )
+
+        render_file_view(self.root, "auth-api-files")
+
+        exported = (self.root / "shared_views" / "auth-api-files" / "dist" / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("Tokens expire after one hour.", exported)
+        self.assertNotIn("rightmemory:example", exported)
+        self.assertNotIn("Sample Project Graph", exported)
+        self.assertNotIn("sample-node", exported)
+
     def test_file_package_does_not_include_retriever_prompt(self):
         write_file_view_recipe(
             self.root,

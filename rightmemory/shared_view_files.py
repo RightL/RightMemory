@@ -54,6 +54,8 @@ FILE_RECIPE_PUBLISH_KEYS = {"enabled", "hub_url", "credential_id"}
 
 HEADING_ID_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|S#|MF#|MQ#|#)([A-Za-z0-9_.-]+)\}")
 NODE_ID_RE = re.compile(r"^\s*-\s+`([^`]+)`")
+MANAGED_EXAMPLE_START = "<!-- rightmemory:example:start -->"
+MANAGED_EXAMPLE_END = "<!-- rightmemory:example:end -->"
 
 
 @dataclass(frozen=True)
@@ -441,7 +443,15 @@ def _selected_lines_from_source(lines: list[str], recipe: FileViewRecipe, exclud
     heading_depth: int | None = None
     excluded_subtree_depth: int | None = None
     include_subtree = False
+    in_managed_example = False
     for line in lines:
+        if MANAGED_EXAMPLE_START in line:
+            in_managed_example = MANAGED_EXAMPLE_END not in line
+            continue
+        if in_managed_example:
+            if MANAGED_EXAMPLE_END in line:
+                in_managed_example = False
+            continue
         heading_match = HEADING_ID_RE.match(line)
         if heading_match:
             depth = len(heading_match.group(1))
