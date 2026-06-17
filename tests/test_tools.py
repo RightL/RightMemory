@@ -366,6 +366,64 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertEqual(edit_result, "edited shared_views/alice-auth-api/view.md: replaced 1 occurrence")
         self.assertEqual(add_result, "staged: shared_views/alice-auth-api/view.md")
 
+    def test_shared_view_builder_tool_creates_canonical_file_recipe(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Project {#project}\n\n"
+            "## Auth API {#auth-api}\n\n"
+            "- `token-expiry` Tokens expire after one hour. -> [rel:auth-api]\n",
+            encoding="utf-8",
+        )
+        tools = MemoryTools(self.root, role="shared-view-builder")
+
+        result = tools.create_file_view_recipe(
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth context.",
+            include_headings=["auth-api"],
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
+        )
+
+        recipe = (self.root / "shared_views" / "auth-api-files" / "recipe.toml").read_text(encoding="utf-8")
+        rendered = (self.root / "shared_views" / "auth-api-files" / "dist" / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("success: wrote canonical file view auth-api-files", result)
+        self.assertIn('include_headings = ["auth-api"]', recipe)
+        self.assertIn('[publish]', recipe)
+        self.assertIn("Tokens expire after one hour.", rendered)
+
+    def test_shared_view_builder_tool_reports_bad_file_selection(self):
+        (self.root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="shared-view-builder")
+
+        result = tools.create_file_view_recipe(
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth context.",
+            include_headings=["missing-auth-api"],
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
+        )
+
+        self.assertIn("failed:", result)
+        self.assertIn("include_headings id not found in active memory: missing-auth-api", result)
+
+    def test_shared_view_builder_tool_creates_canonical_question_view(self):
+        tools = MemoryTools(self.root, role="shared-view-builder")
+
+        result = tools.create_question_view(
+            view_id="auth-api-ask",
+            title="Auth API Questions",
+            intent="Let frontend agents ask auth questions.",
+            retriever_instructions="Answer from auth API memory only.",
+        )
+
+        question_toml = (self.root / "shared_views" / "auth-api-ask" / "question.toml").read_text(encoding="utf-8")
+        retriever = (self.root / "shared_views" / "auth-api-ask" / "retriever.md").read_text(encoding="utf-8")
+        self.assertIn("success: wrote canonical question view auth-api-ask", result)
+        self.assertIn('kind = "question"', question_toml)
+        self.assertIn("access_token_hashes = []", question_toml)
+        self.assertIn("Answer from auth API memory only.", retriever)
+
     def test_insight_read_tools_are_limited_to_active_memory_and_insight_logs(self):
         (self.root / "MEMORY.md").write_text("# Domain\n\nmemory beta\n", encoding="utf-8")
         (self.root / "MEMORY_detail.md").write_text("# Detail\n", encoding="utf-8")

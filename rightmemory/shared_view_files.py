@@ -21,6 +21,36 @@ from .shared_view_models import (
     validate_heading_id,
 )
 
+FILE_RECIPE_KEYS = {
+    "version",
+    "view_id",
+    "kind",
+    "title",
+    "approved",
+    "intent",
+    "render",
+    "include_headings",
+    "include_nodes",
+    "include_files",
+    "exclude_ids",
+    "publish",
+}
+FILE_RECIPE_REQUIRED_KEYS = {
+    "version",
+    "view_id",
+    "kind",
+    "title",
+    "approved",
+    "intent",
+    "render",
+    "include_headings",
+    "include_nodes",
+    "include_files",
+    "exclude_ids",
+}
+FILE_RECIPE_ARRAY_KEYS = {"include_headings", "include_nodes", "include_files", "exclude_ids"}
+FILE_RECIPE_PUBLISH_KEYS = {"enabled", "hub_url", "credential_id"}
+
 
 HEADING_ID_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|S#|MF#|MQ#|#)([A-Za-z0-9_.-]+)\}")
 NODE_ID_RE = re.compile(r"^\s*-\s+`([^`]+)`")
@@ -118,6 +148,35 @@ def load_file_view_recipe(memory_root: Path, view_id: str) -> FileViewRecipe:
     )
 
 
+def validate_file_view_recipe_source(
+    memory_root: Path,
+    view_id: str,
+    *,
+    require_selection: bool = False,
+    require_publish: bool = False,
+) -> FileViewRecipe:
+    root = Path(memory_root).expanduser()
+    clean_view_id = validate_heading_id(view_id)
+    path = _view_dir(root, clean_view_id) / "recipe.toml"
+    if not path.is_file():
+        raise FileNotFoundError(f"file view recipe not found: shared_views/{clean_view_id}/recipe.toml")
+    with path.open("rb") as handle:
+        data = tomllib.load(handle)
+
+    errors = _file_view_recipe_schema_errors(data, require_publish=require_publish)
+    if errors:
+        raise ValueError("invalid file view recipe:\n" + "\n".join(f"- {error}" for error in errors))
+
+    recipe = load_file_view_recipe(root, clean_view_id)
+    selected = recipe.include_headings or recipe.include_nodes or recipe.include_files
+    if require_selection and not selected:
+        raise ValueError(
+            "invalid file view recipe:\n"
+            "- file view recipe must include at least one heading, node, or memory file"
+        )
+    return recipe
+
+
 def load_all_file_view_recipes(memory_root: Path) -> list[FileViewRecipe]:
     root = Path(memory_root).expanduser()
     views_root = root / PROVIDER_VIEWS_DIR
@@ -180,7 +239,7 @@ def export_file_view_package(memory_root: Path, view_id: str, target_path: Path)
 
 def approve_file_view(memory_root: Path, view_id: str) -> str:
     root = Path(memory_root).expanduser()
-    recipe = load_file_view_recipe(root, view_id)
+    recipe = validate_file_view_recipe_source(root, view_id, require_selection=True)
     _write_text(_view_dir(root, recipe.view_id) / "recipe.toml", _render_recipe_toml(_replace_recipe(recipe, approved=True)))
     return f"approved file view {recipe.view_id}"
 
@@ -195,7 +254,7 @@ def invite_file_view(
     expires_at: str | None = None,
 ) -> str:
     root = Path(memory_root).expanduser()
-    recipe = load_file_view_recipe(root, view_id)
+    recipe = validate_file_view_recipe_source(root, view_id, require_selection=True)
     if not recipe.approved:
         raise ValueError(f"file view is not approved: {recipe.view_id}")
     resolved_hub_url = _optional_text(hub_url) or recipe.publish_hub_url
@@ -247,6 +306,11 @@ def publish_approved_file_views(memory_root: Path) -> list[FileViewPublishResult
     results: list[FileViewPublishResult] = []
     for recipe in load_all_file_view_recipes(root):
         if not recipe.approved:
+            continue
+        try:
+            validate_file_view_recipe_source(root, recipe.view_id, require_selection=True)
+        except (FileNotFoundError, ValueError) as exc:
+            results.append(FileViewPublishResult(recipe.view_id, "failed", str(exc)))
             continue
         if not recipe.publish_hub_url or not recipe.publish_credential_id:
             results.append(FileViewPublishResult(recipe.view_id, "skipped", "approved recipe has no publish target"))
@@ -438,6 +502,47 @@ def _render_recipe_toml(recipe: FileViewRecipe) -> str:
             ]
         )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _file_view_recipe_schema_errors(data: dict[str, object], *, require_publish: bool) -> list[str]:
+    errors: list[str] = []
+    keys = set(data)
+    unknown = sorted(keys - FILE_RECIPE_KEYS)
+    if unknown:
+        errors.append(
+            "unsupported field(s): "
+            + ", ".join(unknown)
+            + "; use include_headings, include_nodes, include_files, and exclude_ids"
+        )
+    missing = sorted(FILE_RECIPE_REQUIRED_KEYS - keys)
+    if missing:
+        errors.append("missing required field(s): " + ", ".join(missing))
+    if data.get("kind") != "file":
+        errors.append('kind must be "file"')
+    for key in sorted(FILE_RECIPE_ARRAY_KEYS):
+        value = data.get(key)
+        if not isinstance(value, list):
+            errors.append(f"{key} must be a TOML array")
+            continue
+        if any(not isinstance(item, str) or not item.strip() for item in value):
+            errors.append(f"{key} entries must be non-empty strings")
+    publish = data.get("publish")
+    if publish is None:
+        if require_publish:
+            errors.append("missing required [publish] table")
+        return errors
+    if not isinstance(publish, dict):
+        errors.append("[publish] must be a TOML table")
+        return errors
+    unknown_publish = sorted(set(publish) - FILE_RECIPE_PUBLISH_KEYS)
+    if unknown_publish:
+        errors.append("[publish] has unsupported field(s): " + ", ".join(unknown_publish))
+    if require_publish:
+        for key in ("hub_url", "credential_id"):
+            value = publish.get(key)
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"[publish].{key} must be a non-empty string")
+    return errors
 
 
 def _replace_recipe(recipe: FileViewRecipe, *, approved: bool) -> FileViewRecipe:

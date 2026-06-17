@@ -886,7 +886,25 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("shared-view builder", instructions)
         self.assertIn("recipe.toml", instructions)
         self.assertIn("question.toml", instructions)
+        self.assertIn("create_file_view_recipe", instructions)
+        self.assertIn("create_question_view", instructions)
         self.assertIn("Do not edit provider private memory", instructions)
+
+    def test_shared_view_builder_runtime_exposes_compiler_tools(self):
+        config = RuntimeConfig(
+            role="shared-view-builder",
+            runtime_mode="standalone",
+            model_id="openai/test",
+            memory_root=Path("/memory"),
+            state_root=Path("/memory"),
+        )
+
+        with patch.object(RightMemoryRuntime, "_build_agent", return_value=object()):
+            runtime = RightMemoryRuntime(config)
+
+        tool_names = {tool.__name__ for tool in runtime._agent_tools()}
+        self.assertIn("create_file_view_recipe", tool_names)
+        self.assertIn("create_question_view", tool_names)
 
     def _write_config(self, content: str) -> Path:
         handle = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)

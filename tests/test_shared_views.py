@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.hub.client import HubClientError
-from rightmemory.shared_view_builder import run_file_view_builder
+from rightmemory.shared_view_builder import run_file_view_builder, run_question_view_builder
 from rightmemory.shared_view_files import (
     FileViewPullResult,
     FileViewPublishResult,
@@ -351,6 +351,58 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         self.assertEqual(result, "built file view auth-api-files")
         self.assertTrue(preview.is_file())
         self.assertIn("Tokens expire after one hour.", preview.read_text(encoding="utf-8"))
+
+    def test_file_view_builder_rejects_noncanonical_model_recipe(self):
+        def fake_builder(memory_root, view_id, message):
+            view_dir = memory_root / "shared_views" / view_id
+            view_dir.mkdir(parents=True)
+            (view_dir / "view.md").write_text("# Auth API Files\n", encoding="utf-8")
+            (view_dir / "recipe.toml").write_text(
+                'kind = "file"\n'
+                'approved = false\n'
+                'title = "Auth API Files"\n'
+                'intent = "Expose auth context."\n'
+                'include = ["auth-api"]\n'
+                'exclude = []\n',
+                encoding="utf-8",
+            )
+            return "built file view auth-api-files"
+
+        with patch("rightmemory.shared_view_builder._run_builder", side_effect=fake_builder):
+            with self.assertRaisesRegex(ValueError, "unsupported field\\(s\\): exclude, include"):
+                run_file_view_builder(
+                    self.root,
+                    view_id="auth-api-files",
+                    title="Auth API Files",
+                    intent="Expose auth context.",
+                    hub_url="https://hub.example.test",
+                    credential_id="alice-publish",
+                )
+
+    def test_question_view_builder_rejects_noncanonical_model_config(self):
+        def fake_builder(memory_root, view_id, message):
+            view_dir = memory_root / "shared_views" / view_id
+            view_dir.mkdir(parents=True)
+            (view_dir / "view.md").write_text("# Auth API Questions\n", encoding="utf-8")
+            (view_dir / "retriever.md").write_text("Answer from auth memory.\n", encoding="utf-8")
+            (view_dir / "question.toml").write_text(
+                'kind = "question"\n'
+                'approved = false\n'
+                'title = "Auth API Questions"\n'
+                'intent = "Answer auth questions."\n'
+                'include = ["auth-api"]\n',
+                encoding="utf-8",
+            )
+            return "built question view auth-api-ask"
+
+        with patch("rightmemory.shared_view_builder._run_builder", side_effect=fake_builder):
+            with self.assertRaisesRegex(ValueError, "unsupported field\\(s\\): include"):
+                run_question_view_builder(
+                    self.root,
+                    view_id="auth-api-ask",
+                    title="Auth API Questions",
+                    intent="Answer auth questions.",
+                )
 
 
 class SharedFileViewPullTests(unittest.TestCase):

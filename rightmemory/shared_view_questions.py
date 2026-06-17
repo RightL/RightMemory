@@ -17,6 +17,31 @@ from .shared_view_models import (
     validate_heading_id,
 )
 
+QUESTION_VIEW_KEYS = {
+    "version",
+    "view_id",
+    "kind",
+    "title",
+    "approved",
+    "intent",
+    "start_timeout_seconds",
+    "answer_timeout_seconds",
+    "provider_role",
+    "access_token_hashes",
+}
+QUESTION_VIEW_REQUIRED_KEYS = {
+    "version",
+    "view_id",
+    "kind",
+    "title",
+    "approved",
+    "intent",
+    "start_timeout_seconds",
+    "answer_timeout_seconds",
+    "provider_role",
+    "access_token_hashes",
+}
+
 
 DEFAULT_START_TIMEOUT_SECONDS = 10
 DEFAULT_ANSWER_TIMEOUT_SECONDS = 180
@@ -94,9 +119,23 @@ def load_question_view(memory_root: Path, view_id: str) -> QuestionViewConfig:
     )
 
 
+def validate_question_view_source(memory_root: Path, view_id: str) -> QuestionViewConfig:
+    root = Path(memory_root).expanduser()
+    clean_view_id = validate_heading_id(view_id)
+    path = root / PROVIDER_VIEWS_DIR / clean_view_id / "question.toml"
+    if not path.is_file():
+        raise FileNotFoundError(f"question view config not found: shared_views/{clean_view_id}/question.toml")
+    with path.open("rb") as handle:
+        data = tomllib.load(handle)
+    errors = _question_view_schema_errors(data)
+    if errors:
+        raise ValueError("invalid question view config:\n" + "\n".join(f"- {error}" for error in errors))
+    return load_question_view(root, clean_view_id)
+
+
 def approve_question_view(memory_root: Path, view_id: str) -> str:
     root = Path(memory_root).expanduser()
-    config = load_question_view(root, view_id)
+    config = validate_question_view_source(root, view_id)
     approved = QuestionViewConfig(
         view_id=config.view_id,
         title=config.title,
@@ -122,7 +161,7 @@ def publish_question_view(
     expires_at: str | None = None,
 ) -> str:
     root = Path(memory_root).expanduser()
-    config = load_question_view(root, view_id)
+    config = validate_question_view_source(root, view_id)
     if not config.approved:
         raise ValueError(f"question view is not approved: {config.view_id}")
     clean_hub_url = _required_text(hub_url, "hub_url")
@@ -325,6 +364,22 @@ def _render_question_toml(config: QuestionViewConfig) -> str:
             "",
         ]
     )
+
+
+def _question_view_schema_errors(data: dict[str, object]) -> list[str]:
+    errors: list[str] = []
+    keys = set(data)
+    unknown = sorted(keys - QUESTION_VIEW_KEYS)
+    if unknown:
+        errors.append("unsupported field(s): " + ", ".join(unknown))
+    missing = sorted(QUESTION_VIEW_REQUIRED_KEYS - keys)
+    if missing:
+        errors.append("missing required field(s): " + ", ".join(missing))
+    if data.get("kind") != "question":
+        errors.append('kind must be "question"')
+    if not isinstance(data.get("access_token_hashes"), list):
+        errors.append("access_token_hashes must be a TOML array")
+    return errors
 
 
 def _positive_int(value: object, default: int) -> int:

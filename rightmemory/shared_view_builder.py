@@ -4,8 +4,9 @@ from pathlib import Path
 
 from .config import load_config
 from .runtime import RightMemoryRuntime
-from .shared_view_files import render_file_view
+from .shared_view_files import render_file_view, validate_file_view_recipe_source
 from .shared_view_models import validate_heading_id
+from .shared_view_questions import validate_question_view_source
 
 
 def run_file_view_builder(
@@ -33,7 +34,14 @@ def run_file_view_builder(
     output = _run_builder(memory_root, clean_view_id, message)
     _require_artifact(memory_root, clean_view_id, "view.md")
     _require_artifact(memory_root, clean_view_id, "recipe.toml")
+    validate_file_view_recipe_source(
+        memory_root,
+        clean_view_id,
+        require_selection=True,
+        require_publish=True,
+    )
     render_file_view(memory_root, clean_view_id)
+    _require_nonempty_file_view_context(memory_root, clean_view_id)
     return output
 
 
@@ -59,6 +67,7 @@ def run_question_view_builder(
     _require_artifact(memory_root, clean_view_id, "view.md")
     _require_artifact(memory_root, clean_view_id, "retriever.md")
     _require_artifact(memory_root, clean_view_id, "question.toml")
+    validate_question_view_source(memory_root, clean_view_id)
     return output
 
 
@@ -77,3 +86,15 @@ def _require_artifact(memory_root: Path, view_id: str, relative: str) -> None:
     path = root / "shared_views" / view_id / relative
     if not path.is_file():
         raise RuntimeError(f"shared-view builder did not create required artifact: {path.relative_to(root)}")
+
+
+def _require_nonempty_file_view_context(memory_root: Path, view_id: str) -> None:
+    root = Path(memory_root).expanduser()
+    path = root / "shared_views" / view_id / "dist" / "MEMORY.md"
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    marker = "## Published Context"
+    if marker not in text or not text.split(marker, 1)[1].strip():
+        raise RuntimeError(
+            "shared-view builder rendered an empty file view; "
+            "call create_file_view_recipe with ids that select memory content"
+        )

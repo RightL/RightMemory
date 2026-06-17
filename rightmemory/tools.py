@@ -8,6 +8,13 @@ from difflib import SequenceMatcher
 from hashlib import sha256
 from pathlib import Path
 
+from .shared_view_files import (
+    render_file_view,
+    validate_file_view_recipe_source,
+    write_file_view_recipe,
+)
+from .shared_view_questions import validate_question_view_source, write_question_view
+
 
 FULL_READ_LINE_LIMIT = 200
 READ_TOOL_LINE_LIMIT = 2000
@@ -362,6 +369,96 @@ class MemoryTools:
             self._read_signatures[destination] = signature
         return f"renamed {source_relative} to {destination_relative}"
 
+    def create_file_view_recipe(
+        self,
+        view_id: str,
+        title: str,
+        intent: str,
+        include_headings: list[str] | None = None,
+        include_nodes: list[str] | None = None,
+        include_files: list[str] | None = None,
+        exclude_ids: list[str] | None = None,
+        publish_hub_url: str | None = None,
+        publish_credential_id: str | None = None,
+    ) -> str:
+        """Create and render a canonical MF# file-view recipe, or return actionable validation failures."""
+        self._require_shared_view_builder_tool()
+        include_headings = include_headings or []
+        include_nodes = include_nodes or []
+        include_files = include_files or []
+        exclude_ids = exclude_ids or []
+        errors = self._shared_view_selection_errors(
+            include_headings=include_headings,
+            include_nodes=include_nodes,
+            include_files=include_files,
+            exclude_ids=exclude_ids,
+        )
+        if not (include_headings or include_nodes or include_files):
+            errors.append("select at least one include_headings, include_nodes, or include_files entry")
+        if errors:
+            return "failed: " + "; ".join(errors)
+        try:
+            write_file_view_recipe(
+                self.memory_root,
+                view_id=view_id,
+                title=title,
+                intent=intent,
+                include_headings=include_headings,
+                include_nodes=include_nodes,
+                include_files=include_files,
+                exclude_ids=exclude_ids,
+                approved=False,
+                publish_hub_url=publish_hub_url,
+                publish_credential_id=publish_credential_id,
+            )
+            recipe = validate_file_view_recipe_source(
+                self.memory_root,
+                view_id,
+                require_selection=True,
+                require_publish=bool(publish_hub_url or publish_credential_id),
+            )
+            render_file_view(self.memory_root, recipe.view_id)
+            rendered = self.memory_root / "shared_views" / recipe.view_id / "dist" / "MEMORY.md"
+            if not self._file_view_rendered_context(rendered):
+                return "failed: selected ids rendered an empty Published Context; choose ids that match memory content"
+        except (OSError, ValueError) as exc:
+            return f"failed: {exc}"
+        return (
+            f"success: wrote canonical file view {recipe.view_id} with "
+            f"{len(recipe.include_headings)} heading(s), {len(recipe.include_nodes)} node(s), "
+            f"{len(recipe.include_files)} file(s), and {len(recipe.exclude_ids)} excluded id(s)"
+        )
+
+    def create_question_view(
+        self,
+        view_id: str,
+        title: str,
+        intent: str,
+        retriever_instructions: str,
+        start_timeout_seconds: int = 10,
+        answer_timeout_seconds: int = 180,
+    ) -> str:
+        """Create canonical MQ# question-view source files, or return actionable validation failures."""
+        self._require_shared_view_builder_tool()
+        try:
+            write_question_view(
+                self.memory_root,
+                view_id=view_id,
+                title=title,
+                intent=intent,
+                retriever_instructions=retriever_instructions,
+                approved=False,
+                start_timeout_seconds=start_timeout_seconds,
+                answer_timeout_seconds=answer_timeout_seconds,
+            )
+            config = validate_question_view_source(self.memory_root, view_id)
+        except (OSError, ValueError) as exc:
+            return f"failed: {exc}"
+        return (
+            f"success: wrote canonical question view {config.view_id} with "
+            f"start timeout {config.start_timeout_seconds}s and answer timeout {config.answer_timeout_seconds}s"
+        )
+
     def git_status(self) -> str:
         """Return short git status for the RightMemory root."""
         if self._has_role_read_scope():
@@ -586,6 +683,78 @@ class MemoryTools:
             if path.is_file() and self._is_under_root(path)
         ]
         return sorted(set(files))
+
+    def _require_shared_view_builder_tool(self) -> None:
+        if self.role not in SHARED_VIEW_BUILDER_ROLES:
+            raise ValueError("shared-view compiler tools are only available to the shared-view-builder role")
+
+    def _shared_view_selection_errors(
+        self,
+        *,
+        include_headings: list[str],
+        include_nodes: list[str],
+        include_files: list[str],
+        exclude_ids: list[str],
+    ) -> list[str]:
+        errors: list[str] = []
+        memory_ids = self._memory_id_kinds()
+        errors.extend(self._id_selection_errors("include_headings", include_headings, memory_ids, expected_kind="heading"))
+        errors.extend(self._id_selection_errors("include_nodes", include_nodes, memory_ids, expected_kind="node"))
+        errors.extend(self._id_selection_errors("exclude_ids", exclude_ids, memory_ids, expected_kind=None))
+        for value in include_files:
+            path = Path(value)
+            if path.is_absolute() or ".." in path.parts or not re.fullmatch(r"MEMORY(?:_[A-Za-z0-9_.-]+)?\.md", path.as_posix()):
+                errors.append(f"include_files entry must be a memory file: {value}")
+                continue
+            if not (self.memory_root / path).is_file():
+                errors.append(f"include_files entry does not exist: {value}")
+        return errors
+
+    def _id_selection_errors(
+        self,
+        label: str,
+        ids: list[str],
+        memory_ids: dict[str, str],
+        *,
+        expected_kind: str | None,
+    ) -> list[str]:
+        errors: list[str] = []
+        seen: set[str] = set()
+        for item_id in ids:
+            if item_id in seen:
+                errors.append(f"{label} contains duplicate id: {item_id}")
+                continue
+            seen.add(item_id)
+            actual_kind = memory_ids.get(item_id)
+            if actual_kind is None:
+                errors.append(f"{label} id not found in active memory: {item_id}")
+            elif expected_kind is not None and actual_kind != expected_kind:
+                errors.append(f"{label} id {item_id} is a {actual_kind}, not a {expected_kind}")
+        return errors
+
+    def _memory_id_kinds(self) -> dict[str, str]:
+        ids: dict[str, str] = {}
+        for file_path in self._memory_files():
+            if self._is_memory_skill_file(file_path):
+                continue
+            for line in file_path.read_text(encoding="utf-8").splitlines():
+                heading = ANCHOR_RE.match(line)
+                if heading:
+                    ids.setdefault(heading.group(2), "heading")
+                    continue
+                node = NODE_RE.match(line)
+                if node:
+                    ids.setdefault(node.group(1), "node")
+        return ids
+
+    def _file_view_rendered_context(self, path: Path) -> str:
+        if not path.is_file():
+            return ""
+        marker = "## Published Context"
+        text = path.read_text(encoding="utf-8")
+        if marker not in text:
+            return ""
+        return text.split(marker, 1)[1].strip()
 
     def _read_lines(self, resolved: Path, original_path: str, mark_read: bool = True) -> list[str]:
         if not resolved.is_file():

@@ -576,6 +576,13 @@ class RightMemoryRuntime:
         ]
         if self.config.role == "sync-reconciler":
             write_tools.append(self._agent_tool(self.tools.git_discard))
+        if self.config.role == "shared-view-builder":
+            write_tools.extend(
+                [
+                    self._agent_tool(self.tools.create_file_view_recipe),
+                    self._agent_tool(self.tools.create_question_view),
+                ]
+            )
         if self.config.sync.enabled and self.config.role in SYNC_TOOL_ROLES:
             write_tools.append(self._agent_tool(self.sync_push))
         return write_tools
