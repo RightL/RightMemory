@@ -92,14 +92,101 @@ function renderOptions(items, selectedValue = "") {
     .join("");
 }
 
+function credentialLabel(credential) {
+  const parts = [credential.credential_id || ""];
+  if (credential.kind) {
+    parts.push(credential.kind);
+  }
+  if (credential.base_url) {
+    parts.push(credential.base_url);
+  }
+  return parts.filter(Boolean).join(" | ");
+}
+
+function renderCredentialOptions(credentials, blankLabel = "") {
+  const options = [];
+  if (blankLabel) {
+    options.push(`<option value="">${escapeHtml(blankLabel)}</option>`);
+  }
+  if (!credentials.length && !blankLabel) {
+    return `<option value="">No credentials yet</option>`;
+  }
+  credentials.forEach((credential) => {
+    options.push(`
+      <option
+        value="${escapeHtml(credential.credential_id || "")}"
+        data-base-url="${escapeHtml(credential.base_url || "")}"
+        data-provider-id="${escapeHtml(credential.provider_id || "")}"
+      >${escapeHtml(credentialLabel(credential))}</option>
+    `);
+  });
+  return options.join("");
+}
+
 function renderJsonPanel(title, value) {
   return `<section class="panel wide"><h2>${escapeHtml(title)}</h2><pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre></section>`;
+}
+
+function renderProviderInbox(interactions) {
+  if (!interactions.length) {
+    return `<p>No provider inbox records.</p>`;
+  }
+  const groups = new Map();
+  interactions.forEach((interaction) => {
+    const viewId = interaction.view_id || "unknown-view";
+    if (!groups.has(viewId)) {
+      groups.set(viewId, []);
+    }
+    groups.get(viewId).push(interaction);
+  });
+  return Array.from(groups.entries()).map(([viewId, records]) => `
+    <div class="record-group">
+      <h3>${escapeHtml(viewId)}</h3>
+      <div class="record-list">
+        ${records.map(renderInboxRecord).join("")}
+      </div>
+    </div>
+  `).join("");
+}
+
+function renderInboxRecord(record) {
+  const payload = record.payload || {};
+  const message = payload.message || record.message || "";
+  const task = payload.task_context || record.task_context || "";
+  return `
+    <article class="record-card">
+      <strong>${escapeHtml(message || record.interaction_id || "Inbox record")}</strong>
+      <small>${escapeHtml(record.created_at || "")}</small>
+      <small>${escapeHtml(record.connection_id || "")}${record.actor_id ? ` | ${escapeHtml(record.actor_id)}` : ""}</small>
+      ${task ? `<p>${escapeHtml(task)}</p>` : ""}
+    </article>
+  `;
+}
+
+function renderPublishEvents(events) {
+  if (!events.length) {
+    return `<p>No publish events.</p>`;
+  }
+  return `
+    <div class="record-list">
+      ${events.map((event) => `
+        <article class="record-card">
+          <strong>${escapeHtml(event.view_id || "unknown-view")} ${escapeHtml(event.status || "")}</strong>
+          <small>${escapeHtml(event.created_at || "")}${event.trigger ? ` | ${escapeHtml(event.trigger)}` : ""}</small>
+          <p>${escapeHtml(event.message || "")}</p>
+        </article>
+      `).join("")}
+    </div>
+  `;
 }
 
 async function renderSharedViews() {
   const payload = await fetchJson("/api/share/views");
   const providerViews = payload.data.provider_views || [];
   const connections = payload.data.connections || [];
+  const credentials = payload.data.credentials || [];
+  const credentialOptions = renderCredentialOptions(credentials);
+  const optionalCredentialOptions = renderCredentialOptions(credentials, "Use recipe default");
   const providerOptions = renderOptions(
     providerViews.map((view) => ({
       value: view.view_id,
@@ -148,6 +235,7 @@ async function renderSharedViews() {
   const hasQuestionConnections = connections.some((connection) => (connection.type || connection.view_type) === "question");
   const hasFileProviderViews = providerViews.some((view) => view.type === "file");
   const hasQuestionProviderViews = providerViews.some((view) => view.type === "question");
+  const hasCredentials = credentials.length > 0;
 
   return `
     <div class="flow-layout">
@@ -176,11 +264,11 @@ async function renderSharedViews() {
             <input name="hub_url" placeholder="https://hub.example.test" required>
           </label>
           <label>
-            Credential id
-            <input name="credential_id" placeholder="alice-publish" required>
+            Credential
+            <select class="credential-select" name="credential_id" required>${credentialOptions}</select>
           </label>
           <div class="button-row">
-            <button class="primary" type="submit">Build File View</button>
+            <button class="primary" type="submit"${hasCredentials ? "" : " disabled"}>Build File View</button>
           </div>
         </form>
       </section>
@@ -255,8 +343,8 @@ async function renderSharedViews() {
               <input name="hub_url" placeholder="from recipe">
             </label>
             <label>
-              Credential id
-              <input name="credential_id" placeholder="from recipe">
+              Credential
+              <select class="credential-select" name="credential_id">${optionalCredentialOptions}</select>
             </label>
             <label>
               Label
@@ -290,8 +378,8 @@ async function renderSharedViews() {
             <input name="hub_url" placeholder="https://hub.example.test" required>
           </label>
           <label>
-            Credential id
-            <input name="credential_id" placeholder="alice-publish" required>
+            Credential
+            <select class="credential-select" name="credential_id" required>${credentialOptions}</select>
           </label>
           <label>
             Question base URL
@@ -309,7 +397,7 @@ async function renderSharedViews() {
             </label>
           </details>
           <div class="button-row">
-            <button class="primary" type="submit"${hasQuestionProviderViews ? "" : " disabled"}>Publish Invitation</button>
+            <button class="primary" type="submit"${hasQuestionProviderViews && hasCredentials ? "" : " disabled"}>Publish Invitation</button>
           </div>
         </form>
       </section>
@@ -362,6 +450,8 @@ async function renderSharedViews() {
           <div class="button-row">
             <button class="primary" name="action" value="pull" type="submit"${hasFileConnections ? "" : " disabled"}>Pull</button>
             <button name="action" value="status" type="submit"${hasFileConnections ? "" : " disabled"}>Status</button>
+            <button id="pull-all-connections" type="button"${hasFileConnections ? "" : " disabled"}>Pull All</button>
+            <button id="status-all-connections" type="button"${connections.length ? "" : " disabled"}>Status All</button>
           </div>
         </form>
         <form id="question-connection-form" class="guided-form">
@@ -398,6 +488,38 @@ async function renderSharedViews() {
           </details>
         </form>
       </section>
+
+      <section class="panel flow-panel">
+        <div class="section-heading">
+          <span class="step-badge">8</span>
+          <div>
+            <h2>Provider Inbox</h2>
+          </div>
+        </div>
+        <form id="provider-inbox-form" class="guided-form">
+          <label>
+            Credential
+            <select class="credential-select" name="credential_id" required>${credentialOptions}</select>
+          </label>
+          <details class="advanced">
+            <summary>Provider override</summary>
+            <label>
+              HTTP hub URL
+              <input name="hub_url" placeholder="from credential">
+            </label>
+            <label>
+              Provider id
+              <input name="provider_id" placeholder="from credential">
+            </label>
+          </details>
+          <div class="button-row">
+            <button class="primary" type="submit"${hasCredentials ? "" : " disabled"}>Load Inbox</button>
+          </div>
+        </form>
+        <div id="provider-inbox-list" class="record-output">
+          <p>No provider inbox loaded.</p>
+        </div>
+      </section>
     </div>
 
     <section class="panel wide">
@@ -413,6 +535,16 @@ async function renderSharedViews() {
           <h3>Views I Use</h3>
           ${renderItems(connections.map((connection) => ({ label: `${connection.heading_id} (${connection.relationship})` })))}
         </div>
+      </div>
+    </section>
+
+    <section class="panel wide" id="publish-events-panel">
+      <div class="section-heading">
+        <h2>Auto-Publish Events</h2>
+      </div>
+      <div id="publish-events-list" class="record-output"><p>Load events to inspect recent file-view publishing.</p></div>
+      <div class="button-row">
+        <button id="load-publish-events" type="button">Load Events</button>
       </div>
     </section>
 
@@ -784,6 +916,8 @@ function attachPanelHandlers() {
 }
 
 function attachSharedViewHandlers() {
+  attachCredentialSelectHandlers();
+
   const buildFileViewForm = document.querySelector("#build-file-view-form");
   if (buildFileViewForm) {
     buildFileViewForm.addEventListener("submit", async (event) => {
@@ -946,6 +1080,32 @@ function attachSharedViewHandlers() {
     });
   }
 
+  const pullAllButton = document.querySelector("#pull-all-connections");
+  if (pullAllButton) {
+    pullAllButton.addEventListener("click", async () => {
+      try {
+        const payload = await fetchJson("/api/use/connections/pull-all", { method: "POST" });
+        showSharedViewResult(JSON.stringify(payload.data.results || [], null, 2));
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const statusAllButton = document.querySelector("#status-all-connections");
+  if (statusAllButton) {
+    statusAllButton.addEventListener("click", async () => {
+      try {
+        const payload = await fetchJson("/api/use/connections/status-all");
+        showSharedViewResult(JSON.stringify(payload.data.statuses || [], null, 2));
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
   const questionConnectionForm = document.querySelector("#question-connection-form");
   if (questionConnectionForm) {
     questionConnectionForm.addEventListener("submit", async (event) => {
@@ -985,6 +1145,74 @@ function attachSharedViewHandlers() {
         setMessage(error.message);
       }
     });
+  }
+
+  const providerInboxForm = document.querySelector("#provider-inbox-form");
+  if (providerInboxForm) {
+    providerInboxForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const payload = await fetchJson("/api/share/provider-inbox", {
+          method: "POST",
+          body: JSON.stringify({
+            credential_id: form.get("credential_id"),
+            hub_url: form.get("hub_url"),
+            provider_id: form.get("provider_id"),
+          }),
+        });
+        const target = document.querySelector("#provider-inbox-list");
+        if (target) {
+          target.innerHTML = renderProviderInbox(payload.data.interactions || []);
+        }
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const loadPublishEventsButton = document.querySelector("#load-publish-events");
+  if (loadPublishEventsButton) {
+    loadPublishEventsButton.addEventListener("click", async () => {
+      try {
+        const payload = await fetchJson("/api/share/publish-events");
+        const target = document.querySelector("#publish-events-list");
+        if (target) {
+          target.innerHTML = renderPublishEvents(payload.data.events || []);
+        }
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+}
+
+function attachCredentialSelectHandlers() {
+  document.querySelectorAll(".credential-select").forEach((select) => {
+    const update = () => fillCredentialDefaults(select);
+    select.addEventListener("change", update);
+    update();
+  });
+}
+
+function fillCredentialDefaults(select) {
+  const option = select.selectedOptions ? select.selectedOptions[0] : null;
+  if (!option || !option.value) {
+    return;
+  }
+  const form = select.closest("form");
+  if (!form) {
+    return;
+  }
+  const hubInput = form.querySelector('input[name="hub_url"]');
+  if (hubInput && !hubInput.value && option.dataset.baseUrl) {
+    hubInput.value = option.dataset.baseUrl;
+  }
+  const providerInput = form.querySelector('input[name="provider_id"]');
+  if (providerInput && !providerInput.value && option.dataset.providerId) {
+    providerInput.value = option.dataset.providerId;
   }
 }
 

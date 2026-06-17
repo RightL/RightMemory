@@ -142,6 +142,11 @@ class WebStudioStaticTests(unittest.TestCase):
         self.assertNotIn("consumer-view-form", script.text)
         self.assertIn("accept-invite-form", script.text)
         self.assertIn("credential-form", script.text)
+        self.assertIn("provider-inbox-form", script.text)
+        self.assertIn("publish-events-panel", script.text)
+        self.assertIn("pull-all-connections", script.text)
+        self.assertIn("status-all-connections", script.text)
+        self.assertIn("credential-select", script.text)
 
 
 @unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")

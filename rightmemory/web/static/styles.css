@@ -310,6 +310,39 @@ textarea {
   margin-top: 5px;
 }
 
+.record-output {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.record-group {
+  display: grid;
+  gap: 8px;
+}
+
+.record-list {
+  display: grid;
+  gap: 8px;
+}
+
+.record-card {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 10px;
+}
+
+.record-card small {
+  color: var(--muted);
+}
+
+.record-card p {
+  color: var(--text);
+}
+
 .browser-grid {
   display: grid;
   grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
