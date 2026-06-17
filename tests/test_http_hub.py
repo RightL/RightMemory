@@ -111,6 +111,64 @@ class HubStoreTests(unittest.TestCase):
         self.assertIsNotNone(accepted)
         self.assertEqual(accepted["question_token"], "question-token")
 
+    def test_admin_helpers_list_hub_state_without_secret_material(self):
+        store = HubStore(self.root)
+        store.initialize(admin_token="admin-secret")
+        provider_token = store.create_provider_token("alice", label="publish")
+        store.register_question_view(
+            "alice-auth-api",
+            provider_id="alice",
+            title="Alice Auth API",
+            description="Public auth facts.",
+            question_base_url="https://provider.example.test",
+            question_token="question-token",
+            created_by_token_id=provider_token.token_id,
+        )
+        invitation = store.create_invitation("alice-auth-api", actor_id=provider_token.token_id, label="frontend")
+        accepted = store.accept_invitation(invitation["raw_token"], consumer_label="frontend")
+        self.assertIsNotNone(accepted)
+        actor = store.require_token(accepted["connection_token"], action="connect", view_id="alice-auth-api")
+        interaction = store.record_interaction(
+            "alice-auth-api",
+            actor=actor,
+            payload={"actor": "assistant", "message": "Docs are stale."},
+        )
+
+        overview = store.hub_overview()
+        providers = store.list_providers()
+        views = store.list_views()
+        invitations = store.list_view_invitations("alice-auth-api")
+        connections = store.list_connections()
+        interactions = store.list_interactions(provider_id="alice")
+        audit = store.list_audit_events(limit=50)
+        rendered = " ".join(
+            [
+                str(overview),
+                str(providers),
+                str(views),
+                str(invitations),
+                str(connections),
+                str(interactions),
+                str([event.details for event in audit]),
+            ]
+        )
+
+        self.assertEqual(overview["provider_count"], 1)
+        self.assertEqual(overview["view_count"], 1)
+        self.assertGreaterEqual(overview["active_token_count"], 3)
+        self.assertEqual(providers[0]["provider_id"], "alice")
+        self.assertEqual(views[0]["view_id"], "alice-auth-api")
+        self.assertEqual(views[0]["kind"], "question")
+        self.assertEqual(views[0]["question_base_url"], "https://provider.example.test")
+        self.assertEqual(invitations[0]["token_id"], invitation["token_id"])
+        self.assertEqual(connections[0]["connection_id"], accepted["connection_id"])
+        self.assertEqual(interactions[0]["interaction_id"], interaction["interaction_id"])
+        self.assertIn("question_view.registered", [event.kind for event in audit])
+        self.assertNotIn(provider_token.raw_token, rendered)
+        self.assertNotIn(invitation["raw_token"], rendered)
+        self.assertNotIn(accepted["connection_token"], rendered)
+        self.assertNotIn("question-token", str(views))
+
 
 class HubPackageTests(unittest.TestCase):
     def setUp(self):

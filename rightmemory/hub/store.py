@@ -215,15 +215,39 @@ class HubStore:
             )
             return True
 
-    def list_tokens(self) -> list[dict[str, Any]]:
+    def list_tokens(
+        self,
+        *,
+        action: str | None = None,
+        provider_id: str | None = None,
+        view_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[object] = []
+        if action:
+            clauses.append("action = ?")
+            values.append(_validate_action(action))
+        if provider_id:
+            clauses.append("provider_id = ?")
+            values.append(_validate_hub_id(provider_id, "provider_id"))
+        if view_id:
+            clauses.append("view_id = ?")
+            values.append(_validate_hub_id(view_id, "view_id"))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.extend([_normalize_limit(limit), _normalize_offset(offset)])
         with self._connect() as connection:
             self._apply_migrations(connection)
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, action, provider_id, view_id, label, created_at, revoked_at
                 FROM tokens
-                ORDER BY created_at, id
-                """
+                {where}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                values,
             ).fetchall()
         return [
             {
@@ -238,17 +262,293 @@ class HubStore:
             for row in rows
         ]
 
-    def list_audit_events(self) -> list[AuditEvent]:
+    def list_audit_events(
+        self,
+        *,
+        kind: str | None = None,
+        provider_id: str | None = None,
+        view_id: str | None = None,
+        actor_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AuditEvent]:
+        clauses: list[str] = []
+        values: list[object] = []
+        if kind:
+            clauses.append("kind = ?")
+            values.append(_validate_hub_id(kind, "audit kind"))
+        if provider_id:
+            clauses.append("provider_id = ?")
+            values.append(_validate_hub_id(provider_id, "provider_id"))
+        if view_id:
+            clauses.append("view_id = ?")
+            values.append(_validate_hub_id(view_id, "view_id"))
+        if actor_id:
+            clauses.append("actor_id = ?")
+            values.append(_validate_hub_id(actor_id, "actor_id"))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.extend([_normalize_limit(limit), _normalize_offset(offset)])
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            rows = connection.execute(
+                f"""
+                SELECT id, kind, actor_id, provider_id, view_id, details_json, created_at
+                FROM audit_events
+                {where}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                values,
+            ).fetchall()
+        return [_audit_event_from_row(row) for row in rows]
+
+    def hub_overview(self) -> dict[str, Any]:
+        config = self.load_config()
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            provider_count = connection.execute("SELECT COUNT(*) FROM providers").fetchone()[0]
+            view_count = connection.execute("SELECT COUNT(*) FROM views").fetchone()[0]
+            token_count = connection.execute("SELECT COUNT(*) FROM tokens").fetchone()[0]
+            active_token_count = connection.execute(
+                "SELECT COUNT(*) FROM tokens WHERE revoked_at IS NULL"
+            ).fetchone()[0]
+            interaction_count = connection.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
+            audit_event_count = connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+            recent_auth_failures = connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE kind = 'token.rejected'"
+            ).fetchone()[0]
+        return {
+            "hub_root": str(self.root.resolve()),
+            "initialized": self.db_path.is_file() and self.config_path.is_file(),
+            "storage_present": self.storage_root.is_dir(),
+            "public_base_url": config.public_base_url,
+            "max_package_bytes": config.max_package_bytes,
+            "provider_count": provider_count,
+            "view_count": view_count,
+            "token_count": token_count,
+            "active_token_count": active_token_count,
+            "interaction_count": interaction_count,
+            "audit_event_count": audit_event_count,
+            "recent_auth_failure_count": recent_auth_failures,
+        }
+
+    def list_providers(self, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         with self._connect() as connection:
             self._apply_migrations(connection)
             rows = connection.execute(
                 """
-                SELECT id, kind, actor_id, provider_id, view_id, details_json, created_at
-                FROM audit_events
-                ORDER BY created_at, id
-                """
+                SELECT
+                    p.id AS provider_id,
+                    p.label AS label,
+                    p.created_at AS created_at,
+                    p.updated_at AS updated_at,
+                    COUNT(DISTINCT v.id) AS view_count,
+                    COUNT(DISTINCT CASE WHEN t.revoked_at IS NULL THEN t.id END) AS active_token_count
+                FROM providers p
+                LEFT JOIN views v ON v.provider_id = p.id
+                LEFT JOIN tokens t ON t.provider_id = p.id
+                GROUP BY p.id
+                ORDER BY p.updated_at DESC, p.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (_normalize_limit(limit), _normalize_offset(offset)),
             ).fetchall()
-        return [_audit_event_from_row(row) for row in rows]
+        return [
+            {
+                "provider_id": row["provider_id"],
+                "label": row["label"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "view_count": row["view_count"],
+                "active_token_count": row["active_token_count"],
+            }
+            for row in rows
+        ]
+
+    def list_views(
+        self,
+        *,
+        provider_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[object] = []
+        if provider_id:
+            clauses.append("v.provider_id = ?")
+            values.append(_validate_hub_id(provider_id, "provider_id"))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.extend([_normalize_limit(limit), _normalize_offset(offset)])
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            rows = connection.execute(
+                f"""
+                SELECT
+                    v.id AS view_id,
+                    v.provider_id AS provider_id,
+                    v.title AS title,
+                    v.ref AS ref,
+                    v.description AS description,
+                    v.current_version_id AS current_version_id,
+                    v.created_at AS created_at,
+                    v.updated_at AS updated_at,
+                    vv.package_hash AS package_hash,
+                    vv.storage_path AS storage_path,
+                    vv.manifest_json AS manifest_json,
+                    vv.created_at AS version_created_at,
+                    vv.created_by_token_id AS created_by_token_id
+                FROM views v
+                LEFT JOIN view_versions vv ON vv.id = v.current_version_id
+                {where}
+                ORDER BY v.updated_at DESC, v.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                values,
+            ).fetchall()
+        return [_admin_view_from_row(row) for row in rows]
+
+    def get_admin_view(self, view_id: str) -> dict[str, Any] | None:
+        clean_view_id = _validate_hub_id(view_id, "view_id")
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            row = connection.execute(
+                """
+                SELECT
+                    v.id AS view_id,
+                    v.provider_id AS provider_id,
+                    v.title AS title,
+                    v.ref AS ref,
+                    v.description AS description,
+                    v.current_version_id AS current_version_id,
+                    v.created_at AS created_at,
+                    v.updated_at AS updated_at,
+                    vv.package_hash AS package_hash,
+                    vv.storage_path AS storage_path,
+                    vv.manifest_json AS manifest_json,
+                    vv.created_at AS version_created_at,
+                    vv.created_by_token_id AS created_by_token_id
+                FROM views v
+                LEFT JOIN view_versions vv ON vv.id = v.current_version_id
+                WHERE v.id = ?
+                """,
+                (clean_view_id,),
+            ).fetchone()
+        return _admin_view_from_row(row) if row is not None else None
+
+    def list_view_invitations(
+        self,
+        view_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clean_view_id = _validate_hub_id(view_id, "view_id")
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            rows = connection.execute(
+                """
+                SELECT
+                    i.id AS invitation_id,
+                    i.view_id AS view_id,
+                    i.token_id AS token_id,
+                    i.label AS label,
+                    i.expires_at AS expires_at,
+                    i.revoked_at AS invitation_revoked_at,
+                    i.created_at AS created_at,
+                    i.accepted_count AS accepted_count,
+                    t.revoked_at AS token_revoked_at
+                FROM invitations i
+                LEFT JOIN tokens t ON t.id = i.token_id
+                WHERE i.view_id = ?
+                ORDER BY i.created_at DESC, i.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (clean_view_id, _normalize_limit(limit), _normalize_offset(offset)),
+            ).fetchall()
+        return [_admin_invitation_from_row(row) for row in rows]
+
+    def list_connections(
+        self,
+        *,
+        view_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[object] = []
+        if view_id:
+            clauses.append("c.view_id = ?")
+            values.append(_validate_hub_id(view_id, "view_id"))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.extend([_normalize_limit(limit), _normalize_offset(offset)])
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            rows = connection.execute(
+                f"""
+                SELECT
+                    c.id AS connection_id,
+                    c.invitation_id AS invitation_id,
+                    c.view_id AS view_id,
+                    c.token_id AS token_id,
+                    c.consumer_label AS consumer_label,
+                    c.created_at AS created_at,
+                    c.revoked_at AS connection_revoked_at,
+                    t.revoked_at AS token_revoked_at,
+                    v.provider_id AS provider_id
+                FROM connections c
+                LEFT JOIN tokens t ON t.id = c.token_id
+                JOIN views v ON v.id = c.view_id
+                {where}
+                ORDER BY c.created_at DESC, c.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                values,
+            ).fetchall()
+        return [_admin_connection_from_row(row) for row in rows]
+
+    def list_interactions(
+        self,
+        *,
+        provider_id: str | None = None,
+        view_id: str | None = None,
+        connection_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[object] = []
+        if provider_id:
+            clauses.append("v.provider_id = ?")
+            values.append(_validate_hub_id(provider_id, "provider_id"))
+        if view_id:
+            clauses.append("i.view_id = ?")
+            values.append(_validate_hub_id(view_id, "view_id"))
+        if connection_id:
+            clauses.append("i.connection_id = ?")
+            values.append(_validate_hub_id(connection_id, "connection_id"))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.extend([_normalize_limit(limit), _normalize_offset(offset)])
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            rows = connection.execute(
+                f"""
+                SELECT
+                    i.id AS interaction_id,
+                    i.view_id AS view_id,
+                    i.connection_id AS connection_id,
+                    i.actor_id AS actor_id,
+                    i.payload_json AS payload_json,
+                    i.created_at AS created_at,
+                    v.provider_id AS provider_id
+                FROM interactions i
+                JOIN views v ON v.id = i.view_id
+                {where}
+                ORDER BY i.created_at DESC, i.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                values,
+            ).fetchall()
+        return [_interaction_from_row(row) for row in rows]
 
     def get_view(self, view_id: str) -> dict[str, Any] | None:
         clean_view_id = _validate_hub_id(view_id, "view_id")
@@ -636,27 +936,7 @@ class HubStore:
         }
 
     def list_provider_inbox(self, provider_id: str) -> list[dict[str, Any]]:
-        clean_provider_id = _validate_hub_id(provider_id, "provider_id")
-        with self._connect() as connection:
-            self._apply_migrations(connection)
-            rows = connection.execute(
-                """
-                SELECT
-                    i.id AS interaction_id,
-                    i.view_id AS view_id,
-                    i.connection_id AS connection_id,
-                    i.actor_id AS actor_id,
-                    i.payload_json AS payload_json,
-                    i.created_at AS created_at,
-                    v.provider_id AS provider_id
-                FROM interactions i
-                JOIN views v ON v.id = i.view_id
-                WHERE v.provider_id = ?
-                ORDER BY i.created_at, i.id
-                """,
-                (clean_provider_id,),
-            ).fetchall()
-        return [_interaction_from_row(row) for row in rows]
+        return self.list_interactions(provider_id=provider_id)
 
     def store_package_version(
         self,
@@ -983,6 +1263,18 @@ def _audit_event_from_row(row: sqlite3.Row) -> AuditEvent:
     )
 
 
+def _normalize_limit(limit: int) -> int:
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValueError("limit must be an integer")
+    return max(1, min(limit, 200))
+
+
+def _normalize_offset(offset: int) -> int:
+    if isinstance(offset, bool) or not isinstance(offset, int):
+        raise ValueError("offset must be an integer")
+    return max(0, offset)
+
+
 def _view_from_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "view_id": row["id"],
@@ -994,6 +1286,68 @@ def _view_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def _admin_view_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    manifest = _json_object(row["manifest_json"])
+    raw_metadata = manifest.get("invitation_metadata")
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+    kind = _optional_string(metadata.get("kind")) or _kind_from_ref(row["ref"]) or "file"
+    view = {
+        "view_id": row["view_id"],
+        "provider_id": row["provider_id"],
+        "kind": kind,
+        "title": row["title"],
+        "ref": row["ref"],
+        "description": row["description"],
+        "current_version_id": row["current_version_id"],
+        "package_hash": row["package_hash"],
+        "storage_path": row["storage_path"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "version_created_at": row["version_created_at"],
+        "created_by_token_id": row["created_by_token_id"],
+    }
+    question_base_url = _optional_string(metadata.get("question_base_url"))
+    if question_base_url:
+        view["question_base_url"] = question_base_url
+    return view
+
+
+def _admin_invitation_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "invitation_id": row["invitation_id"],
+        "view_id": row["view_id"],
+        "token_id": row["token_id"],
+        "label": row["label"],
+        "expires_at": row["expires_at"],
+        "created_at": row["created_at"],
+        "accepted_count": row["accepted_count"],
+        "revoked_at": row["invitation_revoked_at"] or row["token_revoked_at"],
+    }
+
+
+def _admin_connection_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "connection_id": row["connection_id"],
+        "invitation_id": row["invitation_id"],
+        "provider_id": row["provider_id"],
+        "view_id": row["view_id"],
+        "token_id": row["token_id"],
+        "consumer_label": row["consumer_label"],
+        "created_at": row["created_at"],
+        "revoked_at": row["connection_revoked_at"] or row["token_revoked_at"],
+    }
+
+
+def _json_object(value: object) -> dict[str, Any]:
+    if not isinstance(value, str):
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _current_view_version_from_row(root: Path, row: sqlite3.Row) -> dict[str, Any]:
