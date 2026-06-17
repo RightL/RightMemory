@@ -293,6 +293,25 @@ def record_file_view_publish_results(
             )
 
 
+def list_file_view_publish_events(memory_root: Path, *, limit: int = 50) -> list[dict[str, object]]:
+    root = Path(memory_root).expanduser()
+    path = root / ".runtime" / "shared_views" / "publish-events.jsonl"
+    if not path.is_file():
+        return []
+    records: list[dict[str, object]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            records.append(item)
+    records.reverse()
+    return records[: max(0, int(limit))]
+
+
 def _download_file_view_archive(root: Path, connection: SharedViewConnection) -> bytes:
     target = connection.target
     if target.kind != "http-file":

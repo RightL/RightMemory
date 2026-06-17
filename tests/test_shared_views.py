@@ -15,6 +15,7 @@ from rightmemory.shared_view_files import (
     approve_file_view,
     export_file_view_package,
     invite_file_view,
+    list_file_view_publish_events,
     publish_approved_file_views,
     pull_file_view,
     record_file_view_publish_results,
@@ -481,6 +482,21 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
         self.assertEqual(records[0]["status"], "failed")
         self.assertEqual(records[0]["message"], "hub offline")
         self.assertEqual(records[0]["trigger"], "update-write")
+
+    def test_list_file_view_publish_events_returns_newest_valid_events(self):
+        events = self.root / ".runtime" / "shared_views" / "publish-events.jsonl"
+        events.parent.mkdir(parents=True, exist_ok=True)
+        events.write_text(
+            '{"created_at":"2026-06-17T10:00:00+00:00","view_id":"old","status":"published","message":"old","trigger":"memory-write"}\n'
+            "not json\n"
+            '{"created_at":"2026-06-17T11:00:00+00:00","view_id":"new","status":"failed","message":"boom","trigger":"memory-write"}\n',
+            encoding="utf-8",
+        )
+
+        listed = list_file_view_publish_events(self.root)
+
+        self.assertEqual([event["view_id"] for event in listed], ["new", "old"])
+        self.assertEqual(listed[0]["status"], "failed")
 
 
 class SharedQuestionViewTests(unittest.TestCase):
