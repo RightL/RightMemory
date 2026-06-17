@@ -5,7 +5,7 @@ from pathlib import Path
 
 from rightmemory.config import ReviewConfig, ReviewSourceConfig
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
-from rightmemory.review import ReviewScanner, ReviewStateStore
+from rightmemory.review import ReviewScanResult, ReviewScanner, ReviewStateStore
 from rightmemory.transcripts.codex import parse_session as parse_codex_session
 from rightmemory.transcripts.claude import parse_session as parse_claude_session
 
@@ -242,6 +242,55 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertIn('"user": "first"', calls[0])
         self.assertNotIn('"user": "second"', calls[0])
         self.assertEqual(len(state.sessions), 1)
+
+    def test_scan_reviews_longest_prefix_duplicate_and_marks_alias_reviewed(self):
+        calls = []
+        callback_calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            short = source / "01-short.jsonl"
+            long = source / "02-long.jsonl"
+            self._write_codex(short, turns=[("u1", "a1")], session_id="short")
+            self._write_codex(long, turns=[("u1", "a1"), ("u2", "a2")], session_id="long")
+            self._set_mtime(short, 1_000)
+            self._set_mtime(long, 2_000)
+
+            def on_review_success(count: int) -> None:
+                saved = ReviewStateStore(root).load()
+                callback_calls.append((count, len(saved.sessions)))
+
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                lambda session_id, message: calls.append(message) or "ok",
+                on_review_success=on_review_success,
+            )
+
+            result = scanner.scan_once(now=10_000)
+            state = ReviewStateStore(root).load()
+
+        self.assertEqual(result.reviewed, 1)
+        self.assertEqual(result.skipped_duplicate, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertIn('"session_id": "long"', calls[0])
+        self.assertNotIn('"session_id": "short"', calls[0])
+        self.assertIn('"user": "u2"', calls[0])
+        self.assertIn("codex:long", state.sessions)
+        self.assertIn("codex:short", state.sessions)
+        self.assertEqual(callback_calls, [(1, 2)])
+
+    def test_scan_result_format_includes_skipped_duplicate(self):
+        result = ReviewScanResult(reviewed=1, skipped_duplicate=2)
+
+        formatted = result.format()
+
+        self.assertIn("reviewed: 1", formatted)
+        self.assertIn("skipped_duplicate: 2", formatted)
 
     def test_scan_skips_reviewed_session_even_when_file_changes(self):
         calls = []

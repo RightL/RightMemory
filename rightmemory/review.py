@@ -34,6 +34,7 @@ class ReviewState:
 @dataclass(frozen=True)
 class ReviewScanResult:
     reviewed: int = 0
+    skipped_duplicate: int = 0
     waiting_for_batch: int = 0
     skipped_idle: int = 0
     skipped_old: int = 0
@@ -46,6 +47,7 @@ class ReviewScanResult:
     def format(self) -> str:
         return (
             f"reviewed: {self.reviewed}\n"
+            f"skipped_duplicate: {self.skipped_duplicate}\n"
             f"waiting_for_batch: {self.waiting_for_batch}\n"
             f"skipped_idle: {self.skipped_idle}\n"
             f"skipped_old: {self.skipped_old}\n"
@@ -62,6 +64,12 @@ class ReviewCandidate:
     transcript: TranscriptFile
     normalized: NormalizedSession
     mtime: float
+
+
+@dataclass(frozen=True)
+class ReviewCandidateDedupeResult:
+    representatives: list[ReviewCandidate]
+    aliases_by_representative: dict[str, list[ReviewCandidate]] = field(default_factory=dict)
 
 
 class ReviewStateStore:
@@ -123,6 +131,7 @@ class ReviewScanner:
         candidates: list[ReviewCandidate] = []
         counts = {
             "reviewed": 0,
+            "skipped_duplicate": 0,
             "waiting_for_batch": 0,
             "skipped_idle": 0,
             "skipped_old": 0,
@@ -173,15 +182,7 @@ class ReviewScanner:
                     )
                 )
 
-        sorted_candidates = sorted(
-            candidates,
-            key=lambda candidate: (
-                candidate.mtime,
-                candidate.transcript.path.as_posix(),
-                candidate.normalized.source,
-                candidate.normalized.session_id,
-            ),
-        )
+        sorted_candidates = sorted(candidates, key=_scan_order_key)
         unique_candidates = []
         seen_candidate_keys: set[str] = set()
         for candidate in sorted_candidates:
@@ -192,11 +193,14 @@ class ReviewScanner:
             seen_candidate_keys.add(state_key)
             unique_candidates.append(candidate)
 
-        if require_full_batch and len(unique_candidates) < self.config.batch_size:
-            counts["waiting_for_batch"] += len(unique_candidates)
+        deduped = _dedupe_prefix_candidates(unique_candidates)
+        representatives = deduped.representatives
+
+        if require_full_batch and len(representatives) < self.config.batch_size:
+            counts["waiting_for_batch"] += len(representatives)
             return ReviewScanResult(**counts)
 
-        batch = unique_candidates[: self.config.batch_size]
+        batch = representatives[: self.config.batch_size]
         if not batch:
             return ReviewScanResult(**counts)
 
@@ -204,8 +208,16 @@ class ReviewScanner:
         if not self._review_with_retry(normalized_batch, counts):
             return ReviewScanResult(**counts)
 
+        reviewed_candidates = []
+        for candidate in batch:
+            reviewed_candidates.append(candidate)
+            reviewed_candidates.extend(
+                deduped.aliases_by_representative.get(_candidate_state_key(candidate), [])
+            )
+
         reviewed_at = datetime.now(UTC).isoformat()
-        for session in normalized_batch:
+        for candidate in reviewed_candidates:
+            session = candidate.normalized
             sessions[_state_key(session.source, session.session_id)] = ReviewSessionState(
                 session_id=session.session_id,
                 source=session.source,
@@ -213,6 +225,7 @@ class ReviewScanner:
             )
         self.state_store.save(ReviewState(sessions=sessions))
         counts["reviewed"] += len(normalized_batch)
+        counts["skipped_duplicate"] += len(reviewed_candidates) - len(normalized_batch)
         if self.on_review_success is not None:
             self.on_review_success(len(normalized_batch))
         return ReviewScanResult(**counts)
@@ -252,6 +265,71 @@ def _parse(transcript: TranscriptFile) -> NormalizedSession | None:
     if transcript.source == "claude":
         return claude.parse_session(transcript.path)
     return None
+
+
+def _dedupe_prefix_candidates(candidates: list[ReviewCandidate]) -> ReviewCandidateDedupeResult:
+    kept: list[tuple[ReviewCandidate, tuple[str, ...]]] = []
+    aliases_by_representative: dict[str, list[ReviewCandidate]] = {}
+
+    for candidate in sorted(candidates, key=_prefix_dedupe_order_key):
+        candidate_hashes = _turn_hashes(candidate.normalized)
+        representative: ReviewCandidate | None = None
+        for kept_candidate, kept_hashes in kept:
+            if candidate.normalized.source != kept_candidate.normalized.source:
+                continue
+            if _is_hash_prefix(candidate_hashes, kept_hashes):
+                representative = kept_candidate
+                break
+        if representative is None:
+            kept.append((candidate, candidate_hashes))
+            continue
+        aliases_by_representative.setdefault(_candidate_state_key(representative), []).append(candidate)
+
+    representatives = sorted((candidate for candidate, _hashes in kept), key=_scan_order_key)
+    return ReviewCandidateDedupeResult(
+        representatives=representatives,
+        aliases_by_representative=aliases_by_representative,
+    )
+
+
+def _scan_order_key(candidate: ReviewCandidate) -> tuple[float, str, str, str]:
+    return (
+        candidate.mtime,
+        candidate.transcript.path.as_posix(),
+        candidate.normalized.source,
+        candidate.normalized.session_id,
+    )
+
+
+def _prefix_dedupe_order_key(candidate: ReviewCandidate) -> tuple[int, float, str, str, str]:
+    return (
+        -len(candidate.normalized.turns),
+        -candidate.mtime,
+        candidate.transcript.path.as_posix(),
+        candidate.normalized.source,
+        candidate.normalized.session_id,
+    )
+
+
+def _candidate_state_key(candidate: ReviewCandidate) -> str:
+    return _state_key(candidate.normalized.source, candidate.normalized.session_id)
+
+
+def _turn_hashes(session: NormalizedSession) -> tuple[str, ...]:
+    hashes = []
+    for turn in session.turns:
+        payload = json.dumps(
+            {"user": turn.user, "assistant": turn.assistant},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        hashes.append(hashlib.sha256(payload.encode("utf-8")).hexdigest())
+    return tuple(hashes)
+
+
+def _is_hash_prefix(shorter: tuple[str, ...], longer: tuple[str, ...]) -> bool:
+    return len(shorter) <= len(longer) and longer[: len(shorter)] == shorter
 
 
 def _review_batch_id(sessions: list[NormalizedSession]) -> str:
