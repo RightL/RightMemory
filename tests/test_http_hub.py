@@ -400,6 +400,99 @@ class HubApiTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "ok")
         self.assertTrue(response.json()["initialized"])
 
+    def test_admin_routes_require_admin_token(self):
+        missing = self.client.get("/api/admin/overview")
+        provider = self.client.get("/api/admin/overview", headers=_auth(self.provider_token.raw_token))
+        admin = self.client.get("/api/admin/overview", headers=_auth("admin-secret"))
+
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(provider.status_code, 403)
+        self.assertEqual(admin.status_code, 200)
+        self.assertTrue(admin.json()["overview"]["initialized"])
+
+    def test_admin_api_lists_creates_and_revokes_hub_state(self):
+        package = self.root / "package"
+        _write_package(package)
+        publish = self.client.post(
+            "/api/views/alice-auth-api/versions",
+            content=_zip_package(package),
+            headers={**_auth(self.provider_token.raw_token), "content-type": "application/zip"},
+        )
+        self.assertEqual(publish.status_code, 201)
+
+        created_token = self.client.post(
+            "/api/admin/providers/bob/tokens",
+            headers=_auth("admin-secret"),
+            json={"label": "publish"},
+        )
+        invitation = self.client.post(
+            "/api/admin/views/alice-auth-api/invitations",
+            headers=_auth("admin-secret"),
+            json={"label": "frontend"},
+        )
+        invitation_token = invitation.json()["invitation_url"].rsplit("/i/", 1)[1]
+        accepted = self.client.post(
+            f"/api/invitations/{invitation_token}/accept",
+            json={"consumer_label": "frontend"},
+        )
+        interaction = self.client.post(
+            "/api/views/alice-auth-api/interactions",
+            headers=_auth(accepted.json()["connection_token"]),
+            json={"actor": "assistant", "message": "Docs are stale."},
+        )
+        overview = self.client.get("/api/admin/overview", headers=_auth("admin-secret"))
+        providers = self.client.get("/api/admin/providers", headers=_auth("admin-secret"))
+        views = self.client.get("/api/admin/views", headers=_auth("admin-secret"))
+        view = self.client.get("/api/admin/views/alice-auth-api", headers=_auth("admin-secret"))
+        invitations = self.client.get(
+            "/api/admin/views/alice-auth-api/invitations",
+            headers=_auth("admin-secret"),
+        )
+        connections = self.client.get("/api/admin/connections", headers=_auth("admin-secret"))
+        inbox = self.client.get("/api/admin/inbox?provider_id=alice", headers=_auth("admin-secret"))
+        audit = self.client.get("/api/admin/audit?kind=interaction.created", headers=_auth("admin-secret"))
+
+        revoke_invitation = self.client.post(
+            f"/api/admin/invitations/{invitation.json()['token_id']}/revoke",
+            headers=_auth("admin-secret"),
+        )
+        revoke_connection = self.client.post(
+            f"/api/admin/connections/{accepted.json()['token_id']}/revoke",
+            headers=_auth("admin-secret"),
+        )
+
+        self.assertEqual(created_token.status_code, 201)
+        self.assertEqual(created_token.json()["provider_id"], "bob")
+        self.assertIn("raw_token", created_token.json())
+        self.assertEqual(invitation.status_code, 201)
+        self.assertEqual(accepted.status_code, 201)
+        self.assertEqual(interaction.status_code, 201)
+        self.assertEqual(overview.status_code, 200)
+        self.assertGreaterEqual(overview.json()["overview"]["provider_count"], 2)
+        self.assertEqual(providers.status_code, 200)
+        self.assertIn("alice", [item["provider_id"] for item in providers.json()["providers"]])
+        self.assertEqual(views.status_code, 200)
+        self.assertIn("alice-auth-api", [item["view_id"] for item in views.json()["views"]])
+        self.assertEqual(view.status_code, 200)
+        self.assertEqual(view.json()["view"]["kind"], "file")
+        self.assertEqual(invitations.status_code, 200)
+        self.assertEqual(invitations.json()["invitations"][0]["token_id"], invitation.json()["token_id"])
+        self.assertEqual(connections.status_code, 200)
+        self.assertEqual(connections.json()["connections"][0]["connection_id"], accepted.json()["connection_id"])
+        self.assertEqual(inbox.status_code, 200)
+        self.assertEqual(inbox.json()["interactions"][0]["interaction_id"], interaction.json()["interaction_id"])
+        self.assertEqual(audit.status_code, 200)
+        self.assertEqual(audit.json()["events"][0]["kind"], "interaction.created")
+        self.assertEqual(revoke_invitation.status_code, 200)
+        self.assertTrue(revoke_invitation.json()["revoked"])
+        self.assertEqual(revoke_connection.status_code, 200)
+        self.assertTrue(revoke_connection.json()["revoked"])
+        self.assertFalse(
+            self.store.verify_token(accepted.json()["connection_token"], action="connect", view_id="alice-auth-api")
+        )
+        token_list = self.client.get("/api/admin/tokens", headers=_auth("admin-secret")).json()
+        self.assertNotIn(created_token.json()["raw_token"], str(token_list))
+
     def test_register_question_view_invite_and_accept_flow(self):
         registered = self.client.post(
             "/api/views/alice-auth-api/question",
