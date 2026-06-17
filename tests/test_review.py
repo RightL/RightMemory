@@ -543,6 +543,76 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertIn('"session_id": "s1"', calls[0])
         self.assertIn('"session_id": "c1"', calls[0])
 
+    def test_scan_prefix_dedupe_is_provider_local(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            codex_source = root / "codex"
+            claude_root = root / "claude"
+            claude_project = claude_root / "-repo"
+            codex_source.mkdir()
+            claude_project.mkdir(parents=True)
+            codex_transcript = codex_source / "codex.jsonl"
+            claude_transcript = claude_project / "claude.jsonl"
+            self._write_codex(codex_transcript, turns=[("shared", "answer")], session_id="codex-short")
+            self._write_claude(
+                claude_transcript,
+                turns=[("shared", "answer"), ("claude extra", "answer")],
+                session_id="claude-long",
+            )
+            self._set_mtime(codex_transcript, 1_000)
+            self._set_mtime(claude_transcript, 2_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[
+                        ReviewSourceConfig(kind="codex", path=codex_source),
+                        ReviewSourceConfig(kind="claude", path=claude_root),
+                    ],
+                ),
+                lambda session_id, message: calls.append(message) or "ok",
+            )
+
+            result = scanner.scan_once(now=10_000)
+
+        self.assertEqual(result.reviewed, 2)
+        self.assertEqual(result.skipped_duplicate, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertIn('"source": "codex"', calls[0])
+        self.assertIn('"source": "claude"', calls[0])
+
+    def test_scan_full_batch_gate_uses_representative_count_after_dedupe(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            short = source / "01-short.jsonl"
+            long = source / "02-long.jsonl"
+            self._write_codex(short, turns=[("u1", "a1")], session_id="short")
+            self._write_codex(long, turns=[("u1", "a1"), ("u2", "a2")], session_id="long")
+            self._set_mtime(short, 1_000)
+            self._set_mtime(long, 2_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    batch_size=2,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                lambda session_id, message: calls.append(message) or "ok",
+            )
+
+            result = scanner.scan_once(now=10_000, require_full_batch=True)
+            state = ReviewStateStore(root).load()
+
+        self.assertEqual(result.reviewed, 0)
+        self.assertEqual(result.skipped_duplicate, 0)
+        self.assertEqual(result.waiting_for_batch, 1)
+        self.assertEqual(calls, [])
+        self.assertEqual(state.sessions, {})
+
     def test_scan_skips_session_from_existing_state_entry(self):
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:
