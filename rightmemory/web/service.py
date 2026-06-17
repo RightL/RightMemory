@@ -16,11 +16,19 @@ from ..config import (
 )
 from ..session import MemoryWriteLock
 from ..shared_view_builder import run_file_view_builder, run_question_view_builder
-from ..shared_view_files import approve_file_view, invite_file_view, pull_file_view
+from ..shared_view_files import (
+    approve_file_view,
+    invite_file_view,
+    list_file_view_publish_events,
+    pull_all_file_views,
+    pull_file_view,
+)
+from ..shared_view_models import load_shared_view_credential, list_shared_view_credentials
 from ..shared_view_questions import answer_question_view, approve_question_view, ask_question_view, publish_question_view
 from ..shared_views import (
     accept_http_shared_view_invitation,
     accept_shared_view_invitation,
+    list_http_shared_view_inbox,
     list_shared_view_inbox,
     list_shared_view_notes,
     load_connections,
@@ -134,6 +142,7 @@ class WebStudioService:
         return {
             "provider_views": provider_view_summaries(self.memory_root),
             "connections": [_json_safe(connection) for connection in load_connections(self.memory_root).values()],
+            "credentials": list_shared_view_credentials(self.memory_root),
         }
 
     def build_file_view(self, payload: dict[str, Any]) -> str:
@@ -183,6 +192,27 @@ class WebStudioService:
             expires_at=_optional_payload_str(payload, "expires_at"),
         )
 
+    def provider_http_inbox(self, payload: dict[str, Any]) -> dict[str, Any]:
+        credential_id = _required_payload_str(payload, "credential_id")
+        credential = load_shared_view_credential(self.memory_root, credential_id)
+        hub_url = _optional_payload_str(payload, "hub_url") or credential.get("base_url")
+        provider_id = _optional_payload_str(payload, "provider_id") or credential.get("provider_id")
+        if not hub_url:
+            raise ValueError("provider inbox requires a hub URL")
+        if not provider_id:
+            raise ValueError("provider inbox requires a provider id")
+        return {
+            "interactions": list_http_shared_view_inbox(
+                self.memory_root,
+                hub_url=hub_url,
+                credential_id=credential_id,
+                provider_id=provider_id,
+            )
+        }
+
+    def publish_events(self) -> dict[str, Any]:
+        return {"events": list_file_view_publish_events(self.memory_root)}
+
     def save_credential(self, payload: dict[str, Any]) -> str:
         credential_id = _required_payload_str(payload, "credential_id")
         save_shared_view_credential(
@@ -217,8 +247,19 @@ class WebStudioService:
         result = pull_file_view(self.memory_root, heading_id)
         return result.message
 
+    def pull_all_connections(self) -> dict[str, Any]:
+        return {"results": [_json_safe(result) for result in pull_all_file_views(self.memory_root)]}
+
     def connection_status(self, heading_id: str) -> dict[str, Any]:
         return shared_view_connection_status(self.memory_root, heading_id)
+
+    def connection_statuses(self) -> dict[str, Any]:
+        return {
+            "statuses": [
+                shared_view_connection_status(self.memory_root, connection.heading_id)
+                for connection in load_connections(self.memory_root).values()
+            ]
+        }
 
     def ask_connection(self, heading_id: str, payload: dict[str, Any]) -> str:
         return ask_question_view(self.memory_root, heading_id, _required_payload_str(payload, "question"))

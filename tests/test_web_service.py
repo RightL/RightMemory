@@ -278,6 +278,97 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
         self.assertEqual(credential["provider_id"], "alice")
         self.assertEqual(credential["token"], "secret-token")
 
+    def test_shared_views_include_sanitized_credentials(self):
+        response = self.client.post(
+            "/api/share/credentials",
+            json={
+                "credential_id": "alice-publish",
+                "kind": "http-publish",
+                "hub_url": "https://hub.example.test",
+                "provider_id": "alice",
+                "token": "secret-token",
+            },
+            headers={"x-csrf-token": self.csrf},
+        )
+
+        listing = self.client.get("/api/share/views")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(listing.status_code, 200)
+        credentials = listing.json()["data"]["credentials"]
+        self.assertEqual(credentials[0]["credential_id"], "alice-publish")
+        self.assertEqual(credentials[0]["base_url"], "https://hub.example.test")
+        self.assertEqual(credentials[0]["provider_id"], "alice")
+        self.assertNotIn("token", credentials[0])
+
+    def test_provider_inbox_uses_saved_credential_defaults(self):
+        self.client.post(
+            "/api/share/credentials",
+            json={
+                "credential_id": "alice-publish",
+                "kind": "http-publish",
+                "hub_url": "https://hub.example.test",
+                "provider_id": "alice",
+                "token": "secret-token",
+            },
+            headers={"x-csrf-token": self.csrf},
+        )
+        with patch("rightmemory.web.service.list_http_shared_view_inbox") as inbox:
+            inbox.return_value = [
+                {
+                    "interaction_id": "int-1",
+                    "view_id": "auth-api-files",
+                    "connection_id": "conn-1",
+                    "payload": {"message": "Docs are stale"},
+                }
+            ]
+            response = self.client.post(
+                "/api/share/provider-inbox",
+                json={"credential_id": "alice-publish"},
+                headers={"x-csrf-token": self.csrf},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        inbox.assert_called_once_with(
+            self.root.resolve(),
+            hub_url="https://hub.example.test",
+            credential_id="alice-publish",
+            provider_id="alice",
+        )
+        self.assertEqual(response.json()["data"]["interactions"][0]["view_id"], "auth-api-files")
+
+    def test_publish_events_pull_all_and_status_all_api(self):
+        with patch("rightmemory.web.service.list_file_view_publish_events") as events:
+            events.return_value = [{"view_id": "auth-api-files", "status": "published"}]
+            events_response = self.client.get("/api/share/publish-events")
+
+        with patch("rightmemory.web.service.pull_all_file_views") as pull_all:
+            pull_all.return_value = [FileViewPullResult("auth-api-files", "pulled", "file view pulled")]
+            pull_response = self.client.post(
+                "/api/use/connections/pull-all",
+                headers={"x-csrf-token": self.csrf},
+            )
+
+        with patch("rightmemory.web.service.shared_view_connection_status") as connection_status:
+            connection_status.return_value = {
+                "heading_id": "auth-api-files",
+                "type": "file",
+                "target": "http-file",
+                "status": "imported",
+                "message": "file view import is available",
+            }
+            with patch("rightmemory.web.service.load_connections") as connections:
+                connection = type("Connection", (), {"heading_id": "auth-api-files"})()
+                connections.return_value = {"auth-api-files": connection}
+                status_response = self.client.get("/api/use/connections/status-all")
+
+        self.assertEqual(events_response.status_code, 200)
+        self.assertEqual(events_response.json()["data"]["events"][0]["status"], "published")
+        self.assertEqual(pull_response.status_code, 200)
+        self.assertEqual(pull_response.json()["data"]["results"][0]["status"], "pulled")
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.json()["data"]["statuses"][0]["status"], "imported")
+
     def test_provider_question_endpoint_accepts_connection_bearer_for_remote_ask(self):
         calls = []
         write_question_view(

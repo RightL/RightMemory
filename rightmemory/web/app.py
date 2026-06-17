@@ -211,6 +211,27 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
             ) from exc
         return ok_response(message)
 
+    @app.post("/api/share/provider-inbox")
+    def provider_http_inbox(
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        try:
+            data = service.provider_http_inbox(payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_detail("could not load provider inbox", technical=str(exc)),
+            ) from exc
+        return ok_response("provider inbox loaded", data)
+
+    @app.get("/api/share/publish-events")
+    def publish_events(service=Depends(current_service)):
+        return ok_response("publish events loaded", service.publish_events())
+
     @app.post("/api/share/questions/{view_id}/ask")
     def answer_question_view(
         view_id: str,
@@ -269,6 +290,26 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
                 detail=error_detail("could not accept shared-view invitation", technical=str(exc)),
             ) from exc
         return ok_response(message)
+
+    @app.post("/api/use/connections/pull-all")
+    def pull_all_connections(
+        request: Request,
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        try:
+            data = service.pull_all_connections()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_detail("could not pull shared views", technical=str(exc)),
+            ) from exc
+        return ok_response("shared views pulled", data)
+
+    @app.get("/api/use/connections/status-all")
+    def connection_statuses(service=Depends(current_service)):
+        return ok_response("shared view statuses loaded", service.connection_statuses())
 
     @app.post("/api/use/connections/{heading_id}/pull")
     def pull_connection(
