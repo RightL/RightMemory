@@ -284,6 +284,105 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertIn("codex:short", state.sessions)
         self.assertEqual(callback_calls, [(1, 2)])
 
+    def test_scan_exact_duplicate_keeps_newest_representative(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            older = source / "01-older.jsonl"
+            newer = source / "02-newer.jsonl"
+            turns = [("u1", "a1"), ("u2", "a2")]
+            self._write_codex(older, turns=turns, session_id="older")
+            self._write_codex(newer, turns=turns, session_id="newer")
+            self._set_mtime(older, 1_000)
+            self._set_mtime(newer, 2_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                lambda session_id, message: calls.append(message) or "ok",
+            )
+
+            result = scanner.scan_once(now=10_000)
+            state = ReviewStateStore(root).load()
+
+        self.assertEqual(result.reviewed, 1)
+        self.assertEqual(result.skipped_duplicate, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertIn('"session_id": "newer"', calls[0])
+        self.assertNotIn('"session_id": "older"', calls[0])
+        self.assertIn("codex:older", state.sessions)
+        self.assertIn("codex:newer", state.sessions)
+
+    def test_scan_exact_duplicate_same_mtime_uses_path_tiebreaker(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            first = source / "01-first.jsonl"
+            second = source / "02-second.jsonl"
+            turns = [("u1", "a1")]
+            self._write_codex(first, turns=turns, session_id="first")
+            self._write_codex(second, turns=turns, session_id="second")
+            self._set_mtime(first, 1_000)
+            self._set_mtime(second, 1_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                lambda session_id, message: calls.append(message) or "ok",
+            )
+
+            result = scanner.scan_once(now=10_000)
+
+        self.assertEqual(result.reviewed, 1)
+        self.assertEqual(result.skipped_duplicate, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertIn('"session_id": "first"', calls[0])
+        self.assertNotIn('"session_id": "second"', calls[0])
+
+    def test_scan_does_not_mark_duplicate_alias_when_reviewer_fails(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            short = source / "01-short.jsonl"
+            long = source / "02-long.jsonl"
+            self._write_codex(short, turns=[("u1", "a1")], session_id="short")
+            self._write_codex(long, turns=[("u1", "a1"), ("u2", "a2")], session_id="long")
+            self._set_mtime(short, 1_000)
+            self._set_mtime(long, 2_000)
+
+            def fail(session_id: str, message: str) -> str:
+                calls.append(message)
+                raise RuntimeError("review failed")
+
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                fail,
+            )
+
+            result = scanner.scan_once(now=10_000)
+            state = ReviewStateStore(root).load()
+
+        self.assertEqual(result.reviewed, 0)
+        self.assertEqual(result.skipped_duplicate, 0)
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('"session_id": "long"', calls[0])
+        self.assertEqual(state.sessions, {})
+
     def test_scan_result_format_includes_skipped_duplicate(self):
         result = ReviewScanResult(reviewed=1, skipped_duplicate=2)
 
