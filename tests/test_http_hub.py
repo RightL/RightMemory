@@ -493,6 +493,18 @@ class HubApiTests(unittest.TestCase):
         token_list = self.client.get("/api/admin/tokens", headers=_auth("admin-secret")).json()
         self.assertNotIn(created_token.json()["raw_token"], str(token_list))
 
+    def test_console_static_routes_are_served(self):
+        page = self.client.get("/console")
+        script = self.client.get("/console/static/console.js")
+        styles = self.client.get("/console/static/console.css")
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("RightMemory Hub Console", page.text)
+        self.assertEqual(script.status_code, 200)
+        self.assertIn("/api/admin/overview", script.text)
+        self.assertEqual(styles.status_code, 200)
+        self.assertIn(".console-shell", styles.text)
+
     def test_register_question_view_invite_and_accept_flow(self):
         registered = self.client.post(
             "/api/views/alice-auth-api/question",

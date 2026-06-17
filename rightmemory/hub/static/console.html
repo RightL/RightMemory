@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RightMemory Hub Console</title>
+    <link rel="stylesheet" href="/console/static/console.css">
+  </head>
+  <body>
+    <main class="console-shell">
+      <header class="topbar">
+        <div>
+          <h1>RightMemory Hub Console</h1>
+          <p id="health-line">Admin console for shared-view hub state.</p>
+        </div>
+        <form id="token-form" class="token-form">
+          <input id="admin-token" name="admin_token" type="password" autocomplete="off" placeholder="Admin token" required>
+          <button type="submit">Connect</button>
+        </form>
+      </header>
+
+      <nav class="tabs" aria-label="Hub Console Sections">
+        <button type="button" data-tab="overview" class="active">Overview</button>
+        <button type="button" data-tab="providers">Providers</button>
+        <button type="button" data-tab="views">Views</button>
+        <button type="button" data-tab="invitations">Invitations</button>
+        <button type="button" data-tab="connections">Connections</button>
+        <button type="button" data-tab="inbox">Inbox</button>
+        <button type="button" data-tab="audit">Audit</button>
+        <button type="button" data-tab="tokens">Tokens</button>
+      </nav>
+
+      <section id="notice" class="notice" hidden></section>
+
+      <section id="overview" class="panel active">
+        <h2>Overview</h2>
+        <div id="overview-grid" class="metric-grid"></div>
+      </section>
+
+      <section id="providers" class="panel">
+        <div class="panel-header">
+          <h2>Providers</h2>
+          <form id="provider-token-form" class="inline-form">
+            <input name="provider_id" placeholder="provider id" required>
+            <input name="label" placeholder="token label">
+            <button type="submit">Create Token</button>
+          </form>
+        </div>
+        <div id="provider-token-result" class="result-box" hidden></div>
+        <div id="providers-table"></div>
+      </section>
+
+      <section id="views" class="panel">
+        <h2>Views</h2>
+        <div id="views-table"></div>
+      </section>
+
+      <section id="invitations" class="panel">
+        <div class="panel-header">
+          <h2>Invitations</h2>
+          <form id="invitation-form" class="inline-form">
+            <input name="view_id" placeholder="view id" required>
+            <input name="label" placeholder="invitation label">
+            <input name="expires_at" placeholder="2026-06-17T12:00:00Z">
+            <button type="submit">Create Invitation</button>
+          </form>
+        </div>
+        <div id="invitation-result" class="result-box" hidden></div>
+        <div id="invitations-table"></div>
+      </section>
+
+      <section id="connections" class="panel">
+        <h2>Connections</h2>
+        <div id="connections-table"></div>
+      </section>
+
+      <section id="inbox" class="panel">
+        <h2>Inbox</h2>
+        <div id="inbox-table"></div>
+      </section>
+
+      <section id="audit" class="panel">
+        <h2>Audit</h2>
+        <div id="audit-table"></div>
+      </section>
+
+      <section id="tokens" class="panel">
+        <h2>Tokens</h2>
+        <div id="tokens-table"></div>
+      </section>
+    </main>
+    <script src="/console/static/console.js"></script>
+  </body>
+</html>
