@@ -201,6 +201,25 @@ def load_shared_view_credential(memory_root: Path, credential_id: str) -> dict[s
     return {key: value for key, value in raw.items() if isinstance(key, str) and isinstance(value, str)}
 
 
+def list_shared_view_credentials(memory_root: Path) -> list[dict[str, str]]:
+    root = Path(memory_root).expanduser()
+    credentials = _load_credentials(root).get("credentials", {})
+    if not isinstance(credentials, dict):
+        raise ValueError("shared view credential store is invalid")
+    summaries: list[dict[str, str]] = []
+    for credential_id in sorted(credentials):
+        raw = credentials[credential_id]
+        if not isinstance(raw, dict):
+            continue
+        summary: dict[str, str] = {"credential_id": validate_heading_id(str(credential_id))}
+        for key in ("kind", "base_url", "provider_id", "view_id", "created_at"):
+            value = raw.get(key)
+            if isinstance(value, str) and value:
+                summary[key] = value
+        summaries.append(summary)
+    return summaries
+
+
 def _load_target(raw_target: object) -> SharedViewTarget:
     if raw_target in (None, {}):
         return SharedViewTarget()

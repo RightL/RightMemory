@@ -26,6 +26,7 @@ from rightmemory.shared_view_models import (
     SharedViewTarget,
     load_connections,
     load_shared_view_credential,
+    list_shared_view_credentials,
     save_connections,
     validate_connection,
 )
@@ -105,6 +106,34 @@ class SharedViewModelTests(unittest.TestCase):
             )
 
         self.assertIn("unknown shared view target kind `local`", str(caught.exception))
+
+    def test_list_shared_view_credentials_omits_tokens(self):
+        save_shared_view_credential(
+            self.root,
+            "alice-publish",
+            kind="http-publish",
+            token="secret-token",
+            base_url="https://hub.example.test",
+            provider_id="alice",
+            view_id="auth-api-files",
+        )
+
+        credentials = list_shared_view_credentials(self.root)
+
+        self.assertEqual(
+            credentials,
+            [
+                {
+                    "credential_id": "alice-publish",
+                    "kind": "http-publish",
+                    "base_url": "https://hub.example.test",
+                    "provider_id": "alice",
+                    "view_id": "auth-api-files",
+                    "created_at": credentials[0]["created_at"],
+                }
+            ],
+        )
+        self.assertNotIn("token", credentials[0])
 
     def test_accept_http_question_invitation_uses_direct_provider_endpoint(self):
         with patch("rightmemory.shared_views.HubClient") as client_type:
