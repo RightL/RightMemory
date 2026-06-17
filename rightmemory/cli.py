@@ -88,6 +88,7 @@ DEFAULT_PRUNER_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 DEFAULT_PRUNER_WATCH_RETRY_SECONDS = 60
 DEFAULT_SYNC_WATCH_INTERVAL_SECONDS = 60 * 60
 DEFAULT_WATCH_MAX_CONSECUTIVE_FAILURES = 3
+DEFAULT_HUB_ROOT = Path("rightmemory-hub")
 WATCH_REFRESH_POLL_SECONDS = 5
 DREAMER_WATCH_SESSION_ID = "dreamer-watch"
 _DREAMER_WATCH_SKIPPED = "skipped"
@@ -298,34 +299,50 @@ def _profile_main(argv: list[str]) -> int:
     raise ValueError(f"unknown profile command: {args.command}")
 
 
+def _resolve_hub_root(hub_root: Path | None) -> Path:
+    return (hub_root or DEFAULT_HUB_ROOT).expanduser().resolve()
+
+
+def _resolve_hub_revoke_args(args: argparse.Namespace) -> tuple[Path, str]:
+    if args.token_id is None:
+        return _resolve_hub_root(None), args.hub_root_or_token_id
+    return _resolve_hub_root(Path(args.hub_root_or_token_id)), args.token_id
+
+
+def _hub_init_hint(hub_root: Path) -> str:
+    if hub_root == _resolve_hub_root(None):
+        return "rightmemory hub init"
+    return f"rightmemory hub init {hub_root}"
+
+
 def _hub_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory hub")
     subparsers = parser.add_subparsers(dest="command", required=True)
     init = subparsers.add_parser("init")
-    init.add_argument("hub_root", type=Path)
+    init.add_argument("hub_root", nargs="?", type=Path)
     init.add_argument("--admin-token")
     init.add_argument("--public-base-url", default=DEFAULT_PUBLIC_BASE_URL)
     status = subparsers.add_parser("status")
-    status.add_argument("hub_root", type=Path)
+    status.add_argument("hub_root", nargs="?", type=Path)
     token = subparsers.add_parser("token")
     token_subparsers = token.add_subparsers(dest="token_command", required=True)
     token_list = token_subparsers.add_parser("list")
-    token_list.add_argument("hub_root", type=Path)
+    token_list.add_argument("hub_root", nargs="?", type=Path)
     token_create = token_subparsers.add_parser("create")
-    token_create.add_argument("hub_root", type=Path)
+    token_create.add_argument("hub_root", nargs="?", type=Path)
     token_create.add_argument("--provider", required=True)
     token_create.add_argument("--label")
     token_revoke = token_subparsers.add_parser("revoke")
-    token_revoke.add_argument("hub_root", type=Path)
-    token_revoke.add_argument("token_id")
+    token_revoke.add_argument("hub_root_or_token_id")
+    token_revoke.add_argument("token_id", nargs="?")
     serve = subparsers.add_parser("serve")
-    serve.add_argument("hub_root", type=Path)
+    serve.add_argument("hub_root", nargs="?", type=Path)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
     args = parser.parse_args(argv)
 
     if args.command == "init":
-        hub_root = args.hub_root.expanduser().resolve()
+        hub_root = _resolve_hub_root(args.hub_root)
         store = HubStore(hub_root)
         admin_token = args.admin_token or (None if _hub_initialized(store) else secrets.token_urlsafe(32))
         store.initialize(admin_token=admin_token, public_base_url=args.public_base_url)
@@ -341,24 +358,28 @@ def _hub_main(argv: list[str]) -> int:
             print("admin_token\tunchanged")
         return 0
     if args.command == "status":
-        print(_format_hub_status(args.hub_root))
+        print(_format_hub_status(_resolve_hub_root(args.hub_root)))
         return 0
     if args.command == "token":
         return _hub_token_main(args)
     if args.command == "serve":
-        hub_root = args.hub_root.expanduser().resolve()
+        hub_root = _resolve_hub_root(args.hub_root)
         if not _hub_initialized(HubStore(hub_root)):
-            raise ValueError(f"hub is not initialized: {hub_root}. Run: rightmemory hub init {hub_root}")
+            raise ValueError(f"hub is not initialized: {hub_root}. Run: {_hub_init_hint(hub_root)}")
         uvicorn.run(create_hub_app(hub_root), host=args.host, port=args.port)
         return 0
     raise ValueError(f"unknown hub command: {args.command}")
 
 
 def _hub_token_main(args: argparse.Namespace) -> int:
-    hub_root = args.hub_root.expanduser().resolve()
+    if args.token_command == "revoke":
+        hub_root, token_id = _resolve_hub_revoke_args(args)
+    else:
+        hub_root = _resolve_hub_root(args.hub_root)
+        token_id = ""
     store = HubStore(hub_root)
     if not _hub_initialized(store):
-        raise ValueError(f"hub is not initialized: {hub_root}. Run: rightmemory hub init {hub_root}")
+        raise ValueError(f"hub is not initialized: {hub_root}. Run: {_hub_init_hint(hub_root)}")
     if args.token_command == "create":
         token = store.create_provider_token(args.provider, label=args.label)
         print(f"token_id\t{token.token_id}")
@@ -386,13 +407,13 @@ def _hub_token_main(args: argparse.Namespace) -> int:
                         revoked,
                     ]
                 )
-            )
+        )
         return 0
     if args.token_command == "revoke":
-        if store.revoke_token(args.token_id):
-            print(f"revoked\t{args.token_id}")
+        if store.revoke_token(token_id):
+            print(f"revoked\t{token_id}")
             return 0
-        print(f"not_found\t{args.token_id}")
+        print(f"not_found\t{token_id}")
         return 1
     raise ValueError(f"unknown hub token command: {args.token_command}")
 

@@ -748,6 +748,94 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")
         self.assertEqual(run.call_args.kwargs["port"], 9876)
 
+    def test_hub_commands_default_to_rightmemory_hub_root(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_hub = Path(tempdir) / "rightmemory-hub"
+            with patch("rightmemory.cli.DEFAULT_HUB_ROOT", default_hub):
+                with patch("sys.stdout", stdout):
+                    init_result = main(
+                        [
+                            "hub",
+                            "init",
+                            "--admin-token",
+                            "admin-secret",
+                            "--public-base-url",
+                            "https://hub.example.test",
+                        ]
+                    )
+                    create_result = main(
+                        [
+                            "hub",
+                            "token",
+                            "create",
+                            "--provider",
+                            "alice",
+                            "--label",
+                            "publish",
+                        ]
+                    )
+                    status_result = main(["hub", "status"])
+                    list_result = main(["hub", "token", "list"])
+
+                lines = stdout.getvalue().splitlines()
+                token_id = next(line.split("\t", 1)[1] for line in lines if line.startswith("token_id\t"))
+                with patch("sys.stdout", stdout):
+                    revoke_result = main(["hub", "token", "revoke", token_id])
+
+            store = HubStore(default_hub)
+            admin_ok = store.verify_token("admin-secret", action="admin")
+            hub_db_exists = (default_hub / "hub.db").is_file()
+
+        output = stdout.getvalue()
+        self.assertEqual(init_result, 0)
+        self.assertEqual(create_result, 0)
+        self.assertEqual(status_result, 0)
+        self.assertEqual(list_result, 0)
+        self.assertEqual(revoke_result, 0)
+        self.assertTrue(admin_ok)
+        self.assertTrue(hub_db_exists)
+        self.assertIn(f"hub_root\t{default_hub.resolve()}", output)
+        self.assertIn("public_base_url\thttps://hub.example.test", output)
+        self.assertIn("revoked\t", output)
+
+    def test_hub_explicit_root_still_overrides_default(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_hub = Path(tempdir) / "rightmemory-hub"
+            explicit_hub = Path(tempdir) / "explicit-hub"
+            with patch("rightmemory.cli.DEFAULT_HUB_ROOT", default_hub):
+                with patch("sys.stdout", stdout):
+                    result = main(
+                        [
+                            "hub",
+                            "init",
+                            str(explicit_hub),
+                            "--admin-token",
+                            "admin-secret",
+                        ]
+                    )
+            explicit_hub_db_exists = (explicit_hub / "hub.db").is_file()
+            default_hub_db_exists = (default_hub / "hub.db").exists()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(explicit_hub_db_exists)
+        self.assertFalse(default_hub_db_exists)
+        self.assertIn(f"hub_root\t{explicit_hub.resolve()}", stdout.getvalue())
+
+    def test_hub_serve_uses_default_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_hub = Path(tempdir) / "rightmemory-hub"
+            HubStore(default_hub).initialize(admin_token="admin-secret")
+
+            with patch("rightmemory.cli.DEFAULT_HUB_ROOT", default_hub):
+                with patch("rightmemory.cli.uvicorn.run") as run:
+                    result = main(["hub", "serve"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(run.call_args.kwargs["host"], "127.0.0.1")
+        self.assertEqual(run.call_args.kwargs["port"], 8765)
+
     def test_profile_list_ignores_project_binding(self):
         stdout = io.StringIO()
 
