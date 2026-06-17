@@ -135,6 +135,8 @@ class WebStudioStaticTests(unittest.TestCase):
         self.assertNotIn("ready for the next Web Studio API slice", script.text)
         self.assertIn("build-file-view-form", script.text)
         self.assertIn("build-question-view-form", script.text)
+        self.assertIn("invite-file-view-form", script.text)
+        self.assertIn("publish-question-view-form", script.text)
         self.assertIn("file-connection-form", script.text)
         self.assertIn("question-connection-form", script.text)
         self.assertNotIn("consumer-view-form", script.text)
@@ -198,6 +200,62 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
         self.assertEqual(approve_response.status_code, 200)
         self.assertEqual(approve.call_args.args[0], self.root.resolve())
         self.assertEqual(approve.call_args.args[1], "auth-api-files")
+
+    def test_provider_invites_file_view_from_web_studio(self):
+        with patch(
+            "rightmemory.web.service.invite_file_view",
+            return_value="invited file view auth-api-files\ninvitation_url\thttps://hub.example.test/i/invite-token",
+        ) as invite:
+            response = self.client.post(
+                "/api/share/views/auth-api-files/invite",
+                json={
+                    "hub_url": "https://hub.example.test",
+                    "credential_id": "alice-publish",
+                    "label": "frontend",
+                    "expires_at": "2026-07-01T00:00:00+00:00",
+                },
+                headers={"x-csrf-token": self.csrf},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        invite.assert_called_once_with(
+            self.root.resolve(),
+            "auth-api-files",
+            hub_url="https://hub.example.test",
+            credential_id="alice-publish",
+            label="frontend",
+            expires_at="2026-07-01T00:00:00+00:00",
+        )
+        self.assertIn("invitation_url", response.json()["message"])
+
+    def test_provider_publishes_question_invitation_from_web_studio(self):
+        with patch(
+            "rightmemory.web.service.publish_question_view",
+            return_value="published question view auth-api-ask\ninvitation_url\thttps://hub.example.test/i/invite-token",
+        ) as publish:
+            response = self.client.post(
+                "/api/share/views/auth-api-ask/publish-question",
+                json={
+                    "hub_url": "https://hub.example.test",
+                    "credential_id": "alice-publish",
+                    "question_base_url": "https://provider.example.test",
+                    "label": "frontend",
+                    "expires_at": "2026-07-01T00:00:00+00:00",
+                },
+                headers={"x-csrf-token": self.csrf},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        publish.assert_called_once_with(
+            self.root.resolve(),
+            "auth-api-ask",
+            hub_url="https://hub.example.test",
+            credential_id="alice-publish",
+            question_base_url="https://provider.example.test",
+            label="frontend",
+            expires_at="2026-07-01T00:00:00+00:00",
+        )
+        self.assertIn("invitation_url", response.json()["message"])
 
     def test_save_http_publish_credential_from_web_studio(self):
         response = self.client.post(

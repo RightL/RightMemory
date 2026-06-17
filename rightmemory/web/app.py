@@ -175,6 +175,42 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
             ) from exc
         return ok_response(message)
 
+    @app.post("/api/share/views/{view_id}/invite")
+    def invite_file_view(
+        view_id: str,
+        request: Request,
+        payload: dict[str, object] | None = Body(default=None),
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        try:
+            message = service.invite_file_view(view_id, payload or {})
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_detail("could not create file-view invitation", technical=str(exc)),
+            ) from exc
+        return ok_response(message)
+
+    @app.post("/api/share/views/{view_id}/publish-question")
+    def publish_question_view(
+        view_id: str,
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        try:
+            message = service.publish_question_view(view_id, payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_detail("could not publish question-view invitation", technical=str(exc)),
+            ) from exc
+        return ok_response(message)
+
     @app.post("/api/share/questions/{view_id}/ask")
     def answer_question_view(
         view_id: str,

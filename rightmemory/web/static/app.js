@@ -106,6 +106,22 @@ async function renderSharedViews() {
       label: `${view.view_id || view.error} (${view.type || "view"}${view.approved ? ", approved" : ""})`,
     })),
   );
+  const fileProviderOptions = renderOptions(
+    providerViews
+      .filter((view) => view.type === "file")
+      .map((view) => ({
+        value: view.view_id,
+        label: `${view.view_id || view.error}${view.approved ? " (approved)" : ""}`,
+      })),
+  );
+  const questionProviderOptions = renderOptions(
+    providerViews
+      .filter((view) => view.type === "question")
+      .map((view) => ({
+        value: view.view_id,
+        label: `${view.view_id || view.error}${view.approved ? " (approved)" : ""}`,
+      })),
+  );
   const connectionOptions = renderOptions(
     connections.map((connection) => ({
       value: connection.heading_id,
@@ -130,6 +146,8 @@ async function renderSharedViews() {
   );
   const hasFileConnections = connections.some((connection) => (connection.type || connection.view_type) === "file");
   const hasQuestionConnections = connections.some((connection) => (connection.type || connection.view_type) === "question");
+  const hasFileProviderViews = providerViews.some((view) => view.type === "file");
+  const hasQuestionProviderViews = providerViews.some((view) => view.type === "question");
 
   return `
     <div class="flow-layout">
@@ -222,6 +240,84 @@ async function renderSharedViews() {
         <div class="section-heading">
           <span class="step-badge">4</span>
           <div>
+            <h2>Create File Invitation</h2>
+          </div>
+        </div>
+        <form id="invite-file-view-form" class="guided-form">
+          <label>
+            File view
+            <select name="view_id">${fileProviderOptions}</select>
+          </label>
+          <details class="advanced">
+            <summary>Hub override</summary>
+            <label>
+              HTTP hub URL
+              <input name="hub_url" placeholder="from recipe">
+            </label>
+            <label>
+              Credential id
+              <input name="credential_id" placeholder="from recipe">
+            </label>
+            <label>
+              Label
+              <input name="label" placeholder="frontend">
+            </label>
+            <label>
+              Expires at
+              <input name="expires_at" placeholder="2026-07-01T00:00:00+00:00">
+            </label>
+          </details>
+          <div class="button-row">
+            <button class="primary" type="submit"${hasFileProviderViews ? "" : " disabled"}>Create Invitation</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel flow-panel">
+        <div class="section-heading">
+          <span class="step-badge">5</span>
+          <div>
+            <h2>Publish Question Invitation</h2>
+          </div>
+        </div>
+        <form id="publish-question-view-form" class="guided-form">
+          <label>
+            Question view
+            <select name="view_id">${questionProviderOptions}</select>
+          </label>
+          <label>
+            HTTP hub URL
+            <input name="hub_url" placeholder="https://hub.example.test" required>
+          </label>
+          <label>
+            Credential id
+            <input name="credential_id" placeholder="alice-publish" required>
+          </label>
+          <label>
+            Question base URL
+            <input name="question_base_url" placeholder="https://provider.example.test" required>
+          </label>
+          <details class="advanced">
+            <summary>Invitation options</summary>
+            <label>
+              Label
+              <input name="label" placeholder="frontend">
+            </label>
+            <label>
+              Expires at
+              <input name="expires_at" placeholder="2026-07-01T00:00:00+00:00">
+            </label>
+          </details>
+          <div class="button-row">
+            <button class="primary" type="submit"${hasQuestionProviderViews ? "" : " disabled"}>Publish Invitation</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel flow-panel">
+        <div class="section-heading">
+          <span class="step-badge">6</span>
+          <div>
             <h2>Accept a View</h2>
           </div>
         </div>
@@ -253,7 +349,7 @@ async function renderSharedViews() {
 
       <section class="panel flow-panel">
         <div class="section-heading">
-          <span class="step-badge">5</span>
+          <span class="step-badge">7</span>
           <div>
             <h2>Use a Connected View</h2>
           </div>
@@ -747,6 +843,57 @@ function attachSharedViewHandlers() {
             type: form.get("type"),
           }),
         });
+        setMessage(payload.message);
+        await loadPanel();
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const inviteFileViewForm = document.querySelector("#invite-file-view-form");
+  if (inviteFileViewForm) {
+    inviteFileViewForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const viewId = String(form.get("view_id") || "").trim();
+        const payload = await fetchJson(`/api/share/views/${encodeURIComponent(viewId)}/invite`, {
+          method: "POST",
+          body: JSON.stringify({
+            hub_url: form.get("hub_url"),
+            credential_id: form.get("credential_id"),
+            label: form.get("label"),
+            expires_at: form.get("expires_at"),
+          }),
+        });
+        showSharedViewResult(payload.message);
+        setMessage(payload.message);
+        await loadPanel();
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const publishQuestionViewForm = document.querySelector("#publish-question-view-form");
+  if (publishQuestionViewForm) {
+    publishQuestionViewForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const viewId = String(form.get("view_id") || "").trim();
+        const payload = await fetchJson(`/api/share/views/${encodeURIComponent(viewId)}/publish-question`, {
+          method: "POST",
+          body: JSON.stringify({
+            hub_url: form.get("hub_url"),
+            credential_id: form.get("credential_id"),
+            question_base_url: form.get("question_base_url"),
+            label: form.get("label"),
+            expires_at: form.get("expires_at"),
+          }),
+        });
+        showSharedViewResult(payload.message);
         setMessage(payload.message);
         await loadPanel();
       } catch (error) {

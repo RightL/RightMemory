@@ -1,83 +1,31 @@
 # Shared Views Usage
 
-Shared views let one RightMemory root use collaboration context owned by another root without treating the provider's private memory as local memory. The current model has two explicit kinds:
+Shared views let one RightMemory root use collaboration context owned by another root without reading the provider's private memory root.
 
-- `MF#`: mirrored file view. The provider publishes a scoped file package over HTTP. The consumer syncs that package into `.runtime/shared_views/imports/<mf-id>/`, and ordinary retrieve reads it with normal file tools.
-- `MQ#`: provider question view. The consumer asks a live provider-side question over HTTP. This is synchronous ask-or-unavailable, not a queued note flow.
+There are two sharing modes:
 
-All normal transport is HTTP, even when provider and consumer are on the same machine. Direct provider filesystem access and mounted-folder hub flows are not part of the current product path.
+- `MF#`: mirrored file context. The provider publishes a scoped file package to an HTTP hub. The consumer accepts an invitation, pulls the package into `.runtime/shared_views/imports/<mf-id>/`, and retrieve reads the mirrored files with normal file tools.
+- `MQ#`: live provider questions. The provider publishes a question view invitation. The consumer accepts it, stores a provider question token, and asks the provider Web Studio endpoint synchronously when needed.
 
-## Provider: Build an `MF#` File View
+All normal sharing goes through HTTP, even on one machine. Direct provider filesystem access, mounted provider roots, local package invitations, and generic `M#` shared-view headings are not part of the product path.
 
-Create a file-view recipe from natural language:
+## Scenario
 
-```bash
-rightmemory --profile alice shared-view build-file auth-api-files \
-  "Expose auth API integration context for frontend agents" \
-  --title "Auth API Files" \
-  --hub-url http://127.0.0.1:8765 \
-  --credential-id alice-publish
-```
+Assume Alice owns provider memory and a frontend agent consumes selected auth API context.
 
-The builder writes:
-
-```text
-shared_views/auth-api-files/
-  view.md
-  recipe.toml
-  .gitignore
-```
-
-Review the files, then approve:
+Alice runs:
 
 ```bash
-rightmemory --profile alice shared-view approve auth-api-files --type file
+rightmemory --profile alice ...
 ```
 
-Approved file views rebuild and publish automatically after successful memory-write roles. Generated `dist/` output is not committed.
-
-## Provider: Build an `MQ#` Question View
-
-Create a question-view endpoint from natural language:
+The frontend consumer runs:
 
 ```bash
-rightmemory --profile alice shared-view build-question auth-api-ask \
-  "Let frontend agents ask temporary auth API questions" \
-  --title "Auth API Questions"
+rightmemory --profile frontend ...
 ```
 
-The builder writes:
-
-```text
-shared_views/auth-api-ask/
-  view.md
-  retriever.md
-  question.toml
-```
-
-`retriever.md` is provider-side only. It is the prompt used when the provider receives a live question. Approve the question view after review:
-
-```bash
-rightmemory --profile alice shared-view approve auth-api-ask --type question
-```
-
-Remote asks require a provider-approved bearer token. `question.toml` stores token hashes in `access_token_hashes`; invitation accept responses deliver the raw `question_token` to the consumer credential store.
-The consumer keeps the hub connection token for notes separate from the provider question token used for live asks.
-
-Publish an approved question view to the hub and create an invitation:
-
-```bash
-rightmemory --profile alice shared-view publish-question auth-api-ask \
-  --hub-url http://127.0.0.1:8765 \
-  --credential-id alice-publish \
-  --question-base-url http://127.0.0.1:8765
-```
-
-The command registers `MQ#` metadata with the hub, generates a question token, stores only its hash in `question.toml`, and prints an invitation URL.
-
-## HTTP Hub Setup For `MF#`
-
-Initialize and serve a hub:
+They also use an HTTP hub for invitations and file packages:
 
 ```bash
 rightmemory hub init ./rightmemory-hub --public-base-url http://127.0.0.1:8765
@@ -85,7 +33,7 @@ rightmemory hub token create ./rightmemory-hub --provider alice --label publish
 rightmemory hub serve ./rightmemory-hub --host 127.0.0.1 --port 8765
 ```
 
-Store the printed provider token in the provider memory root:
+Alice stores the printed provider token in her memory root:
 
 ```bash
 rightmemory --profile alice shared-view credential set alice-publish \
@@ -95,74 +43,210 @@ rightmemory --profile alice shared-view credential set alice-publish \
   --token-prompt
 ```
 
-The file-view recipe stores the hub URL and credential id. Tokens stay in `.runtime/shared_views/credentials.toml`.
+Tokens are stored under `.runtime/shared_views/credentials.toml`.
 
-## Consumer: Accept And Use `MF#`
+## Share Stable Context With `MF#`
 
-Accept an HTTP invitation:
+Use `MF#` when the consumer should retrieve from a scoped, mirrored snapshot of provider context.
+
+Alice builds a file view from natural language:
+
+```bash
+rightmemory --profile alice shared-view build-file auth-api-files \
+  "Expose auth API integration context for frontend agents" \
+  --title "Auth API Files" \
+  --hub-url http://127.0.0.1:8765 \
+  --credential-id alice-publish
+```
+
+This creates provider-owned source files:
+
+```text
+shared_views/auth-api-files/
+  view.md
+  recipe.toml
+  .gitignore
+```
+
+Alice reviews the recipe, then approves it:
+
+```bash
+rightmemory --profile alice shared-view approve auth-api-files --type file
+```
+
+Alice creates an invitation:
+
+```bash
+rightmemory --profile alice shared-view invite auth-api-files --label frontend
+```
+
+`invite` publishes the current file-view package to the hub and prints an invitation URL. After approval, future successful memory-write roles also rebuild and publish approved file views automatically. Generated `dist/` output is runtime output and should not be committed.
+
+The frontend consumer accepts the invitation:
 
 ```bash
 rightmemory --profile frontend shared-view accept-invite http://127.0.0.1:8765/i/<invite-token>
 ```
 
-This creates an `MF#` heading in `MEMORY.md` and stores resolver metadata in `shared_views.toml`. Pull manually when you want to inspect the mirror immediately:
+This creates an `MF#` heading in `MEMORY.md`, stores resolver metadata in `shared_views.toml`, and stores the hub connection token in `.runtime/shared_views/credentials.toml`.
+
+The frontend can pull or inspect manually:
 
 ```bash
 rightmemory --profile frontend shared-view pull auth-api-files
 rightmemory --profile frontend shared-view status auth-api-files
 ```
 
-Ordinary retrieve also pulls accepted `MF#` views before the retrieve agent starts:
+Retrieve also pulls accepted `MF#` views before the retrieve agent starts:
 
 ```bash
 rightmemory --profile frontend retrieve --session codex-frontend \
   "Find auth API context for login token expiry"
 ```
 
-The sync result is intentionally not added to retrieve session history, which keeps cache hits stable.
+The pull result is intentionally not added to retrieve session history, which keeps cache hits stable.
 
-## Consumer: Ask `MQ#`
+## Ask Live Questions With `MQ#`
 
-An `MQ#` invitation must point at the provider's Web Studio question endpoint, not at a file-package hub. When retrieve reports relevant provider-question context, the main agent can ask the provider explicitly:
+Use `MQ#` when the consumer needs a temporary answer from the provider's current private memory and should not receive a mirrored file package.
+
+Alice starts Web Studio so the provider question endpoint is reachable:
+
+```bash
+rightmemory --profile alice web start --host 127.0.0.1 --port 8766
+```
+
+Alice builds a question view:
+
+```bash
+rightmemory --profile alice shared-view build-question auth-api-ask \
+  "Let frontend agents ask temporary auth API questions" \
+  --title "Auth API Questions"
+```
+
+This creates:
+
+```text
+shared_views/auth-api-ask/
+  view.md
+  retriever.md
+  question.toml
+```
+
+`retriever.md` is provider-side only. It is the prompt used when Alice's root receives a live question.
+
+Alice reviews and approves the question view:
+
+```bash
+rightmemory --profile alice shared-view approve auth-api-ask --type question
+```
+
+Alice publishes a question invitation:
+
+```bash
+rightmemory --profile alice shared-view publish-question auth-api-ask \
+  --hub-url http://127.0.0.1:8765 \
+  --credential-id alice-publish \
+  --question-base-url http://127.0.0.1:8766 \
+  --label frontend
+```
+
+This registers `MQ#` metadata with the hub, generates a raw question token, stores only its hash in `question.toml`, and prints an invitation URL.
+
+The frontend accepts the invitation:
+
+```bash
+rightmemory --profile frontend shared-view accept-invite http://127.0.0.1:8765/i/<invite-token>
+```
+
+The consumer stores two separate credentials:
+
+- the hub connection token, used for notes and interaction records;
+- the provider question token, used only for live asks.
+
+When retrieve reports that an `MQ#` connection is relevant, the main agent can ask explicitly:
 
 ```bash
 rightmemory --profile frontend shared-view ask auth-api-ask \
   "How should login refresh tokens work?"
 ```
 
-The ask command returns either an answer or an unavailable result. It does not create a queued note automatically.
+The result is either answered or unavailable. Failed asks do not create queued notes.
 
-## Notes And Inbox
+## Notes And Provider Inbox
 
-Notes are explicit, one-way interactions and can target either `MF#` or `MQ#` connections:
+Notes are explicit, one-way interactions. They can target either `MF#` or `MQ#` connections.
+
+The frontend sends a note:
 
 ```bash
 rightmemory --profile frontend shared-view note auth-api-files \
   --confirm \
   --task "frontend login migration" \
   "Docs are missing token_expires_at."
+```
 
+Alice checks the provider inbox through the hub:
+
+```bash
 rightmemory --profile alice shared-view inbox-http \
   --hub-url http://127.0.0.1:8765 \
   --credential-id alice-publish \
   --provider alice
 ```
 
-Failed `MQ#` asks do not become notes. Send a note only when the user or agent intentionally wants to tell the provider something.
+Local notes and local inbox records can also be inspected with:
+
+```bash
+rightmemory --profile frontend shared-view notes
+rightmemory --profile alice shared-view inbox
+```
+
+## Operational Checks
+
+List accepted shared-view connections:
+
+```bash
+rightmemory --profile frontend shared-view list
+```
+
+Pull all accepted file views:
+
+```bash
+rightmemory --profile frontend shared-view pull
+```
+
+Check all accepted connection statuses:
+
+```bash
+rightmemory --profile frontend shared-view status
+```
+
+Automatic file-view publish events are appended to:
+
+```text
+.runtime/shared_views/publish-events.jsonl
+```
+
+If an automatic publish fails, the approved file view remains locally renderable, but consumers only see the last successfully published package until the provider fixes the hub or credential problem and republishes.
 
 ## Web Studio
 
-Web Studio exposes the same flow:
+Web Studio exposes the main provider and consumer flow:
 
-- Build File View
-- Build Question View
-- Approve View
-- Accept HTTP Invitation
-- Pull `MF#`
-- Ask `MQ#`
-- Send Note
+- store provider publish credentials;
+- build file views;
+- build question views;
+- approve views;
+- create `MF#` file invitations;
+- publish `MQ#` question invitations;
+- accept HTTP invitations;
+- pull and check `MF#` connections;
+- ask `MQ#` connections;
+- send notes;
+- view local activity.
 
-The UI does not expose generic shared-view retrieval, direct provider filesystem access, local package invitations, or mounted-folder publication.
+Web Studio does not initialize or serve the hub, create provider hub tokens, show the provider HTTP inbox, or expose generic shared-view retrieval. Use the CLI commands above for those operations.
 
 ## File Ownership
 
@@ -184,5 +268,6 @@ Do not commit runtime state:
 .runtime/shared_views/imports/
 .runtime/shared_views/notes/
 .runtime/shared_views/inbox/
+.runtime/shared_views/publish-events.jsonl
 shared_views/<view-id>/dist/
 ```

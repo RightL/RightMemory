@@ -419,6 +419,45 @@ class JsonRequestTests(unittest.TestCase):
         )
         self.assertIn("invitation_url", stdout.getvalue())
 
+    def test_shared_view_invite_cli_dispatches_file_view_inviter(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch(
+                    "rightmemory.cli.invite_file_view",
+                    return_value="invited file view auth-api-files\ninvitation_url\thttps://hub.example.test/i/invite-token",
+                ) as invite,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(
+                    [
+                        "shared-view",
+                        "invite",
+                        "auth-api-files",
+                        "--hub-url",
+                        "https://hub.example.test",
+                        "--credential-id",
+                        "alice-publish",
+                        "--label",
+                        "frontend",
+                        "--expires-at",
+                        "2026-07-01T00:00:00+00:00",
+                    ]
+                )
+
+        self.assertEqual(result, 0)
+        invite.assert_called_once_with(
+            root,
+            "auth-api-files",
+            hub_url="https://hub.example.test",
+            credential_id="alice-publish",
+            label="frontend",
+            expires_at="2026-07-01T00:00:00+00:00",
+        )
+        self.assertIn("invitation_url", stdout.getvalue())
+
     def test_shared_view_legacy_commands_are_removed(self):
         for command in ("define", "build", "export", "publish", "publish-http", "retrieve", "accept"):
             with self.subTest(command=command):

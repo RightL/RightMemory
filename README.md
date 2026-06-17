@@ -258,6 +258,12 @@ rightmemory shared-view credential set alice-publish \
 
 Approved `MF#` file views rebuild and publish automatically after successful memory-write roles. `rightmemory retrieve` silently syncs accepted `MF#` packages before it searches, without adding sync output to retrieve session history.
 
+Create an `MF#` invitation by publishing the current file package and asking the hub for an invitation URL:
+
+```bash
+rightmemory shared-view invite auth-api-files --label frontend
+```
+
 Approved `MQ#` question views are published explicitly:
 
 ```bash
@@ -275,7 +281,7 @@ rightmemory shared-view accept-invite http://127.0.0.1:8765/i/<invite-token>
 
 For `MF#`, the synced `shared_views.toml` stores the hub URL and credential id. For `MQ#`, the invitation must provide the provider Web Studio question endpoint and an accepted `question_token`; the ask command sends that bearer token, and the provider validates it against `question.toml` token hashes. Bearer tokens stay under `.runtime/shared_views/credentials.toml`.
 
-Web Studio exposes the same guided flows: build file view, build question view, approve, accept HTTP invitation, pull `MF#`, ask `MQ#`, and send explicit notes. Direct provider filesystem reads, mounted folder hubs, generic shared-view retrieval, and legacy single-marker shared-view headings are not part of the current product path.
+Web Studio exposes the same guided flows: build file view, build question view, approve, create `MF#` invitations, publish `MQ#` invitations, accept HTTP invitation, pull `MF#`, ask `MQ#`, and send explicit notes. Direct provider filesystem reads, mounted folder hubs, generic shared-view retrieval, and legacy single-marker shared-view headings are not part of the current product path.
 
 ### Edges
 

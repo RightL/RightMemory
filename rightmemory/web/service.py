@@ -16,8 +16,8 @@ from ..config import (
 )
 from ..session import MemoryWriteLock
 from ..shared_view_builder import run_file_view_builder, run_question_view_builder
-from ..shared_view_files import approve_file_view, pull_file_view
-from ..shared_view_questions import answer_question_view, approve_question_view, ask_question_view
+from ..shared_view_files import approve_file_view, invite_file_view, pull_file_view
+from ..shared_view_questions import answer_question_view, approve_question_view, ask_question_view, publish_question_view
 from ..shared_views import (
     accept_http_shared_view_invitation,
     accept_shared_view_invitation,
@@ -161,6 +161,27 @@ class WebStudioService:
         if view_type == "question":
             return approve_question_view(self.memory_root, view_id)
         raise ValueError("shared view approve type must be file or question")
+
+    def invite_file_view(self, view_id: str, payload: dict[str, Any]) -> str:
+        return invite_file_view(
+            self.memory_root,
+            view_id,
+            hub_url=_optional_payload_str(payload, "hub_url"),
+            credential_id=_optional_payload_str(payload, "credential_id"),
+            label=_optional_payload_str(payload, "label"),
+            expires_at=_optional_payload_str(payload, "expires_at"),
+        )
+
+    def publish_question_view(self, view_id: str, payload: dict[str, Any]) -> str:
+        return publish_question_view(
+            self.memory_root,
+            view_id,
+            hub_url=_required_payload_str(payload, "hub_url"),
+            credential_id=_required_payload_str(payload, "credential_id"),
+            question_base_url=_required_payload_str(payload, "question_base_url"),
+            label=_optional_payload_str(payload, "label"),
+            expires_at=_optional_payload_str(payload, "expires_at"),
+        )
 
     def save_credential(self, payload: dict[str, Any]) -> str:
         credential_id = _required_payload_str(payload, "credential_id")

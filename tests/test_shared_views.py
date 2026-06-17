@@ -14,6 +14,7 @@ from rightmemory.shared_view_files import (
     FileViewPublishResult,
     approve_file_view,
     export_file_view_package,
+    invite_file_view,
     publish_approved_file_views,
     pull_file_view,
     record_file_view_publish_results,
@@ -421,6 +422,22 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
         self.assertEqual(results[0].status, "published")
         self.assertEqual(clients[0].base_url, "https://hub.example.test")
         self.assertIn("dist/MEMORY.md", clients[0].publish_calls[0]["files"])
+
+    def test_invite_file_view_publishes_current_package_and_creates_invitation(self):
+        clients = []
+
+        with patch("rightmemory.shared_view_files.HubClient", side_effect=lambda base_url, token: _record_fake_client(clients, base_url, token)):
+            result = invite_file_view(self.root, "auth-api-files", label="frontend")
+
+        client = clients[0]
+        self.assertIn("invited file view auth-api-files", result)
+        self.assertIn("invitation_url\thttps://hub.example.test/i/invite-token", result)
+        self.assertEqual(client.base_url, "https://hub.example.test")
+        self.assertEqual(client.token, "publish-token")
+        self.assertEqual(client.publish_calls[0]["view_id"], "auth-api-files")
+        self.assertIn("dist/MEMORY.md", client.publish_calls[0]["files"])
+        self.assertEqual(client.invitation_calls[0]["view_id"], "auth-api-files")
+        self.assertEqual(client.invitation_calls[0]["label"], "frontend")
 
     def test_record_file_view_publish_results_logs_failures(self):
         record_file_view_publish_results(
