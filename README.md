@@ -617,12 +617,17 @@ path = "~/.codex/sessions"
 
 If `[[review.sources]]` is omitted, RightMemory checks the default Codex and
 Claude locations. By default it considers transcript files modified in the last
-3 days, then reviews time-adjacent eligible sessions in batches of up to 3.
-Review state is stored under `<memory-root>/.runtime/review/state.json` and
-records reviewed provider sessions by source and session id. A successful batch
-marks every included provider session reviewed; a failed batch marks none. If
-the same provider session later changes or resumes, scanner state treats it as
-already reviewed unless you clear the corresponding review state.
+3 days, suppresses provider-local prefix duplicates from forked transcripts,
+then reviews time-adjacent eligible representatives in batches of up to 3. When
+one eligible transcript is a normalized-turn prefix of a longer transcript from
+the same provider, RightMemory reviews the longest representative and records
+the shorter covered session under `skipped_duplicate` after representative
+success. Review state is stored under `<memory-root>/.runtime/review/state.json`
+and records reviewed provider sessions by source and session id. A successful
+batch marks every included representative and covered duplicate reviewed; a
+failed batch marks none. If the same provider session later changes or resumes,
+scanner state treats it as already reviewed unless you clear the corresponding
+review state.
 
 ### Forgetting And History
 
