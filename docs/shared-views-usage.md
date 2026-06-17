@@ -234,19 +234,19 @@ If an automatic publish fails, the approved file view remains locally renderable
 
 Web Studio exposes the main provider and consumer flow:
 
-- store provider publish credentials;
-- build file views;
-- build question views;
-- approve views;
-- create `MF#` file invitations;
-- publish `MQ#` question invitations;
+- save HTTP hub credentials without showing stored tokens;
+- build, approve, and invite `MF#` file views;
+- build, approve, and publish `MQ#` question views;
 - accept HTTP invitations;
-- pull and check `MF#` connections;
-- ask `MQ#` connections;
-- send notes;
-- view local activity.
+- pull or status one `MF#` connection;
+- pull all `MF#` connections;
+- status all shared-view connections;
+- ask one `MQ#` connection;
+- send provider-visible notes;
+- Provider Inbox: read the provider HTTP inbox for the active provider root;
+- Auto-Publish Events: inspect recent `MF#` auto-publish events.
 
-Web Studio does not initialize or serve the hub, create provider hub tokens, show the provider HTTP inbox, or expose generic shared-view retrieval. Use the CLI commands above for those operations.
+Web Studio does not initialize or serve the hub, create global provider hub tokens, manage every provider on a hub, revoke invitations or accepted connections, show the full hub audit log, or expose generic shared-view retrieval. Use the CLI commands above for bootstrap operations. Treat a future Hub Console as the right place for hub-wide runtime administration.
 
 ## File Ownership
 
