@@ -93,6 +93,26 @@ class ShareModelTests(unittest.TestCase):
 
         self.assertIn("file part requires [shares.auth-api.file]", str(caught.exception))
 
+    def test_load_rejects_non_boolean_approved(self):
+        (self.root / "shares.toml").write_text(
+            '[shares.auth-api]\n'
+            'version = 1\n'
+            'role = "provider"\n'
+            'title = "Auth API"\n'
+            'state = "draft"\n'
+            'parts = ["file"]\n'
+            '[shares.auth-api.file]\n'
+            'view_id = "auth-api-files"\n'
+            'intent = "Expose auth context."\n'
+            'approved = "false"\n',
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(ValueError) as caught:
+            load_shares(self.root)
+
+        self.assertIn("file part approved for auth-api must be a boolean", str(caught.exception))
+
 
 def _write_canonical_file_and_question_parts(root: Path):
     from rightmemory.shared_view_files import write_file_view_recipe

@@ -151,7 +151,7 @@ def _load_file_part(share_id: str, raw: object, *, role: str, required: bool) ->
         view_id=_optional_string(raw.get("view_id")),
         intent=_optional_string(raw.get("intent")),
         heading_id=_optional_string(raw.get("heading_id")),
-        approved=bool(raw.get("approved", False)),
+        approved=_optional_bool(raw.get("approved", False), f"file part approved for {share_id}"),
     )
 
 
@@ -167,7 +167,7 @@ def _load_question_part(share_id: str, raw: object, *, role: str, required: bool
         intent=_optional_string(raw.get("intent")),
         heading_id=_optional_string(raw.get("heading_id")),
         question_base_url=_optional_string(raw.get("question_base_url")),
-        approved=bool(raw.get("approved", False)),
+        approved=_optional_bool(raw.get("approved", False), f"question part approved for {share_id}"),
     )
 
 
@@ -249,6 +249,12 @@ def _optional_string(value: object) -> str | None:
         raise ValueError("optional share fields must be strings")
     clean = value.strip()
     return clean or None
+
+
+def _optional_bool(value: object, label: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{label} must be a boolean")
 
 
 def _toml_key(value: str) -> str:
