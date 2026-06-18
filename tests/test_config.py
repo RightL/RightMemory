@@ -848,14 +848,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.model_id, "openai/reconciler")
         self.assertTrue(config.sync.enabled)
 
-    def test_retrieve_prompt_uses_mf_mq_schema_without_endpoint_tool(self):
+    def test_retrieve_prompt_uses_context_first_contract(self):
         instructions = build_instructions(Path("/memory"), "retrieve")
 
-        self.assertIn("MF#", instructions)
+        self.assertIn("supplied daily memory snapshot", instructions)
+        self.assertIn("read_skill", instructions)
+        self.assertIn("read_mf", instructions)
         self.assertIn("MQ#", instructions)
         self.assertIn("provider-question context", instructions)
-        self.assertNotIn("M# headings", instructions)
+        self.assertNotIn("Read `MEMORY.md` before retrieval", instructions)
+        self.assertNotIn("read_command", instructions)
         self.assertNotIn("retrieve_shared_view", instructions)
+        self.assertNotIn("rightmemory shared-view ask", instructions)
 
     def test_write_role_prompts_preserve_shared_view_boundary(self):
         for role in ("update", "dreamer", "reviewer"):

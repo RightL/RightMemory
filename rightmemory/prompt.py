@@ -213,11 +213,9 @@ def _sync_guidance(role: str) -> str:
 def _tool_guidance(role: str) -> str:
     if role == "retrieve":
         return (
-            "- Use the provided read-only tools for `read`, `grep`, `glob`, restricted `read_command`, outline, "
-            "and validation.\n"
-            "- Retrieve has ordinary read/search tools. It does not call shared-view endpoints directly.\n"
-            "- `read_command` accepts common read-only shell forms such as `cat path`, `sed -n 'X,Yp' path`, "
-            "`rg pattern`, `rg --files`, `git status --short`, and `git diff`. It does not run a general shell."
+            "- Use `read_skill(skill_id)` only when a relevant `S#` heading needs its full skill body.\n"
+            "- Use `read_mf(mf_id)` only when a relevant `MF#` heading needs mirrored provider context.\n"
+            "- Retrieve does not call shared-view endpoints or provider-question ask commands directly."
         )
     if role == "historian":
         return (

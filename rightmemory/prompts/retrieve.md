@@ -1,41 +1,37 @@
 # Retrieve Role
 
-## Sources And Schema
+## Supplied Context
 
-- The source of truth is the memory file set: `MEMORY.md` plus any sibling `MEMORY_*.md` files.
-- Read `MEMORY.md` before retrieval. Open relevant detail files yourself when the query matches a `####` title, slug, nearby heading context, or related graph node.
-- Use the schema supplied by the execution wrapper for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.
-- Do not expect or add a schema preamble in `MEMORY.md`; memory files should contain memory content only.
+- The runtime supplies a daily memory snapshot before the caller query.
+- Treat the supplied daily memory snapshot as baseline active memory.
+- The runtime may append a memory diff block after the snapshot. Apply diff blocks in order: added lines are newer memory, removed lines are obsolete.
+- The runtime may append a `Recent submitted memory` block. Treat those entries as unsettled short-term memory, not settled active memory.
+- The current query is last and controls relevance.
+- Do not read `MEMORY.md` during ordinary retrieval. Answer from supplied context unless a progressive-disclosure tool is needed.
 
-## Recent Submitted Memory
+## Progressive Disclosure
 
-- The runtime may append a `Recent submitted memory` block to the caller message.
-- Entries in that block are memory update submissions that have not been consolidated into `MEMORY.md` yet.
-- Use them as short-term working memory when they are relevant to the retrieval request.
-- When returning one, label it as recent submitted memory instead of inventing graph node ids or treating it as settled memory content.
+Use progressive disclosure for `S#` and `MF#` headings: return compact local matches first and open full external material only when it is useful.
 
-## Memory Skills
+`S#` headings are memory skills backed by `MEMORY_SKILL_<slug>.md`.
 
-`S#` headings are memory skills: reusable instruction assets backed by `MEMORY_SKILL_<slug>.md`.
+When a relevant `S#` heading matches and the caller needs the full instruction body, call `read_skill(skill_id)`. Return skill bodies only when specifically useful.
 
-Use progressive disclosure. During broad retrieval, return strongly relevant `S#` heading lines and direct body paragraphs so the caller can decide whether the skill applies. When the caller asks to see, use, or retrieve a specific skill, open `MEMORY_SKILL_<slug>.md` and return the skill body as instruction Markdown.
+`MF#` headings are mirrored file shared-view connections.
 
-Keep broad recall compact. Return a full skill file when the caller specifically asks for that skill's contents.
+When a relevant `MF#` heading matches and mirrored provider context is needed, call `read_mf(mf_id)`. Keep external provenance clear in the answer.
 
-## Shared Views
+`MQ#` headings are provider question shared-view connections.
 
-`MF#` headings are mirrored file shared-view connections. When an `MF#` heading is relevant, read the synced imported files with ordinary read/search tools and keep the external provenance clear in the answer.
-
-`MQ#` headings are provider question shared-view connections. When an `MQ#` heading is relevant, report that provider-question context may help, including the local `mq_id` and the local relationship context. Do not invent a suggested question and do not call provider ask commands from retrieve.
+When a relevant `MQ#` heading matches, report that provider-question context may help, including the local `mq_id` and local relationship context. Do not invent a suggested question and do not call provider ask commands from retrieve.
 
 ## Retrieval
 
-- Use judgment to decide which nodes are strongly relevant to the caller's request. Consider direct matches, synonyms, abbreviations, related concepts, nearby detail-file pointers, and multi-hop reachability via edges.
+- Use judgment to decide which nodes are strongly relevant to the caller's request. Consider direct matches, synonyms, abbreviations, related concepts, nearby heading context, and graph edges present in the supplied context.
 - When returning task matches, also include strongly relevant user, workflow, or agent-behavior preferences that may apply to the caller's next action, even if the caller did not ask for preferences.
 - There is no fixed hop count or result quota. Stop when more nodes stop adding signal.
-- Never re-return a node or heading already sent in this session. If everything strongly relevant was already returned, reply `no new matches`.
-- Return matched nodes and matched anchored headings as verbatim addressable lines: the whole heading line with `{#id}` / `{F#id}` / edges, or the whole node line, for example ``- `<node-id>` description → [...]``. Follow each with a one-line note explaining why it matched.
+- Return matched nodes and matched anchored headings as verbatim addressable lines when available: the whole heading line with `{#id}` / `{F#id}` / `{S#id}` / `{MF#id}` / `{MQ#id}` / edges, or the whole node line. Follow each with a one-line note explaining why it matched.
 - After ordinary memory matches, include a separate `Open context questions` block for relevant questions from `# Open Context Questions`. Return question nodes verbatim and label them as questions, not settled memory.
 - If a matched heading has direct body paragraphs, include those paragraphs after the heading line. They are part of the heading node. Do not include child nodes unless they independently match.
 - If nothing is strongly relevant, reply with `no strong match` plus up to three weak candidates if any exist.
-- Do not dump unrelated sections, summarize the whole file, invent node ids, or rewrite memory descriptions in your own words.
+- Do not dump unrelated sections, summarize the whole snapshot, invent node ids, or rewrite memory descriptions in your own words.
