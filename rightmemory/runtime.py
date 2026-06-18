@@ -6,7 +6,7 @@ import shutil
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -21,8 +21,16 @@ from .provider_sessions import ProviderSessionStore
 from .recent_submitted import (
     RecentSubmittedMemoryDeliveryStore,
     RecentSubmittedMemoryEntry,
-    append_recent_submitted_memory,
     collect_recent_submitted_memory,
+)
+from .retrieve_context import (
+    RetrieveContextStore,
+    build_retrieve_request_text,
+    current_memory_head,
+    format_memory_diff_block,
+    format_recent_submitted_context_block,
+    load_daily_snapshot,
+    memory_diff_since,
 )
 from .semantic_upgrades import SemanticUpgradeContext, mark_absorbed, pending_context
 from .session import MemoryWriteLock, MessageSessionStore, _ensure_runtime_gitignore, _fsync_directory
@@ -58,6 +66,14 @@ THINK_START_TAG = "<think>"
 THINK_END_TAG = "</think>"
 
 
+@dataclass(frozen=True)
+class PreparedRetrieveTurn:
+    message: str
+    query: str
+    recent_submitted_entries: list[RecentSubmittedMemoryEntry]
+    memory_commit: str | None
+
+
 class RightMemoryRuntime:
     def __init__(self, config: RuntimeConfig):
         if config.runtime_mode not in {"standalone", "cli-agent"}:
@@ -65,6 +81,7 @@ class RightMemoryRuntime:
         self.config = config
         self.tools = MemoryTools(config.memory_root, role=config.role)
         self.sessions = MessageSessionStore(config.state_root, config.role)
+        self.retrieve_context = RetrieveContextStore(config.state_root)
         self.recent_submitted_delivery = RecentSubmittedMemoryDeliveryStore(config.state_root)
         self._message_history: list[Any] = []
         self._active_trace: DebugTrace | None = None
@@ -86,25 +103,28 @@ class RightMemoryRuntime:
             self._mark_semantic_upgrades_absorbed()
             return str(result)
         self._pull_file_views_for_retrieve()
-        prepared_message, recent_submitted_entries = self._prepare_retrieve_message(
+        prepared = self._prepare_retrieve_turn(
             NO_SESSION_RIGHTMEMORY_SESSION_ID,
             message,
         )
         result, post_sync = self._run_locked_turn(
             lambda: self.agent.run_sync(
-                prepared_message,
-                message_history=self._message_history or None,
+                prepared.message,
+                message_history=None if self.config.role == "retrieve" else self._message_history or None,
                 model_settings=self._model_settings(),
                 usage_limits=self._usage_limits(),
             )
         )
-        self._store_message_history_from_result(result)
-        self._record_recent_submitted_delivery(NO_SESSION_RIGHTMEMORY_SESSION_ID, recent_submitted_entries)
+        output = self._result_output(result)
+        if self.config.role == "retrieve":
+            self._record_successful_retrieve_turn(NO_SESSION_RIGHTMEMORY_SESSION_ID, prepared, output)
+        else:
+            self._store_message_history_from_result(result)
         if post_sync is not None:
             self._run_sync_reconciler(post_sync)
         self._publish_file_views_after_write()
         self._mark_semantic_upgrades_absorbed()
-        return self._result_output(result)
+        return output
 
     def run_session_turn(self, session_id: str, message: str, *, on_started: Callable[[], None] | None = None) -> str:
         if not message.strip():
@@ -197,7 +217,7 @@ class RightMemoryRuntime:
     def _run_session_model(self, session_id: str, message: str, *, on_started: Callable[[], None] | None = None):
         with self.sessions.locked(session_id) as session:
             self._pull_file_views_for_retrieve()
-            prepared_message, recent_submitted_entries = self._prepare_retrieve_message(session_id, message)
+            prepared = self._prepare_retrieve_turn(session_id, message)
             history_json = session.load_json()
             history = self._load_message_history(history_json) if history_json is not None else None
             self._trace("history_loaded", message_count=len(history or []))
@@ -205,27 +225,30 @@ class RightMemoryRuntime:
                 on_started()
             self._trace("model_started")
             result = self.agent.run_sync(
-                prepared_message,
-                message_history=history,
+                prepared.message,
+                message_history=None if self.config.role == "retrieve" else history,
                 model_settings=self._model_settings(),
                 usage_limits=self._usage_limits(),
             )
-            self._trace("model_finished", output=self._result_output(result))
-            session.save_json(self._dump_message_history(result))
-            self._trace("history_saved", path=str(session.paths.history))
-            self._record_recent_submitted_delivery(session_id, recent_submitted_entries)
+            output = self._result_output(result)
+            self._trace("model_finished", output=output)
+            if self.config.role == "retrieve":
+                self._record_successful_retrieve_turn(session_id, prepared, output)
+            else:
+                session.save_json(self._dump_message_history(result))
+                self._trace("history_saved", path=str(session.paths.history))
             return result
 
     def _run_session_cli_agent(self, session_id: str, message: str, *, on_started: Callable[[], None] | None = None) -> str:
         with self.sessions.locked(session_id):
             self._pull_file_views_for_retrieve()
-            prepared_message, recent_submitted_entries = self._prepare_retrieve_message(session_id, message)
+            prepared = self._prepare_retrieve_turn(session_id, message)
             if on_started is not None:
                 on_started()
             self._trace("model_started")
-            result = self.agent.run_session_turn(session_id, prepared_message)
+            result = self.agent.run_session_turn(session_id, prepared.message)
             self._trace("model_finished", output=str(result))
-            self._record_recent_submitted_delivery(session_id, recent_submitted_entries)
+            self._record_successful_retrieve_turn(session_id, prepared, str(result))
             return result
 
     def _run_prune_turn_direct(self, session_id: str, pruner_config: PrunerConfig):
@@ -461,18 +484,48 @@ class RightMemoryRuntime:
             return nullcontext()
         return MemoryWriteLock(self.config.memory_root)
 
-    def _prepare_retrieve_message(
+    def _prepare_retrieve_turn(
         self,
         session_id: str,
         message: str,
-    ) -> tuple[str, list[RecentSubmittedMemoryEntry]]:
+    ) -> PreparedRetrieveTurn:
         if self.config.role != "retrieve":
-            return message, []
+            return PreparedRetrieveTurn(message, message, [], None)
+        snapshot = load_daily_snapshot(self.config.memory_root)
+        state = self.retrieve_context.load(session_id)
+        current_commit = current_memory_head(self.config.memory_root)
+        base_commit = state.delivered_memory_commit or snapshot.base_commit
+        diff = memory_diff_since(self.config.memory_root, base_commit, current_commit)
+        diff_block = format_memory_diff_block(diff)
+
         entries = collect_recent_submitted_memory(self.config.memory_root)
-        if not entries:
-            return message, []
-        entries = self.recent_submitted_delivery.new_entries(session_id, entries)
-        return append_recent_submitted_memory(message, entries), entries
+        if entries:
+            entries = self.recent_submitted_delivery.new_entries(session_id, entries)
+        recent_block = format_recent_submitted_context_block(entries)
+        request = build_retrieve_request_text(
+            snapshot_text=snapshot.text,
+            turns=state.turns,
+            diff_block=diff_block,
+            recent_block=recent_block,
+            query=message,
+        )
+        return PreparedRetrieveTurn(request, message, entries, current_commit)
+
+    def _record_successful_retrieve_turn(
+        self,
+        session_id: str,
+        prepared: PreparedRetrieveTurn,
+        output: str,
+    ) -> None:
+        if self.config.role != "retrieve":
+            return
+        self.retrieve_context.record_success(
+            session_id,
+            query=prepared.query,
+            answer=output,
+            memory_commit=prepared.memory_commit,
+        )
+        self._record_recent_submitted_delivery(session_id, prepared.recent_submitted_entries)
 
     def _record_recent_submitted_delivery(
         self,
