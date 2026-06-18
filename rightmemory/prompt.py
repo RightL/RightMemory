@@ -121,8 +121,8 @@ def _cli_agent_guidance(memory_root: Path, role: str) -> str:
         return (
             "\nCLI-agent adaptation:\n"
             "- Follow the embedded schema for `MF#` and `MQ#` headings.\n"
-            "- For relevant `MF#` headings, use ordinary read/search commands on synced imported files when they are visible in the memory store.\n"
-            "- For relevant `MQ#` headings, report provider-question context with the local mq_id and relationship context; do not call provider ask commands from retrieve.\n"
+            "- For relevant `MF#` headings, inspect synced external file context when it is visible in the memory store.\n"
+            "- For relevant `MQ#` headings, report that provider-question context may help with the local `mq_id` and relationship context.\n"
         )
     return ""
 
@@ -215,7 +215,7 @@ def _tool_guidance(role: str) -> str:
         return (
             "Available retrieve tools:\n"
             "- `read_skill(skill_id)` reads a full memory skill body for a relevant `S#` heading.\n"
-            "- `read_mf(mf_id)` reads a mirrored import package for a relevant `MF#` heading."
+            "- `read_mf(mf_id)` reads external file context for a relevant `MF#` heading."
         )
     if role == "historian":
         return (

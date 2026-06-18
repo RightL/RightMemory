@@ -25,9 +25,9 @@ Keep broad recall compact. Return a full skill body when the caller specifically
 
 ## Shared Views
 
-`MF#` headings are mirrored file shared-view connections. When an `MF#` heading is relevant, read the mirrored import package and keep the external provenance clear in the answer.
+For a relevant `MF#` heading, call `read_mf(mf_id)` and make clear which information came from the returned external context.
 
-`MQ#` headings are provider question shared-view connections. When an `MQ#` heading is relevant, report that provider-question context may help, including the local `mq_id` and the local relationship context. Do not invent a suggested question and do not call provider ask commands from retrieve.
+For a relevant `MQ#` heading, report that provider-question context may help, including the local `mq_id` and local relationship context. Do not invent a suggested question or imply the provider answer is already known.
 
 ## Retrieval
 
