@@ -1,3 +1,4 @@
+import os
 import subprocess
 import shutil
 import tempfile
@@ -58,6 +59,19 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("Available skills:\n- beta", result)
         self.assertNotIn("MEMORY_SKILL_beta.md", result)
 
+    @unittest.skipIf(not hasattr(os, "symlink"), "symlink is not available")
+    def test_retrieve_read_skill_does_not_follow_symlink_outside_root(self):
+        outside = self.root.parent / f"{self.root.name}-outside-skill.md"
+        self.addCleanup(outside.unlink, missing_ok=True)
+        outside.write_text("# Outside\n\nsecret\n", encoding="utf-8")
+        (self.root / "MEMORY_SKILL_alpha.md").symlink_to(outside)
+        tools = MemoryTools(self.root, role="retrieve")
+
+        result = tools.read_skill("alpha")
+
+        self.assertIn("Skill not found: alpha", result)
+        self.assertNotIn("secret", result)
+
     def test_retrieve_read_mf_returns_whole_import_package_by_id(self):
         import_root = self.root / ".runtime" / "shared_views" / "imports" / "auth-api"
         import_root.mkdir(parents=True)
@@ -81,6 +95,37 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("MF import not found: auth-api", result)
         self.assertIn("Available MF imports:\n- billing-api", result)
         self.assertNotIn(".runtime", result)
+
+    @unittest.skipIf(not hasattr(os, "symlink"), "symlink is not available")
+    def test_retrieve_read_mf_does_not_follow_symlink_outside_root(self):
+        import_root = self.root / ".runtime" / "shared_views" / "imports" / "auth-api"
+        import_root.mkdir(parents=True)
+        outside = self.root.parent / f"{self.root.name}-outside-mf.md"
+        self.addCleanup(outside.unlink, missing_ok=True)
+        outside.write_text("external secret\n", encoding="utf-8")
+        (import_root / "secret.md").symlink_to(outside)
+        tools = MemoryTools(self.root, role="retrieve")
+
+        result = tools.read_mf("auth-api")
+
+        self.assertIn("MF import is empty: auth-api", result)
+        self.assertNotIn("external secret", result)
+
+    @unittest.skipIf(not hasattr(os, "symlink"), "symlink is not available")
+    def test_retrieve_read_mf_does_not_list_symlinked_import_root(self):
+        outside_imports = self.root.parent / f"{self.root.name}-outside-imports"
+        self.addCleanup(shutil.rmtree, outside_imports, ignore_errors=True)
+        (outside_imports / "auth-api").mkdir(parents=True)
+        shared_views_root = self.root / ".runtime" / "shared_views"
+        shared_views_root.mkdir(parents=True)
+        (shared_views_root / "imports").symlink_to(outside_imports)
+        tools = MemoryTools(self.root, role="retrieve")
+
+        result = tools.read_mf("missing")
+
+        self.assertIn("MF import not found: missing", result)
+        self.assertIn("Available MF imports:\n- none", result)
+        self.assertNotIn("auth-api", result)
 
     def test_update_role_cannot_read_mf_import_files(self):
         imported = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"

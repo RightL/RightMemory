@@ -139,17 +139,17 @@ class MemoryTools:
         clean_id = self._validate_memory_reference_id(skill_id)
         relative = f"MEMORY_SKILL_{clean_id}.md"
         path = self.memory_root / relative
-        if not path.is_file():
+        if not self._is_safe_read_file(path):
             return self._missing_skill_message(clean_id)
         return self._cap_command_output(self._read_text(path))
 
     def read_mf(self, mf_id: str) -> str:
-        """Read a mirrored MF# import package by id."""
+        """Read external file context for an MF# id."""
         clean_id = self._validate_memory_reference_id(mf_id)
         root = self.memory_root / RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX / clean_id
-        if not root.is_dir():
+        if not root.is_dir() or not self._is_under_root(root):
             return self._missing_mf_message(clean_id)
-        files = sorted(path for path in root.rglob("*") if path.is_file())
+        files = sorted(path for path in root.rglob("*") if self._is_safe_read_file(path))
         if not files:
             return f"MF import is empty: {clean_id}\n\n{self._available_mf_imports_block()}"
         parts = [f"MF import: {clean_id}", ""]
@@ -1001,7 +1001,7 @@ class MemoryTools:
     def _available_skills_block(self) -> str:
         ids = []
         for path in sorted(self.memory_root.glob("MEMORY_SKILL_*.md")):
-            if path.is_file():
+            if self._is_safe_read_file(path):
                 ids.append(path.stem.removeprefix("MEMORY_SKILL_"))
         if not ids:
             return "Available skills:\n- none"
@@ -1012,10 +1012,16 @@ class MemoryTools:
 
     def _available_mf_imports_block(self) -> str:
         imports_root = self.memory_root / RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX
-        ids = sorted(path.name for path in imports_root.iterdir() if path.is_dir()) if imports_root.is_dir() else []
+        if not imports_root.is_dir() or not self._is_under_root(imports_root):
+            ids = []
+        else:
+            ids = sorted(path.name for path in imports_root.iterdir() if path.is_dir() and self._is_under_root(path))
         if not ids:
             return "Available MF imports:\n- none"
         return "Available MF imports:\n" + "\n".join(f"- {item}" for item in ids)
+
+    def _is_safe_read_file(self, path: Path) -> bool:
+        return path.is_file() and self._is_under_root(path)
 
     def _validate_read_command_path_tokens(self, args: list[str], path_indices: set[int]) -> None:
         for index in path_indices:
