@@ -974,7 +974,7 @@ class RuntimeTests(unittest.TestCase):
         )
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.run_session_turn.return_value = "cli reply"
+            executor_class.return_value.run_stateless_turn.return_value = "cli reply"
             runtime = RightMemoryRuntime(config)
             result = runtime.run_session_turn("agent-session", "remember one")
 
@@ -1607,12 +1607,12 @@ class RuntimeTests(unittest.TestCase):
             events.append(("locked", session_id))
             return FakeLockedSession()
 
-        def run_session_turn(session_id, message):
-            events.append(("agent", session_id, message))
+        def run_stateless_turn(message):
+            events.append(("agent", message))
             return "cli reply"
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.run_session_turn.side_effect = run_session_turn
+            executor_class.return_value.run_stateless_turn.side_effect = run_stateless_turn
             runtime = RightMemoryRuntime(config)
             runtime.sessions.locked = locked
             result = runtime.run_turn("remember one")
@@ -1623,7 +1623,7 @@ class RuntimeTests(unittest.TestCase):
             [
                 ("locked", NO_SESSION_RIGHTMEMORY_SESSION_ID),
                 "lock_enter",
-                ("agent", NO_SESSION_RIGHTMEMORY_SESSION_ID, "Daily memory snapshot\n\n# Query\n\nremember one\n"),
+                ("agent", "Daily memory snapshot\n\n# Query\n\nremember one\n"),
                 "lock_exit",
             ],
         )
@@ -1896,13 +1896,13 @@ class RuntimeTests(unittest.TestCase):
         )
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.run_session_turn.return_value = "cli reply"
+            executor_class.return_value.run_stateless_turn.return_value = "cli reply"
             runtime = RightMemoryRuntime(config)
             result = runtime.run_session_turn("agent-session", "find one")
 
         self.assertEqual(result, "cli reply")
-        executor_class.return_value.run_session_turn.assert_called_once()
-        _, message = executor_class.return_value.run_session_turn.call_args.args
+        executor_class.return_value.run_stateless_turn.assert_called_once()
+        (message,) = executor_class.return_value.run_stateless_turn.call_args.args
         self.assertTrue(message.startswith("Daily memory snapshot\n"))
         self.assertLess(message.index("# Recent submitted memory"), message.index("# Query"))
         self.assertTrue(message.rstrip().endswith("# Query\n\nfind one"))
@@ -2569,7 +2569,7 @@ class RuntimeTests(unittest.TestCase):
         )
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.run_session_turn.return_value = "cli reply"
+            executor_class.return_value.run_stateless_turn.return_value = "cli reply"
             runtime = RightMemoryRuntime(config)
             result = runtime.run_session_turn("agent-session", "remember one")
 

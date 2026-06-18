@@ -426,6 +426,27 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertEqual(state_record.provider_session_id, "thread-state")
         self.assertIsNone(memory_record)
 
+    def test_retrieve_stateless_turn_does_not_save_provider_session(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(
+                root,
+                "retrieve",
+                AgentCliConfig(provider="codex"),
+            )
+
+            with patch(
+                "rightmemory.agent_cli._run_cli",
+                return_value=(
+                    '{"type":"thread.started","thread_id":"thread-1"}\n'
+                    '{"item":{"type":"agent_message","text":"reply"}}\n'
+                ),
+            ):
+                result = executor.run_stateless_turn("snapshot\n\n# Query\n\nfind root")
+
+            self.assertEqual(result, "reply")
+            self.assertFalse((root / ".runtime" / "agent_cli_sessions" / "retrieve").exists())
+
     def test_run_turn_resumes_saved_provider_session_in_second_executor(self):
         calls = []
 

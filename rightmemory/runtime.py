@@ -246,6 +246,11 @@ class RightMemoryRuntime:
             if on_started is not None:
                 on_started()
             self._trace("model_started")
+            if self.config.role == "retrieve":
+                result = self.agent.run_stateless_turn(prepared.message)
+                self._trace("model_finished", output=str(result))
+                self._record_successful_retrieve_turn(session_id, prepared, str(result))
+                return result
             result = self.agent.run_session_turn(session_id, prepared.message)
             self._trace("model_finished", output=str(result))
             self._record_successful_retrieve_turn(session_id, prepared, str(result))

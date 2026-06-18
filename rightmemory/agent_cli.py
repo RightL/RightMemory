@@ -47,6 +47,15 @@ class CliAgentExecutor:
     def run_turn(self, message: str) -> str:
         return self.run_session_turn(NO_SESSION_RIGHTMEMORY_SESSION_ID, message)
 
+    def run_stateless_turn(self, message: str) -> str:
+        result = self._run_provider(
+            message,
+            provider_session_id=None,
+            resume=False,
+            rightmemory_session_id=NO_SESSION_RIGHTMEMORY_SESSION_ID,
+        )
+        return result.text
+
     def run_session_turn(self, rightmemory_session_id: str, message: str) -> str:
         record = self.store.load(rightmemory_session_id)
         if record is not None and record.provider != self.config.provider:
