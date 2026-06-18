@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 import tomllib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -16,6 +18,8 @@ from .session import _ensure_memory_gitignore, _ensure_runtime_gitignore, _fsync
 
 PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 PROJECT_PROFILE_FILE = ".rightmemory-profile"
+PROFILE_REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
+PROFILE_REGISTRY_LOCK_POLL_SECONDS = 0.05
 
 
 class ProfileError(ValueError):
@@ -150,16 +154,29 @@ def create_profile(default_root: Path, name: str, root: Path | None = None) -> P
     profile_name = validate_profile_name(name)
     home = Path(default_root).expanduser()
     target_root = _normalize_profile_root(default_profile_root(home, profile_name) if root is None else root)
-    profiles = load_profiles(home)
-    if profile_name in profiles:
-        raise ProfileError(f"profile already exists: {profile_name}")
-    if target_root.exists() and not _looks_like_memory_root(target_root):
-        raise ProfileError(f"{target_root} does not look like a RightMemory root")
-    if not target_root.exists():
-        initialize_memory_root(target_root, source_root=home)
-    profiles[profile_name] = Profile(name=profile_name, root=target_root)
-    save_profiles(home, profiles)
-    return profiles[profile_name]
+    with _profile_registry_lock(home):
+        profiles = load_profiles(home)
+        if profile_name in profiles:
+            raise ProfileError(f"profile already exists: {profile_name}")
+        if target_root.exists() and not _looks_like_memory_root(target_root):
+            raise ProfileError(f"{target_root} does not look like a RightMemory root")
+        if not target_root.exists():
+            initialize_memory_root(target_root, source_root=home)
+        profiles[profile_name] = Profile(name=profile_name, root=target_root)
+        save_profiles(home, profiles)
+        return profiles[profile_name]
+
+
+def remove_profile(default_root: Path, name: str) -> Profile:
+    profile_name = validate_profile_name(name)
+    home = Path(default_root).expanduser()
+    with _profile_registry_lock(home):
+        profiles = load_profiles(home)
+        profile = profiles.pop(profile_name, None)
+        if profile is None:
+            raise ProfileError(f"profile not found: {profile_name}")
+        save_profiles(home, profiles)
+        return profile
 
 
 def initialize_memory_root(memory_root: Path, *, source_root: Path) -> None:
@@ -238,6 +255,35 @@ def _seed_profile_config(*, source_root: Path, target_root: Path) -> None:
         data = _profile_seed_config(raw)
     data.setdefault("review", {})["sources"] = []
     target_config.write_text(_dump_toml(data), encoding="utf-8")
+
+
+@contextmanager
+def _profile_registry_lock(default_root: Path):
+    root = Path(default_root).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    lock_dir = root / "profiles.toml.lock"
+    deadline = time.monotonic() + PROFILE_REGISTRY_LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            lock_dir.mkdir()
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise ProfileError(f"profile registry is locked: {lock_dir}")
+            time.sleep(PROFILE_REGISTRY_LOCK_POLL_SECONDS)
+    try:
+        (lock_dir / "owner").write_text(str(os.getpid()), encoding="utf-8")
+        yield
+    finally:
+        owner = lock_dir / "owner"
+        try:
+            owner.unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            lock_dir.rmdir()
+        except FileNotFoundError:
+            pass
 
 
 def _profile_seed_config(raw: dict[str, Any]) -> dict[str, Any]:

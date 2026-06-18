@@ -24,11 +24,9 @@ Keep broad recall compact. Return a full skill file when the caller specifically
 
 ## Shared Views
 
-M# headings are local shared-view connection nodes for external shared context.
+`MF#` headings are mirrored file shared-view connections. When an `MF#` heading is relevant, read the synced imported files with ordinary read/search tools and keep the external provenance clear in the answer.
 
-When an `M#` heading is strongly relevant to the caller's request, use the shared-view endpoint for that local heading id and caller query. Treat the returned content as external shared context with its own provenance and freshness, not as local memory.
-
-Do not infer the backing mode of a shared view endpoint, and do not read imported shared-view files directly as local `MEMORY*.md`.
+`MQ#` headings are provider question shared-view connections. When an `MQ#` heading is relevant, report that provider-question context may help, including the local `mq_id` and the local relationship context. Do not invent a suggested question and do not call provider ask commands from retrieve.
 
 ## Retrieval
 

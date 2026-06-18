@@ -8,6 +8,13 @@ from difflib import SequenceMatcher
 from hashlib import sha256
 from pathlib import Path
 
+from .shared_view_files import (
+    render_file_view,
+    validate_file_view_recipe_source,
+    write_file_view_recipe,
+)
+from .shared_view_questions import validate_question_view_source, write_question_view
+
 
 FULL_READ_LINE_LIMIT = 200
 READ_TOOL_LINE_LIMIT = 2000
@@ -37,9 +44,10 @@ MAX_CLOSE_MATCHES = 3
 MAX_EDIT_MATCH_LINES = 8
 MAX_MATCH_PREVIEW_CHARS = 180
 
-ANCHOR_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|S#|M#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
-ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{(F#|S#|M#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
-POINTER_HEADING_KINDS = {"F#", "S#"}
+ANCHOR_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|S#|MF#|MQ#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
+ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{(F#|S#|MF#|MQ#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
+UNSUPPORTED_ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{([A-Za-z]+#)([A-Za-z0-9_.-]+)\}")
+TERMINAL_HEADING_KINDS = {"F#", "S#", "MF#", "MQ#"}
 ANY_HEADING_RE = re.compile(r"^(#+)\s+(.+?)\s*$")
 HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$")
 NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*→\s*\[(.*?)\])?\s*$")
@@ -49,14 +57,17 @@ MEMORY_SKILL_FILE_RE = re.compile(r"^MEMORY_SKILL_[A-Za-z0-9_.-]+\.md$")
 INSIGHT_LOG_FILE_RE = re.compile(r"^insight_logs/[A-Za-z0-9_.-]+\.md$")
 SHARED_VIEW_REGISTRY_PATH = "shared_views.toml"
 SHARED_VIEW_DEFINITION_FILE_RE = re.compile(
-    r"^shared_views/[A-Za-z0-9_.-]+/(?:view\.md|retriever\.md|export\.toml|\.gitignore)$"
+    r"^shared_views/[A-Za-z0-9_.-]+/(?:view\.md|retriever\.md|recipe\.toml|question\.toml|\.gitignore)$"
 )
 RUNTIME_SHARED_VIEW_PATH_PREFIX = ".runtime/shared_views/"
+RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX = ".runtime/shared_views/imports/"
 GIT_REVISION_RE = re.compile(r"^[A-Za-z0-9_.^~/-]+$")
 PRUNE_SUBJECT_PREFIX = "prune:"
 ACTIVE_MEMORY_ROLES = {"dreamer", "pruner", "reviewer", "sync-reconciler", "update"}
 INSIGHT_ROLES = {"insight"}
+RETRIEVE_ROLES = {"retrieve"}
 SYNC_RECONCILER_ROLES = {"sync-reconciler"}
+SHARED_VIEW_BUILDER_ROLES = {"shared-view-builder"}
 INSIGHT_READ_PATHS = ("MEMORY.md", "MEMORY_*.md", "insight_logs/*.md")
 
 
@@ -358,6 +369,96 @@ class MemoryTools:
             self._read_signatures[destination] = signature
         return f"renamed {source_relative} to {destination_relative}"
 
+    def create_file_view_recipe(
+        self,
+        view_id: str,
+        title: str,
+        intent: str,
+        include_headings: list[str] | None = None,
+        include_nodes: list[str] | None = None,
+        include_files: list[str] | None = None,
+        exclude_ids: list[str] | None = None,
+        publish_hub_url: str | None = None,
+        publish_credential_id: str | None = None,
+    ) -> str:
+        """Create and render a canonical MF# file-view recipe, or return actionable validation failures."""
+        self._require_shared_view_builder_tool()
+        include_headings = include_headings or []
+        include_nodes = include_nodes or []
+        include_files = include_files or []
+        exclude_ids = exclude_ids or []
+        errors = self._shared_view_selection_errors(
+            include_headings=include_headings,
+            include_nodes=include_nodes,
+            include_files=include_files,
+            exclude_ids=exclude_ids,
+        )
+        if not (include_headings or include_nodes or include_files):
+            errors.append("select at least one include_headings, include_nodes, or include_files entry")
+        if errors:
+            return "failed: " + "; ".join(errors)
+        try:
+            write_file_view_recipe(
+                self.memory_root,
+                view_id=view_id,
+                title=title,
+                intent=intent,
+                include_headings=include_headings,
+                include_nodes=include_nodes,
+                include_files=include_files,
+                exclude_ids=exclude_ids,
+                approved=False,
+                publish_hub_url=publish_hub_url,
+                publish_credential_id=publish_credential_id,
+            )
+            recipe = validate_file_view_recipe_source(
+                self.memory_root,
+                view_id,
+                require_selection=True,
+                require_publish=bool(publish_hub_url or publish_credential_id),
+            )
+            render_file_view(self.memory_root, recipe.view_id)
+            rendered = self.memory_root / "shared_views" / recipe.view_id / "dist" / "MEMORY.md"
+            if not self._file_view_rendered_context(rendered):
+                return "failed: selected ids rendered an empty Published Context; choose ids that match memory content"
+        except (OSError, ValueError) as exc:
+            return f"failed: {exc}"
+        return (
+            f"success: wrote canonical file view {recipe.view_id} with "
+            f"{len(recipe.include_headings)} heading(s), {len(recipe.include_nodes)} node(s), "
+            f"{len(recipe.include_files)} file(s), and {len(recipe.exclude_ids)} excluded id(s)"
+        )
+
+    def create_question_view(
+        self,
+        view_id: str,
+        title: str,
+        intent: str,
+        retriever_instructions: str,
+        start_timeout_seconds: int = 10,
+        answer_timeout_seconds: int = 180,
+    ) -> str:
+        """Create canonical MQ# question-view source files, or return actionable validation failures."""
+        self._require_shared_view_builder_tool()
+        try:
+            write_question_view(
+                self.memory_root,
+                view_id=view_id,
+                title=title,
+                intent=intent,
+                retriever_instructions=retriever_instructions,
+                approved=False,
+                start_timeout_seconds=start_timeout_seconds,
+                answer_timeout_seconds=answer_timeout_seconds,
+            )
+            config = validate_question_view_source(self.memory_root, view_id)
+        except (OSError, ValueError) as exc:
+            return f"failed: {exc}"
+        return (
+            f"success: wrote canonical question view {config.view_id} with "
+            f"start timeout {config.start_timeout_seconds}s and answer timeout {config.answer_timeout_seconds}s"
+        )
+
     def git_status(self) -> str:
         """Return short git status for the RightMemory root."""
         if self._has_role_read_scope():
@@ -583,6 +684,78 @@ class MemoryTools:
         ]
         return sorted(set(files))
 
+    def _require_shared_view_builder_tool(self) -> None:
+        if self.role not in SHARED_VIEW_BUILDER_ROLES:
+            raise ValueError("shared-view compiler tools are only available to the shared-view-builder role")
+
+    def _shared_view_selection_errors(
+        self,
+        *,
+        include_headings: list[str],
+        include_nodes: list[str],
+        include_files: list[str],
+        exclude_ids: list[str],
+    ) -> list[str]:
+        errors: list[str] = []
+        memory_ids = self._memory_id_kinds()
+        errors.extend(self._id_selection_errors("include_headings", include_headings, memory_ids, expected_kind="heading"))
+        errors.extend(self._id_selection_errors("include_nodes", include_nodes, memory_ids, expected_kind="node"))
+        errors.extend(self._id_selection_errors("exclude_ids", exclude_ids, memory_ids, expected_kind=None))
+        for value in include_files:
+            path = Path(value)
+            if path.is_absolute() or ".." in path.parts or not re.fullmatch(r"MEMORY(?:_[A-Za-z0-9_.-]+)?\.md", path.as_posix()):
+                errors.append(f"include_files entry must be a memory file: {value}")
+                continue
+            if not (self.memory_root / path).is_file():
+                errors.append(f"include_files entry does not exist: {value}")
+        return errors
+
+    def _id_selection_errors(
+        self,
+        label: str,
+        ids: list[str],
+        memory_ids: dict[str, str],
+        *,
+        expected_kind: str | None,
+    ) -> list[str]:
+        errors: list[str] = []
+        seen: set[str] = set()
+        for item_id in ids:
+            if item_id in seen:
+                errors.append(f"{label} contains duplicate id: {item_id}")
+                continue
+            seen.add(item_id)
+            actual_kind = memory_ids.get(item_id)
+            if actual_kind is None:
+                errors.append(f"{label} id not found in active memory: {item_id}")
+            elif expected_kind is not None and actual_kind != expected_kind:
+                errors.append(f"{label} id {item_id} is a {actual_kind}, not a {expected_kind}")
+        return errors
+
+    def _memory_id_kinds(self) -> dict[str, str]:
+        ids: dict[str, str] = {}
+        for file_path in self._memory_files():
+            if self._is_memory_skill_file(file_path):
+                continue
+            for line in file_path.read_text(encoding="utf-8").splitlines():
+                heading = ANCHOR_RE.match(line)
+                if heading:
+                    ids.setdefault(heading.group(2), "heading")
+                    continue
+                node = NODE_RE.match(line)
+                if node:
+                    ids.setdefault(node.group(1), "node")
+        return ids
+
+    def _file_view_rendered_context(self, path: Path) -> str:
+        if not path.is_file():
+            return ""
+        marker = "## Published Context"
+        text = path.read_text(encoding="utf-8")
+        if marker not in text:
+            return ""
+        return text.split(marker, 1)[1].strip()
+
     def _read_lines(self, resolved: Path, original_path: str, mark_read: bool = True) -> list[str]:
         if not resolved.is_file():
             raise FileNotFoundError(f"file not found: {original_path}")
@@ -610,6 +783,8 @@ class MemoryTools:
             self._check_allowed_read_search_dir(resolved, path)
             if relative_base == ".":
                 return self.list_files(glob_pattern)
+            if self._is_runtime_shared_view_import_path(relative_base):
+                return self.glob("**/*", relative_base)
             return self.glob(glob_pattern, relative_base)
         raise FileNotFoundError(f"path not found: {path}")
 
@@ -801,7 +976,8 @@ class MemoryTools:
             resolved = self._resolve_path(token)
             relative_path = resolved.relative_to(self.memory_root).as_posix()
             if self._is_runtime_shared_view_path(relative_path):
-                raise ValueError("read commands must use retrieve_shared_view for runtime shared-view content")
+                if not self._is_runtime_shared_view_import_path(relative_path):
+                    raise ValueError("runtime shared-view imports are only readable by retrieve")
             if self._has_role_read_scope():
                 self._check_allowed_read_command_path(token)
 
@@ -828,9 +1004,12 @@ class MemoryTools:
     def _reject_runtime_shared_view_glob(self, pattern: str) -> None:
         normalized = pattern[1:] if pattern.startswith("!") else pattern
         if normalized.startswith(RUNTIME_SHARED_VIEW_PATH_PREFIX) or f"/{RUNTIME_SHARED_VIEW_PATH_PREFIX}" in normalized:
-            raise ValueError("read commands must use retrieve_shared_view for runtime shared-view content")
+            if not self._is_runtime_shared_view_import_path(normalized):
+                raise ValueError("runtime shared-view imports are only readable by retrieve")
 
     def _exclude_runtime_shared_view_rg_paths(self, args: list[str]) -> list[str]:
+        if self.role == "retrieve":
+            return args
         insert_at = args.index("--") if "--" in args else len(args)
         return [*args[:insert_at], "--glob", f"!{RUNTIME_SHARED_VIEW_PATH_PREFIX}**", *args[insert_at:]]
 
@@ -841,6 +1020,7 @@ class MemoryTools:
             line
             for line in output.splitlines()
             if not line.startswith(RUNTIME_SHARED_VIEW_PATH_PREFIX)
+            or (self.role == "retrieve" and line.startswith(RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX))
         ]
         return "\n".join(kept)
 
@@ -855,6 +1035,11 @@ class MemoryTools:
             if not resolved.is_dir():
                 expanded_path_indices.add(len(expanded))
                 expanded.append(token)
+                continue
+            relative_path = resolved.relative_to(self.memory_root).as_posix()
+            if self.role == "retrieve" and self._is_runtime_shared_view_import_path(relative_path):
+                expanded_path_indices.add(len(expanded))
+                expanded.append(relative_path)
                 continue
             self._check_allowed_read_search_dir(resolved, token)
             for relative_path in self._existing_role_read_paths_under(resolved):
@@ -930,44 +1115,41 @@ class MemoryTools:
         errors: list[str] = []
         for path in files:
             heading_stack: list[tuple[int, int]] = []
-            active_pointer: tuple[int, int] | None = None
+            active_terminal: tuple[int, int] | None = None
             relative_path = path.relative_to(self.memory_root)
             for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
                 heading_match = ANY_HEADING_RE.match(line)
                 if heading_match is None:
-                    if active_pointer is not None and NODE_RE.match(line):
-                        pointer_line = active_pointer[1]
+                    if active_terminal is not None and NODE_RE.match(line):
                         errors.append(
-                            f"#### pointer cannot contain child node at {relative_path}:{line_number} "
-                            f"(pointer starts at line {pointer_line})"
+                            f"terminal `####` heading cannot contain node lines at {relative_path}:{line_number}"
                         )
                     continue
 
                 depth = len(heading_match.group(1))
-                if active_pointer is not None and depth > active_pointer[0]:
-                    pointer_line = active_pointer[1]
+                unsupported = UNSUPPORTED_ANCHOR_KIND_RE.match(line)
+                if unsupported is not None and ANCHOR_KIND_RE.match(line) is None:
                     errors.append(
-                        f"#### pointer cannot contain child heading at {relative_path}:{line_number} "
-                        f"(pointer starts at line {pointer_line})"
+                        f"unsupported heading marker `{unsupported.group(2)}` at {relative_path}:{line_number}"
                     )
                 while heading_stack and heading_stack[-1][0] >= depth:
                     heading_stack.pop()
                 parent_depth = heading_stack[-1][0] if heading_stack else None
-                if active_pointer is not None and depth <= active_pointer[0]:
-                    active_pointer = None
+                if active_terminal is not None and depth <= active_terminal[0]:
+                    active_terminal = None
 
                 if depth > 4:
-                    errors.append(f"heading deeper than #### at {relative_path}:{line_number}")
+                    errors.append(f"headings deeper than `####` are not allowed at {relative_path}:{line_number}")
                 elif depth == 4:
                     anchor_match = ANCHOR_KIND_RE.match(line)
-                    if anchor_match is None or anchor_match.group(2) not in POINTER_HEADING_KINDS:
+                    if anchor_match is None or anchor_match.group(2) not in TERMINAL_HEADING_KINDS:
                         errors.append(
-                            f"#### pointer must use `{{F#slug}}` or `{{S#slug}}` at {relative_path}:{line_number}"
+                            f"`####` terminal reference must use `{{F#slug}}`, `{{S#slug}}`, `{{MF#slug}}`, or `{{MQ#slug}}` at {relative_path}:{line_number}"
                         )
                     if parent_depth != 3:
-                        errors.append(f"#### pointer must be under a ### heading at {relative_path}:{line_number}")
-                    if anchor_match is not None and anchor_match.group(2) in POINTER_HEADING_KINDS:
-                        active_pointer = (depth, line_number)
+                        errors.append(f"`####` terminal reference must be under a `###` heading at {relative_path}:{line_number}")
+                    if anchor_match is not None and anchor_match.group(2) in TERMINAL_HEADING_KINDS:
+                        active_terminal = (depth, line_number)
 
                 heading_stack.append((depth, line_number))
         return errors
@@ -1073,6 +1255,8 @@ class MemoryTools:
             return "insight_logs/*.md"
         if self.role in SYNC_RECONCILER_ROLES:
             return "MEMORY.md, MEMORY_*.md, shared_views.toml, shared_views/<id> source files, or insight_logs/*.md"
+        if self.role in SHARED_VIEW_BUILDER_ROLES:
+            return "shared_views/<id> source files"
         return "MEMORY.md or MEMORY_*.md"
 
     def _is_allowed_write_path(self, relative_path: str) -> bool:
@@ -1085,6 +1269,8 @@ class MemoryTools:
                 or self._is_shared_view_definition_path(relative_path)
                 or self._is_insight_log_path(relative_path)
             )
+        if self.role in SHARED_VIEW_BUILDER_ROLES:
+            return self._is_shared_view_definition_path(relative_path)
         return self._is_active_memory_path(relative_path)
 
     def _allowed_write_path(self, path: str) -> str:
@@ -1108,10 +1294,12 @@ class MemoryTools:
         relative_path = resolved.relative_to(self.memory_root).as_posix()
         if self._is_allowed_read_relative_file(relative_path):
             return resolved
+        if self._is_runtime_shared_view_path(relative_path):
+            raise ValueError("runtime shared-view imports are only readable by retrieve")
         raise ValueError(f"can only read {self._read_policy_label()}: {relative_path}")
 
     def _has_role_read_scope(self) -> bool:
-        return self.role in INSIGHT_ROLES
+        return self.role in INSIGHT_ROLES | RETRIEVE_ROLES
 
     def _read_policy_label(self) -> str:
         return "MEMORY.md, MEMORY_*.md, or insight_logs/*.md"
@@ -1119,6 +1307,8 @@ class MemoryTools:
     def _is_allowed_read_file(self, path: Path) -> bool:
         relative_path = path.relative_to(self.memory_root).as_posix()
         if self._is_runtime_shared_view_path(relative_path):
+            if self._is_runtime_shared_view_import_path(relative_path):
+                return self.role == "retrieve"
             return False
         if not self._has_role_read_scope():
             return True
@@ -1126,15 +1316,23 @@ class MemoryTools:
 
     def _is_allowed_read_relative_file(self, relative_path: str) -> bool:
         if self._is_runtime_shared_view_path(relative_path):
+            if self._is_runtime_shared_view_import_path(relative_path):
+                return self.role == "retrieve"
             return False
         if not self._has_role_read_scope():
             return True
         return self._is_active_memory_path(relative_path) or self._is_insight_log_path(relative_path)
 
     def _check_allowed_read_search_dir(self, path: Path, original_path: str) -> None:
+        relative_path = path.relative_to(self.memory_root).as_posix()
+        if self._is_runtime_shared_view_import_path(relative_path):
+            if self.role == "retrieve":
+                return
+            raise ValueError("runtime shared-view imports are only readable by retrieve")
+        if self._is_runtime_shared_view_path(relative_path):
+            raise ValueError("runtime shared-view imports are only readable by retrieve")
         if not self._has_role_read_scope():
             return
-        relative_path = path.relative_to(self.memory_root).as_posix()
         if relative_path in {".", "insight_logs"}:
             return
         raise ValueError(f"can only search {self._read_policy_label()}: {relative_path or original_path}")
@@ -1144,6 +1342,8 @@ class MemoryTools:
             return True
         relative_path = path.relative_to(self.memory_root).as_posix()
         if path.is_dir():
+            if self._is_runtime_shared_view_import_path(relative_path):
+                return self.role == "retrieve"
             return relative_path == "insight_logs"
         return self._is_allowed_read_relative_file(relative_path)
 
@@ -1192,6 +1392,9 @@ class MemoryTools:
 
     def _is_runtime_shared_view_path(self, relative_path: str) -> bool:
         return relative_path.startswith(RUNTIME_SHARED_VIEW_PATH_PREFIX)
+
+    def _is_runtime_shared_view_import_path(self, relative_path: str) -> bool:
+        return relative_path.startswith(RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX)
 
     def _is_memory_skill_file(self, path: Path) -> bool:
         relative_path = path.relative_to(self.memory_root).as_posix()

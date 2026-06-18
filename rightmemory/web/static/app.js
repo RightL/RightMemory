@@ -92,26 +92,150 @@ function renderOptions(items, selectedValue = "") {
     .join("");
 }
 
+function credentialLabel(credential) {
+  const parts = [credential.credential_id || ""];
+  if (credential.kind) {
+    parts.push(credential.kind);
+  }
+  if (credential.base_url) {
+    parts.push(credential.base_url);
+  }
+  return parts.filter(Boolean).join(" | ");
+}
+
+function renderCredentialOptions(credentials, blankLabel = "") {
+  const options = [];
+  if (blankLabel) {
+    options.push(`<option value="">${escapeHtml(blankLabel)}</option>`);
+  }
+  if (!credentials.length && !blankLabel) {
+    return `<option value="">No credentials yet</option>`;
+  }
+  credentials.forEach((credential) => {
+    options.push(`
+      <option
+        value="${escapeHtml(credential.credential_id || "")}"
+        data-base-url="${escapeHtml(credential.base_url || "")}"
+        data-provider-id="${escapeHtml(credential.provider_id || "")}"
+      >${escapeHtml(credentialLabel(credential))}</option>
+    `);
+  });
+  return options.join("");
+}
+
 function renderJsonPanel(title, value) {
   return `<section class="panel wide"><h2>${escapeHtml(title)}</h2><pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre></section>`;
+}
+
+function renderProviderInbox(interactions) {
+  if (!interactions.length) {
+    return `<p>No provider inbox records.</p>`;
+  }
+  const groups = new Map();
+  interactions.forEach((interaction) => {
+    const viewId = interaction.view_id || "unknown-view";
+    if (!groups.has(viewId)) {
+      groups.set(viewId, []);
+    }
+    groups.get(viewId).push(interaction);
+  });
+  return Array.from(groups.entries()).map(([viewId, records]) => `
+    <div class="record-group">
+      <h3>${escapeHtml(viewId)}</h3>
+      <div class="record-list">
+        ${records.map(renderInboxRecord).join("")}
+      </div>
+    </div>
+  `).join("");
+}
+
+function renderInboxRecord(record) {
+  const payload = record.payload || {};
+  const message = payload.message || record.message || "";
+  const task = payload.task_context || record.task_context || "";
+  return `
+    <article class="record-card">
+      <strong>${escapeHtml(message || record.interaction_id || "Inbox record")}</strong>
+      <small>${escapeHtml(record.created_at || "")}</small>
+      <small>${escapeHtml(record.connection_id || "")}${record.actor_id ? ` | ${escapeHtml(record.actor_id)}` : ""}</small>
+      ${task ? `<p>${escapeHtml(task)}</p>` : ""}
+    </article>
+  `;
+}
+
+function renderPublishEvents(events) {
+  if (!events.length) {
+    return `<p>No publish events.</p>`;
+  }
+  return `
+    <div class="record-list">
+      ${events.map((event) => `
+        <article class="record-card">
+          <strong>${escapeHtml(event.view_id || "unknown-view")} ${escapeHtml(event.status || "")}</strong>
+          <small>${escapeHtml(event.created_at || "")}${event.trigger ? ` | ${escapeHtml(event.trigger)}` : ""}</small>
+          <p>${escapeHtml(event.message || "")}</p>
+        </article>
+      `).join("")}
+    </div>
+  `;
 }
 
 async function renderSharedViews() {
   const payload = await fetchJson("/api/share/views");
   const providerViews = payload.data.provider_views || [];
   const connections = payload.data.connections || [];
+  const credentials = payload.data.credentials || [];
+  const credentialOptions = renderCredentialOptions(credentials);
+  const optionalCredentialOptions = renderCredentialOptions(credentials, "Use recipe default");
   const providerOptions = renderOptions(
     providerViews.map((view) => ({
       value: view.view_id,
-      label: view.title ? `${view.title} (${view.view_id})` : view.view_id || view.error,
+      label: `${view.view_id || view.error} (${view.type || "view"}${view.approved ? ", approved" : ""})`,
     })),
+  );
+  const fileProviderOptions = renderOptions(
+    providerViews
+      .filter((view) => view.type === "file")
+      .map((view) => ({
+        value: view.view_id,
+        label: `${view.view_id || view.error}${view.approved ? " (approved)" : ""}`,
+      })),
+  );
+  const questionProviderOptions = renderOptions(
+    providerViews
+      .filter((view) => view.type === "question")
+      .map((view) => ({
+        value: view.view_id,
+        label: `${view.view_id || view.error}${view.approved ? " (approved)" : ""}`,
+      })),
   );
   const connectionOptions = renderOptions(
     connections.map((connection) => ({
       value: connection.heading_id,
-      label: `${connection.heading_id} (${connection.relationship || "shared view"})`,
+      label: `${connection.heading_id} (${connection.type || connection.view_type || "shared view"})`,
     })),
   );
+  const fileConnectionOptions = renderOptions(
+    connections
+      .filter((connection) => (connection.type || connection.view_type) === "file")
+      .map((connection) => ({
+        value: connection.heading_id,
+        label: connection.heading_id,
+      })),
+  );
+  const questionConnectionOptions = renderOptions(
+    connections
+      .filter((connection) => (connection.type || connection.view_type) === "question")
+      .map((connection) => ({
+        value: connection.heading_id,
+        label: connection.heading_id,
+      })),
+  );
+  const hasFileConnections = connections.some((connection) => (connection.type || connection.view_type) === "file");
+  const hasQuestionConnections = connections.some((connection) => (connection.type || connection.view_type) === "question");
+  const hasFileProviderViews = providerViews.some((view) => view.type === "file");
+  const hasQuestionProviderViews = providerViews.some((view) => view.type === "question");
+  const hasCredentials = credentials.length > 0;
 
   return `
     <div class="flow-layout">
@@ -119,44 +243,32 @@ async function renderSharedViews() {
         <div class="section-heading">
           <span class="step-badge">1</span>
           <div>
-            <h2>Create a View</h2>
-            <p>Name the collaboration surface and describe what memory should be included.</p>
+            <h2>Build File View</h2>
           </div>
         </div>
-        <form id="define-view-form" class="guided-form">
+        <form id="build-file-view-form" class="guided-form">
           <label>
-            View name
-            <input name="title" placeholder="Auth API with Alice" required>
+            View id
+            <input name="view_id" placeholder="auth-api-files" required>
           </label>
           <label>
-            Memory focus
-            <textarea name="filter_terms" placeholder="auth, tokens, oauth"></textarea>
+            Title
+            <input name="title" placeholder="Auth API Files" required>
           </label>
-          <label class="inline-choice">
-            <input name="include_all" type="checkbox">
-            Include broad memory when the focus is intentionally open
+          <label>
+            Intent
+            <textarea name="intent" placeholder="Expose auth API integration context" required></textarea>
           </label>
-          <details class="advanced">
-            <summary>Naming and audience</summary>
-            <label>
-              View id
-              <input name="view_id" placeholder="auto from name">
-            </label>
-            <label>
-              Audience
-              <input name="audience" placeholder="Alice, team, external collaborator">
-            </label>
-            <label>
-              Description
-              <textarea name="description" placeholder="What this view is for"></textarea>
-            </label>
-            <label>
-              Source globs
-              <textarea name="source_globs" placeholder="shared_views/auth/*.md"></textarea>
-            </label>
-          </details>
+          <label>
+            HTTP hub URL
+            <input name="hub_url" placeholder="https://hub.example.test" required>
+          </label>
+          <label>
+            Credential
+            <select class="credential-select" name="credential_id" required>${credentialOptions}</select>
+          </label>
           <div class="button-row">
-            <button class="primary" type="submit">Create View</button>
+            <button class="primary" type="submit"${hasCredentials ? "" : " disabled"}>Build File View</button>
           </div>
         </form>
       </section>
@@ -165,44 +277,25 @@ async function renderSharedViews() {
         <div class="section-heading">
           <span class="step-badge">2</span>
           <div>
-            <h2>Publish or Refresh</h2>
-            <p>Pick an existing view, then build or publish it without retyping the view id.</p>
+            <h2>Build Question View</h2>
           </div>
         </div>
-        <form id="provider-view-form" class="guided-form">
+        <form id="build-question-view-form" class="guided-form">
           <label>
-            View
-            <select name="view_id">${providerOptions}</select>
+            View id
+            <input name="view_id" placeholder="auth-api-ask" required>
           </label>
           <label>
-            Focus query
-            <input name="query" placeholder="optional query for this build">
+            Title
+            <input name="title" placeholder="Auth API Questions" required>
+          </label>
+          <label>
+            Intent
+            <textarea name="intent" placeholder="Let frontend agents ask auth API questions" required></textarea>
           </label>
           <div class="button-row">
-            <button class="primary" name="action" value="build" type="submit"${providerViews.length ? "" : " disabled"}>Build</button>
+            <button class="primary" type="submit">Build Question View</button>
           </div>
-          <details class="advanced">
-            <summary>Publish targets</summary>
-            <label>
-              Local hub folder
-              <input name="target" placeholder="/path/to/shared hub or package folder">
-            </label>
-            <div class="button-row">
-              <button name="action" value="export" type="submit"${providerViews.length ? "" : " disabled"}>Export Package</button>
-              <button name="action" value="publish-mounted" type="submit"${providerViews.length ? "" : " disabled"}>Publish Local</button>
-            </div>
-            <label>
-              HTTP hub URL
-              <input name="hub_url" placeholder="https://hub.example.test">
-            </label>
-            <label>
-              Credential id
-              <input name="credential_id" placeholder="auto from view id">
-            </label>
-            <div class="button-row">
-              <button name="action" value="publish-http" type="submit"${providerViews.length ? "" : " disabled"}>Publish HTTP</button>
-            </div>
-          </details>
         </form>
       </section>
 
@@ -210,14 +303,116 @@ async function renderSharedViews() {
         <div class="section-heading">
           <span class="step-badge">3</span>
           <div>
+            <h2>Approve View</h2>
+          </div>
+        </div>
+        <form id="approve-view-form" class="guided-form">
+          <label>
+            View
+            <select name="view_id">${providerOptions}</select>
+          </label>
+          <label>
+            Type
+            <select name="type">
+              <option value="file">File</option>
+              <option value="question">Question</option>
+            </select>
+          </label>
+          <div class="button-row">
+            <button class="primary" type="submit"${providerViews.length ? "" : " disabled"}>Approve</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel flow-panel">
+        <div class="section-heading">
+          <span class="step-badge">4</span>
+          <div>
+            <h2>Create File Invitation</h2>
+          </div>
+        </div>
+        <form id="invite-file-view-form" class="guided-form">
+          <label>
+            File view
+            <select name="view_id">${fileProviderOptions}</select>
+          </label>
+          <details class="advanced">
+            <summary>Hub override</summary>
+            <label>
+              HTTP hub URL
+              <input name="hub_url" placeholder="from recipe">
+            </label>
+            <label>
+              Credential
+              <select class="credential-select" name="credential_id">${optionalCredentialOptions}</select>
+            </label>
+            <label>
+              Label
+              <input name="label" placeholder="frontend">
+            </label>
+            <label>
+              Expires at
+              <input name="expires_at" placeholder="2026-07-01T00:00:00+00:00">
+            </label>
+          </details>
+          <div class="button-row">
+            <button class="primary" type="submit"${hasFileProviderViews ? "" : " disabled"}>Create Invitation</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel flow-panel">
+        <div class="section-heading">
+          <span class="step-badge">5</span>
+          <div>
+            <h2>Publish Question Invitation</h2>
+          </div>
+        </div>
+        <form id="publish-question-view-form" class="guided-form">
+          <label>
+            Question view
+            <select name="view_id">${questionProviderOptions}</select>
+          </label>
+          <label>
+            HTTP hub URL
+            <input name="hub_url" placeholder="https://hub.example.test" required>
+          </label>
+          <label>
+            Credential
+            <select class="credential-select" name="credential_id" required>${credentialOptions}</select>
+          </label>
+          <label>
+            Question base URL
+            <input name="question_base_url" placeholder="https://provider.example.test" required>
+          </label>
+          <details class="advanced">
+            <summary>Invitation options</summary>
+            <label>
+              Label
+              <input name="label" placeholder="frontend">
+            </label>
+            <label>
+              Expires at
+              <input name="expires_at" placeholder="2026-07-01T00:00:00+00:00">
+            </label>
+          </details>
+          <div class="button-row">
+            <button class="primary" type="submit"${hasQuestionProviderViews && hasCredentials ? "" : " disabled"}>Publish Invitation</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel flow-panel">
+        <div class="section-heading">
+          <span class="step-badge">6</span>
+          <div>
             <h2>Accept a View</h2>
-            <p>Paste an invitation URL or package folder. RightMemory can infer the rest in ordinary cases.</p>
           </div>
         </div>
         <form id="accept-invite-form" class="guided-form">
           <label>
             Invitation
-            <textarea name="invitation" placeholder="https://.../i/token or /path/to/package" required></textarea>
+            <textarea name="invitation" placeholder="https://.../i/token" required></textarea>
           </label>
           <details class="advanced">
             <summary>Connection naming</summary>
@@ -242,26 +437,43 @@ async function renderSharedViews() {
 
       <section class="panel flow-panel">
         <div class="section-heading">
-          <span class="step-badge">4</span>
+          <span class="step-badge">7</span>
           <div>
             <h2>Use a Connected View</h2>
-            <p>Retrieve context or send feedback from a selected connection.</p>
           </div>
         </div>
-        <form id="consumer-view-form" class="guided-form">
+        <form id="file-connection-form" class="guided-form">
           <label>
-            Connection
-            <select name="heading_id">${connectionOptions}</select>
-          </label>
-          <label>
-            Ask the view
-            <input name="query" placeholder="What context do I need?">
+            File connection
+            <select name="heading_id">${fileConnectionOptions}</select>
           </label>
           <div class="button-row">
-            <button class="primary" name="action" value="retrieve" type="submit"${connections.length ? "" : " disabled"}>Retrieve</button>
+            <button class="primary" name="action" value="pull" type="submit"${hasFileConnections ? "" : " disabled"}>Pull</button>
+            <button name="action" value="status" type="submit"${hasFileConnections ? "" : " disabled"}>Status</button>
+            <button id="pull-all-connections" type="button"${hasFileConnections ? "" : " disabled"}>Pull All</button>
+            <button id="status-all-connections" type="button"${connections.length ? "" : " disabled"}>Status All</button>
           </div>
+        </form>
+        <form id="question-connection-form" class="guided-form">
+          <label>
+            Question connection
+            <select name="heading_id">${questionConnectionOptions}</select>
+          </label>
+          <label>
+            Question
+            <input name="question" placeholder="How do tokens refresh?">
+          </label>
+          <div class="button-row">
+            <button class="primary" type="submit"${hasQuestionConnections ? "" : " disabled"}>Ask</button>
+          </div>
+        </form>
+        <form id="consumer-note-form" class="guided-form">
           <details class="advanced">
             <summary>Send a note</summary>
+            <label>
+              Connection
+              <select name="heading_id">${connectionOptions}</select>
+            </label>
             <label>
               Message
               <textarea name="message" placeholder="What should the provider know?"></textarea>
@@ -271,10 +483,42 @@ async function renderSharedViews() {
               Confirm provider-visible note
             </label>
             <div class="button-row">
-              <button name="action" value="note" type="submit"${connections.length ? "" : " disabled"}>Send Note</button>
+              <button type="submit"${connections.length ? "" : " disabled"}>Send Note</button>
             </div>
           </details>
         </form>
+      </section>
+
+      <section class="panel flow-panel">
+        <div class="section-heading">
+          <span class="step-badge">8</span>
+          <div>
+            <h2>Provider Inbox</h2>
+          </div>
+        </div>
+        <form id="provider-inbox-form" class="guided-form">
+          <label>
+            Credential
+            <select class="credential-select" name="credential_id" required>${credentialOptions}</select>
+          </label>
+          <details class="advanced">
+            <summary>Provider override</summary>
+            <label>
+              HTTP hub URL
+              <input name="hub_url" placeholder="from credential">
+            </label>
+            <label>
+              Provider id
+              <input name="provider_id" placeholder="from credential">
+            </label>
+          </details>
+          <div class="button-row">
+            <button class="primary" type="submit"${hasCredentials ? "" : " disabled"}>Load Inbox</button>
+          </div>
+        </form>
+        <div id="provider-inbox-list" class="record-output">
+          <p>No provider inbox loaded.</p>
+        </div>
       </section>
     </div>
 
@@ -291,6 +535,16 @@ async function renderSharedViews() {
           <h3>Views I Use</h3>
           ${renderItems(connections.map((connection) => ({ label: `${connection.heading_id} (${connection.relationship})` })))}
         </div>
+      </div>
+    </section>
+
+    <section class="panel wide" id="publish-events-panel">
+      <div class="section-heading">
+        <h2>Auto-Publish Events</h2>
+      </div>
+      <div id="publish-events-list" class="record-output"><p>Load events to inspect recent file-view publishing.</p></div>
+      <div class="button-row">
+        <button id="load-publish-events" type="button">Load Events</button>
       </div>
     </section>
 
@@ -616,22 +870,6 @@ function escapeHtml(value) {
   }[char]));
 }
 
-function splitTerms(value) {
-  return String(value || "")
-    .split(/[\n,]/)
-    .map((term) => term.trim())
-    .filter(Boolean);
-}
-
-function slugify(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-}
-
 document.querySelector("#login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -678,24 +916,22 @@ function attachPanelHandlers() {
 }
 
 function attachSharedViewHandlers() {
-  const defineViewForm = document.querySelector("#define-view-form");
-  if (defineViewForm) {
-    defineViewForm.addEventListener("submit", async (event) => {
+  attachCredentialSelectHandlers();
+
+  const buildFileViewForm = document.querySelector("#build-file-view-form");
+  if (buildFileViewForm) {
+    buildFileViewForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
         const form = new FormData(event.currentTarget);
-        const title = String(form.get("title") || "").trim();
-        const viewId = String(form.get("view_id") || "").trim() || slugify(title);
-        const payload = await fetchJson("/api/share/views", {
+        const payload = await fetchJson("/api/share/views/build-file", {
           method: "POST",
           body: JSON.stringify({
-            view_id: viewId,
-            title,
-            description: form.get("description"),
-            audience: form.get("audience"),
-            source_globs: splitTerms(form.get("source_globs")),
-            filter_terms: splitTerms(form.get("filter_terms")),
-            include_all: form.get("include_all") === "on",
+            view_id: form.get("view_id"),
+            title: form.get("title"),
+            intent: form.get("intent"),
+            hub_url: form.get("hub_url"),
+            credential_id: form.get("credential_id"),
           }),
         });
         setMessage(payload.message);
@@ -706,37 +942,94 @@ function attachSharedViewHandlers() {
     });
   }
 
-  const providerViewForm = document.querySelector("#provider-view-form");
-  if (providerViewForm) {
-    providerViewForm.addEventListener("submit", async (event) => {
+  const buildQuestionViewForm = document.querySelector("#build-question-view-form");
+  if (buildQuestionViewForm) {
+    buildQuestionViewForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
         const form = new FormData(event.currentTarget);
-        const action = event.submitter?.value;
-        const viewId = String(form.get("view_id") || "").trim();
-        const query = String(form.get("query") || "").trim();
-        let path = `/api/share/views/${encodeURIComponent(viewId)}/build`;
-        let body = query ? { query } : {};
-        if (action === "export") {
-          path = `/api/share/views/${encodeURIComponent(viewId)}/export`;
-          body = { target: form.get("target"), replace: true, ...(query ? { query } : {}) };
-        } else if (action === "publish-mounted") {
-          path = `/api/share/views/${encodeURIComponent(viewId)}/publish`;
-          body = { kind: "mounted", hub: form.get("target"), replace: true, ...(query ? { query } : {}) };
-        } else if (action === "publish-http") {
-          path = `/api/share/views/${encodeURIComponent(viewId)}/publish`;
-          body = {
-            kind: "http",
-            hub_url: form.get("hub_url"),
-            credential_id: String(form.get("credential_id") || "").trim() || `${viewId}-publish`,
-            ...(query ? { query } : {}),
-          };
-        }
-        const payload = await fetchJson(path, { method: "POST", body: JSON.stringify(body) });
+        const payload = await fetchJson("/api/share/views/build-question", {
+          method: "POST",
+          body: JSON.stringify({
+            view_id: form.get("view_id"),
+            title: form.get("title"),
+            intent: form.get("intent"),
+          }),
+        });
         setMessage(payload.message);
-        if (action === "build") {
-          await loadPanel();
-        }
+        await loadPanel();
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const approveViewForm = document.querySelector("#approve-view-form");
+  if (approveViewForm) {
+    approveViewForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const viewId = String(form.get("view_id") || "").trim();
+        const payload = await fetchJson(`/api/share/views/${encodeURIComponent(viewId)}/approve`, {
+          method: "POST",
+          body: JSON.stringify({
+            type: form.get("type"),
+          }),
+        });
+        setMessage(payload.message);
+        await loadPanel();
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const inviteFileViewForm = document.querySelector("#invite-file-view-form");
+  if (inviteFileViewForm) {
+    inviteFileViewForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const viewId = String(form.get("view_id") || "").trim();
+        const payload = await fetchJson(`/api/share/views/${encodeURIComponent(viewId)}/invite`, {
+          method: "POST",
+          body: JSON.stringify({
+            hub_url: form.get("hub_url"),
+            credential_id: form.get("credential_id"),
+            label: form.get("label"),
+            expires_at: form.get("expires_at"),
+          }),
+        });
+        showSharedViewResult(payload.message);
+        setMessage(payload.message);
+        await loadPanel();
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const publishQuestionViewForm = document.querySelector("#publish-question-view-form");
+  if (publishQuestionViewForm) {
+    publishQuestionViewForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const viewId = String(form.get("view_id") || "").trim();
+        const payload = await fetchJson(`/api/share/views/${encodeURIComponent(viewId)}/publish-question`, {
+          method: "POST",
+          body: JSON.stringify({
+            hub_url: form.get("hub_url"),
+            credential_id: form.get("credential_id"),
+            question_base_url: form.get("question_base_url"),
+            label: form.get("label"),
+            expires_at: form.get("expires_at"),
+          }),
+        });
+        showSharedViewResult(payload.message);
+        setMessage(payload.message);
+        await loadPanel();
       } catch (error) {
         setMessage(error.message);
       }
@@ -766,32 +1059,160 @@ function attachSharedViewHandlers() {
     });
   }
 
-  const consumerViewForm = document.querySelector("#consumer-view-form");
-  if (consumerViewForm) {
-    consumerViewForm.addEventListener("submit", async (event) => {
+  const fileConnectionForm = document.querySelector("#file-connection-form");
+  if (fileConnectionForm) {
+    fileConnectionForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
         const form = new FormData(event.currentTarget);
         const action = event.submitter?.value;
         const headingId = String(form.get("heading_id") || "").trim();
         const path =
-          action === "note"
-            ? `/api/use/connections/${encodeURIComponent(headingId)}/note`
-            : `/api/use/connections/${encodeURIComponent(headingId)}/retrieve`;
-        const body =
-          action === "note"
-            ? {
-                message: form.get("message"),
-                confirmed: form.get("confirmed") === "on",
-              }
-            : { query: form.get("query") };
-        const payload = await fetchJson(path, { method: "POST", body: JSON.stringify(body) });
+          action === "status"
+            ? `/api/use/connections/${encodeURIComponent(headingId)}/status`
+            : `/api/use/connections/${encodeURIComponent(headingId)}/pull`;
+        const payload = await fetchJson(path, { method: action === "status" ? "GET" : "POST" });
+        showSharedViewResult(action === "status" ? JSON.stringify(payload.data, null, 2) : payload.message);
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const pullAllButton = document.querySelector("#pull-all-connections");
+  if (pullAllButton) {
+    pullAllButton.addEventListener("click", async () => {
+      try {
+        const payload = await fetchJson("/api/use/connections/pull-all", { method: "POST" });
+        showSharedViewResult(JSON.stringify(payload.data.results || [], null, 2));
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const statusAllButton = document.querySelector("#status-all-connections");
+  if (statusAllButton) {
+    statusAllButton.addEventListener("click", async () => {
+      try {
+        const payload = await fetchJson("/api/use/connections/status-all");
+        showSharedViewResult(JSON.stringify(payload.data.statuses || [], null, 2));
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const questionConnectionForm = document.querySelector("#question-connection-form");
+  if (questionConnectionForm) {
+    questionConnectionForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const headingId = String(form.get("heading_id") || "").trim();
+        const payload = await fetchJson(`/api/use/connections/${encodeURIComponent(headingId)}/ask`, {
+          method: "POST",
+          body: JSON.stringify({ question: form.get("question") }),
+        });
         showSharedViewResult(payload.data?.text || payload.message);
         setMessage(payload.message);
       } catch (error) {
         setMessage(error.message);
       }
     });
+  }
+
+  const consumerNoteForm = document.querySelector("#consumer-note-form");
+  if (consumerNoteForm) {
+    consumerNoteForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const headingId = String(form.get("heading_id") || "").trim();
+        const payload = await fetchJson(`/api/use/connections/${encodeURIComponent(headingId)}/note`, {
+          method: "POST",
+          body: JSON.stringify({
+            message: form.get("message"),
+            confirmed: form.get("confirmed") === "on",
+          }),
+        });
+        showSharedViewResult(payload.message);
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const providerInboxForm = document.querySelector("#provider-inbox-form");
+  if (providerInboxForm) {
+    providerInboxForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const payload = await fetchJson("/api/share/provider-inbox", {
+          method: "POST",
+          body: JSON.stringify({
+            credential_id: form.get("credential_id"),
+            hub_url: form.get("hub_url"),
+            provider_id: form.get("provider_id"),
+          }),
+        });
+        const target = document.querySelector("#provider-inbox-list");
+        if (target) {
+          target.innerHTML = renderProviderInbox(payload.data.interactions || []);
+        }
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const loadPublishEventsButton = document.querySelector("#load-publish-events");
+  if (loadPublishEventsButton) {
+    loadPublishEventsButton.addEventListener("click", async () => {
+      try {
+        const payload = await fetchJson("/api/share/publish-events");
+        const target = document.querySelector("#publish-events-list");
+        if (target) {
+          target.innerHTML = renderPublishEvents(payload.data.events || []);
+        }
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+}
+
+function attachCredentialSelectHandlers() {
+  document.querySelectorAll(".credential-select").forEach((select) => {
+    const update = () => fillCredentialDefaults(select);
+    select.addEventListener("change", update);
+    update();
+  });
+}
+
+function fillCredentialDefaults(select) {
+  const option = select.selectedOptions ? select.selectedOptions[0] : null;
+  if (!option || !option.value) {
+    return;
+  }
+  const form = select.closest("form");
+  if (!form) {
+    return;
+  }
+  const hubInput = form.querySelector('input[name="hub_url"]');
+  if (hubInput && !hubInput.value && option.dataset.baseUrl) {
+    hubInput.value = option.dataset.baseUrl;
+  }
+  const providerInput = form.querySelector('input[name="provider_id"]');
+  if (providerInput && !providerInput.value && option.dataset.providerId) {
+    providerInput.value = option.dataset.providerId;
   }
 }
 

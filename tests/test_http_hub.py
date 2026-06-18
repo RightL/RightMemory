@@ -1,3 +1,4 @@
+import importlib.util
 import sqlite3
 import tempfile
 import unittest
@@ -17,6 +18,9 @@ from rightmemory.hub.packages import (
     load_package_manifest,
 )
 from rightmemory.hub.store import HubStore
+
+
+HTTPX2_AVAILABLE = importlib.util.find_spec("httpx2") is not None
 
 
 class HubStoreTests(unittest.TestCase):
@@ -83,6 +87,88 @@ class HubStoreTests(unittest.TestCase):
         self.assertNotIn(provider_token.raw_token, rendered)
         self.assertNotIn("admin-secret", rendered)
 
+    def test_question_invitation_metadata_is_described_and_question_token_only_on_accept(self):
+        store = HubStore(self.root)
+        store.initialize(admin_token="admin-secret")
+        registered = store.register_question_view(
+            "alice-auth-api",
+            provider_id="alice",
+            title="Alice Auth API",
+            description="Public auth facts.",
+            question_base_url="https://provider.example.test",
+            question_token="question-token",
+        )
+        invitation = store.create_invitation("alice-auth-api", label="frontend")
+
+        described = store.describe_invitation(invitation["raw_token"])
+        accepted = store.accept_invitation(invitation["raw_token"], consumer_label="frontend")
+
+        self.assertEqual(registered["provider_id"], "alice")
+        self.assertIsNotNone(described)
+        self.assertEqual(described["kind"], "question")
+        self.assertEqual(described["question_base_url"], "https://provider.example.test")
+        self.assertNotIn("question_token", described)
+        self.assertIsNotNone(accepted)
+        self.assertEqual(accepted["question_token"], "question-token")
+
+    def test_admin_helpers_list_hub_state_without_secret_material(self):
+        store = HubStore(self.root)
+        store.initialize(admin_token="admin-secret")
+        provider_token = store.create_provider_token("alice", label="publish")
+        store.register_question_view(
+            "alice-auth-api",
+            provider_id="alice",
+            title="Alice Auth API",
+            description="Public auth facts.",
+            question_base_url="https://provider.example.test",
+            question_token="question-token",
+            created_by_token_id=provider_token.token_id,
+        )
+        invitation = store.create_invitation("alice-auth-api", actor_id=provider_token.token_id, label="frontend")
+        accepted = store.accept_invitation(invitation["raw_token"], consumer_label="frontend")
+        self.assertIsNotNone(accepted)
+        actor = store.require_token(accepted["connection_token"], action="connect", view_id="alice-auth-api")
+        interaction = store.record_interaction(
+            "alice-auth-api",
+            actor=actor,
+            payload={"actor": "assistant", "message": "Docs are stale."},
+        )
+
+        overview = store.hub_overview()
+        providers = store.list_providers()
+        views = store.list_views()
+        invitations = store.list_view_invitations("alice-auth-api")
+        connections = store.list_connections()
+        interactions = store.list_interactions(provider_id="alice")
+        audit = store.list_audit_events(limit=50)
+        rendered = " ".join(
+            [
+                str(overview),
+                str(providers),
+                str(views),
+                str(invitations),
+                str(connections),
+                str(interactions),
+                str([event.details for event in audit]),
+            ]
+        )
+
+        self.assertEqual(overview["provider_count"], 1)
+        self.assertEqual(overview["view_count"], 1)
+        self.assertGreaterEqual(overview["active_token_count"], 3)
+        self.assertEqual(providers[0]["provider_id"], "alice")
+        self.assertEqual(views[0]["view_id"], "alice-auth-api")
+        self.assertEqual(views[0]["kind"], "question")
+        self.assertEqual(views[0]["question_base_url"], "https://provider.example.test")
+        self.assertEqual(invitations[0]["token_id"], invitation["token_id"])
+        self.assertEqual(connections[0]["connection_id"], accepted["connection_id"])
+        self.assertEqual(interactions[0]["interaction_id"], interaction["interaction_id"])
+        self.assertIn("question_view.registered", [event.kind for event in audit])
+        self.assertNotIn(provider_token.raw_token, rendered)
+        self.assertNotIn(invitation["raw_token"], rendered)
+        self.assertNotIn(accepted["connection_token"], rendered)
+        self.assertNotIn("question-token", str(views))
+
 
 class HubPackageTests(unittest.TestCase):
     def setUp(self):
@@ -146,7 +232,7 @@ class HubPackageTests(unittest.TestCase):
             source_root=package,
             view_id="alice-auth-api",
             title="Alice Auth API",
-            ref="rightmemory://view/alice-auth-api",
+            ref="rightmemory://mf/alice-auth-api",
             files=("../escape.md",),
             size_bytes=1,
             package_hash="0" * 64,
@@ -176,7 +262,7 @@ class HubPackageTests(unittest.TestCase):
             source_root=package,
             view_id="alice-auth-api",
             title="Alice Auth API",
-            ref="rightmemory://view/alice-auth-api",
+            ref="rightmemory://mf/alice-auth-api",
             files=("dist/MEMORY.md",),
             size_bytes=len(b"snapshot bytes\n"),
             package_hash="1" * 64,
@@ -237,26 +323,40 @@ class HubPackageTests(unittest.TestCase):
         self.assertIn("does not match publish target", str(caught.exception))
 
 
-def _write_package(package: Path, *, view_id: str = "alice-auth-api", memory_text: str | None = None) -> None:
+def _write_package(
+    package: Path,
+    *,
+    view_id: str = "alice-auth-api",
+    memory_text: str | None = None,
+    kind: str = "file",
+    ref: str | None = None,
+    question_base_url: str | None = None,
+    question_token: str | None = None,
+) -> None:
     package.mkdir(parents=True)
     (package / "dist").mkdir()
     title = "Alice Auth API" if view_id == "alice-auth-api" else view_id
+    resolved_ref = ref or f"rightmemory://mf/{view_id}"
     (package / "view.md").write_text(f"# {title}\n", encoding="utf-8")
-    (package / "export.toml").write_text(
+    (package / "recipe.toml").write_text(
         f"""
         version = 1
         view_id = "{view_id}"
-        ref = "rightmemory://view/{view_id}"
+        ref = "{resolved_ref}"
         title = "{title}"
+        approved = true
         """,
         encoding="utf-8",
     )
     (package / "rightmemory-shared-view.toml").write_text(
         f"""
         version = 1
+        kind = "{kind}"
         view_id = "{view_id}"
-        ref = "rightmemory://view/{view_id}"
+        ref = "{resolved_ref}"
         title = "{title}"
+        {_optional_toml_line("question_base_url", question_base_url)}
+        {_optional_toml_line("question_token", question_token)}
 
         [transport]
         kind = "package"
@@ -269,8 +369,20 @@ def _write_package(package: Path, *, view_id: str = "alice-auth-api", memory_tex
         memory_text or "# Alice Auth API Shared View\n\nTokens rotate monthly.\n",
         encoding="utf-8",
     )
+    (package / "dist" / "manifest.toml").write_text(
+        f"""
+        version = 1
+        view_id = "{view_id}"
+        """,
+        encoding="utf-8",
+    )
 
 
+def _optional_toml_line(key: str, value: str | None) -> str:
+    return f'{key} = "{value}"' if value else ""
+
+
+@unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")
 class HubApiTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -288,7 +400,143 @@ class HubApiTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "ok")
         self.assertTrue(response.json()["initialized"])
 
-    def test_publish_invite_accept_retrieve_interact_and_inbox_flow(self):
+    def test_admin_routes_require_admin_token(self):
+        missing = self.client.get("/api/admin/overview")
+        provider = self.client.get("/api/admin/overview", headers=_auth(self.provider_token.raw_token))
+        admin = self.client.get("/api/admin/overview", headers=_auth("admin-secret"))
+
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(provider.status_code, 403)
+        self.assertEqual(admin.status_code, 200)
+        self.assertTrue(admin.json()["overview"]["initialized"])
+
+    def test_admin_api_lists_creates_and_revokes_hub_state(self):
+        package = self.root / "package"
+        _write_package(package)
+        publish = self.client.post(
+            "/api/views/alice-auth-api/versions",
+            content=_zip_package(package),
+            headers={**_auth(self.provider_token.raw_token), "content-type": "application/zip"},
+        )
+        self.assertEqual(publish.status_code, 201)
+
+        created_token = self.client.post(
+            "/api/admin/providers/bob/tokens",
+            headers=_auth("admin-secret"),
+            json={"label": "publish"},
+        )
+        invitation = self.client.post(
+            "/api/admin/views/alice-auth-api/invitations",
+            headers=_auth("admin-secret"),
+            json={"label": "frontend"},
+        )
+        invitation_token = invitation.json()["invitation_url"].rsplit("/i/", 1)[1]
+        accepted = self.client.post(
+            f"/api/invitations/{invitation_token}/accept",
+            json={"consumer_label": "frontend"},
+        )
+        interaction = self.client.post(
+            "/api/views/alice-auth-api/interactions",
+            headers=_auth(accepted.json()["connection_token"]),
+            json={"actor": "assistant", "message": "Docs are stale."},
+        )
+        overview = self.client.get("/api/admin/overview", headers=_auth("admin-secret"))
+        providers = self.client.get("/api/admin/providers", headers=_auth("admin-secret"))
+        views = self.client.get("/api/admin/views", headers=_auth("admin-secret"))
+        view = self.client.get("/api/admin/views/alice-auth-api", headers=_auth("admin-secret"))
+        invitations = self.client.get(
+            "/api/admin/views/alice-auth-api/invitations",
+            headers=_auth("admin-secret"),
+        )
+        connections = self.client.get("/api/admin/connections", headers=_auth("admin-secret"))
+        inbox = self.client.get("/api/admin/inbox?provider_id=alice", headers=_auth("admin-secret"))
+        audit = self.client.get("/api/admin/audit?kind=interaction.created", headers=_auth("admin-secret"))
+
+        revoke_invitation = self.client.post(
+            f"/api/admin/invitations/{invitation.json()['token_id']}/revoke",
+            headers=_auth("admin-secret"),
+        )
+        revoke_connection = self.client.post(
+            f"/api/admin/connections/{accepted.json()['token_id']}/revoke",
+            headers=_auth("admin-secret"),
+        )
+
+        self.assertEqual(created_token.status_code, 201)
+        self.assertEqual(created_token.json()["provider_id"], "bob")
+        self.assertIn("raw_token", created_token.json())
+        self.assertEqual(invitation.status_code, 201)
+        self.assertEqual(accepted.status_code, 201)
+        self.assertEqual(interaction.status_code, 201)
+        self.assertEqual(overview.status_code, 200)
+        self.assertGreaterEqual(overview.json()["overview"]["provider_count"], 2)
+        self.assertEqual(providers.status_code, 200)
+        self.assertIn("alice", [item["provider_id"] for item in providers.json()["providers"]])
+        self.assertEqual(views.status_code, 200)
+        self.assertIn("alice-auth-api", [item["view_id"] for item in views.json()["views"]])
+        self.assertEqual(view.status_code, 200)
+        self.assertEqual(view.json()["view"]["kind"], "file")
+        self.assertEqual(invitations.status_code, 200)
+        self.assertEqual(invitations.json()["invitations"][0]["token_id"], invitation.json()["token_id"])
+        self.assertEqual(connections.status_code, 200)
+        self.assertEqual(connections.json()["connections"][0]["connection_id"], accepted.json()["connection_id"])
+        self.assertEqual(inbox.status_code, 200)
+        self.assertEqual(inbox.json()["interactions"][0]["interaction_id"], interaction.json()["interaction_id"])
+        self.assertEqual(audit.status_code, 200)
+        self.assertEqual(audit.json()["events"][0]["kind"], "interaction.created")
+        self.assertEqual(revoke_invitation.status_code, 200)
+        self.assertTrue(revoke_invitation.json()["revoked"])
+        self.assertEqual(revoke_connection.status_code, 200)
+        self.assertTrue(revoke_connection.json()["revoked"])
+        self.assertFalse(
+            self.store.verify_token(accepted.json()["connection_token"], action="connect", view_id="alice-auth-api")
+        )
+        token_list = self.client.get("/api/admin/tokens", headers=_auth("admin-secret")).json()
+        self.assertNotIn(created_token.json()["raw_token"], str(token_list))
+
+    def test_console_static_routes_are_served(self):
+        page = self.client.get("/console")
+        script = self.client.get("/console/static/console.js")
+        styles = self.client.get("/console/static/console.css")
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("RightMemory Hub Console", page.text)
+        self.assertEqual(script.status_code, 200)
+        self.assertIn("/api/admin/overview", script.text)
+        self.assertEqual(styles.status_code, 200)
+        self.assertIn(".console-shell", styles.text)
+
+    def test_register_question_view_invite_and_accept_flow(self):
+        registered = self.client.post(
+            "/api/views/alice-auth-api/question",
+            headers=_auth(self.provider_token.raw_token),
+            json={
+                "title": "Alice Auth API",
+                "description": "Public auth facts.",
+                "question_base_url": "https://provider.example.test",
+                "question_token": "question-token",
+            },
+        )
+        invitation = self.client.post(
+            "/api/views/alice-auth-api/invitations",
+            headers=_auth(self.provider_token.raw_token),
+            json={"label": "frontend agent"},
+        )
+
+        self.assertEqual(registered.status_code, 201)
+        self.assertEqual(registered.json()["provider_id"], "alice")
+        self.assertEqual(invitation.status_code, 201)
+        invitation_token = invitation.json()["invitation_url"].rsplit("/i/", 1)[1]
+        described = self.client.get(f"/api/invitations/{invitation_token}/view")
+        accepted = self.client.post(f"/api/invitations/{invitation_token}/accept")
+
+        self.assertEqual(described.status_code, 200)
+        self.assertEqual(described.json()["kind"], "question")
+        self.assertEqual(described.json()["question_base_url"], "https://provider.example.test")
+        self.assertNotIn("question_token", described.json())
+        self.assertEqual(accepted.status_code, 201)
+        self.assertEqual(accepted.json()["question_token"], "question-token")
+
+    def test_publish_invite_accept_pull_interact_and_inbox_flow(self):
         first_package = self.root / "package-v1"
         _write_package(
             first_package,
@@ -369,19 +617,18 @@ class HubApiTests(unittest.TestCase):
         connection_token = accepted_body["connection_token"]
         self.assertTrue(connection_token)
 
-        retrieval = self.client.post(
-            "/api/views/alice-auth-api/retrieve",
+        package_download = self.client.get(
+            "/api/views/alice-auth-api/package",
             headers=_auth(connection_token),
-            json={"query": "refresh token rotation", "limit": 4},
         )
 
-        self.assertEqual(retrieval.status_code, 200)
-        retrieval_body = retrieval.json()
-        self.assertEqual(retrieval_body["view_id"], "alice-auth-api")
-        self.assertEqual(retrieval_body["version_id"], second_version_id)
-        self.assertTrue(retrieval_body["freshness"])
-        self.assertEqual(retrieval_body["provenance"]["title"], "Alice Auth API")
-        self.assertIn("Refresh tokens rotate monthly", retrieval_body["snippets"][0]["text"])
+        self.assertEqual(package_download.status_code, 200)
+        with zipfile.ZipFile(BytesIO(package_download.content)) as archive:
+            names = set(archive.namelist())
+            pulled_memory = archive.read("dist/MEMORY.md").decode("utf-8")
+        self.assertIn("recipe.toml", names)
+        self.assertIn("dist/manifest.toml", names)
+        self.assertIn("Refresh tokens rotate monthly", pulled_memory)
 
         other_package = self.root / "package-other"
         _write_package(other_package, view_id="alice-billing-api", memory_text="# Billing\n\nInvoices are separate.\n")
@@ -392,10 +639,9 @@ class HubApiTests(unittest.TestCase):
         )
         self.assertEqual(other_publish.status_code, 201)
 
-        wrong_view = self.client.post(
-            "/api/views/alice-billing-api/retrieve",
+        wrong_view = self.client.get(
+            "/api/views/alice-billing-api/package",
             headers=_auth(connection_token),
-            json={"query": "invoices"},
         )
 
         self.assertEqual(wrong_view.status_code, 403)
@@ -431,6 +677,38 @@ class HubApiTests(unittest.TestCase):
             self.assertEqual(records[0]["payload"]["message"], "Docs are missing token_expires_at.")
             self.assertEqual(records[0]["payload"]["task_context"], "frontend login migration")
             self.assertEqual(records[0]["payload"]["actor"], "assistant")
+
+    def test_question_invitation_api_accept_response_includes_question_token(self):
+        registered = self.client.post(
+            "/api/views/alice-auth-api/question",
+            headers=_auth(self.provider_token.raw_token),
+            json={
+                "title": "Alice Auth API",
+                "description": "Public auth facts.",
+                "question_base_url": "https://provider.example.test",
+                "question_token": "question-token",
+            },
+        )
+        self.assertEqual(registered.status_code, 201)
+        invitation = self.client.post(
+            "/api/views/alice-auth-api/invitations",
+            headers=_auth(self.provider_token.raw_token),
+            json={"label": "frontend agent"},
+        )
+        invitation_token = invitation.json()["invitation_url"].rsplit("/i/", 1)[1]
+
+        described = self.client.get(f"/api/invitations/{invitation_token}/view")
+        accepted = self.client.post(
+            f"/api/invitations/{invitation_token}/accept",
+            json={"consumer_label": "frontend"},
+        )
+
+        self.assertEqual(described.status_code, 200)
+        self.assertEqual(described.json()["kind"], "question")
+        self.assertEqual(described.json()["question_base_url"], "https://provider.example.test")
+        self.assertNotIn("question_token", described.json())
+        self.assertEqual(accepted.status_code, 201)
+        self.assertEqual(accepted.json()["question_token"], "question-token")
 
     def test_failed_auth_is_audited_without_raw_token_material(self):
         package = self.root / "package"

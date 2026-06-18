@@ -21,6 +21,7 @@ from .auth import (
 )
 from .models import error_detail, ok_response
 from .service import WebStudioService, resolve_allowed_memory_root
+from ..shared_view_questions import question_response_payload, verify_question_view_token
 
 
 def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> FastAPI:
@@ -122,8 +123,8 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
     def shared_views(service=Depends(current_service)):
         return ok_response("shared views loaded", service.shared_views())
 
-    @app.post("/api/share/views")
-    def define_view(
+    @app.post("/api/share/views/build-file")
+    def build_file_view(
         request: Request,
         payload: dict[str, object] = Body(...),
         session=Depends(current_session),
@@ -131,16 +132,51 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         require_csrf(root, request, request.headers.get("x-csrf-token"))
         service = service_for_active_root(session.active_root)
         try:
-            message = service.define_view(payload)
+            message = service.build_file_view(payload)
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=error_detail("could not define shared view", technical=str(exc)),
+                detail=error_detail("could not build file view", technical=str(exc)),
             ) from exc
         return ok_response(message)
 
-    @app.post("/api/share/views/{view_id}/build")
-    def build_view(
+    @app.post("/api/share/views/build-question")
+    def build_question_view(
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        try:
+            message = service.build_question_view(payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_detail("could not build question view", technical=str(exc)),
+            ) from exc
+        return ok_response(message)
+
+    @app.post("/api/share/views/{view_id}/approve")
+    def approve_view(
+        view_id: str,
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        try:
+            message = service.approve_view(view_id, payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_detail("could not approve shared view", technical=str(exc)),
+            ) from exc
+        return ok_response(message)
+
+    @app.post("/api/share/views/{view_id}/invite")
+    def invite_file_view(
         view_id: str,
         request: Request,
         payload: dict[str, object] | None = Body(default=None),
@@ -149,16 +185,16 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         require_csrf(root, request, request.headers.get("x-csrf-token"))
         service = service_for_active_root(session.active_root)
         try:
-            message = service.build_view(view_id, payload or {})
+            message = service.invite_file_view(view_id, payload or {})
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=error_detail("could not build shared view", technical=str(exc)),
+                detail=error_detail("could not create file-view invitation", technical=str(exc)),
             ) from exc
         return ok_response(message)
 
-    @app.post("/api/share/views/{view_id}/export")
-    def export_view(
+    @app.post("/api/share/views/{view_id}/publish-question")
+    def publish_question_view(
         view_id: str,
         request: Request,
         payload: dict[str, object] = Body(...),
@@ -167,17 +203,16 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         require_csrf(root, request, request.headers.get("x-csrf-token"))
         service = service_for_active_root(session.active_root)
         try:
-            message = service.export_view(view_id, payload)
+            message = service.publish_question_view(view_id, payload)
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=error_detail("could not export shared view", technical=str(exc)),
+                detail=error_detail("could not publish question-view invitation", technical=str(exc)),
             ) from exc
         return ok_response(message)
 
-    @app.post("/api/share/views/{view_id}/publish")
-    def publish_view(
-        view_id: str,
+    @app.post("/api/share/provider-inbox")
+    def provider_http_inbox(
         request: Request,
         payload: dict[str, object] = Body(...),
         session=Depends(current_session),
@@ -185,13 +220,42 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         require_csrf(root, request, request.headers.get("x-csrf-token"))
         service = service_for_active_root(session.active_root)
         try:
-            message = service.publish_view(view_id, payload)
+            data = service.provider_http_inbox(payload)
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=error_detail("could not publish shared view", technical=str(exc)),
+                detail=error_detail("could not load provider inbox", technical=str(exc)),
             ) from exc
-        return ok_response(message)
+        return ok_response("provider inbox loaded", data)
+
+    @app.get("/api/share/publish-events")
+    def publish_events(service=Depends(current_service)):
+        return ok_response("publish events loaded", service.publish_events())
+
+    @app.post("/api/share/questions/{view_id}/ask")
+    def answer_question_view(
+        view_id: str,
+        request: Request,
+        payload: dict[str, object] = Body(...),
+    ):
+        session = read_session(root, request)
+        if session is not None:
+            require_csrf(root, request, request.headers.get("x-csrf-token"))
+            service = service_for_active_root(session.active_root)
+        elif _verify_question_bearer(root, view_id, request):
+            service = WebStudioService(root, allowed_root=root)
+        else:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=error_detail("login required"))
+        try:
+            text = service.answer_question_view(view_id, payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_detail("could not answer shared-view question", technical=str(exc)),
+            ) from exc
+        payload = question_response_payload(text)
+        message = "shared view question answered" if payload["status"] == "answered" else "shared view question unavailable"
+        return ok_response(message, payload)
 
     @app.post("/api/share/credentials")
     def save_credential(
@@ -227,8 +291,49 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
             ) from exc
         return ok_response(message)
 
-    @app.post("/api/use/connections/{heading_id}/retrieve")
-    def retrieve_connection(
+    @app.post("/api/use/connections/pull-all")
+    def pull_all_connections(
+        request: Request,
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        try:
+            data = service.pull_all_connections()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_detail("could not pull shared views", technical=str(exc)),
+            ) from exc
+        return ok_response("shared views pulled", data)
+
+    @app.get("/api/use/connections/status-all")
+    def connection_statuses(service=Depends(current_service)):
+        return ok_response("shared view statuses loaded", service.connection_statuses())
+
+    @app.post("/api/use/connections/{heading_id}/pull")
+    def pull_connection(
+        heading_id: str,
+        request: Request,
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        try:
+            message = service.pull_connection(heading_id)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_detail("could not pull shared view", technical=str(exc)),
+            ) from exc
+        return ok_response(message)
+
+    @app.get("/api/use/connections/{heading_id}/status")
+    def connection_status(heading_id: str, service=Depends(current_service)):
+        return ok_response("shared view status loaded", service.connection_status(heading_id))
+
+    @app.post("/api/use/connections/{heading_id}/ask")
+    def ask_connection(
         heading_id: str,
         request: Request,
         payload: dict[str, object] = Body(...),
@@ -237,13 +342,15 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         require_csrf(root, request, request.headers.get("x-csrf-token"))
         service = service_for_active_root(session.active_root)
         try:
-            text = service.retrieve_connection(heading_id, payload)
+            text = service.ask_connection(heading_id, payload)
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=error_detail("could not retrieve shared view", technical=str(exc)),
+                detail=error_detail("could not ask shared view", technical=str(exc)),
             ) from exc
-        return ok_response("shared view retrieved", {"text": text})
+        payload = question_response_payload(text)
+        message = "shared view question answered" if payload["status"] == "answered" else "shared view question unavailable"
+        return ok_response(message, payload)
 
     @app.post("/api/use/connections/{heading_id}/note")
     def note_connection(
@@ -294,6 +401,16 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
         return ok_response("active root updated", data)
 
     return app
+
+
+def _verify_question_bearer(root: Path, view_id: str, request: Request) -> bool:
+    authorization = request.headers.get("authorization", "")
+    scheme, separator, token = authorization.partition(" ")
+    return bool(
+        separator
+        and scheme.lower() == "bearer"
+        and verify_question_view_token(root, view_id, token.strip())
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

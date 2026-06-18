@@ -12,8 +12,27 @@ MEMORY_ROOT_ENV = "RIGHTMEMORY_ROOT"
 MEMORY_ROOT = Path(os.environ.get(MEMORY_ROOT_ENV, "~/.rightmemory")).expanduser()
 _STATE_ROOT_UNSET = cast(Path, object())
 CONFIG_PATH = MEMORY_ROOT / "rightmemory.toml"
-ROLES = {"dreamer", "historian", "insight", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"}
-MODEL_FALLBACK_ROLES = ("update", "dreamer", "insight", "reviewer", "pruner", "sync-reconciler", "historian")
+ROLES = {
+    "dreamer",
+    "historian",
+    "insight",
+    "pruner",
+    "retrieve",
+    "reviewer",
+    "shared-view-builder",
+    "sync-reconciler",
+    "update",
+}
+MODEL_FALLBACK_ROLES = (
+    "update",
+    "dreamer",
+    "insight",
+    "reviewer",
+    "pruner",
+    "sync-reconciler",
+    "historian",
+    "shared-view-builder",
+)
 DEFAULT_MAX_TOOL_RETRIES = 10
 DEFAULT_REVIEW_IDLE_SECONDS = 6 * 60 * 60
 DEFAULT_REVIEW_SINCE_DAYS = 3

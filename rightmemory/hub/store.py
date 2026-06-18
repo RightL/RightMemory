@@ -215,15 +215,39 @@ class HubStore:
             )
             return True
 
-    def list_tokens(self) -> list[dict[str, Any]]:
+    def list_tokens(
+        self,
+        *,
+        action: str | None = None,
+        provider_id: str | None = None,
+        view_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[object] = []
+        if action:
+            clauses.append("action = ?")
+            values.append(_validate_action(action))
+        if provider_id:
+            clauses.append("provider_id = ?")
+            values.append(_validate_hub_id(provider_id, "provider_id"))
+        if view_id:
+            clauses.append("view_id = ?")
+            values.append(_validate_hub_id(view_id, "view_id"))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.extend([_normalize_limit(limit), _normalize_offset(offset)])
         with self._connect() as connection:
             self._apply_migrations(connection)
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, action, provider_id, view_id, label, created_at, revoked_at
                 FROM tokens
-                ORDER BY created_at, id
-                """
+                {where}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                values,
             ).fetchall()
         return [
             {
@@ -238,17 +262,293 @@ class HubStore:
             for row in rows
         ]
 
-    def list_audit_events(self) -> list[AuditEvent]:
+    def list_audit_events(
+        self,
+        *,
+        kind: str | None = None,
+        provider_id: str | None = None,
+        view_id: str | None = None,
+        actor_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AuditEvent]:
+        clauses: list[str] = []
+        values: list[object] = []
+        if kind:
+            clauses.append("kind = ?")
+            values.append(_validate_hub_id(kind, "audit kind"))
+        if provider_id:
+            clauses.append("provider_id = ?")
+            values.append(_validate_hub_id(provider_id, "provider_id"))
+        if view_id:
+            clauses.append("view_id = ?")
+            values.append(_validate_hub_id(view_id, "view_id"))
+        if actor_id:
+            clauses.append("actor_id = ?")
+            values.append(_validate_hub_id(actor_id, "actor_id"))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.extend([_normalize_limit(limit), _normalize_offset(offset)])
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            rows = connection.execute(
+                f"""
+                SELECT id, kind, actor_id, provider_id, view_id, details_json, created_at
+                FROM audit_events
+                {where}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                values,
+            ).fetchall()
+        return [_audit_event_from_row(row) for row in rows]
+
+    def hub_overview(self) -> dict[str, Any]:
+        config = self.load_config()
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            provider_count = connection.execute("SELECT COUNT(*) FROM providers").fetchone()[0]
+            view_count = connection.execute("SELECT COUNT(*) FROM views").fetchone()[0]
+            token_count = connection.execute("SELECT COUNT(*) FROM tokens").fetchone()[0]
+            active_token_count = connection.execute(
+                "SELECT COUNT(*) FROM tokens WHERE revoked_at IS NULL"
+            ).fetchone()[0]
+            interaction_count = connection.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
+            audit_event_count = connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+            recent_auth_failures = connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE kind = 'token.rejected'"
+            ).fetchone()[0]
+        return {
+            "hub_root": str(self.root.resolve()),
+            "initialized": self.db_path.is_file() and self.config_path.is_file(),
+            "storage_present": self.storage_root.is_dir(),
+            "public_base_url": config.public_base_url,
+            "max_package_bytes": config.max_package_bytes,
+            "provider_count": provider_count,
+            "view_count": view_count,
+            "token_count": token_count,
+            "active_token_count": active_token_count,
+            "interaction_count": interaction_count,
+            "audit_event_count": audit_event_count,
+            "recent_auth_failure_count": recent_auth_failures,
+        }
+
+    def list_providers(self, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         with self._connect() as connection:
             self._apply_migrations(connection)
             rows = connection.execute(
                 """
-                SELECT id, kind, actor_id, provider_id, view_id, details_json, created_at
-                FROM audit_events
-                ORDER BY created_at, id
-                """
+                SELECT
+                    p.id AS provider_id,
+                    p.label AS label,
+                    p.created_at AS created_at,
+                    p.updated_at AS updated_at,
+                    COUNT(DISTINCT v.id) AS view_count,
+                    COUNT(DISTINCT CASE WHEN t.revoked_at IS NULL THEN t.id END) AS active_token_count
+                FROM providers p
+                LEFT JOIN views v ON v.provider_id = p.id
+                LEFT JOIN tokens t ON t.provider_id = p.id
+                GROUP BY p.id
+                ORDER BY p.updated_at DESC, p.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (_normalize_limit(limit), _normalize_offset(offset)),
             ).fetchall()
-        return [_audit_event_from_row(row) for row in rows]
+        return [
+            {
+                "provider_id": row["provider_id"],
+                "label": row["label"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "view_count": row["view_count"],
+                "active_token_count": row["active_token_count"],
+            }
+            for row in rows
+        ]
+
+    def list_views(
+        self,
+        *,
+        provider_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[object] = []
+        if provider_id:
+            clauses.append("v.provider_id = ?")
+            values.append(_validate_hub_id(provider_id, "provider_id"))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.extend([_normalize_limit(limit), _normalize_offset(offset)])
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            rows = connection.execute(
+                f"""
+                SELECT
+                    v.id AS view_id,
+                    v.provider_id AS provider_id,
+                    v.title AS title,
+                    v.ref AS ref,
+                    v.description AS description,
+                    v.current_version_id AS current_version_id,
+                    v.created_at AS created_at,
+                    v.updated_at AS updated_at,
+                    vv.package_hash AS package_hash,
+                    vv.storage_path AS storage_path,
+                    vv.manifest_json AS manifest_json,
+                    vv.created_at AS version_created_at,
+                    vv.created_by_token_id AS created_by_token_id
+                FROM views v
+                LEFT JOIN view_versions vv ON vv.id = v.current_version_id
+                {where}
+                ORDER BY v.updated_at DESC, v.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                values,
+            ).fetchall()
+        return [_admin_view_from_row(row) for row in rows]
+
+    def get_admin_view(self, view_id: str) -> dict[str, Any] | None:
+        clean_view_id = _validate_hub_id(view_id, "view_id")
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            row = connection.execute(
+                """
+                SELECT
+                    v.id AS view_id,
+                    v.provider_id AS provider_id,
+                    v.title AS title,
+                    v.ref AS ref,
+                    v.description AS description,
+                    v.current_version_id AS current_version_id,
+                    v.created_at AS created_at,
+                    v.updated_at AS updated_at,
+                    vv.package_hash AS package_hash,
+                    vv.storage_path AS storage_path,
+                    vv.manifest_json AS manifest_json,
+                    vv.created_at AS version_created_at,
+                    vv.created_by_token_id AS created_by_token_id
+                FROM views v
+                LEFT JOIN view_versions vv ON vv.id = v.current_version_id
+                WHERE v.id = ?
+                """,
+                (clean_view_id,),
+            ).fetchone()
+        return _admin_view_from_row(row) if row is not None else None
+
+    def list_view_invitations(
+        self,
+        view_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clean_view_id = _validate_hub_id(view_id, "view_id")
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            rows = connection.execute(
+                """
+                SELECT
+                    i.id AS invitation_id,
+                    i.view_id AS view_id,
+                    i.token_id AS token_id,
+                    i.label AS label,
+                    i.expires_at AS expires_at,
+                    i.revoked_at AS invitation_revoked_at,
+                    i.created_at AS created_at,
+                    i.accepted_count AS accepted_count,
+                    t.revoked_at AS token_revoked_at
+                FROM invitations i
+                LEFT JOIN tokens t ON t.id = i.token_id
+                WHERE i.view_id = ?
+                ORDER BY i.created_at DESC, i.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (clean_view_id, _normalize_limit(limit), _normalize_offset(offset)),
+            ).fetchall()
+        return [_admin_invitation_from_row(row) for row in rows]
+
+    def list_connections(
+        self,
+        *,
+        view_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[object] = []
+        if view_id:
+            clauses.append("c.view_id = ?")
+            values.append(_validate_hub_id(view_id, "view_id"))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.extend([_normalize_limit(limit), _normalize_offset(offset)])
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            rows = connection.execute(
+                f"""
+                SELECT
+                    c.id AS connection_id,
+                    c.invitation_id AS invitation_id,
+                    c.view_id AS view_id,
+                    c.token_id AS token_id,
+                    c.consumer_label AS consumer_label,
+                    c.created_at AS created_at,
+                    c.revoked_at AS connection_revoked_at,
+                    t.revoked_at AS token_revoked_at,
+                    v.provider_id AS provider_id
+                FROM connections c
+                LEFT JOIN tokens t ON t.id = c.token_id
+                JOIN views v ON v.id = c.view_id
+                {where}
+                ORDER BY c.created_at DESC, c.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                values,
+            ).fetchall()
+        return [_admin_connection_from_row(row) for row in rows]
+
+    def list_interactions(
+        self,
+        *,
+        provider_id: str | None = None,
+        view_id: str | None = None,
+        connection_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[object] = []
+        if provider_id:
+            clauses.append("v.provider_id = ?")
+            values.append(_validate_hub_id(provider_id, "provider_id"))
+        if view_id:
+            clauses.append("i.view_id = ?")
+            values.append(_validate_hub_id(view_id, "view_id"))
+        if connection_id:
+            clauses.append("i.connection_id = ?")
+            values.append(_validate_hub_id(connection_id, "connection_id"))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.extend([_normalize_limit(limit), _normalize_offset(offset)])
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            rows = connection.execute(
+                f"""
+                SELECT
+                    i.id AS interaction_id,
+                    i.view_id AS view_id,
+                    i.connection_id AS connection_id,
+                    i.actor_id AS actor_id,
+                    i.payload_json AS payload_json,
+                    i.created_at AS created_at,
+                    v.provider_id AS provider_id
+                FROM interactions i
+                JOIN views v ON v.id = i.view_id
+                {where}
+                ORDER BY i.created_at DESC, i.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                values,
+            ).fetchall()
+        return [_interaction_from_row(row) for row in rows]
 
     def get_view(self, view_id: str) -> dict[str, Any] | None:
         clean_view_id = _validate_hub_id(view_id, "view_id")
@@ -353,6 +653,118 @@ class HubStore:
             "created_at": now,
         }
 
+    def register_question_view(
+        self,
+        view_id: str,
+        *,
+        provider_id: str,
+        title: str,
+        description: str,
+        question_base_url: str,
+        question_token: str,
+        created_by_token_id: str | None = None,
+    ) -> dict[str, Any]:
+        clean_view_id = _validate_hub_id(view_id, "view_id")
+        clean_provider_id = _validate_hub_id(provider_id, "provider_id")
+        clean_title = _required_string(title, "title")
+        clean_description = _optional_string(description)
+        clean_question_base_url = _required_string(question_base_url, "question_base_url")
+        clean_question_token = _required_string(question_token, "question_token")
+        clean_created_by = _validate_hub_id(created_by_token_id, "created_by_token_id") if created_by_token_id else None
+        version_id = _new_id("ver")
+        ref = f"rightmemory://mq/{clean_view_id}"
+        manifest = _question_manifest_json(
+            view_id=clean_view_id,
+            version_id=version_id,
+            title=clean_title,
+            ref=ref,
+            description=clean_description,
+            question_base_url=clean_question_base_url,
+            question_token=clean_question_token,
+        )
+        manifest_json = json.dumps(manifest, sort_keys=True)
+        package_hash = sha256(manifest_json.encode("utf-8")).hexdigest()
+        storage_path = self.storage_root / "views" / clean_view_id / "questions" / version_id
+        relative_storage_path = storage_path.relative_to(self.root).as_posix()
+        now = _now_iso()
+        try:
+            storage_path.mkdir(parents=True, exist_ok=False)
+            _atomic_write_text(storage_path / "manifest.json", manifest_json + "\n")
+            with self._connect() as connection:
+                self._apply_migrations(connection)
+                connection.execute(
+                    """
+                    INSERT INTO providers(id, label, created_at, updated_at)
+                    VALUES(?, NULL, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at
+                    """,
+                    (clean_provider_id, now, now),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO views(
+                        id, provider_id, title, ref, description, current_version_id, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        provider_id = COALESCE(views.provider_id, excluded.provider_id),
+                        title = excluded.title,
+                        ref = excluded.ref,
+                        description = excluded.description,
+                        current_version_id = excluded.current_version_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        clean_view_id,
+                        clean_provider_id,
+                        clean_title,
+                        ref,
+                        clean_description,
+                        version_id,
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO view_versions(
+                        id, view_id, package_hash, storage_path, manifest_json, created_at, created_by_token_id
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        version_id,
+                        clean_view_id,
+                        package_hash,
+                        relative_storage_path,
+                        manifest_json,
+                        now,
+                        clean_created_by,
+                    ),
+                )
+                self._append_audit_event(
+                    connection,
+                    "question_view.registered",
+                    actor_id=clean_created_by,
+                    provider_id=clean_provider_id,
+                    view_id=clean_view_id,
+                    details={"version_id": version_id},
+                )
+        except BaseException:
+            if storage_path.exists():
+                shutil.rmtree(storage_path)
+            raise
+        return {
+            "view_id": clean_view_id,
+            "provider_id": clean_provider_id,
+            "version_id": version_id,
+            "current_version_id": version_id,
+            "package_hash": package_hash,
+            "title": clean_title,
+            "ref": ref,
+            "description": clean_description,
+        }
+
     def describe_invitation(self, raw_token: str) -> dict[str, Any] | None:
         token_row = self._find_token(raw_token, action="invite", provider_id=None, view_id=None)
         if token_row is None:
@@ -373,9 +785,11 @@ class HubStore:
                     v.title AS title,
                     v.ref AS ref,
                     v.description AS description,
-                    v.current_version_id AS current_version_id
+                    v.current_version_id AS current_version_id,
+                    vv.manifest_json AS manifest_json
                 FROM invitations i
                 JOIN views v ON v.id = i.view_id
+                LEFT JOIN view_versions vv ON vv.id = v.current_version_id
                 WHERE i.token_id = ?
                 """,
                 (token_row["id"],),
@@ -398,9 +812,11 @@ class HubStore:
                     i.view_id AS view_id,
                     i.expires_at AS expires_at,
                     i.revoked_at AS invitation_revoked_at,
-                    v.provider_id AS provider_id
+                    v.provider_id AS provider_id,
+                    vv.manifest_json AS manifest_json
                 FROM invitations i
                 JOIN views v ON v.id = i.view_id
+                LEFT JOIN view_versions vv ON vv.id = v.current_version_id
                 WHERE i.token_id = ?
                 """,
                 (token_row["id"],),
@@ -459,6 +875,7 @@ class HubStore:
             "view_id": invitation["view_id"],
             "consumer_label": clean_consumer_label,
             "created_at": now,
+            **_accepted_invitation_metadata(invitation["manifest_json"]),
         }
 
     def record_interaction(
@@ -519,27 +936,7 @@ class HubStore:
         }
 
     def list_provider_inbox(self, provider_id: str) -> list[dict[str, Any]]:
-        clean_provider_id = _validate_hub_id(provider_id, "provider_id")
-        with self._connect() as connection:
-            self._apply_migrations(connection)
-            rows = connection.execute(
-                """
-                SELECT
-                    i.id AS interaction_id,
-                    i.view_id AS view_id,
-                    i.connection_id AS connection_id,
-                    i.actor_id AS actor_id,
-                    i.payload_json AS payload_json,
-                    i.created_at AS created_at,
-                    v.provider_id AS provider_id
-                FROM interactions i
-                JOIN views v ON v.id = i.view_id
-                WHERE v.provider_id = ?
-                ORDER BY i.created_at, i.id
-                """,
-                (clean_provider_id,),
-            ).fetchall()
-        return [_interaction_from_row(row) for row in rows]
+        return self.list_interactions(provider_id=provider_id)
 
     def store_package_version(
         self,
@@ -802,6 +1199,35 @@ def _manifest_json(stored: HubStoredPackage) -> dict[str, Any]:
         "size_bytes": manifest.size_bytes,
         "package_hash": manifest.package_hash,
         "version_id": stored.version_id,
+        "invitation_metadata": _selected_invitation_metadata(manifest.invitation_metadata),
+    }
+
+
+def _question_manifest_json(
+    *,
+    view_id: str,
+    version_id: str,
+    title: str,
+    ref: str,
+    description: str | None,
+    question_base_url: str,
+    question_token: str,
+) -> dict[str, Any]:
+    return {
+        "view_id": view_id,
+        "title": title,
+        "ref": ref,
+        "description": description,
+        "maintainer": None,
+        "files": [],
+        "size_bytes": 0,
+        "package_hash": "",
+        "version_id": version_id,
+        "invitation_metadata": {
+            "kind": "question",
+            "question_base_url": question_base_url,
+            "question_token": question_token,
+        },
     }
 
 
@@ -837,6 +1263,18 @@ def _audit_event_from_row(row: sqlite3.Row) -> AuditEvent:
     )
 
 
+def _normalize_limit(limit: int) -> int:
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValueError("limit must be an integer")
+    return max(1, min(limit, 200))
+
+
+def _normalize_offset(offset: int) -> int:
+    if isinstance(offset, bool) or not isinstance(offset, int):
+        raise ValueError("offset must be an integer")
+    return max(0, offset)
+
+
 def _view_from_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "view_id": row["id"],
@@ -848,6 +1286,68 @@ def _view_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def _admin_view_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    manifest = _json_object(row["manifest_json"])
+    raw_metadata = manifest.get("invitation_metadata")
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+    kind = _optional_string(metadata.get("kind")) or _kind_from_ref(row["ref"]) or "file"
+    view = {
+        "view_id": row["view_id"],
+        "provider_id": row["provider_id"],
+        "kind": kind,
+        "title": row["title"],
+        "ref": row["ref"],
+        "description": row["description"],
+        "current_version_id": row["current_version_id"],
+        "package_hash": row["package_hash"],
+        "storage_path": row["storage_path"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "version_created_at": row["version_created_at"],
+        "created_by_token_id": row["created_by_token_id"],
+    }
+    question_base_url = _optional_string(metadata.get("question_base_url"))
+    if question_base_url:
+        view["question_base_url"] = question_base_url
+    return view
+
+
+def _admin_invitation_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "invitation_id": row["invitation_id"],
+        "view_id": row["view_id"],
+        "token_id": row["token_id"],
+        "label": row["label"],
+        "expires_at": row["expires_at"],
+        "created_at": row["created_at"],
+        "accepted_count": row["accepted_count"],
+        "revoked_at": row["invitation_revoked_at"] or row["token_revoked_at"],
+    }
+
+
+def _admin_connection_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "connection_id": row["connection_id"],
+        "invitation_id": row["invitation_id"],
+        "provider_id": row["provider_id"],
+        "view_id": row["view_id"],
+        "token_id": row["token_id"],
+        "consumer_label": row["consumer_label"],
+        "created_at": row["created_at"],
+        "revoked_at": row["connection_revoked_at"] or row["token_revoked_at"],
+    }
+
+
+def _json_object(value: object) -> dict[str, Any]:
+    if not isinstance(value, str):
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _current_view_version_from_row(root: Path, row: sqlite3.Row) -> dict[str, Any]:
@@ -876,8 +1376,49 @@ def _current_view_version_from_row(root: Path, row: sqlite3.Row) -> dict[str, An
     }
 
 
+def _selected_invitation_metadata(data: dict[str, Any]) -> dict[str, str]:
+    selected: dict[str, str] = {}
+    for key in ("kind", "question_base_url", "question_url", "ask_base_url", "question_token"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            selected[key] = value.strip()
+    return selected
+
+
+def _invitation_metadata_from_json(value: object) -> dict[str, str]:
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        manifest = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(manifest, dict):
+        return {}
+    metadata = manifest.get("invitation_metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    return _selected_invitation_metadata(metadata)
+
+
+def _accepted_invitation_metadata(value: object) -> dict[str, str]:
+    metadata = _invitation_metadata_from_json(value)
+    token = _optional_string(metadata.get("question_token"))
+    if token:
+        return {"question_token": token}
+    return {}
+
+
+def _kind_from_ref(ref: str | None) -> str | None:
+    if isinstance(ref, str) and ref.startswith("rightmemory://mq/"):
+        return "question"
+    if isinstance(ref, str) and ref.startswith("rightmemory://mf/"):
+        return "file"
+    return None
+
+
 def _invitation_from_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    metadata = _invitation_metadata_from_json(row["manifest_json"])
+    invitation = {
         "invitation_id": row["invitation_id"],
         "view_id": row["view_id"],
         "provider_id": row["provider_id"],
@@ -890,6 +1431,14 @@ def _invitation_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "accepted_count": row["accepted_count"],
         "created_at": row["invitation_created_at"],
     }
+    kind = _optional_string(metadata.get("kind")) or _kind_from_ref(row["ref"])
+    if kind:
+        invitation["kind"] = kind
+    for key in ("question_base_url", "question_url", "ask_base_url"):
+        value = _optional_string(metadata.get(key))
+        if value:
+            invitation[key] = value
+    return invitation
 
 
 def _interaction_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -963,6 +1512,13 @@ def _optional_string(value: object) -> str | None:
         raise ValueError("optional hub string fields must be strings")
     value = value.strip()
     return value or None
+
+
+def _required_string(value: object, label: str) -> str:
+    clean = _optional_string(value)
+    if clean is None:
+        raise ValueError(f"{label} must be a non-empty string")
+    return clean
 
 
 def _new_id(prefix: str) -> str:

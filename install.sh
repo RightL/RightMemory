@@ -517,7 +517,8 @@ ensure_memory_initial_commit() {
       shared_views.toml
       shared_views/*/view.md
       shared_views/*/retriever.md
-      shared_views/*/export.toml
+      shared_views/*/recipe.toml
+      shared_views/*/question.toml
       shared_views/*/.gitignore
       insight_logs/*.md
     )
@@ -542,7 +543,8 @@ ensure_memory_initial_commit() {
         shared_views.toml \
         'shared_views/*/view.md' \
         'shared_views/*/retriever.md' \
-        'shared_views/*/export.toml' \
+        'shared_views/*/recipe.toml' \
+        'shared_views/*/question.toml' \
         'shared_views/*/.gitignore' \
         'insight_logs/*.md'
   )
@@ -578,7 +580,8 @@ cat > "$MEMORY_ROOT/.gitignore" <<'EOF'
 !shared_views/*/
 !shared_views/*/view.md
 !shared_views/*/retriever.md
-!shared_views/*/export.toml
+!shared_views/*/recipe.toml
+!shared_views/*/question.toml
 !shared_views/*/.gitignore
 !insight_logs/
 !insight_logs/*.md

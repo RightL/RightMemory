@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 import uvicorn
-from fastapi import Body, FastAPI, HTTPException, Request, status
+from fastapi import Body, FastAPI, HTTPException, Request, Response, status
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
-from .packages import PackageValidationError, retrieve_memory_snippets, validate_package_relative_path
+from .packages import PackageValidationError, validate_package_relative_path
 from .store import HubStore
 
 
@@ -21,6 +23,16 @@ ZIP_ENTRY_OVERHEAD_BYTES = 256
 def create_hub_app(hub_root: Path) -> FastAPI:
     store = HubStore(Path(hub_root).expanduser())
     app = FastAPI(title="RightMemory Shared View Hub")
+    static_root = Path(__file__).parent / "static"
+    if static_root.is_dir():
+        app.mount("/console/static", StaticFiles(directory=static_root), name="hub-console-static")
+
+    @app.get("/console")
+    def console() -> FileResponse:
+        index = static_root / "console.html"
+        if not index.is_file():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="hub console is not installed")
+        return FileResponse(index)
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -29,6 +41,174 @@ def create_hub_app(hub_root: Path) -> FastAPI:
             "status": "ok" if initialized else "uninitialized",
             "initialized": initialized,
             "storage": store.storage_root.is_dir(),
+        }
+
+    @app.get("/api/admin/overview")
+    def admin_overview(request: Request) -> dict[str, Any]:
+        _require_admin(store, request)
+        return {"overview": store.hub_overview()}
+
+    @app.get("/api/admin/providers")
+    def admin_providers(request: Request) -> dict[str, Any]:
+        _require_admin(store, request)
+        return {
+            "providers": store.list_providers(
+                limit=_query_limit(request),
+                offset=_query_offset(request),
+            )
+        }
+
+    @app.post("/api/admin/providers/{provider_id}/tokens", status_code=status.HTTP_201_CREATED)
+    def admin_create_provider_token(
+        provider_id: str,
+        request: Request,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any]:
+        actor = _require_admin(store, request)
+        data = payload or {}
+        try:
+            token = store.create_provider_token(provider_id, label=_optional_payload_str(data, "label"))
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        return {
+            "token_id": token.token_id,
+            "raw_token": token.raw_token,
+            "action": token.action,
+            "provider_id": token.provider_id,
+            "view_id": token.view_id,
+            "label": token.label,
+            "created_at": token.created_at,
+            "created_by_token_id": actor.token_id,
+        }
+
+    @app.get("/api/admin/tokens")
+    def admin_tokens(request: Request) -> dict[str, Any]:
+        _require_admin(store, request)
+        return {
+            "tokens": store.list_tokens(
+                action=_query_optional_id(request, "action"),
+                provider_id=_query_optional_id(request, "provider_id"),
+                view_id=_query_optional_id(request, "view_id"),
+                limit=_query_limit(request),
+                offset=_query_offset(request),
+            )
+        }
+
+    @app.post("/api/admin/tokens/{token_id}/revoke")
+    def admin_revoke_token(token_id: str, request: Request) -> dict[str, Any]:
+        _require_admin(store, request)
+        return {"token_id": token_id, "revoked": store.revoke_token(token_id)}
+
+    @app.get("/api/admin/views")
+    def admin_views(request: Request) -> dict[str, Any]:
+        _require_admin(store, request)
+        return {
+            "views": store.list_views(
+                provider_id=_query_optional_id(request, "provider_id"),
+                limit=_query_limit(request),
+                offset=_query_offset(request),
+            )
+        }
+
+    @app.get("/api/admin/views/{view_id}")
+    def admin_view(view_id: str, request: Request) -> dict[str, Any]:
+        _require_admin(store, request)
+        view = store.get_admin_view(view_id)
+        if view is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="view not found")
+        return {"view": view}
+
+    @app.get("/api/admin/views/{view_id}/invitations")
+    def admin_view_invitations(view_id: str, request: Request) -> dict[str, Any]:
+        _require_admin(store, request)
+        return {
+            "view_id": view_id,
+            "invitations": store.list_view_invitations(
+                view_id,
+                limit=_query_limit(request),
+                offset=_query_offset(request),
+            ),
+        }
+
+    @app.post("/api/admin/views/{view_id}/invitations", status_code=status.HTTP_201_CREATED)
+    def admin_create_invitation(
+        view_id: str,
+        request: Request,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any]:
+        actor = _require_admin(store, request)
+        data = payload or {}
+        try:
+            invitation = store.create_invitation(
+                view_id,
+                actor_id=actor.token_id,
+                label=_optional_payload_str(data, "label"),
+                expires_at=_optional_payload_str(data, "expires_at"),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="view not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        config = store.load_config()
+        return {
+            "invitation_id": invitation["invitation_id"],
+            "token_id": invitation["token_id"],
+            "view_id": invitation["view_id"],
+            "label": invitation["label"],
+            "expires_at": invitation["expires_at"],
+            "created_at": invitation["created_at"],
+            "invitation_url": f"{config.public_base_url.rstrip('/')}/i/{invitation['raw_token']}",
+        }
+
+    @app.post("/api/admin/invitations/{token_id}/revoke")
+    def admin_revoke_invitation(token_id: str, request: Request) -> dict[str, Any]:
+        _require_admin(store, request)
+        return {"token_id": token_id, "revoked": store.revoke_token(token_id)}
+
+    @app.get("/api/admin/connections")
+    def admin_connections(request: Request) -> dict[str, Any]:
+        _require_admin(store, request)
+        return {
+            "connections": store.list_connections(
+                view_id=_query_optional_id(request, "view_id"),
+                limit=_query_limit(request),
+                offset=_query_offset(request),
+            )
+        }
+
+    @app.post("/api/admin/connections/{token_id}/revoke")
+    def admin_revoke_connection(token_id: str, request: Request) -> dict[str, Any]:
+        _require_admin(store, request)
+        return {"token_id": token_id, "revoked": store.revoke_token(token_id)}
+
+    @app.get("/api/admin/inbox")
+    def admin_inbox(request: Request) -> dict[str, Any]:
+        _require_admin(store, request)
+        return {
+            "interactions": store.list_interactions(
+                provider_id=_query_optional_id(request, "provider_id"),
+                view_id=_query_optional_id(request, "view_id"),
+                connection_id=_query_optional_id(request, "connection_id"),
+                limit=_query_limit(request),
+                offset=_query_offset(request),
+            )
+        }
+
+    @app.get("/api/admin/audit")
+    def admin_audit(request: Request) -> dict[str, Any]:
+        _require_admin(store, request)
+        return {
+            "events": [
+                _audit_event_payload(event)
+                for event in store.list_audit_events(
+                    kind=_query_optional_id(request, "kind"),
+                    provider_id=_query_optional_id(request, "provider_id"),
+                    view_id=_query_optional_id(request, "view_id"),
+                    actor_id=_query_optional_id(request, "actor_id"),
+                    limit=_query_limit(request),
+                    offset=_query_offset(request),
+                )
+            ]
         }
 
     @app.post("/api/views/{view_id}/versions", status_code=status.HTTP_201_CREATED)
@@ -59,6 +239,30 @@ def create_hub_app(hub_root: Path) -> FastAPI:
             "package_hash": stored.manifest.package_hash,
             "title": stored.manifest.title,
         }
+
+    @app.post("/api/views/{view_id}/question", status_code=status.HTTP_201_CREATED)
+    def register_question_view(
+        view_id: str,
+        request: Request,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any]:
+        actor = _require_token(store, request, action="publish")
+        _require_actor_provider(actor.provider_id)
+        _ensure_view_provider_scope(store, view_id, actor.provider_id)
+        data = payload or {}
+        try:
+            registered = store.register_question_view(
+                view_id,
+                provider_id=actor.provider_id,
+                title=_required_payload_str(data, "title"),
+                description=_optional_payload_str(data, "description") or "",
+                question_base_url=_required_payload_str(data, "question_base_url"),
+                question_token=_required_payload_str(data, "question_token"),
+                created_by_token_id=actor.token_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        return registered
 
     @app.post("/api/views/{view_id}/invitations", status_code=status.HTTP_201_CREATED)
     def create_invitation(
@@ -123,43 +327,31 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         )
         if accepted is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invitation not found")
-        return {
+        response = {
             "connection_id": accepted["connection_id"],
             "token_id": accepted["token_id"],
             "connection_token": accepted["connection_token"],
             "view_id": accepted["view_id"],
             "consumer_label": accepted["consumer_label"],
         }
+        question_token = accepted.get("question_token")
+        if isinstance(question_token, str) and question_token:
+            response["question_token"] = question_token
+        return response
 
-    @app.post("/api/views/{view_id}/retrieve")
-    def retrieve_view(
-        view_id: str,
-        request: Request,
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any]:
+    @app.get("/api/views/{view_id}/package")
+    def download_package(view_id: str, request: Request) -> Response:
         _require_connection_actor(store, request, view_id)
-        body = payload or {}
-        query = _required_payload_str(body, "query")
-        limit = _payload_limit(body.get("limit"))
         current = store.get_current_view_version(view_id)
         if current is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="view not found")
-        try:
-            snippets = retrieve_memory_snippets(current["path"], query, limit=limit)
-        except PackageValidationError as exc:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-        return {
-            "view_id": current["view_id"],
-            "version_id": current["version_id"],
-            "freshness": current["version_created_at"],
-            "provenance": {
-                "title": current["title"],
-                "ref": current["ref"],
-                "provider_id": current["provider_id"],
-                "package_hash": current["package_hash"],
-            },
-            "snippets": snippets,
-        }
+        with tempfile.TemporaryDirectory() as tempdir:
+            archive_path = Path(tempdir) / "package.zip"
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for path in sorted(Path(current["path"]).rglob("*")):
+                    if path.is_file() and not path.is_symlink():
+                        archive.write(path, path.relative_to(current["path"]).as_posix())
+            return Response(content=archive_path.read_bytes(), media_type="application/zip")
 
     @app.post("/api/views/{view_id}/interactions", status_code=status.HTTP_201_CREATED)
     def post_interaction(
@@ -238,6 +430,64 @@ def _require_provider_or_admin(store: HubStore, request: Request, provider_id: s
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid bearer token") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+def _require_admin(store: HubStore, request: Request):
+    token = _bearer_token(request)
+    try:
+        return store.require_token(token, action="admin")
+    except PermissionError as exc:
+        if (
+            store.verify_token(token, action="publish")
+            or store.verify_token(token, action="connect")
+            or store.verify_token(token, action="invite")
+        ):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin token required") from exc
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid bearer token") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+def _query_limit(request: Request, *, default: int = 100) -> int:
+    raw = request.query_params.get("limit")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="limit must be an integer") from exc
+    return max(1, min(value, 200))
+
+
+def _query_offset(request: Request) -> int:
+    raw = request.query_params.get("offset")
+    if raw is None:
+        return 0
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="offset must be an integer") from exc
+    return max(0, value)
+
+
+def _query_optional_id(request: Request, key: str) -> str | None:
+    value = request.query_params.get(key)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _audit_event_payload(event) -> dict[str, Any]:
+    return {
+        "event_id": event.id,
+        "kind": event.kind,
+        "actor_id": event.actor_id,
+        "provider_id": event.provider_id,
+        "view_id": event.view_id,
+        "details": event.details,
+        "created_at": event.created_at,
+    }
 
 
 def _require_actor_provider(provider_id: str | None) -> None:

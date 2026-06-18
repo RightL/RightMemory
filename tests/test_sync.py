@@ -45,7 +45,8 @@ class SyncManagerTests(unittest.TestCase):
         self.assertIn("shared_views.toml", MEMORY_SYNC_PATHS)
         self.assertIn("shared_views/*/view.md", MEMORY_SYNC_PATHS)
         self.assertIn("shared_views/*/retriever.md", MEMORY_SYNC_PATHS)
-        self.assertIn("shared_views/*/export.toml", MEMORY_SYNC_PATHS)
+        self.assertIn("shared_views/*/recipe.toml", MEMORY_SYNC_PATHS)
+        self.assertIn("shared_views/*/question.toml", MEMORY_SYNC_PATHS)
 
     def test_preflight_rejects_memory_root_nested_in_outer_git_repo(self):
         outer_remote = self.root / "outer.git"
@@ -121,7 +122,10 @@ class SyncManagerTests(unittest.TestCase):
         runtime_cache.parent.mkdir(parents=True)
         runtime_cache.write_text("runtime cache\n", encoding="utf-8")
         registry = self.device / "shared_views.toml"
-        registry.write_text('[connections.alice-auth-api]\nref = "rightmemory://view/current"\n', encoding="utf-8")
+        registry.write_text(
+            '[connections.alice-auth-api]\ntype = "file"\nref = "rightmemory://mf/current"\n',
+            encoding="utf-8",
+        )
 
         dirty = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
         registry.unlink()

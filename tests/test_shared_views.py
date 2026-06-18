@@ -1,1147 +1,854 @@
+import io
 import json
+import threading
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.hub.client import HubClientError
-from rightmemory.shared_views import (
+from rightmemory.shared_view_builder import run_file_view_builder, run_question_view_builder
+from rightmemory.shared_view_files import (
+    FileViewPullResult,
+    FileViewPublishResult,
+    approve_file_view,
+    export_file_view_package,
+    invite_file_view,
+    list_file_view_publish_events,
+    publish_approved_file_views,
+    pull_file_view,
+    record_file_view_publish_results,
+    render_file_view,
+    write_file_view_recipe,
+)
+from rightmemory.shared_view_models import (
     SharedViewConnection,
     SharedViewTarget,
-    accept_shared_view,
-    accept_http_shared_view_invitation,
-    accept_shared_view_invitation,
-    build_shared_view,
-    define_shared_view,
-    export_shared_view,
-    list_http_shared_view_inbox,
-    list_shared_view_notes,
-    list_shared_view_inbox,
     load_connections,
-    load_shared_view_definition,
-    publish_http_shared_view,
-    publish_shared_view,
-    record_shared_view_note,
-    retrieve_shared_view,
     load_shared_view_credential,
+    list_shared_view_credentials,
     save_connections,
+    validate_connection,
+)
+from rightmemory.shared_view_questions import (
+    _run_provider_question,
+    answer_question_view,
+    ask_question_view,
+    publish_question_view,
+    question_token_hash,
+    verify_question_view_token,
+    write_question_view,
+)
+from rightmemory.shared_views import (
+    accept_http_shared_view_invitation,
+    list_shared_view_notes,
+    record_shared_view_note,
     save_shared_view_credential,
+    shared_view_connection_status,
 )
 
 
-class SharedViewRegistryTests(unittest.TestCase):
+class SharedViewModelTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
 
-    def test_save_and_load_connections(self):
-        connection = SharedViewConnection(
-            heading_id="alice-auth-api",
-            ref="rightmemory://view/alice-auth-api",
-            relationship="human",
-            maintainer="Alice",
-            description="Auth API collaboration context",
-            accepted_from="rightmemory://view/invite/abc123",
-            target=SharedViewTarget(kind="package", path=".runtime/shared_views/imports/alice-auth-api"),
+    def test_save_and_load_file_and_question_connections(self):
+        save_connections(
+            self.root,
+            {
+                "auth-api-files": SharedViewConnection(
+                    heading_id="auth-api-files",
+                    view_type="file",
+                    ref="rightmemory://mf/auth-api-files",
+                    target=SharedViewTarget(
+                        kind="http-file",
+                        base_url="https://hub.example.test",
+                        view_id="auth-api-files",
+                        credential_id="http-auth-api-files",
+                    ),
+                ),
+                "auth-api-ask": SharedViewConnection(
+                    heading_id="auth-api-ask",
+                    view_type="question",
+                    ref="rightmemory://mq/auth-api-ask",
+                    target=SharedViewTarget(
+                        kind="http-question",
+                        base_url="https://hub.example.test",
+                        view_id="auth-api-ask",
+                        credential_id="http-auth-api-ask",
+                        question_base_url="https://provider.example.test",
+                        question_credential_id="http-auth-api-ask-question",
+                    ),
+                ),
+            },
         )
 
-        save_connections(self.root, {"alice-auth-api": connection})
         loaded = load_connections(self.root)
 
-        self.assertEqual(loaded["alice-auth-api"], connection)
+        self.assertEqual(loaded["auth-api-files"].view_type, "file")
+        self.assertEqual(loaded["auth-api-files"].target.kind, "http-file")
+        self.assertEqual(loaded["auth-api-ask"].view_type, "question")
+        self.assertEqual(loaded["auth-api-ask"].target.kind, "http-question")
 
-    def test_save_and_load_connection_with_dotted_heading_id(self):
-        connection = SharedViewConnection(
-            heading_id="team.auth-api",
-            ref="rightmemory://view/team.auth-api",
-            relationship="team-space",
-            maintainer="Auth Team",
-            description="Team auth API collaboration context",
-            target=SharedViewTarget(kind="package", path=".runtime/shared_views/imports/team.auth-api"),
-        )
-
-        save_connections(self.root, {"team.auth-api": connection})
-        loaded = load_connections(self.root)
-
-        self.assertIn("team.auth-api", loaded)
-        self.assertEqual(loaded["team.auth-api"], connection)
-
-    def test_save_connections_rejects_unknown_relationship(self):
-        connection = SharedViewConnection(
-            heading_id="alice-auth-api",
-            ref="rightmemory://view/alice-auth-api",
-            relationship="mystery",
-        )
-
+    def test_provider_root_targets_are_rejected(self):
         with self.assertRaises(ValueError) as caught:
-            save_connections(self.root, {"alice-auth-api": connection})
+            validate_connection(
+                self.root,
+                "auth-api-files",
+                SharedViewConnection(
+                    heading_id="auth-api-files",
+                    view_type="file",
+                    ref="rightmemory://mf/auth-api-files",
+                    target=SharedViewTarget(kind="local", path="/tmp/alice"),
+                ),
+            )
 
-        self.assertIn("unknown shared view relationship", str(caught.exception))
+        self.assertIn("unknown shared view target kind `local`", str(caught.exception))
 
-    def test_save_connections_rejects_unknown_target_kind(self):
-        connection = SharedViewConnection(
-            heading_id="alice-auth-api",
-            ref="rightmemory://view/alice-auth-api",
-            target=SharedViewTarget(kind="remote_cache"),
-        )
-
-        with self.assertRaises(ValueError) as caught:
-            save_connections(self.root, {"alice-auth-api": connection})
-
-        self.assertIn("unknown shared view target kind", str(caught.exception))
-
-    def test_save_connections_rejects_package_without_path(self):
-        connection = SharedViewConnection(
-            heading_id="alice-auth-api",
-            ref="rightmemory://view/alice-auth-api",
-            target=SharedViewTarget(kind="package"),
-        )
-
-        with self.assertRaises(ValueError) as caught:
-            save_connections(self.root, {"alice-auth-api": connection})
-
-        self.assertIn("package shared view target requires path", str(caught.exception))
-
-    def test_save_and_load_http_connection_target_metadata(self):
-        connection = SharedViewConnection(
-            heading_id="alice-auth-api",
-            ref="rightmemory://view/alice-auth-api",
-            relationship="human",
-            accepted_from="https://hub.example.test/i/invite-token",
-            target=SharedViewTarget(
-                kind="http",
-                base_url="https://hub.example.test",
-                view_id="alice-auth-api",
-                credential_id="conn-alice-auth-api",
-                version_id="ver_1",
-                accepted_from_url="https://hub.example.test/i/invite-token",
-            ),
-        )
-
-        save_connections(self.root, {"alice-auth-api": connection})
-        loaded = load_connections(self.root)["alice-auth-api"]
-        registry_text = (self.root / "shared_views.toml").read_text(encoding="utf-8")
-
-        self.assertEqual(loaded, connection)
-        self.assertIn('kind = "http"', registry_text)
-        self.assertIn('credential_id = "conn-alice-auth-api"', registry_text)
-        self.assertNotIn("secret-token", registry_text)
-
-    def test_http_credentials_store_token_outside_synced_registry(self):
+    def test_list_shared_view_credentials_omits_tokens(self):
         save_shared_view_credential(
             self.root,
-            "conn-alice-auth-api",
-            kind="http-connection",
+            "alice-publish",
+            kind="http-publish",
             token="secret-token",
             base_url="https://hub.example.test",
-            view_id="alice-auth-api",
-        )
-        save_connections(
-            self.root,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(
-                        kind="http",
-                        base_url="https://hub.example.test",
-                        view_id="alice-auth-api",
-                        credential_id="conn-alice-auth-api",
-                    ),
-                )
-            },
-        )
-
-        registry_text = (self.root / "shared_views.toml").read_text(encoding="utf-8")
-        credential = load_shared_view_credential(self.root, "conn-alice-auth-api")
-
-        self.assertNotIn("secret-token", registry_text)
-        self.assertEqual(credential["token"], "secret-token")
-        self.assertEqual(credential["kind"], "http-connection")
-
-    def test_save_connections_rejects_target_paths_outside_memory_root(self):
-        paths = [str(self.root.parent / "outside"), "../outside"]
-        for path in paths:
-            with self.subTest(path=path):
-                connection = SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(kind="local_markdown", path=path),
-                )
-
-                with self.assertRaises(ValueError) as caught:
-                    save_connections(self.root, {"alice-auth-api": connection})
-
-                self.assertIn("shared view target path must stay under the memory root", str(caught.exception))
-
-    def test_load_connections_rejects_unknown_relationship(self):
-        (self.root / "shared_views.toml").write_text(
-            """
-            [connections.alice-auth-api]
-            ref = "rightmemory://view/alice-auth-api"
-            relationship = "mystery"
-            """,
-            encoding="utf-8",
-        )
-
-        with self.assertRaises(ValueError) as caught:
-            load_connections(self.root)
-
-        self.assertIn("unknown shared view relationship", str(caught.exception))
-
-    def test_load_connections_normalizes_old_local_markdown_target_to_package(self):
-        (self.root / ".runtime/shared_views/imports/alice-auth-api").mkdir(parents=True)
-        (self.root / "shared_views.toml").write_text(
-            """
-            [connections.alice-auth-api]
-            ref = "rightmemory://view/alice-auth-api"
-            relationship = "human"
-
-            [connections.alice-auth-api.target]
-            kind = "local_markdown"
-            path = ".runtime/shared_views/imports/alice-auth-api"
-            """,
-            encoding="utf-8",
-        )
-
-        loaded = load_connections(self.root)
-
-        self.assertEqual(loaded["alice-auth-api"].target.kind, "package")
-
-    def test_load_connections_rejects_target_outside_memory_root(self):
-        (self.root / "shared_views.toml").write_text(
-            """
-            [connections.alice-auth-api]
-            ref = "rightmemory://view/alice-auth-api"
-            relationship = "human"
-
-            [connections.alice-auth-api.target]
-            kind = "local_markdown"
-            path = "../outside"
-            """,
-            encoding="utf-8",
-        )
-
-        with self.assertRaises(ValueError) as caught:
-            load_connections(self.root)
-
-        self.assertIn("shared view target path must stay under the memory root", str(caught.exception))
-
-
-class SharedViewHttpAdapterTests(unittest.TestCase):
-    def setUp(self):
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tempdir.cleanup)
-        self.root = Path(self.tempdir.name)
-        (self.root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
-        save_shared_view_credential(
-            self.root,
-            "conn-alice-auth-api",
-            kind="http-connection",
-            token="accepted-token",
-            base_url="https://hub.example.test",
-            view_id="alice-auth-api",
-        )
-        save_connections(
-            self.root,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    relationship="human",
-                    maintainer="Alice",
-                    target=SharedViewTarget(
-                        kind="http",
-                        base_url="https://hub.example.test",
-                        view_id="alice-auth-api",
-                        credential_id="conn-alice-auth-api",
-                        version_id="ver_current",
-                    ),
-                )
-            },
-        )
-
-    def test_retrieve_http_connection_uses_local_credential(self):
-        clients = []
-
-        with patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)):
-            result = retrieve_shared_view(self.root, "alice-auth-api", "token expiry")
-
-        fake = clients[0]
-        self.assertIn("Status: fresh", result)
-        self.assertIn("Provenance: Alice Auth API", result)
-        self.assertIn("dist/MEMORY.md:7: token_expires_at is included.", result)
-        self.assertEqual(fake.base_url, "https://hub.example.test")
-        self.assertEqual(fake.token, "accepted-token")
-        self.assertEqual(fake.retrieve_calls, [("alice-auth-api", "token expiry", 12)])
-
-    def test_http_note_requires_confirmation_then_posts_interaction(self):
-        clients = []
-
-        with patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)):
-            unconfirmed = record_shared_view_note(self.root, "alice-auth-api", "Docs are stale")
-            confirmed = record_shared_view_note(
-                self.root,
-                "alice-auth-api",
-                "Docs are stale",
-                confirmed=True,
-                actor="assistant",
-                task_context="login migration",
-            )
-
-        fake = clients[0]
-        self.assertIn("confirmation required", unconfirmed)
-        self.assertEqual(confirmed, "recorded shared view note for alice-auth-api")
-        self.assertEqual(fake.interactions[0]["view_id"], "alice-auth-api")
-        self.assertEqual(fake.interactions[0]["payload"]["message"], "Docs are stale")
-        self.assertEqual(fake.interactions[0]["payload"]["actor"], "assistant")
-        self.assertEqual(fake.interactions[0]["payload"]["task_context"], "login migration")
-
-    def test_accept_http_invitation_records_metadata_and_local_credential(self):
-        clients = []
-
-        with patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)):
-            result = accept_http_shared_view_invitation(
-                self.root,
-                "https://hub.example.test/rightmemory/i/invite-token",
-                heading_id="alice-auth-api",
-            )
-
-        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
-        registry = load_connections(self.root)["alice-auth-api"]
-        credential = load_shared_view_credential(self.root, registry.target.credential_id or "")
-
-        self.assertEqual(result, "accepted shared view alice-auth-api")
-        self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
-        self.assertEqual(registry.target.kind, "http")
-        self.assertEqual(registry.target.base_url, "https://hub.example.test/rightmemory")
-        self.assertEqual(registry.target.view_id, "alice-auth-api")
-        self.assertEqual(registry.target.accepted_from_url, "https://hub.example.test/rightmemory/i/invite-token")
-        self.assertEqual(credential["token"], "accepted-token")
-        self.assertEqual(credential["base_url"], "https://hub.example.test/rightmemory")
-        fake = clients[0]
-        self.assertEqual(fake.base_url, "https://hub.example.test/rightmemory")
-        self.assertEqual(fake.accepted_tokens, ["invite-token"])
-
-    def test_accept_http_invitation_does_not_overwrite_existing_credential(self):
-        clients = []
-        with (
-            patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)),
-            self.assertRaises(ValueError) as caught,
-        ):
-            accept_http_shared_view_invitation(
-                self.root,
-                "https://hub.example.test/i/invite-token",
-                heading_id="alice-auth-api",
-                credential_id="conn-alice-auth-api",
-            )
-
-        self.assertIn("shared view credential already exists", str(caught.exception))
-        self.assertEqual(clients[0].accepted_tokens, [])
-
-    def test_accept_http_invitation_saves_credential_if_local_accept_fails(self):
-        clients = []
-
-        with (
-            patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)),
-            patch("rightmemory.shared_views.accept_shared_view", side_effect=ValueError("local registry broken")),
-            self.assertRaises(ValueError),
-        ):
-            accept_http_shared_view_invitation(
-                self.root,
-                "https://hub.example.test/i/invite-token",
-                heading_id="new-auth-api",
-            )
-
-        credential = load_shared_view_credential(self.root, "http-new-auth-api")
-        self.assertEqual(clients[0].accepted_tokens, ["invite-token"])
-        self.assertEqual(credential["token"], "accepted-token")
-        self.assertEqual(credential["base_url"], "https://hub.example.test")
-        self.assertEqual(credential["view_id"], "alice-auth-api")
-
-    def test_publish_http_view_exports_package_and_uses_publish_credential(self):
-        clients = []
-        (self.root / "MEMORY.md").write_text(
-            "# Provider\n\nAuth API accepts signed tokens.\nPrivate payroll note.\n",
-            encoding="utf-8",
-        )
-        define_shared_view(
-            self.root,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            description="Auth API collaboration context.",
-            filter_terms=["auth"],
-        )
-        save_shared_view_credential(
-            self.root,
-            "alice-publish",
-            kind="http-publish",
-            token="publish-token",
-            base_url="https://hub.example.test",
             provider_id="alice",
+            view_id="auth-api-files",
         )
 
-        with patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)):
-            result = publish_http_shared_view(
-                self.root,
-                "alice-auth-api",
-                hub_url="https://hub.example.test/",
-                credential_id="alice-publish",
-                query="auth",
-            )
+        credentials = list_shared_view_credentials(self.root)
 
-        fake = clients[0]
-        self.assertIn("published shared view alice-auth-api to HTTP hub https://hub.example.test version ver_http", result)
-        self.assertEqual(fake.base_url, "https://hub.example.test")
-        self.assertEqual(fake.token, "publish-token")
-        self.assertEqual(fake.publish_calls[0]["view_id"], "alice-auth-api")
-        self.assertEqual(fake.invitation_calls, [("alice-auth-api", None, None)])
-        self.assertIn("invitation_url\thttps://hub.example.test/i/invite-token", result)
-        self.assertIn("rightmemory-shared-view.toml", fake.publish_calls[0]["files"])
-        self.assertIn("dist/MEMORY.md", fake.publish_calls[0]["files"])
-        self.assertIn("Auth API accepts signed tokens.", fake.publish_calls[0]["memory"])
-
-    def test_list_http_inbox_uses_publish_credential(self):
-        clients = []
-        save_shared_view_credential(
-            self.root,
-            "alice-publish",
-            kind="http-publish",
-            token="publish-token",
-            base_url="https://hub.example.test",
-            provider_id="alice",
-        )
-
-        with patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)):
-            records = list_http_shared_view_inbox(
-                self.root,
-                hub_url="https://hub.example.test/",
-                credential_id="alice-publish",
-                provider_id="alice",
-            )
-
-        fake = clients[0]
-        self.assertEqual(fake.base_url, "https://hub.example.test")
-        self.assertEqual(fake.token, "publish-token")
-        self.assertEqual(fake.provider_inbox_calls, ["alice"])
-        self.assertEqual(records[0]["payload"]["message"], "Docs are stale")
-
-    def test_http_target_cannot_redirect_local_credential_to_another_hub(self):
-        save_connections(
-            self.root,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    relationship="human",
-                    maintainer="Alice",
-                    target=SharedViewTarget(
-                        kind="http",
-                        base_url="https://evil.example.test",
-                        view_id="alice-auth-api",
-                        credential_id="conn-alice-auth-api",
-                    ),
-                )
-            },
-        )
-
-        with patch("rightmemory.shared_views.HubClient", side_effect=AssertionError("credential leaked")):
-            result = retrieve_shared_view(self.root, "alice-auth-api", "token expiry")
-
-        self.assertIn("Status: unavailable", result)
-
-    def test_http_retrieve_falls_back_to_cache_when_hub_fails(self):
-        clients = []
-        with patch("rightmemory.shared_views.HubClient", side_effect=lambda *args: _record_fake_client(clients, *args)):
-            retrieve_shared_view(self.root, "alice-auth-api", "token expiry")
-
-        def failing_client(*args):
-            client = _record_fake_client(clients, *args)
-            client.fail_retrieve = True
-            return client
-
-        with patch("rightmemory.shared_views.HubClient", side_effect=failing_client):
-            result = retrieve_shared_view(self.root, "alice-auth-api", "token expiry")
-
-        self.assertIn("Status: cached", result)
-        self.assertIn("token_expires_at", result)
-
-    def test_http_note_is_queued_when_hub_delivery_fails(self):
-        clients = []
-
-        def failing_client(*args):
-            client = _record_fake_client(clients, *args)
-            client.fail_interaction = True
-            return client
-
-        with patch("rightmemory.shared_views.HubClient", side_effect=failing_client):
-            result = record_shared_view_note(
-                self.root,
-                "alice-auth-api",
-                "Docs are stale",
-                confirmed=True,
-            )
-
-        notes = list_shared_view_notes(self.root, "alice-auth-api")
-        self.assertEqual(result, "queued shared view note for alice-auth-api")
-        self.assertEqual(notes[0]["status"], "queued")
-
-
-class _FakeHubClient:
-    def __init__(self, base_url: str = "", token: str | None = None):
-        self.base_url = base_url
-        self.token = token
-        self.retrieve_calls = []
-        self.interactions = []
-        self.accepted_tokens = []
-        self.publish_calls = []
-        self.invitation_calls = []
-        self.provider_inbox_calls = []
-        self.fail_retrieve = False
-        self.fail_interaction = False
-
-    def retrieve_view(self, view_id: str, query: str, *, limit: int = 12):
-        if self.fail_retrieve:
-            raise HubClientError("hub unavailable")
-        self.retrieve_calls.append((view_id, query, limit))
-        return {
-            "view_id": view_id,
-            "version_id": "ver_current",
-            "freshness": "2026-06-13T00:00:00+00:00",
-            "provenance": {"title": "Alice Auth API", "package_hash": "abc123"},
-            "snippets": [
-                {"path": "dist/MEMORY.md", "line": 7, "text": "token_expires_at is included."},
-            ],
-        }
-
-    def post_interaction(self, view_id: str, payload: dict[str, object]):
-        if self.fail_interaction:
-            raise HubClientError("hub unavailable")
-        self.interactions.append({"view_id": view_id, "payload": payload})
-        return {"status": "recorded", "interaction_id": "int_1"}
-
-    def get_invitation_view(self, invite_token: str):
-        return {
-            "view_id": "alice-auth-api",
-            "title": "Alice Auth API",
-            "ref": "rightmemory://view/alice-auth-api",
-            "description": "Auth API collaboration context.",
-            "provider_id": "alice",
-            "current_version_id": "ver_current",
-        }
-
-    def accept_invitation(self, invite_token: str, *, consumer_label: str | None = None):
-        self.accepted_tokens.append(invite_token)
-        return {
-            "connection_id": "con_1",
-            "connection_token": "accepted-token",
-            "view_id": "alice-auth-api",
-            "consumer_label": consumer_label,
-        }
-
-    def publish_package(self, view_id: str, package_root: Path):
-        files = sorted(path.relative_to(package_root).as_posix() for path in package_root.rglob("*") if path.is_file())
-        memory = (package_root / "dist" / "MEMORY.md").read_text(encoding="utf-8")
-        self.publish_calls.append({"view_id": view_id, "files": files, "memory": memory})
-        return {"version_id": "ver_http"}
-
-    def create_invitation(self, view_id: str, *, label: str | None = None, expires_at: str | None = None):
-        self.invitation_calls.append((view_id, label, expires_at))
-        return {"invitation_url": f"{self.base_url}/i/invite-token"}
-
-    def provider_inbox(self, provider_id: str):
-        self.provider_inbox_calls.append(provider_id)
-        return {
-            "provider_id": provider_id,
-            "interactions": [
+        self.assertEqual(
+            credentials,
+            [
                 {
-                    "view_id": "alice-auth-api",
-                    "payload": {"message": "Docs are stale"},
+                    "credential_id": "alice-publish",
+                    "kind": "http-publish",
+                    "base_url": "https://hub.example.test",
+                    "provider_id": "alice",
+                    "view_id": "auth-api-files",
+                    "created_at": credentials[0]["created_at"],
                 }
             ],
-        }
+        )
+        self.assertNotIn("token", credentials[0])
+
+    def test_accept_http_question_invitation_uses_direct_provider_endpoint(self):
+        with patch("rightmemory.shared_views.HubClient") as client_type:
+            client = client_type.return_value
+            client.get_invitation_view.return_value = {
+                "view_id": "auth-api-ask",
+                "kind": "question",
+                "title": "Auth API Questions",
+                "ref": "rightmemory://mq/auth-api-ask",
+                "question_base_url": "https://provider.example.test",
+            }
+            client.accept_invitation.return_value = {
+                "view_id": "auth-api-ask",
+                "connection_token": "connection-token",
+                "question_token": "question-token",
+            }
+            result = accept_http_shared_view_invitation(self.root, "https://hub.example.test/i/invite-token")
+
+        connection = load_connections(self.root)["auth-api-ask"]
+        credential = load_shared_view_credential(self.root, "http-auth-api-ask")
+        self.assertEqual(result, "accepted shared view auth-api-ask")
+        self.assertEqual(connection.view_type, "question")
+        self.assertEqual(connection.target.kind, "http-question")
+        self.assertEqual(connection.target.base_url, "https://hub.example.test")
+        self.assertEqual(connection.target.question_base_url, "https://provider.example.test")
+        self.assertEqual(connection.target.credential_id, "http-auth-api-ask")
+        self.assertEqual(connection.target.question_credential_id, "http-auth-api-ask-question")
+        question_credential = load_shared_view_credential(self.root, "http-auth-api-ask-question")
+        self.assertEqual(credential["base_url"], "https://hub.example.test")
+        self.assertEqual(credential["token"], "connection-token")
+        self.assertEqual(question_credential["base_url"], "https://provider.example.test")
+        self.assertEqual(question_credential["token"], "question-token")
+        self.assertIn("{MQ#auth-api-ask}", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
+
+        with patch("rightmemory.shared_views.HubClient") as note_client_type:
+            note_client_type.return_value.post_interaction.return_value = {"status": "recorded"}
+            note_result = record_shared_view_note(self.root, "auth-api-ask", "Docs are stale.", confirmed=True)
+
+        self.assertIn("recorded shared view note", note_result)
+        self.assertEqual(note_client_type.call_args.args, ("https://hub.example.test", "connection-token"))
+
+    def test_accept_http_question_invitation_requires_question_endpoint(self):
+        with patch("rightmemory.shared_views.HubClient") as client_type:
+            client = client_type.return_value
+            client.get_invitation_view.return_value = {
+                "view_id": "auth-api-ask",
+                "kind": "question",
+                "title": "Auth API Questions",
+                "ref": "rightmemory://mq/auth-api-ask",
+            }
+            client.accept_invitation.return_value = {
+                "view_id": "auth-api-ask",
+                "connection_token": "connection-token",
+                "question_token": "question-token",
+            }
+
+            with self.assertRaises(ValueError) as caught:
+                accept_http_shared_view_invitation(self.root, "https://hub.example.test/i/invite-token")
+
+        self.assertIn("question_base_url", str(caught.exception))
+        client.accept_invitation.assert_not_called()
+
+    def test_accept_http_question_invitation_requires_question_token(self):
+        with patch("rightmemory.shared_views.HubClient") as client_type:
+            client = client_type.return_value
+            client.get_invitation_view.return_value = {
+                "view_id": "auth-api-ask",
+                "kind": "question",
+                "title": "Auth API Questions",
+                "ref": "rightmemory://mq/auth-api-ask",
+                "question_base_url": "https://provider.example.test",
+            }
+            client.accept_invitation.return_value = {
+                "view_id": "auth-api-ask",
+                "connection_token": "connection-token",
+            }
+
+            with self.assertRaises(ValueError) as caught:
+                accept_http_shared_view_invitation(self.root, "https://hub.example.test/i/invite-token")
+
+        self.assertIn("question_token", str(caught.exception))
 
 
-def _record_fake_client(clients: list[_FakeHubClient], base_url: str, token: str | None = None):
-    client = _FakeHubClient(base_url, token)
-    clients.append(client)
-    return client
-
-
-class SharedViewBuilderTests(unittest.TestCase):
+class SharedFileViewRecipeTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
         (self.root / "MEMORY.md").write_text(
             "# Project {#project}\n\n"
-            "Auth API accepts signed tokens.\n"
-            "Private payroll note should stay internal.\n"
-            "Token rotation happens monthly.\n",
+            "## Auth API {#auth-api}\n\n"
+            "- `token-expiry` Tokens expire after one hour. -> [rel:auth-api]\n"
+            "- `private-payroll` Payroll details stay private. -> [rel:auth-api]\n",
             encoding="utf-8",
         )
 
-    def test_define_and_build_shared_view_materializes_filtered_markdown(self):
-        define_result = define_shared_view(
+    def test_file_recipe_renders_selected_context_without_excluded_ids(self):
+        write_file_view_recipe(
             self.root,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            description="Auth API collaboration context.",
-            audience="Frontend integration team",
-            maintainer="Alice",
-            retriever_instructions="Answer with API contract facts and omit unrelated private notes.",
-            filter_terms=["auth", "token"],
-        )
-        build_result = build_shared_view(self.root, "alice-auth-api")
-
-        view_dir = self.root / "shared_views" / "alice-auth-api"
-        exported = (view_dir / "dist" / "MEMORY.md").read_text(encoding="utf-8")
-
-        self.assertIn("defined shared view alice-auth-api", define_result)
-        self.assertIn("built shared view alice-auth-api", build_result)
-        self.assertIn("# Alice Auth API", (view_dir / "view.md").read_text(encoding="utf-8"))
-        self.assertIn("omit unrelated private notes", (view_dir / "retriever.md").read_text(encoding="utf-8"))
-        self.assertIn('filter_terms = ["auth", "token"]', (view_dir / "export.toml").read_text(encoding="utf-8"))
-        self.assertEqual((view_dir / ".gitignore").read_text(encoding="utf-8"), "dist/\n")
-        self.assertIn("Auth API accepts signed tokens.", exported)
-        self.assertIn("Token rotation happens monthly.", exported)
-        self.assertNotIn("Private payroll note", exported)
-        self.assertIn("memory_sha256", (view_dir / "dist" / "manifest.toml").read_text(encoding="utf-8"))
-
-    def test_export_shared_view_writes_package_and_invitation(self):
-        define_shared_view(
-            self.root,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            description="Auth API collaboration context.",
-            maintainer="Alice",
-            filter_terms=["auth"],
-        )
-        target = self.root / "exported-auth-view"
-
-        result = export_shared_view(self.root, "alice-auth-api", target)
-
-        self.assertIn("exported shared view alice-auth-api", result)
-        self.assertTrue((target / "view.md").exists())
-        self.assertTrue((target / "dist" / "MEMORY.md").exists())
-        invitation = (target / "rightmemory-shared-view.toml").read_text(encoding="utf-8")
-        self.assertIn('view_id = "alice-auth-api"', invitation)
-        self.assertIn('kind = "package"', invitation)
-
-    def test_build_shared_view_requires_explicit_scope_or_include_all(self):
-        define_shared_view(
-            self.root,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_headings=["auth-api"],
+            include_nodes=["token-expiry"],
+            exclude_ids=["private-payroll"],
+            approved=True,
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
         )
 
-        with self.assertRaises(ValueError) as caught:
-            build_shared_view(self.root, "alice-auth-api")
+        result = render_file_view(self.root, "auth-api-files")
 
-        self.assertIn("requires at least one --term", str(caught.exception))
+        exported = self.root / "shared_views" / "auth-api-files" / "dist" / "MEMORY.md"
+        recipe = self.root / "shared_views" / "auth-api-files" / "recipe.toml"
+        self.assertIn("rendered file view auth-api-files", result)
+        self.assertIn("Tokens expire after one hour.", exported.read_text(encoding="utf-8"))
+        self.assertNotIn("Payroll details", exported.read_text(encoding="utf-8"))
+        self.assertIn('kind = "file"', recipe.read_text(encoding="utf-8"))
 
-    def test_define_shared_view_include_all_allows_broad_export(self):
-        define_shared_view(
-            self.root,
-            view_id="full-onboarding",
-            title="Full Onboarding",
-            include_all=True,
-        )
-
-        result = build_shared_view(self.root, "full-onboarding")
-
-        exported = self.root / "shared_views" / "full-onboarding" / "dist" / "MEMORY.md"
-        self.assertIn("built shared view full-onboarding", result)
-        self.assertIn("Private payroll note should stay internal.", exported.read_text(encoding="utf-8"))
-
-    def test_load_shared_view_definition_rejects_string_include_all(self):
-        view_dir = self.root / "shared_views" / "full-onboarding"
-        view_dir.mkdir(parents=True)
-        (view_dir / "export.toml").write_text(
-            """
-            version = 1
-            view_id = "full-onboarding"
-            ref = "rightmemory://view/full-onboarding"
-            title = "Full Onboarding"
-            include_all = "false"
-            """,
+    def test_file_recipe_excludes_nested_heading_subtree(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Project {#project}\n\n"
+            "## Auth API {#auth-api}\n\n"
+            "Public auth context.\n\n"
+            "### Internal Tokens {#internal-tokens}\n\n"
+            "- `secret-token` Private token shape. -> [rel:internal-tokens]\n\n"
+            "### Public Tokens {#public-tokens}\n\n"
+            "- `token-expiry` Tokens expire after one hour. -> [rel:public-tokens]\n",
             encoding="utf-8",
         )
-
-        with self.assertRaises(ValueError) as caught:
-            load_shared_view_definition(self.root, "full-onboarding")
-
-        self.assertIn("include_all must be a boolean", str(caught.exception))
-
-    def test_export_shared_view_rebuilds_stale_dist(self):
-        define_shared_view(
+        write_file_view_recipe(
             self.root,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            filter_terms=["auth"],
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_headings=["auth-api"],
+            exclude_ids=["internal-tokens"],
+            approved=True,
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
         )
-        view_dir = self.root / "shared_views" / "alice-auth-api"
-        (view_dir / "dist").mkdir()
-        (view_dir / "dist" / "MEMORY.md").write_text("stale generated output\n", encoding="utf-8")
-        (view_dir / "dist" / "MEMORY_EXTRA.md").write_text("stale extra output\n", encoding="utf-8")
-        target = self.root / "exported-auth-view"
 
-        export_shared_view(self.root, "alice-auth-api", target)
+        render_file_view(self.root, "auth-api-files")
 
-        exported = (target / "dist" / "MEMORY.md").read_text(encoding="utf-8")
-        self.assertIn("Auth API accepts signed tokens.", exported)
-        self.assertNotIn("stale generated output", exported)
-        self.assertFalse((target / "dist" / "MEMORY_EXTRA.md").exists())
+        exported = (self.root / "shared_views" / "auth-api-files" / "dist" / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("Public auth context.", exported)
+        self.assertIn("Tokens expire after one hour.", exported)
+        self.assertNotIn("Internal Tokens", exported)
+        self.assertNotIn("Private token shape", exported)
 
-    def test_export_shared_view_accepts_query_scope_without_definition_terms(self):
-        define_shared_view(
+    def test_file_recipe_excludes_managed_example_template_block(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Alice Auth API {#alice-auth-api}\n\n"
+            "## Session Model {#alice-session-model}\n\n"
+            "- `token-expiry` Tokens expire after one hour. -> [rel:alice-session-model]\n\n"
+            "---\n\n"
+            "> Starter template. <!-- rightmemory:example:start -->\n\n"
+            "# Sample Project Graph {#sample-project-graph}\n\n"
+            "- `sample-node` This is example content, not user memory. -> []\n\n"
+            "<!-- rightmemory:example:end -->\n",
+            encoding="utf-8",
+        )
+        write_file_view_recipe(
             self.root,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_headings=["alice-auth-api"],
+            approved=True,
         )
-        target = self.root / "exported-auth-view"
 
-        export_shared_view(self.root, "alice-auth-api", target, query="token")
+        render_file_view(self.root, "auth-api-files")
 
-        exported = (target / "dist" / "MEMORY.md").read_text(encoding="utf-8")
-        self.assertIn("Token rotation happens monthly.", exported)
-        self.assertNotIn("Private payroll note", exported)
+        exported = (self.root / "shared_views" / "auth-api-files" / "dist" / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("Tokens expire after one hour.", exported)
+        self.assertNotIn("rightmemory:example", exported)
+        self.assertNotIn("Sample Project Graph", exported)
+        self.assertNotIn("sample-node", exported)
 
-    def test_export_replace_refuses_non_package_directory(self):
-        define_shared_view(
+    def test_file_package_does_not_include_retriever_prompt(self):
+        write_file_view_recipe(
             self.root,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            filter_terms=["auth"],
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_headings=["auth-api"],
+            approved=True,
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
         )
-        target = self.root / "not-a-package"
-        target.mkdir()
-        (target / "notes.txt").write_text("real work\n", encoding="utf-8")
+        package = self.root / "package"
 
-        with self.assertRaises(ValueError) as caught:
-            export_shared_view(self.root, "alice-auth-api", target, replace=True)
+        export_file_view_package(self.root, "auth-api-files", package)
 
-        self.assertIn("requires an existing shared-view package", str(caught.exception))
-        self.assertEqual((target / "notes.txt").read_text(encoding="utf-8"), "real work\n")
+        self.assertTrue((package / "view.md").exists())
+        self.assertTrue((package / "recipe.toml").exists())
+        self.assertTrue((package / "dist" / "MEMORY.md").exists())
+        self.assertFalse((package / "retriever.md").exists())
 
-    def test_export_replace_refreshes_existing_package(self):
-        define_shared_view(
+    def test_approve_file_view_sets_approved_true(self):
+        write_file_view_recipe(
             self.root,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            filter_terms=["auth"],
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth context.",
+            include_headings=["auth-api"],
+            approved=False,
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
         )
-        target = self.root / "exported-auth-view"
-        export_shared_view(self.root, "alice-auth-api", target)
-        (target / "dist" / "MEMORY.md").write_text("stale package\n", encoding="utf-8")
 
-        export_shared_view(self.root, "alice-auth-api", target, replace=True)
+        result = approve_file_view(self.root, "auth-api-files")
 
-        exported = (target / "dist" / "MEMORY.md").read_text(encoding="utf-8")
-        self.assertIn("Auth API accepts signed tokens.", exported)
-        self.assertNotIn("stale package", exported)
+        self.assertIn("approved file view auth-api-files", result)
+        recipe = (self.root / "shared_views" / "auth-api-files" / "recipe.toml").read_text(encoding="utf-8")
+        self.assertIn("approved = true", recipe)
 
-    def test_publish_shared_view_writes_minimal_hub_registry(self):
-        define_shared_view(
-            self.root,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            description="Auth API collaboration context.",
-            maintainer="Alice",
-            filter_terms=["auth"],
-        )
-        hub = self.root / "hub"
+    def test_file_view_builder_renders_generated_dist_preview(self):
+        def fake_builder(memory_root, view_id, message):
+            write_file_view_recipe(
+                memory_root,
+                view_id=view_id,
+                title="Auth API Files",
+                intent="Expose auth API integration context.",
+                include_headings=["auth-api"],
+                approved=False,
+                publish_hub_url="https://hub.example.test",
+                publish_credential_id="alice-publish",
+            )
+            return "built file view auth-api-files"
 
-        result = publish_shared_view(self.root, "alice-auth-api", hub)
+        with patch("rightmemory.shared_view_builder._run_builder", side_effect=fake_builder):
+            result = run_file_view_builder(
+                self.root,
+                view_id="auth-api-files",
+                title="Auth API Files",
+                intent="Expose auth API integration context.",
+                hub_url="https://hub.example.test",
+                credential_id="alice-publish",
+            )
 
-        self.assertIn("published shared view alice-auth-api", result)
-        registry = (hub / "registry.toml").read_text(encoding="utf-8")
-        self.assertIn('[views."alice-auth-api"]', registry)
-        self.assertIn('package_path = "views/alice-auth-api"', registry)
-        self.assertTrue((hub / "views" / "alice-auth-api" / "dist" / "MEMORY.md").exists())
-        invitation = (hub / "invitations" / "alice-auth-api.toml").read_text(encoding="utf-8")
-        self.assertIn('kind = "hub"', invitation)
-        self.assertIn(f'path = "{hub.resolve()}"', invitation)
+        preview = self.root / "shared_views" / "auth-api-files" / "dist" / "MEMORY.md"
+        self.assertEqual(result, "built file view auth-api-files")
+        self.assertTrue(preview.is_file())
+        self.assertIn("Tokens expire after one hour.", preview.read_text(encoding="utf-8"))
+
+    def test_file_view_builder_rejects_noncanonical_model_recipe(self):
+        def fake_builder(memory_root, view_id, message):
+            view_dir = memory_root / "shared_views" / view_id
+            view_dir.mkdir(parents=True)
+            (view_dir / "view.md").write_text("# Auth API Files\n", encoding="utf-8")
+            (view_dir / "recipe.toml").write_text(
+                'kind = "file"\n'
+                'approved = false\n'
+                'title = "Auth API Files"\n'
+                'intent = "Expose auth context."\n'
+                'include = ["auth-api"]\n'
+                'exclude = []\n',
+                encoding="utf-8",
+            )
+            return "built file view auth-api-files"
+
+        with patch("rightmemory.shared_view_builder._run_builder", side_effect=fake_builder):
+            with self.assertRaisesRegex(ValueError, "unsupported field\\(s\\): exclude, include"):
+                run_file_view_builder(
+                    self.root,
+                    view_id="auth-api-files",
+                    title="Auth API Files",
+                    intent="Expose auth context.",
+                    hub_url="https://hub.example.test",
+                    credential_id="alice-publish",
+                )
+
+    def test_question_view_builder_rejects_noncanonical_model_config(self):
+        def fake_builder(memory_root, view_id, message):
+            view_dir = memory_root / "shared_views" / view_id
+            view_dir.mkdir(parents=True)
+            (view_dir / "view.md").write_text("# Auth API Questions\n", encoding="utf-8")
+            (view_dir / "retriever.md").write_text("Answer from auth memory.\n", encoding="utf-8")
+            (view_dir / "question.toml").write_text(
+                'kind = "question"\n'
+                'approved = false\n'
+                'title = "Auth API Questions"\n'
+                'intent = "Answer auth questions."\n'
+                'include = ["auth-api"]\n',
+                encoding="utf-8",
+            )
+            return "built question view auth-api-ask"
+
+        with patch("rightmemory.shared_view_builder._run_builder", side_effect=fake_builder):
+            with self.assertRaisesRegex(ValueError, "unsupported field\\(s\\): include"):
+                run_question_view_builder(
+                    self.root,
+                    view_id="auth-api-ask",
+                    title="Auth API Questions",
+                    intent="Answer auth questions.",
+                )
 
 
-class SharedViewAcceptTests(unittest.TestCase):
+class SharedFileViewPullTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
-        (self.root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
-
-    def test_accept_shared_view_creates_heading_and_registry_entry(self):
-        result = accept_shared_view(
+        save_connections(
             self.root,
-            heading_id="alice-auth-api",
-            title="Alice Auth API",
-            body="Alice owns auth API collaboration context.",
-            ref="rightmemory://view/alice-auth-api",
-            relationship="human",
-            maintainer="Alice",
-            description="Auth API collaboration context",
-            accepted_from="rightmemory://view/invite/abc123",
-            target_path=".runtime/shared_views/imports/alice-auth-api",
+            {
+                "auth-api-files": SharedViewConnection(
+                    heading_id="auth-api-files",
+                    view_type="file",
+                    ref="rightmemory://mf/auth-api-files",
+                    target=SharedViewTarget(
+                        kind="http-file",
+                        base_url="https://hub.example.test",
+                        view_id="auth-api-files",
+                        credential_id="http-auth-api-files",
+                    ),
+                )
+            },
         )
-
-        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
-        loaded = load_connections(self.root)
-
-        self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
-        self.assertIn("Alice owns auth API collaboration context.", memory)
-        self.assertEqual(loaded["alice-auth-api"].ref, "rightmemory://view/alice-auth-api")
-        self.assertIn("accepted shared view alice-auth-api", result)
-
-    def test_accept_shared_view_does_not_duplicate_existing_heading(self):
-        accept_shared_view(
+        save_shared_view_credential(
             self.root,
-            heading_id="alice-auth-api",
-            title="Alice Auth API",
-            body="Alice owns auth API collaboration context.",
-            ref="rightmemory://view/alice-auth-api",
-        )
-        accept_shared_view(
-            self.root,
-            heading_id="alice-auth-api",
-            title="Alice Auth API",
-            body="Alice owns auth API collaboration context.",
-            ref="rightmemory://view/alice-auth-api",
+            "http-auth-api-files",
+            kind="http-connection",
+            token="connection-token",
+            base_url="https://hub.example.test",
+            view_id="auth-api-files",
         )
 
-        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
-
-        self.assertEqual(memory.count("{M#alice-auth-api}"), 1)
-
-    def test_accept_shared_view_uses_existing_m_heading_in_detail_file(self):
-        (self.root / "MEMORY_ALICE.md").write_text("## Existing Alice View {M#alice-auth-api}\n", encoding="utf-8")
-
-        result = accept_shared_view(
-            self.root,
-            heading_id="alice-auth-api",
-            title="Alice Auth API",
-            body="Alice owns auth API collaboration context.",
-            ref="rightmemory://view/alice-auth-api",
+    def test_pull_file_view_replaces_import_atomically(self):
+        archive = _zip_bytes(
+            {
+                "view.md": "# Auth API Files\n",
+                "recipe.toml": 'version = 1\nview_id = "auth-api-files"\nkind = "file"\n',
+                "rightmemory-shared-view.toml": 'version = 1\nview_id = "auth-api-files"\nkind = "file"\n',
+                "dist/MEMORY.md": "# Published Context\n\nTokens expire after one hour.\n",
+                "dist/manifest.toml": 'version = 1\nview_id = "auth-api-files"\n',
+            }
         )
 
-        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
-        detail = (self.root / "MEMORY_ALICE.md").read_text(encoding="utf-8")
+        with patch("rightmemory.shared_view_files.HubClient") as client_type:
+            client_type.return_value.download_package.return_value = archive
+            result = pull_file_view(self.root, "auth-api-files")
 
-        self.assertIn("accepted shared view alice-auth-api", result)
-        self.assertNotIn("### Alice Auth API {M#alice-auth-api}", memory)
-        self.assertEqual(detail.count("{M#alice-auth-api}"), 1)
+        imported = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files"
+        self.assertEqual(result.status, "pulled")
+        self.assertIn("Tokens expire", (imported / "dist" / "MEMORY.md").read_text(encoding="utf-8"))
 
-    def test_accept_shared_view_rejects_conflicting_graph_id(self):
-        before = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+    def test_pull_file_view_falls_back_to_stale_import(self):
+        imported = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"
+        imported.mkdir(parents=True)
+        (imported / "MEMORY.md").write_text("stale but usable\n", encoding="utf-8")
 
-        with self.assertRaises(ValueError) as caught:
-            accept_shared_view(
-                self.root,
-                heading_id="project",
-                title="Project Shared View",
-                body="Invalid duplicate graph id.",
-                ref="rightmemory://view/project",
-            )
+        with patch("rightmemory.shared_view_files.HubClient") as client_type:
+            client_type.return_value.download_package.side_effect = HubClientError("offline")
+            result = pull_file_view(self.root, "auth-api-files")
 
-        after = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertEqual(result.status, "stale")
+        self.assertIn("stale but usable", (imported / "MEMORY.md").read_text(encoding="utf-8"))
 
-        self.assertIn("graph id `project` already exists", str(caught.exception))
-        self.assertEqual(after, before)
 
-    def test_accept_shared_view_rejects_conflicting_graph_id_in_detail_file(self):
-        (self.root / "MEMORY_ALICE.md").write_text("## Alice Skill {S#alice-auth-api}\n", encoding="utf-8")
-
-        with self.assertRaises(ValueError) as caught:
-            accept_shared_view(
-                self.root,
-                heading_id="alice-auth-api",
-                title="Alice Auth API",
-                body="Invalid duplicate graph id.",
-                ref="rightmemory://view/alice-auth-api",
-            )
-
-        self.assertIn("MEMORY_ALICE.md", str(caught.exception))
-        self.assertIn("{S#alice-auth-api}", str(caught.exception))
-
-    def test_accept_shared_view_rejects_conflicting_bullet_node_id(self):
-        before = "# Project {#project}\n\n- `alice-auth-api` existing node\n"
-        (self.root / "MEMORY.md").write_text(before, encoding="utf-8")
-
-        with self.assertRaises(ValueError) as caught:
-            accept_shared_view(
-                self.root,
-                heading_id="alice-auth-api",
-                title="Alice Auth API",
-                body="Invalid duplicate graph id.",
-                ref="rightmemory://view/alice-auth-api",
-            )
-
-        after = (self.root / "MEMORY.md").read_text(encoding="utf-8")
-
-        self.assertIn("bullet node `alice-auth-api`", str(caught.exception))
-        self.assertEqual(after, before)
-        self.assertFalse((self.root / "shared_views.toml").exists())
-
-    def test_accept_shared_view_ignores_conflicting_graph_id_in_skill_file(self):
-        (self.root / "MEMORY_SKILL_auth.md").write_text("## Freeform Skill {#alice-auth-api}\n", encoding="utf-8")
-
-        result = accept_shared_view(
-            self.root,
-            heading_id="alice-auth-api",
-            title="Alice Auth API",
-            body="Alice owns auth API collaboration context.",
-            ref="rightmemory://view/alice-auth-api",
-        )
-
-        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
-
-        self.assertIn("accepted shared view alice-auth-api", result)
-        self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
-
-    def test_accept_shared_view_ignores_m_marker_in_skill_file(self):
-        (self.root / "MEMORY_SKILL_auth.md").write_text("## Freeform Skill {M#alice-auth-api}\n", encoding="utf-8")
-
-        accept_shared_view(
-            self.root,
-            heading_id="alice-auth-api",
-            title="Alice Auth API",
-            body="Alice owns auth API collaboration context.",
-            ref="rightmemory://view/alice-auth-api",
-        )
-
-        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
-
-        self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
-
-    def test_rejected_accept_leaves_memory_unchanged(self):
-        before = (self.root / "MEMORY.md").read_text(encoding="utf-8")
-        cases = (
-            {"ref": "   "},
-            {"ref": "rightmemory://view/alice-auth-api", "target_path": "   "},
-        )
-
-        for kwargs in cases:
-            with self.subTest(kwargs=kwargs):
-                with self.assertRaises(ValueError):
-                    accept_shared_view(
-                        self.root,
-                        heading_id="alice-auth-api",
-                        title="Alice Auth API",
-                        body="Alice owns auth API collaboration context.",
-                        **kwargs,
-                    )
-
-                after = (self.root / "MEMORY.md").read_text(encoding="utf-8")
-
-                self.assertEqual(after, before)
-                self.assertFalse((self.root / "shared_views.toml").exists())
-
-    def test_accept_shared_view_normalizes_generated_title(self):
-        accept_shared_view(
-            self.root,
-            heading_id="alice-auth-api",
-            title="Alice\n{#project} Auth   API {M#bad}",
-            body="Alice owns auth API collaboration context.",
-            ref="rightmemory://view/alice-auth-api",
-        )
-
-        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
-
-        self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
-        self.assertNotIn("{M#bad}", memory)
-
-    def test_accept_shared_view_inserts_into_existing_shared_views_section(self):
+class SharedFileViewAutoPublishTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
         (self.root / "MEMORY.md").write_text(
-            "# Shared Views\n\nExisting shared context.\n\n# Work Context\n\nWork notes stay here.\n",
+            "# Project {#project}\n\n## Auth API {#auth-api}\n\n- `token-expiry` Tokens expire. -> [rel:auth-api]\n",
             encoding="utf-8",
         )
-
-        accept_shared_view(
+        save_shared_view_credential(
             self.root,
-            heading_id="alice-auth-api",
-            title="Alice Auth API",
-            body="Alice owns auth API collaboration context.",
-            ref="rightmemory://view/alice-auth-api",
+            "alice-publish",
+            kind="http-publish",
+            token="publish-token",
+            base_url="https://hub.example.test",
+            provider_id="alice",
+        )
+        write_file_view_recipe(
+            self.root,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_headings=["auth-api"],
+            approved=True,
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
         )
 
-        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+    def test_publish_approved_file_views_renders_and_uploads(self):
+        clients = []
 
-        self.assertLess(memory.index("### Alice Auth API {M#alice-auth-api}"), memory.index("# Work Context"))
-        self.assertTrue(memory.rstrip().endswith("Work notes stay here."))
+        with patch("rightmemory.shared_view_files.HubClient", side_effect=lambda base_url, token: _record_fake_client(clients, base_url, token)):
+            results = publish_approved_file_views(self.root)
 
-    def test_accept_shared_view_invitation_copies_package_and_records_resolver(self):
-        provider = self.root / "provider"
-        consumer = self.root / "consumer"
-        provider.mkdir()
-        consumer.mkdir()
-        (provider / "MEMORY.md").write_text(
-            "# Provider\n\nAuth API accepts signed tokens.\n",
+        self.assertEqual(results[0].status, "published")
+        self.assertEqual(clients[0].base_url, "https://hub.example.test")
+        self.assertIn("dist/MEMORY.md", clients[0].publish_calls[0]["files"])
+
+    def test_invite_file_view_publishes_current_package_and_creates_invitation(self):
+        clients = []
+
+        with patch("rightmemory.shared_view_files.HubClient", side_effect=lambda base_url, token: _record_fake_client(clients, base_url, token)):
+            result = invite_file_view(self.root, "auth-api-files", label="frontend")
+
+        client = clients[0]
+        self.assertIn("invited file view auth-api-files", result)
+        self.assertIn("invitation_url\thttps://hub.example.test/i/invite-token", result)
+        self.assertEqual(client.base_url, "https://hub.example.test")
+        self.assertEqual(client.token, "publish-token")
+        self.assertEqual(client.publish_calls[0]["view_id"], "auth-api-files")
+        self.assertIn("dist/MEMORY.md", client.publish_calls[0]["files"])
+        self.assertEqual(client.invitation_calls[0]["view_id"], "auth-api-files")
+        self.assertEqual(client.invitation_calls[0]["label"], "frontend")
+
+    def test_record_file_view_publish_results_logs_failures(self):
+        record_file_view_publish_results(
+            self.root,
+            [FileViewPublishResult("auth-api-files", "failed", "hub offline")],
+            trigger="update-write",
+        )
+
+        path = self.root / ".runtime" / "shared_views" / "publish-events.jsonl"
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(records[0]["view_id"], "auth-api-files")
+        self.assertEqual(records[0]["status"], "failed")
+        self.assertEqual(records[0]["message"], "hub offline")
+        self.assertEqual(records[0]["trigger"], "update-write")
+
+    def test_list_file_view_publish_events_returns_newest_valid_events(self):
+        events = self.root / ".runtime" / "shared_views" / "publish-events.jsonl"
+        events.parent.mkdir(parents=True, exist_ok=True)
+        events.write_text(
+            '{"created_at":"2026-06-17T10:00:00+00:00","view_id":"old","status":"published","message":"old","trigger":"memory-write"}\n'
+            "not json\n"
+            '{"created_at":"2026-06-17T11:00:00+00:00","view_id":"new","status":"failed","message":"boom","trigger":"memory-write"}\n',
             encoding="utf-8",
         )
-        (consumer / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
-        define_shared_view(
-            provider,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            description="Auth API collaboration context.",
-            maintainer="Alice",
-            filter_terms=["auth"],
+
+        listed = list_file_view_publish_events(self.root)
+
+        self.assertEqual([event["view_id"] for event in listed], ["new", "old"])
+        self.assertEqual(listed[0]["status"], "failed")
+
+
+class SharedQuestionViewTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+
+    def test_write_question_view_config(self):
+        result = write_question_view(
+            self.root,
+            view_id="auth-api-ask",
+            title="Auth API Questions",
+            intent="Let frontend agents ask auth API questions.",
+            retriever_instructions="Answer only from auth API memory.",
+            approved=True,
+            access_tokens=["question-token"],
         )
-        package = self.root / "package"
-        export_shared_view(provider, "alice-auth-api", package)
 
-        result = accept_shared_view_invitation(consumer, package)
+        view_dir = self.root / "shared_views" / "auth-api-ask"
+        self.assertIn("wrote question view auth-api-ask", result)
+        self.assertTrue((view_dir / "view.md").exists())
+        self.assertTrue((view_dir / "retriever.md").exists())
+        question_toml = (view_dir / "question.toml").read_text(encoding="utf-8")
+        self.assertIn('kind = "question"', question_toml)
+        self.assertIn(question_token_hash("question-token"), question_toml)
+        self.assertTrue(verify_question_view_token(self.root, "auth-api-ask", "question-token"))
+        self.assertFalse(verify_question_view_token(self.root, "auth-api-ask", "wrong-token"))
 
-        memory = (consumer / "MEMORY.md").read_text(encoding="utf-8")
-        connections = load_connections(consumer)
-        imported = consumer / ".runtime" / "shared_views" / "imports" / "alice-auth-api"
-        self.assertIn("accepted shared view alice-auth-api", result)
-        self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
-        self.assertEqual(connections["alice-auth-api"].target.kind, "package")
-        self.assertEqual(connections["alice-auth-api"].target.view_id, "alice-auth-api")
-        self.assertTrue((imported / "rightmemory-shared-view.toml").exists())
-
-    def test_accept_shared_view_invitation_sanitizes_body_as_plain_prose(self):
-        provider = self.root / "provider"
-        consumer = self.root / "consumer"
-        provider.mkdir()
-        consumer.mkdir()
-        (provider / "MEMORY.md").write_text("# Provider\n\nAuth API accepts signed tokens.\n", encoding="utf-8")
-        (consumer / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
-        define_shared_view(
-            provider,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            description="### Injected {#bad}\n- `bad-node` do not create me. → []",
-            filter_terms=["auth"],
+    def test_publish_question_view_registers_question_metadata_and_hashes_token(self):
+        write_question_view(
+            self.root,
+            view_id="auth-api-ask",
+            title="Auth API Questions",
+            intent="Let frontend agents ask auth API questions.",
+            retriever_instructions="Answer only from auth API memory.",
+            approved=True,
         )
-        package = self.root / "package"
-        export_shared_view(provider, "alice-auth-api", package)
-
-        accept_shared_view_invitation(consumer, package)
-
-        memory = (consumer / "MEMORY.md").read_text(encoding="utf-8")
-        self.assertNotIn("### Injected", memory)
-        self.assertNotIn("{#bad}", memory)
-        self.assertNotIn("- `bad-node`", memory)
-        self.assertIn("Injected do not create me.", memory)
-
-    def test_reaccept_package_invitation_preserves_existing_import_when_copy_fails(self):
-        provider = self.root / "provider"
-        consumer = self.root / "consumer"
-        provider.mkdir()
-        consumer.mkdir()
-        (provider / "MEMORY.md").write_text("# Provider\n\nAuth API accepts signed tokens.\n", encoding="utf-8")
-        (consumer / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
-        define_shared_view(
-            provider,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            filter_terms=["auth"],
+        save_shared_view_credential(
+            self.root,
+            "alice-publish",
+            kind="http-publish",
+            token="publish-token",
+            base_url="https://hub.example.test",
+            provider_id="alice",
         )
-        package = self.root / "package"
-        export_shared_view(provider, "alice-auth-api", package)
-        accept_shared_view_invitation(consumer, package)
-        imported_memory = consumer / ".runtime" / "shared_views" / "imports" / "alice-auth-api" / "dist" / "MEMORY.md"
-        imported_memory.write_text("existing imported package\n", encoding="utf-8")
+        clients = []
 
-        with patch("rightmemory.shared_views.shutil.copytree", side_effect=PermissionError("copy failed")):
-            with self.assertRaises(PermissionError):
-                accept_shared_view_invitation(consumer, package)
+        with patch("rightmemory.shared_view_questions.HubClient", side_effect=lambda base_url, token: _record_fake_client(clients, base_url, token)):
+            result = publish_question_view(
+                self.root,
+                "auth-api-ask",
+                hub_url="https://hub.example.test",
+                credential_id="alice-publish",
+                question_base_url="https://provider.example.test",
+                label="frontend",
+                expires_at="2026-07-01T00:00:00+00:00",
+            )
 
-        self.assertEqual(imported_memory.read_text(encoding="utf-8"), "existing imported package\n")
+        client = clients[0]
+        question_token = client.question_registrations[0]["question_token"]
+        question_toml = (self.root / "shared_views" / "auth-api-ask" / "question.toml").read_text(encoding="utf-8")
+        self.assertIn("published question view auth-api-ask", result)
+        self.assertIn("invitation_url\thttps://hub.example.test/i/invite-token", result)
+        self.assertEqual(client.base_url, "https://hub.example.test")
+        self.assertEqual(client.token, "publish-token")
+        self.assertEqual(client.question_registrations[0]["view_id"], "auth-api-ask")
+        self.assertEqual(client.question_registrations[0]["question_base_url"], "https://provider.example.test")
+        self.assertEqual(client.invitation_calls[0]["label"], "frontend")
+        self.assertEqual(client.invitation_calls[0]["expires_at"], "2026-07-01T00:00:00+00:00")
+        self.assertIn(question_token_hash(question_token), question_toml)
+        self.assertNotIn(question_token, question_toml)
 
-    def test_accept_package_invitation_preserves_symlinked_markdown_for_retrieval_skip(self):
-        consumer = self.root / "consumer"
-        consumer.mkdir()
-        (consumer / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
-        package = self.root / "package"
-        (package / "dist").mkdir(parents=True)
-        (package / "view.md").write_text("# Alice Auth API\n", encoding="utf-8")
-        (package / "export.toml").write_text(
-            """
-            version = 1
-            view_id = "alice-auth-api"
-            ref = "rightmemory://view/alice-auth-api"
-            title = "Alice Auth API"
-            """,
-            encoding="utf-8",
+    def test_run_provider_question_sets_started_from_runtime_callback(self):
+        started = threading.Event()
+        observations = []
+
+        class FakeRuntime:
+            def __init__(self, config):
+                self.config = config
+
+            def run_session_turn(self, session_id, prompt, *, on_started=None):
+                observations.append(started.is_set())
+                if on_started is not None:
+                    on_started()
+                observations.append(started.is_set())
+                return "Use token_expires_at."
+
+            def cleanup(self):
+                observations.append("cleanup")
+
+        with (
+            patch("rightmemory.config.load_config", return_value=object()),
+            patch("rightmemory.runtime.RightMemoryRuntime", FakeRuntime),
+        ):
+            answer = _run_provider_question(
+                self.root,
+                "retrieve",
+                "auth-api-ask",
+                "Provider question:\nHow do tokens refresh?",
+                started,
+            )
+
+        self.assertEqual(answer, "Use token_expires_at.")
+        self.assertEqual(observations, [False, True, "cleanup"])
+
+    def test_ask_question_view_returns_unavailable_when_provider_does_not_start(self):
+        save_connections(
+            self.root,
+            {
+                "auth-api-ask": SharedViewConnection(
+                    heading_id="auth-api-ask",
+                    view_type="question",
+                    ref="rightmemory://mq/auth-api-ask",
+                    target=SharedViewTarget(
+                        kind="http-question",
+                        base_url="https://hub.example.test",
+                        view_id="auth-api-ask",
+                        credential_id="http-auth-api-ask",
+                        question_base_url="https://provider.example.test",
+                        question_credential_id="http-auth-api-ask-question",
+                    ),
+                )
+            },
         )
-        (package / "rightmemory-shared-view.toml").write_text(
-            """
-            version = 1
-            view_id = "alice-auth-api"
-            ref = "rightmemory://view/alice-auth-api"
-            title = "Alice Auth API"
-
-            [transport]
-            kind = "package"
-            path = "."
-            view_id = "alice-auth-api"
-            """,
-            encoding="utf-8",
+        save_shared_view_credential(
+            self.root,
+            "http-auth-api-ask-question",
+            kind="http-question",
+            token="question-token",
+            base_url="https://provider.example.test",
+            view_id="auth-api-ask",
         )
-        outside = self.root / "outside.md"
-        outside.write_text("Outside secret should not be imported.\n", encoding="utf-8")
-        try:
-            (package / "dist" / "MEMORY.md").symlink_to(outside)
-        except (NotImplementedError, OSError) as exc:
-            self.skipTest(f"symlinks unavailable: {exc}")
 
-        accept_shared_view_invitation(consumer, package)
-        result = retrieve_shared_view(consumer, "alice-auth-api", "outside secret")
+        with patch("rightmemory.shared_view_questions.HubClient") as client_type:
+            client_type.return_value.ask_question.side_effect = HubClientError("provider did not start")
+            result = ask_question_view(self.root, "auth-api-ask", "How do tokens refresh?")
 
-        imported = consumer / ".runtime" / "shared_views" / "imports" / "alice-auth-api" / "dist" / "MEMORY.md"
-        self.assertTrue(imported.is_symlink())
-        self.assertIn("Status: fresh", result)
-        self.assertNotIn("Outside secret should not be imported.", result)
+        self.assertIn("Status: unavailable", result)
+        self.assertIn("provider did not start", result)
 
-    def test_accept_package_invitation_ignores_symlinked_dist_directory(self):
-        consumer = self.root / "consumer"
-        consumer.mkdir()
-        (consumer / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
-        package = self.root / "package"
-        package.mkdir()
-        (package / "view.md").write_text("# Alice Auth API\n", encoding="utf-8")
-        (package / "export.toml").write_text(
-            """
-            version = 1
-            view_id = "alice-auth-api"
-            ref = "rightmemory://view/alice-auth-api"
-            title = "Alice Auth API"
-            """,
-            encoding="utf-8",
+    def test_ask_question_view_preserves_provider_unavailable_payload(self):
+        save_connections(
+            self.root,
+            {
+                "auth-api-ask": SharedViewConnection(
+                    heading_id="auth-api-ask",
+                    view_type="question",
+                    ref="rightmemory://mq/auth-api-ask",
+                    target=SharedViewTarget(
+                        kind="http-question",
+                        base_url="https://hub.example.test",
+                        view_id="remote-auth-api-ask",
+                        credential_id="http-auth-api-ask",
+                        question_base_url="https://provider.example.test",
+                        question_credential_id="http-auth-api-ask-question",
+                    ),
+                )
+            },
         )
-        (package / "rightmemory-shared-view.toml").write_text(
-            """
-            version = 1
-            view_id = "alice-auth-api"
-            ref = "rightmemory://view/alice-auth-api"
-            title = "Alice Auth API"
-
-            [transport]
-            kind = "package"
-            path = "."
-            view_id = "alice-auth-api"
-            """,
-            encoding="utf-8",
+        save_shared_view_credential(
+            self.root,
+            "http-auth-api-ask-question",
+            kind="http-question",
+            token="question-token",
+            base_url="https://provider.example.test",
+            view_id="remote-auth-api-ask",
         )
-        outside = self.root / "outside"
-        outside.mkdir()
-        (outside / "MEMORY.md").write_text("Outside dist secret should not be imported.\n", encoding="utf-8")
-        try:
-            (package / "dist").symlink_to(outside, target_is_directory=True)
-        except (NotImplementedError, OSError) as exc:
-            self.skipTest(f"symlinks unavailable: {exc}")
+        provider_text = "Shared question: remote-auth-api-ask\nStatus: unavailable\nReason: provider is busy\n"
 
-        accept_shared_view_invitation(consumer, package)
-        result = retrieve_shared_view(consumer, "alice-auth-api", "outside dist secret")
+        with patch("rightmemory.shared_view_questions.HubClient") as client_type:
+            client_type.return_value.ask_question.return_value = {
+                "status": "ok",
+                "data": {
+                    "status": "unavailable",
+                    "reason": "provider is busy",
+                    "text": provider_text,
+                },
+            }
+            result = ask_question_view(self.root, "auth-api-ask", "How do tokens refresh?")
 
-        imported_dist = consumer / ".runtime" / "shared_views" / "imports" / "alice-auth-api" / "dist"
-        self.assertTrue(imported_dist.is_symlink())
-        self.assertIn("Status: fresh", result)
-        self.assertNotIn("Outside dist secret should not be imported.", result)
+        self.assertIn("Shared question: auth-api-ask", result)
+        self.assertIn("Status: unavailable", result)
+        self.assertIn("provider is busy", result)
+
+    def test_answer_question_view_times_out_when_provider_does_not_start(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        write_question_view(
+            self.root,
+            view_id="auth-api-ask",
+            title="Auth API Questions",
+            intent="Let frontend agents ask auth API questions.",
+            retriever_instructions="Answer only from auth API memory.",
+            approved=True,
+            start_timeout_seconds=1,
+            answer_timeout_seconds=1,
+        )
+
+        def blocked_start(root, provider_role, view_id, prompt, started):
+            release.wait(5)
+            return "too late"
+
+        with patch("rightmemory.shared_view_questions._run_provider_question", side_effect=blocked_start):
+            result = answer_question_view(self.root, "auth-api-ask", "How do tokens refresh?")
+
+        self.assertIn("Status: unavailable", result)
+        self.assertIn("provider did not start within 1 seconds", result)
+
+    def test_answer_question_view_times_out_after_provider_starts(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        write_question_view(
+            self.root,
+            view_id="auth-api-ask",
+            title="Auth API Questions",
+            intent="Let frontend agents ask auth API questions.",
+            retriever_instructions="Answer only from auth API memory.",
+            approved=True,
+            start_timeout_seconds=1,
+            answer_timeout_seconds=1,
+        )
+
+        def slow_answer(root, provider_role, view_id, prompt, started):
+            started.set()
+            release.wait(5)
+            return "too late"
+
+        with patch("rightmemory.shared_view_questions._run_provider_question", side_effect=slow_answer):
+            result = answer_question_view(self.root, "auth-api-ask", "How do tokens refresh?")
+
+        self.assertIn("Status: unavailable", result)
+        self.assertIn("provider answer timed out after 1 seconds", result)
+
+    def test_connection_status_reports_file_imports_and_question_targets(self):
+        save_connections(
+            self.root,
+            {
+                "auth-api-files": SharedViewConnection(
+                    heading_id="auth-api-files",
+                    view_type="file",
+                    ref="rightmemory://mf/auth-api-files",
+                    target=SharedViewTarget(
+                        kind="http-file",
+                        base_url="https://hub.example.test",
+                        credential_id="http-auth-api-files",
+                    ),
+                ),
+                "auth-api-ask": SharedViewConnection(
+                    heading_id="auth-api-ask",
+                    view_type="question",
+                    ref="rightmemory://mq/auth-api-ask",
+                    target=SharedViewTarget(
+                        kind="http-question",
+                        base_url="https://hub.example.test",
+                        credential_id="http-auth-api-ask",
+                        question_base_url="https://provider.example.test",
+                        question_credential_id="http-auth-api-ask-question",
+                    ),
+                ),
+            },
+        )
+        imported = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"
+        imported.mkdir(parents=True)
+        (imported / "MEMORY.md").write_text("published context\n", encoding="utf-8")
+
+        file_status = shared_view_connection_status(self.root, "auth-api-files")
+        question_status = shared_view_connection_status(self.root, "auth-api-ask")
+
+        self.assertEqual(file_status["status"], "imported")
+        self.assertEqual(question_status["status"], "configured")
 
 
 class SharedViewInteractionTests(unittest.TestCase):
@@ -1150,537 +857,142 @@ class SharedViewInteractionTests(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
 
-    def test_human_connection_requires_confirmation_before_note(self):
+    def test_note_requires_http_target(self):
         save_connections(
             self.root,
             {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    relationship="human",
-                    maintainer="Alice",
+                "auth-api-files": SharedViewConnection(
+                    heading_id="auth-api-files",
+                    view_type="file",
+                    ref="rightmemory://mf/auth-api-files",
+                    target=SharedViewTarget(kind="none"),
                 )
             },
         )
 
-        result = record_shared_view_note(self.root, "alice-auth-api", "Docs are stale")
+        result = record_shared_view_note(self.root, "auth-api-files", "Docs are stale.", confirmed=True)
 
-        self.assertIn("confirmation required", result)
-        self.assertFalse((self.root / ".runtime/shared_views/interactions").exists())
+        self.assertEqual(result, "shared view auth-api-files does not have an HTTP interaction target")
 
-    def test_owned_agent_connection_records_note_without_confirmation(self):
+    def test_note_posts_to_http_for_file_and_question_views(self):
+        for view_type, target_kind, heading_id, ref in (
+            ("file", "http-file", "auth-api-files", "rightmemory://mf/auth-api-files"),
+            ("question", "http-question", "auth-api-ask", "rightmemory://mq/auth-api-ask"),
+        ):
+            target = SharedViewTarget(
+                kind=target_kind,
+                base_url="https://hub.example.test",
+                view_id=heading_id,
+                credential_id=f"http-{heading_id}",
+            )
+            if view_type == "question":
+                target = SharedViewTarget(
+                    kind=target_kind,
+                    base_url="https://hub.example.test",
+                    view_id=heading_id,
+                    credential_id=f"http-{heading_id}",
+                    question_base_url="https://provider.example.test",
+                    question_credential_id=f"http-{heading_id}-question",
+                )
+            save_connections(
+                self.root,
+                {
+                    heading_id: SharedViewConnection(
+                        heading_id=heading_id,
+                        view_type=view_type,
+                        ref=ref,
+                        target=target,
+                    )
+                },
+            )
+            save_shared_view_credential(
+                self.root,
+                f"http-{heading_id}",
+                kind="http-connection",
+                token="connection-token",
+                base_url="https://hub.example.test",
+                view_id=heading_id,
+            )
+
+            with patch("rightmemory.shared_views.HubClient") as client_type:
+                client_type.return_value.post_interaction.return_value = {"status": "recorded"}
+                result = record_shared_view_note(self.root, heading_id, "Docs are stale.", confirmed=True)
+
+            self.assertIn("recorded shared view note", result)
+            self.assertEqual(client_type.call_args.args, ("https://hub.example.test", "connection-token"))
+            self.assertEqual(len(list_shared_view_notes(self.root, heading_id)), 1)
+
+    def test_note_http_failure_is_recorded_as_failed_not_queued(self):
         save_connections(
             self.root,
             {
-                "auth-agent": SharedViewConnection(
-                    heading_id="auth-agent",
-                    ref="rightmemory://view/auth-agent",
-                    relationship="owned-agent",
-                )
-            },
-        )
-
-        result = record_shared_view_note(self.root, "auth-agent", "Sync docs need a refresh")
-
-        interaction_path = self.root / ".runtime/shared_views/interactions/auth-agent.jsonl"
-        records = [json.loads(line) for line in interaction_path.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["relationship"], "owned-agent")
-        self.assertEqual(records[0]["status"], "queued")
-        self.assertEqual(records[0]["message"], "Sync docs need a refresh")
-        self.assertIn("queued shared view note", result)
-
-    def test_confirmed_human_note_is_recorded(self):
-        save_connections(
-            self.root,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    relationship="human",
-                    maintainer="Alice",
-                )
-            },
-        )
-
-        result = record_shared_view_note(self.root, "alice-auth-api", "Confirmed docs update", confirmed=True)
-
-        interaction_path = self.root / ".runtime/shared_views/interactions/alice-auth-api.jsonl"
-        records = [json.loads(line) for line in interaction_path.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual(records[0]["relationship"], "human")
-        self.assertEqual(records[0]["status"], "queued")
-        self.assertEqual(records[0]["message"], "Confirmed docs update")
-        self.assertIn("queued shared view note", result)
-
-    def test_local_provider_connection_delivers_confirmed_note_to_provider_inbox(self):
-        provider = self.root / "provider"
-        consumer = self.root / "consumer"
-        provider.mkdir()
-        consumer.mkdir()
-        save_connections(
-            consumer,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    relationship="human",
-                    maintainer="Alice",
-                    target=SharedViewTarget(kind="local", path=str(provider), view_id="alice-auth-api"),
-                )
-            },
-        )
-
-        result = record_shared_view_note(
-            consumer,
-            "alice-auth-api",
-            "Docs are missing token_expires_at.",
-            confirmed=True,
-            actor="assistant",
-            task_context="frontend login migration",
-        )
-
-        inbox = list_shared_view_inbox(provider, "alice-auth-api")
-        self.assertIn("recorded shared view note", result)
-        self.assertEqual(len(inbox), 1)
-        self.assertEqual(inbox[0]["message"], "Docs are missing token_expires_at.")
-        self.assertEqual(inbox[0]["task_context"], "frontend login migration")
-        self.assertEqual(inbox[0]["actor"], "assistant")
-
-    def test_package_connection_queues_confirmed_note_locally(self):
-        save_connections(
-            self.root,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    relationship="human",
-                    target=SharedViewTarget(kind="package", path=".runtime/shared_views/imports/alice-auth-api"),
-                )
-            },
-        )
-        (self.root / ".runtime/shared_views/imports/alice-auth-api").mkdir(parents=True)
-
-        result = record_shared_view_note(self.root, "alice-auth-api", "Package docs are stale.", confirmed=True)
-
-        interaction_path = self.root / ".runtime/shared_views/interactions/alice-auth-api.jsonl"
-        records = [json.loads(line) for line in interaction_path.read_text(encoding="utf-8").splitlines()]
-        self.assertIn("queued shared view note", result)
-        self.assertEqual(records[0]["status"], "queued")
-
-
-class SharedViewRetrieveTests(unittest.TestCase):
-    def setUp(self):
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tempdir.cleanup)
-        self.root = Path(self.tempdir.name)
-
-    def test_retrieve_shared_view_returns_fresh_markdown_matches(self):
-        target = self.root / ".runtime/shared_views/imports/alice-auth-api"
-        target.mkdir(parents=True)
-        (target / "MEMORY.md").write_text(
-            "# Alice Auth API\n\nAuth API accepts signed tokens.\nAn unrelated note.\n",
-            encoding="utf-8",
-        )
-        (target / "MEMORY_EXTRA.md").write_text(
-            "Token rotation happens monthly.\n",
-            encoding="utf-8",
-        )
-        save_connections(
-            self.root,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    maintainer="Alice",
-                    description="Auth collaboration context",
+                "auth-api-files": SharedViewConnection(
+                    heading_id="auth-api-files",
+                    view_type="file",
+                    ref="rightmemory://mf/auth-api-files",
                     target=SharedViewTarget(
-                        kind="package",
-                        path=".runtime/shared_views/imports/alice-auth-api",
+                        kind="http-file",
+                        base_url="https://hub.example.test",
+                        view_id="auth-api-files",
+                        credential_id="http-auth-api-files",
                     ),
                 )
             },
         )
-
-        result = retrieve_shared_view(self.root, "alice-auth-api", "the auth token")
-
-        self.assertIn("Shared view: alice-auth-api", result)
-        self.assertIn("Status: fresh", result)
-        self.assertIn("Ref: rightmemory://view/alice-auth-api", result)
-        self.assertIn("Maintainer: Alice", result)
-        self.assertIn("Description: Auth collaboration context", result)
-        self.assertIn("Freshness:", result)
-        self.assertIn("Matches:", result)
-        self.assertIn("- MEMORY.md:3: Auth API accepts signed tokens.", result)
-        self.assertIn("- MEMORY_EXTRA.md:1: Token rotation happens monthly.", result)
-        self.assertNotIn("An unrelated note.", result)
-
-        cache = self.root / ".runtime/shared_views/cache/alice-auth-api.txt"
-        self.assertTrue(cache.exists())
-        self.assertIn("Auth API accepts signed tokens.", cache.read_text(encoding="utf-8"))
-        self.assertEqual((self.root / ".runtime/.gitignore").read_text(encoding="utf-8"), "*\n")
-
-    def test_retrieve_shared_view_returns_fresh_when_cache_write_fails(self):
-        target = self.root / ".runtime/shared_views/imports/alice-auth-api"
-        target.mkdir(parents=True)
-        (target / "MEMORY.md").write_text(
-            "# Alice Auth API\n\nToken expiry metadata includes token_expires_at.\n",
-            encoding="utf-8",
-        )
-        save_connections(
+        save_shared_view_credential(
             self.root,
+            "http-auth-api-files",
+            kind="http-connection",
+            token="connection-token",
+            base_url="https://hub.example.test",
+            view_id="auth-api-files",
+        )
+
+        with patch("rightmemory.shared_views.HubClient") as client_type:
+            client_type.return_value.post_interaction.side_effect = HubClientError("offline")
+            result = record_shared_view_note(self.root, "auth-api-files", "Docs are stale.", confirmed=True)
+
+        notes = list_shared_view_notes(self.root, "auth-api-files")
+        self.assertEqual(result, "failed to send shared view note for auth-api-files")
+        self.assertEqual(notes[0]["status"], "failed")
+        self.assertNotEqual(notes[0]["status"], "queued")
+
+
+class _FakeHubClient:
+    def __init__(self, base_url: str, token: str):
+        self.base_url = base_url
+        self.token = token
+        self.publish_calls = []
+        self.question_registrations = []
+        self.invitation_calls = []
+
+    def publish_package(self, view_id: str, package_root: Path):
+        self.publish_calls.append(
             {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(
-                        kind="package",
-                        path=".runtime/shared_views/imports/alice-auth-api",
-                    ),
-                )
-            },
+                "view_id": view_id,
+                "files": sorted(path.relative_to(package_root).as_posix() for path in package_root.rglob("*") if path.is_file()),
+            }
         )
+        return {"version_id": "ver_1"}
 
-        with patch("rightmemory.shared_views._write_shared_view_cache", side_effect=PermissionError("read-only")):
-            result = retrieve_shared_view(self.root, "alice-auth-api", "token expiry")
+    def register_question_view(self, view_id: str, **kwargs):
+        self.question_registrations.append({"view_id": view_id, **kwargs})
+        return {"version_id": "ver_1", "view_id": view_id}
 
-        self.assertIn("Status: fresh", result)
-        self.assertIn("- MEMORY.md:3: Token expiry metadata includes token_expires_at.", result)
+    def create_invitation(self, view_id: str, *, label: str | None = None, expires_at: str | None = None):
+        self.invitation_calls.append({"view_id": view_id, "label": label, "expires_at": expires_at})
+        return {"invitation_url": "https://hub.example.test/i/invite-token"}
 
-    def test_retrieve_shared_view_skips_symlinked_markdown_files(self):
-        target = self.root / ".runtime/shared_views/imports/alice-auth-api"
-        target.mkdir(parents=True)
-        (target / "MEMORY.md").write_text("# Alice Auth API\n\nPublic shared note.\n", encoding="utf-8")
-        outside_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(outside_dir.cleanup)
-        outside_file = Path(outside_dir.name) / "MEMORY_leak_source.md"
-        outside_file.write_text("Outside root secret phrase should not be imported.\n", encoding="utf-8")
-        try:
-            (target / "MEMORY_leak.md").symlink_to(outside_file)
-        except (NotImplementedError, OSError) as exc:
-            self.skipTest(f"symlinks unavailable: {exc}")
-        save_connections(
-            self.root,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(
-                        kind="package",
-                        path=".runtime/shared_views/imports/alice-auth-api",
-                    ),
-                )
-            },
-        )
 
-        result = retrieve_shared_view(self.root, "alice-auth-api", "outside secret phrase")
+def _record_fake_client(clients: list[_FakeHubClient], base_url: str, token: str) -> _FakeHubClient:
+    client = _FakeHubClient(base_url, token)
+    clients.append(client)
+    return client
 
-        self.assertIn("Status: fresh", result)
-        self.assertIn("- no strong match in published shared memory", result)
-        self.assertNotIn("Outside root secret phrase", result)
 
-    def test_retrieve_shared_view_uses_cache_when_target_disappears(self):
-        target = self.root / ".runtime/shared_views/imports/alice-auth-api"
-        target.mkdir(parents=True)
-        (target / "MEMORY.md").write_text(
-            "# Alice Auth API\n\nDurable cache phrase lives here.\n",
-            encoding="utf-8",
-        )
-        save_connections(
-            self.root,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(
-                        kind="package",
-                        path=".runtime/shared_views/imports/alice-auth-api",
-                    ),
-                )
-            },
-        )
-        retrieve_shared_view(self.root, "alice-auth-api", "durable cache")
-        (target / "MEMORY.md").unlink()
-        target.rmdir()
-
-        result = retrieve_shared_view(self.root, "alice-auth-api", "durable cache")
-
-        self.assertIn("Shared view: alice-auth-api", result)
-        self.assertIn("Status: cached", result)
-        self.assertNotIn("Status: fresh", result)
-        self.assertIn("- MEMORY.md:3: Durable cache phrase lives here.", result)
-
-    def test_retrieve_shared_view_cache_matches_later_query(self):
-        target = self.root / ".runtime/shared_views/imports/alice-auth-api"
-        target.mkdir(parents=True)
-        (target / "MEMORY.md").write_text(
-            "# Alice Auth API\n\nAlpha deployment note.\nBeta rollback note.\n",
-            encoding="utf-8",
-        )
-        save_connections(
-            self.root,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(
-                        kind="package",
-                        path=".runtime/shared_views/imports/alice-auth-api",
-                    ),
-                )
-            },
-        )
-        fresh = retrieve_shared_view(self.root, "alice-auth-api", "alpha")
-        (target / "MEMORY.md").unlink()
-        target.rmdir()
-
-        cached = retrieve_shared_view(self.root, "alice-auth-api", "beta")
-
-        self.assertIn("Status: fresh", fresh)
-        self.assertIn("- MEMORY.md:3: Alpha deployment note.", fresh)
-        self.assertIn("Status: cached", cached)
-        self.assertIn("- MEMORY.md:4: Beta rollback note.", cached)
-        self.assertNotIn("Alpha deployment note.", cached)
-
-    def test_retrieve_shared_view_termless_query_has_no_strong_match(self):
-        target = self.root / ".runtime/shared_views/imports/alice-auth-api"
-        target.mkdir(parents=True)
-        (target / "MEMORY.md").write_text(
-            "# Alice Auth API\n\nUI layout decisions live in the shared view.\n",
-            encoding="utf-8",
-        )
-        save_connections(
-            self.root,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(
-                        kind="package",
-                        path=".runtime/shared_views/imports/alice-auth-api",
-                    ),
-                )
-            },
-        )
-
-        result = retrieve_shared_view(self.root, "alice-auth-api", "UI")
-
-        self.assertIn("Status: fresh", result)
-        self.assertIn("- no strong match in published shared memory", result)
-        self.assertNotIn("- MEMORY.md:3: UI layout decisions live in the shared view.", result)
-
-    def test_retrieve_shared_view_does_not_use_cache_after_revocation(self):
-        target = self.root / ".runtime/shared_views/imports/alice-auth-api"
-        target.mkdir(parents=True)
-        (target / "MEMORY.md").write_text(
-            "# Alice Auth API\n\nRevoked cache phrase should disappear.\n",
-            encoding="utf-8",
-        )
-        save_connections(
-            self.root,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(
-                        kind="package",
-                        path=".runtime/shared_views/imports/alice-auth-api",
-                    ),
-                )
-            },
-        )
-        retrieve_shared_view(self.root, "alice-auth-api", "revoked cache")
-        save_connections(
-            self.root,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(kind="revoked"),
-                )
-            },
-        )
-
-        result = retrieve_shared_view(self.root, "alice-auth-api", "revoked cache")
-
-        self.assertIn("Shared view: alice-auth-api", result)
-        self.assertIn("Status: unavailable", result)
-        self.assertIn("Reason: access revoked", result)
-        self.assertNotIn("Status: cached", result)
-        self.assertNotIn("Revoked cache phrase should disappear.", result)
-
-    def test_retrieve_shared_view_reads_accepted_package_endpoint(self):
-        package = self.root / ".runtime/shared_views/imports/alice-auth-api"
-        (package / "dist").mkdir(parents=True)
-        (package / "export.toml").write_text(
-            """
-            version = 1
-            view_id = "alice-auth-api"
-            ref = "rightmemory://view/alice-auth-api"
-            title = "Alice Auth API"
-            """,
-            encoding="utf-8",
-        )
-        (package / "dist" / "MEMORY.md").write_text(
-            "# Alice Auth API Shared View\n\nToken expiry metadata includes token_expires_at.\n",
-            encoding="utf-8",
-        )
-        save_connections(
-            self.root,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(
-                        kind="package",
-                        path=".runtime/shared_views/imports/alice-auth-api",
-                        view_id="alice-auth-api",
-                    ),
-                )
-            },
-        )
-
-        result = retrieve_shared_view(self.root, "alice-auth-api", "token expiry")
-
-        self.assertIn("Status: fresh", result)
-        self.assertIn("Provenance: Alice Auth API", result)
-        self.assertIn("Backing: filtered Markdown", result)
-        self.assertIn("token_expires_at", result)
-
-    def test_retrieve_shared_view_uses_local_provider_retriever_prompt_backing(self):
-        provider = self.root / "provider"
-        consumer = self.root / "consumer"
-        provider.mkdir()
-        consumer.mkdir()
-        (provider / "MEMORY.md").write_text(
-            "# Provider\n\n"
-            "Auth API returns token_expires_at in login responses.\n"
-            "Payroll API returns salary bands.\n",
-            encoding="utf-8",
-        )
-        define_shared_view(
-            provider,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            description="Auth API collaboration context.",
-            retriever_instructions="Answer from auth API collaboration context.",
-            filter_terms=["auth", "token"],
-        )
-        save_connections(
-            consumer,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(kind="local", path=str(provider), view_id="alice-auth-api"),
-                )
-            },
-        )
-
-        result = retrieve_shared_view(consumer, "alice-auth-api", "token expiry salary")
-
-        self.assertIn("Status: fresh", result)
-        self.assertIn("Backing: retriever prompt", result)
-        self.assertIn("Auth API returns token_expires_at", result)
-        self.assertNotIn("Payroll API returns salary bands", result)
-
-    def test_retrieve_shared_view_does_not_scan_provider_memory_without_filter_scope(self):
-        provider = self.root / "provider"
-        consumer = self.root / "consumer"
-        provider.mkdir()
-        consumer.mkdir()
-        (provider / "MEMORY.md").write_text(
-            "# Provider\n\n"
-            "Payroll API returns salary bands.\n",
-            encoding="utf-8",
-        )
-        define_shared_view(
-            provider,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            retriever_instructions="Answer only auth API collaboration context.",
-        )
-        save_connections(
-            consumer,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(kind="local", path=str(provider), view_id="alice-auth-api"),
-                )
-            },
-        )
-
-        result = retrieve_shared_view(consumer, "alice-auth-api", "salary")
-
-        self.assertIn("Status: unavailable", result)
-        self.assertNotIn("Payroll API returns salary bands", result)
-
-    def test_retrieve_shared_view_infers_prompt_scope_without_explicit_filter_terms(self):
-        provider = self.root / "provider"
-        consumer = self.root / "consumer"
-        provider.mkdir()
-        consumer.mkdir()
-        (provider / "MEMORY.md").write_text(
-            "# Provider\n\n"
-            "Auth API returns token_expires_at in login responses.\n"
-            "Payroll API returns salary bands.\n",
-            encoding="utf-8",
-        )
-        define_shared_view(
-            provider,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            retriever_instructions="Answer only auth API collaboration context.",
-        )
-        save_connections(
-            consumer,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(kind="local", path=str(provider), view_id="alice-auth-api"),
-                )
-            },
-        )
-
-        result = retrieve_shared_view(consumer, "alice-auth-api", "token salary")
-
-        self.assertIn("Status: fresh", result)
-        self.assertIn("Backing: retriever prompt with inferred scope", result)
-        self.assertIn("Auth API returns token_expires_at", result)
-        self.assertNotIn("Payroll API returns salary bands", result)
-
-    def test_retrieve_shared_view_uses_hub_hosted_package(self):
-        provider = self.root / "provider"
-        consumer = self.root / "consumer"
-        hub = self.root / "hub"
-        provider.mkdir()
-        consumer.mkdir()
-        (provider / "MEMORY.md").write_text(
-            "# Provider\n\nAuth API accepts signed tokens.\n",
-            encoding="utf-8",
-        )
-        define_shared_view(
-            provider,
-            view_id="alice-auth-api",
-            title="Alice Auth API",
-            description="Auth API collaboration context.",
-            filter_terms=["auth"],
-        )
-        publish_shared_view(provider, "alice-auth-api", hub)
-        save_connections(
-            consumer,
-            {
-                "alice-auth-api": SharedViewConnection(
-                    heading_id="alice-auth-api",
-                    ref="rightmemory://view/alice-auth-api",
-                    target=SharedViewTarget(kind="hub", path=str(hub), view_id="alice-auth-api"),
-                )
-            },
-        )
-
-        result = retrieve_shared_view(consumer, "alice-auth-api", "signed token")
-
-        self.assertIn("Status: fresh", result)
-        self.assertIn("Provenance: hub hosted Alice Auth API", result)
-        self.assertIn("Auth API accepts signed tokens.", result)
+def _zip_bytes(files: dict[str, str]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, text in files.items():
+            archive.writestr(name, text)
+    return buffer.getvalue()

@@ -33,36 +33,33 @@ from .config import (
 from .dreamer_trigger import DreamerTriggerStore
 from .doctor import format_doctor_report, run_agent_cli_doctor
 from .hub.app import create_hub_app
+from .hub.client import HubClientError
 from .hub.store import DEFAULT_PUBLIC_BASE_URL, HubStore
 from .insight_trigger import InsightTriggerStore
 from .profiles import (
     ProfileError,
     create_profile,
     load_profiles,
+    remove_profile,
     resolve_memory_root,
-    save_profiles,
     validate_profile_name,
 )
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 from .session import MemoryWriteLock
+from .shared_view_builder import run_file_view_builder, run_question_view_builder
+from .shared_view_files import approve_file_view, invite_file_view, pull_all_file_views, pull_file_view
+from .shared_view_questions import approve_question_view, ask_question_view, publish_question_view
 from .shared_views import (
-    SharedViewTarget,
     accept_http_shared_view_invitation,
-    accept_shared_view,
     accept_shared_view_invitation,
-    build_shared_view,
-    define_shared_view,
-    export_shared_view,
     list_http_shared_view_inbox,
     list_shared_view_inbox,
     list_shared_view_notes,
     load_connections,
-    publish_http_shared_view,
-    publish_shared_view,
     record_shared_view_note,
-    retrieve_shared_view,
     save_shared_view_credential,
+    shared_view_connection_status,
 )
 from .status import collect_status, format_status_dashboard
 from .sync import SyncManager
@@ -92,6 +89,7 @@ DEFAULT_PRUNER_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 DEFAULT_PRUNER_WATCH_RETRY_SECONDS = 60
 DEFAULT_SYNC_WATCH_INTERVAL_SECONDS = 60 * 60
 DEFAULT_WATCH_MAX_CONSECUTIVE_FAILURES = 3
+DEFAULT_HUB_ROOT = Path("rightmemory-hub")
 WATCH_REFRESH_POLL_SECONDS = 5
 DREAMER_WATCH_SESSION_ID = "dreamer-watch"
 _DREAMER_WATCH_SKIPPED = "skipped"
@@ -291,51 +289,78 @@ def _profile_main(argv: list[str]) -> int:
         print(f"{name}\t{profiles[name].root}")
         return 0
     if args.command == "remove":
-        name = validate_profile_name(args.name)
-        profiles = load_profiles(home)
-        profile = profiles.pop(name, None)
-        if profile is None:
-            raise ProfileError(f"profile not found: {name}")
-        save_profiles(home, profiles)
-        print(f"removed {name}; memory root remains at {profile.root}")
+        profile = remove_profile(home, args.name)
+        print(f"removed {profile.name}; memory root remains at {profile.root}")
         return 0
     raise ValueError(f"unknown profile command: {args.command}")
+
+
+def _resolve_hub_root(hub_root: Path | None) -> Path:
+    return (hub_root or DEFAULT_HUB_ROOT).expanduser().resolve()
+
+
+def _resolve_hub_revoke_args(args: argparse.Namespace) -> tuple[Path, str]:
+    if args.token_id is None:
+        return _resolve_hub_root(None), args.hub_root_or_token_id
+    return _resolve_hub_root(Path(args.hub_root_or_token_id)), args.token_id
+
+
+def _hub_init_hint(hub_root: Path) -> str:
+    if hub_root == _resolve_hub_root(None):
+        return "rightmemory hub init"
+    return f"rightmemory hub init {hub_root}"
 
 
 def _hub_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory hub")
     subparsers = parser.add_subparsers(dest="command", required=True)
     init = subparsers.add_parser("init")
-    init.add_argument("hub_root", type=Path)
+    init.add_argument("hub_root", nargs="?", type=Path)
     init.add_argument("--admin-token")
-    init.add_argument("--public-base-url", default=DEFAULT_PUBLIC_BASE_URL)
+    init.add_argument("--public-base-url")
     status = subparsers.add_parser("status")
-    status.add_argument("hub_root", type=Path)
+    status.add_argument("hub_root", nargs="?", type=Path)
     token = subparsers.add_parser("token")
     token_subparsers = token.add_subparsers(dest="token_command", required=True)
     token_list = token_subparsers.add_parser("list")
-    token_list.add_argument("hub_root", type=Path)
+    token_list.add_argument("hub_root", nargs="?", type=Path)
     token_create = token_subparsers.add_parser("create")
-    token_create.add_argument("hub_root", type=Path)
+    token_create.add_argument("hub_root", nargs="?", type=Path)
     token_create.add_argument("--provider", required=True)
     token_create.add_argument("--label")
     token_revoke = token_subparsers.add_parser("revoke")
-    token_revoke.add_argument("hub_root", type=Path)
-    token_revoke.add_argument("token_id")
+    token_revoke.add_argument("hub_root_or_token_id")
+    token_revoke.add_argument("token_id", nargs="?")
     serve = subparsers.add_parser("serve")
-    serve.add_argument("hub_root", type=Path)
+    serve.add_argument("hub_root", nargs="?", type=Path)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
     args = parser.parse_args(argv)
 
     if args.command == "init":
-        hub_root = args.hub_root.expanduser().resolve()
+        hub_root = _resolve_hub_root(args.hub_root)
         store = HubStore(hub_root)
-        admin_token = args.admin_token or (None if _hub_initialized(store) else secrets.token_urlsafe(32))
-        store.initialize(admin_token=admin_token, public_base_url=args.public_base_url)
-        if admin_token and not store.verify_token(admin_token, action="admin"):
-            raise ValueError("admin token was not installed because a bootstrap admin token already exists")
-        config = store.load_config()
+        requested_public_base_url = args.public_base_url or DEFAULT_PUBLIC_BASE_URL
+        initialized = _hub_initialized(store)
+        if initialized:
+            config = store.load_config()
+            if args.public_base_url is not None and args.public_base_url != config.public_base_url:
+                raise ValueError(
+                    "hub is already initialized with public_base_url "
+                    f"{config.public_base_url}; requested {args.public_base_url}. Use a new hub root."
+                )
+            if args.admin_token and not store.verify_token(args.admin_token, action="admin"):
+                raise ValueError(
+                    "hub is already initialized with a different bootstrap admin token; "
+                    "token rotation is not supported by hub init"
+                )
+            admin_token = None
+        else:
+            admin_token = args.admin_token or secrets.token_urlsafe(32)
+            store.initialize(admin_token=admin_token, public_base_url=requested_public_base_url)
+            config = store.load_config()
+            if not store.verify_token(admin_token, action="admin"):
+                raise ValueError("admin token was not installed")
         print(f"hub_root\t{hub_root}")
         print("initialized\tyes")
         print(f"public_base_url\t{config.public_base_url}")
@@ -345,24 +370,28 @@ def _hub_main(argv: list[str]) -> int:
             print("admin_token\tunchanged")
         return 0
     if args.command == "status":
-        print(_format_hub_status(args.hub_root))
+        print(_format_hub_status(_resolve_hub_root(args.hub_root)))
         return 0
     if args.command == "token":
         return _hub_token_main(args)
     if args.command == "serve":
-        hub_root = args.hub_root.expanduser().resolve()
+        hub_root = _resolve_hub_root(args.hub_root)
         if not _hub_initialized(HubStore(hub_root)):
-            raise ValueError(f"hub is not initialized: {hub_root}. Run: rightmemory hub init {hub_root}")
+            raise ValueError(f"hub is not initialized: {hub_root}. Run: {_hub_init_hint(hub_root)}")
         uvicorn.run(create_hub_app(hub_root), host=args.host, port=args.port)
         return 0
     raise ValueError(f"unknown hub command: {args.command}")
 
 
 def _hub_token_main(args: argparse.Namespace) -> int:
-    hub_root = args.hub_root.expanduser().resolve()
+    if args.token_command == "revoke":
+        hub_root, token_id = _resolve_hub_revoke_args(args)
+    else:
+        hub_root = _resolve_hub_root(args.hub_root)
+        token_id = ""
     store = HubStore(hub_root)
     if not _hub_initialized(store):
-        raise ValueError(f"hub is not initialized: {hub_root}. Run: rightmemory hub init {hub_root}")
+        raise ValueError(f"hub is not initialized: {hub_root}. Run: {_hub_init_hint(hub_root)}")
     if args.token_command == "create":
         token = store.create_provider_token(args.provider, label=args.label)
         print(f"token_id\t{token.token_id}")
@@ -390,13 +419,13 @@ def _hub_token_main(args: argparse.Namespace) -> int:
                         revoked,
                     ]
                 )
-            )
+        )
         return 0
     if args.token_command == "revoke":
-        if store.revoke_token(args.token_id):
-            print(f"revoked\t{args.token_id}")
+        if store.revoke_token(token_id):
+            print(f"revoked\t{token_id}")
             return 0
-        print(f"not_found\t{args.token_id}")
+        print(f"not_found\t{token_id}")
         return 1
     raise ValueError(f"unknown hub token command: {args.token_command}")
 
@@ -429,39 +458,39 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory shared-view")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("list")
-    define = subparsers.add_parser("define")
-    define.add_argument("view_id")
-    define.add_argument("--title", required=True)
-    define.add_argument("--description")
-    define.add_argument("--audience")
-    define.add_argument("--maintainer")
-    define.add_argument("--ref")
-    define.add_argument("--instructions")
-    define.add_argument("--source", action="append", dest="sources")
-    define.add_argument("--term", action="append", dest="terms")
-    define.add_argument("--include-all", action="store_true")
-    build = subparsers.add_parser("build")
-    build.add_argument("view_id")
-    build.add_argument("--query", default="")
-    build.add_argument("--context-lines", type=int, default=0)
-    build.add_argument("--limit", type=int, default=200)
-    export = subparsers.add_parser("export")
-    export.add_argument("view_id")
-    export.add_argument("--target", required=True, type=Path)
-    export.add_argument("--query", default="")
-    export.add_argument("--replace", action="store_true")
-    publish = subparsers.add_parser("publish")
-    publish.add_argument("view_id")
-    publish.add_argument("--hub", required=True, type=Path)
-    publish.add_argument("--query", default="")
-    publish.add_argument("--replace", action="store_true")
-    publish_http = subparsers.add_parser("publish-http")
-    publish_http.add_argument("view_id")
-    publish_http.add_argument("--hub-url", required=True)
-    publish_http.add_argument("--credential-id", required=True)
-    publish_http.add_argument("--query", default="")
-    publish_http.add_argument("--invite-label")
-    publish_http.add_argument("--expires-at")
+    build_file = subparsers.add_parser("build-file")
+    build_file.add_argument("view_id")
+    build_file.add_argument("intent", nargs="+")
+    build_file.add_argument("--title", required=True)
+    build_file.add_argument("--hub-url", required=True)
+    build_file.add_argument("--credential-id", required=True)
+    build_question = subparsers.add_parser("build-question")
+    build_question.add_argument("view_id")
+    build_question.add_argument("intent", nargs="+")
+    build_question.add_argument("--title", required=True)
+    publish_question = subparsers.add_parser("publish-question")
+    publish_question.add_argument("view_id")
+    publish_question.add_argument("--hub-url", required=True)
+    publish_question.add_argument("--credential-id", required=True)
+    publish_question.add_argument("--question-base-url", required=True)
+    publish_question.add_argument("--label")
+    publish_question.add_argument("--expires-at")
+    invite = subparsers.add_parser("invite")
+    invite.add_argument("view_id")
+    invite.add_argument("--hub-url")
+    invite.add_argument("--credential-id")
+    invite.add_argument("--label")
+    invite.add_argument("--expires-at")
+    approve = subparsers.add_parser("approve")
+    approve.add_argument("view_id")
+    approve.add_argument("--type", choices=("file", "question"), required=True)
+    pull = subparsers.add_parser("pull")
+    pull.add_argument("heading_id", nargs="?")
+    status_parser = subparsers.add_parser("status")
+    status_parser.add_argument("heading_id", nargs="?")
+    ask = subparsers.add_parser("ask")
+    ask.add_argument("heading_id")
+    ask.add_argument("question", nargs=argparse.REMAINDER)
     credential = subparsers.add_parser("credential")
     credential_subparsers = credential.add_subparsers(dest="credential_command", required=True)
     credential_set = credential_subparsers.add_parser("set")
@@ -474,9 +503,6 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     credential_set.add_argument("--hub-url", required=True)
     credential_set.add_argument("--view-id")
     credential_set.add_argument("--provider")
-    retrieve = subparsers.add_parser("retrieve")
-    retrieve.add_argument("heading_id")
-    retrieve.add_argument("query", nargs=argparse.REMAINDER)
     note = subparsers.add_parser("note")
     note.add_argument("heading_id")
     note.add_argument("--confirm", action="store_true")
@@ -491,25 +517,12 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     inbox_http.add_argument("--hub-url", required=True)
     inbox_http.add_argument("--credential-id", required=True)
     inbox_http.add_argument("--provider", required=True)
-    accept = subparsers.add_parser("accept")
-    accept.add_argument("heading_id")
-    accept.add_argument("--title", required=True)
-    accept.add_argument("--body", default="")
-    accept.add_argument("--ref", required=True)
-    accept.add_argument("--relationship", choices=("human", "owned-agent", "team-space", "external"), default="human")
-    accept.add_argument("--maintainer")
-    accept.add_argument("--description")
-    accept.add_argument("--accepted-from")
-    accept.add_argument("--package")
-    accept.add_argument("--provider-root", type=Path)
-    accept.add_argument("--hub", type=Path)
     accept_invite = subparsers.add_parser("accept-invite")
     accept_invite.add_argument("invitation")
     accept_invite.add_argument("--heading-id")
     accept_invite.add_argument("--title")
     accept_invite.add_argument("--body")
     accept_invite.add_argument("--relationship", choices=("human", "owned-agent", "team-space", "external"))
-    accept_invite.add_argument("--no-copy-package", action="store_true")
     if argv[:1] == ["note"]:
         args = note.parse_intermixed_args(argv[1:])
         args.command = "note"
@@ -519,54 +532,91 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
         for heading_id, connection in sorted(load_connections(memory_root).items()):
             maintainer = connection.maintainer or "-"
             description = connection.description or "-"
-            print(f"{heading_id}\t{connection.relationship}\t{maintainer}\t{description}")
+            print(f"{heading_id}\t{connection.view_type}\t{connection.relationship}\t{maintainer}\t{description}")
         return 0
-    if args.command == "define":
+    if args.command == "build-file":
+        intent = " ".join(args.intent).strip()
+        if not intent:
+            raise ValueError("shared-view build-file requires an intent")
         print(
-            define_shared_view(
+            run_file_view_builder(
                 memory_root,
                 view_id=args.view_id,
                 title=args.title,
-                description=args.description,
-                audience=args.audience,
-                maintainer=args.maintainer,
-                retriever_instructions=args.instructions,
-                source_globs=args.sources,
-                filter_terms=args.terms,
-                include_all=args.include_all,
-                ref=args.ref,
+                intent=intent,
+                hub_url=args.hub_url,
+                credential_id=args.credential_id,
             )
         )
         return 0
-    if args.command == "build":
+    if args.command == "build-question":
+        intent = " ".join(args.intent).strip()
+        if not intent:
+            raise ValueError("shared-view build-question requires an intent")
         print(
-            build_shared_view(
+            run_question_view_builder(
                 memory_root,
-                args.view_id,
-                query=args.query,
-                context_lines=args.context_lines,
-                limit=args.limit,
+                view_id=args.view_id,
+                title=args.title,
+                intent=intent,
             )
         )
         return 0
-    if args.command == "export":
-        print(export_shared_view(memory_root, args.view_id, args.target, replace=args.replace, query=args.query))
-        return 0
-    if args.command == "publish":
-        print(publish_shared_view(memory_root, args.view_id, args.hub, replace=args.replace, query=args.query))
-        return 0
-    if args.command == "publish-http":
+    if args.command == "publish-question":
         print(
-            publish_http_shared_view(
+            publish_question_view(
                 memory_root,
                 args.view_id,
                 hub_url=args.hub_url,
                 credential_id=args.credential_id,
-                query=args.query,
-                invitation_label=args.invite_label,
+                question_base_url=args.question_base_url,
+                label=args.label,
                 expires_at=args.expires_at,
             )
         )
+        return 0
+    if args.command == "invite":
+        print(
+            invite_file_view(
+                memory_root,
+                args.view_id,
+                hub_url=args.hub_url,
+                credential_id=args.credential_id,
+                label=args.label,
+                expires_at=args.expires_at,
+            )
+        )
+        return 0
+    if args.command == "approve":
+        if args.type == "file":
+            print(approve_file_view(memory_root, args.view_id))
+        else:
+            print(approve_question_view(memory_root, args.view_id))
+        return 0
+    if args.command == "pull":
+        if args.heading_id:
+            result = pull_file_view(memory_root, args.heading_id)
+            print(result.message)
+            return 0 if result.status in {"pulled", "stale"} else 1
+        exit_code = 0
+        for result in pull_all_file_views(memory_root):
+            print(f"{result.heading_id}\t{result.status}\t{result.message}")
+            if result.status == "unavailable":
+                exit_code = 1
+        return exit_code
+    if args.command == "status":
+        if args.heading_id:
+            item = shared_view_connection_status(memory_root, args.heading_id)
+            print(_format_shared_view_status(item))
+            return 0 if item.get("status") != "unavailable" else 1
+        for heading_id in sorted(load_connections(memory_root)):
+            print(_format_shared_view_status(shared_view_connection_status(memory_root, heading_id)))
+        return 0
+    if args.command == "ask":
+        question = " ".join(args.question).strip()
+        if not question:
+            raise ValueError("shared-view ask requires a question")
+        print(ask_question_view(memory_root, args.heading_id, question), end="")
         return 0
     if args.command == "credential":
         if args.credential_command == "set":
@@ -582,12 +632,6 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
             print(f"saved shared view credential {args.credential_id}")
             return 0
         raise ValueError(f"unknown shared-view credential command: {args.credential_command}")
-    if args.command == "retrieve":
-        query = " ".join(args.query).strip()
-        if not query:
-            raise ValueError("shared-view retrieve requires a query")
-        print(retrieve_shared_view(memory_root, args.heading_id, query), end="")
-        return 0
     if args.command == "note":
         message = " ".join(args.message).strip()
         if not message:
@@ -620,24 +664,6 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
         ):
             print(json.dumps(record, ensure_ascii=False, sort_keys=True))
         return 0
-    if args.command == "accept":
-        target = _shared_view_accept_target(args)
-        with MemoryWriteLock(memory_root):
-            print(
-                accept_shared_view(
-                    memory_root,
-                    heading_id=args.heading_id,
-                    title=args.title,
-                    body=args.body,
-                    ref=args.ref,
-                    relationship=args.relationship,
-                    maintainer=args.maintainer,
-                    description=args.description,
-                    accepted_from=args.accepted_from,
-                    target=target,
-                )
-            )
-        return 0
     if args.command == "accept-invite":
         with MemoryWriteLock(memory_root):
             print(
@@ -648,7 +674,6 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
                     title=args.title,
                     body=args.body,
                     relationship=args.relationship,
-                    copy_package=not args.no_copy_package,
                 )
             )
         return 0
@@ -663,7 +688,6 @@ def _accept_shared_view_invitation_from_cli(
     title: str | None,
     body: str | None,
     relationship: str | None,
-    copy_package: bool,
 ) -> str:
     if _is_http_url(invitation):
         return accept_http_shared_view_invitation(
@@ -674,15 +698,18 @@ def _accept_shared_view_invitation_from_cli(
             body=body,
             relationship=relationship,
         )
-    return accept_shared_view_invitation(
-        memory_root,
-        Path(invitation),
-        heading_id=heading_id,
-        title=title,
-        body=body,
-        relationship=relationship,
-        copy_package=copy_package,
-    )
+    return accept_shared_view_invitation(memory_root, Path(invitation))
+
+
+def _format_shared_view_status(item: dict[str, object]) -> str:
+    fields = [
+        str(item.get("heading_id") or "-"),
+        str(item.get("type") or "-"),
+        str(item.get("target") or "-"),
+        str(item.get("status") or "-"),
+        str(item.get("message") or "-"),
+    ]
+    return "\t".join(fields)
 
 
 def _shared_view_credential_token(args: argparse.Namespace) -> str:
@@ -699,23 +726,6 @@ def _shared_view_credential_token(args: argparse.Namespace) -> str:
 
 def _is_http_url(value: str) -> bool:
     return value.startswith("http://") or value.startswith("https://")
-
-
-def _shared_view_accept_target(args: argparse.Namespace) -> SharedViewTarget | None:
-    selected = [
-        name
-        for name in ("package", "provider_root", "hub")
-        if getattr(args, name) is not None
-    ]
-    if len(selected) > 1:
-        raise ValueError("shared-view accept target must use one of --package, --provider-root, or --hub")
-    if args.package is not None:
-        return SharedViewTarget(kind="package", path=str(Path(args.package).expanduser().resolve()), view_id=args.heading_id)
-    if args.provider_root is not None:
-        return SharedViewTarget(kind="local", path=str(args.provider_root.expanduser().resolve()), view_id=args.heading_id)
-    if args.hub is not None:
-        return SharedViewTarget(kind="hub", path=str(args.hub.expanduser().resolve()), view_id=args.heading_id)
-    return None
 
 
 def _web_main(argv: list[str], memory_root: Path) -> int:
@@ -749,6 +759,17 @@ def _web_main(argv: list[str], memory_root: Path) -> int:
         print(format_web_status(start_web_service(memory_root, host=args.host, port=args.port)))
         return 0
     raise ValueError(f"unknown web command: {args.command}")
+
+
+def cli_main(argv: list[str] | None = None) -> int:
+    try:
+        return main(argv)
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
+    except (ValueError, ProfileError, HubClientError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 def _is_help_request(args: list[str]) -> bool:
@@ -1682,4 +1703,4 @@ def _insight_trigger_incrementer(memory_root: Path, points_per_item: float) -> C
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli_main())

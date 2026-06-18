@@ -6,13 +6,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.async_update import AsyncUpdateState, AsyncUpdateStore
-from rightmemory.cli import _daemon_stdio_json, _dreamer_watch_once, _handle_json_request, _insight_watch_once, main
+from rightmemory.cli import _daemon_stdio_json, _dreamer_watch_once, _handle_json_request, _insight_watch_once, cli_main, main
 from rightmemory.config import DreamerWatchConfig, InsightWatchConfig
 from rightmemory.dreamer_trigger import DreamerTriggerStore
 from rightmemory.doctor import DoctorCheck
 from rightmemory.hub.store import HubStore
 from rightmemory.insight_trigger import InsightTriggerStore
-from rightmemory.shared_views import load_connections, load_shared_view_credential
+from rightmemory.shared_view_files import FileViewPullResult
+from rightmemory.shared_view_models import SharedViewConnection, SharedViewTarget, load_shared_view_credential, save_connections
 from rightmemory.watch import MANAGED_WATCH_TARGETS, WATCH_COMMANDS, _process_command
 
 
@@ -38,6 +39,18 @@ class FakeRuntime:
 
     def cleanup(self):
         pass
+
+
+class CliEntrypointTests(unittest.TestCase):
+    def test_cli_main_reports_expected_errors_without_traceback(self):
+        stderr = io.StringIO()
+
+        with patch("rightmemory.cli.main", side_effect=ValueError("hub request failed: HTTP 404")), patch("sys.stderr", stderr):
+            result = cli_main(["shared-view", "accept-invite", "https://hub.example.test/i/revoked"])
+
+        self.assertEqual(result, 1)
+        self.assertEqual(stderr.getvalue(), "error: hub request failed: HTTP 404\n")
+        self.assertNotIn("Traceback", stderr.getvalue())
 
 
 class FakeReviewResult:
@@ -233,124 +246,253 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("session s1: hello", stdout.getvalue())
 
-    def test_shared_view_accept_cli_uses_active_memory_root(self):
+    def test_build_file_cli_runs_builder_agent(self):
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            (root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli.run_file_view_builder", return_value="built file view auth-api-files") as builder,
+                patch("sys.stdout", stdout),
+            ):
+                result = main([
+                    "shared-view",
+                    "build-file",
+                    "auth-api-files",
+                    "Expose",
+                    "auth",
+                    "API",
+                    "context",
+                    "--title",
+                    "Auth API Files",
+                    "--hub-url",
+                    "https://hub.example.test",
+                    "--credential-id",
+                    "alice-publish",
+                ])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(builder.call_args.kwargs["intent"], "Expose auth API context")
+        self.assertEqual(builder.call_args.kwargs["hub_url"], "https://hub.example.test")
+        self.assertEqual(builder.call_args.kwargs["credential_id"], "alice-publish")
+        self.assertIn("built file view", stdout.getvalue())
+
+    def test_build_question_cli_runs_builder_agent(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli.run_question_view_builder", return_value="built question view auth-api-ask") as builder,
+                patch("sys.stdout", stdout),
+            ):
+                result = main([
+                    "shared-view",
+                    "build-question",
+                    "auth-api-ask",
+                    "Let",
+                    "frontend",
+                    "agents",
+                    "ask",
+                    "auth",
+                    "questions",
+                    "--title",
+                    "Auth API Questions",
+                ])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(builder.call_args.kwargs["intent"], "Let frontend agents ask auth questions")
+        self.assertIn("built question view", stdout.getvalue())
+
+    def test_shared_view_approve_cli_dispatches_by_type(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli.approve_file_view", return_value="approved file view auth-api-files") as approve,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["shared-view", "approve", "auth-api-files", "--type", "file"])
+
+        self.assertEqual(result, 0)
+        approve.assert_called_once_with(root, "auth-api-files")
+        self.assertIn("approved file view", stdout.getvalue())
+
+    def test_shared_view_pull_cli_dispatches_file_view(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli.pull_file_view", return_value=FileViewPullResult("auth-api-files", "pulled", "file view pulled")) as pull,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["shared-view", "pull", "auth-api-files"])
+
+        self.assertEqual(result, 0)
+        pull.assert_called_once_with(root, "auth-api-files")
+        self.assertIn("file view pulled", stdout.getvalue())
+
+    def test_shared_view_status_cli_reports_file_import_state(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            save_connections(
+                root,
+                {
+                    "auth-api-files": SharedViewConnection(
+                        heading_id="auth-api-files",
+                        view_type="file",
+                        ref="rightmemory://mf/auth-api-files",
+                        target=SharedViewTarget(
+                            kind="http-file",
+                            base_url="https://hub.example.test",
+                            credential_id="http-auth-api-files",
+                        ),
+                    )
+                },
+            )
+            imported = root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"
+            imported.mkdir(parents=True)
+            (imported / "MEMORY.md").write_text("published context\n", encoding="utf-8")
 
             with (
                 patch("rightmemory.cli.default_memory_root", return_value=root),
                 patch("sys.stdout", stdout),
             ):
-                result = main(
-                    [
-                        "shared-view",
-                        "accept",
-                        "alice-auth-api",
-                        "--title",
-                        "Alice Auth API",
-                        "--body",
-                        "Alice owns auth API collaboration context.",
-                        "--ref",
-                        "rightmemory://view/alice-auth-api",
-                        "--relationship",
-                        "human",
-                        "--maintainer",
-                        "Alice",
-                        "--description",
-                        "Auth API collaboration context",
-                        "--package",
-                        ".runtime/shared_views/imports/alice-auth-api",
-                    ]
-                )
-
-            memory = (root / "MEMORY.md").read_text(encoding="utf-8")
-            connection = load_connections(root)["alice-auth-api"]
+                result = main(["shared-view", "status", "auth-api-files"])
 
         self.assertEqual(result, 0)
-        self.assertIn("accepted shared view alice-auth-api", stdout.getvalue())
-        self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
         self.assertEqual(
-            connection.target.path,
-            str((Path.cwd() / ".runtime/shared_views/imports/alice-auth-api").resolve()),
+            stdout.getvalue().strip(),
+            "auth-api-files\tfile\thttp-file\timported\tfile view import is available",
         )
 
-    def test_shared_view_accept_cli_uses_memory_write_lock(self):
-        stdout = io.StringIO()
-        events = []
+    def test_shared_view_ask_cli_dispatches_question_view(self):
+        calls = []
 
-        class FakeMemoryWriteLock:
-            def __init__(self, memory_root):
-                self.memory_root = memory_root
-
-            def __enter__(self):
-                events.append(("lock_enter", self.memory_root))
-                return self
-
-            def __exit__(self, exc_type, exc, traceback):
-                events.append(("lock_exit", exc_type))
+        def fake_ask(memory_root, heading_id, question):
+            calls.append((memory_root, heading_id, question))
+            return "Shared question: auth-api-ask\nStatus: answered\nAnswer: Use token_expires_at.\n"
 
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-
-            def fake_accept_shared_view(memory_root, **kwargs):
-                events.append(("accept", memory_root, kwargs["heading_id"]))
-                return f"accepted shared view {kwargs['heading_id']}"
-
             with (
                 patch("rightmemory.cli.default_memory_root", return_value=root),
-                patch("rightmemory.cli.MemoryWriteLock", FakeMemoryWriteLock),
-                patch("rightmemory.cli.accept_shared_view", side_effect=fake_accept_shared_view),
+                patch("rightmemory.cli.ask_question_view", side_effect=fake_ask),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                result = main(["shared-view", "ask", "auth-api-ask", "How", "do", "tokens", "refresh?"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls[0], (root, "auth-api-ask", "How do tokens refresh?"))
+        self.assertIn("Status: answered", stdout.getvalue())
+
+    def test_shared_view_publish_question_cli_dispatches_question_publisher(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch(
+                    "rightmemory.cli.publish_question_view",
+                    return_value="published question view auth-api-ask\ninvitation_url\thttps://hub.example.test/i/invite-token",
+                ) as publish,
                 patch("sys.stdout", stdout),
             ):
                 result = main(
                     [
                         "shared-view",
-                        "accept",
-                        "alice-auth-api",
-                        "--title",
-                        "Alice Auth API",
-                        "--ref",
-                        "rightmemory://view/alice-auth-api",
+                        "publish-question",
+                        "auth-api-ask",
+                        "--hub-url",
+                        "https://hub.example.test",
+                        "--credential-id",
+                        "alice-publish",
+                        "--question-base-url",
+                        "https://provider.example.test",
+                        "--label",
+                        "frontend",
+                        "--expires-at",
+                        "2026-07-01T00:00:00+00:00",
                     ]
                 )
 
         self.assertEqual(result, 0)
-        self.assertEqual(
-            events,
-            [
-                ("lock_enter", root),
-                ("accept", root, "alice-auth-api"),
-                ("lock_exit", None),
-            ],
+        publish.assert_called_once_with(
+            root,
+            "auth-api-ask",
+            hub_url="https://hub.example.test",
+            credential_id="alice-publish",
+            question_base_url="https://provider.example.test",
+            label="frontend",
+            expires_at="2026-07-01T00:00:00+00:00",
         )
-        self.assertIn("accepted shared view alice-auth-api", stdout.getvalue())
+        self.assertIn("invitation_url", stdout.getvalue())
+
+    def test_shared_view_invite_cli_dispatches_file_view_inviter(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch(
+                    "rightmemory.cli.invite_file_view",
+                    return_value="invited file view auth-api-files\ninvitation_url\thttps://hub.example.test/i/invite-token",
+                ) as invite,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(
+                    [
+                        "shared-view",
+                        "invite",
+                        "auth-api-files",
+                        "--hub-url",
+                        "https://hub.example.test",
+                        "--credential-id",
+                        "alice-publish",
+                        "--label",
+                        "frontend",
+                        "--expires-at",
+                        "2026-07-01T00:00:00+00:00",
+                    ]
+                )
+
+        self.assertEqual(result, 0)
+        invite.assert_called_once_with(
+            root,
+            "auth-api-files",
+            hub_url="https://hub.example.test",
+            credential_id="alice-publish",
+            label="frontend",
+            expires_at="2026-07-01T00:00:00+00:00",
+        )
+        self.assertIn("invitation_url", stdout.getvalue())
+
+    def test_shared_view_legacy_commands_are_removed(self):
+        for command in ("define", "build", "export", "publish", "publish-http", "retrieve", "accept"):
+            with self.subTest(command=command):
+                with self.assertRaises(SystemExit):
+                    main(["shared-view", command])
 
     def test_shared_view_list_cli_prints_connections(self):
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            (root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
-
-            with patch("rightmemory.cli.default_memory_root", return_value=root), patch("sys.stdout", io.StringIO()):
-                main(
-                    [
-                        "shared-view",
-                        "accept",
-                        "alice-auth-api",
-                        "--title",
-                        "Alice Auth API",
-                        "--ref",
-                        "rightmemory://view/alice-auth-api",
-                        "--relationship",
-                        "human",
-                        "--maintainer",
-                        "Alice",
-                        "--description",
-                        "Auth API collaboration context",
-                    ]
-                )
+            save_connections(
+                root,
+                {
+                    "auth-api-files": SharedViewConnection(
+                        heading_id="auth-api-files",
+                        view_type="file",
+                        ref="rightmemory://mf/auth-api-files",
+                        relationship="human",
+                        maintainer="Alice",
+                        description="Auth API file context",
+                    )
+                },
+            )
 
             with (
                 patch("rightmemory.cli.default_memory_root", return_value=root),
@@ -359,206 +501,33 @@ class JsonRequestTests(unittest.TestCase):
                 result = main(["shared-view", "list"])
 
         self.assertEqual(result, 0)
-        self.assertEqual(stdout.getvalue().strip(), "alice-auth-api\thuman\tAlice\tAuth API collaboration context")
-
-    def test_shared_view_retrieve_cli_returns_endpoint_context(self):
-        stdout = io.StringIO()
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            target = root / ".runtime/shared_views/imports/alice-auth-api"
-            target.mkdir(parents=True)
-            (target / "MEMORY.md").write_text(
-                "# Alice Auth API\n\ntoken_expires_at is returned with auth token expiry metadata.\n",
-                encoding="utf-8",
-            )
-            (root / "shared_views.toml").write_text(
-                """
-                [connections."alice-auth-api"]
-                ref = "rightmemory://view/alice-auth-api"
-                relationship = "human"
-
-                [connections."alice-auth-api".target]
-                kind = "package"
-                path = ".runtime/shared_views/imports/alice-auth-api"
-                """,
-                encoding="utf-8",
-            )
-
-            with (
-                patch("rightmemory.cli.default_memory_root", return_value=root),
-                patch("sys.stdout", stdout),
-            ):
-                result = main(["shared-view", "retrieve", "alice-auth-api", "token", "expiry"])
-
-        self.assertEqual(result, 0)
-        self.assertIn("Status: fresh", stdout.getvalue())
-        self.assertIn("token_expires_at", stdout.getvalue())
+        self.assertEqual(stdout.getvalue().strip(), "auth-api-files\tfile\thuman\tAlice\tAuth API file context")
 
     def test_shared_view_note_cli_requires_confirmation_for_human_connection(self):
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            (root / "shared_views.toml").write_text(
-                """
-                [connections."alice-auth-api"]
-                ref = "rightmemory://view/alice-auth-api"
-                relationship = "human"
-                maintainer = "Alice"
-                """,
-                encoding="utf-8",
+            save_connections(
+                root,
+                {
+                    "auth-api-files": SharedViewConnection(
+                        heading_id="auth-api-files",
+                        view_type="file",
+                        ref="rightmemory://mf/auth-api-files",
+                        relationship="human",
+                        maintainer="Alice",
+                    )
+                },
             )
 
             with (
                 patch("rightmemory.cli.default_memory_root", return_value=root),
                 patch("sys.stdout", stdout),
             ):
-                result = main(["shared-view", "note", "alice-auth-api", "Docs", "are", "stale"])
+                result = main(["shared-view", "note", "auth-api-files", "Docs", "are", "stale"])
 
         self.assertEqual(result, 0)
         self.assertIn("confirmation required", stdout.getvalue())
-
-    def test_shared_view_note_cli_confirm_after_heading_records_human_note(self):
-        stdout = io.StringIO()
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            (root / "shared_views.toml").write_text(
-                """
-                [connections."alice-auth-api"]
-                ref = "rightmemory://view/alice-auth-api"
-                relationship = "human"
-                maintainer = "Alice"
-                """,
-                encoding="utf-8",
-            )
-
-            with (
-                patch("rightmemory.cli.default_memory_root", return_value=root),
-                patch("sys.stdout", stdout),
-            ):
-                result = main(["shared-view", "note", "alice-auth-api", "--confirm", "Docs", "are", "stale"])
-
-            interaction_path = root / ".runtime/shared_views/interactions/alice-auth-api.jsonl"
-            records = [json.loads(line) for line in interaction_path.read_text(encoding="utf-8").splitlines()]
-
-        self.assertEqual(result, 0)
-        self.assertIn("queued shared view note", stdout.getvalue())
-        self.assertEqual(records[0]["relationship"], "human")
-        self.assertEqual(records[0]["status"], "queued")
-        self.assertEqual(records[0]["message"], "Docs are stale")
-
-    def test_shared_view_note_cli_actor_after_heading_is_recorded(self):
-        stdout = io.StringIO()
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            (root / "shared_views.toml").write_text(
-                """
-                [connections."auth-agent"]
-                ref = "rightmemory://view/auth-agent"
-                relationship = "owned-agent"
-                """,
-                encoding="utf-8",
-            )
-
-            with (
-                patch("rightmemory.cli.default_memory_root", return_value=root),
-                patch("sys.stdout", stdout),
-            ):
-                result = main(["shared-view", "note", "auth-agent", "--actor", "assistant", "Docs", "are", "stale"])
-
-            interaction_path = root / ".runtime/shared_views/interactions/auth-agent.jsonl"
-            records = [json.loads(line) for line in interaction_path.read_text(encoding="utf-8").splitlines()]
-
-        self.assertEqual(result, 0)
-        self.assertIn("queued shared view note", stdout.getvalue())
-        self.assertEqual(records[0]["actor"], "assistant")
-        self.assertEqual(records[0]["status"], "queued")
-        self.assertEqual(records[0]["message"], "Docs are stale")
-
-    def test_shared_view_define_build_and_export_cli(self):
-        stdout = io.StringIO()
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            package = root / "package"
-            (root / "MEMORY.md").write_text(
-                "# Provider\n\nAuth API accepts signed tokens.\nPrivate payroll note.\n",
-                encoding="utf-8",
-            )
-
-            with (
-                patch("rightmemory.cli.default_memory_root", return_value=root),
-                patch("sys.stdout", stdout),
-            ):
-                define_result = main(
-                    [
-                        "shared-view",
-                        "define",
-                        "alice-auth-api",
-                        "--title",
-                        "Alice Auth API",
-                        "--description",
-                        "Auth API collaboration context.",
-                        "--maintainer",
-                        "Alice",
-                        "--instructions",
-                        "Answer from auth API context.",
-                        "--term",
-                        "auth",
-                    ]
-                )
-                build_result = main(["shared-view", "build", "alice-auth-api", "--context-lines", "0"])
-                export_result = main(["shared-view", "export", "alice-auth-api", "--target", str(package)])
-
-            exported = (package / "dist" / "MEMORY.md").read_text(encoding="utf-8")
-
-        self.assertEqual(define_result, 0)
-        self.assertEqual(build_result, 0)
-        self.assertEqual(export_result, 0)
-        self.assertIn("defined shared view alice-auth-api", stdout.getvalue())
-        self.assertIn("built shared view alice-auth-api", stdout.getvalue())
-        self.assertIn("exported shared view alice-auth-api", stdout.getvalue())
-        self.assertIn("Auth API accepts signed tokens.", exported)
-        self.assertNotIn("Private payroll note.", exported)
-
-    def test_shared_view_accept_invite_cli_records_package_connection(self):
-        stdout = io.StringIO()
-        with tempfile.TemporaryDirectory() as tempdir:
-            provider = Path(tempdir) / "provider"
-            consumer = Path(tempdir) / "consumer"
-            package = Path(tempdir) / "package"
-            provider.mkdir()
-            consumer.mkdir()
-            (provider / "MEMORY.md").write_text("# Provider\n\nAuth API accepts signed tokens.\n", encoding="utf-8")
-            (consumer / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
-
-            with patch("rightmemory.cli.default_memory_root", return_value=provider), patch("sys.stdout", io.StringIO()):
-                main(
-                    [
-                        "shared-view",
-                        "define",
-                        "alice-auth-api",
-                        "--title",
-                        "Alice Auth API",
-                        "--description",
-                        "Auth API collaboration context.",
-                        "--term",
-                        "auth",
-                    ]
-                )
-                main(["shared-view", "export", "alice-auth-api", "--target", str(package)])
-
-            with (
-                patch("rightmemory.cli.default_memory_root", return_value=consumer),
-                patch("sys.stdout", stdout),
-            ):
-                result = main(["shared-view", "accept-invite", str(package)])
-
-            memory = (consumer / "MEMORY.md").read_text(encoding="utf-8")
-            registry = (consumer / "shared_views.toml").read_text(encoding="utf-8")
-
-        self.assertEqual(result, 0)
-        self.assertIn("accepted shared view alice-auth-api", stdout.getvalue())
-        self.assertIn("### Alice Auth API {M#alice-auth-api}", memory)
-        self.assertIn('kind = "package"', registry)
 
     def test_shared_view_accept_invite_cli_dispatches_http_urls(self):
         stdout = io.StringIO()
@@ -588,15 +557,13 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.accept_http_shared_view_invitation", side_effect=fake_accept_http),
                 patch("sys.stdout", stdout),
             ):
-                result = main(
-                    [
-                        "shared-view",
-                        "accept-invite",
-                        "https://hub.example.test/i/invite-token",
-                        "--heading-id",
-                        "remote-auth",
-                    ]
-                )
+                result = main([
+                    "shared-view",
+                    "accept-invite",
+                    "https://hub.example.test/i/invite-token",
+                    "--heading-id",
+                    "remote-auth",
+                ])
 
         self.assertEqual(result, 0)
         self.assertEqual(
@@ -676,54 +643,6 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(credential["token"], "prompt-token")
         self.assertIn("saved shared view credential alice-publish", stdout.getvalue())
 
-    def test_shared_view_publish_http_cli_uses_active_memory_root(self):
-        stdout = io.StringIO()
-        calls = []
-
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-
-            def fake_publish_http(
-                memory_root,
-                view_id,
-                *,
-                hub_url,
-                credential_id,
-                query=None,
-                invitation_label=None,
-                expires_at=None,
-            ):
-                calls.append((memory_root, view_id, hub_url, credential_id, query, invitation_label, expires_at))
-                return f"published shared view {view_id} to HTTP hub {hub_url}"
-
-            with (
-                patch("rightmemory.cli.default_memory_root", return_value=root),
-                patch("rightmemory.cli.publish_http_shared_view", side_effect=fake_publish_http),
-                patch("sys.stdout", stdout),
-            ):
-                result = main(
-                    [
-                        "shared-view",
-                        "publish-http",
-                        "alice-auth-api",
-                        "--hub-url",
-                        "https://hub.example.test",
-                        "--credential-id",
-                        "alice-publish",
-                        "--query",
-                        "auth",
-                        "--invite-label",
-                        "frontend",
-                    ]
-                )
-
-        self.assertEqual(result, 0)
-        self.assertEqual(
-            calls,
-            [(root, "alice-auth-api", "https://hub.example.test", "alice-publish", "auth", "frontend", None)],
-        )
-        self.assertIn("published shared view alice-auth-api", stdout.getvalue())
-
     def test_shared_view_inbox_http_cli_prints_remote_records(self):
         stdout = io.StringIO()
         calls = []
@@ -788,6 +707,36 @@ class JsonRequestTests(unittest.TestCase):
                 )
                 status_result = main(["hub", "status", str(hub_root)])
                 second_init_result = main(["hub", "init", str(hub_root)])
+                same_url_init_result = main(
+                    [
+                        "hub",
+                        "init",
+                        str(hub_root),
+                        "--public-base-url",
+                        "https://hub.example.test",
+                    ]
+                )
+                same_admin_init_result = main(
+                    [
+                        "hub",
+                        "init",
+                        str(hub_root),
+                        "--admin-token",
+                        "admin-secret",
+                    ]
+                )
+                with self.assertRaises(ValueError) as public_url_error:
+                    main(
+                        [
+                            "hub",
+                            "init",
+                            str(hub_root),
+                            "--public-base-url",
+                            "https://other.example.test",
+                        ]
+                    )
+                with self.assertRaises(ValueError) as admin_token_error:
+                    main(["hub", "init", str(hub_root), "--admin-token", "other-secret"])
 
             lines = stdout.getvalue().splitlines()
             token_id = next(line.split("\t", 1)[1] for line in lines if line.startswith("token_id\t"))
@@ -803,12 +752,19 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(create_result, 0)
         self.assertEqual(status_result, 0)
         self.assertEqual(second_init_result, 0)
+        self.assertEqual(same_url_init_result, 0)
+        self.assertEqual(same_admin_init_result, 0)
         self.assertEqual(revoke_result, 0)
         self.assertTrue(admin_ok)
         self.assertFalse(provider_token_ok)
         self.assertIn("initialized\tyes", stdout.getvalue())
         self.assertIn("public_base_url\thttps://hub.example.test", stdout.getvalue())
         self.assertIn("admin_token\tunchanged", stdout.getvalue())
+        self.assertIn(
+            "already initialized with public_base_url https://hub.example.test",
+            str(public_url_error.exception),
+        )
+        self.assertIn("token rotation is not supported by hub init", str(admin_token_error.exception))
 
     def test_hub_token_list_prints_revocation_handles_without_raw_tokens(self):
         stdout = io.StringIO()
@@ -840,6 +796,94 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")
         self.assertEqual(run.call_args.kwargs["port"], 9876)
+
+    def test_hub_commands_default_to_rightmemory_hub_root(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_hub = Path(tempdir) / "rightmemory-hub"
+            with patch("rightmemory.cli.DEFAULT_HUB_ROOT", default_hub):
+                with patch("sys.stdout", stdout):
+                    init_result = main(
+                        [
+                            "hub",
+                            "init",
+                            "--admin-token",
+                            "admin-secret",
+                            "--public-base-url",
+                            "https://hub.example.test",
+                        ]
+                    )
+                    create_result = main(
+                        [
+                            "hub",
+                            "token",
+                            "create",
+                            "--provider",
+                            "alice",
+                            "--label",
+                            "publish",
+                        ]
+                    )
+                    status_result = main(["hub", "status"])
+                    list_result = main(["hub", "token", "list"])
+
+                lines = stdout.getvalue().splitlines()
+                token_id = next(line.split("\t", 1)[1] for line in lines if line.startswith("token_id\t"))
+                with patch("sys.stdout", stdout):
+                    revoke_result = main(["hub", "token", "revoke", token_id])
+
+            store = HubStore(default_hub)
+            admin_ok = store.verify_token("admin-secret", action="admin")
+            hub_db_exists = (default_hub / "hub.db").is_file()
+
+        output = stdout.getvalue()
+        self.assertEqual(init_result, 0)
+        self.assertEqual(create_result, 0)
+        self.assertEqual(status_result, 0)
+        self.assertEqual(list_result, 0)
+        self.assertEqual(revoke_result, 0)
+        self.assertTrue(admin_ok)
+        self.assertTrue(hub_db_exists)
+        self.assertIn(f"hub_root\t{default_hub.resolve()}", output)
+        self.assertIn("public_base_url\thttps://hub.example.test", output)
+        self.assertIn("revoked\t", output)
+
+    def test_hub_explicit_root_still_overrides_default(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_hub = Path(tempdir) / "rightmemory-hub"
+            explicit_hub = Path(tempdir) / "explicit-hub"
+            with patch("rightmemory.cli.DEFAULT_HUB_ROOT", default_hub):
+                with patch("sys.stdout", stdout):
+                    result = main(
+                        [
+                            "hub",
+                            "init",
+                            str(explicit_hub),
+                            "--admin-token",
+                            "admin-secret",
+                        ]
+                    )
+            explicit_hub_db_exists = (explicit_hub / "hub.db").is_file()
+            default_hub_db_exists = (default_hub / "hub.db").exists()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(explicit_hub_db_exists)
+        self.assertFalse(default_hub_db_exists)
+        self.assertIn(f"hub_root\t{explicit_hub.resolve()}", stdout.getvalue())
+
+    def test_hub_serve_uses_default_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_hub = Path(tempdir) / "rightmemory-hub"
+            HubStore(default_hub).initialize(admin_token="admin-secret")
+
+            with patch("rightmemory.cli.DEFAULT_HUB_ROOT", default_hub):
+                with patch("rightmemory.cli.uvicorn.run") as run:
+                    result = main(["hub", "serve"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(run.call_args.kwargs["host"], "127.0.0.1")
+        self.assertEqual(run.call_args.kwargs["port"], 8765)
 
     def test_profile_list_ignores_project_binding(self):
         stdout = io.StringIO()

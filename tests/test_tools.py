@@ -23,22 +23,38 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.tools.list_files("../*.md")
 
-    def test_read_tools_exclude_runtime_shared_view_content(self):
-        runtime_import = self.root / ".runtime" / "shared_views" / "imports" / "alice-auth-api"
-        runtime_import.mkdir(parents=True)
-        (runtime_import / "MEMORY.md").write_text("external shared context\n", encoding="utf-8")
+    def test_retrieve_role_can_read_mf_import_files(self):
+        imported = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"
+        imported.mkdir(parents=True)
+        (imported / "MEMORY.md").write_text("Tokens expire after one hour.\n", encoding="utf-8")
         tools = MemoryTools(self.root, role="retrieve")
 
-        with self.assertRaises(ValueError):
-            tools.read(".runtime/shared_views/imports/alice-auth-api/MEMORY.md")
-        with self.assertRaises(ValueError):
-            tools.read_command("rg external .runtime/shared_views/imports/alice-auth-api/MEMORY.md")
-        with self.assertRaises(ValueError):
-            tools.read_command("rg external --glob .runtime/shared_views/**")
+        result = tools.read(".runtime/shared_views/imports/auth-api-files/dist/MEMORY.md")
+        grep_result = tools.grep("Tokens expire", ".runtime/shared_views/imports/auth-api-files")
 
-        self.assertNotIn(".runtime/shared_views/imports/alice-auth-api/MEMORY.md", tools.glob("**/*"))
-        self.assertEqual(tools.read_command("rg external"), "no matches")
-        self.assertNotIn(".runtime/shared_views/imports/alice-auth-api/MEMORY.md", tools.read_command("rg --files"))
+        self.assertIn("Tokens expire after one hour.", result)
+        self.assertIn("MEMORY.md", grep_result)
+        if shutil.which("rg") is not None:
+            rg_result = tools.read_command("rg Tokens .runtime/shared_views/imports/auth-api-files")
+            self.assertIn(".runtime/shared_views/imports/auth-api-files/dist/MEMORY.md", rg_result)
+            self.assertIn("Tokens expire after one hour.", rg_result)
+
+    def test_update_role_cannot_read_mf_import_files(self):
+        imported = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"
+        imported.mkdir(parents=True)
+        (imported / "MEMORY.md").write_text("External context.\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="update")
+
+        with self.assertRaises(ValueError) as caught:
+            tools.read(".runtime/shared_views/imports/auth-api-files/dist/MEMORY.md")
+
+        self.assertIn("runtime shared-view imports are only readable by retrieve", str(caught.exception))
+        self.assertEqual(tools.list_files(".runtime/shared_views/imports/**/*.md"), [])
+        self.assertNotIn(".runtime/shared_views/imports", "\n".join(tools.glob("**/*.md")))
+        self.assertEqual(tools.grep("External", glob=".runtime/shared_views/imports/**/*.md"), "no matches")
+        with self.assertRaises(ValueError) as grep_error:
+            tools.grep("External", ".runtime/shared_views/imports/auth-api-files")
+        self.assertIn("runtime shared-view imports are only readable by retrieve", str(grep_error.exception))
 
     def test_read_file_truncates_large_full_reads(self):
         memory = self.root / "MEMORY.md"
@@ -324,13 +340,13 @@ class MemoryToolsTests(unittest.TestCase):
     def test_sync_reconciler_can_repair_shared_view_registry(self):
         self._git("init")
         registry = self.root / "shared_views.toml"
-        registry.write_text('[connections.alice-auth-api]\nref = "rightmemory://view/old"\n', encoding="utf-8")
+        registry.write_text('[connections.alice-auth-api]\ntype = "file"\nref = "rightmemory://mf/old"\n', encoding="utf-8")
         tools = MemoryTools(self.root, role="sync-reconciler")
         tools.read_file("shared_views.toml")
         edit_result = tools.edit_file(
             "shared_views.toml",
-            'ref = "rightmemory://view/old"',
-            'ref = "rightmemory://view/new"',
+            'ref = "rightmemory://mf/old"',
+            'ref = "rightmemory://mf/new"',
         )
         add_result = tools.git_add(["shared_views.toml"])
         self.assertEqual(edit_result, "edited shared_views.toml: replaced 1 occurrence")
@@ -349,6 +365,64 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertEqual(edit_result, "edited shared_views/alice-auth-api/view.md: replaced 1 occurrence")
         self.assertEqual(add_result, "staged: shared_views/alice-auth-api/view.md")
+
+    def test_shared_view_builder_tool_creates_canonical_file_recipe(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Project {#project}\n\n"
+            "## Auth API {#auth-api}\n\n"
+            "- `token-expiry` Tokens expire after one hour. -> [rel:auth-api]\n",
+            encoding="utf-8",
+        )
+        tools = MemoryTools(self.root, role="shared-view-builder")
+
+        result = tools.create_file_view_recipe(
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth context.",
+            include_headings=["auth-api"],
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
+        )
+
+        recipe = (self.root / "shared_views" / "auth-api-files" / "recipe.toml").read_text(encoding="utf-8")
+        rendered = (self.root / "shared_views" / "auth-api-files" / "dist" / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("success: wrote canonical file view auth-api-files", result)
+        self.assertIn('include_headings = ["auth-api"]', recipe)
+        self.assertIn('[publish]', recipe)
+        self.assertIn("Tokens expire after one hour.", rendered)
+
+    def test_shared_view_builder_tool_reports_bad_file_selection(self):
+        (self.root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="shared-view-builder")
+
+        result = tools.create_file_view_recipe(
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth context.",
+            include_headings=["missing-auth-api"],
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
+        )
+
+        self.assertIn("failed:", result)
+        self.assertIn("include_headings id not found in active memory: missing-auth-api", result)
+
+    def test_shared_view_builder_tool_creates_canonical_question_view(self):
+        tools = MemoryTools(self.root, role="shared-view-builder")
+
+        result = tools.create_question_view(
+            view_id="auth-api-ask",
+            title="Auth API Questions",
+            intent="Let frontend agents ask auth questions.",
+            retriever_instructions="Answer from auth API memory only.",
+        )
+
+        question_toml = (self.root / "shared_views" / "auth-api-ask" / "question.toml").read_text(encoding="utf-8")
+        retriever = (self.root / "shared_views" / "auth-api-ask" / "retriever.md").read_text(encoding="utf-8")
+        self.assertIn("success: wrote canonical question view auth-api-ask", result)
+        self.assertIn('kind = "question"', question_toml)
+        self.assertIn("access_token_hashes = []", question_toml)
+        self.assertIn("Answer from auth API memory only.", retriever)
 
     def test_insight_read_tools_are_limited_to_active_memory_and_insight_logs(self):
         (self.root / "MEMORY.md").write_text("# Domain\n\nmemory beta\n", encoding="utf-8")
@@ -863,18 +937,31 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertIn("validation passed", result)
 
-    def test_validate_memory_accepts_shared_view_heading_marker(self):
+    def test_validate_memory_accepts_file_and_question_shared_view_heading_markers(self):
         (self.root / "MEMORY.md").write_text(
             "# Project {#project}\n\n"
-            "## Alice Auth API {M#alice-auth-api} → [rel:project]\n\n"
-            "Alice owns auth API collaboration context.\n\n"
-            "- `frontend-login` Frontend login work uses Alice's shared view. → [rel:alice-auth-api]\n",
+            "## Auth API Files {MF#auth-api-files} → [rel:project]\n\n"
+            "Use this mirrored file view before login changes.\n\n"
+            "## Auth API Questions {MQ#auth-api-ask} → [rel:auth-api-files]\n\n"
+            "Use this provider question view for live auth API clarification.\n",
             encoding="utf-8",
         )
 
         result = self.tools.validate_memory()
 
-        self.assertIn("validation passed: 3 ids", result)
+        self.assertIn("validation passed", result)
+
+    def test_validate_memory_rejects_legacy_m_heading_marker(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Project {#project}\n\n"
+            "## Legacy View {M#legacy-view}\n",
+            encoding="utf-8",
+        )
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("validation failed", result)
+        self.assertIn("unsupported heading marker `M#`", result)
 
     def test_validate_memory_requires_skill_backing_file(self):
         (self.root / "MEMORY.md").write_text(
@@ -924,18 +1011,18 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertIn("validation passed", result)
 
-    def test_validate_memory_rejects_four_hash_shared_view_pointer(self):
+    def test_validate_memory_allows_four_hash_shared_view_references(self):
         (self.root / "MEMORY.md").write_text(
             "# Project {#project}\n\n"
             "### Integrations\n\n"
-            "#### Alice Auth API {M#alice-auth-api}\n\n"
-            "This should be a normal #/##/### shared-view heading, not a pointer.\n",
+            "#### Auth API Files {MF#auth-api-files}\n\n"
+            "#### Auth API Questions {MQ#auth-api-ask}\n",
             encoding="utf-8",
         )
 
         result = self.tools.validate_memory()
 
-        self.assertIn("#### pointer must use `{F#slug}` or `{S#slug}`", result)
+        self.assertIn("validation passed", result)
 
     def test_validate_memory_catches_self_and_duplicate_edges(self):
         (self.root / "MEMORY.md").write_text(
@@ -976,9 +1063,9 @@ class MemoryToolsTests(unittest.TestCase):
 
         result = self.tools.validate_memory()
 
-        self.assertIn("#### pointer must be under a ### heading", result)
-        self.assertIn("#### pointer must use `{F#slug}`", result)
-        self.assertIn("heading deeper than ####", result)
+        self.assertIn("`####` terminal reference must be under a `###` heading", result)
+        self.assertIn("`####` terminal reference must use", result)
+        self.assertIn("headings deeper than `####` are not allowed", result)
 
     def test_validate_memory_allows_body_under_four_hash_pointer(self):
         (self.root / "MEMORY.md").write_text(
@@ -1008,8 +1095,8 @@ class MemoryToolsTests(unittest.TestCase):
 
         result = self.tools.validate_memory()
 
-        self.assertIn("#### pointer cannot contain child node", result)
-        self.assertIn("#### pointer cannot contain child heading", result)
+        self.assertIn("terminal `####` heading cannot contain node lines", result)
+        self.assertIn("headings deeper than `####` are not allowed", result)
 
     def _git(self, *args):
         process = subprocess.run(

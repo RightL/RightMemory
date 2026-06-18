@@ -1,9 +1,13 @@
 import os
 import subprocess
 import tempfile
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
+from rightmemory import profiles as profiles_module
 from rightmemory.profiles import (
     Profile,
     ProfileError,
@@ -12,6 +16,7 @@ from rightmemory.profiles import (
     discover_project_profile,
     load_profiles,
     profile_registry_path,
+    remove_profile,
     resolve_memory_root,
     save_profiles,
     validate_profile_name,
@@ -148,7 +153,8 @@ class ProfileTests(unittest.TestCase):
             "!shared_views/*/\n"
             "!shared_views/*/view.md\n"
             "!shared_views/*/retriever.md\n"
-            "!shared_views/*/export.toml\n"
+            "!shared_views/*/recipe.toml\n"
+            "!shared_views/*/question.toml\n"
             "!shared_views/*/.gitignore\n"
             "!insight_logs/\n"
             "!insight_logs/*.md\n",
@@ -170,6 +176,45 @@ class ProfileTests(unittest.TestCase):
 
         self.assertEqual(profile.root, existing)
         self.assertEqual(profiles["existing"].root, existing)
+
+    def test_create_profile_serializes_concurrent_registry_updates(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_root = Path(tempdir) / "default"
+            items = []
+            for index in range(6):
+                name = f"profile-{index}"
+                root = Path(tempdir) / name
+                root.mkdir()
+                (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+                (root / "insight_logs").mkdir()
+                items.append((name, root))
+
+            original_atomic = profiles_module._atomic_write_text
+
+            def slow_atomic(path: Path, text: str) -> None:
+                time.sleep(0.02)
+                original_atomic(path, text)
+
+            with patch("rightmemory.profiles._atomic_write_text", side_effect=slow_atomic):
+                with ThreadPoolExecutor(max_workers=len(items)) as executor:
+                    list(executor.map(lambda item: create_profile(default_root, item[0], root=item[1]), items))
+
+            profiles = load_profiles(default_root)
+
+        self.assertEqual(set(profiles), {name for name, _root in items})
+
+    def test_remove_profile_unregisters_without_deleting_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_root = Path(tempdir) / "default"
+            profile = create_profile(default_root, "alpha")
+
+            removed = remove_profile(default_root, "alpha")
+            profiles = load_profiles(default_root)
+            root_exists = profile.root.exists()
+
+        self.assertEqual(removed.root, profile.root)
+        self.assertNotIn("alpha", profiles)
+        self.assertTrue(root_exists)
 
     def test_create_profile_normalizes_relative_root(self):
         original_cwd = Path.cwd()

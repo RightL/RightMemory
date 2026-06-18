@@ -15,14 +15,13 @@ from .models import HubPackageManifest, HubStoredPackage
 
 REQUIRED_PACKAGE_FILES = (
     "view.md",
-    "export.toml",
+    "recipe.toml",
     "rightmemory-shared-view.toml",
     "dist/MEMORY.md",
+    "dist/manifest.toml",
 )
 DEFAULT_MAX_PACKAGE_BYTES = 10 * 1024 * 1024
 _ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-QUERY_TERM_RE = re.compile(r"[A-Za-z0-9_]{3,}")
-COMMON_QUERY_WORDS = {"the", "and", "for"}
 
 
 class PackageValidationError(ValueError):
@@ -92,33 +91,6 @@ def copy_package_version(
     )
 
 
-def retrieve_memory_snippets(
-    package_root: Path,
-    query: str,
-    *,
-    limit: int = 12,
-) -> list[dict[str, Any]]:
-    clean_limit = max(1, min(int(limit), 25))
-    terms = _query_terms(query)
-    memory_path = Path(package_root).expanduser() / "dist" / "MEMORY.md"
-    if not memory_path.is_file():
-        raise PackageValidationError("published package is missing dist/MEMORY.md")
-    snippets: list[dict[str, Any]] = []
-    for line_number, line in enumerate(memory_path.read_text(encoding="utf-8").splitlines(), start=1):
-        lowered = line.lower()
-        if terms and any(term in lowered for term in terms):
-            snippets.append(
-                {
-                    "path": "dist/MEMORY.md",
-                    "line": line_number,
-                    "text": line,
-                }
-            )
-            if len(snippets) >= clean_limit:
-                break
-    return snippets
-
-
 def _package_snapshot(
     source_root: Path,
     *,
@@ -163,12 +135,12 @@ def _package_snapshot_from_entries(
         package_digest.update(b"\0")
 
     content_by_path = dict(file_bytes)
-    export_metadata = _load_toml_bytes(content_by_path["export.toml"], "export.toml")
+    recipe_metadata = _load_toml_bytes(content_by_path["recipe.toml"], "recipe.toml")
     invitation_metadata = _load_toml_bytes(
         content_by_path["rightmemory-shared-view.toml"],
         "rightmemory-shared-view.toml",
     )
-    view_id = _package_view_id(export_metadata, invitation_metadata)
+    view_id = _package_view_id(recipe_metadata, invitation_metadata)
     if expected_view_id is not None:
         clean_expected = _validate_hub_id(expected_view_id, "publish target view_id")
         if view_id != clean_expected:
@@ -180,20 +152,21 @@ def _package_snapshot_from_entries(
         manifest=HubPackageManifest(
             source_root=source_root.resolve(),
             view_id=view_id,
-            title=_metadata_string(export_metadata, "title")
+            title=_metadata_string(recipe_metadata, "title")
             or _metadata_string(invitation_metadata, "title")
             or view_id,
-            ref=_metadata_string(export_metadata, "ref")
+            ref=_metadata_string(recipe_metadata, "ref")
             or _metadata_string(invitation_metadata, "ref")
-            or f"rightmemory://view/{view_id}",
-            description=_metadata_string(export_metadata, "description")
+            or f"rightmemory://mf/{view_id}",
+            description=_metadata_string(recipe_metadata, "intent")
+            or _metadata_string(recipe_metadata, "description")
             or _metadata_string(invitation_metadata, "description"),
-            maintainer=_metadata_string(export_metadata, "maintainer")
+            maintainer=_metadata_string(recipe_metadata, "maintainer")
             or _metadata_string(invitation_metadata, "maintainer"),
             files=files,
             size_bytes=size_bytes,
             package_hash=package_digest.hexdigest(),
-            export_metadata=export_metadata,
+            export_metadata=recipe_metadata,
             invitation_metadata=invitation_metadata,
         ),
         files=tuple(file_bytes),
@@ -285,7 +258,3 @@ def _validate_hub_id(value: str, label: str) -> str:
     if clean in {".", ".."} or not _ID_RE.fullmatch(clean):
         raise PackageValidationError(f"{label} contains invalid characters: {value!r}")
     return clean
-
-
-def _query_terms(query: str) -> list[str]:
-    return [term.lower() for term in QUERY_TERM_RE.findall(query) if term.lower() not in COMMON_QUERY_WORDS]

@@ -207,41 +207,46 @@ Move child content into a detail file when a heading becomes too dense, especial
 
 ### Shared Views
 
-Shared views connect one memory root to collaboration context owned somewhere else: another person, team space, project, or agent memory root. In local memory, a `#`, `##`, or `###` heading can use `{M#slug}` to record the local relationship to that external shared view.
+Shared views connect one memory root to collaboration context owned somewhere else: another person, team space, project, or agent memory root. RightMemory now uses two explicit heading types:
+
+- `{MF#slug}` records a mirrored file shared view. Retrieve silently pulls the latest HTTP package into `.runtime/shared_views/imports/<slug>/` before the retrieve agent starts, then the retrieve agent uses ordinary read/search tools on that local mirror.
+- `{MQ#slug}` records a provider question shared view. Retrieve may report that provider-question context is relevant, but the main agent, CLI, or Web Studio calls the question endpoint explicitly with `rightmemory shared-view ask`.
 
 For a practical provider/consumer walkthrough, see [docs/shared-views-usage.md](docs/shared-views-usage.md).
 
-The provider owns the shared-view source under `shared_views/<view-id>/`: `view.md` describes the contract, `retriever.md` can hold view-specific retrieval policy, and `export.toml` stores builder/export settings. Generated `dist/` output is preview or publishing output. The consumer records resolver details in `shared_views.toml`, keeps cache and interaction records under `.runtime/shared_views/`, and stores local consequences in ordinary memory when they become durable.
+The provider owns source files under `shared_views/<view-id>/`. File views use `view.md` and `recipe.toml`, then render generated `dist/` packages for HTTP publication. Question views use `view.md`, `question.toml`, and provider-private `retriever.md`. Consumers record resolver metadata in `shared_views.toml`; credentials, imports, and interaction records stay under `.runtime/shared_views/`.
 
 ```bash
-rightmemory shared-view define alice-auth-api \
-  --title "Alice Auth API" \
-  --description "Auth API collaboration context" \
-  --maintainer Alice \
-  --instructions "Answer with API contract facts and omit unrelated private notes." \
-  --term auth \
-  --term token
+rightmemory shared-view build-file auth-api-files \
+  "Expose auth API integration context" \
+  --title "Auth API Files" \
+  --hub-url http://127.0.0.1:8765 \
+  --credential-id alice-publish
+rightmemory shared-view approve auth-api-files --type file
 
-rightmemory shared-view build alice-auth-api
-rightmemory shared-view export alice-auth-api --target ./alice-auth-api-view
+rightmemory shared-view build-question auth-api-ask \
+  "Let frontend agents ask temporary auth API questions" \
+  --title "Auth API Questions"
+rightmemory shared-view approve auth-api-ask --type question
 
-rightmemory shared-view accept-invite ./alice-auth-api-view
-
-rightmemory shared-view retrieve alice-auth-api "token expiry"
+rightmemory shared-view accept-invite http://127.0.0.1:8765/i/<invite-token>
+rightmemory shared-view pull auth-api-files
+rightmemory shared-view status auth-api-files
+rightmemory shared-view ask auth-api-ask "How do tokens refresh?"
 rightmemory shared-view note alice-auth-api --confirm --task "frontend login migration" \
   "Docs are missing token_expires_at."
 rightmemory shared-view inbox alice-auth-api
 ```
 
-For a small local team hub, publish the provider view with `rightmemory shared-view publish alice-auth-api --hub <hub-dir>` and share the generated invitation from `<hub-dir>/invitations/`. Hub interactions are recorded under the hub directory; local-provider interactions are delivered to the provider root's `.runtime/shared_views/inbox/`.
-
-For a network-capable hub, initialize and serve a separate hub root, create a provider token, store that token as a local runtime credential in the provider memory root, then publish through HTTP:
+All normal sharing goes through HTTP, even on one machine. Initialize and serve a separate hub root, create a provider token, and store that token as a local runtime credential in the provider memory root:
 
 ```bash
-rightmemory hub init ./rightmemory-hub --public-base-url http://127.0.0.1:8765
-rightmemory hub token create ./rightmemory-hub --provider alice --label publish
-rightmemory hub serve ./rightmemory-hub --host 127.0.0.1 --port 8765
+rightmemory hub init --public-base-url http://127.0.0.1:8765
+rightmemory hub token create --provider alice --label publish
+rightmemory hub serve --host 127.0.0.1 --port 8765
 ```
+
+After the hub is running, open `http://127.0.0.1:8765/console` and enter the admin token printed by `rightmemory hub init`. The console is for hub administration: providers, tokens, views, invitations, connections, inbox, and audit.
 
 Then store the printed provider token through a hidden prompt, so it does not need to appear in shell history:
 
@@ -251,22 +256,34 @@ rightmemory shared-view credential set alice-publish \
   --hub-url http://127.0.0.1:8765 \
   --provider alice \
   --token-prompt
-rightmemory shared-view publish-http alice-auth-api \
-  --hub-url http://127.0.0.1:8765 \
-  --credential-id alice-publish
 ```
 
-In Web Studio, use Settings -> HTTP Hub Credential to save the provider token locally, then use Shared Views -> Publish HTTP with the saved credential id.
+Approved `MF#` file views rebuild and publish automatically after successful memory-write roles. `rightmemory retrieve` silently syncs accepted `MF#` packages before it searches, without adding sync output to retrieve session history.
 
-Consumers accept HTTP invitations with the same `accept-invite` command used for package invitations:
+Create an `MF#` invitation by publishing the current file package and asking the hub for an invitation URL:
+
+```bash
+rightmemory shared-view invite auth-api-files --label frontend
+```
+
+Approved `MQ#` question views are published explicitly:
+
+```bash
+rightmemory shared-view publish-question auth-api-ask \
+  --hub-url http://127.0.0.1:8765 \
+  --credential-id alice-publish \
+  --question-base-url http://127.0.0.1:8765
+```
+
+Consumers accept HTTP invitations with `accept-invite`:
 
 ```bash
 rightmemory shared-view accept-invite http://127.0.0.1:8765/i/<invite-token>
 ```
 
-The synced `shared_views.toml` stores the hub URL and credential id; bearer tokens stay under `.runtime/shared_views/credentials.json`.
+For `MF#`, the synced `shared_views.toml` stores the hub URL and credential id. For `MQ#`, the invitation must provide the provider Web Studio question endpoint and an accepted `question_token`; the ask command sends that bearer token, and the provider validates it against `question.toml` token hashes. Bearer tokens stay under `.runtime/shared_views/credentials.toml`.
 
-The builder requires explicit scope before publishing filtered Markdown: use one or more `--term` values, pass `--query` to `build`, `export`, or `publish`, or use `--include-all` when the view is intentionally broad. For manual connections, prefer `accept-invite`; when wiring an existing reachable target yourself, use `rightmemory shared-view accept <heading-id> --package <package-dir>`, `--provider-root <root>`, or `--hub <hub-dir>` so the resolver behavior is clear.
+Web Studio exposes the same guided flows: build file view, build question view, approve, create `MF#` invitations, publish `MQ#` invitations, accept HTTP invitation, pull `MF#`, ask `MQ#`, and send explicit notes. Direct provider filesystem reads, mounted folder hubs, generic shared-view retrieval, and legacy single-marker shared-view headings are not part of the current product path.
 
 ### Edges
 
@@ -390,10 +407,13 @@ rightmemory prune
 rightmemory prune watch
 rightmemory history --session <agent-session-id> "find pruned memory about the old setup"
 rightmemory shared-view list
-rightmemory shared-view define <view-id> --title "View Title" --term keyword
-rightmemory shared-view build <view-id>
-rightmemory shared-view export <view-id> --target <package-dir>
-rightmemory shared-view accept-invite <package-or-invitation>
+rightmemory shared-view build-file <view-id> "intent" --title "View Title" --hub-url <url> --credential-id <id>
+rightmemory shared-view build-question <view-id> "intent" --title "View Title"
+rightmemory shared-view approve <view-id> --type file
+rightmemory shared-view accept-invite <http-invitation>
+rightmemory shared-view pull <mf-id>
+rightmemory shared-view status <id>
+rightmemory shared-view ask <mq-id> "question"
 rightmemory status
 rightmemory watch start
 rightmemory watch status

@@ -10,7 +10,8 @@ Addressable headings use:
 ### Human Title {#heading-id} → [edge1, edge2, ...]
 ### File-Backed Title {F#heading-id} → [edge1, edge2, ...]
 ### Skill Title {S#heading-id} → [edge1, edge2, ...]
-### Shared View Title {M#heading-id} → [edge1, edge2, ...]
+### Mirrored File View {MF#heading-id} → [edge1, edge2, ...]
+### Provider Question View {MQ#heading-id} → [edge1, edge2, ...]
 ```
 
 Plain tree headings without graph edges may omit the anchor and edge list.
@@ -26,7 +27,8 @@ Nodes use:
 - `heading-id` and `node-id` share one namespace; do not reuse an id between a heading and a node.
 - `F#` marks a heading as backed by an ordinary detail file. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:F#heading-id`.
 - `S#` marks a heading as backed by a memory skill file. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:S#heading-id`.
-- `M#` marks a local heading as a shared-view connection. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:M#heading-id`. The heading body records the local relationship and collaboration meaning; resolver details live outside memory prose.
+- `MF#` marks a mirrored file shared-view connection. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:MF#heading-id`. The heading body records the local relationship and collaboration meaning; HTTP resolver details live outside memory prose.
+- `MQ#` marks a provider question shared-view connection. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:MQ#heading-id`. The heading body records when provider-side questions may help; prompts, HTTP resolver details, and credentials live outside memory prose.
 - `S#heading-id` maps to sibling skill file `MEMORY_SKILL_heading-id.md`.
 - Edges may connect heading to heading, heading to node, node to heading, or node to node.
 - Node lines with no edges write `→ []`; heading lines with no edges may omit `→ []`.
@@ -61,19 +63,31 @@ backticked labels are treated as instructional text rather than memory nodes.
 
 ## Shared Views
 
-Shared views connect a local memory root to collaboration context owned by another person, project, team space, or agent root. Use an `M#` heading when this root needs a durable local relationship to that external shared view. The heading body should explain the relationship in local terms: what the view represents, when to retrieve it, and how it relates to nearby work. Store resolver details in `shared_views.toml`, not in memory prose.
+Shared views connect a local memory root to collaboration context owned by another person, project, team space, or agent root. Use an `MF#` heading when this root should use provider-published mirrored files as external read context. Use an `MQ#` heading when this root may ask a provider-side retriever a synchronous question. In both cases, the heading body explains the relationship in local terms: what the view represents, when it helps, and how it relates to nearby work. Store resolver details in `shared_views.toml`, not in memory prose.
 
-A provider root may define views under `shared_views/<view-id>/`:
+A provider root may define file views under `shared_views/<view-id>/`:
+
+```text
+shared_views/<view-id>/
+  view.md
+  recipe.toml
+  dist/
+```
+
+`view.md` and `recipe.toml` are provider-owned file-view source files. The recipe records the approved source headings, nodes, or files chosen by the builder. The generated `dist/` directory is preview or publishing output; it is not active provider memory.
+
+A provider root may define question views under `shared_views/<view-id>/`:
 
 ```text
 shared_views/<view-id>/
   view.md
   retriever.md
-  export.toml
-  dist/
+  question.toml
 ```
 
-`view.md`, `retriever.md`, and `export.toml` are provider-owned shared-view source files. They describe the view contract, policy-guided retrieval instructions, and builder/export settings. The generated `dist/` directory is preview or publishing output; do not treat it as active memory or a consumer's local memory source. Consumers retrieve through the shared-view endpoint and record local consequences in their own memory when those consequences become durable.
+`retriever.md` belongs only to provider question views. It is the provider-side retrieval prompt used when an accepted consumer asks an `MQ#` question.
+
+Consumers pull accepted `MF#` file views into `.runtime/shared_views/imports/<view-id>/` before retrieve runs, then read those imported files with ordinary read/search tools. Consumers call `MQ#` question views through explicit ask commands or UI actions outside retrieve. Record local consequences in ordinary memory only when those consequences become durable.
 
 ## Memory Domains
 
@@ -111,13 +125,17 @@ Written edges may be one-way or reciprocal [stored on both records so either sid
 - `#`, `##`, and `###` may have `{#short-slug}` anchors and edges when the whole subtree is a graph target.
 - A file-backed `#`, `##`, or `###` heading uses `{F#short-slug}` and maps to sibling detail file `MEMORY_<short-slug>.md`.
 - A skill-backed `#`, `##`, or `###` heading uses `{S#short-slug}` and maps to sibling skill file `MEMORY_SKILL_<short-slug>.md`.
-- A shared-view `#`, `##`, or `###` heading uses `{M#short-slug}` and points to an external shared view through an out-of-band resolver entry. Do not use `M#` on `####` pointers.
+- A mirrored file shared-view `#`, `##`, or `###` heading uses `{MF#short-slug}` and points to an external file view through an out-of-band resolver entry.
+- A provider question shared-view `#`, `##`, or `###` heading uses `{MQ#short-slug}` and points to an external question view through an out-of-band resolver entry.
 - When a heading's child content moves into its detail file, keep only the heading line and any heading body paragraphs in the current file. Do not leave child node lines or child headings under that heading in the current file.
-- `#### Human Title {F#short-slug}` is the deepest heading level allowed in a memory file and points to sibling detail file `MEMORY_<short-slug>.md`.
-- `#### Human Title {S#short-slug}` is also allowed as a skill pointer under an existing `###` topic and points to sibling skill file `MEMORY_SKILL_<short-slug>.md`.
-- A `####` pointer may have body paragraphs directly under it when they summarize the detail file or explain the pointer.
-- Do not write child node lines or child headings under a `####` pointer in the current file.
-- Create `####` pointers only under an existing or newly created `###` topic; do not jump directly from `#` or `##` to `####`.
+- `####` is the deepest heading level allowed in a memory file and is a terminal reference heading under an existing `###` topic.
+- `#### Human Title {F#short-slug}` points to sibling detail file `MEMORY_<short-slug>.md`.
+- `#### Human Title {S#short-slug}` points to sibling skill file `MEMORY_SKILL_<short-slug>.md`.
+- `#### Human Title {MF#short-slug}` points to a mirrored file shared-view connection.
+- `#### Human Title {MQ#short-slug}` points to a provider question shared-view connection.
+- A `####` terminal reference may have body paragraphs directly under it when they summarize or explain the reference.
+- Do not write child node lines or child headings under a `####` terminal reference in the current file.
+- Create `####` terminal references only under an existing or newly created `###` topic; do not jump directly from `#` or `##` to `####`.
 - Detail files use the same schema recursively.
 
 ## Placement Rules

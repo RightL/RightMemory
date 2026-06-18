@@ -156,7 +156,7 @@ class InstallScriptTests(unittest.TestCase):
             memory_root.mkdir()
             (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
             (memory_root / "shared_views.toml").write_text(
-                '[connections.alice-auth-api]\nref = "rightmemory://view/current"\n',
+                '[connections.alice-auth-api]\ntype = "file"\nref = "rightmemory://mf/current"\n',
                 encoding="utf-8",
             )
 
@@ -210,7 +210,8 @@ class InstallScriptTests(unittest.TestCase):
             "!shared_views/*/\n"
             "!shared_views/*/view.md\n"
             "!shared_views/*/retriever.md\n"
-            "!shared_views/*/export.toml\n"
+            "!shared_views/*/recipe.toml\n"
+            "!shared_views/*/question.toml\n"
             "!shared_views/*/.gitignore\n"
             "!insight_logs/\n"
             "!insight_logs/*.md\n",
@@ -235,6 +236,9 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("mode=cli-agent", install_stamp)
         self.assertIn("rightmemory retrieve --session <stable-session-id>", orchestrator)
         self.assertIn("Open context questions", orchestrator)
+        self.assertIn("Provider question context", orchestrator)
+        self.assertIn("rightmemory shared-view ask <mq-id>", orchestrator)
+        self.assertIn("do not forward a question invented by retrieve", orchestrator)
         self.assertIn('export RIGHTMEMORY_ROOT="', wrapper)
         self.assertIn('exec "', wrapper)
         self.assertIn(' -m rightmemory.cli "$@"', wrapper)

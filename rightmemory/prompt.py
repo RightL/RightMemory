@@ -8,7 +8,17 @@ from .config import MEMORY_ROOT_ENV
 from .semantic_upgrades import SemanticUpgradeContext, render_prompt_context
 
 
-ROLE_PROMPTS = {"dreamer", "historian", "insight", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"}
+ROLE_PROMPTS = {
+    "dreamer",
+    "historian",
+    "insight",
+    "pruner",
+    "retrieve",
+    "reviewer",
+    "shared-view-builder",
+    "sync-reconciler",
+    "update",
+}
 
 
 def build_cli_agent_instructions(
@@ -31,7 +41,7 @@ Memory store:
 - MEMORY.md
 - MEMORY_*.md
 - shared_views.toml
-- shared_views/<view-id>/view.md, retriever.md, export.toml
+- shared_views/<view-id>/view.md, recipe.toml, question.toml, retriever.md
 - insight_logs/
 
 Follow the canonical role instructions below. Use the embedded schema as the schema source of truth.
@@ -108,11 +118,11 @@ def _semantic_upgrade_guidance(role: str, semantic_upgrades: SemanticUpgradeCont
 
 def _cli_agent_guidance(memory_root: Path, role: str) -> str:
     if role == "retrieve":
-        root_env = f"{MEMORY_ROOT_ENV}={quote(str(memory_root))}"
         return (
             "\nCLI-agent adaptation:\n"
-            "- For a strongly relevant `M#` heading, retrieve external shared context with "
-            f"`{root_env} rightmemory shared-view retrieve <heading-id> <query>` using the local heading id and caller query.\n"
+            "- Follow the embedded schema for `MF#` and `MQ#` headings.\n"
+            "- For relevant `MF#` headings, use ordinary read/search commands on synced imported files when they are visible in the memory store.\n"
+            "- For relevant `MQ#` headings, report provider-question context with the local mq_id and relationship context; do not call provider ask commands from retrieve.\n"
         )
     return ""
 
@@ -169,12 +179,24 @@ def _command_guidance(role: str) -> str:
             "- Preserve coherent durable memory when the evidence supports it, narrowing or marking uncertainty "
             "rather than dropping durable information."
         )
+    if role == "shared-view-builder":
+        return (
+            "- The `rightmemory shared-view build-file` or `rightmemory shared-view build-question` command selected "
+            "shared-view builder behavior.\n"
+            "- Build only provider-owned shared-view source artifacts under `shared_views/<view-id>/`."
+        )
     raise ValueError(f"role must be one of: {_role_list()}")
 
 
 def _sync_guidance(role: str) -> str:
-    if role in {"historian", "retrieve"}:
-        return "- Retrieval uses local memory and does not perform sync preflight by default."
+    if role == "historian":
+        return "- Historical retrieval uses local memory and does not perform sync preflight by default."
+    if role == "retrieve":
+        return (
+            "- Retrieve does not perform sync preflight by default. It silently pulls accepted `MF#` file views "
+            "before model start and does not add pull results to session history. Do not mention pull results "
+            "unless imported file content is relevant."
+        )
     if role == "sync-reconciler":
         return (
             "- The runtime supplies repair context in the caller message. If the caller message "
@@ -183,7 +205,7 @@ def _sync_guidance(role: str) -> str:
             "reports dirty state or a conflict, repair the supplied memory files in the same role, validate memory, "
             "commit the repaired state, and call `sync_push` again."
         )
-    if role in {"dreamer", "insight", "pruner", "reviewer", "update"}:
+    if role in {"dreamer", "insight", "pruner", "reviewer", "shared-view-builder", "update"}:
         return ""
     return ""
 
@@ -192,11 +214,8 @@ def _tool_guidance(role: str) -> str:
     if role == "retrieve":
         return (
             "- Use the provided read-only tools for `read`, `grep`, `glob`, restricted `read_command`, outline, "
-            "validation, and `retrieve_shared_view`.\n"
-            "- Use `retrieve_shared_view(heading_id, query)` when a relevant `M#` heading points to an external "
-            "shared view endpoint. Pass the local heading id and the caller's query.\n"
-            "- Treat shared-view results as external context with their own provenance and freshness. Do not read "
-            "external shared-view Markdown as local memory.\n"
+            "and validation.\n"
+            "- Retrieve has ordinary read/search tools. It does not call shared-view endpoints directly.\n"
             "- `read_command` accepts common read-only shell forms such as `cat path`, `sed -n 'X,Yp' path`, "
             "`rg pattern`, `rg --files`, `git status --short`, and `git diff`. It does not run a general shell."
         )
@@ -211,6 +230,16 @@ def _tool_guidance(role: str) -> str:
             "- Use the provided tools for memory-root reads, Insight log creation or refinement, git inspection, and committing Insight logs.\n"
             "- Commit tools are scoped to `insight_logs/*.md`; keep active memory and unrelated files out of Insight commits.\n"
             "- Do not run memory validation; Insight does not edit the memory graph."
+        )
+    if role == "shared-view-builder":
+        return (
+            "- Use read/search tools to inspect provider memory and shared-view source files.\n"
+            "- For file views, call `create_file_view_recipe` instead of hand-writing `recipe.toml`. "
+            "If it returns `failed: ...`, correct the selected ids or arguments and call it again.\n"
+            "- For question views, call `create_question_view` instead of hand-writing `question.toml`. "
+            "If it returns `failed: ...`, correct the arguments and call it again.\n"
+            "- You may use ordinary file tools only for non-machine prose/source edits such as refining `view.md` "
+            "or reading existing artifacts."
         )
     guidance = (
         "- Use the provided tools for `read`, `grep`, `glob`, restricted `read_command`, outline, exact file "
@@ -235,7 +264,7 @@ def _tool_guidance(role: str) -> str:
         guidance += (
             "\n- Commit and edit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `shared_views.toml`, "
             "`shared_views/<view-id>/view.md`, `shared_views/<view-id>/retriever.md`, "
-            "`shared_views/<view-id>/export.toml`, and `insight_logs/*.md` for sync repair; keep unrelated untracked files out of repair commits "
+            "`shared_views/<view-id>/recipe.toml`, `shared_views/<view-id>/question.toml`, and `insight_logs/*.md` for sync repair; keep unrelated untracked files out of repair commits "
             "unless the caller explicitly asks about them.\n"
             "- `git_discard(paths)` is destructive. Use it for invalid, partial, or unsafe memory-owned "
             "changes after inspecting the diff."

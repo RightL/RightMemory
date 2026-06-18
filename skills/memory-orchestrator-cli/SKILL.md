@@ -28,6 +28,10 @@ description: "Use when the user's request may depend on long-term context from e
 - Retrieval may include an `Open context questions` block after ordinary memory matches. Treat those lines as agent-facing questions, not memory facts.
 - If the current task or workspace context already answers one, include the question id and answer in the next memory update brief.
 - Do not start extra investigation just because a question was surfaced.
+- Retrieval may include `Provider question context` lines for relevant `MQ#` headings. Treat these as optional external ask opportunities, not memory facts.
+- If provider-question context would materially help the current task, call `rightmemory shared-view ask <mq-id> "<question>"` yourself after retrieve returns.
+- Phrase the question from the actual task context; do not forward a question invented by retrieve.
+- If the ask reports unavailable, continue with available local context and tell the user the provider question endpoint is currently unavailable.
 
 ## Updates
 

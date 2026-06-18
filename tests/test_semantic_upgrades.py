@@ -100,7 +100,8 @@ class SemanticUpgradeParserTests(unittest.TestCase):
         self.assertIn("Uncertain:", notes_by_id["uncertain-memory-marker"].body)
         self.assertIn("S#slug", notes_by_id["schema-level-memory-skills"].body)
         self.assertIn("reusable instruction assets", notes_by_id["schema-level-memory-skills"].body)
-        self.assertIn("M#slug", notes_by_id["shared-view-headings"].body)
+        self.assertIn("MF#slug", notes_by_id["shared-view-headings"].body)
+        self.assertIn("MQ#slug", notes_by_id["shared-view-headings"].body)
         self.assertIn("shared view", notes_by_id["shared-view-headings"].body)
         self.assertEqual([], result.warnings)
 
