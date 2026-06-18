@@ -168,32 +168,82 @@ def publish_question_view(
     clean_credential_id = validate_heading_id(credential_id)
     clean_question_base_url = _required_text(question_base_url, "question_base_url")
     credential = load_shared_view_credential(root, clean_credential_id)
+    client = HubClient(clean_hub_url, credential["token"])
+    _register_question_view_with_client(
+        root,
+        config.view_id,
+        client=client,
+        question_base_url=clean_question_base_url,
+    )
+    invitation = client.create_invitation(
+        config.view_id,
+        label=label,
+        expires_at=expires_at,
+    )
+    invitation_url = invitation.get("invitation_url")
+    if not isinstance(invitation_url, str) or not invitation_url:
+        raise ValueError("hub did not return an invitation_url")
+    return f"published question view {config.view_id}\ninvitation_url\t{invitation_url}"
+
+
+def register_question_view_with_hub(
+    memory_root: Path,
+    view_id: str,
+    *,
+    hub_url: str,
+    credential_id: str,
+    question_base_url: str,
+) -> dict[str, object]:
+    root = Path(memory_root).expanduser()
+    config = validate_question_view_source(root, view_id)
+    if not config.approved:
+        raise ValueError(f"question view is not approved: {config.view_id}")
+    clean_hub_url = _required_text(hub_url, "hub_url")
+    clean_credential_id = validate_heading_id(credential_id)
+    credential = load_shared_view_credential(root, clean_credential_id)
+    return _register_question_view_with_client(
+        root,
+        config.view_id,
+        client=HubClient(clean_hub_url, credential["token"]),
+        question_base_url=question_base_url,
+    )
+
+
+def _register_question_view_with_client(
+    memory_root: Path,
+    view_id: str,
+    *,
+    client: HubClient,
+    question_base_url: str,
+) -> dict[str, object]:
+    root = Path(memory_root).expanduser()
+    config = validate_question_view_source(root, view_id)
+    if not config.approved:
+        raise ValueError(f"question view is not approved: {config.view_id}")
+    clean_question_base_url = _required_text(question_base_url, "question_base_url")
     question_token = secrets.token_urlsafe(32)
     updated_hashes = tuple(dict.fromkeys((*config.access_token_hashes, question_token_hash(question_token))))
     updated_config = QuestionViewConfig(
-        view_id=config.view_id,
-        title=config.title,
-        intent=config.intent,
-        approved=config.approved,
-        start_timeout_seconds=config.start_timeout_seconds,
-        answer_timeout_seconds=config.answer_timeout_seconds,
-        provider_role=config.provider_role,
-        access_token_hashes=updated_hashes,
+        config.view_id,
+        config.title,
+        config.intent,
+        config.approved,
+        config.start_timeout_seconds,
+        config.answer_timeout_seconds,
+        config.provider_role,
+        updated_hashes,
     )
     _write_text(root / PROVIDER_VIEWS_DIR / config.view_id / "question.toml", _render_question_toml(updated_config))
-    client = HubClient(clean_hub_url, credential["token"])
-    client.register_question_view(
+    response = client.register_question_view(
         config.view_id,
         title=config.title,
         description=config.intent,
         question_base_url=clean_question_base_url,
         question_token=question_token,
     )
-    invitation = client.create_invitation(config.view_id, label=label, expires_at=expires_at)
-    invitation_url = invitation.get("invitation_url")
-    if not isinstance(invitation_url, str) or not invitation_url:
-        raise ValueError("hub did not return an invitation_url")
-    return f"published question view {config.view_id}\ninvitation_url\t{invitation_url}"
+    if not isinstance(response, dict):
+        raise ValueError("hub did not return a question registration response")
+    return response
 
 
 def ask_question_view(memory_root: Path, heading_id: str, question: str) -> str:

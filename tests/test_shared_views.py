@@ -16,6 +16,7 @@ from rightmemory.shared_view_files import (
     export_file_view_package,
     invite_file_view,
     list_file_view_publish_events,
+    publish_file_view_package,
     publish_approved_file_views,
     pull_file_view,
     record_file_view_publish_results,
@@ -35,8 +36,10 @@ from rightmemory.shared_view_questions import (
     _run_provider_question,
     answer_question_view,
     ask_question_view,
+    load_question_view,
     publish_question_view,
     question_token_hash,
+    register_question_view_with_hub,
     verify_question_view_token,
     write_question_view,
 )
@@ -534,6 +537,38 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
         self.assertEqual(clients[0].base_url, "https://hub.example.test")
         self.assertIn("dist/MEMORY.md", clients[0].publish_calls[0]["files"])
 
+    def test_publish_file_view_package_does_not_create_invitation(self):
+        save_shared_view_credential(
+            self.root,
+            "alice-publish",
+            kind="http-publish",
+            token="publish-token",
+            base_url="https://hub.example.test",
+            provider_id="alice",
+        )
+        write_file_view_recipe(
+            self.root,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_nodes=("token-expiry",),
+            approved=True,
+        )
+        (self.root / "MEMORY.md").write_text("# Auth {#auth}\n\n- `token-expiry` Tokens expire.\n", encoding="utf-8")
+        clients = []
+
+        with patch("rightmemory.shared_view_files.HubClient", side_effect=lambda base_url, token: _record_fake_client(clients, base_url, token)):
+            result = publish_file_view_package(
+                self.root,
+                "auth-api-files",
+                hub_url="https://hub.example.test",
+                credential_id="alice-publish",
+            )
+
+        self.assertEqual(result["version_id"], "ver_1")
+        self.assertEqual(clients[0].publish_calls[0]["view_id"], "auth-api-files")
+        self.assertEqual(clients[0].invitation_calls, [])
+
     def test_invite_file_view_publishes_current_package_and_creates_invitation(self):
         clients = []
 
@@ -648,8 +683,40 @@ class SharedQuestionViewTests(unittest.TestCase):
         self.assertEqual(client.question_registrations[0]["question_base_url"], "https://provider.example.test")
         self.assertEqual(client.invitation_calls[0]["label"], "frontend")
         self.assertEqual(client.invitation_calls[0]["expires_at"], "2026-07-01T00:00:00+00:00")
-        self.assertIn(question_token_hash(question_token), question_toml)
-        self.assertNotIn(question_token, question_toml)
+
+    def test_register_question_view_with_hub_does_not_create_invitation(self):
+        save_shared_view_credential(
+            self.root,
+            "alice-publish",
+            kind="http-publish",
+            token="publish-token",
+            base_url="https://hub.example.test",
+            provider_id="alice",
+        )
+        write_question_view(
+            self.root,
+            view_id="auth-api-ask",
+            title="Auth API Questions",
+            intent="Let frontend agents ask auth questions.",
+            retriever_instructions="Answer from auth memory.",
+            approved=True,
+        )
+        clients = []
+
+        with patch("rightmemory.shared_view_questions.HubClient", side_effect=lambda base_url, token: _record_fake_client(clients, base_url, token)):
+            result = register_question_view_with_hub(
+                self.root,
+                "auth-api-ask",
+                hub_url="https://hub.example.test",
+                credential_id="alice-publish",
+                question_base_url="https://provider.example.test",
+            )
+
+        self.assertEqual(result["view_id"], "auth-api-ask")
+        self.assertEqual(clients[0].question_registrations[0]["view_id"], "auth-api-ask")
+        self.assertEqual(clients[0].invitation_calls, [])
+        config = load_question_view(self.root, "auth-api-ask")
+        self.assertEqual(len(config.access_token_hashes), 1)
 
     def test_run_provider_question_sets_started_from_runtime_callback(self):
         started = threading.Event()

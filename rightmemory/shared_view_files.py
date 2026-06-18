@@ -266,16 +266,57 @@ def invite_file_view(
     if not resolved_credential_id:
         raise ValueError("file view invite requires a credential id")
     credential = load_shared_view_credential(root, resolved_credential_id)
-    with TemporaryDirectory() as tempdir:
-        package = Path(tempdir) / recipe.view_id
-        export_file_view_package(root, recipe.view_id, package)
-        client = HubClient(resolved_hub_url, credential["token"])
-        client.publish_package(recipe.view_id, package)
-        invitation = client.create_invitation(recipe.view_id, label=label, expires_at=expires_at)
+    client = HubClient(resolved_hub_url, credential["token"])
+    _publish_file_view_package_with_client(root, recipe.view_id, client=client)
+    invitation = client.create_invitation(
+        recipe.view_id,
+        label=label,
+        expires_at=expires_at,
+    )
     invitation_url = invitation.get("invitation_url")
     if not isinstance(invitation_url, str) or not invitation_url:
         raise ValueError("hub did not return an invitation_url")
     return f"invited file view {recipe.view_id}\ninvitation_url\t{invitation_url}"
+
+
+def publish_file_view_package(
+    memory_root: Path,
+    view_id: str,
+    *,
+    hub_url: str,
+    credential_id: str,
+) -> dict[str, object]:
+    root = Path(memory_root).expanduser()
+    recipe = validate_file_view_recipe_source(root, view_id, require_selection=True)
+    if not recipe.approved:
+        raise ValueError(f"file view is not approved: {recipe.view_id}")
+    clean_hub_url = _required_text(hub_url, "hub_url")
+    clean_credential_id = validate_heading_id(credential_id)
+    credential = load_shared_view_credential(root, clean_credential_id)
+    return _publish_file_view_package_with_client(
+        root,
+        recipe.view_id,
+        client=HubClient(clean_hub_url, credential["token"]),
+    )
+
+
+def _publish_file_view_package_with_client(
+    memory_root: Path,
+    view_id: str,
+    *,
+    client: HubClient,
+) -> dict[str, object]:
+    root = Path(memory_root).expanduser()
+    recipe = validate_file_view_recipe_source(root, view_id, require_selection=True)
+    if not recipe.approved:
+        raise ValueError(f"file view is not approved: {recipe.view_id}")
+    with TemporaryDirectory() as tempdir:
+        package = Path(tempdir) / recipe.view_id
+        export_file_view_package(root, recipe.view_id, package)
+        response = client.publish_package(recipe.view_id, package)
+    if not isinstance(response, dict):
+        raise ValueError("hub did not return a publish response")
+    return response
 
 
 def pull_file_view(memory_root: Path, heading_id: str) -> FileViewPullResult:
