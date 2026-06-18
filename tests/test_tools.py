@@ -421,7 +421,7 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertEqual(result, "staged: MEMORY.md, insight_logs/2026-05-30-143012.md")
         with self.assertRaisesRegex(
             ValueError,
-            r"MEMORY.md, MEMORY_\*\.md, shared_views\.toml, shared_views/<id> source files, or insight_logs/\*\.md",
+            r"MEMORY.md, MEMORY_\*\.md, shared_views\.toml, shares\.toml, shared_views/<id> source files, or insight_logs/\*\.md",
         ):
             tools.git_add(["rightmemory.toml"])
 
@@ -439,6 +439,24 @@ class MemoryToolsTests(unittest.TestCase):
         add_result = tools.git_add(["shared_views.toml"])
         self.assertEqual(edit_result, "edited shared_views.toml: replaced 1 occurrence")
         self.assertEqual(add_result, "staged: shared_views.toml")
+
+    def test_sync_reconciler_can_repair_share_registry(self):
+        self._git("init")
+        registry = self.root / "shares.toml"
+        registry.write_text(
+            '[shares.auth-api]\nversion = 1\nrole = "provider"\ntitle = "Old Auth API"\nstate = "draft"\nparts = ["file"]\n',
+            encoding="utf-8",
+        )
+        tools = MemoryTools(self.root, role="sync-reconciler")
+        tools.read_file("shares.toml")
+        edit_result = tools.edit_file(
+            "shares.toml",
+            'title = "Old Auth API"',
+            'title = "Auth API"',
+        )
+        add_result = tools.git_add(["shares.toml"])
+        self.assertEqual(edit_result, "edited shares.toml: replaced 1 occurrence")
+        self.assertEqual(add_result, "staged: shares.toml")
 
     def test_sync_reconciler_can_repair_shared_view_definition_source(self):
         self._git("init")

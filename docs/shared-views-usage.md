@@ -1,5 +1,7 @@
 # Shared Views Usage
 
+Use `rightmemory share` for the normal relationship-level provider/consumer flow. This document describes the lower-level `rightmemory shared-view` primitives that still back that workflow and remain useful for advanced debugging, scripting, and tests.
+
 Shared views let one RightMemory root use collaboration context owned by another root without reading the provider's private memory root.
 
 There are two sharing modes:

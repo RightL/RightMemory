@@ -515,6 +515,7 @@ ensure_memory_initial_commit() {
       MEMORY.md
       MEMORY_*.md
       shared_views.toml
+      shares.toml
       shared_views/*/view.md
       shared_views/*/retriever.md
       shared_views/*/recipe.toml
@@ -541,6 +542,7 @@ ensure_memory_initial_commit() {
         MEMORY.md \
         'MEMORY_*.md' \
         shared_views.toml \
+        shares.toml \
         'shared_views/*/view.md' \
         'shared_views/*/retriever.md' \
         'shared_views/*/recipe.toml' \
@@ -576,6 +578,7 @@ cat > "$MEMORY_ROOT/.gitignore" <<'EOF'
 !MEMORY.md
 !MEMORY_*.md
 !shared_views.toml
+!shares.toml
 !shared_views/
 !shared_views/*/
 !shared_views/*/view.md

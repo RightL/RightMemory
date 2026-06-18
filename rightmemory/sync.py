@@ -15,6 +15,7 @@ MEMORY_SYNC_PATHS = (
     "MEMORY.md",
     "MEMORY_*.md",
     "shared_views.toml",
+    "shares.toml",
     "shared_views/*/view.md",
     "shared_views/*/retriever.md",
     "shared_views/*/recipe.toml",

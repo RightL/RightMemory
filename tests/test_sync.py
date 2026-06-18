@@ -43,6 +43,7 @@ class SyncManagerTests(unittest.TestCase):
         from rightmemory.sync import MEMORY_SYNC_PATHS
 
         self.assertIn("shared_views.toml", MEMORY_SYNC_PATHS)
+        self.assertIn("shares.toml", MEMORY_SYNC_PATHS)
         self.assertIn("shared_views/*/view.md", MEMORY_SYNC_PATHS)
         self.assertIn("shared_views/*/retriever.md", MEMORY_SYNC_PATHS)
         self.assertIn("shared_views/*/recipe.toml", MEMORY_SYNC_PATHS)

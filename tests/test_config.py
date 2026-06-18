@@ -1935,6 +1935,7 @@ class RuntimeTests(unittest.TestCase):
             "!MEMORY.md\n"
             "!MEMORY_*.md\n"
             "!shared_views.toml\n"
+            "!shares.toml\n"
             "!shared_views/\n"
             "!shared_views/*/\n"
             "!shared_views/*/view.md\n"
@@ -2932,6 +2933,7 @@ class PromptTests(unittest.TestCase):
 
         self.assertIn("Commit and edit tools are scoped", prompt)
         self.assertIn("shared_views.toml", prompt)
+        self.assertIn("shares.toml", prompt)
         self.assertIn("shared_views/<view-id>/view.md", prompt)
         self.assertIn("insight_logs/*.md", prompt)
         self.assertIn("git_discard", prompt)

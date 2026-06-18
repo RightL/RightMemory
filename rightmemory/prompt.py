@@ -41,6 +41,7 @@ Memory store:
 - MEMORY.md
 - MEMORY_*.md
 - shared_views.toml
+- shares.toml
 - shared_views/<view-id>/view.md, recipe.toml, question.toml, retriever.md
 - insight_logs/
 
@@ -90,6 +91,7 @@ Memory source of truth:
 - The root file is MEMORY.md.
 - Optional detail files are named MEMORY_<slug>.md.
 - Insight logs are stored under insight_logs/.
+- Share relationships are stored in shares.toml.
 - Shared-view resolver metadata is stored in shared_views.toml.
 - Provider-owned shared-view source files live under shared_views/<view-id>/; dist/ output there is generated preview or publishing output, not active memory.
 - MEMORY.md is normal memory, not a routing-only index.
@@ -260,7 +262,7 @@ def _tool_guidance(role: str) -> str:
         )
     if role == "sync-reconciler":
         guidance += (
-            "\n- Commit and edit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `shared_views.toml`, "
+            "\n- Commit and edit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `shared_views.toml`, `shares.toml`, "
             "`shared_views/<view-id>/view.md`, `shared_views/<view-id>/retriever.md`, "
             "`shared_views/<view-id>/recipe.toml`, `shared_views/<view-id>/question.toml`, and `insight_logs/*.md` for sync repair; keep unrelated untracked files out of repair commits "
             "unless the caller explicitly asks about them.\n"

@@ -123,6 +123,7 @@ def _ensure_memory_gitignore(memory_root: Path) -> None:
             b"!MEMORY.md\n"
             b"!MEMORY_*.md\n"
             b"!shared_views.toml\n"
+            b"!shares.toml\n"
             b"!shared_views/\n"
             b"!shared_views/*/\n"
             b"!shared_views/*/view.md\n"

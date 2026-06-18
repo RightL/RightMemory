@@ -167,6 +167,34 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(status, "")
         self.assertIn("shared_views.toml", committed_files)
 
+    def test_initial_install_baselines_existing_share_registry(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+            (memory_root / "shares.toml").write_text(
+                '[shares.auth-api]\n'
+                'version = 1\n'
+                'role = "provider"\n'
+                'title = "Auth API"\n'
+                'state = "draft"\n'
+                'parts = ["file"]\n'
+                '[shares.auth-api.file]\n'
+                'view_id = "auth-api-files"\n'
+                'intent = "Expose auth context."\n'
+                'approved = false\n',
+                encoding="utf-8",
+            )
+
+            self._install(memory_root, skills_target)
+            status = self._git(memory_root, "status", "--short")
+            committed_files = self._git(memory_root, "ls-tree", "--name-only", "-r", "HEAD").splitlines()
+
+        self.assertEqual(status, "")
+        self.assertIn("shares.toml", committed_files)
+
     def test_install_preserves_existing_memory_repo_author(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -206,6 +234,7 @@ class InstallScriptTests(unittest.TestCase):
             "!MEMORY.md\n"
             "!MEMORY_*.md\n"
             "!shared_views.toml\n"
+            "!shares.toml\n"
             "!shared_views/\n"
             "!shared_views/*/\n"
             "!shared_views/*/view.md\n"
