@@ -107,6 +107,36 @@ class HubClient:
             bearer=True,
         )
 
+    def create_share_invitation(
+        self,
+        share_id: str,
+        *,
+        title: str,
+        parts: list[dict[str, str]],
+        label: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"title": title, "parts": parts}
+        if label:
+            payload["label"] = label
+        if expires_at:
+            payload["expires_at"] = expires_at
+        return self._request(
+            "POST",
+            f"/api/shares/{urllib.parse.quote(share_id)}/invitations",
+            json_body=payload,
+            bearer=True,
+        )
+
+    def get_share_invitation(self, token: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/share-invitations/{urllib.parse.quote(token)}/view")
+
+    def accept_share_invitation(self, token: str, *, consumer_label: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if consumer_label:
+            payload["consumer_label"] = consumer_label
+        return self._request("POST", f"/api/share-invitations/{urllib.parse.quote(token)}/accept", json_body=payload)
+
     def provider_inbox(self, provider_id: str) -> dict[str, Any]:
         return self._request(
             "GET",

@@ -653,6 +653,77 @@ class HubStore:
             "created_at": now,
         }
 
+    def create_share_invitation(
+        self,
+        share_id: str,
+        *,
+        provider_id: str,
+        title: str,
+        parts: list[dict[str, str]],
+        actor_id: str | None = None,
+        label: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        clean_share_id = _validate_hub_id(share_id, "share_id")
+        clean_provider_id = _validate_hub_id(provider_id, "provider_id")
+        clean_title = _required_string(title, "title")
+        clean_parts = self._validate_share_parts(clean_provider_id, parts)
+        clean_actor_id = _validate_hub_id(actor_id, "actor_id") if actor_id else None
+        clean_label = _optional_string(label)
+        clean_expires_at = _normalize_optional_datetime(expires_at, "expires_at")
+        payload = {
+            "share_id": clean_share_id,
+            "title": clean_title,
+            "provider_id": clean_provider_id,
+            "parts": clean_parts,
+        }
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            token = self._create_token(
+                connection,
+                action="share-invite",
+                provider_id=clean_provider_id,
+                view_id=None,
+                label=clean_label,
+            )
+            invitation_id = _new_id("sinv")
+            now = _now_iso()
+            connection.execute(
+                """
+                INSERT INTO share_invitations(
+                    id, share_id, provider_id, token_id, title, label, expires_at, revoked_at, created_at, accepted_count, payload_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, ?)
+                """,
+                (
+                    invitation_id,
+                    clean_share_id,
+                    clean_provider_id,
+                    token.token_id,
+                    clean_title,
+                    clean_label,
+                    clean_expires_at,
+                    now,
+                    json.dumps(payload, sort_keys=True),
+                ),
+            )
+            self._append_audit_event(
+                connection,
+                "share_invitation.created",
+                actor_id=clean_actor_id,
+                provider_id=clean_provider_id,
+                details={"share_id": clean_share_id, "invitation_id": invitation_id, "label": clean_label},
+            )
+        return {
+            "invitation_id": invitation_id,
+            "token_id": token.token_id,
+            "raw_token": token.raw_token,
+            "share_id": clean_share_id,
+            "label": clean_label,
+            "expires_at": clean_expires_at,
+            "created_at": now,
+        }
+
     def register_question_view(
         self,
         view_id: str,
@@ -798,6 +869,40 @@ class HubStore:
             return None
         return _invitation_from_row(row)
 
+    def describe_share_invitation(self, raw_token: str) -> dict[str, Any] | None:
+        row = self._share_invitation_row(raw_token)
+        if row is None:
+            return None
+        payload = _json_object(row["payload_json"])
+        if not payload:
+            return None
+        described_parts: list[dict[str, Any]] = []
+        for part in payload.get("parts", []):
+            if not isinstance(part, dict):
+                continue
+            described_part = {
+                "type": _required_string(part.get("type"), "share part type"),
+                "view_id": _required_string(part.get("view_id"), "share part view_id"),
+            }
+            view = self.get_view(described_part["view_id"])
+            if view is not None:
+                described_part["title"] = view["title"]
+                if view.get("description"):
+                    described_part["description"] = view["description"]
+            current = self.get_current_view_version(described_part["view_id"])
+            if current is not None:
+                metadata = _invitation_metadata_from_json(json.dumps(current["manifest"], sort_keys=True))
+                question_base_url = _optional_string(metadata.get("question_base_url"))
+                if question_base_url:
+                    described_part["question_base_url"] = question_base_url
+            described_parts.append(described_part)
+        return {
+            "share_id": _required_string(payload.get("share_id"), "share_id"),
+            "title": _required_string(payload.get("title"), "title"),
+            "provider_id": _required_string(payload.get("provider_id"), "provider_id"),
+            "parts": described_parts,
+        }
+
     def accept_invitation(self, raw_token: str, *, consumer_label: str | None = None) -> dict[str, Any] | None:
         token_row = self._find_token(raw_token, action="invite", provider_id=None, view_id=None)
         if token_row is None:
@@ -876,6 +981,66 @@ class HubStore:
             "consumer_label": clean_consumer_label,
             "created_at": now,
             **_accepted_invitation_metadata(invitation["manifest_json"]),
+        }
+
+    def accept_share_invitation(self, raw_token: str, *, consumer_label: str | None = None) -> dict[str, Any] | None:
+        row = self._share_invitation_row(raw_token)
+        if row is None:
+            return None
+        payload = _json_object(row["payload_json"])
+        if not payload:
+            return None
+        clean_consumer_label = _optional_string(consumer_label)
+        accepted_parts: list[dict[str, Any]] = []
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            for part in payload.get("parts", []):
+                if not isinstance(part, dict):
+                    continue
+                part_type = _required_string(part.get("type"), "share part type")
+                view_id = _validate_hub_id(_required_string(part.get("view_id"), "share part view_id"), "view_id")
+                connection_token = self._create_token(
+                    connection,
+                    action="connect",
+                    provider_id=row["provider_id"],
+                    view_id=view_id,
+                    label=clean_consumer_label,
+                )
+                connection_id = _new_id("con")
+                now = _now_iso()
+                connection.execute(
+                    """
+                    INSERT INTO connections(id, invitation_id, view_id, token_id, consumer_label, created_at, revoked_at)
+                    VALUES(?, NULL, ?, ?, ?, ?, NULL)
+                    """,
+                    (connection_id, view_id, connection_token.token_id, clean_consumer_label, now),
+                )
+                accepted_part: dict[str, Any] = {
+                    "type": part_type,
+                    "view_id": view_id,
+                    "connection_id": connection_id,
+                    "token_id": connection_token.token_id,
+                    "connection_token": connection_token.raw_token,
+                }
+                if part_type == "question":
+                    accepted_part.update(_accepted_invitation_metadata(self._current_manifest_json(connection, view_id)))
+                accepted_parts.append(accepted_part)
+            connection.execute(
+                "UPDATE share_invitations SET accepted_count = accepted_count + 1 WHERE id = ?",
+                (row["id"],),
+            )
+            self._append_audit_event(
+                connection,
+                "share_invitation.accepted",
+                provider_id=row["provider_id"],
+                details={"share_id": row["share_id"], "invitation_id": row["id"], "consumer_label": clean_consumer_label},
+            )
+        return {
+            "share_id": _required_string(payload.get("share_id"), "share_id"),
+            "title": _required_string(payload.get("title"), "title"),
+            "provider_id": _required_string(payload.get("provider_id"), "provider_id"),
+            "consumer_label": clean_consumer_label,
+            "parts": accepted_parts,
         }
 
     def record_interaction(
@@ -1052,6 +1217,12 @@ class HubStore:
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)",
                 (1, _now_iso()),
             )
+        if 2 not in applied:
+            connection.executescript(_MIGRATION_2)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)",
+                (2, _now_iso()),
+            )
         connection.commit()
 
     def _ensure_admin_token(self, connection: sqlite3.Connection, raw_token: str) -> None:
@@ -1176,6 +1347,90 @@ class HubStore:
                 _now_iso(),
             ),
         )
+
+    def _share_invitation_row(self, raw_token: str) -> sqlite3.Row | None:
+        token_row = self._find_token(raw_token, action="share-invite", provider_id=None, view_id=None)
+        if token_row is None:
+            return None
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            row = connection.execute(
+                """
+                SELECT
+                    si.id AS id,
+                    si.share_id AS share_id,
+                    si.provider_id AS provider_id,
+                    si.title AS title,
+                    si.label AS label,
+                    si.expires_at AS expires_at,
+                    si.revoked_at AS revoked_at,
+                    si.created_at AS created_at,
+                    si.accepted_count AS accepted_count,
+                    si.payload_json AS payload_json
+                FROM share_invitations si
+                WHERE si.token_id = ?
+                """,
+                (token_row["id"],),
+            ).fetchone()
+        if row is None or row["revoked_at"] is not None or _is_expired(row["expires_at"]):
+            return None
+        return row
+
+    def _validate_share_parts(self, provider_id: str, parts: list[dict[str, str]]) -> list[dict[str, str]]:
+        if not isinstance(parts, list) or not parts:
+            raise ValueError("parts must be a non-empty list")
+        clean_provider_id = _validate_hub_id(provider_id, "provider_id")
+        clean_parts: list[dict[str, str]] = []
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            for raw_part in parts:
+                if not isinstance(raw_part, dict):
+                    raise ValueError("share part must be an object")
+                part_type = _required_string(raw_part.get("type"), "share part type")
+                if part_type not in {"file", "question"}:
+                    raise ValueError(f"share part type must be file or question: {part_type!r}")
+                view_id = _validate_hub_id(_required_string(raw_part.get("view_id"), "share part view_id"), "view_id")
+                view = connection.execute(
+                    """
+                    SELECT
+                        v.id AS id,
+                        v.provider_id AS provider_id,
+                        v.current_version_id AS current_version_id,
+                        v.ref AS ref,
+                        vv.manifest_json AS manifest_json
+                    FROM views v
+                    LEFT JOIN view_versions vv ON vv.id = v.current_version_id
+                    WHERE v.id = ?
+                    """,
+                    (view_id,),
+                ).fetchone()
+                if view is None:
+                    raise KeyError(f"view not found: {view_id}")
+                if view["provider_id"] != clean_provider_id:
+                    raise ValueError(f"share part view belongs to another provider: {view_id}")
+                if not isinstance(view["current_version_id"], str) or not view["current_version_id"]:
+                    raise KeyError(f"view has no current version: {view_id}")
+                metadata_kind = _optional_string(_invitation_metadata_from_json(view["manifest_json"]).get("kind"))
+                actual_kind = metadata_kind or _kind_from_ref(view["ref"]) or "file"
+                if actual_kind != part_type:
+                    raise ValueError(f"share part type does not match view kind for {view_id}")
+                clean_parts.append({"type": part_type, "view_id": view_id})
+        return clean_parts
+
+    def _current_manifest_json(self, connection: sqlite3.Connection, view_id: str) -> str:
+        clean_view_id = _validate_hub_id(view_id, "view_id")
+        row = connection.execute(
+            """
+            SELECT vv.manifest_json AS manifest_json
+            FROM views v
+            JOIN view_versions vv ON vv.id = v.current_version_id
+            WHERE v.id = ?
+            """,
+            (clean_view_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"view not found: {clean_view_id}")
+        return str(row["manifest_json"])
 
 
 def _render_config(config: HubConfig) -> str:
@@ -1638,4 +1893,24 @@ CREATE INDEX idx_tokens_provider_view ON tokens(provider_id, view_id);
 CREATE INDEX idx_view_versions_view ON view_versions(view_id, created_at);
 CREATE INDEX idx_interactions_view ON interactions(view_id, created_at);
 CREATE INDEX idx_audit_events_kind ON audit_events(kind, created_at);
+"""
+
+_MIGRATION_2 = """
+CREATE TABLE IF NOT EXISTS share_invitations(
+    id TEXT PRIMARY KEY,
+    share_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    token_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    label TEXT,
+    expires_at TEXT,
+    revoked_at TEXT,
+    created_at TEXT NOT NULL,
+    accepted_count INTEGER NOT NULL DEFAULT 0,
+    payload_json TEXT NOT NULL,
+    FOREIGN KEY(token_id) REFERENCES tokens(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_share_invitations_token ON share_invitations(token_id);
+CREATE INDEX IF NOT EXISTS idx_share_invitations_provider ON share_invitations(provider_id, created_at);
 """

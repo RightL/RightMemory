@@ -111,6 +111,44 @@ class HubStoreTests(unittest.TestCase):
         self.assertIsNotNone(accepted)
         self.assertEqual(accepted["question_token"], "question-token")
 
+    def test_share_invitation_accepts_file_and_question_parts(self):
+        store = HubStore(self.root)
+        store.initialize(admin_token="admin-secret")
+        provider_token = store.create_provider_token("alice", label="publish")
+        _store_file_package(store, "auth-api-files", provider_token.token_id)
+        store.register_question_view(
+            "auth-api-ask",
+            provider_id="alice",
+            title="Auth API Questions",
+            description="Ask auth questions.",
+            question_base_url="https://provider.example.test",
+            question_token="question-token",
+            created_by_token_id=provider_token.token_id,
+        )
+
+        invitation = store.create_share_invitation(
+            "auth-api",
+            provider_id="alice",
+            title="Auth API",
+            parts=[
+                {"type": "file", "view_id": "auth-api-files"},
+                {"type": "question", "view_id": "auth-api-ask"},
+            ],
+            actor_id=provider_token.token_id,
+            label="frontend",
+        )
+        described = store.describe_share_invitation(invitation["raw_token"])
+        accepted = store.accept_share_invitation(invitation["raw_token"], consumer_label="frontend")
+
+        self.assertIsNotNone(described)
+        self.assertEqual(described["share_id"], "auth-api")
+        self.assertEqual([part["type"] for part in described["parts"]], ["file", "question"])
+        self.assertIsNotNone(accepted)
+        self.assertEqual(accepted["share_id"], "auth-api")
+        self.assertEqual(len(accepted["parts"]), 2)
+        question_part = [part for part in accepted["parts"] if part["type"] == "question"][0]
+        self.assertEqual(question_part["question_token"], "question-token")
+
     def test_admin_helpers_list_hub_state_without_secret_material(self):
         store = HubStore(self.root)
         store.initialize(admin_token="admin-secret")
@@ -382,6 +420,17 @@ def _optional_toml_line(key: str, value: str | None) -> str:
     return f'{key} = "{value}"' if value else ""
 
 
+def _store_file_package(store: HubStore, view_id: str, token_id: str):
+    package = store.root / f"package-{view_id}"
+    _write_package(package, view_id=view_id)
+    return store.store_package_version(
+        package,
+        view_id=view_id,
+        provider_id="alice",
+        created_by_token_id=token_id,
+    )
+
+
 @unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")
 class HubApiTests(unittest.TestCase):
     def setUp(self):
@@ -535,6 +584,42 @@ class HubApiTests(unittest.TestCase):
         self.assertNotIn("question_token", described.json())
         self.assertEqual(accepted.status_code, 201)
         self.assertEqual(accepted.json()["question_token"], "question-token")
+
+    def test_share_invitation_api_round_trip(self):
+        _store_file_package(self.store, "auth-api-files", self.provider_token.token_id)
+        self.store.register_question_view(
+            "auth-api-ask",
+            provider_id="alice",
+            title="Auth API Questions",
+            description="Ask auth questions.",
+            question_base_url="https://provider.example.test",
+            question_token="question-token",
+            created_by_token_id=self.provider_token.token_id,
+        )
+
+        response = self.client.post(
+            "/api/shares/auth-api/invitations",
+            headers={"Authorization": f"Bearer {self.provider_token.raw_token}"},
+            json={
+                "title": "Auth API",
+                "parts": [
+                    {"type": "file", "view_id": "auth-api-files"},
+                    {"type": "question", "view_id": "auth-api-ask"},
+                ],
+                "label": "frontend",
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        invitation_url = response.json()["invitation_url"]
+        token = invitation_url.rsplit("/", 1)[1]
+
+        described = self.client.get(f"/api/share-invitations/{token}/view")
+        accepted = self.client.post(f"/api/share-invitations/{token}/accept", json={"consumer_label": "frontend"})
+
+        self.assertEqual(described.status_code, 200)
+        self.assertEqual(accepted.status_code, 201)
+        self.assertEqual(accepted.json()["share_id"], "auth-api")
+        self.assertEqual(len(accepted.json()["parts"]), 2)
 
     def test_publish_invite_accept_pull_interact_and_inbox_flow(self):
         first_package = self.root / "package-v1"

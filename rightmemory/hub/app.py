@@ -294,6 +294,52 @@ def create_hub_app(hub_root: Path) -> FastAPI:
             "expires_at": invitation["expires_at"],
         }
 
+    @app.post("/api/shares/{share_id}/invitations", status_code=status.HTTP_201_CREATED)
+    def create_share_invitation(
+        share_id: str,
+        request: Request,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any]:
+        actor = _require_token(store, request, action="publish")
+        _require_actor_provider(actor.provider_id)
+        data = payload or {}
+        try:
+            invitation = store.create_share_invitation(
+                share_id,
+                provider_id=actor.provider_id,
+                title=_required_payload_str(data, "title"),
+                parts=_required_payload_parts(data),
+                actor_id=actor.token_id,
+                label=_optional_payload_str(data, "label"),
+                expires_at=_optional_payload_str(data, "expires_at"),
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        config = store.load_config()
+        return {
+            "invitation_id": invitation["invitation_id"],
+            "token_id": invitation["token_id"],
+            "share_id": invitation["share_id"],
+            "invitation_url": f"{config.public_base_url.rstrip('/')}/i/share/{invitation['raw_token']}",
+            "expires_at": invitation["expires_at"],
+        }
+
+    @app.get("/i/share/{token}")
+    def share_invitation_landing(token: str) -> dict[str, Any]:
+        invitation = store.describe_share_invitation(token)
+        if invitation is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="share invitation not found")
+        return {
+            "share_id": invitation["share_id"],
+            "title": invitation["title"],
+            "provider_id": invitation["provider_id"],
+            "parts": invitation["parts"],
+            "api": {
+                "view": f"/api/share-invitations/{token}/view",
+                "accept": f"/api/share-invitations/{token}/accept",
+            },
+        }
+
     @app.get("/i/{token}")
     def invitation_landing(token: str) -> dict[str, Any]:
         invitation = store.describe_invitation(token)
@@ -314,6 +360,13 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         invitation = store.describe_invitation(token)
         if invitation is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invitation not found")
+        return invitation
+
+    @app.get("/api/share-invitations/{token}/view")
+    def describe_share_invitation(token: str) -> dict[str, Any]:
+        invitation = store.describe_share_invitation(token)
+        if invitation is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="share invitation not found")
         return invitation
 
     @app.post("/api/invitations/{token}/accept", status_code=status.HTTP_201_CREATED)
@@ -338,6 +391,16 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         if isinstance(question_token, str) and question_token:
             response["question_token"] = question_token
         return response
+
+    @app.post("/api/share-invitations/{token}/accept", status_code=status.HTTP_201_CREATED)
+    def accept_share_invitation(token: str, payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+        accepted = store.accept_share_invitation(
+            token,
+            consumer_label=_optional_payload_str(payload or {}, "consumer_label"),
+        )
+        if accepted is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="share invitation not found")
+        return accepted
 
     @app.get("/api/views/{view_id}/package")
     def download_package(view_id: str, request: Request) -> Response:
@@ -587,6 +650,24 @@ def _optional_payload_str(payload: dict[str, Any], key: str) -> str | None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{key} must be a string")
     value = value.strip()
     return value or None
+
+
+def _required_payload_parts(payload: dict[str, Any]) -> list[dict[str, str]]:
+    parts = payload.get("parts")
+    if not isinstance(parts, list) or not parts:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="parts must be a non-empty list")
+    clean_parts: list[dict[str, str]] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="each part must be an object")
+        part_type = part.get("type")
+        view_id = part.get("view_id")
+        if not isinstance(part_type, str) or not part_type.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="part type must be a non-empty string")
+        if not isinstance(view_id, str) or not view_id.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="part view_id must be a non-empty string")
+        clean_parts.append({"type": part_type.strip(), "view_id": view_id.strip()})
+    return clean_parts
 
 
 def _payload_limit(value: Any) -> int:
