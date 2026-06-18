@@ -213,9 +213,9 @@ def _sync_guidance(role: str) -> str:
 def _tool_guidance(role: str) -> str:
     if role == "retrieve":
         return (
-            "- Use `read_skill(skill_id)` only when a relevant `S#` heading needs its full skill body.\n"
-            "- Use `read_mf(mf_id)` only when a relevant `MF#` heading needs mirrored provider context.\n"
-            "- Retrieve does not call shared-view endpoints or provider-question ask commands directly."
+            "Available retrieve tools:\n"
+            "- `read_skill(skill_id)` reads a full memory skill body for a relevant `S#` heading.\n"
+            "- `read_mf(mf_id)` reads a mirrored import package for a relevant `MF#` heading."
         )
     if role == "historian":
         return (
