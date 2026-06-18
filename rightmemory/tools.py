@@ -134,6 +134,32 @@ class MemoryTools:
             output += f"\n[truncated: showing lines {offset}-{end} of {len(lines)}; use offset/limit for more]"
         return output
 
+    def read_skill(self, skill_id: str) -> str:
+        """Read a MEMORY_SKILL body by S# id."""
+        clean_id = self._validate_memory_reference_id(skill_id)
+        relative = f"MEMORY_SKILL_{clean_id}.md"
+        path = self.memory_root / relative
+        if not path.is_file():
+            return self._missing_skill_message(clean_id)
+        return self._cap_command_output(self._read_text(path))
+
+    def read_mf(self, mf_id: str) -> str:
+        """Read a mirrored MF# import package by id."""
+        clean_id = self._validate_memory_reference_id(mf_id)
+        root = self.memory_root / RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX / clean_id
+        if not root.is_dir():
+            return self._missing_mf_message(clean_id)
+        files = sorted(path for path in root.rglob("*") if path.is_file())
+        if not files:
+            return f"MF import is empty: {clean_id}\n\n{self._available_mf_imports_block()}"
+        parts = [f"MF import: {clean_id}", ""]
+        for path in files:
+            relative = path.relative_to(root).as_posix()
+            parts.append(f"===== {relative} =====")
+            parts.append(self._read_text(path).rstrip())
+            parts.append("")
+        return self._cap_command_output("\n".join(parts).rstrip())
+
     def read_file(
         self,
         path: str,
@@ -962,6 +988,34 @@ class MemoryTools:
             output[:COMMAND_OUTPUT_CHAR_LIMIT]
             + f"\n[truncated: output exceeded {COMMAND_OUTPUT_CHAR_LIMIT} characters]"
         )
+
+    def _validate_memory_reference_id(self, value: str) -> str:
+        clean = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", clean):
+            raise ValueError("id must contain only letters, numbers, dot, underscore, or dash")
+        return clean
+
+    def _missing_skill_message(self, skill_id: str) -> str:
+        return f"Skill not found: {skill_id}\n\n{self._available_skills_block()}"
+
+    def _available_skills_block(self) -> str:
+        ids = []
+        for path in sorted(self.memory_root.glob("MEMORY_SKILL_*.md")):
+            if path.is_file():
+                ids.append(path.stem.removeprefix("MEMORY_SKILL_"))
+        if not ids:
+            return "Available skills:\n- none"
+        return "Available skills:\n" + "\n".join(f"- {item}" for item in ids)
+
+    def _missing_mf_message(self, mf_id: str) -> str:
+        return f"MF import not found: {mf_id}\n\n{self._available_mf_imports_block()}"
+
+    def _available_mf_imports_block(self) -> str:
+        imports_root = self.memory_root / RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX
+        ids = sorted(path.name for path in imports_root.iterdir() if path.is_dir()) if imports_root.is_dir() else []
+        if not ids:
+            return "Available MF imports:\n- none"
+        return "Available MF imports:\n" + "\n".join(f"- {item}" for item in ids)
 
     def _validate_read_command_path_tokens(self, args: list[str], path_indices: set[int]) -> None:
         for index in path_indices:

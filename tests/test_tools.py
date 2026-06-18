@@ -39,6 +39,49 @@ class MemoryToolsTests(unittest.TestCase):
             self.assertIn(".runtime/shared_views/imports/auth-api-files/dist/MEMORY.md", rg_result)
             self.assertIn("Tokens expire after one hour.", rg_result)
 
+    def test_retrieve_read_skill_returns_skill_body_by_id(self):
+        (self.root / "MEMORY_SKILL_alpha.md").write_text("# Alpha Skill\n\nUse alpha.\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="retrieve")
+
+        result = tools.read_skill("alpha")
+
+        self.assertIn("# Alpha Skill", result)
+        self.assertIn("Use alpha.", result)
+
+    def test_retrieve_read_skill_failure_lists_available_ids_without_paths(self):
+        (self.root / "MEMORY_SKILL_beta.md").write_text("# Beta Skill\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="retrieve")
+
+        result = tools.read_skill("alpha")
+
+        self.assertIn("Skill not found: alpha", result)
+        self.assertIn("Available skills:\n- beta", result)
+        self.assertNotIn("MEMORY_SKILL_beta.md", result)
+
+    def test_retrieve_read_mf_returns_whole_import_package_by_id(self):
+        import_root = self.root / ".runtime" / "shared_views" / "imports" / "auth-api"
+        import_root.mkdir(parents=True)
+        (import_root / "MEMORY.md").write_text("# Auth API\n\nToken expiry.\n", encoding="utf-8")
+        (import_root / "manifest.toml").write_text("view_id = \"auth-api\"\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="retrieve")
+
+        result = tools.read_mf("auth-api")
+
+        self.assertIn("MF import: auth-api", result)
+        self.assertIn("===== MEMORY.md =====", result)
+        self.assertIn("Token expiry.", result)
+        self.assertIn("===== manifest.toml =====", result)
+
+    def test_retrieve_read_mf_failure_lists_available_ids_without_paths(self):
+        (self.root / ".runtime" / "shared_views" / "imports" / "billing-api").mkdir(parents=True)
+        tools = MemoryTools(self.root, role="retrieve")
+
+        result = tools.read_mf("auth-api")
+
+        self.assertIn("MF import not found: auth-api", result)
+        self.assertIn("Available MF imports:\n- billing-api", result)
+        self.assertNotIn(".runtime", result)
+
     def test_update_role_cannot_read_mf_import_files(self):
         imported = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"
         imported.mkdir(parents=True)

@@ -877,9 +877,10 @@ class ConfigTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
 
         tool_names = {tool.__name__ for tool in runtime._agent_tools()}
+        self.assertEqual(tool_names, {"read_skill", "read_mf"})
         self.assertNotIn("retrieve_shared_view", tool_names)
-        self.assertIn("read", tool_names)
-        self.assertIn("grep", tool_names)
+        self.assertNotIn("read_command", tool_names)
+        self.assertNotIn("grep", tool_names)
 
     def test_shared_view_builder_role_loads_prompt(self):
         instructions = build_instructions(Path("/memory"), "shared-view-builder")
@@ -2585,13 +2586,14 @@ class RuntimeTests(unittest.TestCase):
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
+            (Path(self.tempdir.name) / "MEMORY_SKILL_alpha.md").write_text("# Alpha\n", encoding="utf-8")
             with runtime._debug_trace("agent-session"):
-                runtime.agent.kwargs["tools"][0]("*.md")
+                runtime.agent.kwargs["tools"][0]("alpha")
 
         trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "retrieve" / "agent-session.jsonl"
         events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([event["event"] for event in events], ["tool_started", "tool_finished"])
-        self.assertEqual(events[0]["tool"], "glob")
+        self.assertEqual(events[0]["tool"], "read_skill")
 
     def test_debug_trace_records_failures_before_history_save(self):
         config = RuntimeConfig(
@@ -2647,9 +2649,9 @@ class RuntimeTests(unittest.TestCase):
             tools = {tool.__name__: tool for tool in runtime.agent.kwargs["tools"]}
 
             with self.assertRaises(fake_modules["pydantic_ai"].ModelRetry) as caught:
-                tools["glob"]("../*.md")
+                tools["read_skill"]("../bad")
 
-        self.assertIn("glob pattern must be relative", str(caught.exception))
+        self.assertIn("id must contain only letters", str(caught.exception))
 
     def test_runtime_exposes_commit_tools(self):
         config = RuntimeConfig(role="update", model_id="openai/test")
@@ -2692,10 +2694,11 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
 
         tool_names = {tool.__name__ for tool in runtime.agent.kwargs["tools"]}
-        self.assertIn("read", tool_names)
-        self.assertIn("grep", tool_names)
-        self.assertIn("glob", tool_names)
-        self.assertIn("read_command", tool_names)
+        self.assertEqual(tool_names, {"read_skill", "read_mf"})
+        self.assertNotIn("read", tool_names)
+        self.assertNotIn("grep", tool_names)
+        self.assertNotIn("glob", tool_names)
+        self.assertNotIn("read_command", tool_names)
         self.assertNotIn("search_files", tool_names)
         self.assertNotIn("edit_file", tool_names)
         self.assertNotIn("create_file", tool_names)

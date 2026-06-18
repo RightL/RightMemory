@@ -596,6 +596,11 @@ class RightMemoryRuntime:
         )
 
     def _agent_tools(self) -> list[Callable[..., Any]]:
+        if self.config.role == "retrieve":
+            return [
+                self._agent_tool(self.tools.read_skill),
+                self._agent_tool(self.tools.read_mf),
+            ]
         read_tools = [
             self._agent_tool(self.tools.glob),
             self._agent_tool(self.tools.grep),
@@ -612,8 +617,6 @@ class RightMemoryRuntime:
                     self._agent_tool(self.tools.git_show_file),
                 ]
             )
-        if self.config.role == "retrieve":
-            return read_tools
         if self.config.role == "historian":
             return read_tools
         write_tools = [
