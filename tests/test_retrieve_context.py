@@ -5,12 +5,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from rightmemory.retrieve_context import (
+    RetrieveContextStore,
     active_memory_paths,
+    build_retrieve_request_text,
     current_memory_head,
     format_memory_diff_block,
+    format_recent_submitted_context_block,
     load_daily_snapshot,
     memory_diff_since,
 )
+from rightmemory.recent_submitted import RecentSubmittedMemoryEntry
 
 
 class RetrieveContextSnapshotTests(unittest.TestCase):
@@ -100,3 +104,63 @@ class RetrieveContextDiffTests(unittest.TestCase):
             check=True,
         )
         return result.stdout.strip()
+
+
+class RetrieveContextRequestTests(unittest.TestCase):
+    def test_request_text_places_snapshot_first_and_query_last(self):
+        text = build_retrieve_request_text(
+            snapshot_text="Daily memory snapshot\n===== MEMORY.md =====\n# Root\n",
+            turns=[("find alpha", "alpha answer")],
+            diff_block="# Memory changes since previous retrieve turn\n\n```diff\n+beta\n```",
+            recent_block="Recent submitted memory\n\nremember gamma",
+            query="find gamma",
+        )
+
+        self.assertTrue(text.startswith("Daily memory snapshot\n"))
+        self.assertIn("# Prior retrieve conversation\n\nUser: find alpha\nAssistant: alpha answer", text)
+        self.assertIn("# Memory changes since previous retrieve turn", text)
+        self.assertIn("Recent submitted memory", text)
+        self.assertTrue(text.rstrip().endswith("# Query\n\nfind gamma"))
+
+    def test_request_text_omits_empty_diff_and_recent_blocks(self):
+        text = build_retrieve_request_text(
+            snapshot_text="Daily memory snapshot\n===== MEMORY.md =====\n# Root\n",
+            turns=[],
+            diff_block="",
+            recent_block="",
+            query="find root",
+        )
+
+        self.assertNotIn("Memory changes since previous retrieve turn", text)
+        self.assertNotIn("Recent submitted memory", text)
+        self.assertTrue(text.rstrip().endswith("# Query\n\nfind root"))
+
+    def test_recent_submitted_context_block_omits_empty_entries(self):
+        self.assertEqual(format_recent_submitted_context_block([]), "")
+        block = format_recent_submitted_context_block(
+            [
+                RecentSubmittedMemoryEntry(
+                    update_session_id="update-a",
+                    candidate_id=1,
+                    submitted_at="2026-06-18T00:00:00+00:00",
+                    message="remember delta",
+                )
+            ]
+        )
+        self.assertTrue(block.startswith("# Recent submitted memory"))
+        self.assertIn("remember delta", block)
+
+    def test_retrieve_context_store_persists_turns_and_commit_cursor(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = RetrieveContextStore(root)
+
+            state = store.load("retrieve-a")
+            self.assertEqual(state.turns, [])
+            self.assertIsNone(state.delivered_memory_commit)
+
+            store.record_success("retrieve-a", query="find alpha", answer="alpha answer", memory_commit="abc123")
+            state = store.load("retrieve-a")
+
+        self.assertEqual(state.delivered_memory_commit, "abc123")
+        self.assertEqual([(turn.query, turn.answer) for turn in state.turns], [("find alpha", "alpha answer")])
