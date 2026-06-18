@@ -1,8 +1,17 @@
+import asyncio
+import json
+import zipfile
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 from unittest.mock import patch
 
+from starlette.requests import Request
+
+from rightmemory.hub.app import create_hub_app
+from rightmemory.hub.store import HubStore
 from rightmemory.share_models import (
     ShareFilePart,
     ShareQuestionPart,
@@ -12,7 +21,16 @@ from rightmemory.share_models import (
     validate_share_id,
 )
 from rightmemory.shared_view_models import load_shared_view_credential, save_shared_view_credential
+from rightmemory.shared_view_questions import ask_question_view
+from rightmemory.shared_views import record_shared_view_note
 from rightmemory.shares import approve_share, create_share, join_share, publish_share, share_status
+from rightmemory.web.app import create_web_app
+
+
+def _ensure_mapping(value) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise AssertionError(f"expected JSON object response, got {type(value).__name__}")
+    return value
 
 
 class ShareModelTests(unittest.TestCase):
@@ -287,3 +305,278 @@ class ShareConsumerFlowTests(unittest.TestCase):
 
         self.assertIn("auth-api provider=alice state=joined parts=file", result)
         self.assertIn("file auth-api-files", result)
+
+
+class _InProcessHubClient:
+    apps_by_base_url: dict[str, object] = {}
+
+    def __init__(self, base_url: str, token: str | None = None, *, timeout: int = 30):
+        self.base_url = base_url.rstrip("/")
+        self.token = token
+        self.timeout = timeout
+
+    def publish_package(self, view_id: str, package_root: Path) -> dict[str, object]:
+        endpoint = self._endpoint("/api/views/{view_id}/versions", "POST")
+        response = asyncio.run(
+            endpoint(
+                view_id=view_id,
+                request=self._request_object(
+                    "POST",
+                    f"/api/views/{quote(view_id)}/versions",
+                    body=_zip_package(package_root),
+                    headers=self._headers(bearer=True, content_type="application/zip"),
+                ),
+            )
+        )
+        return _ensure_mapping(response)
+
+    def register_question_view(
+        self,
+        view_id: str,
+        *,
+        title: str,
+        description: str,
+        question_base_url: str,
+        question_token: str,
+    ) -> dict[str, object]:
+        endpoint = self._endpoint("/api/views/{view_id}/question", "POST")
+        response = endpoint(
+            view_id,
+            self._request_object(
+                "POST",
+                f"/api/views/{quote(view_id)}/question",
+                headers=self._headers(bearer=True),
+            ),
+            payload={
+                "title": title,
+                "description": description,
+                "question_base_url": question_base_url,
+                "question_token": question_token,
+            },
+        )
+        return _ensure_mapping(response)
+
+    def create_share_invitation(
+        self,
+        share_id: str,
+        *,
+        title: str,
+        parts: list[dict[str, str]],
+        label: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {"title": title, "parts": parts}
+        if label:
+            payload["label"] = label
+        if expires_at:
+            payload["expires_at"] = expires_at
+        endpoint = self._endpoint("/api/shares/{share_id}/invitations", "POST")
+        response = endpoint(
+            share_id,
+            self._request_object(
+                "POST",
+                f"/api/shares/{quote(share_id)}/invitations",
+                headers=self._headers(bearer=True),
+            ),
+            payload=payload,
+        )
+        return _ensure_mapping(response)
+
+    def get_share_invitation(self, token: str) -> dict[str, object]:
+        endpoint = self._endpoint("/api/share-invitations/{token}/view", "GET")
+        return _ensure_mapping(endpoint(token))
+
+    def accept_share_invitation(self, token: str, *, consumer_label: str | None = None) -> dict[str, object]:
+        payload = {"consumer_label": consumer_label} if consumer_label else {}
+        endpoint = self._endpoint("/api/share-invitations/{token}/accept", "POST")
+        return _ensure_mapping(endpoint(token, payload=payload))
+
+    def download_package(self, view_id: str) -> bytes:
+        endpoint = self._endpoint("/api/views/{view_id}/package", "GET")
+        response = endpoint(
+            view_id,
+            self._request_object(
+                "GET",
+                f"/api/views/{quote(view_id)}/package",
+                headers=self._headers(bearer=True),
+            ),
+        )
+        if not hasattr(response, "body"):
+            raise AssertionError("hub package endpoint did not return a response body")
+        return bytes(response.body)
+
+    def ask_question(self, view_id: str, question: str) -> dict[str, object]:
+        endpoint = self._endpoint("/api/share/questions/{view_id}/ask", "POST")
+        response = endpoint(
+            view_id,
+            self._request_object(
+                "POST",
+                f"/api/share/questions/{quote(view_id)}/ask",
+                headers=self._headers(bearer=True),
+            ),
+            payload={"question": question},
+        )
+        return _ensure_mapping(response)
+
+    def post_interaction(self, view_id: str, payload: dict[str, object]) -> dict[str, object]:
+        endpoint = self._endpoint("/api/views/{view_id}/interactions", "POST")
+        response = endpoint(
+            view_id,
+            self._request_object(
+                "POST",
+                f"/api/views/{quote(view_id)}/interactions",
+                headers=self._headers(bearer=True),
+            ),
+            payload=payload,
+        )
+        return _ensure_mapping(response)
+
+    def _headers(self, *, bearer: bool = False, content_type: str | None = None) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        if bearer:
+            if not self.token:
+                raise AssertionError("hub token is required")
+            headers["Authorization"] = f"Bearer {self.token}"
+        if content_type:
+            headers["content-type"] = content_type
+        return headers
+
+    def _endpoint(self, path_template: str, method: str):
+        app = self.apps_by_base_url.get(self.base_url)
+        if app is None:
+            raise AssertionError(f"no in-process app installed for {self.base_url}")
+        for route in app.router.routes:
+            if getattr(route, "path", None) == path_template and method in getattr(route, "methods", set()):
+                return route.endpoint
+        raise AssertionError(f"route not found: {method} {path_template}")
+
+    def _request_object(self, method: str, path: str, *, body: bytes | None = None, headers: dict[str, str] | None = None) -> Request:
+        parsed = urlsplit(f"{self.base_url}{path}")
+        payload = body or b""
+        sent = False
+
+        async def receive():
+            nonlocal sent
+            if sent:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            sent = True
+            return {"type": "http.request", "body": payload, "more_body": False}
+
+        return Request(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": method,
+                "scheme": parsed.scheme,
+                "path": parsed.path,
+                "raw_path": parsed.path.encode("utf-8"),
+                "query_string": parsed.query.encode("utf-8"),
+                "headers": [
+                    (key.lower().encode("utf-8"), value.encode("utf-8")) for key, value in (headers or {}).items()
+                ],
+                "client": ("127.0.0.1", 1),
+                "server": (parsed.hostname or "localhost", parsed.port or 443),
+                "root_path": "",
+            },
+            receive,
+        )
+
+
+def _zip_package(package: Path) -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(package.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(package).as_posix())
+    return buffer.getvalue()
+
+
+class ShareEndToEndTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+        self.provider = self.root / "provider"
+        self.consumer = self.root / "consumer"
+        self.hub = self.root / "hub"
+        self.provider.mkdir()
+        self.consumer.mkdir()
+        (self.provider / "MEMORY.md").write_text(
+            "# Auth {#auth}\n\n- `token-expiry` Tokens expire after one hour. -> [rel:auth-api]\n",
+            encoding="utf-8",
+        )
+        (self.consumer / "MEMORY.md").write_text("# Frontend\n", encoding="utf-8")
+        self.store = HubStore(self.hub)
+        self.store.initialize(admin_token="admin-secret", public_base_url="https://hub.example.test")
+        self.provider_token = self.store.create_provider_token("alice", label="publish")
+        _InProcessHubClient.apps_by_base_url = {
+            "https://hub.example.test": create_hub_app(self.hub),
+            "https://provider.example.test": create_web_app(self.provider),
+        }
+        self.addCleanup(_InProcessHubClient.apps_by_base_url.clear)
+
+    def test_file_question_share_join_status(self):
+        save_shared_view_credential(
+            self.provider,
+            "alice-publish",
+            kind="http-publish",
+            token=self.provider_token.raw_token,
+            base_url="https://hub.example.test",
+            provider_id="alice",
+        )
+        _write_canonical_file_and_question_parts(self.provider)
+        create_share(
+            self.provider,
+            "auth-api",
+            title="Auth API",
+            provider_id="alice",
+            hub_url="https://hub.example.test",
+            credential_id="alice-publish",
+            file_intent="Expose auth API integration context.",
+            question_intent="Let frontend agents ask auth questions.",
+            question_base_url="https://provider.example.test",
+            build_parts=False,
+        )
+        approve_share(self.provider, "auth-api")
+
+        with (
+            patch("rightmemory.shared_view_files.HubClient", _InProcessHubClient),
+            patch("rightmemory.shared_view_questions.HubClient", _InProcessHubClient),
+            patch("rightmemory.shared_views.HubClient", _InProcessHubClient),
+            patch("rightmemory.shares.HubClient", _InProcessHubClient),
+            patch(
+                "rightmemory.shared_view_questions._run_provider_question",
+                side_effect=lambda root, provider_role, view_id, prompt, started: _answer_in_process_question(
+                    started,
+                    "Tokens expire after one hour.",
+                ),
+            ),
+        ):
+            published = publish_share(self.provider, "auth-api", label="frontend")
+            self.assertIn("/i/share/", published)
+            invitation_url = published.split("invitation_url\t", 1)[1].strip()
+
+            joined = join_share(self.consumer, invitation_url, consumer_label="frontend")
+            answer = ask_question_view(self.consumer, "auth-api-ask", "How do tokens refresh?")
+            note = record_shared_view_note(self.consumer, "auth-api-files", "Docs are stale.", confirmed=True)
+
+        self.assertIn("joined share auth-api", joined)
+        self.assertIn("Status: answered", answer)
+        self.assertIn("Tokens expire after one hour.", answer)
+        self.assertIn("recorded shared view note", note)
+        status = share_status(self.consumer, "auth-api")
+        self.assertIn("auth-api provider=alice state=joined parts=file,question", status)
+        self.assertIn("file auth-api-files pulled", status)
+        self.assertIn("question auth-api-ask ready", status)
+        memory_text = (self.consumer / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("{MF#auth-api-files}", memory_text)
+        self.assertIn("{MQ#auth-api-ask}", memory_text)
+        inbox = self.store.list_provider_inbox("alice")
+        self.assertEqual(len(inbox), 1)
+        self.assertEqual(inbox[0]["view_id"], "auth-api-files")
+
+
+def _answer_in_process_question(started, answer: str) -> str:
+    started.set()
+    return answer

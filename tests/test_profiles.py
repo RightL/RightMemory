@@ -149,6 +149,7 @@ class ProfileTests(unittest.TestCase):
             "!MEMORY.md\n"
             "!MEMORY_*.md\n"
             "!shared_views.toml\n"
+            "!shares.toml\n"
             "!shared_views/\n"
             "!shared_views/*/\n"
             "!shared_views/*/view.md\n"

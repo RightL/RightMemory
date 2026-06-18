@@ -12,7 +12,7 @@ from .shared_view_builder import run_file_view_builder, run_question_view_builde
 from .shared_view_files import approve_file_view, publish_file_view_package, pull_file_view
 from .shared_view_models import SharedViewTarget, load_shared_view_credential, save_shared_view_credential, validate_heading_id
 from .shared_view_questions import approve_question_view, register_question_view_with_hub
-from .shared_views import accept_shared_view
+from .shared_views import accept_shared_view, shared_view_connection_status
 
 
 def create_share(
@@ -274,16 +274,17 @@ def join_share(memory_root: Path, invitation_url: str, *, consumer_label: str | 
 
 
 def share_status(memory_root: Path, share_id: str | None = None) -> str:
-    shares = load_shares(Path(memory_root).expanduser())
+    root = Path(memory_root).expanduser()
+    shares = load_shares(root)
     selected = [shares[validate_share_id(share_id)]] if share_id else [shares[key] for key in sorted(shares)]
     lines: list[str] = []
     for share in selected:
         provider = share.provider_id or "-"
         lines.append(f"{share.share_id} provider={provider} state={share.state} parts={','.join(share.parts)}")
         if share.file:
-            lines.append(f"file {share.file.heading_id or share.file.view_id or '-'}")
+            lines.append(_share_part_status_line(root, share, "file"))
         if share.question:
-            lines.append(f"question {share.question.heading_id or share.question.view_id or '-'}")
+            lines.append(_share_part_status_line(root, share, "question"))
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -363,3 +364,30 @@ def _record_runtime_invitation(memory_root: Path, share_id: str, invitation_url:
         "updated_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
     }
     path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _share_part_status_line(root: Path, share: ShareRelationship, part_type: str) -> str:
+    if part_type == "file":
+        part = share.file
+        identifier = part.heading_id if part else None
+        fallback = part.view_id if part else None
+    else:
+        part = share.question
+        identifier = part.heading_id if part else None
+        fallback = part.view_id if part else None
+    name = identifier or fallback or "-"
+    if share.role == "consumer" and identifier:
+        status = shared_view_connection_status(root, identifier)
+        raw_state = str(status.get("status") or "unknown")
+        if part_type == "file":
+            state = "pulled" if raw_state == "imported" else raw_state
+        else:
+            state = "ready" if raw_state == "configured" else raw_state
+        return f"{part_type} {name} {state}"
+    if share.state == "published":
+        state = "published"
+    elif bool(getattr(part, "approved", False)):
+        state = "approved"
+    else:
+        state = "draft"
+    return f"{part_type} {name} {state}"
