@@ -1,6 +1,7 @@
 import tempfile
 import types
 import json
+import subprocess
 import tomllib
 import unittest
 from dataclasses import replace
@@ -1780,6 +1781,46 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertFalse((root / ".runtime" / "retrieve_context" / "sessions" / "agent-session.json").exists())
 
+    def test_retrieve_appends_diff_only_when_memory_head_changes(self):
+        root = Path(self.tempdir.name)
+        self._git(root, "init")
+        self._git(root, "config", "user.email", "test@example.com")
+        self._git(root, "config", "user.name", "Test User")
+        (root / "MEMORY.md").write_text("# Root {#root}\n\nfirst\n", encoding="utf-8")
+        self._git(root, "add", "MEMORY.md")
+        self._git(root, "commit", "-m", "initial memory")
+        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=root)
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+            runtime.run_session_turn("agent-session", "find first")
+            (root / "MEMORY.md").write_text("# Root {#root}\n\nsecond\n", encoding="utf-8")
+            self._git(root, "add", "MEMORY.md")
+            self._git(root, "commit", "-m", "update memory")
+            runtime.run_session_turn("agent-session", "find second")
+            runtime.run_session_turn("agent-session", "find third")
+
+        second_message = runtime.agent.calls[1]["message"]
+        third_message = runtime.agent.calls[2]["message"]
+        self.assertIn("# Memory changes since previous retrieve turn", second_message)
+        self.assertIn("+second", second_message)
+        self.assertNotIn("# Memory changes since previous retrieve turn", third_message)
+
+    def test_retrieve_request_prefix_is_byte_identical_before_first_volatile_block(self):
+        root = Path(self.tempdir.name)
+        (root / "MEMORY.md").write_text("# Root {#root}\n\nstable\n", encoding="utf-8")
+        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=root)
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            first_runtime = RightMemoryRuntime(config)
+            first_runtime.run_session_turn("session-a", "find alpha")
+            second_runtime = RightMemoryRuntime(config)
+            second_runtime.run_session_turn("session-b", "find beta")
+
+        first = first_runtime.agent.calls[0]["message"].split("# Query", 1)[0]
+        second = second_runtime.agent.calls[0]["message"].split("# Query", 1)[0]
+        self.assertEqual(first, second)
+
     def test_retrieve_turn_records_recent_submitted_delivery_after_success(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
         self._write_async_update_state(
@@ -2690,6 +2731,17 @@ class RuntimeTests(unittest.TestCase):
                 "updated_at": "2026-05-20T00:00:00+00:00",
             }
         )
+
+    def _git(self, root: Path, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        return result.stdout.strip()
 
     def _fake_pydantic_modules(self):
         class FakeModelRetry(Exception):
