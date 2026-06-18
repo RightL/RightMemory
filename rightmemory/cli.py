@@ -61,6 +61,7 @@ from .shared_views import (
     save_shared_view_credential,
     shared_view_connection_status,
 )
+from .shares import approve_share, create_share, join_share, list_shares, publish_share, share_status
 from .status import collect_status, format_status_dashboard
 from .sync import SyncManager
 from .watch import (
@@ -130,6 +131,9 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "shared-view":
         active = resolve_memory_root(profile_name=profile_name, cwd=Path.cwd(), default_root=default_memory_root())
         return _shared_view_main(argv[1:], active.memory_root)
+    if argv and argv[0] == "share":
+        active = resolve_memory_root(profile_name=profile_name, cwd=Path.cwd(), default_root=default_memory_root())
+        return _share_main(argv[1:], active.memory_root)
     if not argv:
         _top_level_parser().print_help()
         return 0
@@ -678,6 +682,66 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
             )
         return 0
     raise ValueError(f"unknown shared-view command: {args.command}")
+
+
+def _share_main(argv: list[str], memory_root: Path) -> int:
+    parser = argparse.ArgumentParser(prog="rightmemory share")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    create = subparsers.add_parser("create")
+    create.add_argument("share_id")
+    create.add_argument("--title", required=True)
+    create.add_argument("--provider", required=True)
+    create.add_argument("--hub-url", required=True)
+    create.add_argument("--credential-id", required=True)
+    create.add_argument("--file")
+    create.add_argument("--question")
+    create.add_argument("--question-base-url")
+    approve = subparsers.add_parser("approve")
+    approve.add_argument("share_id")
+    publish = subparsers.add_parser("publish")
+    publish.add_argument("share_id")
+    publish.add_argument("--label")
+    publish.add_argument("--expires-at")
+    join = subparsers.add_parser("join")
+    join.add_argument("invitation_url")
+    join.add_argument("--consumer-label")
+    status_parser = subparsers.add_parser("status")
+    status_parser.add_argument("share_id", nargs="?")
+    subparsers.add_parser("list")
+    args = parser.parse_args(argv)
+
+    if args.command == "create":
+        print(
+            create_share(
+                memory_root,
+                args.share_id,
+                title=args.title,
+                provider_id=args.provider,
+                hub_url=args.hub_url,
+                credential_id=args.credential_id,
+                file_intent=args.file,
+                question_intent=args.question,
+                question_base_url=args.question_base_url,
+            )
+        )
+        return 0
+    if args.command == "approve":
+        print(approve_share(memory_root, args.share_id))
+        return 0
+    if args.command == "publish":
+        print(publish_share(memory_root, args.share_id, label=args.label, expires_at=args.expires_at))
+        return 0
+    if args.command == "join":
+        with MemoryWriteLock(memory_root):
+            print(join_share(memory_root, args.invitation_url, consumer_label=args.consumer_label))
+        return 0
+    if args.command == "status":
+        print(share_status(memory_root, args.share_id), end="")
+        return 0
+    if args.command == "list":
+        print(list_shares(memory_root), end="")
+        return 0
+    raise ValueError(f"unknown share command: {args.command}")
 
 
 def _accept_shared_view_invitation_from_cli(

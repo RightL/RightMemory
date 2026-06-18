@@ -53,6 +53,79 @@ class CliEntrypointTests(unittest.TestCase):
         self.assertNotIn("Traceback", stderr.getvalue())
 
 
+class ShareCliTests(unittest.TestCase):
+    def test_share_create_dispatches_to_create_share(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli.create_share", return_value="created share auth-api") as create,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(
+                    [
+                        "share",
+                        "create",
+                        "auth-api",
+                        "--title",
+                        "Auth API",
+                        "--provider",
+                        "alice",
+                        "--hub-url",
+                        "https://hub.example.test",
+                        "--credential-id",
+                        "alice-publish",
+                        "--file",
+                        "Expose auth API integration context.",
+                        "--question",
+                        "Let frontend agents ask auth questions.",
+                        "--question-base-url",
+                        "https://provider.example.test",
+                    ]
+                )
+
+        self.assertEqual(result, 0)
+        self.assertIn("created share auth-api", stdout.getvalue())
+        create.assert_called_once()
+        self.assertEqual(create.call_args.args[:2], (root, "auth-api"))
+        self.assertEqual(create.call_args.kwargs["provider_id"], "alice")
+        self.assertEqual(create.call_args.kwargs["file_intent"], "Expose auth API integration context.")
+
+    def test_share_publish_dispatches_to_publish_share(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch(
+                    "rightmemory.cli.publish_share",
+                    return_value="published share auth-api\ninvitation_url\thttps://hub/i/share/token",
+                ) as publish,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["share", "publish", "auth-api", "--label", "frontend"])
+
+        self.assertEqual(result, 0)
+        publish.assert_called_once_with(root, "auth-api", label="frontend", expires_at=None)
+        self.assertIn("https://hub/i/share/token", stdout.getvalue())
+
+    def test_share_join_dispatches_to_join_share(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli.join_share", return_value="joined share auth-api") as join,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["share", "join", "https://hub.example.test/i/share/token", "--consumer-label", "frontend"])
+
+        self.assertEqual(result, 0)
+        join.assert_called_once_with(root, "https://hub.example.test/i/share/token", consumer_label="frontend")
+        self.assertIn("joined share auth-api", stdout.getvalue())
+
+
 class FakeReviewResult:
     def __init__(self, text: str, reviewed: int = 0, failed: int = 0):
         self.text = text
