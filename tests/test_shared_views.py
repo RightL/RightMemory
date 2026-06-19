@@ -575,6 +575,52 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         restored = (self.root / "shared_views" / "auth-api-files" / "recipe.toml").read_text(encoding="utf-8")
         self.assertEqual(restored, original)
 
+    def test_refresh_file_view_publish_failure_keeps_refresh_commit_clean(self):
+        self._init_git_memory()
+        write_extractive_file_view_recipe(
+            self.root,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_headings=["auth-api"],
+            approved=True,
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
+            last_semantic_refresh_at="2000-01-01T00:00:00+00:00",
+            last_semantic_refresh_memory_commit="old",
+        )
+        self._git(
+            "add",
+            "shared_views/auth-api-files/.gitignore",
+            "shared_views/auth-api-files/recipe.toml",
+            "shared_views/auth-api-files/view.md",
+        )
+        self._git("commit", "-m", "shared-view: initial")
+        old_head = self._git("rev-parse", "HEAD")
+
+        def fake_builder(memory_root, view_id, message):
+            write_generative_file_view(
+                memory_root,
+                view_id=view_id,
+                title="Auth API Files",
+                intent="Expose sanitized auth context.",
+                published_context="Tokens expire after one hour.",
+                approved=False,
+            )
+            return "refreshed"
+
+        with (
+            patch("rightmemory.shared_view_builder._run_builder", side_effect=fake_builder),
+            patch("rightmemory.shared_view_builder.publish_file_view_package", side_effect=RuntimeError("publish down")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "publish down"):
+                refresh_file_view(self.root, "auth-api-files", force=True, publish=True)
+
+        self.assertNotEqual(self._git("rev-parse", "HEAD"), old_head)
+        self.assertEqual(self._git("status", "--short"), "")
+        recipe = load_file_view_recipe(self.root, "auth-api-files")
+        self.assertEqual(recipe.render, "generative")
+
     def test_file_view_builder_rejects_noncanonical_model_recipe(self):
         def fake_builder(memory_root, view_id, message):
             view_dir = memory_root / "shared_views" / view_id
@@ -608,6 +654,17 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.root, check=True)
         subprocess.run(["git", "add", "MEMORY.md"], cwd=self.root, check=True)
         subprocess.run(["git", "commit", "-m", "memory: initial"], cwd=self.root, check=True, stdout=subprocess.PIPE)
+
+    def _git(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=self.root,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result.stdout.strip()
 
     def test_question_view_builder_rejects_noncanonical_model_config(self):
         def fake_builder(memory_root, view_id, message):

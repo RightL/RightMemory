@@ -89,6 +89,7 @@ def refresh_file_view(memory_root: Path, view_id: str, *, force: bool = False, p
         backup_dir = Path(tempdir) / clean_view_id
         if view_dir.exists():
             shutil.copytree(view_dir, backup_dir)
+        refreshed: FileViewRecipe
         try:
             output = _run_builder(root, clean_view_id, _refresh_message(old_recipe))
             with MemoryWriteLock(root):
@@ -107,14 +108,6 @@ def refresh_file_view(memory_root: Path, view_id: str, *, force: bool = False, p
                     render_file_view(root, clean_view_id)
                 _require_nonempty_file_view_context(root, clean_view_id)
                 _commit_refresh_if_changed(root, clean_view_id)
-            if publish and refreshed.approved and refreshed.publish_hub_url and refreshed.publish_credential_id:
-                publish_file_view_package(
-                    root,
-                    clean_view_id,
-                    hub_url=refreshed.publish_hub_url,
-                    credential_id=refreshed.publish_credential_id,
-                )
-            return f"refreshed file view {clean_view_id}\n{output}"
         except BaseException:
             with MemoryWriteLock(root):
                 if backup_dir.exists():
@@ -122,6 +115,14 @@ def refresh_file_view(memory_root: Path, view_id: str, *, force: bool = False, p
                         shutil.rmtree(view_dir)
                     shutil.copytree(backup_dir, view_dir)
             raise
+        if publish and refreshed.approved and refreshed.publish_hub_url and refreshed.publish_credential_id:
+            publish_file_view_package(
+                root,
+                clean_view_id,
+                hub_url=refreshed.publish_hub_url,
+                credential_id=refreshed.publish_credential_id,
+            )
+        return f"refreshed file view {clean_view_id}\n{output}"
 
 
 def run_question_view_builder(
