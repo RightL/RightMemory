@@ -13,6 +13,7 @@ _TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 SHARE_ROLES = {"provider", "consumer"}
 SHARE_STATES = {"draft", "approved", "published", "joined"}
 SHARE_PARTS = {"file", "question"}
+SHARE_TRANSPORTS = {"http", "git"}
 
 
 @dataclass(frozen=True)
@@ -39,9 +40,12 @@ class ShareRelationship:
     title: str
     state: str
     parts: tuple[str, ...]
+    transport: str = "http"
     provider_id: str | None = None
     hub_url: str | None = None
     credential_id: str | None = None
+    git_url: str | None = None
+    git_branch: str | None = None
     accepted_from: str | None = None
     file: ShareFilePart | None = None
     question: ShareQuestionPart | None = None
@@ -87,6 +91,12 @@ def save_shares(memory_root: Path, shares: dict[str, ShareRelationship]) -> None
             lines.append(f"hub_url = {_toml_string(share.hub_url)}")
         if share.credential_id:
             lines.append(f"credential_id = {_toml_string(share.credential_id)}")
+        if share.transport != "http":
+            lines.append(f"transport = {_toml_string(share.transport)}")
+        if share.git_url:
+            lines.append(f"git_url = {_toml_string(share.git_url)}")
+        if share.git_branch:
+            lines.append(f"git_branch = {_toml_string(share.git_branch)}")
         lines.append(f"state = {_toml_string(share.state)}")
         lines.append(f"parts = {_toml_array(share.parts)}")
         if share.accepted_from:
@@ -121,6 +131,7 @@ def _load_share(share_id: str, raw: object) -> ShareRelationship:
     role = _required_choice(_optional_string(raw.get("role")), SHARE_ROLES, f"share role for {share_id}")
     title = _required_string(_optional_string(raw.get("title")), f"share title for {share_id}")
     state = _required_choice(_optional_string(raw.get("state")), SHARE_STATES, f"share state for {share_id}")
+    transport = _required_choice(_optional_string(raw.get("transport")) or "http", SHARE_TRANSPORTS, f"share transport for {share_id}")
     parts = _load_parts(raw.get("parts"), share_id)
     file_part = _load_file_part(share_id, raw.get("file"), role=role, required="file" in parts)
     question_part = _load_question_part(share_id, raw.get("question"), role=role, required="question" in parts)
@@ -131,6 +142,9 @@ def _load_share(share_id: str, raw: object) -> ShareRelationship:
         provider_id=_optional_string(raw.get("provider_id")),
         hub_url=_optional_string(raw.get("hub_url")),
         credential_id=_optional_string(raw.get("credential_id")),
+        transport=transport,
+        git_url=_optional_string(raw.get("git_url")),
+        git_branch=_optional_string(raw.get("git_branch")),
         state=state,
         parts=parts,
         accepted_from=_optional_string(raw.get("accepted_from")),
@@ -176,9 +190,16 @@ def _validate_share(share: ShareRelationship) -> ShareRelationship:
     role = _required_choice(_optional_string(share.role), SHARE_ROLES, f"share role for {share_id}")
     title = _required_string(_optional_string(share.title), f"share title for {share_id}")
     state = _required_choice(_optional_string(share.state), SHARE_STATES, f"share state for {share_id}")
+    transport = _required_choice(_optional_string(share.transport) or "http", SHARE_TRANSPORTS, f"share transport for {share_id}")
     parts = _normalize_parts(share.parts, share_id)
     file_part = share.file
     question_part = share.question
+    git_url = _optional_string(share.git_url)
+    git_branch = _optional_string(share.git_branch)
+    if transport == "git":
+        _required_string(git_url, f"git_url for {share_id}")
+        if "question" in parts:
+            raise ValueError(f"git share {share_id} supports file parts only")
     if "file" in parts:
         if file_part is None:
             raise ValueError(f"file part requires [shares.{share_id}.file]")
@@ -201,9 +222,12 @@ def _validate_share(share: ShareRelationship) -> ShareRelationship:
         title=title,
         state=state,
         parts=parts,
+        transport=transport,
         provider_id=_optional_string(share.provider_id),
         hub_url=_optional_string(share.hub_url),
         credential_id=_optional_string(share.credential_id),
+        git_url=git_url,
+        git_branch=git_branch,
         accepted_from=_optional_string(share.accepted_from),
         file=file_part,
         question=question_part,

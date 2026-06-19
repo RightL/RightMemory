@@ -231,6 +231,36 @@ class ShareModelTests(unittest.TestCase):
         self.assertIn("[shares.auth-api]", text)
         self.assertIn('parts = ["file", "question"]', text)
 
+    def test_git_provider_share_round_trips_transport_metadata(self):
+        save_shares(
+            self.root,
+            {
+                "auth-api": ShareRelationship(
+                    share_id="auth-api",
+                    role="provider",
+                    title="Auth API",
+                    provider_id="alice",
+                    state="draft",
+                    parts=("file",),
+                    transport="git",
+                    git_url="https://github.com/user/rightmemory-shares.git",
+                    git_branch="gh-pages",
+                    file=ShareFilePart(view_id="auth-api-files", intent="Share auth API context"),
+                )
+            },
+        )
+
+        loaded = load_shares(self.root)["auth-api"]
+        text = (self.root / "shares.toml").read_text(encoding="utf-8")
+
+        self.assertEqual(loaded.transport, "git")
+        self.assertEqual(loaded.git_url, "https://github.com/user/rightmemory-shares.git")
+        self.assertEqual(loaded.git_branch, "gh-pages")
+        self.assertIn('transport = "git"', text)
+        self.assertIn('git_url = "https://github.com/user/rightmemory-shares.git"', text)
+        self.assertIn('git_branch = "gh-pages"', text)
+        self.assertNotIn("hub_url", text)
+
     def test_load_rejects_part_without_config(self):
         (self.root / "shares.toml").write_text(
             '[shares.auth-api]\n'
