@@ -8,12 +8,15 @@ from difflib import SequenceMatcher
 from hashlib import sha256
 from pathlib import Path
 
+from .share_models import ShareFilePart, ShareQuestionPart, ShareRelationship, load_shares, save_shares, validate_share_id
+from .share_results import normalize_share_capability
 from .shared_view_files import (
     render_file_view,
     validate_file_view_recipe_source,
     write_extractive_file_view_recipe,
     write_generative_file_view,
 )
+from .shared_view_models import validate_heading_id
 from .shared_view_questions import validate_question_view_source, write_question_view
 
 
@@ -523,6 +526,77 @@ class MemoryTools:
             f"success: wrote canonical question view {config.view_id} with "
             f"start timeout {config.start_timeout_seconds}s and answer timeout {config.answer_timeout_seconds}s"
         )
+
+    def create_or_update_share_relationship(
+        self,
+        share_id: str,
+        title: str,
+        provider_id: str,
+        hub_url: str,
+        credential_id: str,
+        capability: str = "auto",
+        file_view_id: str | None = None,
+        file_intent: str | None = None,
+        question_view_id: str | None = None,
+        question_intent: str | None = None,
+        question_base_url: str | None = None,
+    ) -> str:
+        """Create canonical provider share registry data, or return actionable validation failures."""
+        self._require_shared_view_builder_tool()
+        try:
+            clean_share_id = validate_share_id(share_id)
+            clean_capability = normalize_share_capability(capability)
+            if clean_capability == "auto":
+                clean_capability = _capability_from_selected_views(file_view_id, question_view_id)
+            parts: list[str] = []
+            file_part = None
+            question_part = None
+            if clean_capability in {"file_context", "both"}:
+                if not file_view_id or not file_intent:
+                    return "failed: file_context capability requires file_view_id and file_intent"
+                try:
+                    validate_file_view_recipe_source(self.memory_root, file_view_id, require_selection=False)
+                except (OSError, ValueError) as exc:
+                    return f"failed: file view source is invalid: {exc}"
+                parts.append("file")
+                file_part = ShareFilePart(
+                    view_id=validate_heading_id(file_view_id),
+                    intent=str(file_intent).strip(),
+                    approved=False,
+                )
+            if clean_capability in {"live_questions", "both"}:
+                if not question_view_id or not question_intent or not question_base_url:
+                    return "failed: live_questions capability requires question_view_id, question_intent, and question_base_url"
+                try:
+                    validate_question_view_source(self.memory_root, question_view_id)
+                except (OSError, ValueError) as exc:
+                    return f"failed: question view source is invalid: {exc}"
+                parts.append("question")
+                question_part = ShareQuestionPart(
+                    view_id=validate_heading_id(question_view_id),
+                    intent=str(question_intent).strip(),
+                    question_base_url=str(question_base_url).strip(),
+                    approved=False,
+                )
+            if not parts:
+                return "failed: share capability selected no shareable capability"
+            shares = load_shares(self.memory_root)
+            shares[clean_share_id] = ShareRelationship(
+                share_id=clean_share_id,
+                role="provider",
+                title=str(title).strip(),
+                provider_id=validate_heading_id(provider_id),
+                hub_url=str(hub_url).strip().rstrip("/"),
+                credential_id=validate_heading_id(credential_id),
+                state="draft",
+                parts=tuple(parts),
+                file=file_part,
+                question=question_part,
+            )
+            save_shares(self.memory_root, shares)
+        except (OSError, ValueError) as exc:
+            return f"failed: {exc}"
+        return f"success: wrote share relationship {clean_share_id} with capability {clean_capability}"
 
     def git_status(self) -> str:
         """Return short git status for the RightMemory root."""
@@ -1675,3 +1749,15 @@ class MemoryTools:
 
     def _loc(self, item: MemoryId) -> str:
         return f"{item.file.relative_to(self.memory_root)}:{item.line_number}"
+
+
+def _capability_from_selected_views(file_view_id: str | None, question_view_id: str | None) -> str:
+    has_file = bool(str(file_view_id or "").strip())
+    has_question = bool(str(question_view_id or "").strip())
+    if has_file and has_question:
+        return "both"
+    if has_file:
+        return "file_context"
+    if has_question:
+        return "live_questions"
+    return "auto"

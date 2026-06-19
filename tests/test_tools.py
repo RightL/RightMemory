@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from rightmemory.share_models import load_shares
 from rightmemory.tools import MemoryTools
 
 
@@ -548,6 +549,62 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn('kind = "question"', question_toml)
         self.assertIn("access_token_hashes = []", question_toml)
         self.assertIn("Answer from auth API memory only.", retriever)
+
+    def test_shared_view_builder_tool_creates_share_relationship(self):
+        tools = MemoryTools(self.root, role="shared-view-builder")
+        tools.create_generative_file_view(
+            "auth-api-files",
+            "Auth API Files",
+            "Share stable auth API context.",
+            "## Auth API\nUse POST /auth/refresh on token expiry.",
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
+        )
+        tools.create_question_view(
+            "auth-api-ask",
+            "Auth API Questions",
+            "Let consumers ask auth API questions.",
+            "Answer only auth API integration questions.",
+        )
+
+        result = tools.create_or_update_share_relationship(
+            share_id="auth-api",
+            title="Auth API",
+            provider_id="alice",
+            hub_url="https://hub.example.test",
+            credential_id="alice-publish",
+            capability="both",
+            file_view_id="auth-api-files",
+            file_intent="Share stable auth API context.",
+            question_view_id="auth-api-ask",
+            question_intent="Let consumers ask auth API questions.",
+            question_base_url="https://provider.example.test",
+        )
+
+        shares = load_shares(self.root)
+        self.assertIn("success: wrote share relationship auth-api", result)
+        self.assertEqual(shares["auth-api"].parts, ("file", "question"))
+        self.assertEqual(shares["auth-api"].file.view_id, "auth-api-files")
+        self.assertEqual(shares["auth-api"].question.view_id, "auth-api-ask")
+        self.assertFalse(shares["auth-api"].file.approved)
+        self.assertFalse(shares["auth-api"].question.approved)
+
+    def test_shared_view_builder_tool_rejects_missing_selected_artifact(self):
+        tools = MemoryTools(self.root, role="shared-view-builder")
+
+        result = tools.create_or_update_share_relationship(
+            share_id="auth-api",
+            title="Auth API",
+            provider_id="alice",
+            hub_url="https://hub.example.test",
+            credential_id="alice-publish",
+            capability="file_context",
+            file_view_id="auth-api-files",
+            file_intent="Share stable auth API context.",
+        )
+
+        self.assertIn("failed:", result)
+        self.assertIn("file view source is invalid", result)
 
     def test_insight_read_tools_are_limited_to_active_memory_and_insight_logs(self):
         (self.root / "MEMORY.md").write_text("# Domain\n\nmemory beta\n", encoding="utf-8")

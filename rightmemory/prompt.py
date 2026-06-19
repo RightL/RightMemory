@@ -183,7 +183,7 @@ def _command_guidance(role: str) -> str:
         )
     if role == "shared-view-builder":
         return (
-            "- The `rightmemory shared-view build-file` or `rightmemory shared-view build-question` command selected "
+            "- The `rightmemory shared-view ...` or `rightmemory share ...` command selected "
             "shared-view builder behavior.\n"
             "- Build only provider-owned shared-view source artifacts under `shared_views/<view-id>/`."
         )
@@ -239,6 +239,8 @@ def _tool_guidance(role: str) -> str:
             "`failed: ...`, correct the selected ids or arguments and call it again.\n"
             "- For question views, call `create_question_view` instead of hand-writing `question.toml`. "
             "If it returns `failed: ...`, correct the arguments and call it again.\n"
+            "- For share-level requests, call `create_or_update_share_relationship` after the selected "
+            "file context and live question artifacts are valid; do not hand-write `shares.toml`.\n"
             "- You may use ordinary file tools only for non-machine prose/source edits such as refining `view.md` "
             "or reading existing artifacts."
         )
