@@ -12,6 +12,7 @@ from rightmemory.dreamer_trigger import DreamerTriggerStore
 from rightmemory.doctor import DoctorCheck
 from rightmemory.hub.store import HubStore
 from rightmemory.insight_trigger import InsightTriggerStore
+from rightmemory.share_results import ShareOperationResult
 from rightmemory.shared_view_files import FileViewPullResult
 from rightmemory.shared_view_models import SharedViewConnection, SharedViewTarget, load_shared_view_credential, save_connections
 from rightmemory.watch import MANAGED_WATCH_TARGETS, WATCH_COMMANDS, _process_command
@@ -109,6 +110,85 @@ class ShareCliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         publish.assert_called_once_with(root, "auth-api", label="frontend", expires_at=None)
         self.assertIn("https://hub/i/share/token", stdout.getvalue())
+
+    def test_share_create_request_dispatches_to_create_share(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch(
+                    "rightmemory.cli.create_share",
+                    return_value="auth-api provider draft capability=both\n\nBuilder summary:\nBuilt it.\n",
+                ) as create,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(
+                    [
+                        "share",
+                        "create",
+                        "auth-api",
+                        "--provider",
+                        "alice",
+                        "--hub-url",
+                        "https://hub.example.test",
+                        "--credential-id",
+                        "alice-publish",
+                        "--request",
+                        "Share auth API context and allow live questions.",
+                        "--capability",
+                        "both",
+                        "--question-base-url",
+                        "https://provider.example.test",
+                    ]
+                )
+
+        self.assertEqual(result, 0)
+        create.assert_called_once()
+        self.assertIsNone(create.call_args.kwargs["title"])
+        self.assertEqual(create.call_args.kwargs["request"], "Share auth API context and allow live questions.")
+        self.assertEqual(create.call_args.kwargs["capability"], "both")
+        self.assertIn("Built it.", stdout.getvalue())
+
+    def test_share_revise_dispatches_to_revise_share(self):
+        stdout = io.StringIO()
+        expected = ShareOperationResult(
+            share_id="auth-api",
+            title="Auth API",
+            role="provider",
+            state="draft",
+            capability="live_questions",
+            builder_final_message="Updated scope.",
+            next_action="rightmemory share approve auth-api",
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli.revise_share", return_value=expected) as revise,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(
+                    [
+                        "share",
+                        "revise",
+                        "auth-api",
+                        "--capability",
+                        "live-questions",
+                        "Only answer refresh token questions.",
+                    ]
+                )
+
+        self.assertEqual(result, 0)
+        revise.assert_called_once_with(
+            root,
+            "auth-api",
+            "Only answer refresh token questions.",
+            capability="live-questions",
+            question_base_url=None,
+        )
+        self.assertIn("Updated scope.", stdout.getvalue())
+        self.assertIn("rightmemory share approve auth-api", stdout.getvalue())
 
     def test_share_join_dispatches_to_join_share(self):
         stdout = io.StringIO()

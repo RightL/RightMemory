@@ -61,7 +61,8 @@ from .shared_views import (
     save_shared_view_credential,
     shared_view_connection_status,
 )
-from .shares import approve_share, create_share, join_share, list_shares, publish_share, share_status
+from .share_results import format_share_operation_result
+from .shares import approve_share, create_share, join_share, list_shares, publish_share, revise_share, share_status
 from .status import collect_status, format_status_dashboard
 from .sync import SyncManager
 from .watch import (
@@ -696,13 +697,20 @@ def _share_main(argv: list[str], memory_root: Path) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     create = subparsers.add_parser("create")
     create.add_argument("share_id")
-    create.add_argument("--title", required=True)
+    create.add_argument("--title")
     create.add_argument("--provider", required=True)
     create.add_argument("--hub-url", required=True)
     create.add_argument("--credential-id", required=True)
+    create.add_argument("--request")
+    create.add_argument("--capability", choices=("auto", "file-context", "live-questions", "both"), default="auto")
     create.add_argument("--file")
     create.add_argument("--question")
     create.add_argument("--question-base-url")
+    revise = subparsers.add_parser("revise")
+    revise.add_argument("share_id")
+    revise.add_argument("--capability", choices=("auto", "file-context", "live-questions", "both"))
+    revise.add_argument("--question-base-url")
+    revise.add_argument("revision", nargs="+")
     approve = subparsers.add_parser("approve")
     approve.add_argument("share_id")
     publish = subparsers.add_parser("publish")
@@ -718,6 +726,8 @@ def _share_main(argv: list[str], memory_root: Path) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "create":
+        if not args.request and not args.title:
+            raise ValueError("share create requires --title unless --request is used")
         print(
             create_share(
                 memory_root,
@@ -726,9 +736,24 @@ def _share_main(argv: list[str], memory_root: Path) -> int:
                 provider_id=args.provider,
                 hub_url=args.hub_url,
                 credential_id=args.credential_id,
+                request=args.request,
+                capability=args.capability,
                 file_intent=args.file,
                 question_intent=args.question,
                 question_base_url=args.question_base_url,
+            )
+        )
+        return 0
+    if args.command == "revise":
+        print(
+            format_share_operation_result(
+                revise_share(
+                    memory_root,
+                    args.share_id,
+                    " ".join(args.revision).strip(),
+                    capability=args.capability,
+                    question_base_url=args.question_base_url,
+                )
             )
         )
         return 0
