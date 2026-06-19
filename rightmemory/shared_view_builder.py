@@ -96,5 +96,5 @@ def _require_nonempty_file_view_context(memory_root: Path, view_id: str) -> None
     if marker not in text or not text.split(marker, 1)[1].strip():
         raise RuntimeError(
             "shared-view builder rendered an empty file view; "
-            "call create_file_view_recipe with ids that select memory content"
+            "call the file-view compiler tool with content that produces Published Context"
         )

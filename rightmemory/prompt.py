@@ -234,8 +234,9 @@ def _tool_guidance(role: str) -> str:
     if role == "shared-view-builder":
         return (
             "- Use read/search tools to inspect provider memory and shared-view source files.\n"
-            "- For file views, call `create_file_view_recipe` instead of hand-writing `recipe.toml`. "
-            "If it returns `failed: ...`, correct the selected ids or arguments and call it again.\n"
+            "- For file views, call exactly one of `create_extractive_file_view` or "
+            "`create_generative_file_view` instead of hand-writing `recipe.toml`. If it returns "
+            "`failed: ...`, correct the selected ids or arguments and call it again.\n"
             "- For question views, call `create_question_view` instead of hand-writing `question.toml`. "
             "If it returns `failed: ...`, correct the arguments and call it again.\n"
             "- You may use ordinary file tools only for non-machine prose/source edits such as refining `view.md` "

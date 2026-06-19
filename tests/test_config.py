@@ -897,7 +897,9 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("shared-view builder", instructions)
         self.assertIn("recipe.toml", instructions)
         self.assertIn("question.toml", instructions)
-        self.assertIn("create_file_view_recipe", instructions)
+        self.assertIn("create_extractive_file_view", instructions)
+        self.assertIn("create_generative_file_view", instructions)
+        self.assertNotIn("create_file_view_recipe", instructions)
         self.assertIn("create_question_view", instructions)
         self.assertIn("Do not edit provider private memory", instructions)
 
@@ -914,7 +916,9 @@ class ConfigTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
 
         tool_names = {tool.__name__ for tool in runtime._agent_tools()}
-        self.assertIn("create_file_view_recipe", tool_names)
+        self.assertIn("create_extractive_file_view", tool_names)
+        self.assertIn("create_generative_file_view", tool_names)
+        self.assertNotIn("create_file_view_recipe", tool_names)
         self.assertIn("create_question_view", tool_names)
 
     def _write_config(self, content: str) -> Path:

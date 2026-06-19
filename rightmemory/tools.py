@@ -12,6 +12,7 @@ from .shared_view_files import (
     render_file_view,
     validate_file_view_recipe_source,
     write_extractive_file_view_recipe,
+    write_generative_file_view,
 )
 from .shared_view_questions import validate_question_view_source, write_question_view
 
@@ -396,7 +397,7 @@ class MemoryTools:
             self._read_signatures[destination] = signature
         return f"renamed {source_relative} to {destination_relative}"
 
-    def create_file_view_recipe(
+    def create_extractive_file_view(
         self,
         view_id: str,
         title: str,
@@ -408,7 +409,7 @@ class MemoryTools:
         publish_hub_url: str | None = None,
         publish_credential_id: str | None = None,
     ) -> str:
-        """Create and render a canonical MF# file-view recipe, or return actionable validation failures."""
+        """Create and render a canonical extractive MF# file view, or return actionable validation failures."""
         self._require_shared_view_builder_tool()
         include_headings = include_headings or []
         include_nodes = include_nodes or []
@@ -451,10 +452,47 @@ class MemoryTools:
         except (OSError, ValueError) as exc:
             return f"failed: {exc}"
         return (
-            f"success: wrote canonical file view {recipe.view_id} with "
+            f"success: wrote extractive file view {recipe.view_id} with "
             f"{len(recipe.include_headings)} heading(s), {len(recipe.include_nodes)} node(s), "
             f"{len(recipe.include_files)} file(s), and {len(recipe.exclude_ids)} excluded id(s)"
         )
+
+    def create_generative_file_view(
+        self,
+        view_id: str,
+        title: str,
+        intent: str,
+        published_context: str,
+        publish_hub_url: str | None = None,
+        publish_credential_id: str | None = None,
+    ) -> str:
+        """Create and render a canonical generative MF# file view."""
+        self._require_shared_view_builder_tool()
+        if not str(published_context).strip():
+            return "failed: published_context must not be empty"
+        try:
+            write_generative_file_view(
+                self.memory_root,
+                view_id=view_id,
+                title=title,
+                intent=intent,
+                published_context=published_context,
+                approved=False,
+                publish_hub_url=publish_hub_url,
+                publish_credential_id=publish_credential_id,
+            )
+            recipe = validate_file_view_recipe_source(
+                self.memory_root,
+                view_id,
+                require_selection=False,
+                require_publish=bool(publish_hub_url or publish_credential_id),
+            )
+            rendered = self.memory_root / "shared_views" / recipe.view_id / "dist" / "MEMORY.md"
+            if not self._file_view_rendered_context(rendered):
+                return "failed: published_context rendered an empty Published Context"
+        except (OSError, ValueError) as exc:
+            return f"failed: {exc}"
+        return f"success: wrote generative file view {recipe.view_id}"
 
     def create_question_view(
         self,

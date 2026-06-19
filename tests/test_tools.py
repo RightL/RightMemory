@@ -481,7 +481,7 @@ class MemoryToolsTests(unittest.TestCase):
         )
         tools = MemoryTools(self.root, role="shared-view-builder")
 
-        result = tools.create_file_view_recipe(
+        result = tools.create_extractive_file_view(
             view_id="auth-api-files",
             title="Auth API Files",
             intent="Expose auth context.",
@@ -492,7 +492,7 @@ class MemoryToolsTests(unittest.TestCase):
 
         recipe = (self.root / "shared_views" / "auth-api-files" / "recipe.toml").read_text(encoding="utf-8")
         rendered = (self.root / "shared_views" / "auth-api-files" / "dist" / "MEMORY.md").read_text(encoding="utf-8")
-        self.assertIn("success: wrote canonical file view auth-api-files", result)
+        self.assertIn("success: wrote extractive file view auth-api-files", result)
         self.assertIn('include_headings = ["auth-api"]', recipe)
         self.assertIn('[publish]', recipe)
         self.assertIn("Tokens expire after one hour.", rendered)
@@ -501,7 +501,7 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
         tools = MemoryTools(self.root, role="shared-view-builder")
 
-        result = tools.create_file_view_recipe(
+        result = tools.create_extractive_file_view(
             view_id="auth-api-files",
             title="Auth API Files",
             intent="Expose auth context.",
@@ -512,6 +512,25 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertIn("failed:", result)
         self.assertIn("include_headings id not found in active memory: missing-auth-api", result)
+
+    def test_shared_view_builder_tool_creates_generative_file_view(self):
+        tools = MemoryTools(self.root, role="shared-view-builder")
+
+        result = tools.create_generative_file_view(
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose sanitized auth context.",
+            published_context="Tokens expire after one hour.",
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
+        )
+
+        recipe = (self.root / "shared_views" / "auth-api-files" / "recipe.toml").read_text(encoding="utf-8")
+        rendered = (self.root / "shared_views" / "auth-api-files" / "dist" / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("success: wrote generative file view auth-api-files", result)
+        self.assertIn('render = "generative"', recipe)
+        self.assertNotIn("include_nodes", recipe)
+        self.assertIn("Tokens expire after one hour.", rendered)
 
     def test_shared_view_builder_tool_creates_canonical_question_view(self):
         tools = MemoryTools(self.root, role="shared-view-builder")

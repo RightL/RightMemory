@@ -640,7 +640,8 @@ class RightMemoryRuntime:
         if self.config.role == "shared-view-builder":
             write_tools.extend(
                 [
-                    self._agent_tool(self.tools.create_file_view_recipe),
+                    self._agent_tool(self.tools.create_extractive_file_view),
+                    self._agent_tool(self.tools.create_generative_file_view),
                     self._agent_tool(self.tools.create_question_view),
                 ]
             )
