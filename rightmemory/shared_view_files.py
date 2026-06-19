@@ -142,6 +142,39 @@ def _write_file_view_source(root: Path, recipe: FileViewRecipe) -> None:
     _write_text(view_dir / "recipe.toml", _render_recipe_toml(recipe))
 
 
+def write_generative_file_view(
+    memory_root: Path,
+    *,
+    view_id: str,
+    title: str,
+    intent: str,
+    published_context: str,
+    approved: bool = False,
+    publish_hub_url: str | None = None,
+    publish_credential_id: str | None = None,
+    semantic_refresh_days: int = DEFAULT_SEMANTIC_REFRESH_DAYS,
+    last_semantic_refresh_at: str = "",
+    last_semantic_refresh_memory_commit: str = "",
+) -> str:
+    body = _required_text(published_context, "published_context")
+    root = Path(memory_root).expanduser()
+    recipe = FileViewRecipe(
+        view_id=validate_heading_id(view_id),
+        title=_required_text(title, "title"),
+        intent=_required_text(intent, "intent"),
+        render=FILE_VIEW_RENDER_GENERATIVE,
+        approved=bool(approved),
+        publish_hub_url=_optional_text(publish_hub_url),
+        publish_credential_id=validate_heading_id(publish_credential_id) if publish_credential_id else None,
+        semantic_refresh_days=_validate_refresh_days(semantic_refresh_days),
+        last_semantic_refresh_at=str(last_semantic_refresh_at),
+        last_semantic_refresh_memory_commit=str(last_semantic_refresh_memory_commit),
+    )
+    _write_file_view_source(root, recipe)
+    _write_generated_file_view(root, recipe, body)
+    return f"wrote generative file view {recipe.view_id}"
+
+
 def load_file_view_recipe(memory_root: Path, view_id: str) -> FileViewRecipe:
     root = Path(memory_root).expanduser()
     clean_view_id = validate_heading_id(view_id)
@@ -219,6 +252,9 @@ def load_all_file_view_recipes(memory_root: Path) -> list[FileViewRecipe]:
 def render_file_view(memory_root: Path, view_id: str) -> str:
     root = Path(memory_root).expanduser()
     recipe = load_file_view_recipe(root, view_id)
+    if recipe.render == FILE_VIEW_RENDER_GENERATIVE:
+        _require_generated_file_view_output(root, recipe)
+        return f"generated file view {recipe.view_id} already exists"
     rendered = _render_selected_memory(root, recipe)
     view_dir = _view_dir(root, recipe.view_id)
     temp = view_dir / f".dist.tmp-{os.getpid()}"
@@ -491,7 +527,7 @@ def _import_exists(root: Path, heading_id: str) -> bool:
 
 
 def _render_selected_memory(root: Path, recipe: FileViewRecipe) -> str:
-    sections = [f"# {recipe.title} Shared View", "", recipe.intent, "", "## Published Context", ""]
+    sections: list[str] = []
     excluded = set(recipe.exclude_ids)
     for relative in recipe.include_files:
         path = root / relative
@@ -501,8 +537,45 @@ def _render_selected_memory(root: Path, recipe: FileViewRecipe) -> str:
     for source in sources:
         lines = source.read_text(encoding="utf-8").splitlines()
         sections.extend(_selected_lines_from_source(lines, recipe, excluded))
-    rendered = "\n".join(line for line in sections).rstrip() + "\n"
-    return rendered
+    return _render_shared_view_memory(recipe, "\n".join(line for line in sections).rstrip())
+
+
+def _write_generated_file_view(root: Path, recipe: FileViewRecipe, published_context: str) -> None:
+    view_dir = _view_dir(root, recipe.view_id)
+    temp = view_dir / f".dist.tmp-{os.getpid()}"
+    if temp.exists():
+        shutil.rmtree(temp)
+    temp.mkdir(parents=True)
+    _write_text(temp / "MEMORY.md", _render_shared_view_memory(recipe, published_context))
+    _write_text(temp / "manifest.toml", f'version = 1\nview_id = "{recipe.view_id}"\n')
+    final = view_dir / "dist"
+    if final.exists():
+        shutil.rmtree(final)
+    temp.rename(final)
+
+
+def _render_shared_view_memory(recipe: FileViewRecipe, published_context: str) -> str:
+    return "\n".join(
+        [
+            f"# {recipe.title} Shared View",
+            "",
+            recipe.intent,
+            "",
+            "## Published Context",
+            "",
+            published_context.strip(),
+            "",
+        ]
+    )
+
+
+def _require_generated_file_view_output(root: Path, recipe: FileViewRecipe) -> None:
+    path = _view_dir(root, recipe.view_id) / "dist" / "MEMORY.md"
+    if not path.is_file():
+        raise ValueError(f"generative file view output is missing: shared_views/{recipe.view_id}/dist/MEMORY.md")
+    text = path.read_text(encoding="utf-8")
+    if "## Published Context" not in text or not text.split("## Published Context", 1)[1].strip():
+        raise ValueError(f"generative file view output is empty: shared_views/{recipe.view_id}/dist/MEMORY.md")
 
 
 def _selected_lines_from_source(lines: list[str], recipe: FileViewRecipe, excluded: set[str]) -> list[str]:

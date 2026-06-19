@@ -1,5 +1,6 @@
 import io
 import json
+import shutil
 import threading
 import tempfile
 import unittest
@@ -24,6 +25,7 @@ from rightmemory.shared_view_files import (
     render_file_view,
     validate_file_view_recipe_source,
     write_extractive_file_view_recipe,
+    write_generative_file_view,
 )
 from rightmemory.shared_view_models import (
     SharedViewConnection,
@@ -403,6 +405,39 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         self.assertTrue((package / "dist" / "MEMORY.md").exists())
         self.assertFalse((package / "retriever.md").exists())
 
+    def test_generative_recipe_exports_existing_generated_memory(self):
+        write_generative_file_view(
+            self.root,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            published_context="Tokens expire after one hour.",
+            approved=True,
+        )
+        package = self.root / "package"
+
+        export_file_view_package(self.root, "auth-api-files", package)
+
+        exported = (package / "dist" / "MEMORY.md").read_text(encoding="utf-8")
+        recipe = (package / "recipe.toml").read_text(encoding="utf-8")
+        self.assertIn('render = "generative"', recipe)
+        self.assertIn("## Published Context", exported)
+        self.assertIn("Tokens expire after one hour.", exported)
+
+    def test_generative_package_fails_when_generated_memory_missing(self):
+        write_generative_file_view(
+            self.root,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            published_context="Tokens expire after one hour.",
+            approved=True,
+        )
+        shutil.rmtree(self.root / "shared_views" / "auth-api-files" / "dist")
+
+        with self.assertRaisesRegex(ValueError, "generative file view output is missing"):
+            export_file_view_package(self.root, "auth-api-files", self.root / "package")
+
     def test_approve_file_view_sets_approved_true(self):
         write_extractive_file_view_recipe(
             self.root,
@@ -679,6 +714,26 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
 
         self.assertEqual([event["view_id"] for event in listed], ["new", "old"])
         self.assertEqual(listed[0]["status"], "failed")
+
+    def test_publish_approved_generative_view_fails_closed_when_output_missing(self):
+        shutil.rmtree(self.root / "shared_views" / "auth-api-files")
+        write_generative_file_view(
+            self.root,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            published_context="Tokens expire after one hour.",
+            approved=True,
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
+        )
+        shutil.rmtree(self.root / "shared_views" / "auth-api-files" / "dist")
+
+        with patch("rightmemory.shared_view_files.HubClient", side_effect=AssertionError("publish should not run")):
+            results = publish_approved_file_views(self.root)
+
+        self.assertEqual(results[0].status, "failed")
+        self.assertIn("generative file view output is missing", results[0].message)
 
 
 class SharedQuestionViewTests(unittest.TestCase):
