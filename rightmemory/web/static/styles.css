@@ -294,6 +294,34 @@ textarea {
   gap: 10px;
 }
 
+.advanced-tools {
+  display: block;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.advanced-tools summary {
+  cursor: pointer;
+  color: var(--accent-strong);
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.advanced-tools:not([open]) summary {
+  margin-bottom: 0;
+}
+
+.share-console .record-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.share-card strong,
+.share-card small,
+.share-card p {
+  overflow-wrap: anywhere;
+}
+
 .two-column {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -483,7 +511,8 @@ pre {
   .settings-grid,
   .flow-layout,
   .two-column,
-  .browser-grid {
+  .browser-grid,
+  .share-console .record-list {
     grid-template-columns: 1fr;
   }
 }

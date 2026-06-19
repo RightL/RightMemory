@@ -180,13 +180,73 @@ function renderPublishEvents(events) {
   `;
 }
 
+function renderShareRelationships(relationships) {
+  if (!relationships.length) {
+    return `<p>No shares yet.</p>`;
+  }
+  return `
+    <div class="record-list">
+      ${relationships.map((share) => `
+        <article class="record-card share-card">
+          <strong>${escapeHtml(share.title || share.share_id || "Share")}</strong>
+          <small>${escapeHtml(share.share_id || "")} | ${escapeHtml(share.role || "")} | ${escapeHtml(share.state || "")} | ${escapeHtml(share.capability || "auto")}</small>
+          <p>${escapeHtml(renderSharePartsSummary(share))}</p>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderSharePartsSummary(share) {
+  const parts = [];
+  if (share.file) {
+    parts.push(`file: ${share.file.view_id || share.file.heading_id || "pending"}`);
+  }
+  if (share.question) {
+    parts.push(`questions: ${share.question.view_id || share.question.heading_id || "pending"}`);
+  }
+  return parts.join(" | ") || "No configured parts.";
+}
+
+function formatShareOperationResult(result) {
+  const lines = [`${result.share_id || "share"} ${result.role || ""} ${result.state || ""} capability=${result.capability || "auto"}`.trim()];
+  if (result.builder_final_message) {
+    lines.push("", "Builder summary:", result.builder_final_message);
+  }
+  if (Array.isArray(result.statuses) && result.statuses.length) {
+    lines.push("", "Status:");
+    result.statuses.forEach((status) => {
+      const artifact = status.artifact_id || "-";
+      const message = status.message ? `: ${status.message}` : "";
+      lines.push(`${status.capability || "share"} ${artifact} ${status.status || "unknown"}${message}`);
+    });
+  }
+  if (result.invitation_url) {
+    lines.push("", `invitation_url\t${result.invitation_url}`);
+  }
+  if (result.next_action) {
+    lines.push("", "Next:", result.next_action);
+  }
+  return lines.join("\n").trim();
+}
+
 async function renderSharedViews() {
-  const payload = await fetchJson("/api/share/views");
+  const [payload, sharePayload] = await Promise.all([
+    fetchJson("/api/share/views"),
+    fetchJson("/api/share/relationships"),
+  ]);
   const providerViews = payload.data.provider_views || [];
   const connections = payload.data.connections || [];
   const credentials = payload.data.credentials || [];
+  const relationships = sharePayload.data.relationships || [];
   const credentialOptions = renderCredentialOptions(credentials);
   const optionalCredentialOptions = renderCredentialOptions(credentials, "Use recipe default");
+  const relationshipOptions = renderOptions(
+    relationships.map((share) => ({
+      value: share.share_id,
+      label: `${share.share_id} (${share.state || "share"}, ${share.capability || "auto"})`,
+    })),
+  );
   const providerOptions = renderOptions(
     providerViews.map((view) => ({
       value: view.view_id,
@@ -236,12 +296,111 @@ async function renderSharedViews() {
   const hasFileProviderViews = providerViews.some((view) => view.type === "file");
   const hasQuestionProviderViews = providerViews.some((view) => view.type === "question");
   const hasCredentials = credentials.length > 0;
+  const hasRelationships = relationships.length > 0;
 
   return `
+    <section class="panel wide share-console">
+      <div class="section-heading">
+        <h2>Shares</h2>
+      </div>
+      ${renderShareRelationships(relationships)}
+    </section>
+
     <div class="flow-layout">
       <section class="panel flow-panel">
         <div class="section-heading">
           <span class="step-badge">1</span>
+          <div>
+            <h2>Create Share</h2>
+          </div>
+        </div>
+        <form id="create-share-form" class="guided-form">
+          <label>
+            Share id
+            <input name="share_id" placeholder="auth-api" required>
+          </label>
+          <label>
+            Title
+            <input name="title" placeholder="Auth API">
+          </label>
+          <label>
+            Credential
+            <select class="credential-select" name="credential_id" required>${credentialOptions}</select>
+          </label>
+          <label>
+            Provider id
+            <input name="provider_id" placeholder="alice" required>
+          </label>
+          <label>
+            HTTP hub URL
+            <input name="hub_url" placeholder="https://hub.example.test" required>
+          </label>
+          <label>
+            Capability
+            <select name="capability">
+              <option value="auto">Auto</option>
+              <option value="file-context">File context</option>
+              <option value="live-questions">Live questions</option>
+              <option value="both">Both</option>
+            </select>
+          </label>
+          <label>
+            Request
+            <textarea name="request" placeholder="Share the auth API integration context with the frontend project." required></textarea>
+          </label>
+          <label>
+            Question base URL
+            <input name="question_base_url" placeholder="only needed for live questions">
+          </label>
+          <div class="button-row">
+            <button class="primary" type="submit"${hasCredentials ? "" : " disabled"}>Create Share</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel flow-panel">
+        <div class="section-heading">
+          <span class="step-badge">2</span>
+          <div>
+            <h2>Revise Share</h2>
+          </div>
+        </div>
+        <form id="revise-share-form" class="guided-form">
+          <label>
+            Share
+            <select name="share_id">${relationshipOptions}</select>
+          </label>
+          <label>
+            Revision
+            <textarea name="revision" placeholder="Narrow this share to token refresh behavior." required></textarea>
+          </label>
+          <label>
+            Capability
+            <select name="capability">
+              <option value="">Keep current</option>
+              <option value="auto">Auto</option>
+              <option value="file-context">File context</option>
+              <option value="live-questions">Live questions</option>
+              <option value="both">Both</option>
+            </select>
+          </label>
+          <label>
+            Question base URL
+            <input name="question_base_url" placeholder="only if changing live questions">
+          </label>
+          <div class="button-row">
+            <button class="primary" type="submit"${hasRelationships ? "" : " disabled"}>Revise Share</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <details id="advanced-shared-view-tools" class="advanced-tools wide">
+      <summary>Advanced MF/MQ tools</summary>
+      <div class="flow-layout">
+      <section class="panel flow-panel">
+        <div class="section-heading">
+          <span class="step-badge">A</span>
           <div>
             <h2>Build File View</h2>
           </div>
@@ -275,7 +434,7 @@ async function renderSharedViews() {
 
       <section class="panel flow-panel">
         <div class="section-heading">
-          <span class="step-badge">2</span>
+          <span class="step-badge">B</span>
           <div>
             <h2>Build Question View</h2>
           </div>
@@ -301,7 +460,7 @@ async function renderSharedViews() {
 
       <section class="panel flow-panel">
         <div class="section-heading">
-          <span class="step-badge">3</span>
+          <span class="step-badge">C</span>
           <div>
             <h2>Approve View</h2>
           </div>
@@ -326,7 +485,7 @@ async function renderSharedViews() {
 
       <section class="panel flow-panel">
         <div class="section-heading">
-          <span class="step-badge">4</span>
+          <span class="step-badge">D</span>
           <div>
             <h2>Create File Invitation</h2>
           </div>
@@ -363,7 +522,7 @@ async function renderSharedViews() {
 
       <section class="panel flow-panel">
         <div class="section-heading">
-          <span class="step-badge">5</span>
+          <span class="step-badge">E</span>
           <div>
             <h2>Publish Question Invitation</h2>
           </div>
@@ -404,7 +563,7 @@ async function renderSharedViews() {
 
       <section class="panel flow-panel">
         <div class="section-heading">
-          <span class="step-badge">6</span>
+          <span class="step-badge">F</span>
           <div>
             <h2>Accept a View</h2>
           </div>
@@ -437,7 +596,7 @@ async function renderSharedViews() {
 
       <section class="panel flow-panel">
         <div class="section-heading">
-          <span class="step-badge">7</span>
+          <span class="step-badge">G</span>
           <div>
             <h2>Use a Connected View</h2>
           </div>
@@ -491,7 +650,7 @@ async function renderSharedViews() {
 
       <section class="panel flow-panel">
         <div class="section-heading">
-          <span class="step-badge">8</span>
+          <span class="step-badge">H</span>
           <div>
             <h2>Provider Inbox</h2>
           </div>
@@ -520,7 +679,8 @@ async function renderSharedViews() {
           <p>No provider inbox loaded.</p>
         </div>
       </section>
-    </div>
+      </div>
+    </details>
 
     <section class="panel wide">
       <div class="section-heading">
@@ -917,6 +1077,62 @@ function attachPanelHandlers() {
 
 function attachSharedViewHandlers() {
   attachCredentialSelectHandlers();
+
+  const createShareForm = document.querySelector("#create-share-form");
+  if (createShareForm) {
+    createShareForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const payload = await fetchJson("/api/share/relationships", {
+          method: "POST",
+          body: JSON.stringify({
+            share_id: form.get("share_id"),
+            title: form.get("title"),
+            provider_id: form.get("provider_id"),
+            hub_url: form.get("hub_url"),
+            credential_id: form.get("credential_id"),
+            request: form.get("request"),
+            capability: form.get("capability"),
+            question_base_url: form.get("question_base_url"),
+          }),
+        });
+        const resultText = formatShareOperationResult(payload.data || {});
+        setMessage(payload.message);
+        await loadPanel();
+        showSharedViewResult(resultText);
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  const reviseShareForm = document.querySelector("#revise-share-form");
+  if (reviseShareForm) {
+    reviseShareForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(event.currentTarget);
+        const shareId = String(form.get("share_id") || "").trim();
+        const payload = await fetchJson(`/api/share/relationships/${encodeURIComponent(shareId)}/revise`, {
+          method: "POST",
+          body: JSON.stringify({
+            revision: form.get("revision"),
+            capability: form.get("capability"),
+            question_base_url: form.get("question_base_url"),
+          }),
+        });
+        const resultText = formatShareOperationResult(payload.data || {});
+        setMessage(payload.message);
+        await loadPanel();
+        showSharedViewResult(resultText);
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
 
   const buildFileViewForm = document.querySelector("#build-file-view-form");
   if (buildFileViewForm) {
