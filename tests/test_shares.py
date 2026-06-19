@@ -26,7 +26,15 @@ from rightmemory.share_results import ShareCapabilityStatus, ShareOperationResul
 from rightmemory.shared_view_models import SharedViewTarget, load_shared_view_credential, save_shared_view_credential
 from rightmemory.shared_view_questions import ask_question_view
 from rightmemory.shared_views import accept_shared_view, record_shared_view_note
-from rightmemory.shares import approve_share, create_share, join_share, publish_share, share_status
+from rightmemory.shares import (
+    approve_share,
+    create_share,
+    create_share_from_request,
+    join_share,
+    publish_share,
+    revise_share,
+    share_status,
+)
 from rightmemory.web.app import create_web_app
 
 
@@ -325,6 +333,97 @@ class ShareProviderFlowTests(unittest.TestCase):
         self.assertFalse(share.question.approved)
         file_builder.assert_called_once()
         question_builder.assert_called_once()
+
+    def test_create_share_from_request_returns_operation_result(self):
+        expected = ShareOperationResult(
+            share_id="auth-api",
+            title="Auth API",
+            role="provider",
+            state="draft",
+            capability="both",
+            builder_final_message="Built file context and live questions.",
+        )
+
+        with patch("rightmemory.shares.run_share_builder", return_value=expected) as builder:
+            result = create_share_from_request(
+                self.root,
+                share_id="auth-api",
+                title="Auth API",
+                provider_id="alice",
+                hub_url="https://hub.example.test/",
+                credential_id="alice-publish",
+                request="Share the auth API context and allow live questions.",
+                capability="both",
+                question_base_url="https://provider.example.test",
+            )
+
+        self.assertEqual(result, expected)
+        builder.assert_called_once_with(
+            self.root,
+            share_id_hint="auth-api",
+            title_hint="Auth API",
+            request="Share the auth API context and allow live questions.",
+            provider_id="alice",
+            hub_url="https://hub.example.test",
+            credential_id="alice-publish",
+            capability="both",
+            question_base_url="https://provider.example.test",
+        )
+
+    def test_create_share_request_formats_operation_result(self):
+        with patch(
+            "rightmemory.shares.create_share_from_request",
+            return_value=ShareOperationResult(
+                share_id="auth-api",
+                title="Auth API",
+                role="provider",
+                state="draft",
+                capability="file_context",
+                builder_final_message="Built auth context.",
+                next_action="rightmemory share approve auth-api",
+            ),
+        ):
+            result = create_share(
+                self.root,
+                "auth-api",
+                title="Auth API",
+                provider_id="alice",
+                hub_url="https://hub.example.test",
+                credential_id="alice-publish",
+                request="Share auth API context.",
+            )
+
+        self.assertIn("auth-api provider draft capability=file_context", result)
+        self.assertIn("Built auth context.", result)
+        self.assertIn("rightmemory share approve auth-api", result)
+
+    def test_revise_share_returns_operation_result(self):
+        expected = ShareOperationResult(
+            share_id="auth-api",
+            title="Auth API",
+            role="provider",
+            state="draft",
+            capability="live_questions",
+            builder_final_message="Updated live question scope.",
+        )
+
+        with patch("rightmemory.shares.revise_share_builder", return_value=expected) as reviser:
+            result = revise_share(
+                self.root,
+                "auth-api",
+                "Only answer questions about refresh-token behavior.",
+                capability="live-questions",
+                question_base_url="https://provider.example.test",
+            )
+
+        self.assertEqual(result, expected)
+        reviser.assert_called_once_with(
+            self.root,
+            "auth-api",
+            "Only answer questions about refresh-token behavior.",
+            capability="live-questions",
+            question_base_url="https://provider.example.test",
+        )
 
     def test_approve_share_approves_all_parts(self):
         _write_canonical_file_and_question_parts(self.root)

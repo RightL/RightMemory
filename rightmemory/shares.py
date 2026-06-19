@@ -6,8 +6,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .share_builder import revise_share_builder, run_share_builder
 from .hub.client import HubClient, HubClientError
 from .share_models import ShareFilePart, ShareQuestionPart, ShareRelationship, load_shares, save_shares, validate_share_id
+from .share_results import ShareOperationResult, format_share_operation_result
 from .shared_view_builder import run_file_view_builder, run_question_view_builder
 from .shared_view_files import approve_file_view, publish_file_view_package, pull_file_view
 from .shared_view_models import (
@@ -28,10 +30,12 @@ def create_share(
     memory_root: Path,
     share_id: str,
     *,
-    title: str,
+    title: str | None = None,
     provider_id: str,
     hub_url: str,
     credential_id: str,
+    request: str | None = None,
+    capability: str = "auto",
     file_intent: str | None = None,
     question_intent: str | None = None,
     question_base_url: str | None = None,
@@ -39,6 +43,21 @@ def create_share(
 ) -> str:
     root = Path(memory_root).expanduser()
     clean_share_id = validate_share_id(share_id)
+    if request is not None:
+        if file_intent or question_intent:
+            raise ValueError("share create --request cannot be combined with --file or --question")
+        result = create_share_from_request(
+            root,
+            share_id=clean_share_id,
+            title=title,
+            request=request,
+            provider_id=provider_id,
+            hub_url=hub_url,
+            credential_id=credential_id,
+            capability=capability,
+            question_base_url=question_base_url,
+        )
+        return format_share_operation_result(result)
     clean_title = _required_share_value(title, "title").strip()
     clean_provider_id = validate_heading_id(provider_id)
     clean_hub_url = _required_share_value(hub_url, "hub_url").rstrip("/")
@@ -96,6 +115,49 @@ def create_share(
     )
     save_shares(root, shares)
     return f"created share {clean_share_id}; review generated parts, then run: rightmemory share approve {clean_share_id}"
+
+
+def create_share_from_request(
+    memory_root: Path,
+    *,
+    share_id: str | None = None,
+    title: str | None = None,
+    request: str,
+    provider_id: str,
+    hub_url: str,
+    credential_id: str,
+    capability: str = "auto",
+    question_base_url: str | None = None,
+) -> ShareOperationResult:
+    root = Path(memory_root).expanduser()
+    return run_share_builder(
+        root,
+        share_id_hint=validate_share_id(share_id) if share_id else None,
+        title_hint=title.strip() if title and title.strip() else None,
+        request=_required_share_value(request, "request"),
+        provider_id=validate_heading_id(provider_id),
+        hub_url=_required_share_value(hub_url, "hub_url").rstrip("/"),
+        credential_id=validate_heading_id(credential_id),
+        capability=capability,
+        question_base_url=question_base_url.strip() if question_base_url else None,
+    )
+
+
+def revise_share(
+    memory_root: Path,
+    share_id: str,
+    revision: str,
+    *,
+    capability: str | None = None,
+    question_base_url: str | None = None,
+) -> ShareOperationResult:
+    return revise_share_builder(
+        Path(memory_root).expanduser(),
+        validate_share_id(share_id),
+        _required_share_value(revision, "revision"),
+        capability=capability,
+        question_base_url=question_base_url.strip() if question_base_url else None,
+    )
 
 
 def approve_share(memory_root: Path, share_id: str) -> str:
