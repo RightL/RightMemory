@@ -1,4 +1,3 @@
-import importlib.util
 import sqlite3
 import tempfile
 import unittest
@@ -8,8 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from fastapi.testclient import TestClient
-
 from rightmemory.hub.app import create_hub_app
 from rightmemory.hub.models import HubPackageManifest
 from rightmemory.hub.packages import (
@@ -18,9 +15,7 @@ from rightmemory.hub.packages import (
     load_package_manifest,
 )
 from rightmemory.hub.store import HubStore
-
-
-HTTPX2_AVAILABLE = importlib.util.find_spec("httpx2") is not None
+from tests.asgi_client import ASGITestClient as TestClient
 
 
 class HubStoreTests(unittest.TestCase):
@@ -431,7 +426,6 @@ def _store_file_package(store: HubStore, view_id: str, token_id: str):
     )
 
 
-@unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")
 class HubApiTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()

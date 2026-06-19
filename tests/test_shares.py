@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import subprocess
 import zipfile
@@ -43,6 +44,12 @@ from rightmemory.web.app import create_web_app
 def _ensure_mapping(value) -> dict[str, object]:
     if not isinstance(value, dict):
         raise AssertionError(f"expected JSON object response, got {type(value).__name__}")
+    return value
+
+
+def _run_endpoint(value):
+    if inspect.isawaitable(value):
+        return asyncio.run(value)
     return value
 
 
@@ -818,7 +825,7 @@ class _InProcessHubClient:
         question_token: str,
     ) -> dict[str, object]:
         endpoint = self._endpoint("/api/views/{view_id}/question", "POST")
-        response = endpoint(
+        response = _run_endpoint(endpoint(
             view_id,
             self._request_object(
                 "POST",
@@ -831,7 +838,7 @@ class _InProcessHubClient:
                 "question_base_url": question_base_url,
                 "question_token": question_token,
             },
-        )
+        ))
         return _ensure_mapping(response)
 
     def create_share_invitation(
@@ -849,7 +856,7 @@ class _InProcessHubClient:
         if expires_at:
             payload["expires_at"] = expires_at
         endpoint = self._endpoint("/api/shares/{share_id}/invitations", "POST")
-        response = endpoint(
+        response = _run_endpoint(endpoint(
             share_id,
             self._request_object(
                 "POST",
@@ -857,35 +864,35 @@ class _InProcessHubClient:
                 headers=self._headers(bearer=True),
             ),
             payload=payload,
-        )
+        ))
         return _ensure_mapping(response)
 
     def get_share_invitation(self, token: str) -> dict[str, object]:
         endpoint = self._endpoint("/api/share-invitations/{token}/view", "GET")
-        return _ensure_mapping(endpoint(token))
+        return _ensure_mapping(_run_endpoint(endpoint(token)))
 
     def accept_share_invitation(self, token: str, *, consumer_label: str | None = None) -> dict[str, object]:
         payload = {"consumer_label": consumer_label} if consumer_label else {}
         endpoint = self._endpoint("/api/share-invitations/{token}/accept", "POST")
-        return _ensure_mapping(endpoint(token, payload=payload))
+        return _ensure_mapping(_run_endpoint(endpoint(token, payload=payload)))
 
     def download_package(self, view_id: str) -> bytes:
         endpoint = self._endpoint("/api/views/{view_id}/package", "GET")
-        response = endpoint(
+        response = _run_endpoint(endpoint(
             view_id,
             self._request_object(
                 "GET",
                 f"/api/views/{quote(view_id)}/package",
                 headers=self._headers(bearer=True),
             ),
-        )
+        ))
         if not hasattr(response, "body"):
             raise AssertionError("hub package endpoint did not return a response body")
         return bytes(response.body)
 
     def ask_question(self, view_id: str, question: str) -> dict[str, object]:
         endpoint = self._endpoint("/api/share/questions/{view_id}/ask", "POST")
-        response = endpoint(
+        response = _run_endpoint(endpoint(
             view_id,
             self._request_object(
                 "POST",
@@ -893,24 +900,24 @@ class _InProcessHubClient:
                 headers=self._headers(bearer=True),
             ),
             payload={"question": question},
-        )
+        ))
         return _ensure_mapping(response)
 
     def probe_question(self, view_id: str) -> dict[str, object]:
         endpoint = self._endpoint("/api/share/questions/{view_id}/ready", "GET")
-        response = endpoint(
+        response = _run_endpoint(endpoint(
             view_id,
             self._request_object(
                 "GET",
                 f"/api/share/questions/{quote(view_id)}/ready",
                 headers=self._headers(bearer=True),
             ),
-        )
+        ))
         return _ensure_mapping(response)
 
     def post_interaction(self, view_id: str, payload: dict[str, object]) -> dict[str, object]:
         endpoint = self._endpoint("/api/views/{view_id}/interactions", "POST")
-        response = endpoint(
+        response = _run_endpoint(endpoint(
             view_id,
             self._request_object(
                 "POST",
@@ -918,7 +925,7 @@ class _InProcessHubClient:
                 headers=self._headers(bearer=True),
             ),
             payload=payload,
-        )
+        ))
         return _ensure_mapping(response)
 
     def _headers(self, *, bearer: bool = False, content_type: str | None = None) -> dict[str, str]:

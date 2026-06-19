@@ -258,6 +258,8 @@ def provider_view_summaries(memory_root: Path) -> list[dict[str, object]]:
     summaries: list[dict[str, object]] = []
     for view_dir in sorted(path for path in views_root.iterdir() if path.is_dir()):
         view_type = "file" if (view_dir / "recipe.toml").is_file() else "question" if (view_dir / "question.toml").is_file() else "unknown"
+        if view_type == "unknown":
+            continue
         summaries.append(
             {
                 "view_id": view_dir.name,

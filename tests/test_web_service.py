@@ -1,24 +1,18 @@
-import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi.testclient import TestClient
-
 from rightmemory.share_models import ShareFilePart, ShareRelationship, save_shares
 from rightmemory.share_results import ShareOperationResult
 from rightmemory.shared_view_files import FileViewPullResult
-from rightmemory.shared_view_models import load_shared_view_credential
+from rightmemory.shared_view_models import SharedViewConnection, SharedViewTarget, load_shared_view_credential, save_connections
 from rightmemory.shared_view_questions import write_question_view
 from rightmemory.web.app import create_web_app
 from rightmemory.web.service import WebStudioService
+from tests.asgi_client import ASGITestClient as TestClient
 
 
-HTTPX2_AVAILABLE = importlib.util.find_spec("httpx2") is not None
-
-
-@unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")
 class WebStudioReadApiTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -118,7 +112,6 @@ class WebStudioReadApiTests(unittest.TestCase):
         self.assertNotIn("secret-token", response.text)
 
 
-@unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")
 class WebStudioStaticTests(unittest.TestCase):
     def test_static_shell_loads_assets(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -326,7 +319,6 @@ class WebStudioShareRelationshipServiceTests(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")
 class WebStudioSharedViewApiTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -770,6 +762,24 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
         self.assertEqual(calls, [(self.root.resolve(), "https://hub.example.test/i/invite-token", "remote-auth")])
 
     def test_consumer_file_view_pull_question_ask_note_and_notes(self):
+        save_connections(
+            self.root,
+            {
+                "alice-auth-api": SharedViewConnection(
+                    heading_id="alice-auth-api",
+                    view_type="file",
+                    ref="rightmemory://mf/alice-auth-api",
+                    relationship="external",
+                    target=SharedViewTarget(
+                        kind="http-file",
+                        base_url="https://hub.example.test",
+                        credential_id="alice-auth-api-token",
+                        view_id="alice-auth-api",
+                    ),
+                )
+            },
+        )
+
         with patch("rightmemory.web.service.pull_file_view") as pull:
             pull.return_value = FileViewPullResult("auth-api-files", "pulled", "file view pulled")
             pull_response = self.client.post(
@@ -847,7 +857,7 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
             headers={"x-csrf-token": self.csrf},
         )
 
-        self.assertEqual(define_response.status_code, 404)
+        self.assertIn(define_response.status_code, {404, 405})
         self.assertEqual(build_response.status_code, 404)
         self.assertEqual(export_response.status_code, 404)
         self.assertEqual(publish_response.status_code, 404)

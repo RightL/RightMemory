@@ -9,8 +9,6 @@ from typing import Any, Callable
 
 import uvicorn
 from fastapi import Body, FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 from .packages import PackageValidationError, validate_package_relative_path
 from .store import HubStore
@@ -24,18 +22,17 @@ def create_hub_app(hub_root: Path) -> FastAPI:
     store = HubStore(Path(hub_root).expanduser())
     app = FastAPI(title="RightMemory Shared View Hub")
     static_root = Path(__file__).parent / "static"
-    if static_root.is_dir():
-        app.mount("/console/static", StaticFiles(directory=static_root), name="hub-console-static")
 
     @app.get("/console")
-    def console() -> FileResponse:
-        index = static_root / "console.html"
-        if not index.is_file():
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="hub console is not installed")
-        return FileResponse(index)
+    async def console() -> Response:
+        return _static_file_response(static_root, "console.html", allowed={"console.html"})
+
+    @app.get("/console/static/{asset_name}")
+    async def console_static(asset_name: str) -> Response:
+        return _static_file_response(static_root, asset_name, allowed={"console.css", "console.js"})
 
     @app.get("/health")
-    def health() -> dict[str, Any]:
+    async def health() -> dict[str, Any]:
         initialized = store.db_path.is_file() and store.config_path.is_file()
         return {
             "status": "ok" if initialized else "uninitialized",
@@ -44,12 +41,12 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.get("/api/admin/overview")
-    def admin_overview(request: Request) -> dict[str, Any]:
+    async def admin_overview(request: Request) -> dict[str, Any]:
         _require_admin(store, request)
         return {"overview": store.hub_overview()}
 
     @app.get("/api/admin/providers")
-    def admin_providers(request: Request) -> dict[str, Any]:
+    async def admin_providers(request: Request) -> dict[str, Any]:
         _require_admin(store, request)
         return {
             "providers": store.list_providers(
@@ -59,7 +56,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.post("/api/admin/providers/{provider_id}/tokens", status_code=status.HTTP_201_CREATED)
-    def admin_create_provider_token(
+    async def admin_create_provider_token(
         provider_id: str,
         request: Request,
         payload: dict[str, Any] | None = Body(default=None),
@@ -82,7 +79,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.get("/api/admin/tokens")
-    def admin_tokens(request: Request) -> dict[str, Any]:
+    async def admin_tokens(request: Request) -> dict[str, Any]:
         _require_admin(store, request)
         return {
             "tokens": store.list_tokens(
@@ -95,12 +92,12 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.post("/api/admin/tokens/{token_id}/revoke")
-    def admin_revoke_token(token_id: str, request: Request) -> dict[str, Any]:
+    async def admin_revoke_token(token_id: str, request: Request) -> dict[str, Any]:
         _require_admin(store, request)
         return {"token_id": token_id, "revoked": store.revoke_token(token_id)}
 
     @app.get("/api/admin/views")
-    def admin_views(request: Request) -> dict[str, Any]:
+    async def admin_views(request: Request) -> dict[str, Any]:
         _require_admin(store, request)
         return {
             "views": store.list_views(
@@ -111,7 +108,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.get("/api/admin/views/{view_id}")
-    def admin_view(view_id: str, request: Request) -> dict[str, Any]:
+    async def admin_view(view_id: str, request: Request) -> dict[str, Any]:
         _require_admin(store, request)
         view = store.get_admin_view(view_id)
         if view is None:
@@ -119,7 +116,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         return {"view": view}
 
     @app.get("/api/admin/views/{view_id}/invitations")
-    def admin_view_invitations(view_id: str, request: Request) -> dict[str, Any]:
+    async def admin_view_invitations(view_id: str, request: Request) -> dict[str, Any]:
         _require_admin(store, request)
         return {
             "view_id": view_id,
@@ -131,7 +128,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.post("/api/admin/views/{view_id}/invitations", status_code=status.HTTP_201_CREATED)
-    def admin_create_invitation(
+    async def admin_create_invitation(
         view_id: str,
         request: Request,
         payload: dict[str, Any] | None = Body(default=None),
@@ -161,12 +158,12 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.post("/api/admin/invitations/{token_id}/revoke")
-    def admin_revoke_invitation(token_id: str, request: Request) -> dict[str, Any]:
+    async def admin_revoke_invitation(token_id: str, request: Request) -> dict[str, Any]:
         _require_admin(store, request)
         return {"token_id": token_id, "revoked": store.revoke_token(token_id)}
 
     @app.get("/api/admin/connections")
-    def admin_connections(request: Request) -> dict[str, Any]:
+    async def admin_connections(request: Request) -> dict[str, Any]:
         _require_admin(store, request)
         return {
             "connections": store.list_connections(
@@ -177,12 +174,12 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.post("/api/admin/connections/{token_id}/revoke")
-    def admin_revoke_connection(token_id: str, request: Request) -> dict[str, Any]:
+    async def admin_revoke_connection(token_id: str, request: Request) -> dict[str, Any]:
         _require_admin(store, request)
         return {"token_id": token_id, "revoked": store.revoke_token(token_id)}
 
     @app.get("/api/admin/inbox")
-    def admin_inbox(request: Request) -> dict[str, Any]:
+    async def admin_inbox(request: Request) -> dict[str, Any]:
         _require_admin(store, request)
         return {
             "interactions": store.list_interactions(
@@ -195,7 +192,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.get("/api/admin/audit")
-    def admin_audit(request: Request) -> dict[str, Any]:
+    async def admin_audit(request: Request) -> dict[str, Any]:
         _require_admin(store, request)
         return {
             "events": [
@@ -241,7 +238,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.post("/api/views/{view_id}/question", status_code=status.HTTP_201_CREATED)
-    def register_question_view(
+    async def register_question_view(
         view_id: str,
         request: Request,
         payload: dict[str, Any] | None = Body(default=None),
@@ -265,7 +262,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         return registered
 
     @app.post("/api/views/{view_id}/invitations", status_code=status.HTTP_201_CREATED)
-    def create_invitation(
+    async def create_invitation(
         view_id: str,
         request: Request,
         payload: dict[str, Any] | None = Body(default=None),
@@ -295,7 +292,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.post("/api/shares/{share_id}/invitations", status_code=status.HTTP_201_CREATED)
-    def create_share_invitation(
+    async def create_share_invitation(
         share_id: str,
         request: Request,
         payload: dict[str, Any] | None = Body(default=None),
@@ -325,7 +322,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.get("/i/share/{token}")
-    def share_invitation_landing(token: str) -> dict[str, Any]:
+    async def share_invitation_landing(token: str) -> dict[str, Any]:
         invitation = store.describe_share_invitation(token)
         if invitation is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="share invitation not found")
@@ -341,7 +338,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.get("/i/{token}")
-    def invitation_landing(token: str) -> dict[str, Any]:
+    async def invitation_landing(token: str) -> dict[str, Any]:
         invitation = store.describe_invitation(token)
         if invitation is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invitation not found")
@@ -356,21 +353,21 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.get("/api/invitations/{token}/view")
-    def describe_invitation(token: str) -> dict[str, Any]:
+    async def describe_invitation(token: str) -> dict[str, Any]:
         invitation = store.describe_invitation(token)
         if invitation is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invitation not found")
         return invitation
 
     @app.get("/api/share-invitations/{token}/view")
-    def describe_share_invitation(token: str) -> dict[str, Any]:
+    async def describe_share_invitation(token: str) -> dict[str, Any]:
         invitation = store.describe_share_invitation(token)
         if invitation is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="share invitation not found")
         return invitation
 
     @app.post("/api/invitations/{token}/accept", status_code=status.HTTP_201_CREATED)
-    def accept_invitation(
+    async def accept_invitation(
         token: str,
         payload: dict[str, Any] | None = Body(default=None),
     ) -> dict[str, Any]:
@@ -393,7 +390,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         return response
 
     @app.post("/api/share-invitations/{token}/accept", status_code=status.HTTP_201_CREATED)
-    def accept_share_invitation(token: str, payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+    async def accept_share_invitation(token: str, payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
         accepted = store.accept_share_invitation(
             token,
             consumer_label=_optional_payload_str(payload or {}, "consumer_label"),
@@ -403,7 +400,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         return accepted
 
     @app.get("/api/views/{view_id}/package")
-    def download_package(view_id: str, request: Request) -> Response:
+    async def download_package(view_id: str, request: Request) -> Response:
         _require_connection_actor(store, request, view_id)
         current = store.get_current_view_version(view_id)
         if current is None:
@@ -417,7 +414,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
             return Response(content=archive_path.read_bytes(), media_type="application/zip")
 
     @app.post("/api/views/{view_id}/interactions", status_code=status.HTTP_201_CREATED)
-    def post_interaction(
+    async def post_interaction(
         view_id: str,
         request: Request,
         payload: dict[str, Any] | None = Body(default=None),
@@ -438,7 +435,7 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         }
 
     @app.get("/api/providers/{provider_id}/inbox")
-    def provider_inbox(provider_id: str, request: Request) -> dict[str, Any]:
+    async def provider_inbox(provider_id: str, request: Request) -> dict[str, Any]:
         _require_provider_or_admin(store, request, provider_id)
         return {
             "provider_id": provider_id,
@@ -454,6 +451,20 @@ def _bearer_token(request: Request) -> str:
     if separator and scheme.lower() == "bearer" and token.strip():
         return token.strip()
     return ""
+
+
+def _static_file_response(static_root: Path, asset_name: str, *, allowed: set[str]) -> Response:
+    if asset_name not in allowed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="hub console asset not found")
+    path = static_root / asset_name
+    if not path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="hub console asset not found")
+    media_types = {
+        ".css": "text/css; charset=utf-8",
+        ".html": "text/html; charset=utf-8",
+        ".js": "text/javascript; charset=utf-8",
+    }
+    return Response(content=path.read_bytes(), media_type=media_types.get(path.suffix, "application/octet-stream"))
 
 
 def _require_token(store: HubStore, request: Request, *, action: str):
