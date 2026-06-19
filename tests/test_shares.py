@@ -21,6 +21,7 @@ from rightmemory.share_models import (
     save_shares,
     validate_share_id,
 )
+from rightmemory.share_builder import revise_share_builder, run_share_builder
 from rightmemory.share_results import ShareCapabilityStatus, ShareOperationResult, format_share_operation_result
 from rightmemory.shared_view_models import SharedViewTarget, load_shared_view_credential, save_shared_view_credential
 from rightmemory.shared_view_questions import ask_question_view
@@ -89,6 +90,93 @@ class ShareResultTests(unittest.TestCase):
         self.assertEqual(payload["capability"], "file_context")
         self.assertNotIn("builder_final_message", payload)
         self.assertNotIn("invitation_url", payload)
+
+
+class ShareBuilderRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+        (self.root / "rightmemory.toml").write_text('[agent_cli]\nprovider = "codex"\n', encoding="utf-8")
+        (self.root / "MEMORY.md").write_text("# Project\n\n## Auth API\nUse refresh tokens.\n", encoding="utf-8")
+
+    def test_run_share_builder_uses_share_level_session_and_returns_result(self):
+        def fake_run_session_turn(runtime, session_id, message):
+            self.assertEqual(session_id, "share-builder-auth-api")
+            self.assertIn("<share_build>", message)
+            self.assertIn("capability: auto", message)
+            save_shares(
+                self.root,
+                {
+                    "auth-api": ShareRelationship(
+                        share_id="auth-api",
+                        role="provider",
+                        title="Auth API",
+                        provider_id="alice",
+                        hub_url="https://hub.example.test",
+                        credential_id="alice-publish",
+                        state="draft",
+                        parts=("file",),
+                        file=ShareFilePart(
+                            view_id="auth-api-files",
+                            intent="Share auth API context.",
+                            approved=False,
+                        ),
+                    )
+                },
+            )
+            return "Selected Auth API context."
+
+        with patch("rightmemory.share_builder.RightMemoryRuntime.run_session_turn", fake_run_session_turn):
+            result = run_share_builder(
+                self.root,
+                share_id_hint="auth-api",
+                request="Share auth API context.",
+                provider_id="alice",
+                hub_url="https://hub.example.test",
+                credential_id="alice-publish",
+                capability="auto",
+            )
+
+        self.assertEqual(result.share_id, "auth-api")
+        self.assertEqual(result.builder_final_message, "Selected Auth API context.")
+        self.assertEqual(result.capability, "file_context")
+        self.assertEqual(result.next_action, "rightmemory share approve auth-api")
+
+    def test_run_share_reviser_uses_existing_share_session(self):
+        save_shares(
+            self.root,
+            {
+                "auth-api": ShareRelationship(
+                    share_id="auth-api",
+                    role="provider",
+                    title="Auth API",
+                    provider_id="alice",
+                    hub_url="https://hub.example.test",
+                    credential_id="alice-publish",
+                    state="draft",
+                    parts=("question",),
+                    question=ShareQuestionPart(
+                        view_id="auth-api-ask",
+                        intent="Answer auth API questions.",
+                        question_base_url="https://provider.example.test",
+                        approved=False,
+                    ),
+                )
+            },
+        )
+
+        def fake_run_session_turn(runtime, session_id, message):
+            self.assertEqual(session_id, "share-builder-auth-api")
+            self.assertIn("<share_revise>", message)
+            self.assertIn("Include profile endpoint.", message)
+            return "Updated live question scope."
+
+        with patch("rightmemory.share_builder.RightMemoryRuntime.run_session_turn", fake_run_session_turn):
+            result = revise_share_builder(self.root, "auth-api", "Include profile endpoint.")
+
+        self.assertEqual(result.builder_final_message, "Updated live question scope.")
+        self.assertEqual(result.capability, "live_questions")
 
 
 class ShareModelTests(unittest.TestCase):
