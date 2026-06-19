@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import PrunerConfig
+from .memory_git import active_memory_commit_count, first_generation_active_memory_boundary
 
 
 GIT_TIMEOUT_SECONDS = 30
@@ -71,7 +72,7 @@ def prune_due_status(memory_root: Path, config: PrunerConfig) -> PruneDueStatus:
     latest = latest_prune_commit(root)
 
     if latest is not None:
-        commits_since = _commit_count(root, f"{latest}..HEAD")
+        commits_since = active_memory_commit_count(root, f"{latest}..HEAD")
         body = _git_stdout(root, "log", "--max-count=1", "--format=%B", latest)
         if commits_since < config.generation_commits:
             return PruneDueStatus(
@@ -99,7 +100,7 @@ def prune_due_status(memory_root: Path, config: PrunerConfig) -> PruneDueStatus:
             revival_grace_checkpoints=config.revival_grace_checkpoints,
         )
 
-    total_commits = _commit_count(root, "HEAD")
+    total_commits = active_memory_commit_count(root, "HEAD")
     if total_commits < config.generation_commits:
         return PruneDueStatus(
             due=False,
@@ -115,7 +116,7 @@ def prune_due_status(memory_root: Path, config: PrunerConfig) -> PruneDueStatus:
         commits_since_boundary=min(total_commits, config.generation_commits),
         generation_commits=config.generation_commits,
         current_head=current_head,
-        boundary_commit=_first_generation_boundary(root, config.generation_commits),
+        boundary_commit=first_generation_active_memory_boundary(root, config.generation_commits),
         revival_grace_checkpoints=config.revival_grace_checkpoints,
     )
 
@@ -232,23 +233,6 @@ def _ledger_summary(ledger: PruneLedger) -> str:
             for entry in ledger.grace
         )
     return "\n".join(lines) if lines else "(none)"
-
-
-def _first_generation_boundary(root: Path, generation_commits: int) -> str:
-    target = f"HEAD~{generation_commits}"
-    result = _run_git(root, "rev-parse", "--verify", target, check=False)
-    if result.returncode == 0 and result.stdout.strip():
-        return result.stdout.strip()
-    if generation_commits > 1:
-        target = f"HEAD~{generation_commits - 1}"
-        result = _run_git(root, "rev-parse", "--verify", target, check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    return _git_stdout(root, "rev-list", "--max-parents=0", "HEAD").splitlines()[0]
-
-
-def _commit_count(root: Path, revision: str) -> int:
-    return int(_git_stdout(root, "rev-list", "--count", revision))
 
 
 def _git_stdout(root: Path, *args: str) -> str:

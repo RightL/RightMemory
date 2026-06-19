@@ -39,6 +39,30 @@ class PruneTests(unittest.TestCase):
         self.assertEqual(status.latest_prune_commit, None)
         self.assertEqual(status.commits_since_boundary, 3)
 
+    def test_prune_generation_ignores_shared_view_only_commits(self):
+        self._commit_memory("one", "memory: one")
+        self._commit_shared_view_recipe("auth-api-files", "shared-view: refresh auth-api-files")
+        self._commit_memory("two", "memory: two")
+
+        status = prune_due_status(self.root, PrunerConfig(memory_root=self.root, generation_commits=3))
+
+        self.assertFalse(status.due)
+        self.assertEqual(status.commits_since_boundary, 2)
+        self.assertIn("2/3 commits", status.message)
+
+    def test_first_prune_boundary_uses_active_memory_history(self):
+        self._commit_memory("one", "memory: one")
+        self._commit_shared_view_recipe("auth-api-files", "shared-view: refresh auth-api-files")
+        self._commit_memory("two", "memory: two")
+        self._commit_memory("three", "memory: three")
+        active_root = self._git("rev-list", "--max-parents=0", "HEAD", "--", "MEMORY.md")
+
+        status = prune_due_status(self.root, PrunerConfig(memory_root=self.root, generation_commits=3))
+
+        self.assertTrue(status.due)
+        self.assertEqual(status.boundary_commit, active_root)
+        self.assertEqual(status.commits_since_boundary, 3)
+
     def test_previous_prune_controls_next_generation_window(self):
         self._commit_memory("one", "memory: one")
         body = (
@@ -140,6 +164,29 @@ class PruneTests(unittest.TestCase):
     def _commit_memory(self, value: str, message: str) -> None:
         (self.root / "MEMORY.md").write_text(f"# Memory\n\n- `{value}` value\n", encoding="utf-8")
         self._git("add", "MEMORY.md")
+        self._git("commit", "-m", message)
+
+    def _commit_shared_view_recipe(self, view_id: str, message: str) -> None:
+        view_dir = self.root / "shared_views" / view_id
+        view_dir.mkdir(parents=True, exist_ok=True)
+        (view_dir / "recipe.toml").write_text(
+            'version = 1\n'
+            f'view_id = "{view_id}"\n'
+            'kind = "file"\n'
+            'title = "Auth API Files"\n'
+            'approved = true\n'
+            'intent = "Expose auth context."\n'
+            'render = "extractive"\n'
+            'semantic_refresh_days = 7\n'
+            'last_semantic_refresh_at = ""\n'
+            'last_semantic_refresh_memory_commit = ""\n'
+            'include_headings = ["auth-api"]\n'
+            'include_nodes = []\n'
+            'include_files = []\n'
+            'exclude_ids = []\n',
+            encoding="utf-8",
+        )
+        self._git("add", f"shared_views/{view_id}/recipe.toml")
         self._git("commit", "-m", message)
 
     def _git(self, *args: str) -> str:
