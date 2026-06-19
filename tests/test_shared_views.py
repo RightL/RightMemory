@@ -1,6 +1,7 @@
 import io
 import json
 import shutil
+import subprocess
 import threading
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.hub.client import HubClientError
-from rightmemory.shared_view_builder import run_file_view_builder, run_question_view_builder
+from rightmemory.shared_view_builder import refresh_file_view, run_file_view_builder, run_question_view_builder
 from rightmemory.shared_view_files import (
     FileViewPullResult,
     FileViewPublishResult,
@@ -485,6 +486,95 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         self.assertTrue(preview.is_file())
         self.assertIn("Tokens expire after one hour.", preview.read_text(encoding="utf-8"))
 
+    def test_file_view_builder_accepts_generative_output(self):
+        def fake_builder(memory_root, view_id, message):
+            write_generative_file_view(
+                memory_root,
+                view_id=view_id,
+                title="Auth API Files",
+                intent="Expose sanitized auth context.",
+                published_context="Tokens expire after one hour.",
+                approved=False,
+                publish_hub_url="https://hub.example.test",
+                publish_credential_id="alice-publish",
+            )
+            return "built generative file view auth-api-files"
+
+        with patch("rightmemory.shared_view_builder._run_builder", side_effect=fake_builder):
+            result = run_file_view_builder(
+                self.root,
+                view_id="auth-api-files",
+                title="Auth API Files",
+                intent="Expose auth API integration context.",
+                hub_url="https://hub.example.test",
+                credential_id="alice-publish",
+            )
+
+        preview = self.root / "shared_views" / "auth-api-files" / "dist" / "MEMORY.md"
+        self.assertEqual(result, "built generative file view auth-api-files")
+        self.assertIn("Tokens expire after one hour.", preview.read_text(encoding="utf-8"))
+
+    def test_refresh_file_view_preserves_approval_and_publish_settings(self):
+        self._init_git_memory()
+        write_extractive_file_view_recipe(
+            self.root,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_headings=["auth-api"],
+            approved=True,
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
+            last_semantic_refresh_at="2000-01-01T00:00:00+00:00",
+            last_semantic_refresh_memory_commit="old",
+        )
+
+        def fake_builder(memory_root, view_id, message):
+            write_generative_file_view(
+                memory_root,
+                view_id=view_id,
+                title="Auth API Files",
+                intent="Expose sanitized auth context.",
+                published_context="Tokens expire after one hour.",
+                approved=False,
+            )
+            return "refreshed"
+
+        with patch("rightmemory.shared_view_builder._run_builder", side_effect=fake_builder):
+            result = refresh_file_view(self.root, "auth-api-files", force=True)
+
+        recipe = load_file_view_recipe(self.root, "auth-api-files")
+        self.assertIn("refreshed file view auth-api-files", result)
+        self.assertTrue(recipe.approved)
+        self.assertEqual(recipe.publish_hub_url, "https://hub.example.test")
+        self.assertEqual(recipe.publish_credential_id, "alice-publish")
+        self.assertEqual(recipe.render, "generative")
+        self.assertNotEqual(recipe.last_semantic_refresh_memory_commit, "old")
+
+    def test_refresh_file_view_restores_previous_files_on_builder_failure(self):
+        self._init_git_memory()
+        write_extractive_file_view_recipe(
+            self.root,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_headings=["auth-api"],
+            approved=True,
+        )
+        original = (self.root / "shared_views" / "auth-api-files" / "recipe.toml").read_text(encoding="utf-8")
+
+        def fake_builder(memory_root, view_id, message):
+            view_dir = memory_root / "shared_views" / view_id
+            (view_dir / "recipe.toml").write_text("broken = true\n", encoding="utf-8")
+            return "broken"
+
+        with patch("rightmemory.shared_view_builder._run_builder", side_effect=fake_builder):
+            with self.assertRaisesRegex(ValueError, "unsupported field"):
+                refresh_file_view(self.root, "auth-api-files", force=True)
+
+        restored = (self.root / "shared_views" / "auth-api-files" / "recipe.toml").read_text(encoding="utf-8")
+        self.assertEqual(restored, original)
+
     def test_file_view_builder_rejects_noncanonical_model_recipe(self):
         def fake_builder(memory_root, view_id, message):
             view_dir = memory_root / "shared_views" / view_id
@@ -511,6 +601,13 @@ class SharedFileViewRecipeTests(unittest.TestCase):
                     hub_url="https://hub.example.test",
                     credential_id="alice-publish",
                 )
+
+    def _init_git_memory(self) -> None:
+        subprocess.run(["git", "init"], cwd=self.root, check=True, stdout=subprocess.PIPE)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.root, check=True)
+        subprocess.run(["git", "add", "MEMORY.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-m", "memory: initial"], cwd=self.root, check=True, stdout=subprocess.PIPE)
 
     def test_question_view_builder_rejects_noncanonical_model_config(self):
         def fake_builder(memory_root, view_id, message):

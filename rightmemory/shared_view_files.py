@@ -142,6 +142,12 @@ def _write_file_view_source(root: Path, recipe: FileViewRecipe) -> None:
     _write_text(view_dir / "recipe.toml", _render_recipe_toml(recipe))
 
 
+def write_file_view_recipe_from_recipe(memory_root: Path, recipe: FileViewRecipe) -> str:
+    root = Path(memory_root).expanduser()
+    _write_file_view_source(root, recipe)
+    return f"wrote file view recipe {recipe.view_id}"
+
+
 def write_generative_file_view(
     memory_root: Path,
     *,
