@@ -13,6 +13,7 @@ from starlette.requests import Request
 from rightmemory.hub.client import HubClientError
 from rightmemory.hub.app import create_hub_app
 from rightmemory.hub.store import HubStore
+from rightmemory.git_share_transport import git_join_url, parse_git_share_url
 from rightmemory.share_models import (
     ShareFilePart,
     ShareQuestionPart,
@@ -296,6 +297,25 @@ class ShareModelTests(unittest.TestCase):
             load_shares(self.root)
 
         self.assertIn("file part approved for auth-api must be a boolean", str(caught.exception))
+
+
+class GitShareTransportTests(unittest.TestCase):
+    def test_parse_git_share_url_extracts_share_and_branch(self):
+        parsed = parse_git_share_url("https://github.com/user/repo.git#share=auth-api&branch=gh-pages")
+
+        self.assertEqual(parsed.repo_url, "https://github.com/user/repo.git")
+        self.assertEqual(parsed.share_id, "auth-api")
+        self.assertEqual(parsed.branch, "gh-pages")
+
+    def test_parse_git_share_url_requires_share_fragment(self):
+        with self.assertRaisesRegex(ValueError, "share"):
+            parse_git_share_url("https://github.com/user/repo.git")
+
+    def test_git_join_url_uses_clean_fragment(self):
+        self.assertEqual(
+            git_join_url("https://github.com/user/repo.git", "auth-api", "gh-pages"),
+            "https://github.com/user/repo.git#share=auth-api&branch=gh-pages",
+        )
 
 
 def _write_canonical_file_and_question_parts(root: Path):
