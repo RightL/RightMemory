@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlparse
 
-from .git_share_transport import publish_git_share_package
+from .git_share_transport import import_git_file_package, is_git_share_url, parse_git_share_url, publish_git_share_package, read_git_file_share
 from .share_builder import revise_share_builder, run_share_builder
 from .hub.client import HubClient, HubClientError
 from .share_models import ShareFilePart, ShareQuestionPart, ShareRelationship, load_shares, save_shares, validate_share_id
@@ -310,6 +310,8 @@ def _publish_git_share(
 
 def join_share(memory_root: Path, invitation_url: str, *, consumer_label: str | None = None) -> str:
     root = Path(memory_root).expanduser()
+    if is_git_share_url(invitation_url):
+        return _join_git_share(root, invitation_url)
     base_url, token = _parse_share_invitation_url(invitation_url)
     client = HubClient(base_url)
     described = client.get_share_invitation(token)
@@ -413,6 +415,46 @@ def join_share(memory_root: Path, invitation_url: str, *, consumer_label: str | 
         pulled = pull_file_view(root, file_part.heading_id)
         lines.append(f"file {pulled.heading_id} {pulled.status}: {pulled.message}")
     return "\n".join(lines)
+
+
+def _join_git_share(root: Path, invitation_url: str) -> str:
+    reference = parse_git_share_url(invitation_url)
+    described = read_git_file_share(root, reference)
+    import_git_file_package(root, described.view_id, described.package_root)
+    accept_shared_view(
+        root,
+        heading_id=described.view_id,
+        view_type="file",
+        title=described.file_title,
+        body=f"Accepted as part of share {described.share_id}.",
+        ref=f"rightmemory://mf/{described.view_id}",
+        maintainer=described.provider_id,
+        accepted_from=invitation_url,
+        target=SharedViewTarget(
+            kind="git-file",
+            view_id=described.view_id,
+            git_url=reference.repo_url,
+            git_branch=reference.branch,
+            git_share_id=described.share_id,
+            accepted_from_url=invitation_url,
+        ),
+    )
+    shares = load_shares(root)
+    shares[described.share_id] = ShareRelationship(
+        share_id=described.share_id,
+        role="consumer",
+        title=described.title,
+        provider_id=described.provider_id,
+        state="joined",
+        parts=("file",),
+        transport="git",
+        git_url=reference.repo_url,
+        git_branch=reference.branch,
+        accepted_from=invitation_url,
+        file=ShareFilePart(heading_id=described.view_id),
+    )
+    save_shares(root, shares)
+    return f"joined share {described.share_id}\nfile {described.view_id} pulled: Git file view imported"
 
 
 def share_status(memory_root: Path, share_id: str | None = None) -> str:

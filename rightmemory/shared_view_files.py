@@ -393,6 +393,16 @@ def pull_file_view(memory_root: Path, heading_id: str) -> FileViewPullResult:
     connection = load_connections(root).get(clean_heading_id)
     if connection is None or connection.view_type != "file":
         return FileViewPullResult(clean_heading_id, "unavailable", "file view connection not found")
+    if connection.target.kind == "git-file":
+        try:
+            from .git_share_transport import pull_git_file_view
+
+            pull_git_file_view(root, connection.target, clean_heading_id)
+            return FileViewPullResult(clean_heading_id, "pulled", "Git file view pulled")
+        except (ValueError, OSError, RuntimeError) as exc:
+            if _import_exists(root, clean_heading_id):
+                return FileViewPullResult(clean_heading_id, "stale", f"using stale file view import: {exc}")
+            return FileViewPullResult(clean_heading_id, "unavailable", f"file view unavailable: {exc}")
     try:
         archive = _download_file_view_archive(root, connection)
         _replace_import_from_zip(root, clean_heading_id, archive)

@@ -25,7 +25,7 @@ from rightmemory.share_models import (
 )
 from rightmemory.share_builder import revise_share_builder, run_share_builder
 from rightmemory.share_results import ShareCapabilityStatus, ShareOperationResult, format_share_operation_result
-from rightmemory.shared_view_models import SharedViewTarget, load_shared_view_credential, save_shared_view_credential
+from rightmemory.shared_view_models import SharedViewTarget, load_connections, load_shared_view_credential, save_shared_view_credential
 from rightmemory.shared_view_questions import ask_question_view
 from rightmemory.shared_views import accept_shared_view, record_shared_view_note
 from rightmemory.shares import (
@@ -971,6 +971,120 @@ class _InProcessHubClient:
             },
             receive,
         )
+
+
+class GitShareJoinTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+        self.provider = self.root / "provider"
+        self.consumer = self.root / "consumer"
+        self.provider.mkdir()
+        self.consumer.mkdir()
+        (self.provider / "MEMORY.md").write_text(
+            "# Auth {#auth}\n\n- `token-expiry` Tokens expire.\n",
+            encoding="utf-8",
+        )
+        (self.consumer / "MEMORY.md").write_text("# Consumer\n", encoding="utf-8")
+        self.remote = self.root / "remote.git"
+        self._init_remote()
+
+    def test_join_git_share_imports_file_package(self):
+        invitation_url = self._publish_provider()
+
+        joined = join_share(self.consumer, invitation_url)
+
+        self.assertIn("joined share auth-api", joined)
+        self.assertTrue(
+            (
+                self.consumer
+                / ".runtime"
+                / "shared_views"
+                / "imports"
+                / "auth-api-files"
+                / "dist"
+                / "MEMORY.md"
+            ).is_file()
+        )
+        self.assertEqual(load_shares(self.consumer)["auth-api"].transport, "git")
+        self.assertEqual(load_connections(self.consumer)["auth-api-files"].target.kind, "git-file")
+
+    def test_pull_git_file_view_refreshes_import(self):
+        from rightmemory.shared_view_files import pull_file_view, render_file_view
+
+        invitation_url = self._publish_provider()
+        join_share(self.consumer, invitation_url)
+        (self.provider / "MEMORY.md").write_text(
+            "# Auth {#auth}\n\n- `token-expiry` Tokens now expire after two hours.\n",
+            encoding="utf-8",
+        )
+        render_file_view(self.provider, "auth-api-files")
+        publish_share(self.provider, "auth-api")
+
+        result = pull_file_view(self.consumer, "auth-api-files")
+        text = (
+            self.consumer
+            / ".runtime"
+            / "shared_views"
+            / "imports"
+            / "auth-api-files"
+            / "dist"
+            / "MEMORY.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(result.status, "pulled")
+        self.assertIn("two hours", text)
+
+    def _publish_provider(self) -> str:
+        from rightmemory.shared_view_files import render_file_view, write_extractive_file_view_recipe
+
+        write_extractive_file_view_recipe(
+            self.provider,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_nodes=("token-expiry",),
+            approved=True,
+        )
+        render_file_view(self.provider, "auth-api-files")
+        save_shares(
+            self.provider,
+            {
+                "auth-api": ShareRelationship(
+                    share_id="auth-api",
+                    role="provider",
+                    title="Auth API",
+                    provider_id="alice",
+                    state="approved",
+                    parts=("file",),
+                    transport="git",
+                    git_url=str(self.remote),
+                    file=ShareFilePart(
+                        view_id="auth-api-files",
+                        intent="Expose auth API integration context.",
+                        approved=True,
+                    ),
+                )
+            },
+        )
+        published = publish_share(self.provider, "auth-api")
+        return published.split("invitation_url\t", 1)[1].strip()
+
+    def _init_remote(self) -> None:
+        seed = self.root / "seed"
+        subprocess.run(["git", "init", "--bare", str(self.remote)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(["git", "clone", str(self.remote), str(seed)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        (seed / "README.md").write_text("seed\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=seed, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(
+            ["git", "-c", "user.name=Tester", "-c", "user.email=tester@example.test", "commit", "-m", "seed"],
+            cwd=seed,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        subprocess.run(["git", "push"], cwd=seed, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def _zip_package(package: Path) -> bytes:

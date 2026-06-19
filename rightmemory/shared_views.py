@@ -121,9 +121,10 @@ def accept_shared_view(
     if view_type not in {"file", "question"}:
         raise ValueError("shared view type must be file or question")
     resolved_target = target or SharedViewTarget()
-    expected_kind = "http-file" if view_type == "file" else "http-question"
-    if resolved_target.kind not in {"none", expected_kind}:
-        raise ValueError(f"{view_type} shared view requires {expected_kind} HTTP target")
+    expected_kinds = {"http-file", "git-file"} if view_type == "file" else {"http-question"}
+    if resolved_target.kind not in {"none", *expected_kinds}:
+        expected = " or ".join(sorted(expected_kinds))
+        raise ValueError(f"{view_type} shared view requires {expected} target")
     connections = load_connections(root)
     connections[clean_heading_id] = SharedViewConnection(
         heading_id=clean_heading_id,
