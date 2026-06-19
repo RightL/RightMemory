@@ -1,5 +1,6 @@
 import asyncio
 import json
+import subprocess
 import zipfile
 import tempfile
 import unittest
@@ -418,6 +419,45 @@ class ShareProviderFlowTests(unittest.TestCase):
             credential_id="alice-publish",
             capability="both",
             question_base_url="https://provider.example.test",
+            git_url=None,
+            git_branch=None,
+        )
+
+    def test_create_git_share_from_request_forces_file_capability(self):
+        expected = ShareOperationResult(
+            share_id="auth-api",
+            title="Auth API",
+            role="provider",
+            state="draft",
+            capability="file_context",
+            builder_final_message="Built file context.",
+        )
+
+        with patch("rightmemory.shares.run_share_builder", return_value=expected) as builder:
+            result = create_share_from_request(
+                self.root,
+                share_id="auth-api",
+                title="Auth API",
+                provider_id="alice",
+                request="Share auth API context.",
+                capability="auto",
+                git_url="https://github.com/user/rightmemory-shares.git",
+                git_branch="gh-pages",
+            )
+
+        self.assertEqual(result, expected)
+        builder.assert_called_once_with(
+            self.root,
+            share_id_hint="auth-api",
+            title_hint="Auth API",
+            request="Share auth API context.",
+            provider_id="alice",
+            hub_url=None,
+            credential_id=None,
+            capability="file_context",
+            question_base_url=None,
+            git_url="https://github.com/user/rightmemory-shares.git",
+            git_branch="gh-pages",
         )
 
     def test_create_share_request_formats_operation_result(self):
@@ -538,6 +578,62 @@ class ShareProviderFlowTests(unittest.TestCase):
             label="frontend",
             expires_at=None,
         )
+
+    def test_publish_git_share_writes_repo_package(self):
+        from rightmemory.shared_view_files import render_file_view, write_extractive_file_view_recipe
+
+        remote = self.root / "remote.git"
+        seed = self.root / "seed"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(["git", "clone", str(remote), str(seed)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        (seed / "README.md").write_text("seed\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=seed, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(
+            ["git", "-c", "user.name=Tester", "-c", "user.email=tester@example.test", "commit", "-m", "seed"],
+            cwd=seed,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        subprocess.run(["git", "push"], cwd=seed, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        write_extractive_file_view_recipe(
+            self.root,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_nodes=("token-expiry",),
+            approved=True,
+        )
+        render_file_view(self.root, "auth-api-files")
+        save_shares(
+            self.root,
+            {
+                "auth-api": ShareRelationship(
+                    share_id="auth-api",
+                    role="provider",
+                    title="Auth API",
+                    provider_id="alice",
+                    state="approved",
+                    parts=("file",),
+                    transport="git",
+                    git_url=str(remote),
+                    file=ShareFilePart(
+                        view_id="auth-api-files",
+                        intent="Expose auth API integration context.",
+                        approved=True,
+                    ),
+                )
+            },
+        )
+
+        published = publish_share(self.root, "auth-api", push=True)
+
+        self.assertIn("published share auth-api", published)
+        self.assertIn("#share=auth-api", published)
+        verify = self.root / "verify"
+        subprocess.run(["git", "clone", str(remote), str(verify)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertTrue((verify / "shares" / "auth-api" / "share.toml").is_file())
+        self.assertTrue((verify / "shares" / "auth-api" / "package" / "dist" / "MEMORY.md").is_file())
 
 
 class ShareConsumerFlowTests(unittest.TestCase):

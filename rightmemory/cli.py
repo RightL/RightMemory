@@ -699,8 +699,10 @@ def _share_main(argv: list[str], memory_root: Path) -> int:
     create.add_argument("share_id")
     create.add_argument("--title")
     create.add_argument("--provider", required=True)
-    create.add_argument("--hub-url", required=True)
-    create.add_argument("--credential-id", required=True)
+    create.add_argument("--hub-url")
+    create.add_argument("--credential-id")
+    create.add_argument("--git")
+    create.add_argument("--branch")
     create.add_argument("--request")
     create.add_argument("--capability", choices=("auto", "file-context", "live-questions", "both"), default="auto")
     create.add_argument("--file")
@@ -717,6 +719,9 @@ def _share_main(argv: list[str], memory_root: Path) -> int:
     publish.add_argument("share_id")
     publish.add_argument("--label")
     publish.add_argument("--expires-at")
+    publish.add_argument("--git")
+    publish.add_argument("--branch")
+    publish.add_argument("--no-push", action="store_true")
     join = subparsers.add_parser("join")
     join.add_argument("invitation_url")
     join.add_argument("--consumer-label")
@@ -741,6 +746,8 @@ def _share_main(argv: list[str], memory_root: Path) -> int:
                 file_intent=args.file,
                 question_intent=args.question,
                 question_base_url=args.question_base_url,
+                git_url=args.git,
+                git_branch=args.branch,
             )
         )
         return 0
@@ -761,7 +768,17 @@ def _share_main(argv: list[str], memory_root: Path) -> int:
         print(approve_share(memory_root, args.share_id))
         return 0
     if args.command == "publish":
-        print(publish_share(memory_root, args.share_id, label=args.label, expires_at=args.expires_at))
+        print(
+            publish_share(
+                memory_root,
+                args.share_id,
+                label=args.label,
+                expires_at=args.expires_at,
+                git_url=args.git,
+                git_branch=args.branch,
+                push=not args.no_push,
+            )
+        )
         return 0
     if args.command == "join":
         with MemoryWriteLock(memory_root):

@@ -29,33 +29,37 @@ def run_file_view_builder(
     view_id: str,
     title: str,
     intent: str,
-    hub_url: str,
-    credential_id: str,
+    hub_url: str | None = None,
+    credential_id: str | None = None,
 ) -> str:
     clean_view_id = validate_heading_id(view_id)
-    message = "\n".join(
-        [
-            "<shared_view_build>",
-            "kind: file",
-            f"view_id: {clean_view_id}",
-            f"title: {title.strip()}",
-            f"intent: {intent.strip()}",
-            f"publish_hub_url: {hub_url.strip()}",
-            f"publish_credential_id: {credential_id.strip()}",
-            "</shared_view_build>",
-        ]
-    )
+    lines = [
+        "<shared_view_build>",
+        "kind: file",
+        f"view_id: {clean_view_id}",
+        f"title: {title.strip()}",
+        f"intent: {intent.strip()}",
+    ]
+    if hub_url and credential_id:
+        lines.extend(
+            [
+                f"publish_hub_url: {hub_url.strip()}",
+                f"publish_credential_id: {credential_id.strip()}",
+            ]
+        )
+    message = "\n".join([*lines, "</shared_view_build>"])
     output = _run_builder(memory_root, clean_view_id, message)
     _require_artifact(memory_root, clean_view_id, "view.md")
     _require_artifact(memory_root, clean_view_id, "recipe.toml")
+    require_publish = bool(hub_url or credential_id)
     recipe = validate_file_view_recipe_source(
         memory_root,
         clean_view_id,
         require_selection=False,
-        require_publish=True,
+        require_publish=require_publish,
     )
     if recipe.render == FILE_VIEW_RENDER_EXTRACTIVE:
-        validate_file_view_recipe_source(memory_root, clean_view_id, require_selection=True, require_publish=True)
+        validate_file_view_recipe_source(memory_root, clean_view_id, require_selection=True, require_publish=require_publish)
         render_file_view(memory_root, clean_view_id)
     else:
         _require_nonempty_file_view_context(memory_root, clean_view_id)

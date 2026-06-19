@@ -20,18 +20,21 @@ def run_share_builder(
     share_id_hint: str | None,
     request: str,
     provider_id: str,
-    hub_url: str,
-    credential_id: str,
+    hub_url: str | None = None,
+    credential_id: str | None = None,
     capability: str = "auto",
     question_base_url: str | None = None,
     title_hint: str | None = None,
+    git_url: str | None = None,
+    git_branch: str | None = None,
 ) -> ShareOperationResult:
     root = Path(memory_root).expanduser()
     clean_request = request.strip()
     if not clean_request:
         raise ValueError("share request must not be empty")
     clean_share_id = validate_share_id(share_id_hint) if share_id_hint else None
-    clean_capability = normalize_share_capability(capability)
+    clean_git_url = git_url.strip() if git_url and git_url.strip() else None
+    clean_capability = "file_context" if clean_git_url else normalize_share_capability(capability)
     previous_share_ids = set(load_shares(root))
     final_message = _run_builder_turn(
         root,
@@ -45,6 +48,8 @@ def run_share_builder(
             credential_id=credential_id,
             capability=clean_capability,
             question_base_url=question_base_url,
+            git_url=clean_git_url,
+            git_branch=git_branch.strip() if git_branch and git_branch.strip() else None,
         ),
     )
     share = _load_created_share(root, clean_share_id, previous_share_ids)
@@ -114,20 +119,32 @@ def _share_build_message(
     title_hint: str | None,
     request: str,
     provider_id: str,
-    hub_url: str,
-    credential_id: str,
+    hub_url: str | None,
+    credential_id: str | None,
     capability: str,
     question_base_url: str | None,
+    git_url: str | None,
+    git_branch: str | None,
 ) -> str:
     lines = [
         "<share_build>",
         f"share_id_hint: {share_id_hint or ''}",
         f"title_hint: {(title_hint or '').strip()}",
         f"provider_id: {provider_id.strip()}",
-        f"hub_url: {hub_url.strip()}",
-        f"credential_id: {credential_id.strip()}",
         f"capability: {capability}",
     ]
+    if git_url:
+        lines.extend(["transport: git", f"git_url: {git_url.strip()}"])
+        if git_branch:
+            lines.append(f"git_branch: {git_branch.strip()}")
+    else:
+        lines.extend(
+            [
+                "transport: http",
+                f"hub_url: {(hub_url or '').strip()}",
+                f"credential_id: {(credential_id or '').strip()}",
+            ]
+        )
     if question_base_url:
         lines.append(f"question_base_url: {question_base_url.strip()}")
     lines.extend(

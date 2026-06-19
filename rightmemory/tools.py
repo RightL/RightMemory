@@ -532,22 +532,29 @@ class MemoryTools:
         share_id: str,
         title: str,
         provider_id: str,
-        hub_url: str,
-        credential_id: str,
+        hub_url: str | None = None,
+        credential_id: str | None = None,
         capability: str = "auto",
         file_view_id: str | None = None,
         file_intent: str | None = None,
         question_view_id: str | None = None,
         question_intent: str | None = None,
         question_base_url: str | None = None,
+        git_url: str | None = None,
+        git_branch: str | None = None,
     ) -> str:
         """Create canonical provider share registry data, or return actionable validation failures."""
         self._require_shared_view_builder_tool()
         try:
             clean_share_id = validate_share_id(share_id)
-            clean_capability = normalize_share_capability(capability)
+            clean_git_url = str(git_url).strip() if git_url else None
+            clean_capability = "file_context" if clean_git_url else normalize_share_capability(capability)
             if clean_capability == "auto":
                 clean_capability = _capability_from_selected_views(file_view_id, question_view_id)
+            if clean_git_url and clean_capability != "file_context":
+                return "failed: Git transport supports file_context capability only"
+            if clean_git_url and (question_view_id or question_intent or question_base_url):
+                return "failed: Git transport supports file_context capability only"
             parts: list[str] = []
             file_part = None
             question_part = None
@@ -581,13 +588,26 @@ class MemoryTools:
             if not parts:
                 return "failed: share capability selected no shareable capability"
             shares = load_shares(self.memory_root)
+            if clean_git_url:
+                clean_hub_url = None
+                clean_credential_id = None
+            else:
+                if not hub_url or not str(hub_url).strip():
+                    return "failed: HTTP share relationship requires hub_url"
+                if not credential_id or not str(credential_id).strip():
+                    return "failed: HTTP share relationship requires credential_id"
+                clean_hub_url = str(hub_url).strip().rstrip("/")
+                clean_credential_id = validate_heading_id(credential_id)
             shares[clean_share_id] = ShareRelationship(
                 share_id=clean_share_id,
                 role="provider",
                 title=str(title).strip(),
                 provider_id=validate_heading_id(provider_id),
-                hub_url=str(hub_url).strip().rstrip("/"),
-                credential_id=validate_heading_id(credential_id),
+                hub_url=clean_hub_url,
+                credential_id=clean_credential_id,
+                transport="git" if clean_git_url else "http",
+                git_url=clean_git_url,
+                git_branch=str(git_branch).strip() if git_branch and str(git_branch).strip() else None,
                 state="draft",
                 parts=tuple(parts),
                 file=file_part,

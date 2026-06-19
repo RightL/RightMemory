@@ -4,14 +4,16 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlparse
 
+from .git_share_transport import publish_git_share_package
 from .share_builder import revise_share_builder, run_share_builder
 from .hub.client import HubClient, HubClientError
 from .share_models import ShareFilePart, ShareQuestionPart, ShareRelationship, load_shares, save_shares, validate_share_id
 from .share_results import ShareOperationResult, format_share_operation_result
 from .shared_view_builder import run_file_view_builder, run_question_view_builder
-from .shared_view_files import approve_file_view, publish_file_view_package, pull_file_view
+from .shared_view_files import approve_file_view, export_file_view_package, publish_file_view_package, pull_file_view
 from .shared_view_models import (
     SharedViewTarget,
     load_connections,
@@ -32,17 +34,20 @@ def create_share(
     *,
     title: str | None = None,
     provider_id: str,
-    hub_url: str,
-    credential_id: str,
+    hub_url: str | None = None,
+    credential_id: str | None = None,
     request: str | None = None,
     capability: str = "auto",
     file_intent: str | None = None,
     question_intent: str | None = None,
     question_base_url: str | None = None,
+    git_url: str | None = None,
+    git_branch: str | None = None,
     build_parts: bool = True,
 ) -> str:
     root = Path(memory_root).expanduser()
     clean_share_id = validate_share_id(share_id)
+    clean_git_url = git_url.strip() if git_url and git_url.strip() else None
     if request is not None:
         if file_intent or question_intent:
             raise ValueError("share create --request cannot be combined with --file or --question")
@@ -56,12 +61,20 @@ def create_share(
             credential_id=credential_id,
             capability=capability,
             question_base_url=question_base_url,
+            git_url=clean_git_url,
+            git_branch=git_branch,
         )
         return format_share_operation_result(result)
     clean_title = _required_share_value(title, "title").strip()
     clean_provider_id = validate_heading_id(provider_id)
-    clean_hub_url = _required_share_value(hub_url, "hub_url").rstrip("/")
-    clean_credential_id = validate_heading_id(credential_id)
+    if clean_git_url:
+        if question_intent:
+            raise ValueError("Git transport supports file context only")
+        clean_hub_url = None
+        clean_credential_id = None
+    else:
+        clean_hub_url = _required_share_value(hub_url, "hub_url").rstrip("/")
+        clean_credential_id = validate_heading_id(_required_share_value(credential_id, "credential_id"))
     parts: list[str] = []
     file_part: ShareFilePart | None = None
     question_part: ShareQuestionPart | None = None
@@ -108,6 +121,9 @@ def create_share(
         provider_id=clean_provider_id,
         hub_url=clean_hub_url,
         credential_id=clean_credential_id,
+        transport="git" if clean_git_url else "http",
+        git_url=clean_git_url,
+        git_branch=git_branch.strip() if git_branch and git_branch.strip() else None,
         state="draft",
         parts=tuple(parts),
         file=file_part,
@@ -124,22 +140,30 @@ def create_share_from_request(
     title: str | None = None,
     request: str,
     provider_id: str,
-    hub_url: str,
-    credential_id: str,
+    hub_url: str | None = None,
+    credential_id: str | None = None,
     capability: str = "auto",
     question_base_url: str | None = None,
+    git_url: str | None = None,
+    git_branch: str | None = None,
 ) -> ShareOperationResult:
     root = Path(memory_root).expanduser()
+    clean_git_url = git_url.strip() if git_url and git_url.strip() else None
+    clean_capability = "file_context" if clean_git_url else capability
+    if clean_git_url and question_base_url:
+        raise ValueError("Git transport supports file context only")
     return run_share_builder(
         root,
         share_id_hint=validate_share_id(share_id) if share_id else None,
         title_hint=title.strip() if title and title.strip() else None,
         request=_required_share_value(request, "request"),
         provider_id=validate_heading_id(provider_id),
-        hub_url=_required_share_value(hub_url, "hub_url").rstrip("/"),
-        credential_id=validate_heading_id(credential_id),
-        capability=capability,
+        hub_url=_required_share_value(hub_url, "hub_url").rstrip("/") if not clean_git_url else None,
+        credential_id=validate_heading_id(_required_share_value(credential_id, "credential_id")) if not clean_git_url else None,
+        capability=clean_capability,
         question_base_url=question_base_url.strip() if question_base_url else None,
+        git_url=clean_git_url,
+        git_branch=git_branch.strip() if git_branch and git_branch.strip() else None,
     )
 
 
@@ -192,7 +216,16 @@ def approve_share(memory_root: Path, share_id: str) -> str:
     return f"approved share {share.share_id}"
 
 
-def publish_share(memory_root: Path, share_id: str, *, label: str | None = None, expires_at: str | None = None) -> str:
+def publish_share(
+    memory_root: Path,
+    share_id: str,
+    *,
+    label: str | None = None,
+    expires_at: str | None = None,
+    git_url: str | None = None,
+    git_branch: str | None = None,
+    push: bool = True,
+) -> str:
     root = Path(memory_root).expanduser()
     shares = load_shares(root)
     share = _require_share(shares, share_id)
@@ -200,6 +233,10 @@ def publish_share(memory_root: Path, share_id: str, *, label: str | None = None,
         raise ValueError(f"share is not provider-owned: {share.share_id}")
     if share.state not in {"approved", "published"}:
         raise ValueError(f"share is not approved: {share.share_id}")
+    if share.transport == "git" or git_url:
+        if label or expires_at:
+            raise ValueError("Git share publish does not support label or expires_at")
+        return _publish_git_share(root, shares, share, git_url=git_url, git_branch=git_branch, push=push)
     hub_url = _required_share_value(share.hub_url, "hub_url")
     credential_id = _required_share_value(share.credential_id, "credential_id")
     parts_payload: list[dict[str, str]] = []
@@ -234,6 +271,40 @@ def publish_share(memory_root: Path, share_id: str, *, label: str | None = None,
     _record_runtime_invitation(root, share.share_id, invitation_url)
     shares[share.share_id] = _replace_share(share, state="published")
     save_shares(root, shares)
+    return f"published share {share.share_id}\ninvitation_url\t{invitation_url}"
+
+
+def _publish_git_share(
+    root: Path,
+    shares: dict[str, ShareRelationship],
+    share: ShareRelationship,
+    *,
+    git_url: str | None,
+    git_branch: str | None,
+    push: bool,
+) -> str:
+    if "question" in share.parts:
+        raise ValueError("Git transport supports file context only")
+    if "file" not in share.parts or share.file is None:
+        raise ValueError("Git share publish requires a file part")
+    file_view_id = _required_part_value(share.file.view_id, "file view_id")
+    updated_share = share
+    if git_url or git_branch:
+        updated_share = replace(
+            share,
+            transport="git",
+            git_url=git_url.strip() if git_url and git_url.strip() else share.git_url,
+            git_branch=git_branch.strip() if git_branch and git_branch.strip() else share.git_branch,
+        )
+    if not updated_share.git_url:
+        raise ValueError("Git share publish requires --git <repo-url>")
+    with TemporaryDirectory() as tempdir:
+        package = Path(tempdir) / file_view_id
+        export_file_view_package(root, file_view_id, package)
+        invitation_url = publish_git_share_package(root, updated_share, package, push=push)
+    shares[share.share_id] = _replace_share(updated_share, state="published")
+    save_shares(root, shares)
+    _record_runtime_invitation(root, share.share_id, invitation_url)
     return f"published share {share.share_id}\ninvitation_url\t{invitation_url}"
 
 

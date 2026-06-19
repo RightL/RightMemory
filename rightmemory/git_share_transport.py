@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
-from .share_models import validate_share_id
+from .share_models import ShareRelationship, validate_share_id
 
 
 GIT_TIMEOUT_SECONDS = 60
@@ -77,6 +78,44 @@ def ensure_checkout(memory_root: Path, repo_url: str, branch: str | None = None,
     return checkout
 
 
+def publish_git_share_package(
+    memory_root: Path,
+    share: ShareRelationship,
+    package_root: Path,
+    *,
+    push: bool = True,
+) -> str:
+    repo_url = _required_text(share.git_url, "git_url")
+    checkout = ensure_checkout(memory_root, repo_url, share.git_branch, writable=True)
+    share_dir = checkout / "shares" / validate_share_id(share.share_id)
+    package_dir = share_dir / "package"
+    if package_dir.exists():
+        shutil.rmtree(package_dir)
+    share_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(Path(package_root), package_dir)
+    (share_dir / "share.toml").write_text(_render_share_toml(share), encoding="utf-8")
+    relative_share_dir = share_dir.relative_to(checkout).as_posix()
+    _run_git(checkout, "add", relative_share_dir)
+    status = _run_git(checkout, "status", "--short", "--", relative_share_dir).stdout.strip()
+    if status:
+        _run_git(
+            checkout,
+            "-c",
+            "user.name=RightMemory",
+            "-c",
+            "user.email=rightmemory@example.invalid",
+            "commit",
+            "-m",
+            f"Publish RightMemory share {share.share_id}",
+        )
+    if push:
+        if share.git_branch:
+            _run_git(checkout, "push", "-u", "origin", share.git_branch)
+        else:
+            _run_git(checkout, "push", "-u", "origin", "HEAD")
+    return git_join_url(repo_url, share.share_id, share.git_branch)
+
+
 def _single_fragment_value(fragment: dict[str, list[str]], key: str) -> str | None:
     values = fragment.get(key) or []
     if not values:
@@ -100,6 +139,39 @@ def _has_head(checkout: Path) -> bool:
     return _run_git(checkout, "rev-parse", "--verify", "HEAD", check=False).returncode == 0
 
 
+def _render_share_toml(share: ShareRelationship) -> str:
+    file_part = share.file
+    if file_part is None or not file_part.view_id:
+        raise ValueError(f"Git share {share.share_id} requires a file part")
+    lines = [
+        "version = 1",
+        f"share_id = {_toml_string(share.share_id)}",
+        f"title = {_toml_string(share.title)}",
+        f"provider_id = {_toml_string(share.provider_id or '')}",
+        'transport = "git"',
+        'parts = ["file"]',
+        "",
+        "[file]",
+        f"view_id = {_toml_string(file_part.view_id)}",
+        f"title = {_toml_string(f'{share.title} Files')}",
+        f"description = {_toml_string(file_part.intent or '')}",
+        'path = "package"',
+        'manifest = "package/dist/manifest.toml"',
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _required_text(value: str | None, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Git share {label} is required")
+    return value.strip()
+
+
+def _toml_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def _run_git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -119,4 +191,3 @@ def _run_git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedP
         detail = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(f"git {' '.join(args)} failed: {detail}")
     return result
-

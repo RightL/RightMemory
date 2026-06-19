@@ -108,8 +108,38 @@ class ShareCliTests(unittest.TestCase):
                 result = main(["share", "publish", "auth-api", "--label", "frontend"])
 
         self.assertEqual(result, 0)
-        publish.assert_called_once_with(root, "auth-api", label="frontend", expires_at=None)
+        publish.assert_called_once_with(
+            root,
+            "auth-api",
+            label="frontend",
+            expires_at=None,
+            git_url=None,
+            git_branch=None,
+            push=True,
+        )
         self.assertIn("https://hub/i/share/token", stdout.getvalue())
+
+    def test_share_publish_no_push_dispatches_to_publish_share(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli.publish_share", return_value="published share auth-api") as publish,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["share", "publish", "auth-api", "--no-push"])
+
+        self.assertEqual(result, 0)
+        publish.assert_called_once_with(
+            root,
+            "auth-api",
+            label=None,
+            expires_at=None,
+            git_url=None,
+            git_branch=None,
+            push=False,
+        )
 
     def test_share_create_request_dispatches_to_create_share(self):
         stdout = io.StringIO()
@@ -149,6 +179,42 @@ class ShareCliTests(unittest.TestCase):
         self.assertEqual(create.call_args.kwargs["request"], "Share auth API context and allow live questions.")
         self.assertEqual(create.call_args.kwargs["capability"], "both")
         self.assertIn("Built it.", stdout.getvalue())
+
+    def test_share_create_git_request_dispatches_to_create_share(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch(
+                    "rightmemory.cli.create_share",
+                    return_value="auth-api provider draft capability=file_context\n",
+                ) as create,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(
+                    [
+                        "share",
+                        "create",
+                        "auth-api",
+                        "--provider",
+                        "alice",
+                        "--request",
+                        "Share auth API context.",
+                        "--git",
+                        "https://github.com/user/repo.git",
+                        "--branch",
+                        "gh-pages",
+                    ]
+                )
+
+        self.assertEqual(result, 0)
+        create.assert_called_once()
+        self.assertIsNone(create.call_args.kwargs["hub_url"])
+        self.assertIsNone(create.call_args.kwargs["credential_id"])
+        self.assertEqual(create.call_args.kwargs["git_url"], "https://github.com/user/repo.git")
+        self.assertEqual(create.call_args.kwargs["git_branch"], "gh-pages")
+        self.assertEqual(create.call_args.kwargs["capability"], "auto")
 
     def test_share_revise_dispatches_to_revise_share(self):
         stdout = io.StringIO()
