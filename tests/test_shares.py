@@ -21,6 +21,7 @@ from rightmemory.share_models import (
     save_shares,
     validate_share_id,
 )
+from rightmemory.share_results import ShareCapabilityStatus, ShareOperationResult, format_share_operation_result
 from rightmemory.shared_view_models import SharedViewTarget, load_shared_view_credential, save_shared_view_credential
 from rightmemory.shared_view_questions import ask_question_view
 from rightmemory.shared_views import accept_shared_view, record_shared_view_note
@@ -32,6 +33,62 @@ def _ensure_mapping(value) -> dict[str, object]:
     if not isinstance(value, dict):
         raise AssertionError(f"expected JSON object response, got {type(value).__name__}")
     return value
+
+
+class ShareResultTests(unittest.TestCase):
+    def test_format_share_operation_result_includes_builder_summary_and_next_action(self):
+        result = ShareOperationResult(
+            share_id="auth-api",
+            title="Auth API",
+            role="provider",
+            state="draft",
+            capability="both",
+            builder_final_message="Selected auth-api docs and enabled live questions.",
+            statuses=(
+                ShareCapabilityStatus(
+                    capability="file_context",
+                    artifact_id="auth-api-files",
+                    status="draft",
+                    preview_path="shared_views/auth-api-files/dist/MEMORY.md",
+                    message="file context generated",
+                ),
+                ShareCapabilityStatus(
+                    capability="live_questions",
+                    artifact_id="auth-api-ask",
+                    status="draft",
+                    preview_path="shared_views/auth-api-ask/retriever.md",
+                    message="question scope generated",
+                ),
+            ),
+            next_action="rightmemory share approve auth-api",
+        )
+
+        text = format_share_operation_result(result)
+
+        self.assertIn("auth-api provider draft capability=both", text)
+        self.assertIn("Builder summary:", text)
+        self.assertIn("Selected auth-api docs", text)
+        self.assertIn("file_context auth-api-files draft", text)
+        self.assertIn("live_questions auth-api-ask draft", text)
+        self.assertIn("Next:", text)
+        self.assertIn("rightmemory share approve auth-api", text)
+
+    def test_operation_result_json_omits_empty_fields(self):
+        result = ShareOperationResult(
+            share_id="auth-api",
+            title="Auth API",
+            role="consumer",
+            state="joined",
+            capability="file_context",
+            statuses=(),
+        )
+
+        payload = result.to_json()
+
+        self.assertEqual(payload["share_id"], "auth-api")
+        self.assertEqual(payload["capability"], "file_context")
+        self.assertNotIn("builder_final_message", payload)
+        self.assertNotIn("invitation_url", payload)
 
 
 class ShareModelTests(unittest.TestCase):
