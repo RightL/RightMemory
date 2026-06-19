@@ -219,25 +219,23 @@ For a practical provider/consumer walkthrough, see [docs/shared-views-usage.md](
 The provider owns source files under `shared_views/<view-id>/`. File views use `view.md` and `recipe.toml`, then render generated `dist/` packages for HTTP publication. Question views use `view.md`, `question.toml`, and provider-private `retriever.md`. Share relationships live in `shares.toml`; consumers record low-level resolver metadata in `shared_views.toml`; credentials, imports, and interaction records stay under `.runtime/shared_views/`.
 
 ```bash
-rightmemory shared-view build-file auth-api-files \
-  "Expose auth API integration context" \
-  --title "Auth API Files" \
+rightmemory share create auth-api \
+  --provider alice \
   --hub-url http://127.0.0.1:8765 \
-  --credential-id alice-publish
-rightmemory shared-view approve auth-api-files --type file
+  --credential-id alice-publish \
+  --request "Share auth API context with the frontend project and allow live questions." \
+  --capability both \
+  --question-base-url http://127.0.0.1:8766
 
-rightmemory shared-view build-question auth-api-ask \
-  "Let frontend agents ask temporary auth API questions" \
-  --title "Auth API Questions"
-rightmemory shared-view approve auth-api-ask --type question
-
-rightmemory shared-view accept-invite http://127.0.0.1:8765/i/<invite-token>
-rightmemory shared-view pull auth-api-files
-rightmemory shared-view status auth-api-files
+rightmemory share revise auth-api "Narrow the share to login refresh-token behavior."
+rightmemory share approve auth-api
+rightmemory share publish auth-api --label frontend
+rightmemory share join http://127.0.0.1:8765/i/share/<invite-token> --consumer-label frontend
+rightmemory share status auth-api
 rightmemory shared-view ask auth-api-ask "How do tokens refresh?"
-rightmemory shared-view note alice-auth-api --confirm --task "frontend login migration" \
+rightmemory shared-view note auth-api-files --confirm --task "frontend login migration" \
   "Docs are missing token_expires_at."
-rightmemory shared-view inbox alice-auth-api
+rightmemory shared-view inbox
 ```
 
 All normal sharing goes through HTTP, even on one machine. Initialize and serve a separate hub root, create a provider token, and store that token as a local runtime credential in the provider memory root:
@@ -285,7 +283,7 @@ rightmemory shared-view accept-invite http://127.0.0.1:8765/i/<invite-token>
 
 For `MF#`, the synced `shared_views.toml` stores the hub URL and credential id. For `MQ#`, the invitation must provide the provider Web Studio question endpoint and an accepted `question_token`; the ask command sends that bearer token, and the provider validates it against `question.toml` token hashes. Bearer tokens stay under `.runtime/shared_views/credentials.toml`.
 
-Web Studio exposes the same guided flows: build file view, build question view, approve, create `MF#` invitations, publish `MQ#` invitations, accept HTTP invitation, pull `MF#`, ask `MQ#`, and send explicit notes. Direct provider filesystem reads, mounted folder hubs, generic shared-view retrieval, and legacy single-marker shared-view headings are not part of the current product path.
+Web Studio starts with the same share-first provider flow: create and revise a share from natural language, inspect share relationships, and keep the raw `MF#`/`MQ#` builder tools in an advanced section. Direct provider filesystem reads, mounted folder hubs, generic shared-view retrieval, and legacy single-marker shared-view headings are not part of the current product path.
 
 ### Edges
 

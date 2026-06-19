@@ -47,6 +47,57 @@ rightmemory --profile alice shared-view credential set alice-publish \
 
 Tokens are stored under `.runtime/shared_views/credentials.toml`.
 
+## Normal Share Workflow
+
+Use `rightmemory share` for normal provider/consumer sharing. A share is one
+relationship with one optional `MF#` file-context part and one optional `MQ#`
+live-question part. The builder agent chooses and builds the needed artifacts
+from the natural-language request, then writes `shares.toml`.
+
+Alice creates a draft share:
+
+```bash
+rightmemory --profile alice share create auth-api \
+  --provider alice \
+  --hub-url http://127.0.0.1:8765 \
+  --credential-id alice-publish \
+  --request "Share auth API integration context with the frontend project and allow live questions." \
+  --capability both \
+  --question-base-url http://127.0.0.1:8766
+```
+
+If the first draft is not right, Alice can revise it in the same builder
+conversation:
+
+```bash
+rightmemory --profile alice share revise auth-api \
+  "Narrow this share to login refresh-token behavior only."
+```
+
+The command prints the builder's final message, draft artifact statuses, and
+the next command. Alice reviews the generated source files, then approves and
+publishes the bundled share:
+
+```bash
+rightmemory --profile alice share approve auth-api
+rightmemory --profile alice share publish auth-api --label frontend
+```
+
+`publish` creates one bundled invitation URL for all selected parts. The
+frontend consumer accepts that one URL:
+
+```bash
+rightmemory --profile frontend share join http://127.0.0.1:8765/i/share/<invite-token> \
+  --consumer-label frontend
+```
+
+Status is relationship-level:
+
+```bash
+rightmemory --profile alice share status auth-api
+rightmemory --profile frontend share status auth-api
+```
+
 ## Share Stable Context With `MF#`
 
 Use `MF#` when the consumer should retrieve from a scoped, mirrored snapshot of provider context.
@@ -254,8 +305,10 @@ If an automatic publish fails, the approved file view remains locally renderable
 Web Studio exposes the main provider and consumer flow:
 
 - save HTTP hub credentials without showing stored tokens;
-- build, approve, and invite `MF#` file views;
-- build, approve, and publish `MQ#` question views;
+- create and revise relationship-level shares from natural-language requests;
+- inspect current share relationships;
+- use advanced tools to build, approve, and invite `MF#` file views;
+- use advanced tools to build, approve, and publish `MQ#` question views;
 - accept HTTP invitations;
 - pull or status one `MF#` connection;
 - pull all `MF#` connections;
@@ -279,6 +332,7 @@ shared_views/<view-id>/recipe.toml
 shared_views/<view-id>/question.toml
 shared_views/<view-id>/retriever.md
 shared_views/<view-id>/.gitignore
+shares.toml
 shared_views.toml
 ```
 
