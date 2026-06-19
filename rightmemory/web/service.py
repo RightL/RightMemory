@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from ..git_share_transport import is_git_share_url
 from ..config import (
     ROLES,
     load_async_update_config,
@@ -17,7 +19,7 @@ from ..config import (
 from ..session import MemoryWriteLock
 from ..share_models import ShareRelationship, load_shares
 from ..share_results import capability_from_parts
-from ..shares import create_share_from_request, revise_share
+from ..shares import create_share_from_request, join_share, publish_share, revise_share
 from ..shared_view_builder import run_file_view_builder, run_question_view_builder
 from ..shared_view_files import (
     approve_file_view,
@@ -150,20 +152,38 @@ class WebStudioService:
 
     def share_relationships(self) -> dict[str, Any]:
         shares = load_shares(self.memory_root)
-        return {"relationships": [_share_summary(shares[share_id]) for share_id in sorted(shares)]}
+        return {"relationships": [_share_summary(self.memory_root, shares[share_id]) for share_id in sorted(shares)]}
 
     def create_share_relationship(self, payload: dict[str, Any]) -> dict[str, Any]:
-        result = create_share_from_request(
-            self.memory_root,
-            share_id=_optional_payload_str(payload, "share_id"),
-            title=_optional_payload_str(payload, "title"),
-            request=_required_payload_str(payload, "request"),
-            provider_id=_required_payload_str(payload, "provider_id"),
-            hub_url=_required_payload_str(payload, "hub_url"),
-            credential_id=_required_payload_str(payload, "credential_id"),
-            capability=_optional_payload_str(payload, "capability") or "auto",
-            question_base_url=_optional_payload_str(payload, "question_base_url"),
-        )
+        transport = _optional_payload_str(payload, "transport") or "http"
+        if transport == "git":
+            result = create_share_from_request(
+                self.memory_root,
+                share_id=_optional_payload_str(payload, "share_id"),
+                title=_optional_payload_str(payload, "title"),
+                request=_required_payload_str(payload, "request"),
+                provider_id=_required_payload_str(payload, "provider_id"),
+                hub_url=None,
+                credential_id=None,
+                capability="file_context",
+                question_base_url=None,
+                git_url=_required_payload_str(payload, "git_url"),
+                git_branch=_optional_payload_str(payload, "git_branch"),
+            )
+        elif transport == "http":
+            result = create_share_from_request(
+                self.memory_root,
+                share_id=_optional_payload_str(payload, "share_id"),
+                title=_optional_payload_str(payload, "title"),
+                request=_required_payload_str(payload, "request"),
+                provider_id=_required_payload_str(payload, "provider_id"),
+                hub_url=_required_payload_str(payload, "hub_url"),
+                credential_id=_required_payload_str(payload, "credential_id"),
+                capability=_optional_payload_str(payload, "capability") or "auto",
+                question_base_url=_optional_payload_str(payload, "question_base_url"),
+            )
+        else:
+            raise ValueError("share transport must be http or git")
         return result.to_json()
 
     def revise_share_relationship(self, share_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -175,6 +195,18 @@ class WebStudioService:
             question_base_url=_optional_payload_str(payload, "question_base_url"),
         )
         return result.to_json()
+
+    def publish_share_relationship(self, share_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        message = publish_share(
+            self.memory_root,
+            share_id,
+            label=_optional_payload_str(payload, "label"),
+            expires_at=_optional_payload_str(payload, "expires_at"),
+            git_url=_optional_payload_str(payload, "git_url"),
+            git_branch=_optional_payload_str(payload, "git_branch"),
+            push=not bool(payload.get("no_push", False)),
+        )
+        return {"message": message}
 
     def build_file_view(self, payload: dict[str, Any]) -> str:
         return run_file_view_builder(
@@ -260,6 +292,8 @@ class WebStudioService:
     def accept_invite(self, payload: dict[str, Any]) -> str:
         invitation = _required_payload_str(payload, "invitation")
         with MemoryWriteLock(self.memory_root):
+            if is_git_share_url(invitation) or "/i/share/" in invitation:
+                return join_share(self.memory_root, invitation)
             if _is_http_url(invitation):
                 return accept_http_shared_view_invitation(
                     self.memory_root,
@@ -354,10 +388,25 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _share_summary(share: ShareRelationship) -> dict[str, Any]:
+def _share_summary(memory_root: Path, share: ShareRelationship) -> dict[str, Any]:
     data = _json_safe(share)
     data["capability"] = capability_from_parts(share.parts)
+    invitation_url = _runtime_invitation_url(memory_root, share.share_id)
+    if invitation_url:
+        data["invitation_url"] = invitation_url
     return data
+
+
+def _runtime_invitation_url(memory_root: Path, share_id: str) -> str | None:
+    path = Path(memory_root).expanduser() / ".runtime" / "shares" / f"{share_id}.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    value = payload.get("invitation_url") if isinstance(payload, dict) else None
+    return value if isinstance(value, str) and value else None
 
 
 def _settings_loader(loader, memory_root: Path) -> dict[str, Any]:

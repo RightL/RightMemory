@@ -189,12 +189,48 @@ function renderShareRelationships(relationships) {
       ${relationships.map((share) => `
         <article class="record-card share-card">
           <strong>${escapeHtml(share.title || share.share_id || "Share")}</strong>
-          <small>${escapeHtml(share.share_id || "")} | ${escapeHtml(share.role || "")} | ${escapeHtml(share.state || "")} | ${escapeHtml(share.capability || "auto")}</small>
+          <small>${escapeHtml(share.share_id || "")} | ${escapeHtml(share.role || "")} | ${escapeHtml(share.state || "")} | ${escapeHtml(share.transport || "http")} | ${escapeHtml(share.capability || "auto")}</small>
+          ${renderShareTransportSummary(share)}
           <p>${escapeHtml(renderSharePartsSummary(share))}</p>
+          ${renderShareActions(share)}
         </article>
       `).join("")}
     </div>
   `;
+}
+
+function renderShareTransportSummary(share) {
+  const details = [];
+  if (share.git_url) {
+    details.push(`repo: ${share.git_url}`);
+  }
+  if (share.git_branch) {
+    details.push(`branch: ${share.git_branch}`);
+  }
+  if (share.invitation_url) {
+    details.push(`join: ${share.invitation_url}`);
+  }
+  return details.length ? `<small>${escapeHtml(details.join(" | "))}</small>` : "";
+}
+
+function renderShareActions(share) {
+  const actions = [];
+  const canPublish = share.role === "provider" && ["approved", "published"].includes(share.state);
+  if (share.role === "provider") {
+    actions.push(`
+      <button class="share-publish" type="button" data-share-id="${escapeHtml(share.share_id || "")}"${canPublish ? "" : " disabled"}>
+        Publish to ${escapeHtml(share.transport === "git" ? "Git" : "Hub")}
+      </button>
+    `);
+  }
+  if (share.invitation_url) {
+    actions.push(`
+      <button class="copy-join-url" type="button" data-join-url="${escapeHtml(share.invitation_url)}">
+        Copy Join URL
+      </button>
+    `);
+  }
+  return actions.length ? `<div class="button-row share-actions">${actions.join("")}</div>` : "";
 }
 
 function renderSharePartsSummary(share) {
@@ -324,18 +360,33 @@ async function renderSharedViews() {
             <input name="title" placeholder="Auth API">
           </label>
           <label>
+            Transport
+            <select name="transport">
+              <option value="http">HTTP Hub</option>
+              <option value="git">Git Repo</option>
+            </select>
+          </label>
+          <label data-transport-field="http">
             Credential
-            <select class="credential-select" name="credential_id" required>${credentialOptions}</select>
+            <select class="credential-select" name="credential_id">${credentialOptions}</select>
           </label>
           <label>
             Provider id
             <input name="provider_id" placeholder="alice" required>
           </label>
-          <label>
+          <label data-transport-field="http">
             HTTP hub URL
-            <input name="hub_url" placeholder="https://hub.example.test" required>
+            <input name="hub_url" placeholder="https://hub.example.test">
           </label>
-          <label>
+          <label data-transport-field="git" hidden>
+            Git repo URL
+            <input name="git_url" placeholder="https://github.com/user/rightmemory-shares.git">
+          </label>
+          <label data-transport-field="git" hidden>
+            Branch
+            <input name="git_branch" placeholder="default branch">
+          </label>
+          <label data-capability-field>
             Capability
             <select name="capability">
               <option value="auto">Auto</option>
@@ -348,12 +399,12 @@ async function renderSharedViews() {
             Request
             <textarea name="request" placeholder="Share the auth API integration context with the frontend project." required></textarea>
           </label>
-          <label>
+          <label data-question-field>
             Question base URL
             <input name="question_base_url" placeholder="only needed for live questions">
           </label>
           <div class="button-row">
-            <button class="primary" type="submit"${hasCredentials ? "" : " disabled"}>Create Share</button>
+            <button class="primary" type="submit">Create Share</button>
           </div>
         </form>
       </section>
@@ -571,7 +622,7 @@ async function renderSharedViews() {
         <form id="accept-invite-form" class="guided-form">
           <label>
             Invitation
-            <textarea name="invitation" placeholder="https://.../i/token" required></textarea>
+            <textarea name="invitation" placeholder="https://.../i/token or https://github.com/user/rightmemory-shares.git#share=auth-api" required></textarea>
           </label>
           <details class="advanced">
             <summary>Connection naming</summary>
@@ -1080,22 +1131,36 @@ function attachSharedViewHandlers() {
 
   const createShareForm = document.querySelector("#create-share-form");
   if (createShareForm) {
+    const transportSelect = createShareForm.querySelector('select[name="transport"]');
+    if (transportSelect) {
+      transportSelect.addEventListener("change", () => syncCreateShareTransport(createShareForm));
+    }
+    syncCreateShareTransport(createShareForm);
     createShareForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
         const form = new FormData(event.currentTarget);
+        const transport = String(form.get("transport") || "http");
+        const body = {
+          share_id: form.get("share_id"),
+          title: form.get("title"),
+          provider_id: form.get("provider_id"),
+          transport,
+          request: form.get("request"),
+        };
+        if (transport === "git") {
+          body.git_url = form.get("git_url");
+          body.git_branch = form.get("git_branch");
+          body.capability = "file-context";
+        } else {
+          body.hub_url = form.get("hub_url");
+          body.credential_id = form.get("credential_id");
+          body.capability = form.get("capability");
+          body.question_base_url = form.get("question_base_url");
+        }
         const payload = await fetchJson("/api/share/relationships", {
           method: "POST",
-          body: JSON.stringify({
-            share_id: form.get("share_id"),
-            title: form.get("title"),
-            provider_id: form.get("provider_id"),
-            hub_url: form.get("hub_url"),
-            credential_id: form.get("credential_id"),
-            request: form.get("request"),
-            capability: form.get("capability"),
-            question_base_url: form.get("question_base_url"),
-          }),
+          body: JSON.stringify(body),
         });
         const resultText = formatShareOperationResult(payload.data || {});
         setMessage(payload.message);
@@ -1107,6 +1172,42 @@ function attachSharedViewHandlers() {
       }
     });
   }
+
+  document.querySelectorAll(".share-publish").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        const shareId = button.dataset.shareId || "";
+        const payload = await fetchJson(`/api/share/relationships/${encodeURIComponent(shareId)}/publish`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        setMessage(payload.message);
+        await loadPanel();
+        showSharedViewResult(payload.data?.message || payload.message);
+        setMessage(payload.message);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  });
+
+  document.querySelectorAll(".copy-join-url").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const value = button.dataset.joinUrl || "";
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(value);
+          setMessage("Join URL copied.");
+        } else {
+          showSharedViewResult(value);
+          setMessage("Join URL ready.");
+        }
+      } catch (error) {
+        showSharedViewResult(value);
+        setMessage("Join URL ready.");
+      }
+    });
+  });
 
   const reviseShareForm = document.querySelector("#revise-share-form");
   if (reviseShareForm) {
@@ -1402,6 +1503,51 @@ function attachSharedViewHandlers() {
         setMessage(error.message);
       }
     });
+  }
+}
+
+function syncCreateShareTransport(form) {
+  const transport = form.querySelector('select[name="transport"]')?.value || "http";
+  const isGit = transport === "git";
+  form.querySelectorAll("[data-transport-field]").forEach((field) => {
+    field.hidden = field.dataset.transportField !== transport;
+  });
+  form.querySelectorAll('[name="credential_id"], [name="hub_url"], [name="git_url"]').forEach((field) => {
+    field.required = false;
+  });
+  const credential = form.querySelector('[name="credential_id"]');
+  const hubUrl = form.querySelector('[name="hub_url"]');
+  const gitUrl = form.querySelector('[name="git_url"]');
+  if (isGit) {
+    if (gitUrl) {
+      gitUrl.required = true;
+    }
+  } else {
+    if (credential) {
+      credential.required = true;
+    }
+    if (hubUrl) {
+      hubUrl.required = true;
+    }
+  }
+  const capability = form.querySelector('[name="capability"]');
+  if (capability) {
+    capability.disabled = isGit;
+    if (isGit) {
+      capability.value = "file-context";
+    }
+  }
+  const capabilityField = form.querySelector("[data-capability-field]");
+  if (capabilityField) {
+    capabilityField.hidden = isGit;
+  }
+  const questionField = form.querySelector("[data-question-field]");
+  if (questionField) {
+    questionField.hidden = isGit;
+  }
+  const questionBaseUrl = form.querySelector('[name="question_base_url"]');
+  if (questionBaseUrl && isGit) {
+    questionBaseUrl.value = "";
   }
 }
 

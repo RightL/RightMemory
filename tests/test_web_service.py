@@ -162,6 +162,9 @@ class WebStudioStaticSourceTests(unittest.TestCase):
         self.assertIn("revise-share-form", script)
         self.assertIn("advanced-shared-view-tools", script)
         self.assertIn("/api/share/relationships", script)
+        self.assertIn("Git Repo", script)
+        self.assertIn("git_url", script)
+        self.assertIn("Copy Join URL", script)
 
 
 class WebStudioShareRelationshipServiceTests(unittest.TestCase):
@@ -264,6 +267,62 @@ class WebStudioShareRelationshipServiceTests(unittest.TestCase):
             "Only include refresh-token behavior.",
             capability=None,
             question_base_url=None,
+        )
+
+    def test_create_git_share_relationship_uses_git_target(self):
+        with patch(
+            "rightmemory.web.service.create_share_from_request",
+            return_value=ShareOperationResult(
+                share_id="auth-api",
+                title="Auth API",
+                role="provider",
+                state="draft",
+                capability="file_context",
+                builder_final_message="Built auth context.",
+            ),
+        ) as create:
+            created = self.service.create_share_relationship(
+                {
+                    "share_id": "auth-api",
+                    "title": "Auth API",
+                    "provider_id": "alice",
+                    "transport": "git",
+                    "git_url": "https://github.com/user/rightmemory-shares.git",
+                    "git_branch": "gh-pages",
+                    "request": "Share auth API context.",
+                    "capability": "both",
+                    "question_base_url": "https://provider.example.test",
+                }
+            )
+
+        self.assertEqual(created["capability"], "file_context")
+        create.assert_called_once_with(
+            self.root.resolve(),
+            share_id="auth-api",
+            title="Auth API",
+            request="Share auth API context.",
+            provider_id="alice",
+            hub_url=None,
+            credential_id=None,
+            capability="file_context",
+            question_base_url=None,
+            git_url="https://github.com/user/rightmemory-shares.git",
+            git_branch="gh-pages",
+        )
+
+    def test_publish_share_relationship_dispatches_service(self):
+        with patch("rightmemory.web.service.publish_share", return_value="published share auth-api") as publish:
+            result = self.service.publish_share_relationship("auth-api", {"no_push": True})
+
+        self.assertEqual(result["message"], "published share auth-api")
+        publish.assert_called_once_with(
+            self.root.resolve(),
+            "auth-api",
+            label=None,
+            expires_at=None,
+            git_url=None,
+            git_branch=None,
+            push=False,
         )
 
 
@@ -522,6 +581,25 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
             "Only include refresh-token behavior.",
             capability=None,
             question_base_url=None,
+        )
+
+        with patch("rightmemory.web.service.publish_share", return_value="published share auth-api") as publish:
+            published = self.client.post(
+                "/api/share/relationships/auth-api/publish",
+                json={"no_push": True},
+                headers={"x-csrf-token": self.csrf},
+            )
+
+        self.assertEqual(published.status_code, 200)
+        self.assertEqual(published.json()["data"]["message"], "published share auth-api")
+        publish.assert_called_once_with(
+            self.root.resolve(),
+            "auth-api",
+            label=None,
+            expires_at=None,
+            git_url=None,
+            git_branch=None,
+            push=False,
         )
 
     def test_provider_inbox_uses_saved_credential_defaults(self):
