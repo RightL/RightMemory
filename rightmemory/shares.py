@@ -6,13 +6,22 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .hub.client import HubClient
+from .hub.client import HubClient, HubClientError
 from .share_models import ShareFilePart, ShareQuestionPart, ShareRelationship, load_shares, save_shares, validate_share_id
 from .shared_view_builder import run_file_view_builder, run_question_view_builder
 from .shared_view_files import approve_file_view, publish_file_view_package, pull_file_view
-from .shared_view_models import SharedViewTarget, load_shared_view_credential, save_shared_view_credential, validate_heading_id
+from .shared_view_models import (
+    SharedViewTarget,
+    load_connections,
+    load_shared_view_credential,
+    save_shared_view_credential,
+    validate_heading_id,
+)
 from .shared_view_questions import approve_question_view, register_question_view_with_hub
 from .shared_views import accept_shared_view, shared_view_connection_status
+
+
+QUESTION_READINESS_TIMEOUT_SECONDS = 5
 
 
 def create_share(
@@ -382,7 +391,7 @@ def _share_part_status_line(root: Path, share: ShareRelationship, part_type: str
         if part_type == "file":
             state = "pulled" if raw_state == "imported" else raw_state
         else:
-            state = "ready" if raw_state == "configured" else raw_state
+            state = _consumer_question_status_state(root, identifier, raw_state)
         return f"{part_type} {name} {state}"
     if share.state == "published":
         state = "published"
@@ -391,3 +400,31 @@ def _share_part_status_line(root: Path, share: ShareRelationship, part_type: str
     else:
         state = "draft"
     return f"{part_type} {name} {state}"
+
+
+def _consumer_question_status_state(root: Path, heading_id: str, local_state: str) -> str:
+    if local_state != "configured":
+        return local_state
+    try:
+        connection = load_connections(root).get(heading_id)
+    except ValueError:
+        return "unavailable"
+    if connection is None:
+        return "unavailable"
+    target = connection.target
+    if target.kind != "http-question" or not target.question_base_url or not target.question_credential_id:
+        return "unavailable"
+    try:
+        credential = load_shared_view_credential(root, target.question_credential_id)
+        response = HubClient(
+            target.question_base_url,
+            credential["token"],
+            timeout=QUESTION_READINESS_TIMEOUT_SECONDS,
+        ).probe_question(target.view_id or heading_id)
+    except (KeyError, ValueError):
+        return "unavailable"
+    except HubClientError:
+        return "unreachable"
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    status = data.get("status") or response.get("status")
+    return "ready" if status == "ready" else "unavailable"

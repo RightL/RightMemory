@@ -232,6 +232,12 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
     def publish_events(service=Depends(current_service)):
         return ok_response("publish events loaded", service.publish_events())
 
+    @app.get("/api/share/questions/{view_id}/ready")
+    def question_view_ready(view_id: str, request: Request):
+        if not _verify_question_bearer(root, view_id, request):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=error_detail("login required"))
+        return ok_response("shared view question ready", {"view_id": view_id, "status": "ready"})
+
     @app.post("/api/share/questions/{view_id}/ask")
     def answer_question_view(
         view_id: str,

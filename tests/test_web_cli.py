@@ -1,10 +1,12 @@
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.cli import main
+from rightmemory.config import MEMORY_ROOT_ENV
 from rightmemory.web.process import (
     WebServiceStatus,
     web_log_path,
@@ -50,6 +52,30 @@ class WebCliTests(unittest.TestCase):
         self.assertIn("rightmemory.web.app", command)
         self.assertIn("web: running pid 12345", stdout.getvalue())
         self.assertIn("operator token", stdout.getvalue())
+
+    def test_web_start_prepends_source_checkout_to_pythonpath(self):
+        stdout = io.StringIO()
+
+        class FakeProcess:
+            pid = 12345
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source_parent = Path(__file__).resolve().parents[1]
+            with (
+                patch.dict(os.environ, {"PYTHONPATH": "/existing/path"}, clear=False),
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.web.process.subprocess.Popen", return_value=FakeProcess()) as popen,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["web", "start"])
+
+            env = popen.call_args.kwargs["env"]
+
+        self.assertEqual(result, 0)
+        self.assertEqual(env[MEMORY_ROOT_ENV], str(root))
+        self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(source_parent))
+        self.assertIn("/existing/path", env["PYTHONPATH"].split(os.pathsep))
 
     def test_web_stop_removes_stale_pid(self):
         stdout = io.StringIO()

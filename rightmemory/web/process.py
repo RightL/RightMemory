@@ -88,7 +88,7 @@ def start_web_service(
         "--port",
         str(port),
     ]
-    env = {**os.environ, MEMORY_ROOT_ENV: str(root)}
+    env = _web_child_env(root)
     with log_path.open("ab") as log:
         process = subprocess.Popen(
             command,
@@ -141,6 +141,31 @@ def format_stop_result(result: StopWebResult) -> str:
     if result.state == "stale-removed" and result.pid is not None:
         return f"web: removed stale pid {result.pid}"
     return "web: stopped"
+
+
+def _web_child_env(memory_root: Path) -> dict[str, str]:
+    env = {**os.environ, MEMORY_ROOT_ENV: str(memory_root)}
+    source_parent = _source_checkout_parent()
+    if source_parent is not None:
+        env["PYTHONPATH"] = _prepend_pythonpath(str(source_parent), env.get("PYTHONPATH"))
+    return env
+
+
+def _source_checkout_parent() -> Path | None:
+    package_root = Path(__file__).resolve().parents[1]
+    project_root = package_root.parent
+    if (project_root / "pyproject.toml").is_file() and (project_root / "rightmemory" / "__init__.py").is_file():
+        return project_root
+    return None
+
+
+def _prepend_pythonpath(path: str, existing: str | None) -> str:
+    if not existing:
+        return path
+    parts = existing.split(os.pathsep)
+    if path in parts:
+        return existing
+    return os.pathsep.join([path, existing])
 
 
 def _read_settings(memory_root: Path) -> dict[str, object]:

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from starlette.requests import Request
 
+from rightmemory.hub.client import HubClientError
 from rightmemory.hub.app import create_hub_app
 from rightmemory.hub.store import HubStore
 from rightmemory.share_models import (
@@ -20,9 +21,9 @@ from rightmemory.share_models import (
     save_shares,
     validate_share_id,
 )
-from rightmemory.shared_view_models import load_shared_view_credential, save_shared_view_credential
+from rightmemory.shared_view_models import SharedViewTarget, load_shared_view_credential, save_shared_view_credential
 from rightmemory.shared_view_questions import ask_question_view
-from rightmemory.shared_views import record_shared_view_note
+from rightmemory.shared_views import accept_shared_view, record_shared_view_note
 from rightmemory.shares import approve_share, create_share, join_share, publish_share, share_status
 from rightmemory.web.app import create_web_app
 
@@ -326,6 +327,73 @@ class ShareConsumerFlowTests(unittest.TestCase):
         self.assertIn("auth-api provider=alice state=joined parts=file", result)
         self.assertIn("file auth-api-files", result)
 
+    def test_share_status_probes_consumer_question_endpoint(self):
+        self._save_consumer_question_share()
+
+        with patch("rightmemory.shares.HubClient") as client_type:
+            client_type.return_value.probe_question.return_value = {"data": {"status": "ready"}}
+            result = share_status(self.root, "auth-api")
+
+        self.assertIn("question auth-api-ask ready", result)
+        client_type.assert_called_once_with("https://provider.example.test", "question-token", timeout=5)
+        client_type.return_value.probe_question.assert_called_once_with("auth-api-ask")
+
+    def test_share_status_reports_consumer_question_unreachable_when_probe_fails(self):
+        self._save_consumer_question_share()
+
+        with patch("rightmemory.shares.HubClient") as client_type:
+            client_type.return_value.probe_question.side_effect = HubClientError("hub request failed: refused")
+            result = share_status(self.root, "auth-api")
+
+        self.assertIn("question auth-api-ask unreachable", result)
+
+    def _save_consumer_question_share(self):
+        save_shared_view_credential(
+            self.root,
+            "http-auth-api-ask-question",
+            kind="http-question",
+            token="question-token",
+            base_url="https://provider.example.test",
+            view_id="auth-api-ask",
+        )
+        accept_shared_view(
+            self.root,
+            heading_id="auth-api-ask",
+            view_type="question",
+            title="Auth API Questions",
+            body="Accepted as part of share auth-api.",
+            ref="rightmemory://mq/auth-api-ask",
+            maintainer="alice",
+            accepted_from="https://hub.example.test/i/share/share-token",
+            target=SharedViewTarget(
+                kind="http-question",
+                base_url="https://hub.example.test",
+                view_id="auth-api-ask",
+                credential_id="http-auth-api-ask",
+                question_base_url="https://provider.example.test",
+                question_credential_id="http-auth-api-ask-question",
+                accepted_from_url="https://hub.example.test/i/share/share-token",
+            ),
+        )
+        save_shares(
+            self.root,
+            {
+                "auth-api": ShareRelationship(
+                    share_id="auth-api",
+                    role="consumer",
+                    title="Auth API",
+                    provider_id="alice",
+                    hub_url="https://hub.example.test",
+                    state="joined",
+                    parts=("question",),
+                    question=ShareQuestionPart(
+                        heading_id="auth-api-ask",
+                        question_base_url="https://provider.example.test",
+                    ),
+                )
+            },
+        )
+
 
 class _InProcessHubClient:
     apps_by_base_url: dict[str, object] = {}
@@ -435,6 +503,18 @@ class _InProcessHubClient:
                 headers=self._headers(bearer=True),
             ),
             payload={"question": question},
+        )
+        return _ensure_mapping(response)
+
+    def probe_question(self, view_id: str) -> dict[str, object]:
+        endpoint = self._endpoint("/api/share/questions/{view_id}/ready", "GET")
+        response = endpoint(
+            view_id,
+            self._request_object(
+                "GET",
+                f"/api/share/questions/{quote(view_id)}/ready",
+                headers=self._headers(bearer=True),
+            ),
         )
         return _ensure_mapping(response)
 
@@ -585,7 +665,8 @@ class ShareEndToEndTests(unittest.TestCase):
         self.assertIn("Status: answered", answer)
         self.assertIn("Tokens expire after one hour.", answer)
         self.assertIn("recorded shared view note", note)
-        status = share_status(self.consumer, "auth-api")
+        with patch("rightmemory.shares.HubClient", _InProcessHubClient):
+            status = share_status(self.consumer, "auth-api")
         self.assertIn("auth-api provider=alice state=joined parts=file,question", status)
         self.assertIn("file auth-api-files pulled", status)
         self.assertIn("question auth-api-ask ready", status)

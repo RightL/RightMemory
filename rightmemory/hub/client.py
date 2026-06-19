@@ -44,6 +44,13 @@ class HubClient:
             bearer=True,
         )
 
+    def probe_question(self, view_id: str) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/api/share/questions/{urllib.parse.quote(view_id)}/ready",
+            bearer=True,
+        )
+
     def register_question_view(
         self,
         view_id: str,

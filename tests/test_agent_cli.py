@@ -128,6 +128,18 @@ class AgentCliCommandTests(unittest.TestCase):
 
         self.assertIn("workspace-write", command)
 
+    def test_build_codex_uses_workspace_write_for_shared_view_builder(self):
+        command = build_codex_command(
+            Path("/memory/root"),
+            "shared-view-builder",
+            AgentCliConfig(provider="codex"),
+            "prompt",
+            None,
+        )
+
+        self.assertIn("--sandbox", command)
+        self.assertIn("workspace-write", command)
+
     def test_build_codex_uses_read_only_for_historian(self):
         command = build_codex_command(
             Path("/memory/root"),
@@ -305,6 +317,20 @@ class AgentCliCommandTests(unittest.TestCase):
                 "prompt",
             ],
         )
+
+    def test_build_claude_uses_auto_permission_for_shared_view_builder(self):
+        session_id = "123e4567-e89b-12d3-a456-426614174000"
+
+        command = build_claude_command(
+            "shared-view-builder",
+            AgentCliConfig(provider="claude"),
+            "prompt",
+            session_id,
+            False,
+        )
+
+        self.assertIn("--permission-mode", command)
+        self.assertIn("auto", command)
 
     def test_build_claude_command_rejects_non_uuid_session_id(self):
         with self.assertRaises(ValueError) as caught:

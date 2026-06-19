@@ -425,6 +425,34 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         answer.assert_not_called()
 
+    def test_provider_question_ready_probe_validates_bearer_without_answering(self):
+        write_question_view(
+            self.root,
+            view_id="auth-api-ask",
+            title="Auth API Questions",
+            intent="Let frontend agents ask auth API questions.",
+            retriever_instructions="Answer only from auth API memory.",
+            approved=True,
+            access_tokens=["connection-token"],
+        )
+
+        remote_client = TestClient(create_web_app(self.root, operator_token="secret-token"))
+        with patch("rightmemory.web.service.WebStudioService.answer_question_view") as answer:
+            wrong = remote_client.get(
+                "/api/share/questions/auth-api-ask/ready",
+                headers={"Authorization": "Bearer wrong-token"},
+            )
+            ready = remote_client.get(
+                "/api/share/questions/auth-api-ask/ready",
+                headers={"Authorization": "Bearer connection-token"},
+            )
+
+        self.assertEqual(wrong.status_code, 401)
+        self.assertEqual(ready.status_code, 200)
+        self.assertEqual(ready.json()["data"]["status"], "ready")
+        self.assertEqual(ready.json()["data"]["view_id"], "auth-api-ask")
+        answer.assert_not_called()
+
     def test_accept_invite_dispatches_http_urls(self):
         calls = []
 
