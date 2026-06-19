@@ -16,12 +16,14 @@ from rightmemory.shared_view_files import (
     export_file_view_package,
     invite_file_view,
     list_file_view_publish_events,
+    load_file_view_recipe,
     publish_file_view_package,
     publish_approved_file_views,
     pull_file_view,
     record_file_view_publish_results,
     render_file_view,
-    write_file_view_recipe,
+    validate_file_view_recipe_source,
+    write_extractive_file_view_recipe,
 )
 from rightmemory.shared_view_models import (
     SharedViewConnection,
@@ -235,7 +237,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         )
 
     def test_file_recipe_renders_selected_context_without_excluded_ids(self):
-        write_file_view_recipe(
+        write_extractive_file_view_recipe(
             self.root,
             view_id="auth-api-files",
             title="Auth API Files",
@@ -257,6 +259,70 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         self.assertNotIn("Payroll details", exported.read_text(encoding="utf-8"))
         self.assertIn('kind = "file"', recipe.read_text(encoding="utf-8"))
 
+    def test_extractive_recipe_writes_clean_render_and_refresh_metadata(self):
+        write_extractive_file_view_recipe(
+            self.root,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            include_headings=["auth-api"],
+            approved=True,
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
+            last_semantic_refresh_memory_commit="abc123",
+        )
+
+        recipe = load_file_view_recipe(self.root, "auth-api-files")
+        text = (self.root / "shared_views" / "auth-api-files" / "recipe.toml").read_text(encoding="utf-8")
+
+        self.assertEqual(recipe.render, "extractive")
+        self.assertEqual(recipe.semantic_refresh_days, 7)
+        self.assertEqual(recipe.last_semantic_refresh_memory_commit, "abc123")
+        self.assertIn('render = "extractive"', text)
+        self.assertNotIn("expanded-heading-subtrees", text)
+
+    def test_generative_recipe_forbids_selection_fields(self):
+        view_dir = self.root / "shared_views" / "auth-api-files"
+        view_dir.mkdir(parents=True)
+        (view_dir / "recipe.toml").write_text(
+            'version = 1\n'
+            'view_id = "auth-api-files"\n'
+            'kind = "file"\n'
+            'title = "Auth API Files"\n'
+            'approved = true\n'
+            'intent = "Expose auth context."\n'
+            'render = "generative"\n'
+            'semantic_refresh_days = 7\n'
+            'last_semantic_refresh_at = ""\n'
+            'last_semantic_refresh_memory_commit = ""\n'
+            'include_nodes = ["token-expiry"]\n',
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "generative file view recipe must not include selection field"):
+            validate_file_view_recipe_source(self.root, "auth-api-files")
+
+    def test_old_expanded_heading_render_is_rejected(self):
+        view_dir = self.root / "shared_views" / "auth-api-files"
+        view_dir.mkdir(parents=True)
+        (view_dir / "recipe.toml").write_text(
+            'version = 1\n'
+            'view_id = "auth-api-files"\n'
+            'kind = "file"\n'
+            'title = "Auth API Files"\n'
+            'approved = true\n'
+            'intent = "Expose auth context."\n'
+            'render = "expanded-heading-subtrees"\n'
+            'include_headings = ["auth-api"]\n'
+            'include_nodes = []\n'
+            'include_files = []\n'
+            'exclude_ids = []\n',
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, 'render must be "extractive" or "generative"'):
+            validate_file_view_recipe_source(self.root, "auth-api-files")
+
     def test_file_recipe_excludes_nested_heading_subtree(self):
         (self.root / "MEMORY.md").write_text(
             "# Project {#project}\n\n"
@@ -268,7 +334,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
             "- `token-expiry` Tokens expire after one hour. -> [rel:public-tokens]\n",
             encoding="utf-8",
         )
-        write_file_view_recipe(
+        write_extractive_file_view_recipe(
             self.root,
             view_id="auth-api-files",
             title="Auth API Files",
@@ -300,7 +366,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
             "<!-- rightmemory:example:end -->\n",
             encoding="utf-8",
         )
-        write_file_view_recipe(
+        write_extractive_file_view_recipe(
             self.root,
             view_id="auth-api-files",
             title="Auth API Files",
@@ -318,7 +384,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         self.assertNotIn("sample-node", exported)
 
     def test_file_package_does_not_include_retriever_prompt(self):
-        write_file_view_recipe(
+        write_extractive_file_view_recipe(
             self.root,
             view_id="auth-api-files",
             title="Auth API Files",
@@ -338,7 +404,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         self.assertFalse((package / "retriever.md").exists())
 
     def test_approve_file_view_sets_approved_true(self):
-        write_file_view_recipe(
+        write_extractive_file_view_recipe(
             self.root,
             view_id="auth-api-files",
             title="Auth API Files",
@@ -357,7 +423,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
 
     def test_file_view_builder_renders_generated_dist_preview(self):
         def fake_builder(memory_root, view_id, message):
-            write_file_view_recipe(
+            write_extractive_file_view_recipe(
                 memory_root,
                 view_id=view_id,
                 title="Auth API Files",
@@ -516,7 +582,7 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
             base_url="https://hub.example.test",
             provider_id="alice",
         )
-        write_file_view_recipe(
+        write_extractive_file_view_recipe(
             self.root,
             view_id="auth-api-files",
             title="Auth API Files",
@@ -546,7 +612,7 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
             base_url="https://hub.example.test",
             provider_id="alice",
         )
-        write_file_view_recipe(
+        write_extractive_file_view_recipe(
             self.root,
             view_id="auth-api-files",
             title="Auth API Files",

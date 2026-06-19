@@ -11,7 +11,7 @@ from pathlib import Path
 from .shared_view_files import (
     render_file_view,
     validate_file_view_recipe_source,
-    write_file_view_recipe,
+    write_extractive_file_view_recipe,
 )
 from .shared_view_questions import validate_question_view_source, write_question_view
 
@@ -425,7 +425,7 @@ class MemoryTools:
         if errors:
             return "failed: " + "; ".join(errors)
         try:
-            write_file_view_recipe(
+            write_extractive_file_view_recipe(
                 self.memory_root,
                 view_id=view_id,
                 title=title,

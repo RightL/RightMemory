@@ -116,10 +116,10 @@ class ShareModelTests(unittest.TestCase):
 
 
 def _write_canonical_file_and_question_parts(root: Path):
-    from rightmemory.shared_view_files import write_file_view_recipe
+    from rightmemory.shared_view_files import write_extractive_file_view_recipe
     from rightmemory.shared_view_questions import write_question_view
 
-    write_file_view_recipe(
+    write_extractive_file_view_recipe(
         root,
         view_id="auth-api-files",
         title="Auth API Files",

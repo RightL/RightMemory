@@ -34,6 +34,9 @@ FILE_RECIPE_KEYS = {
     "include_files",
     "exclude_ids",
     "publish",
+    "semantic_refresh_days",
+    "last_semantic_refresh_at",
+    "last_semantic_refresh_memory_commit",
 }
 FILE_RECIPE_REQUIRED_KEYS = {
     "version",
@@ -43,13 +46,16 @@ FILE_RECIPE_REQUIRED_KEYS = {
     "approved",
     "intent",
     "render",
-    "include_headings",
-    "include_nodes",
-    "include_files",
-    "exclude_ids",
+    "semantic_refresh_days",
+    "last_semantic_refresh_at",
+    "last_semantic_refresh_memory_commit",
 }
 FILE_RECIPE_ARRAY_KEYS = {"include_headings", "include_nodes", "include_files", "exclude_ids"}
 FILE_RECIPE_PUBLISH_KEYS = {"enabled", "hub_url", "credential_id"}
+FILE_VIEW_RENDER_EXTRACTIVE = "extractive"
+FILE_VIEW_RENDER_GENERATIVE = "generative"
+FILE_VIEW_RENDER_VALUES = {FILE_VIEW_RENDER_EXTRACTIVE, FILE_VIEW_RENDER_GENERATIVE}
+DEFAULT_SEMANTIC_REFRESH_DAYS = 7
 
 
 HEADING_ID_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|S#|MF#|MQ#|#)([A-Za-z0-9_.-]+)\}")
@@ -63,6 +69,7 @@ class FileViewRecipe:
     view_id: str
     title: str
     intent: str
+    render: str = FILE_VIEW_RENDER_EXTRACTIVE
     include_headings: tuple[str, ...] = ()
     include_nodes: tuple[str, ...] = ()
     include_files: tuple[str, ...] = ()
@@ -70,6 +77,9 @@ class FileViewRecipe:
     approved: bool = False
     publish_hub_url: str | None = None
     publish_credential_id: str | None = None
+    semantic_refresh_days: int = DEFAULT_SEMANTIC_REFRESH_DAYS
+    last_semantic_refresh_at: str = ""
+    last_semantic_refresh_memory_commit: str = ""
 
 
 @dataclass(frozen=True)
@@ -86,7 +96,7 @@ class FileViewPublishResult:
     message: str
 
 
-def write_file_view_recipe(
+def write_extractive_file_view_recipe(
     memory_root: Path,
     *,
     view_id: str,
@@ -99,12 +109,16 @@ def write_file_view_recipe(
     approved: bool = False,
     publish_hub_url: str | None = None,
     publish_credential_id: str | None = None,
+    semantic_refresh_days: int = DEFAULT_SEMANTIC_REFRESH_DAYS,
+    last_semantic_refresh_at: str = "",
+    last_semantic_refresh_memory_commit: str = "",
 ) -> str:
     root = Path(memory_root).expanduser()
     recipe = FileViewRecipe(
         view_id=validate_heading_id(view_id),
         title=_required_text(title, "title"),
         intent=_required_text(intent, "intent"),
+        render=FILE_VIEW_RENDER_EXTRACTIVE,
         include_headings=tuple(validate_heading_id(item) for item in include_headings),
         include_nodes=tuple(validate_heading_id(item) for item in include_nodes),
         include_files=tuple(_validate_memory_source_file(item) for item in include_files),
@@ -112,13 +126,20 @@ def write_file_view_recipe(
         approved=bool(approved),
         publish_hub_url=_optional_text(publish_hub_url),
         publish_credential_id=validate_heading_id(publish_credential_id) if publish_credential_id else None,
+        semantic_refresh_days=_validate_refresh_days(semantic_refresh_days),
+        last_semantic_refresh_at=str(last_semantic_refresh_at),
+        last_semantic_refresh_memory_commit=str(last_semantic_refresh_memory_commit),
     )
+    _write_file_view_source(root, recipe)
+    return f"wrote extractive file view recipe {recipe.view_id}"
+
+
+def _write_file_view_source(root: Path, recipe: FileViewRecipe) -> None:
     view_dir = _view_dir(root, recipe.view_id)
     view_dir.mkdir(parents=True, exist_ok=True)
     _write_text(view_dir / ".gitignore", "dist/\n")
     _write_text(view_dir / "view.md", f"# {recipe.title}\n\n{recipe.intent}\n")
     _write_text(view_dir / "recipe.toml", _render_recipe_toml(recipe))
-    return f"wrote file view recipe {recipe.view_id}"
 
 
 def load_file_view_recipe(memory_root: Path, view_id: str) -> FileViewRecipe:
@@ -136,10 +157,12 @@ def load_file_view_recipe(memory_root: Path, view_id: str) -> FileViewRecipe:
         publish = {}
     if not isinstance(publish, dict):
         raise ValueError("file view recipe [publish] must be a TOML table")
+    render = str(data.get("render") or "").strip()
     return FileViewRecipe(
         view_id=validate_heading_id(str(data.get("view_id", clean_view_id))),
         title=str(data.get("title") or clean_view_id),
         intent=str(data.get("intent") or ""),
+        render=render,
         include_headings=tuple(validate_heading_id(str(item)) for item in data.get("include_headings", []) if isinstance(item, str)),
         include_nodes=tuple(validate_heading_id(str(item)) for item in data.get("include_nodes", []) if isinstance(item, str)),
         include_files=tuple(_validate_memory_source_file(item) for item in data.get("include_files", []) if isinstance(item, str)),
@@ -147,6 +170,9 @@ def load_file_view_recipe(memory_root: Path, view_id: str) -> FileViewRecipe:
         approved=bool(data.get("approved", False)),
         publish_hub_url=str(publish.get("hub_url")).strip() if publish.get("hub_url") else None,
         publish_credential_id=validate_heading_id(str(publish.get("credential_id"))) if publish.get("credential_id") else None,
+        semantic_refresh_days=_validate_refresh_days(data.get("semantic_refresh_days", DEFAULT_SEMANTIC_REFRESH_DAYS)),
+        last_semantic_refresh_at=str(data.get("last_semantic_refresh_at") or ""),
+        last_semantic_refresh_memory_commit=str(data.get("last_semantic_refresh_memory_commit") or ""),
     )
 
 
@@ -171,10 +197,10 @@ def validate_file_view_recipe_source(
 
     recipe = load_file_view_recipe(root, clean_view_id)
     selected = recipe.include_headings or recipe.include_nodes or recipe.include_files
-    if require_selection and not selected:
+    if recipe.render == FILE_VIEW_RENDER_EXTRACTIVE and require_selection and not selected:
         raise ValueError(
             "invalid file view recipe:\n"
-            "- file view recipe must include at least one heading, node, or memory file"
+            "- extractive file view recipe must include at least one heading, node, or memory file"
         )
     return recipe
 
@@ -535,13 +561,21 @@ def _render_recipe_toml(recipe: FileViewRecipe) -> str:
         f"title = {_toml_string(recipe.title)}",
         f"approved = {str(recipe.approved).lower()}",
         f"intent = {_toml_string(recipe.intent)}",
-        'render = "expanded-heading-subtrees"',
-        "",
-        f"include_headings = {_toml_array(recipe.include_headings)}",
-        f"include_nodes = {_toml_array(recipe.include_nodes)}",
-        f"include_files = {_toml_array(recipe.include_files)}",
-        f"exclude_ids = {_toml_array(recipe.exclude_ids)}",
+        f"render = {_toml_string(recipe.render)}",
+        f"semantic_refresh_days = {recipe.semantic_refresh_days}",
+        f"last_semantic_refresh_at = {_toml_string(recipe.last_semantic_refresh_at)}",
+        f"last_semantic_refresh_memory_commit = {_toml_string(recipe.last_semantic_refresh_memory_commit)}",
     ]
+    if recipe.render == FILE_VIEW_RENDER_EXTRACTIVE:
+        lines.extend(
+            [
+                "",
+                f"include_headings = {_toml_array(recipe.include_headings)}",
+                f"include_nodes = {_toml_array(recipe.include_nodes)}",
+                f"include_files = {_toml_array(recipe.include_files)}",
+                f"exclude_ids = {_toml_array(recipe.exclude_ids)}",
+            ]
+        )
     if recipe.publish_hub_url or recipe.publish_credential_id:
         lines.extend(
             [
@@ -570,13 +604,30 @@ def _file_view_recipe_schema_errors(data: dict[str, object], *, require_publish:
         errors.append("missing required field(s): " + ", ".join(missing))
     if data.get("kind") != "file":
         errors.append('kind must be "file"')
-    for key in sorted(FILE_RECIPE_ARRAY_KEYS):
-        value = data.get(key)
-        if not isinstance(value, list):
-            errors.append(f"{key} must be a TOML array")
-            continue
-        if any(not isinstance(item, str) or not item.strip() for item in value):
-            errors.append(f"{key} entries must be non-empty strings")
+    render = data.get("render")
+    if render not in FILE_VIEW_RENDER_VALUES:
+        errors.append('render must be "extractive" or "generative"')
+    selection_keys = FILE_RECIPE_ARRAY_KEYS & keys
+    if render == FILE_VIEW_RENDER_EXTRACTIVE:
+        missing_selection = sorted(FILE_RECIPE_ARRAY_KEYS - keys)
+        if missing_selection:
+            errors.append("missing required extractive selection field(s): " + ", ".join(missing_selection))
+        for key in sorted(FILE_RECIPE_ARRAY_KEYS):
+            value = data.get(key)
+            if not isinstance(value, list):
+                errors.append(f"{key} must be a TOML array")
+                continue
+            if any(not isinstance(item, str) or not item.strip() for item in value):
+                errors.append(f"{key} entries must be non-empty strings")
+    elif render == FILE_VIEW_RENDER_GENERATIVE and selection_keys:
+        for key in sorted(selection_keys):
+            errors.append(f"generative file view recipe must not include selection field: {key}")
+    refresh_days = data.get("semantic_refresh_days")
+    if isinstance(refresh_days, bool) or not isinstance(refresh_days, int) or refresh_days < 0:
+        errors.append("semantic_refresh_days must be a nonnegative integer")
+    for key in ("last_semantic_refresh_at", "last_semantic_refresh_memory_commit"):
+        if not isinstance(data.get(key), str):
+            errors.append(f"{key} must be a string")
     publish = data.get("publish")
     if publish is None:
         if require_publish:
@@ -601,6 +652,7 @@ def _replace_recipe(recipe: FileViewRecipe, *, approved: bool) -> FileViewRecipe
         view_id=recipe.view_id,
         title=recipe.title,
         intent=recipe.intent,
+        render=recipe.render,
         include_headings=recipe.include_headings,
         include_nodes=recipe.include_nodes,
         include_files=recipe.include_files,
@@ -608,6 +660,9 @@ def _replace_recipe(recipe: FileViewRecipe, *, approved: bool) -> FileViewRecipe
         approved=approved,
         publish_hub_url=recipe.publish_hub_url,
         publish_credential_id=recipe.publish_credential_id,
+        semantic_refresh_days=recipe.semantic_refresh_days,
+        last_semantic_refresh_at=recipe.last_semantic_refresh_at,
+        last_semantic_refresh_memory_commit=recipe.last_semantic_refresh_memory_commit,
     )
 
 
@@ -644,6 +699,12 @@ def _optional_text(value: str | None) -> str | None:
         return None
     clean = str(value).strip()
     return clean or None
+
+
+def _validate_refresh_days(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("semantic_refresh_days must be a nonnegative integer")
+    return value
 
 
 def _toml_array(values: tuple[str, ...]) -> str:
