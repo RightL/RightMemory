@@ -123,6 +123,45 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
     def shared_views(service=Depends(current_service)):
         return ok_response("shared views loaded", service.shared_views())
 
+    @app.get("/api/share/relationships")
+    def share_relationships(service=Depends(current_service)):
+        return ok_response("share relationships loaded", service.share_relationships())
+
+    @app.post("/api/share/relationships")
+    def create_share_relationship(
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        try:
+            data = service.create_share_relationship(payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_detail("could not create share relationship", technical=str(exc)),
+            ) from exc
+        return ok_response("share relationship created", data)
+
+    @app.post("/api/share/relationships/{share_id}/revise")
+    def revise_share_relationship(
+        share_id: str,
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        try:
+            data = service.revise_share_relationship(share_id, payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_detail("could not revise share relationship", technical=str(exc)),
+            ) from exc
+        return ok_response("share relationship revised", data)
+
     @app.post("/api/share/views/build-file")
     def build_file_view(
         request: Request,

@@ -15,6 +15,9 @@ from ..config import (
     load_sync_config,
 )
 from ..session import MemoryWriteLock
+from ..share_models import ShareRelationship, load_shares
+from ..share_results import capability_from_parts
+from ..shares import create_share_from_request, revise_share
 from ..shared_view_builder import run_file_view_builder, run_question_view_builder
 from ..shared_view_files import (
     approve_file_view,
@@ -144,6 +147,34 @@ class WebStudioService:
             "connections": [_json_safe(connection) for connection in load_connections(self.memory_root).values()],
             "credentials": list_shared_view_credentials(self.memory_root),
         }
+
+    def share_relationships(self) -> dict[str, Any]:
+        shares = load_shares(self.memory_root)
+        return {"relationships": [_share_summary(shares[share_id]) for share_id in sorted(shares)]}
+
+    def create_share_relationship(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = create_share_from_request(
+            self.memory_root,
+            share_id=_optional_payload_str(payload, "share_id"),
+            title=_optional_payload_str(payload, "title"),
+            request=_required_payload_str(payload, "request"),
+            provider_id=_required_payload_str(payload, "provider_id"),
+            hub_url=_required_payload_str(payload, "hub_url"),
+            credential_id=_required_payload_str(payload, "credential_id"),
+            capability=_optional_payload_str(payload, "capability") or "auto",
+            question_base_url=_optional_payload_str(payload, "question_base_url"),
+        )
+        return result.to_json()
+
+    def revise_share_relationship(self, share_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        result = revise_share(
+            self.memory_root,
+            share_id,
+            _required_payload_str(payload, "revision"),
+            capability=_optional_payload_str(payload, "capability"),
+            question_base_url=_optional_payload_str(payload, "question_base_url"),
+        )
+        return result.to_json()
 
     def build_file_view(self, payload: dict[str, Any]) -> str:
         return run_file_view_builder(
@@ -321,6 +352,12 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
     return value
+
+
+def _share_summary(share: ShareRelationship) -> dict[str, Any]:
+    data = _json_safe(share)
+    data["capability"] = capability_from_parts(share.parts)
+    return data
 
 
 def _settings_loader(loader, memory_root: Path) -> dict[str, Any]:

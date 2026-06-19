@@ -6,10 +6,13 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from rightmemory.share_models import ShareFilePart, ShareRelationship, save_shares
+from rightmemory.share_results import ShareOperationResult
 from rightmemory.shared_view_files import FileViewPullResult
 from rightmemory.shared_view_models import load_shared_view_credential
 from rightmemory.shared_view_questions import write_question_view
 from rightmemory.web.app import create_web_app
+from rightmemory.web.service import WebStudioService
 
 
 HTTPX2_AVAILABLE = importlib.util.find_spec("httpx2") is not None
@@ -147,6 +150,109 @@ class WebStudioStaticTests(unittest.TestCase):
         self.assertIn("pull-all-connections", script.text)
         self.assertIn("status-all-connections", script.text)
         self.assertIn("credential-select", script.text)
+
+
+class WebStudioShareRelationshipServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+        (self.root / "MEMORY.md").write_text("# Provider {#provider}\n\nAuth API notes.\n", encoding="utf-8")
+        self.service = WebStudioService(self.root)
+
+    def test_share_relationship_service_lists_create_and_revise(self):
+        save_shares(
+            self.root,
+            {
+                "auth-api": ShareRelationship(
+                    share_id="auth-api",
+                    role="provider",
+                    title="Auth API",
+                    provider_id="alice",
+                    hub_url="https://hub.example.test",
+                    credential_id="alice-publish",
+                    state="draft",
+                    parts=("file",),
+                    file=ShareFilePart(
+                        view_id="auth-api-files",
+                        intent="Share auth API context.",
+                        approved=False,
+                    ),
+                )
+            },
+        )
+
+        listing = self.service.share_relationships()
+
+        relationship = listing["relationships"][0]
+        self.assertEqual(relationship["share_id"], "auth-api")
+        self.assertEqual(relationship["capability"], "file_context")
+        self.assertEqual(relationship["file"]["view_id"], "auth-api-files")
+
+        with patch(
+            "rightmemory.web.service.create_share_from_request",
+            return_value=ShareOperationResult(
+                share_id="billing-api",
+                title="Billing API",
+                role="provider",
+                state="draft",
+                capability="both",
+                builder_final_message="Built billing share.",
+                next_action="rightmemory share approve billing-api",
+            ),
+        ) as create:
+            created = self.service.create_share_relationship(
+                {
+                    "share_id": "billing-api",
+                    "title": "Billing API",
+                    "provider_id": "alice",
+                    "hub_url": "https://hub.example.test",
+                    "credential_id": "alice-publish",
+                    "request": "Share billing API context and questions.",
+                    "capability": "both",
+                    "question_base_url": "https://provider.example.test",
+                }
+            )
+
+        self.assertEqual(created["share_id"], "billing-api")
+        self.assertEqual(created["capability"], "both")
+        create.assert_called_once_with(
+            self.root.resolve(),
+            share_id="billing-api",
+            title="Billing API",
+            request="Share billing API context and questions.",
+            provider_id="alice",
+            hub_url="https://hub.example.test",
+            credential_id="alice-publish",
+            capability="both",
+            question_base_url="https://provider.example.test",
+        )
+
+        with patch(
+            "rightmemory.web.service.revise_share",
+            return_value=ShareOperationResult(
+                share_id="auth-api",
+                title="Auth API",
+                role="provider",
+                state="draft",
+                capability="file_context",
+                builder_final_message="Narrowed auth scope.",
+                next_action="rightmemory share approve auth-api",
+            ),
+        ) as revise:
+            revised = self.service.revise_share_relationship(
+                "auth-api",
+                {"revision": "Only include refresh-token behavior."},
+            )
+
+        self.assertIn("Narrowed auth scope.", revised["builder_final_message"])
+        revise.assert_called_once_with(
+            self.root.resolve(),
+            "auth-api",
+            "Only include refresh-token behavior.",
+            capability=None,
+            question_base_url=None,
+        )
 
 
 @unittest.skipUnless(HTTPX2_AVAILABLE, "FastAPI TestClient requires httpx2 in this environment")
@@ -305,6 +411,106 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
         self.assertEqual(credentials[0]["base_url"], "https://hub.example.test")
         self.assertEqual(credentials[0]["provider_id"], "alice")
         self.assertNotIn("token", credentials[0])
+
+    def test_share_relationships_api_lists_create_and_revise(self):
+        save_shares(
+            self.root,
+            {
+                "auth-api": ShareRelationship(
+                    share_id="auth-api",
+                    role="provider",
+                    title="Auth API",
+                    provider_id="alice",
+                    hub_url="https://hub.example.test",
+                    credential_id="alice-publish",
+                    state="draft",
+                    parts=("file",),
+                    file=ShareFilePart(
+                        view_id="auth-api-files",
+                        intent="Share auth API context.",
+                        approved=False,
+                    ),
+                )
+            },
+        )
+
+        listing = self.client.get("/api/share/relationships")
+
+        self.assertEqual(listing.status_code, 200)
+        relationship = listing.json()["data"]["relationships"][0]
+        self.assertEqual(relationship["share_id"], "auth-api")
+        self.assertEqual(relationship["capability"], "file_context")
+        self.assertEqual(relationship["file"]["view_id"], "auth-api-files")
+
+        with patch(
+            "rightmemory.web.service.create_share_from_request",
+            return_value=ShareOperationResult(
+                share_id="billing-api",
+                title="Billing API",
+                role="provider",
+                state="draft",
+                capability="both",
+                builder_final_message="Built billing share.",
+                next_action="rightmemory share approve billing-api",
+            ),
+        ) as create:
+            created = self.client.post(
+                "/api/share/relationships",
+                json={
+                    "share_id": "billing-api",
+                    "title": "Billing API",
+                    "provider_id": "alice",
+                    "hub_url": "https://hub.example.test",
+                    "credential_id": "alice-publish",
+                    "request": "Share billing API context and questions.",
+                    "capability": "both",
+                    "question_base_url": "https://provider.example.test",
+                },
+                headers={"x-csrf-token": self.csrf},
+            )
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(created.json()["data"]["share_id"], "billing-api")
+        self.assertEqual(created.json()["data"]["capability"], "both")
+        create.assert_called_once_with(
+            self.root.resolve(),
+            share_id="billing-api",
+            title="Billing API",
+            request="Share billing API context and questions.",
+            provider_id="alice",
+            hub_url="https://hub.example.test",
+            credential_id="alice-publish",
+            capability="both",
+            question_base_url="https://provider.example.test",
+        )
+
+        with patch(
+            "rightmemory.web.service.revise_share",
+            return_value=ShareOperationResult(
+                share_id="auth-api",
+                title="Auth API",
+                role="provider",
+                state="draft",
+                capability="file_context",
+                builder_final_message="Narrowed auth scope.",
+                next_action="rightmemory share approve auth-api",
+            ),
+        ) as revise:
+            revised = self.client.post(
+                "/api/share/relationships/auth-api/revise",
+                json={"revision": "Only include refresh-token behavior."},
+                headers={"x-csrf-token": self.csrf},
+            )
+
+        self.assertEqual(revised.status_code, 200)
+        self.assertIn("Narrowed auth scope.", revised.json()["data"]["builder_final_message"])
+        revise.assert_called_once_with(
+            self.root.resolve(),
+            "auth-api",
+            "Only include refresh-token behavior.",
+            capability=None,
+            question_base_url=None,
+        )
 
     def test_provider_inbox_uses_saved_credential_defaults(self):
         self.client.post(
