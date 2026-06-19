@@ -84,6 +84,17 @@ rightmemory --profile alice shared-view invite auth-api-files --label frontend
 
 `invite` publishes the current file-view package to the hub and prints an invitation URL. After approval, future successful memory-write roles also rebuild and publish approved file views automatically. Generated `dist/` output is runtime output and should not be committed.
 
+Semantic refresh is separate from ordinary auto-publish. To rerun the builder
+from the stored refined intent:
+
+```bash
+rightmemory --profile alice shared-view refresh-file auth-api-files --force
+```
+
+Use `--publish` when the refresh should publish after a successful rebuild.
+Normal auto-publish never starts the builder agent; it only publishes the
+current approved package.
+
 The frontend consumer accepts the invitation:
 
 ```bash

@@ -17,7 +17,7 @@ from .shared_view_files import (
     publish_file_view_package,
     render_file_view,
     validate_file_view_recipe_source,
-    write_file_view_recipe_from_recipe,
+    write_file_view_source_from_recipe,
 )
 from .shared_view_models import validate_heading_id
 from .shared_view_questions import validate_question_view_source
@@ -101,7 +101,7 @@ def refresh_file_view(memory_root: Path, view_id: str, *, force: bool = False, p
                     last_semantic_refresh_at=datetime.now(UTC).replace(microsecond=0).isoformat(),
                     last_semantic_refresh_memory_commit=current_active_memory_commit(root),
                 )
-                write_file_view_recipe_from_recipe(root, refreshed)
+                write_file_view_source_from_recipe(root, refreshed)
                 if refreshed.render == FILE_VIEW_RENDER_EXTRACTIVE:
                     validate_file_view_recipe_source(root, clean_view_id, require_selection=True)
                     render_file_view(root, clean_view_id)

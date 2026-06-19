@@ -377,6 +377,33 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(builder.call_args.kwargs["intent"], "Let frontend agents ask auth questions")
         self.assertIn("built question view", stdout.getvalue())
 
+    def test_shared_view_refresh_file_invokes_maintenance_entrypoint(self):
+        calls = []
+
+        def fake_refresh(memory_root, view_id, *, force=False, publish=False):
+            calls.append((memory_root, view_id, force, publish))
+            return "refreshed file view auth-api-files"
+
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli.refresh_file_view", side_effect=fake_refresh),
+                patch("sys.stdout", stdout),
+            ):
+                result = main([
+                    "shared-view",
+                    "refresh-file",
+                    "auth-api-files",
+                    "--force",
+                    "--publish",
+                ])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, [(root, "auth-api-files", True, True)])
+        self.assertIn("refreshed file view auth-api-files", stdout.getvalue())
+
     def test_shared_view_approve_cli_dispatches_by_type(self):
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as tempdir:

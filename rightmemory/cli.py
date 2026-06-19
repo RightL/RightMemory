@@ -47,7 +47,7 @@ from .profiles import (
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 from .session import MemoryWriteLock
-from .shared_view_builder import run_file_view_builder, run_question_view_builder
+from .shared_view_builder import refresh_file_view, run_file_view_builder, run_question_view_builder
 from .shared_view_files import approve_file_view, invite_file_view, pull_all_file_views, pull_file_view
 from .shared_view_questions import approve_question_view, ask_question_view, publish_question_view
 from .shared_views import (
@@ -472,6 +472,10 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
     build_question.add_argument("view_id")
     build_question.add_argument("intent", nargs="+")
     build_question.add_argument("--title", required=True)
+    refresh_file = subparsers.add_parser("refresh-file")
+    refresh_file.add_argument("view_id")
+    refresh_file.add_argument("--force", action="store_true")
+    refresh_file.add_argument("--publish", action="store_true")
     publish_question = subparsers.add_parser("publish-question")
     publish_question.add_argument("view_id")
     publish_question.add_argument("--hub-url", required=True)
@@ -565,6 +569,9 @@ def _shared_view_main(argv: list[str], memory_root: Path) -> int:
                 intent=intent,
             )
         )
+        return 0
+    if args.command == "refresh-file":
+        print(refresh_file_view(memory_root, args.view_id, force=args.force, publish=args.publish))
         return 0
     if args.command == "publish-question":
         print(
