@@ -101,6 +101,36 @@ class SharedViewModelTests(unittest.TestCase):
         self.assertEqual(loaded["auth-api-ask"].view_type, "question")
         self.assertEqual(loaded["auth-api-ask"].target.kind, "http-question")
 
+    def test_git_file_target_round_trips(self):
+        save_connections(
+            self.root,
+            {
+                "auth-api-files": SharedViewConnection(
+                    heading_id="auth-api-files",
+                    view_type="file",
+                    ref="rightmemory://mf/auth-api-files",
+                    target=SharedViewTarget(
+                        kind="git-file",
+                        view_id="auth-api-files",
+                        git_url="https://github.com/user/rightmemory-shares.git",
+                        git_branch="gh-pages",
+                        git_share_id="auth-api",
+                        accepted_from_url=(
+                            "https://github.com/user/rightmemory-shares.git"
+                            "#share=auth-api&branch=gh-pages"
+                        ),
+                    ),
+                )
+            },
+        )
+
+        target = load_connections(self.root)["auth-api-files"].target
+
+        self.assertEqual(target.kind, "git-file")
+        self.assertEqual(target.git_url, "https://github.com/user/rightmemory-shares.git")
+        self.assertEqual(target.git_branch, "gh-pages")
+        self.assertEqual(target.git_share_id, "auth-api")
+
     def test_provider_root_targets_are_rejected(self):
         with self.assertRaises(ValueError) as caught:
             validate_connection(

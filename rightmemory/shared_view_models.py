@@ -13,7 +13,7 @@ RUNTIME_DIR = ".runtime/shared_views"
 PROVIDER_VIEWS_DIR = "shared_views"
 CONNECTION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 VIEW_TYPES = {"file", "question"}
-TARGET_KINDS = {"none", "http-file", "http-question", "revoked"}
+TARGET_KINDS = {"none", "http-file", "http-question", "git-file", "revoked"}
 RELATIONSHIPS = {"human", "owned-agent", "team-space", "external"}
 
 
@@ -26,6 +26,9 @@ class SharedViewTarget:
     credential_id: str | None = None
     question_base_url: str | None = None
     question_credential_id: str | None = None
+    git_url: str | None = None
+    git_branch: str | None = None
+    git_share_id: str | None = None
     version_id: str | None = None
     accepted_from_url: str | None = None
 
@@ -66,6 +69,8 @@ def validate_connection(root: Path, key: str, connection: SharedViewConnection) 
         raise ValueError(f"http-file target requires file view type for {heading_id}")
     if target.kind == "http-question" and connection.view_type != "question":
         raise ValueError(f"http-question target requires question view type for {heading_id}")
+    if target.kind == "git-file" and connection.view_type != "file":
+        raise ValueError(f"git-file target requires file view type for {heading_id}")
     if target.kind in {"http-file", "http-question"}:
         if not target.base_url or not target.credential_id:
             raise ValueError(f"{target.kind} target requires base_url and credential_id for {heading_id}")
@@ -74,6 +79,9 @@ def validate_connection(root: Path, key: str, connection: SharedViewConnection) 
         if not target.question_base_url or not target.question_credential_id:
             raise ValueError(f"http-question target requires question_base_url and question_credential_id for {heading_id}")
         _validate_http_base_url(target.question_base_url)
+    if target.kind == "git-file":
+        if not target.git_url or not target.view_id or not target.git_share_id:
+            raise ValueError(f"git-file target requires git_url, view_id, and git_share_id for {heading_id}")
     return connection
 
 
@@ -138,6 +146,12 @@ def save_connections(memory_root: Path, connections: dict[str, SharedViewConnect
                 lines.append(f"question_base_url = {_toml_string(connection.target.question_base_url)}")
             if connection.target.question_credential_id:
                 lines.append(f"question_credential_id = {_toml_string(connection.target.question_credential_id)}")
+            if connection.target.git_url:
+                lines.append(f"git_url = {_toml_string(connection.target.git_url)}")
+            if connection.target.git_branch:
+                lines.append(f"git_branch = {_toml_string(connection.target.git_branch)}")
+            if connection.target.git_share_id:
+                lines.append(f"git_share_id = {_toml_string(connection.target.git_share_id)}")
             if connection.target.version_id:
                 lines.append(f"version_id = {_toml_string(connection.target.version_id)}")
             if connection.target.accepted_from_url:
@@ -233,6 +247,9 @@ def _load_target(raw_target: object) -> SharedViewTarget:
         credential_id=_optional_heading_id(raw_target.get("credential_id")),
         question_base_url=_optional_string(raw_target.get("question_base_url")),
         question_credential_id=_optional_heading_id(raw_target.get("question_credential_id")),
+        git_url=_optional_string(raw_target.get("git_url")),
+        git_branch=_optional_string(raw_target.get("git_branch")),
+        git_share_id=_optional_heading_id(raw_target.get("git_share_id")),
         version_id=_optional_heading_id(raw_target.get("version_id")),
         accepted_from_url=_optional_string(raw_target.get("accepted_from_url")),
     )
