@@ -2,7 +2,7 @@
 
 **Tree + graph memory for teams of AI coding agents.**
 
-RightMemory gives people and coding agents a structured memory substrate: a heading tree for orderly local context, graph edges for flexible relationships, and shared views for controlled collaboration between memory roots. Memory stays in ordinary Git-syncable files, so durable context can move across sessions, devices, users, agent clients, and collaborating agent teams instead of living inside one vendor UI.
+RightMemory gives people and coding agents a structured memory substrate: a heading tree for orderly local context, graph edges for flexible relationships, and shared views for controlled collaboration between memory roots. The same durable context can move across sessions, devices, users, agent clients, and collaborating agent teams instead of living inside one vendor UI.
 
 ![How one RightMemory root works](docs/assets/rightmemory-single-root.svg)
 
@@ -14,7 +14,7 @@ Modern coding agents are strong inside a single conversation, then strangely for
 
 - **Multi-agent collaboration:** memory roots can share selected context, answer constrained questions, and exchange notes without exposing the whole private memory store.
 - **Tree + graph structure:** headings give agents local reading context, while node ids and typed edges connect related facts across sessions and files.
-- **Readable files:** memory lives in `MEMORY.md`, optional `MEMORY_<slug>.md` detail files, and `insight_logs/` reflection artifacts, so it can be inspected, diffed, versioned, and shared through a normal Git remote.
+- **Multi-device continuity:** the same memory can follow agents across laptops, desktops, clients, and project-specific roots.
 - **Clear ownership:** retrieval, updates, transcript review, sync repair, consolidation, and reflection run through role-specific commands instead of letting the main agent half-edit memory while doing unrelated work.
 - **Vendor-neutral command surface:** Codex CLI and Claude Code CLI have built-in delegated execution today; Gemini CLI-style workflows and other command-capable agents can use the same `rightmemory` CLI or JSON-over-stdio daemon surface.
 
@@ -105,7 +105,7 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 - A heading tree of `#`, `##`, and `###` sections for hierarchical retrieval context.
 - Addressable heading anchors and node ids for precise agent references.
 - Typed graph edges such as `dep:`, `cfg:`, `ver:`, `doc:`, and `todo:` for traversal across the tree.
-- Ordinary Git-syncable files: `MEMORY.md`, optional sibling detail files named `MEMORY_<slug>.md`, and `insight_logs/`.
+- Multi-device memory continuity across laptops, desktops, agent clients, and project-specific roots.
 - A command-backed `memory-orchestrator` skill for retrieval, updates, change-triggered consolidation, and reflection.
 - Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex/Claude CLI role execution.
 - Optional automatic transcript review for idle Codex and Claude sessions.
@@ -139,7 +139,7 @@ rightmemory --profile my-project retrieve --session <agent-session-id> "what do 
 Profile aliases live in `<default-memory-root>/profiles.toml`. New profile roots
 default to a sibling profile-root area, such as
 `~/.rightmemory-profiles/my-project` for the normal default root. Each profile
-root has its own `MEMORY.md`, `rightmemory.toml`, `.runtime/`, Git history,
+root has its own `MEMORY.md`, `rightmemory.toml`, `.runtime/`, change history,
 watcher state, async update queues, sessions, and insight logs.
 
 A project can opt into a local default profile by adding `.rightmemory-profile`
@@ -381,20 +381,20 @@ Both modes require `git` and `uv`. The runtime is installed under
 command is written to `~/.local/bin/rightmemory`. If `~/.local/bin` is not on
 `PATH`, the installer prints shell-profile guidance after install.
 
-Because the memory root is an ordinary Git repository, you can put it on a
-private remote and share the same memory across laptops, desktops, and agent
-clients. Enable RightMemory's managed sync loop when you want the runtime to
-pull before automatic semantic work and push successful memory commits after
-they land.
+RightMemory can keep the same memory root available across laptops, desktops,
+and agent clients. The current managed sync implementation uses a private Git
+remote underneath; the user-facing feature is multi-device memory continuity.
+Enable the sync loop when you want the runtime to pull before automatic
+semantic work and push successful memory changes after they land.
 
 ## Everyday Use
 
 1. Keep the `memory-orchestrator` instruction in `AGENTS.md` or `CLAUDE.md`.
 2. Run `rightmemory watch start` for background review, pruning, consolidation, and Insight cycles.
 3. Let the orchestrator handle memory retrieval and durable updates during agent work.
-4. Use normal git tools in the memory root to inspect or revert memory changes.
+4. Use `rightmemory status` when you need to inspect watcher, queue, and sync state.
 
-Dreamer commits active memory consolidation when the memory graph needs cleanup. Insight commits timestamped reflections under `insight_logs/` when broader patterns, risks, or next-step ideas are worth preserving. Use normal git tools in the memory root to inspect or revert memory commits.
+Dreamer commits active memory consolidation when the memory graph needs cleanup. Insight commits timestamped reflections under `insight_logs/` when broader patterns, risks, or next-step ideas are worth preserving.
 
 ## Command Runtime
 
@@ -709,7 +709,7 @@ Dirty main memory files still block automatic semantic writes before a temporary
 
 ### Automatic Global Sync
 
-RightMemory can keep one memory root shared across devices by using a normal private Git remote. GitHub private repositories are the easiest hosted setup, and any SSH or HTTPS Git remote works once the memory repo has an upstream branch.
+RightMemory can keep one memory root shared across devices. The current sync implementation uses a private Git remote underneath; GitHub private repositories are the easiest hosted setup, and any SSH or HTTPS Git remote works once the memory repo has an upstream branch.
 
 Enable sync in `<memory-root>/rightmemory.toml`:
 
@@ -776,7 +776,7 @@ After install:
 - `MEMORY.md` remains real memory, not a routing-only index.
 - Dedicated memory roles own memory edits so the main agent does not race itself or leave partial writes.
 - Dreamer consolidation and Insight reflection are explicit because structural cleanup and reflective artifacts have different authority boundaries.
-- Git provides history and revertability without adding inline timestamps to every node.
+- Memory prose stays focused on durable context, not operational metadata.
 
 ## License
 

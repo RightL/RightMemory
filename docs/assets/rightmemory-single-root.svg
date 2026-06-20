@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
   <title id="title">How one RightMemory root works</title>
-  <desc id="desc">A diagram showing agent sessions retrieving context from and submitting memory candidates to one Git-backed RightMemory root with a tree and graph structure.</desc>
+  <desc id="desc">A diagram showing agent sessions retrieving context from and submitting memory candidates to one RightMemory root with a tree and graph structure.</desc>
   <rect width="1200" height="620" rx="28" fill="#10151f"/>
   <rect x="36" y="36" width="1128" height="548" rx="18" fill="#17202c" stroke="#2d3a4e" stroke-width="2"/>
 
@@ -37,8 +37,8 @@
   <text x="1020" y="270" text-anchor="middle" fill="#d7e1ee" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="17">small enough to use well</text>
 
   <rect x="900" y="340" width="240" height="95" rx="14" fill="#121b26" stroke="#2f4058"/>
-  <text x="1020" y="377" text-anchor="middle" fill="#9be7c3" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="22" font-weight="700">Git history</text>
-  <text x="1020" y="405" text-anchor="middle" fill="#d7e1ee" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="17">diff, sync, recover</text>
+  <text x="1020" y="377" text-anchor="middle" fill="#9be7c3" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="22" font-weight="700">Device sync</text>
+  <text x="1020" y="405" text-anchor="middle" fill="#d7e1ee" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="17">same context everywhere</text>
 
   <path d="M340 250 C380 250 402 250 442 250" stroke="#8bd3ff" stroke-width="3" fill="none"/>
   <path d="M442 250 L426 241 L426 259 Z" fill="#8bd3ff"/>
@@ -50,5 +50,5 @@
   <path d="M800 388 C836 388 856 388 892 388" stroke="#ffd166" stroke-width="3" fill="none"/>
   <path d="M892 388 L876 379 L876 397 Z" fill="#ffd166"/>
 
-  <text x="64" y="535" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="18">The tree gives attention an orderly path. The graph gives it useful jumps. Git keeps the result inspectable.</text>
+  <text x="64" y="535" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="18">The tree gives attention an orderly path. The graph gives it useful jumps. Sync keeps context available.</text>
 </svg>
