@@ -1,15 +1,18 @@
 # RightMemory
 
-**Tree + graph memory that AI coding agents can share across sessions, clients, and devices.**
+**Tree + graph memory for teams of AI coding agents.**
 
-RightMemory gives coding agents a structured memory substrate: a heading tree for local context, graph edges for cross-session relationships, and command-backed roles for retrieval, updates, transcript review, sync repair, pruning, consolidation, and reflection. Memory stays in ordinary Git-syncable files, so the same durable context can move across devices and agent clients instead of living inside one vendor UI.
+RightMemory gives people and coding agents a structured memory substrate: a heading tree for orderly local context, graph edges for flexible relationships, and shared views for controlled collaboration between memory roots. Memory stays in ordinary Git-syncable files, so durable context can move across sessions, devices, users, agent clients, and collaborating agent teams instead of living inside one vendor UI.
 
-![RightMemory terminal demo](docs/assets/rightmemory-demo.svg)
+![How one RightMemory root works](docs/assets/rightmemory-single-root.svg)
+
+![How RightMemory roots collaborate](docs/assets/rightmemory-shared-roots.svg)
 
 ## Why RightMemory
 
-Modern coding agents are strong inside a single conversation, then strangely forgetful in the next one. RightMemory treats memory as owned project state:
+Modern coding agents are strong inside a single conversation, then strangely forgetful in the next one. RightMemory treats memory as owned project and collaboration state:
 
+- **Multi-agent collaboration:** memory roots can share selected context, answer constrained questions, and exchange notes without exposing the whole private memory store.
 - **Tree + graph structure:** headings give agents local reading context, while node ids and typed edges connect related facts across sessions and files.
 - **Readable files:** memory lives in `MEMORY.md`, optional `MEMORY_<slug>.md` detail files, and `insight_logs/` reflection artifacts, so it can be inspected, diffed, versioned, and shared through a normal Git remote.
 - **Clear ownership:** retrieval, updates, transcript review, sync repair, consolidation, and reflection run through role-specific commands instead of letting the main agent half-edit memory while doing unrelated work.
@@ -72,6 +75,8 @@ rightmemory watch start
 ```
 
 ## Demo Flow
+
+![RightMemory terminal demo](docs/assets/rightmemory-demo.svg)
 
 A typical RightMemory turn looks like this:
 
