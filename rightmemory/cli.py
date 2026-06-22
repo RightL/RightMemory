@@ -231,11 +231,11 @@ def main(argv: list[str] | None = None) -> int:
     if remaining and remaining[0] == "retry":
         _retry_parser(args.role).parse_args(remaining[1:])
         return _retry(config.memory_root, args.role)
+    if remaining and remaining[0] == "_async-worker":
+        return _async_worker(config.memory_root, args.role)
 
     runtime = RightMemoryRuntime(config)
     try:
-        if remaining and remaining[0] == "_async-worker":
-            return _async_worker(runtime, config.memory_root, args.role)
         if not remaining or remaining[0] == "chat":
             chat_args = _chat_parser(args.role).parse_args(remaining[1:] if remaining else [])
             return _chat(runtime, chat_args.session)
@@ -1746,17 +1746,13 @@ def _retry(memory_root, role: str) -> int:
     return 1 if result.worker_error else 0
 
 
-def _async_worker(
-    runtime: RightMemoryRuntime,
-    memory_root,
-    role: str,
-) -> int:
+def _async_worker(memory_root, role: str) -> int:
     dreamer_watch_config = load_dreamer_watch_config(memory_root=memory_root)
     insight_watch_config = load_insight_watch_config(memory_root=memory_root)
     async_update_config = load_async_update_config(memory_root=memory_root)
     store = AsyncUpdateStore(memory_root, role)
     result = store.run_pending_batches(
-        lambda batch_session_id, message: runtime.run_session_turn(batch_session_id, message),
+        lambda batch_session_id, message: _run_async_update_batch(memory_root, role, batch_session_id, message),
         target_batch_candidates=async_update_config.target_batch_candidates,
         max_wait_seconds=async_update_config.max_wait_seconds,
         on_batch_success=_combined_trigger_incrementer(
@@ -1773,6 +1769,16 @@ def _async_worker(
     if result.status == "failed":
         return 1
     return 0
+
+
+def _run_async_update_batch(memory_root, role: str, batch_session_id: str, message: str) -> str:
+    # Reload per batch so queued retries use current model and executor settings.
+    config = load_config(role, memory_root=memory_root)
+    runtime = RightMemoryRuntime(config)
+    try:
+        return runtime.run_session_turn(batch_session_id, message)
+    finally:
+        runtime.cleanup()
 
 
 def _combined_trigger_incrementer(*incrementers: Callable[[int], None]) -> Callable[[int], None]:

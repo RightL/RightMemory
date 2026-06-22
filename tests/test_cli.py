@@ -2,6 +2,7 @@ import io
 import json
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -40,6 +41,19 @@ class FakeRuntime:
 
     def cleanup(self):
         pass
+
+
+@contextmanager
+def _fake_async_worker_process(pid: int = 123):
+    # Tests that fake Popen must also satisfy the production cmdline identity check.
+    with (
+        patch("rightmemory.async_update._process_exists", return_value=True),
+        patch(
+            "rightmemory.async_update._read_process_cmdline",
+            return_value=["python", "-m", "rightmemory.cli", "update", "_async-worker"],
+        ),
+    ):
+        yield pid
 
 
 class CliEntrypointTests(unittest.TestCase):
@@ -2782,7 +2796,7 @@ class JsonRequestTests(unittest.TestCase):
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.async_update.subprocess.Popen") as popen,
-                patch("rightmemory.async_update._process_exists", return_value=True),
+                _fake_async_worker_process(),
                 patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
                 patch("sys.stdout", stdout),
             ):
@@ -2814,7 +2828,7 @@ class JsonRequestTests(unittest.TestCase):
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.async_update.subprocess.Popen") as popen,
-                patch("rightmemory.async_update._process_exists", return_value=True),
+                _fake_async_worker_process(),
                 patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
                 patch("sys.stdout", stdout),
             ):
@@ -2865,7 +2879,7 @@ class JsonRequestTests(unittest.TestCase):
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.async_update.subprocess.Popen") as popen,
-                patch("rightmemory.async_update._process_exists", return_value=True),
+                _fake_async_worker_process(),
                 patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
                 patch("sys.stdout", io.StringIO()),
             ):
@@ -2946,7 +2960,7 @@ class JsonRequestTests(unittest.TestCase):
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.async_update.subprocess.Popen") as popen,
-                patch("rightmemory.async_update._process_exists", return_value=True),
+                _fake_async_worker_process(),
                 patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
                 patch("sys.stdout", stdout),
             ):
@@ -2978,7 +2992,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_async_update_config", return_value=_async_update_config(memory_root, target=2)),
                 patch("rightmemory.async_update.subprocess.Popen") as popen,
                 patch("rightmemory.async_update.UPDATE_DEBOUNCE_SECONDS", 0),
-                patch("rightmemory.async_update._process_exists", return_value=True),
+                _fake_async_worker_process(),
                 patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
                 patch("sys.stdout", io.StringIO()),
             ):
@@ -3010,6 +3024,77 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("pending: 0", stdout.getvalue())
         self.assertIn("result: session update-batch-", stdout.getvalue())
 
+    def test_async_worker_reloads_update_config_between_batches(self):
+        runtime_models = []
+
+        class RecordingRuntime(FakeRuntime):
+            def __init__(self, config=None):
+                super().__init__(config)
+                runtime_models.append(config.model)
+
+            def run_session_turn(self, session_id: str, message: str) -> str:
+                return f"model {self.config.model}"
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            async_root = memory_root / ".runtime" / "async" / "update"
+            async_root.mkdir(parents=True)
+            base_state = {
+                "status": "running",
+                "role": "update",
+                "phase": "waiting",
+                "started_at": "2026-05-29T08:00:00+00:00",
+                "finished_at": None,
+                "pid": None,
+                "result": None,
+                "error": None,
+                "attempts": 0,
+                "next_retry_at": None,
+                "last_error": None,
+                "next_flush_at": "2026-05-29T08:00:00+00:00",
+                "current_batch": [],
+                "next_id": 2,
+            }
+            for session_id in ("agent-1", "agent-2"):
+                (async_root / f"{session_id}.json").write_text(
+                    json.dumps(
+                        {
+                            **base_state,
+                            "session_id": session_id,
+                            "pending": [
+                                {
+                                    "id": 1,
+                                    "message": session_id,
+                                    "submitted_at": "2026-05-29T08:00:00+00:00",
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            models = iter(("initial", "fresh-a", "fresh-b"))
+
+            def fake_load_config(role, **kwargs):
+                return type("Config", (), {"memory_root": memory_root, "model": next(models)})()
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_async_update_config", return_value=_async_update_config(memory_root, target=1)),
+                patch("rightmemory.cli.load_dreamer_watch_config", return_value=_dreamer_watch_config()),
+                patch("rightmemory.cli.load_insight_watch_config", return_value=_insight_watch_config()),
+                patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
+            ):
+                result = main(["update", "_async-worker"])
+
+            first = AsyncUpdateStore(memory_root, "update").read("agent-1")
+            second = AsyncUpdateStore(memory_root, "update").read("agent-2")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(runtime_models, ["fresh-a", "fresh-b"])
+        self.assertEqual(first.result, "model fresh-a")
+        self.assertEqual(second.result, "model fresh-b")
+
     def test_async_worker_increments_dreamer_and_insight_trigger_points(self):
         class RecordingRuntime(FakeRuntime):
             def run_session_turn(self, session_id: str, message: str) -> str:
@@ -3026,7 +3111,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_async_update_config", return_value=_async_update_config(memory_root, target=1)),
                 patch("rightmemory.async_update.subprocess.Popen") as popen,
                 patch("rightmemory.async_update.UPDATE_DEBOUNCE_SECONDS", 0),
-                patch("rightmemory.async_update._process_exists", return_value=True),
+                _fake_async_worker_process(),
                 patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
                 patch("sys.stdout", io.StringIO()),
             ):
@@ -3073,7 +3158,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.load_async_update_config", return_value=_async_update_config(memory_root, target=1)),
                 patch("rightmemory.async_update.subprocess.Popen") as popen,
                 patch("rightmemory.async_update.UPDATE_DEBOUNCE_SECONDS", 0),
-                patch("rightmemory.async_update._process_exists", return_value=True),
+                _fake_async_worker_process(),
                 patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
                 patch("sys.stdout", io.StringIO()),
             ):
