@@ -190,6 +190,73 @@ class StatusDashboardTests(unittest.TestCase):
 
         self.assertIn("log: .runtime/watch/review.log (missing)", output)
 
+    def test_format_status_dashboard_renders_recovery_hints_for_known_issue_shapes(self):
+        dashboard = DashboardStatus(
+            root=Path("/memory/root"),
+            git=GitStatus(summary="dirty: 1 path", issue="dirty worktree: 1 path"),
+            issues=[
+                "git unavailable: not a git repository",
+                "review: stale pid 456",
+                "dreamer: running outside manager",
+                "review: status error: ValueError: bad state",
+                "pruner: rightmemory pruner check failed: RuntimeError: boom",
+                "sync config error: ValueError: bad sync config",
+                "dreamer trigger error: ValueError: dreamer trigger points must be a number",
+                "insight trigger error: ValueError: insight trigger points must be a number",
+                "update worker: stale pid 4",
+                "update worker: state error: ValueError: async update worker state must contain string field: status",
+                "update: state error: JSONDecodeError: Expecting value",
+                "update: manual: manual recovery required: permanent boom",
+                "update: manual-two: manual recovery required: another boom",
+                "update: retrying: retrying after error: temporary boom",
+                "update: agent-1: error: boom",
+                "managed watches: status error: RuntimeError: collector failed",
+                "dreamer: status error: RuntimeError: collector failed",
+                "insight: status error: RuntimeError: collector failed",
+                "update: status error: RuntimeError: collector failed",
+            ],
+        )
+
+        output = format_status_dashboard(dashboard)
+
+        self.assertIn("Recovery", output)
+        expected_hints = [
+            "git: inspect with `git status --short`; resolve local changes before automatic writes continue",
+            "git: inspect the configured memory root and repair Git before retrying",
+            "review: run `rightmemory watch restart review`",
+            "dreamer: stop the foreground process directly, then run `rightmemory watch start dreamer`",
+            "review: rerun `rightmemory status`; inspect watch state if it persists",
+            "pruner: inspect the shown log path, then run `rightmemory watch restart pruner` when appropriate",
+            "sync: fix `rightmemory.toml`, then rerun `rightmemory status`",
+            "dreamer: inspect `.runtime/dreamer/trigger-state.json`",
+            "insight: inspect `.runtime/insight/trigger-state.json`",
+            "update worker: inspect `.runtime/async/update/`; run `rightmemory update retry` only for manual recovery",
+            "update worker: inspect `.runtime/async/update/_worker/state.json`",
+            "update: inspect `.runtime/async/update/` for malformed session JSON",
+            "update manual recovery: run `rightmemory update retry`",
+            "update retrying: automatic retry is pending; inspect with `rightmemory update pull --session retrying`",
+            "update agent-1: inspect with `rightmemory update pull --session agent-1`",
+            "managed watches: rerun `rightmemory status`; inspect watch state if it persists",
+            "dreamer: rerun `rightmemory status`; inspect dreamer state if it persists",
+            "insight: rerun `rightmemory status`; inspect insight state if it persists",
+            "update: rerun `rightmemory status`; inspect async update state if it persists",
+        ]
+        for hint in expected_hints:
+            self.assertIn(f"  {hint}", output)
+        self.assertEqual(output.count("update manual recovery: run `rightmemory update retry`"), 1)
+
+    def test_format_status_dashboard_omits_recovery_when_no_hints_exist(self):
+        dashboard = DashboardStatus(
+            root=Path("/memory/root"),
+            git=GitStatus(summary="clean on main @ abc1234"),
+            issues=["plain informational issue without known recovery"],
+        )
+
+        output = format_status_dashboard(dashboard)
+
+        self.assertIn("Recent Issues", output)
+        self.assertNotIn("Recovery", output)
+
     def test_collect_managed_watches_includes_sync_disabled_and_log_preview(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

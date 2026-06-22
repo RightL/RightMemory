@@ -4,6 +4,7 @@ import fcntl
 import json
 import math
 import re
+import shlex
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -439,14 +440,110 @@ def format_status_dashboard(status: DashboardStatus) -> str:
         lines.append("Async Update")
         lines.extend(_format_section(status.update))
 
-    issues = list(status.issues)
-    if status.git.issue:
-        issues.insert(0, status.git.issue)
+    issues = _dashboard_issues(status)
     if issues:
         lines.append("")
         lines.append("Recent Issues")
         lines.extend(f"  {issue}" for issue in issues)
+    hints = _recovery_hints(status)
+    if hints:
+        lines.append("")
+        lines.append("Recovery")
+        lines.extend(f"  {hint}" for hint in hints)
     return "\n".join(lines)
+
+
+def _dashboard_issues(status: DashboardStatus) -> list[str]:
+    issues = list(status.issues)
+    if status.git.issue:
+        issues.insert(0, status.git.issue)
+    return issues
+
+
+def _recovery_hints(status: DashboardStatus) -> list[str]:
+    hints: list[str] = []
+    seen: set[str] = set()
+    for issue in _dashboard_issues(status):
+        hint = _recovery_hint_for_issue(issue)
+        if hint and hint not in seen:
+            hints.append(hint)
+            seen.add(hint)
+    return hints
+
+
+def _recovery_hint_for_issue(issue: str) -> str | None:
+    # Keep this ordered so broad subsystem patterns do not catch specific cases first.
+    if issue.startswith("dirty worktree:"):
+        return "git: inspect with `git status --short`; resolve local changes before automatic writes continue"
+    if issue.startswith("git unavailable:"):
+        return "git: inspect the configured memory root and repair Git before retrying"
+    if issue.startswith("sync config error:"):
+        return "sync: fix `rightmemory.toml`, then rerun `rightmemory status`"
+    if issue.startswith("dreamer trigger error:"):
+        return "dreamer: inspect `.runtime/dreamer/trigger-state.json`"
+    if issue.startswith("insight trigger error:"):
+        return "insight: inspect `.runtime/insight/trigger-state.json`"
+    if issue.startswith("update worker: stale pid "):
+        return (
+            "update worker: inspect `.runtime/async/update/`; "
+            "run `rightmemory update retry` only for manual recovery"
+        )
+    if issue.startswith("update worker: state error:"):
+        return "update worker: inspect `.runtime/async/update/_worker/state.json`"
+    if issue.startswith("update: state error:"):
+        return "update: inspect `.runtime/async/update/` for malformed session JSON"
+    if issue.startswith("managed watches: status error:"):
+        return "managed watches: rerun `rightmemory status`; inspect watch state if it persists"
+    if issue.startswith("dreamer: status error:"):
+        return "dreamer: rerun `rightmemory status`; inspect dreamer state if it persists"
+    if issue.startswith("insight: status error:"):
+        return "insight: rerun `rightmemory status`; inspect insight state if it persists"
+    if issue.startswith("update: status error:"):
+        return "update: rerun `rightmemory status`; inspect async update state if it persists"
+    update_hint = _update_recovery_hint(issue)
+    if update_hint:
+        return update_hint
+    return _watch_recovery_hint(issue)
+
+
+def _update_recovery_hint(issue: str) -> str | None:
+    match = re.match(r"^update: ([^:]+): manual recovery required:", issue)
+    if match:
+        return "update manual recovery: run `rightmemory update retry`"
+    match = re.match(r"^update: ([^:]+): retrying after error:", issue)
+    if match:
+        session_id = match.group(1)
+        quoted_session = shlex.quote(session_id)
+        return (
+            f"update {session_id}: automatic retry is pending; "
+            f"inspect with `rightmemory update pull --session {quoted_session}`"
+        )
+    match = re.match(r"^update: ([^:]+): error:", issue)
+    if match:
+        session_id = match.group(1)
+        quoted_session = shlex.quote(session_id)
+        return f"update {session_id}: inspect with `rightmemory update pull --session {quoted_session}`"
+    return None
+
+
+def _watch_recovery_hint(issue: str) -> str | None:
+    for name in MANAGED_WATCH_TARGETS:
+        prefix = f"{name}: "
+        if not issue.startswith(prefix):
+            continue
+        detail = issue[len(prefix) :]
+        if detail.startswith("stale pid "):
+            return f"{name}: run `rightmemory watch restart {name}`"
+        if detail == "running outside manager":
+            return f"{name}: stop the foreground process directly, then run `rightmemory watch start {name}`"
+        if detail.startswith("status error:"):
+            return f"{name}: rerun `rightmemory status`; inspect watch state if it persists"
+        if _looks_like_failure(detail):
+            return (
+                f"{name}: inspect the shown log path, then run "
+                f"`rightmemory watch restart {name}` when appropriate"
+            )
+    return None
 
 
 def _format_section(section: SectionStatus) -> list[str]:
