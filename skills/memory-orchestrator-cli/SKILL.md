@@ -18,7 +18,7 @@ description: "Use when the user's request may depend on long-term context from e
 - Skip this factual/context retrieval when the message is clearly self-contained and answerable from the conversation alone.
 - For preference-, workflow-, and behavior-related memory, retrieve proactively and very frequently when the agent is about to make choices that affect how it collaborates, implements, verifies, communicates, or finishes work.
 - Treat phase and topic changes as strong retrieval triggers for preference, workflow, and behavior memory, especially transitions between discussion, implementation, and finishing work.
-- When running retrieve, wait at least 3 minutes for the command before acting on memory. During that wait, do not explore files or advance the task independently.
+- When running retrieve, give the actual retrieve command/session up to 3 minutes to return before acting without memory. This means awaiting or polling the tool result; do not run a separate blocking wait such as `sleep 180`. During the pending retrieve, do not explore files or advance the task independently.
 - The retriever skips items already returned in this session; ask explicitly if you need something again.
 - A returned `S#...` heading is a memory skill: reusable instruction backed by a separate skill body, not an ordinary memory fact.
 - Broad retrieval usually returns only the skill heading and brief body paragraph.

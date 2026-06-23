@@ -264,6 +264,8 @@ class InstallScriptTests(unittest.TestCase):
         self.assertNotIn("Write [retrieve.model] and a default writer [update.model] config", result.stdout)
         self.assertIn("mode=cli-agent", install_stamp)
         self.assertIn("rightmemory retrieve --session <stable-session-id>", orchestrator)
+        self.assertIn("do not run a separate blocking wait such as `sleep 180`", orchestrator)
+        self.assertNotIn("wait at least 3 minutes", orchestrator)
         self.assertIn("Open context questions", orchestrator)
         self.assertIn("Provider question context", orchestrator)
         self.assertIn("rightmemory shared-view ask <mq-id>", orchestrator)

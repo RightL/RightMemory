@@ -175,8 +175,25 @@ historical comparison boundary rather than be the primary trigger.
 
 Design notes for later:
 
-- Use a deterministic estimated-token or byte budget. Exact provider tokenizer
-  counts are not required for budget pressure; a stable estimate is sufficient.
+- Use a deterministic estimated-token budget. Exact provider tokenizer counts
+  are not required for budget pressure; a stable estimate is sufficient. The
+  default good-enough estimator can count Latin/ASCII characters, CJK
+  characters, and other Unicode characters, then compute:
+
+  $$
+  T_{\text{est}} =
+  \left\lceil
+  \frac{C_{\text{latin}}}{4}
+  + C_{\text{cjk}}
+  + \frac{C_{\text{other}}}{2}
+  \right\rceil
+  $$
+
+  Here $C_{\text{latin}}$ includes ordinary ASCII/Latin text, digits,
+  whitespace, and Markdown syntax; $C_{\text{cjk}}$ includes Chinese,
+  Japanese, and Korean characters; and $C_{\text{other}}$ includes remaining
+  Unicode characters. This is a stable pruning pressure metric, not exact model
+  billing-token accounting.
 - The target after maintenance is intentionally below the maximum to avoid
   rerunning maintenance immediately after the next small update.
 - Material deleted from active memory, and detail lost during compression, should
