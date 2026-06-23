@@ -145,6 +145,75 @@ Design notes for later:
 - Dreamer should only clean active memory. Intake locality belongs to
   `memory-orchestrator` and later update-routing design.
 
+## 2026-06-23 Active Memory Budget And Role Split Brainstorm
+
+Context: The user revisited active-memory cleanup after observing that
+retrieve becomes too slow when memory grows, and that accumulated active memory
+contains too much duplicate, project-local, stale, or low-value material. The
+discussion replaced the earlier generation-count-only pruning idea with an
+active-memory budget model.
+
+### Accepted Direction
+
+#### Size-budget active memory pruning
+
+Proposal: Bound active memory by the combined estimated size of all active
+`MEMORY*.md` files. When active memory size $S_{\text{active}}$ exceeds a
+configured maximum $B_{\max}$, run budget maintenance until the active surface
+falls to about $\frac{3}{4}B_{\max}$. The comparison boundary should be chosen
+from Git history by finding a memory-affecting commit where active memory size
+was near that target, then pruning candidates can be selected similarly to the
+current pruner: material unchanged since that boundary is older and less
+reinforced than material added or changed afterward.
+
+Decision: Accepted as the preferred direction to explore next. Prefer this over
+making prune due solely after a fixed number of active-memory commits.
+
+Rationale: Size is the actual pressure on retrieve latency and model context.
+Git history still gives a simple aging signal, but commit count should select a
+historical comparison boundary rather than be the primary trigger.
+
+Design notes for later:
+
+- Use a deterministic estimated-token or byte budget. Exact provider tokenizer
+  counts are not required for budget pressure; a stable estimate is sufficient.
+- The target after maintenance is intentionally below the maximum to avoid
+  rerunning maintenance immediately after the next small update.
+- Material deleted from active memory, and detail lost during compression, should
+  be preserved in colder historical storage, potentially a later RAG-backed
+  archive.
+- Historical archive recall should not automatically reactivate facts into
+  active memory. Reactivation should still go through ordinary memory update.
+
+#### Split organizer, compactor, and pruner responsibilities
+
+Proposal: Separate active-memory maintenance into three clear responsibilities:
+an organizer, a compactor, and a pruner. The current Dreamer role mixes
+organization and compression, so it may need to be renamed or narrowed.
+
+Decision: Accepted as the role split direction.
+
+Rationale: Cleanup has become too broad for one semantic role. Organizing the
+memory tree, compressing bulky content, and deleting budget-expired content
+have different success criteria and should not be blurred.
+
+Design notes for later:
+
+- The organizer role owns active-memory structure: headings, ids, graph edges,
+  duplicate merging, stale open questions, and moving facts to clearer local
+  positions. This may be the current Dreamer narrowed in scope, or Dreamer may
+  be renamed if "dreaming" no longer describes the role.
+- The compactor role owns meaning-preserving compression. It should shrink
+  bulky active content into concise summaries and write archive records for
+  details that leave the active surface.
+- The pruner role owns budget enforcement and deletion only. It should select
+  candidates from the size boundary and reinforcement logic, but it should not
+  perform semantic compaction itself.
+- Pruner may decide that an item should be compacted instead of deleted, but the
+  compaction work belongs to the compactor role.
+- Keep the division visible in prompts, tests, commit subjects, and final
+  reports so future changes do not silently merge the roles again.
+
 ## 2026-06-16 Hub Transport Brainstorm
 
 Context: The user questioned whether the planned HTTP Shared View Hub is needed
