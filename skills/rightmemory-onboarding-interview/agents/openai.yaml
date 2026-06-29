@@ -1,0 +1,4 @@
+interface:
+  display_name: "RightMemory Onboarding Interview"
+  short_description: "Interview users to initialize memory drafts"
+  default_prompt: "Use $rightmemory-onboarding-interview to interview me and draft initial RightMemory MEMORY files."
