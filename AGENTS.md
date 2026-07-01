@@ -69,13 +69,59 @@
 - These docs and skills are instructions for future agents. Patch-like text causes future agents to inherit the order of edits instead of the intended model, while coherent text gives them a stable rule to follow.
 
 ## Recent Agent Correction Window
-- This section is a rolling window of recent user corrections to agent behavior. Keep at most 15 numbered correction entries here. Add new entries at the bottom; when adding would exceed 15 entries, delete entries from the top first.
+- This section is a rolling window of recent user corrections to agent behavior. Keep at most 15 numbered `###` correction entries here. Add new entries at the bottom; when adding would exceed 15 entries, delete entries from the top first.
 - Correction entries should capture reusable agent-behavior fixes, not merely what the current task changed. The task incident is evidence for the behavior.
-- Include enough concrete before/after detail for future agents to reconstruct the failure: what the agent wrote, proposed, or did; what the user rejected or accepted instead; and what habit should change.
-- Keep entries focused on preventing recurrence across tasks. Do not turn them into changelog entries, final diff summaries, or abstract principles with no concrete example.
-1. For retrieve prompt planning, do not add negative guidance for tools retrieve does not expose. The wrong wording was like `Retrieve should not use broad shell, search, generic file-read, or provider-question tools.` The correction is to omit that entirely because retrieve currently exposes typed retrieve tools, not broad shell/search/generic read/provider-question tools.
-2. Keep root-memory-prefix retrieve prompt edits minimal and native to the existing prompt. The wrong shape was adding a new `## Memory Detail Files` section with several explanatory paragraphs. The correction is to update the existing source bullets in `rightmemory/prompts/retrieve.md`, for example changing the daily snapshot bullet to say the snapshot contains `MEMORY.md` and `read_memory_file(slug)` is for relevant `F#` headings backed by `MEMORY_<slug>.md`.
-3. Be schema-specific about detail files. The vague wording `read_memory_file(slug) reads an ordinary MEMORY_<slug>.md detail file` is not enough. The corrected wording should say: `read_memory_file(slug)` reads the `MEMORY_<slug>.md` detail file for a relevant `F#` heading. This matters because `skills/rightmemory-schema.md` defines `{F#slug}` as the pointer to sibling `MEMORY_<slug>.md`.
-4. When showing prompt diffs, label which prompt source each snippet edits. In this repo, retrieve prompt prose lives in `rightmemory/prompts/retrieve.md`, while generated tool guidance lives in `rightmemory/prompt.py` under `Available retrieve tools`. The user asked because an unlabeled prompt diff made it unclear whether one or two files were changing.
-5. The reason for recording these corrections here is not only memory. The user wants future agents to internalize the preference: avoid prompt bloat, avoid documenting nonexistent constraints, tie wording to schema concepts such as `F#`, and make diffs concrete enough to review without guessing.
-6. In the memory-orchestrator prompt discussion, the agent first proposed an overlong update: after the useful natural-artifact gate, it added broad bullets like `Memory usually adds retrieval value for...`, `Do not submit updates that mainly duplicate...`, and `When submitting despite an existing artifact...`, plus examples such as `AGENTS.md` and `DESIGN_NOTES.md` that were too repo-specific to be general. The user corrected this to a compact shape: in the skill, add only the artifact check, skip-unless-retrieval-value rule, and recurring-artifact lookup-rule; in `update.md`, add only the natural-artifact storage rule and recurring-artifact compact-rule. The broader behavior correction is that when the user says a proposed prompt/doc change is too long, duplicative, or poorly targeted, preserve the concrete before/after as evidence but rewrite toward the smallest coherent rule instead of adding taxonomies, repeated caveats, or weak examples.
+- Include enough concrete before/after detail for future agents to reconstruct the failure: what the agent wrote, proposed, or did; what the user rejected or accepted instead; and what habit should change. For wording or prompt corrections, include rejected and accepted snippets when they are the clearest evidence.
+- Keep entries focused on preventing recurrence across tasks. Do not make them mere changelog entries or final diff summaries; use concrete artifacts to expose the reusable behavior mistake.
+
+### 1. Retrieve Prompt Tool Constraints
+
+Do not add negative guidance for tools retrieve does not expose. The wrong wording was like `Retrieve should not use broad shell, search, generic file-read, or provider-question tools.` The correction is to omit that entirely because retrieve currently exposes typed retrieve tools, not broad shell/search/generic read/provider-question tools.
+
+### 2. Root Memory Prefix Prompt Scope
+
+Keep root-memory-prefix retrieve prompt edits minimal and native to the existing prompt. The wrong shape was adding a new `## Memory Detail Files` section with several explanatory paragraphs. The correction is to update the existing source bullets in `rightmemory/prompts/retrieve.md`, for example changing the daily snapshot bullet to say the snapshot contains `MEMORY.md` and `read_memory_file(slug)` is for relevant `F#` headings backed by `MEMORY_<slug>.md`.
+
+### 3. Schema-Specific Detail Files
+
+Be schema-specific about detail files. The vague wording `read_memory_file(slug) reads an ordinary MEMORY_<slug>.md detail file` is not enough. The corrected wording should say: `read_memory_file(slug)` reads the `MEMORY_<slug>.md` detail file for a relevant `F#` heading. This matters because `skills/rightmemory-schema.md` defines `{F#slug}` as the pointer to sibling `MEMORY_<slug>.md`.
+
+### 4. Label Prompt Diff Sources
+
+When showing prompt diffs, label which prompt source each snippet edits. In this repo, retrieve prompt prose lives in `rightmemory/prompts/retrieve.md`, while generated tool guidance lives in `rightmemory/prompt.py` under `Available retrieve tools`. The user asked because an unlabeled prompt diff made it unclear whether one or two files were changing.
+
+### 5. Corrections Are For Behavior, Not Only Memory
+
+The reason for recording these corrections here is not only memory. The user wants future agents to internalize the preference: avoid prompt bloat, avoid documenting nonexistent constraints, tie wording to schema concepts such as `F#`, and make diffs concrete enough to review without guessing.
+
+### 6. Overlong Prompt Diff For A Small Rule
+
+The user asked how to reduce redundant memory-orchestrator updates. The agent first proposed a bloated `skills/memory-orchestrator-cli/SKILL.md` diff: the first, second, and fifth added bullets were useful, but the third, fourth, and sixth repeated or over-expanded the rule. It also used `AGENTS.md` and `DESIGN_NOTES.md` as general examples, which the user rejected as too repo-specific.
+
+Rejected shape:
+
+```diff
++- Before submitting an update, check whether the same useful information is already durably captured in a natural artifact that future agents are likely to inspect, such as a git commit message, design doc, `AGENTS.md`, `DESIGN_NOTES.md`, code comment, experiment report, run log, or project-local notes.
++- If a natural artifact already captures the useful information, skip the memory update unless memory adds retrieval value that the artifact alone does not provide.
++- Memory usually adds retrieval value for durable user preferences, workflow rules, corrections to stale memory, repeated failure patterns, hidden reasoning, non-obvious project/domain interpretation, environment constraints, or stable lookup rules for a class of artifacts.
++- Do not submit updates that mainly duplicate commit history, implementation chronology, report inventories, generated artifact lists, individual experiment rows, parameter tweaks, or one-off local states.
++- For recurring project artifacts, prefer one compact lookup rule over repeated updates. For example, remember that future agents should inspect the local experiment log/report directory when they need run details, rather than remembering every new experiment report path.
++- When submitting despite an existing artifact, state what extra retrieval value memory adds instead of only restating the artifact.
+```
+
+Accepted `skills/memory-orchestrator-cli/SKILL.md` shape:
+
+```diff
++- Before submitting an update, check whether the same useful information is already durably captured in a natural artifact that future agents are likely to inspect, such as a git commit message, design doc, code comment, experiment report, run log, or project-local notes.
++- If a natural artifact already captures the useful information, skip the memory update unless memory adds retrieval value that the artifact alone does not provide.
++- For recurring project artifacts, prefer one compact lookup rule over repeated updates. For example, remember that future agents should inspect the local experiment log/report directory when they need run details, rather than remembering every new experiment report path.
+```
+
+Accepted `rightmemory/prompts/update.md` shape:
+
+```diff
++- Treat natural artifacts such as git commits, project docs, experiment reports, run logs, code comments, and project-local notes as possible durable storage. Do not mirror them into memory unless the candidate adds retrieval value beyond the artifact.
++- When the useful durable shape is a recurring artifact family, prefer a compact lookup rule or durable conclusion over one memory entry per artifact.
+```
+
+The behavior correction is not just about this task: when a user rejects prose as too long, duplicative, or poorly targeted, preserve the concrete before/after evidence and rewrite toward the smallest coherent rule instead of adding taxonomies, repeated caveats, or weak examples.

@@ -34,13 +34,59 @@ Nodes use:
 - Node lines with no edges write `→ []`; heading lines with no edges may omit `→ []`.
 - Useful but unsettled memory uses `Uncertain:` at the start of the node description, for example ``- `<node-id>` Uncertain: <tentative memory claim with its scope or doubt> → [...]``. Revise it into ordinary declarative memory when it becomes settled, or remove it when it is contradicted or no longer useful.
 
-## Memory Entry Shape
+## Memory Quality
 
-A memory entry is durable, reusable knowledge for future agents. It should
-preserve what future agents need to know, rather than narrate how that knowledge
-appeared. Rewrite session evidence, user quotes, correction stories, and
-"observed during" provenance into the durable rule or conclusion; keep exact
-phrasing only when the wording itself is a reusable trigger or artifact.
+Good memory is scoped, durable knowledge that helps future agents act, decide,
+or understand.
+
+### Item Quality
+
+A good memory item states one reusable fact, preference, rule, decision,
+conclusion, or unresolved question at the right scope.
+
+Clearly not good memory:
+
+- Raw chat transcripts.
+- Turn-by-turn session narration.
+- Completed-task progress notes.
+- Raw experiment tables or parameter dumps.
+- Generated artifact inventories.
+- Git log or commit-by-commit history.
+- Copied project documentation or source content.
+- Repeated examples that do not change the rule or conclusion.
+
+### Structure Quality
+
+Good memory structure makes domain, topic, and scope obvious.
+
+Clearly not good structure:
+
+- Duplicate memory.
+- Fake hub nodes.
+- Overloaded headings that mix unrelated topics or scopes.
+- Child nodes that only restate their parent heading.
+- Detail that hides the main reusable point.
+
+### Graph Quality
+
+Good graph edges express useful semantic relationships beyond tree placement.
+
+Clearly not good graph structure:
+
+- Edges that only repeat parent-child containment.
+- `rel:` edges where a specific schema edge type clearly applies.
+
+### Behavior Memory Quality
+
+Good behavior memory is scoped operating guidance for future agents.
+
+Clearly not good behavior memory:
+
+- Transcript review notes.
+- A growing incident history.
+- Frustration context preserved as the memory itself.
+- Project-specific workflow stored as a global default.
+- Examples repeated after the rule is already clear.
 
 ## Memory Skills
 

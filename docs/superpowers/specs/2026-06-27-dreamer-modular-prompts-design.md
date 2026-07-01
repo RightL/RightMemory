@@ -56,7 +56,7 @@ The notes below use these source labels instead of line numbers:
   memory files, schema use, local/global scope, and judgment-based reasoning.
 - `Dreamer: Cleanup And Restructure`: the current section that covers light
   graph fixes, deep restructures, durable value judgment, open questions,
-  compaction/removal, shared-view boundaries, and graveyard behavior.
+  compaction/removal, shared-view boundaries, and stale-memory handling.
 - `Dreamer: Memory Skills`: the current section about turning recurring
   instruction-like memory into `S#` memory skills.
 - `Dreamer: Conflicts And Boundaries`: the current section about contradictions,
@@ -135,9 +135,8 @@ The current Dreamer prompt already contains several hidden steps:
   meaning, such as near-duplicates, unclear heading placement, reciprocal edges,
   stale open questions, edge-type choice that depends on meaning, and
   contradictions.
-- Active memory quality cleanup: judge durable value, preserve
-  hard-to-reproduce conclusions, compress noisy traces, mark locality issues,
-  and move stale low-value material to a graveyard when appropriate.
+- Memory quality cleanup and compaction: judge durable value, preserve
+  hard-to-reproduce conclusions, and compress noisy traces.
 - Behavior memory scope and compaction: keep behavior entries as scoped
   operating rules instead of ever-growing incident histories.
 - Skill extraction: turn reusable instruction-like memory into `S#` skills.
@@ -166,24 +165,22 @@ near-duplicates need judgment about what makes the memory clearer.
 
 ### Quality Cleanup vs Pruner
 
-Dreamer quality cleanup may compact, mark locality issues, or move low-value
-stale material into a graveyard. Budget enforcement is a separate lifecycle
-concern from quality cleanup.
+Dreamer quality cleanup may compact or remove low-value memory content. Budget
+enforcement is a separate lifecycle concern from quality cleanup.
 
 ### Behavior Memory Scope
 
 Behavior, preference, and workflow memory has its own failure mode: it can grow
-by appending every correction, frustration, and incident. That makes active
-memory too long and too global. Behavior cleanup should preserve the rule, keep
-only the shortest useful incident evidence, and make scope explicit.
+by appending every correction, frustration, and incident. That makes memory
+content too long and too global. Behavior cleanup should preserve the rule,
+keep only the shortest useful incident evidence, and make scope explicit.
 
 ### Archive Gap
 
 The role split decision says compaction should write archive records for details
-that leave active memory. The current Dreamer prompt does not define that
-archive mechanism. Until the archive exists, quality cleanup should say what
-detail would be lost and avoid compression that would permanently drop details
-when preservation is unclear.
+removed from the current memory files. The current Dreamer prompt does not
+define that archive mechanism. Until the archive exists, quality cleanup should
+say what detail would be lost when preservation is unclear.
 
 ### Skillifier vs Behavior Cleanup
 
@@ -192,22 +189,19 @@ agent instructions. Some behavior entries naturally overlap with skill
 extraction, while ordinary user preferences, scoped project behavior, and
 one-off corrections remain ordinary memory.
 
-## Severe Active-Memory Problems To Address In Prompts
+## Severe Memory Quality Problems To Address In Prompts
 
 These problems should be called out directly because the current Dreamer prompt
 only covers them indirectly or not at all:
 
 - Behavior memory grows into long incident histories instead of scoped operating
   rules.
-- Project-local facts, duplicated docs, generated artifact inventories, and Git
-  history notes enter global active memory instead of becoming pointers,
-  locality issues, or no durable memory.
+- Project-specific detail, duplicated docs, generated artifact inventories, and
+  Git history notes can enter memory as copied source material instead of
+  durable takeaways or no memory.
 - Raw experiment rows and parameter sweeps remain as tactical detail instead of
   compressing into durable conclusion, current best setting, rejected direction,
   reason, and report pointer.
-- Insight-style or reflective prose can behave like active operational memory
-  instead of being distilled into a durable rule, risk, or decision.
-
 ## Module Drafts
 
 ### Shared Setup
@@ -306,51 +300,36 @@ Boundary notes:
 - Reciprocal edges require judgment and should be added only when they improve
   future retrieval or understanding without misleading the graph.
 
-### Active Memory Quality Cleanup
+### Memory Quality Cleanup And Compaction
 
 Source: `Dreamer: Cleanup And Restructure`,
 `Decision: 2026-06-16 Staged Cleanup`, `Decision: 2026-06-23 Role Split`, and
 `New boundary`.
 
-This module's primary attention is active memory quality. It combines
-durable-value judgment, compaction, locality marking, and graveyard movement
-because separating those too rigidly can make the model behave unnaturally.
+This module's primary attention is memory quality. It combines durable-value
+judgment and compaction because separating those too rigidly can make the model
+behave unnaturally.
 
 Prompt:
-
-> - During consolidation, judge each item by durable value: whether it helps a
->   future agent act, decide, retrieve context, or avoid repeating work.
+> - Clean up and compact the current memory files by durable value: whether it
+>   helps a future agent act, decide, retrieve context, or avoid repeating work.
 > - Compress or remove memory with low durable value appropriately. [[Common
 >   examples include transient progress, over-detailed traces, stale state,
->   low-value repetition, duplicated project documentation, generated artifact
->   inventories, Git history notes, and raw experiment rows.]]
+>   low-value repetition, project-specific detail that duplicates project
+>   sources, generated artifact inventories, Git history notes, and raw
+>   experiment rows.]]
 > - Preserve hard-to-reproduce reasoning, conclusions, failed investigations,
 >   and decisions when recreating them later would take meaningful effort.
 > - If the surrounding record is noisy, keep the durable conclusion and simplify
 >   the trace around it.
 > - Raw experiment detail should usually compress into the durable conclusion,
 >   current best setting, rejected direction, reason, and report pointer.
-> - Memory that looks project-local can be compressed to a pointer or marked as
->   a locality issue. [[Dreamer should not try to move it into project files.]]
-> - Distill insight-style or reflective prose into durable memory when it
->   matters. [[Do not keep reflective prose as ordinary operational memory unless
->   it has become a durable rule, risk, or decision.]]
-> - Move low-value but nontrivial stale memory into a `## Graveyard` heading
->   inside the same `#` memory domain when that is the right cleanup shape.
->   [[Use graveyard movement for material that should leave the main active
->   memory view but should not be deleted yet.]]
-> - Preserve important detail when no archive target exists. [[Do not delete,
->   flatten, or permanently drop long memory just because it is long.]]
 
 Boundary notes:
 
 - This module may edit and compact; it is not a read-only triage report.
 - Direct deletion should stay narrow: duplicate graph junk, exact duplicate
   memory, or clearly obsolete material.
-- Low-value but nontrivial material should usually be compressed or moved to a
-  graveyard before deletion.
-- Deletion after repeated graveyard cycles is a budget or lifecycle concern,
-  not the core quality-cleanup prompt.
 
 ### Behavior Memory Scope And Compaction
 
@@ -441,7 +420,7 @@ Boundary notes:
 - The role split decision says the division should stay visible in prompts,
   tests, commit subjects, and final reports.
 - The report should say whether deterministic preflight, structure organizer,
-  active memory quality cleanup, behavior memory scope/compaction, or
+  memory quality cleanup and compaction, behavior memory scope/compaction, or
   skillifier did meaningful work.
 
 ## Possible Progressive Disclosure Flow
@@ -453,7 +432,7 @@ one combined prompt:
 1. Shared setup
 2. Deterministic mechanical preflight
 3. Structure organizer
-4. Active memory quality cleanup
+4. Memory quality cleanup and compaction
 5. Behavior memory scope and compaction
 6. Skillifier when instruction-like memory remains
 7. Commit and report
@@ -470,8 +449,9 @@ does not need to answer them all at once.
    should it run inside the Dreamer cycle and provide a preflight report to the
    model?
 2. How much prior-step summary should be passed to the next module prompt?
-3. Until archive support exists, when should active memory quality cleanup
-   refuse compression because detail would leave active memory?
+3. Until archive support exists, when should memory quality cleanup and
+   compaction refuse compression because detail would be removed from the
+   current memory files?
 4. Should behavior memory scope and compaction run every Dreamer cycle, or only
    when behavior/preference domains changed or became large?
 5. Should Skillifier remain a conditional Dreamer module, or should it become a
