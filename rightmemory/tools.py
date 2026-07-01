@@ -165,6 +165,20 @@ class MemoryTools:
             parts.append("")
         return self._cap_command_output("\n".join(parts).rstrip())
 
+    def read_memory_file(self, slug: str) -> str:
+        """Read an ordinary MEMORY_<slug>.md detail file by slug."""
+        clean_slug = self._validate_memory_reference_id(slug)
+        if clean_slug.startswith(".") or clean_slug == ".." or clean_slug.startswith("SKILL_"):
+            raise ValueError("slug must name an ordinary MEMORY_<slug>.md detail file")
+        relative = f"MEMORY_{clean_slug}.md"
+        if not MEMORY_DETAIL_FILE_RE.fullmatch(relative) or MEMORY_SKILL_FILE_RE.fullmatch(relative):
+            raise ValueError("slug must name an ordinary MEMORY_<slug>.md detail file")
+        path = self.memory_root / relative
+        if not self._is_safe_read_file(path):
+            return self._missing_memory_file_message(clean_slug)
+        text = self._read_text(path).rstrip()
+        return self._cap_command_output(f"===== {relative} =====\n{text}")
+
     def read_file(
         self,
         path: str,
@@ -1139,6 +1153,23 @@ class MemoryTools:
         if not ids:
             return "Available skills:\n- none"
         return "Available skills:\n" + "\n".join(f"- {item}" for item in ids)
+
+    def _missing_memory_file_message(self, slug: str) -> str:
+        return f"Memory file not found: {slug}\n\n{self._available_memory_files_block()}"
+
+    def _available_memory_files_block(self) -> str:
+        slugs = []
+        for path in sorted(self.memory_root.glob("MEMORY_*.md")):
+            relative = path.relative_to(self.memory_root).as_posix()
+            if (
+                MEMORY_DETAIL_FILE_RE.fullmatch(relative)
+                and not MEMORY_SKILL_FILE_RE.fullmatch(relative)
+                and self._is_safe_read_file(path)
+            ):
+                slugs.append(path.stem.removeprefix("MEMORY_"))
+        if not slugs:
+            return "Available memory files:\n- none"
+        return "Available memory files:\n" + "\n".join(f"- {item}" for item in slugs)
 
     def _missing_mf_message(self, mf_id: str) -> str:
         return f"MF import not found: {mf_id}\n\n{self._available_mf_imports_block()}"

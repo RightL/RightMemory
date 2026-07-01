@@ -60,6 +60,51 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("Available skills:\n- beta", result)
         self.assertNotIn("MEMORY_SKILL_beta.md", result)
 
+    def test_retrieve_read_memory_file_returns_detail_file_by_slug(self):
+        (self.root / "MEMORY_alpha.md").write_text("# Alpha Detail\n\nUse alpha detail.\n", encoding="utf-8")
+        (self.root / "MEMORY_SKILL_alpha.md").write_text("# Alpha Skill\n\nsecret skill.\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="retrieve")
+
+        result = tools.read_memory_file("alpha")
+
+        self.assertIn("===== MEMORY_alpha.md =====", result)
+        self.assertIn("# Alpha Detail", result)
+        self.assertIn("Use alpha detail.", result)
+        self.assertNotIn("secret skill", result)
+
+    def test_retrieve_read_memory_file_failure_lists_available_slugs_without_paths(self):
+        (self.root / "MEMORY_beta.md").write_text("# Beta Detail\n", encoding="utf-8")
+        (self.root / "MEMORY_SKILL_gamma.md").write_text("# Gamma Skill\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="retrieve")
+
+        result = tools.read_memory_file("alpha")
+
+        self.assertIn("Memory file not found: alpha", result)
+        self.assertIn("Available memory files:\n- beta", result)
+        self.assertNotIn("MEMORY_beta.md", result)
+        self.assertNotIn("gamma", result)
+
+    def test_retrieve_read_memory_file_rejects_invalid_slugs(self):
+        tools = MemoryTools(self.root, role="retrieve")
+
+        for slug in ("", "../alpha", "/tmp/alpha", ".hidden", "..", "SKILL_alpha"):
+            with self.subTest(slug=slug):
+                with self.assertRaises(ValueError):
+                    tools.read_memory_file(slug)
+
+    @unittest.skipIf(not hasattr(os, "symlink"), "symlink is not available")
+    def test_retrieve_read_memory_file_does_not_follow_symlink_outside_root(self):
+        outside = self.root.parent / f"{self.root.name}-outside-memory.md"
+        self.addCleanup(outside.unlink, missing_ok=True)
+        outside.write_text("# Outside\n\nsecret\n", encoding="utf-8")
+        (self.root / "MEMORY_alpha.md").symlink_to(outside)
+        tools = MemoryTools(self.root, role="retrieve")
+
+        result = tools.read_memory_file("alpha")
+
+        self.assertIn("Memory file not found: alpha", result)
+        self.assertNotIn("secret", result)
+
     @unittest.skipIf(not hasattr(os, "symlink"), "symlink is not available")
     def test_retrieve_read_skill_does_not_follow_symlink_outside_root(self):
         outside = self.root.parent / f"{self.root.name}-outside-skill.md"
