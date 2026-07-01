@@ -18,7 +18,7 @@ description: "Use when the user's request may depend on long-term context from e
 - Skip this factual/context retrieval when the message is clearly self-contained and answerable from the conversation alone.
 - For preference-, workflow-, and behavior-related memory, retrieve proactively and very frequently when the agent is about to make choices that affect how it collaborates, implements, verifies, communicates, or finishes work.
 - Treat phase and topic changes as strong retrieval triggers for preference, workflow, and behavior memory, especially transitions between discussion, implementation, and finishing work.
-- When running retrieve, give the actual retrieve command/session up to 3 minutes to return before acting without memory. This means awaiting or polling the tool result; do not run a separate blocking wait such as `sleep 180`. During the pending retrieve, do not explore files or advance the task independently.
+- When running retrieve, give the actual retrieve command/session up to 3 minutes to return before acting without memory. This means awaiting or polling the tool result; do not run a separate blocking wait such as `sleep 180` after a successful retrieve. During the pending retrieve, do not explore files or advance the task independently.
 - The retriever skips items already returned in this session; ask explicitly if you need something again.
 - A returned `S#...` heading is a memory skill: reusable instruction backed by a separate skill body, not an ordinary memory fact.
 - Broad retrieval usually returns only the skill heading and brief body paragraph.
@@ -36,6 +36,9 @@ description: "Use when the user's request may depend on long-term context from e
 ## Updates
 
 - After completing work, judge whether this turn produced durable context that should change how a future agent acts, decides, retrieves context, or avoids repeating a mistake. If not, skip the update.
+- Before submitting an update, check whether the same useful information is already durably captured in a natural artifact that future agents are likely to inspect, such as a git commit message, design doc, code comment, experiment report, run log, or project-local notes.
+- If a natural artifact already captures the useful information, skip the memory update unless memory adds retrieval value that the artifact alone does not provide.
+- For recurring project artifacts, prefer one compact lookup rule over repeated updates. For example, remember that future agents should inspect the local experiment log/report directory when they need run details, rather than remembering every new experiment report path.
 - If a user context, preference, workflow, or behavior update may be durable but is uncertain, submit it as a candidate brief with the uncertainty and surrounding context included. The command-backed update role will triage candidate briefs before editing memory.
 - Submit an update when previous work involved a significant amount of effort or reasoning, and reproducing that work later would take substantial effort.
 - Memory-worthy context may include durable user context, user preferences, workflow expectations, emergent reusable workflows discovered through iteration, environment/tooling constraints, repeated agent failure patterns and their fixes, project facts, decisions, blockers, or domain working knowledge.
