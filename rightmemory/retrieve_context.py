@@ -9,10 +9,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
-from .tools import MEMORY_DETAIL_FILE_RE, MEMORY_SKILL_FILE_RE
 
 
-SNAPSHOT_HEADER = "Daily memory snapshot"
+SNAPSHOT_HEADER = "Daily root-memory snapshot"
+SNAPSHOT_SCOPE = "root-memory-v1"
 DIFF_HEADER = "Memory changes since previous retrieve turn"
 RECENT_SUBMITTED_CONTEXT_HEADER = "Recent submitted memory"
 QUERY_HEADER = "Query"
@@ -28,6 +28,7 @@ class DailySnapshot:
     content_hash: str
     text: str
     paths: list[str] = field(default_factory=list)
+    scope: str = SNAPSHOT_SCOPE
 
 
 @dataclass(frozen=True)
@@ -93,17 +94,10 @@ class RetrieveContextStore:
         _write_json(self.memory_root, self._state_path(state.session_id), data)
 
 
-def active_memory_paths(memory_root: Path) -> list[str]:
+def root_memory_paths(memory_root: Path) -> list[str]:
     root = Path(memory_root)
-    paths: list[str] = []
-    for path in root.glob("MEMORY*.md"):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root).as_posix()
-        if relative == "MEMORY.md" or MEMORY_DETAIL_FILE_RE.fullmatch(relative):
-            if not MEMORY_SKILL_FILE_RE.fullmatch(relative):
-                paths.append(relative)
-    return sorted(paths, key=lambda item: (item != "MEMORY.md", item))
+    memory_path = root / "MEMORY.md"
+    return ["MEMORY.md"] if memory_path.is_file() else []
 
 
 def load_daily_snapshot(memory_root: Path, *, now: datetime | None = None) -> DailySnapshot:
@@ -113,10 +107,10 @@ def load_daily_snapshot(memory_root: Path, *, now: datetime | None = None) -> Da
     state_path = root / SNAPSHOT_STATE
     if state_path.exists():
         data = json.loads(state_path.read_text(encoding="utf-8"))
-        if data.get("day") == day:
+        if data.get("day") == day and data.get("scope") == SNAPSHOT_SCOPE:
             return _snapshot_from_dict(data)
 
-    paths = active_memory_paths(root)
+    paths = root_memory_paths(root)
     text = _render_snapshot_text(root, paths)
     snapshot = DailySnapshot(
         day=day,
@@ -146,7 +140,7 @@ def current_memory_head(memory_root: Path) -> str | None:
 def memory_diff_since(memory_root: Path, old_commit: str | None, new_commit: str | None) -> str:
     if not old_commit or not new_commit or old_commit == new_commit:
         return ""
-    changed = _changed_active_memory_paths(memory_root, old_commit, new_commit)
+    changed = _changed_root_memory_paths(memory_root, old_commit, new_commit)
     if not changed:
         return ""
     result = subprocess.run(
@@ -220,9 +214,9 @@ def _render_snapshot_text(memory_root: Path, paths: list[str]) -> str:
     return "\n".join(parts).rstrip() + "\n"
 
 
-def _changed_active_memory_paths(memory_root: Path, old_commit: str, new_commit: str) -> list[str]:
+def _changed_root_memory_paths(memory_root: Path, old_commit: str, new_commit: str) -> list[str]:
     result = subprocess.run(
-        ["git", "diff", "--name-only", old_commit, new_commit, "--", "MEMORY.md", "MEMORY_*.md"],
+        ["git", "diff", "--name-only", old_commit, new_commit, "--", "MEMORY.md"],
         cwd=memory_root,
         text=True,
         stdout=subprocess.PIPE,
@@ -231,12 +225,7 @@ def _changed_active_memory_paths(memory_root: Path, old_commit: str, new_commit:
     )
     if result.returncode != 0:
         raise RuntimeError(f"git diff --name-only failed: {result.stderr.strip()}")
-    paths = []
-    for raw in result.stdout.splitlines():
-        path = raw.strip()
-        if path == "MEMORY.md" or MEMORY_DETAIL_FILE_RE.fullmatch(path):
-            if not MEMORY_SKILL_FILE_RE.fullmatch(path):
-                paths.append(path)
+    paths = [raw.strip() for raw in result.stdout.splitlines() if raw.strip() == "MEMORY.md"]
     return sorted(set(paths))
 
 
@@ -263,10 +252,13 @@ def _snapshot_from_dict(data: dict[str, object]) -> DailySnapshot:
     content_hash = data.get("content_hash")
     text = data.get("text")
     base_commit = data.get("base_commit")
+    scope = data.get("scope")
     if not isinstance(day, str) or not isinstance(content_hash, str) or not isinstance(text, str):
         raise ValueError("daily snapshot state is malformed")
     if base_commit is not None and not isinstance(base_commit, str):
         raise ValueError("daily snapshot base_commit must be a string or null")
+    if scope != SNAPSHOT_SCOPE:
+        raise ValueError("daily snapshot scope is unsupported")
     return DailySnapshot(day=day, base_commit=base_commit, content_hash=content_hash, text=text, paths=paths)
 
 
