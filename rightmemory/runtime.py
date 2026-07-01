@@ -604,6 +604,7 @@ class RightMemoryRuntime:
         if self.config.role == "retrieve":
             return [
                 self._agent_tool(self.tools.read_skill),
+                self._agent_tool(self.tools.read_memory_file),
                 self._agent_tool(self.tools.read_mf),
             ]
         read_tools = [

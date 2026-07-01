@@ -851,13 +851,18 @@ class ConfigTests(unittest.TestCase):
     def test_retrieve_prompt_uses_context_first_contract(self):
         instructions = build_instructions(Path("/memory"), "retrieve")
 
-        self.assertIn("supplies a daily memory snapshot", instructions)
+        self.assertIn("supplies a daily root-memory snapshot", instructions)
+        self.assertIn("read_memory_file", instructions)
         self.assertIn("read_skill", instructions)
         self.assertIn("read_mf", instructions)
         self.assertIn("MQ#", instructions)
         self.assertIn("provider-question context", instructions)
         self.assertIn("reusable instruction assets", instructions)
         self.assertIn("Available retrieve tools", instructions)
+        self.assertIn(
+            "`read_memory_file(slug)` reads the `MEMORY_<slug>.md` detail file for a relevant `F#` heading",
+            instructions,
+        )
         self.assertIn("`read_mf(mf_id)` reads external file context", instructions)
         self.assertIn("Never re-return a node or heading already sent in this session", instructions)
         self.assertNotIn("Read `MEMORY.md` before retrieval", instructions)
@@ -886,7 +891,7 @@ class ConfigTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
 
         tool_names = {tool.__name__ for tool in runtime._agent_tools()}
-        self.assertEqual(tool_names, {"read_skill", "read_mf"})
+        self.assertEqual(tool_names, {"read_memory_file", "read_skill", "read_mf"})
         self.assertNotIn("retrieve_shared_view", tool_names)
         self.assertNotIn("read_command", tool_names)
         self.assertNotIn("grep", tool_names)
@@ -1020,7 +1025,7 @@ class RuntimeTests(unittest.TestCase):
                 output = runtime.run_session_turn("agent-session", "what do we know?")
 
         self.assertEqual(output, "answer")
-        self.assertTrue(captured["message"].startswith("Daily memory snapshot\n"))
+        self.assertTrue(captured["message"].startswith("Daily root-memory snapshot\n"))
         self.assertIn("===== MEMORY.md =====", captured["message"])
         self.assertTrue(captured["message"].rstrip().endswith("# Query\n\nwhat do we know?"))
 
@@ -1632,7 +1637,7 @@ class RuntimeTests(unittest.TestCase):
             [
                 ("locked", NO_SESSION_RIGHTMEMORY_SESSION_ID),
                 "lock_enter",
-                ("agent", "Daily memory snapshot\n\n# Query\n\nremember one\n"),
+                ("agent", "Daily root-memory snapshot\n\n# Query\n\nremember one\n"),
                 "lock_exit",
             ],
         )
@@ -1761,7 +1766,7 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(first, "reply 1")
         self.assertEqual(second, "reply 2")
-        self.assertTrue(runtime.agent.calls[0]["message"].startswith("Daily memory snapshot\n"))
+        self.assertTrue(runtime.agent.calls[0]["message"].startswith("Daily root-memory snapshot\n"))
         self.assertIn("===== MEMORY.md =====", runtime.agent.calls[0]["message"])
         self.assertTrue(runtime.agent.calls[0]["message"].rstrip().endswith("# Query\n\nfind root"))
         self.assertIsNone(runtime.agent.calls[0]["message_history"])
@@ -1776,7 +1781,7 @@ class RuntimeTests(unittest.TestCase):
             state["turns"],
             [{"query": "find root", "answer": "reply 1"}, {"query": "find again", "answer": "reply 2"}],
         )
-        self.assertNotIn("Daily memory snapshot", state_path.read_text(encoding="utf-8"))
+        self.assertNotIn("Daily root-memory snapshot", state_path.read_text(encoding="utf-8"))
 
     def test_retrieve_turn_does_not_record_context_state_after_failure(self):
         root = Path(self.tempdir.name)
@@ -1912,7 +1917,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result, "cli reply")
         executor_class.return_value.run_stateless_turn.assert_called_once()
         (message,) = executor_class.return_value.run_stateless_turn.call_args.args
-        self.assertTrue(message.startswith("Daily memory snapshot\n"))
+        self.assertTrue(message.startswith("Daily root-memory snapshot\n"))
         self.assertLess(message.index("# Recent submitted memory"), message.index("# Query"))
         self.assertTrue(message.rstrip().endswith("# Query\n\nfind one"))
         self.assertIn("remember cli submitted detail", message)
@@ -2708,7 +2713,7 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
 
         tool_names = {tool.__name__ for tool in runtime.agent.kwargs["tools"]}
-        self.assertEqual(tool_names, {"read_skill", "read_mf"})
+        self.assertEqual(tool_names, {"read_memory_file", "read_skill", "read_mf"})
         self.assertNotIn("read", tool_names)
         self.assertNotIn("grep", tool_names)
         self.assertNotIn("glob", tool_names)

@@ -216,6 +216,7 @@ def _tool_guidance(role: str) -> str:
     if role == "retrieve":
         return (
             "Available retrieve tools:\n"
+            "- `read_memory_file(slug)` reads the `MEMORY_<slug>.md` detail file for a relevant `F#` heading.\n"
             "- `read_skill(skill_id)` reads a full memory skill body for a relevant `S#` heading.\n"
             "- `read_mf(mf_id)` reads external file context for a relevant `MF#` heading."
         )

@@ -2,8 +2,8 @@
 
 ## Sources And Schema
 
-- The runtime supplies a daily memory snapshot before the caller query. Treat that supplied snapshot as the ordinary retrieval source.
-- The runtime may append a memory diff block after the daily snapshot when active memory changed after the snapshot was built. Read it as a patch over the supplied snapshot: added lines are newer memory, removed lines are obsolete, and unchanged snapshot lines remain valid.
+- The runtime supplies a daily root-memory snapshot before the caller query. The snapshot contains `MEMORY.md`; use `read_memory_file(slug)` for relevant `F#` headings backed by `MEMORY_<slug>.md`.
+- The runtime may append a memory diff block after the daily root-memory snapshot when `MEMORY.md` changed after the snapshot was built. Read it as a patch over the supplied snapshot: added lines are newer memory, removed lines are obsolete, and unchanged snapshot lines remain valid.
 - The runtime may append a `Recent submitted memory` block before the current query.
 - The current query is last and controls relevance.
 - Use the schema supplied by the execution wrapper for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.
