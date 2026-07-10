@@ -5,136 +5,35 @@ description: Use when a user wants to initialize or onboard a RightMemory memory
 
 # RightMemory Onboarding Interview
 
-## Goal
+Run a short, evidence-aware interview that produces reviewable RightMemory drafts from durable project, user, environment, and agent-behavior context.
 
-Run a short, evidence-aware interview that turns a user's durable project, role, environment, and agent-behavior context into reviewable RightMemory `MEMORY*.md` drafts.
+## Workflow
 
-The interview should reduce user burden: inspect provided paths and links, infer what can be inferred from evidence, and ask only questions whose answers will change future agent behavior.
+1. Read `skills/rightmemory-schema.md` and `MEMORY.example.md` when available. Treat the schema as authoritative and the example as illustrative, never as user facts.
+2. Use the requested staging location, or `./tmp` by default. Do not overwrite a real memory root without explicit permission.
+3. If the user asks what the interview covers, give a compact preview before starting.
+4. Begin with the highest-yield question:
 
-## Procedure
+   > What projects, domains, or responsibilities should this memory cover, and what paths, links, docs, or servers can I inspect for each one?
 
-1. Read the RightMemory schema and example first when available:
-   - `skills/rightmemory-schema.md`
-   - `MEMORY.example.md`
-2. Ask where to write drafts only if the user has not specified a location. Default to `./tmp` for reviewable drafts. Do not overwrite a real memory root unless the user explicitly asks.
-3. If the user asks what the interview will cover, show a compact preview before starting.
-4. Start with the highest-yield question:
+5. Inspect supplied paths, repositories, docs, and links before asking follow-ups. Check durable sources such as READMEs, manifests, tests, API or integration docs, runbooks, and build or deployment files. Use bounded evidence collection only when permitted by the environment and project instructions.
+6. Ask one practical follow-up at a time, and only when the answer cannot be inferred and would change future agent behavior. Focus on responsibility boundaries, project relationships, environments, integration surfaces, downstream callers, durable operating rules, and operationally relevant unknowns.
+7. Stop when the evidence and answers support a useful draft. If the user rejects a question as unhelpful, skip that category and continue from existing evidence.
+8. Write `MEMORY.md` and only the `MEMORY_<slug>.md` detail files needed for scanability. Re-read and validate every draft before reporting completion.
 
-```md
-What projects, domains, or responsibilities should this memory cover, and what paths, links, docs, or servers can I inspect for each one?
-```
+## Memory Content
 
-5. Inspect provided paths, repos, docs, or links before asking follow-up questions. Use bounded evidence collection or subagents only when the environment and user/project instructions allow it.
-6. Ask one practical follow-up at a time. Prefer concrete facts over preferences:
-   - responsibility boundaries;
-   - project relationships and integration paths;
-   - repos, services, libraries, APIs, CLIs, schemas, prompts, runbooks, and deployment units;
-   - local and remote environments;
-   - downstream callers or collaborators;
-   - rules future agents should follow;
-   - unresolved questions that should be asked later only when relevant.
-7. Stop asking when enough durable memory can be drafted. If the user rejects a question as useless, accept that signal, skip that category, and continue from existing evidence.
-8. Write reviewable `MEMORY.md` plus optional `MEMORY_<slug>.md` detail files.
-9. Re-read the drafts and run a schema sanity check before reporting completion.
+- Record reusable facts, relationships, preferences, decisions, and future-facing rules. Rewrite evidence as durable memory; do not preserve transcript narration, onboarding chatter, or source citations.
+- Avoid broad preference surveys, quickly stale status labels, and questions already answered by available evidence.
+- Organize only the domains supported by the evidence. Common domains are a project or responsibility graph, `# User Context`, `# Cross-Session Agent Behavior`, and `# Open Context Questions`.
+- Put loose, actionable unknowns in `# Open Context Questions` as normal nodes with `todo:` edges. Use `Uncertain:` only for tentative claims worth retaining and revising later.
+- Use `{F#slug}` only when moving content to `MEMORY_slug.md` improves root-file scanability. Keep the heading and its summary in the current file, but not the moved child content. A terminal `####` file reference may have a summary but no child nodes or headings.
 
-## Question Discipline
+## Schema And Completion Checks
 
-Ask questions only when the answer cannot be inferred and would change a future agent's action.
+Before saying the drafts are ready:
 
-Good questions:
-
-- "What projects are you responsible for, and what paths or links can I inspect?"
-- "What is your responsibility boundary for these projects?"
-- "Are there remote servers, local copies, or special environments future agents should know?"
-- "When changing public APIs, who are the downstream callers or reviewers?"
-
-Low-value questions to avoid unless clearly actionable:
-
-- abstract priorities such as "what should agents optimize for most?";
-- project status labels that will quickly go stale;
-- broad preference surveys;
-- anything the repos or docs can answer.
-
-## Evidence Use
-
-When the user provides paths or links, inspect them and summarize only durable facts. Look for:
-
-- README, docs, changelogs, build files, package manifests, tests, examples, and integration guides;
-- declared project purpose;
-- main languages and frameworks;
-- public API surfaces and caller-facing wrappers;
-- sync scripts, generated copies, or integration boundaries;
-- build/test commands when explicitly documented;
-- local and remote paths that future agents may need.
-
-Do not write transcript history, source citations, or "the user said in this session" into memory. Rewrite evidence into durable facts and future-facing rules.
-
-## Draft Structure
-
-Prefer this shape unless the user's domain suggests a better one:
-
-```md
-# <Domain Or Project Graph> {#domain-project-graph}
-
-## Owned Projects {#owned-projects}
-
-### <Project> {#project-slug} ->[rel:related-topic]
-
-- `project-purpose` Durable project fact. ->[rel:project-slug]
-- `project-local-path` Local path is `...`. ->[loc:dev-workstation, rel:project-slug]
-
-## <Large Topic> {F#large-topic}
-
-Short summary pointing to `MEMORY_large-topic.md`.
-
-# User Context {#user-context}
-
-## Role And Responsibility {#role-and-responsibility}
-
-- `user-responsibility` Durable role fact. ->[rel:domain-project-graph]
-
-# Cross-Session Agent Behavior {#cross-session-agent-behavior}
-
-## Project Work Guidance {#project-work-guidance}
-
-- `agent-rule` Future-facing agent behavior rule. ->[rel:domain-project-graph]
-
-# Open Context Questions {#open-context-questions}
-
-- `q-specific-unknown` Uncertain: Ask this only when it becomes operationally relevant. ->[todo:related-topic]
-```
-
-Use detail files when a topic would make the root hard to scan. A file-backed heading such as `{F#large-topic}` maps to sibling file `MEMORY_large-topic.md`; keep only the heading and summary in the current file.
-
-## Schema Rules To Preserve
-
-- Use `MEMORY.md` plus optional sibling `MEMORY_*.md` detail files.
-- Use unique heading IDs and node IDs across the memory file set.
-- Node lines use ``- `<node-id>` description ->[...]``. If a node has no edges, write `->[]`.
-- Headings may omit `->[]` when they have no edges.
-- Use `Uncertain:` only for unsettled memory that should be revised later.
-- Use `# Open Context Questions` for loose ends, with normal nodes and `todo:` links.
-- Do not turn example/template memory into facts about the user.
-- Do not add child nodes beneath a terminal `####` file reference.
-
-## Common Mistakes
-
-| Mistake | Correction |
-| --- | --- |
-| Asking a full questionnaire before inspecting paths | Ask for paths first, inspect, then ask only what remains unknown. |
-| Forcing status labels | Skip status unless it affects future action. |
-| Asking abstract preference questions | Convert them into concrete future-agent behavior questions or omit them. |
-| Writing directly into real memory | Draft in `./tmp` or the requested staging location first. |
-| Capturing onboarding chatter | Store durable facts, rules, and open questions instead. |
-| Making every topic a detail file | Split only when it improves scanability. |
-
-## Verification
-
-Before saying the draft is ready:
-
-1. Re-read every created `MEMORY*.md` file.
-2. Check that file-backed headings point to matching `MEMORY_<slug>.md` files.
-3. Check that node lines have `->[...]`.
-4. Check that IDs are meaningful and not duplicated.
-5. Check that uncertain facts are either in `# Open Context Questions` or clearly prefixed with `Uncertain:`.
-6. Confirm the final response lists the created files and any facts that were recorded from user-provided but unverified sources, such as remote server paths not inspected.
+- follow the canonical schema, including meaningful, unique heading and node IDs across the file set and `→[...]` on every node line;
+- confirm every file-backed heading maps to its matching sibling detail file;
+- confirm questions and uncertain claims use the correct forms;
+- list the created files and identify user-provided facts that remain unverified, such as an inaccessible remote path.
