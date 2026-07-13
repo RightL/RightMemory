@@ -5,13 +5,13 @@
 - Core runtime code lives in `rightmemory/`: config loading, command orchestration, standalone tools, CLI-agent delegation, transcript review, async update batching, isolated semantic writes, and provider transcript adapters.
 - Canonical role prompts live in `rightmemory/prompts/`. Edit role behavior there first; installed skills do not contain generated role prompts.
 - `skills/rightmemory-schema.md` is the schema source for memory files. `MEMORY.example.md` is the installer seed and the source for the managed example block that can be refreshed on reinstall.
-- `install.sh` installs either standalone mode or cli-agent mode, preserves existing user memory files, and refreshes the managed example block when present.
+- `install.sh` and `install.ps1` are platform bootstraps for the shared stdlib-only `rightmemory.install_core` transaction. Both modes preserve existing user memory files and refresh the managed example block when present.
 - `retrieve` model config is independent. Other roles may reuse the configured writer executor when their own `[<role>.model]` or `[<role>.agent_cli]` table is absent, so upgrade-added roles can run without rewriting user config.
 
 ## Development Commands
 - Run the test suite with `python -m unittest discover -s tests`.
 - For syntax-only checks, use `python -m compileall -q rightmemory tests`.
-- Use `./install.sh [--mode cli-agent|standalone] <memory-root> <skills-target>` when verifying install behavior.
+- Use `./install.sh [--mode cli-agent|standalone] <memory-root> <skills-target>` on macOS/Linux/WSL or `.\install.ps1 [--mode cli-agent|standalone] <memory-root> <skills-target>` on Windows PowerShell when verifying install behavior.
 - `uv` is available on PATH. Use `uv --version` if you need to check it before running the installer.
 - Useful review commands are `rightmemory review scan --once`, `rightmemory review watch`, and `rightmemory review normalize --source <codex|claude> --path <file>`.
 - Use `rightmemory prune` to run generation-based active memory pruning, and `rightmemory history --session <id> <query>` for explicit retrieval from pruned memory.
@@ -35,7 +35,7 @@
 - The installer creates a memory-root `.gitignore` allowlist so git status normally shows `MEMORY.md`, `MEMORY_*.md`, `shared_views.toml`, `shares.toml`, provider view source files under `shared_views/<view-id>/`, and `insight_logs/*.md`.
 - Runtime/session/review state belongs under `.runtime/` and should not be committed.
 - Share relationships live in `shares.toml`. Shared view connections use `MF#` headings for mirrored file views and `MQ#` headings for provider question views; `shared_views.toml` stores resolver metadata. Provider view source files live under `shared_views/<view-id>/`; generated `dist/`, imports, inboxes, credentials, and interaction records live under generated or runtime locations and should not be committed unless the user intentionally publishes them elsewhere.
-- Watcher locks, install refresh stamps, dreamer and insight trigger state, isolated temporary state, and isolated worktrees belong under `.runtime/`.
+- Watcher locks, PID-bound stop requests, process-identity registrations, install refresh stamps, dreamer and insight trigger state, isolated temporary state, and isolated worktrees belong under `.runtime/`.
 - Semantic upgrade absorption state belongs under `.runtime/semantic-upgrades.json`. Fresh installs baseline current semantic upgrade notes because the seeded memory already matches the current schema. Existing memory roots may report pending semantic upgrade notes; dreamer is responsible for applying them during consolidation.
 - Reviewer scans process one time-adjacent batch of eligible provider sessions per bounded scan. `scan --once` may review a partial batch; `watch` waits for a full `[review].batch_size` batch. Review state remains session-level: once a provider session has been reviewed, later changes or resumed turns with the same source/session id are skipped unless the review state is cleared.
 - The default review window is 3 days via `[review].since_days`; keep that default unless the user explicitly changes the backlog policy.

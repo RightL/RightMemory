@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rightmemory.share_models import load_shares
 from rightmemory.tools import MemoryTools
@@ -15,6 +16,12 @@ class MemoryToolsTests(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
         self.tools = MemoryTools(self.root)
+
+    def _symlink_or_skip(self, link: Path, target: Path, *, target_is_directory: bool = False) -> None:
+        try:
+            link.symlink_to(target, target_is_directory=target_is_directory)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlink is not permitted: {exc}")
 
     def test_rejects_paths_outside_memory_root(self):
         outside = self.root.parent / "outside.md"
@@ -97,7 +104,7 @@ class MemoryToolsTests(unittest.TestCase):
         outside = self.root.parent / f"{self.root.name}-outside-memory.md"
         self.addCleanup(outside.unlink, missing_ok=True)
         outside.write_text("# Outside\n\nsecret\n", encoding="utf-8")
-        (self.root / "MEMORY_alpha.md").symlink_to(outside)
+        self._symlink_or_skip(self.root / "MEMORY_alpha.md", outside)
         tools = MemoryTools(self.root, role="retrieve")
 
         result = tools.read_memory_file("alpha")
@@ -110,7 +117,7 @@ class MemoryToolsTests(unittest.TestCase):
         outside = self.root.parent / f"{self.root.name}-outside-skill.md"
         self.addCleanup(outside.unlink, missing_ok=True)
         outside.write_text("# Outside\n\nsecret\n", encoding="utf-8")
-        (self.root / "MEMORY_SKILL_alpha.md").symlink_to(outside)
+        self._symlink_or_skip(self.root / "MEMORY_SKILL_alpha.md", outside)
         tools = MemoryTools(self.root, role="retrieve")
 
         result = tools.read_skill("alpha")
@@ -149,7 +156,7 @@ class MemoryToolsTests(unittest.TestCase):
         outside = self.root.parent / f"{self.root.name}-outside-mf.md"
         self.addCleanup(outside.unlink, missing_ok=True)
         outside.write_text("external secret\n", encoding="utf-8")
-        (import_root / "secret.md").symlink_to(outside)
+        self._symlink_or_skip(import_root / "secret.md", outside)
         tools = MemoryTools(self.root, role="retrieve")
 
         result = tools.read_mf("auth-api")
@@ -164,7 +171,7 @@ class MemoryToolsTests(unittest.TestCase):
         (outside_imports / "auth-api").mkdir(parents=True)
         shared_views_root = self.root / ".runtime" / "shared_views"
         shared_views_root.mkdir(parents=True)
-        (shared_views_root / "imports").symlink_to(outside_imports)
+        self._symlink_or_skip(shared_views_root / "imports", outside_imports, target_is_directory=True)
         tools = MemoryTools(self.root, role="retrieve")
 
         result = tools.read_mf("missing")
@@ -250,7 +257,7 @@ class MemoryToolsTests(unittest.TestCase):
 
     def test_read_command_cat_and_sed_satisfy_edit_read_gate(self):
         memory = self.root / "MEMORY.md"
-        memory.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+        memory.write_bytes(b"alpha\nbeta\ngamma\n")
 
         self.assertEqual(self.tools.read_command("sed -n '2,3p' MEMORY.md"), "beta\ngamma\n")
         result = self.tools.edit_file("MEMORY.md", "beta\ngamma\n", "BETA\ngamma\n")
@@ -282,6 +289,21 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "MEMORY.md").write_text("alpha\nbeta\n", encoding="utf-8")
 
         self.assertEqual(self.tools.read_command("rg beta MEMORY.md"), "MEMORY.md:beta")
+
+    def test_ripgrep_uses_native_path_separator_without_rewriting_match_text(self):
+        (self.root / "MEMORY.md").write_text("memory\n", encoding="utf-8")
+        completed = subprocess.CompletedProcess(
+            ["rg"],
+            0,
+            stdout="MEMORY.md:C:\\memory\\value\n",
+            stderr="",
+        )
+
+        with patch("rightmemory.tools.subprocess.run", return_value=completed) as run:
+            output = self.tools.read_command("rg memory MEMORY.md")
+
+        self.assertEqual(output, "MEMORY.md:C:\\memory\\value")
+        self.assertIn("--path-separator=/", run.call_args.args[0])
 
     @unittest.skipIf(shutil.which("rg") is None, "rg is not installed")
     def test_read_command_expands_ripgrep_path_globs_without_shell(self):
@@ -326,7 +348,7 @@ class MemoryToolsTests(unittest.TestCase):
 
     def test_edit_file_changes_requested_region(self):
         memory = self.root / "MEMORY.md"
-        memory.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+        memory.write_bytes(b"alpha\nbeta\ngamma\n")
         self.tools.read_file("MEMORY.md")
 
         result = self.tools.edit_file("MEMORY.md", "alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n")
@@ -378,7 +400,7 @@ class MemoryToolsTests(unittest.TestCase):
 
     def test_edit_file_normalizes_line_endings(self):
         memory = self.root / "MEMORY.md"
-        memory.write_text("alpha\r\nbeta\r\n", encoding="utf-8")
+        memory.write_bytes(b"alpha\r\nbeta\r\n")
         self.tools.read_file("MEMORY.md")
 
         result = self.tools.edit_file("MEMORY.md", "alpha\nbeta\n", "alpha\nBETA\n")

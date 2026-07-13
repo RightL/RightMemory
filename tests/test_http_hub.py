@@ -2,6 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 import zipfile
+from contextlib import closing
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,7 +46,7 @@ class HubStoreTests(unittest.TestCase):
         self.assertFalse(store.verify_token("wrong", action="publish", provider_id="alice"))
         self.assertIn("token.created", [event.kind for event in store.list_audit_events()])
 
-        with sqlite3.connect(store.db_path) as connection:
+        with closing(sqlite3.connect(store.db_path)) as connection:
             connection.row_factory = sqlite3.Row
             row = connection.execute(
                 "SELECT * FROM tokens WHERE id = ?",
@@ -658,7 +659,7 @@ class HubApiTests(unittest.TestCase):
                 / "MEMORY.md"
             ).read_text(encoding="utf-8"),
         )
-        with sqlite3.connect(self.store.db_path) as connection:
+        with closing(sqlite3.connect(self.store.db_path)) as connection:
             current_version_id = connection.execute(
                 "SELECT current_version_id FROM views WHERE id = ?",
                 ("alice-auth-api",),

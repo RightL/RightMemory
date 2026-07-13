@@ -2879,9 +2879,10 @@ class PromptTests(unittest.TestCase):
             "sync-reconciler",
             "update",
         ):
-            prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), role)
+            memory_root = Path("/home/example/.rightmemory")
+            prompt = build_cli_agent_instructions(memory_root, role)
 
-            self.assertIn("The configured memory root is /home/example/.rightmemory.", prompt)
+            self.assertIn(f"The configured memory root is {memory_root}.", prompt)
             self.assertIn("RightMemory Schema", prompt)
             self.assertIn(f"{role.title().replace('-', ' ')} Role", prompt)
             self.assertNotIn("Command-selected behavior", prompt)

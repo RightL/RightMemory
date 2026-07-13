@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -14,6 +13,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TextIO
 
+from .platform import (
+    detached_process_kwargs,
+    lock_file,
+    lock_file_nonblocking,
+    process_command,
+    process_exists,
+    process_identity,
+    unlock_file,
+)
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
 
 UPDATE_DEBOUNCE_SECONDS = 60 * 60
@@ -297,7 +305,7 @@ class AsyncUpdateStore:
                     with self._worker_locked():
                         self._clear_current_worker_locked()
             finally:
-                fcntl.flock(leader_handle.fileno(), fcntl.LOCK_UN)
+                unlock_file(leader_handle)
                 leader_handle.close()
 
     def _next_batch(
@@ -468,7 +476,7 @@ class AsyncUpdateStore:
         self.worker_root.mkdir(parents=True, exist_ok=True)
         handle = self._worker_leader_lock_path().open("a+", encoding="utf-8")
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_file_nonblocking(handle)
         except BlockingIOError:
             handle.close()
             return None
@@ -480,11 +488,11 @@ class AsyncUpdateStore:
         self.worker_root.mkdir(parents=True, exist_ok=True)
         lock_path = self._worker_lock_path()
         with lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            lock_file(handle)
             try:
                 yield
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                unlock_file(handle)
 
     def _read_worker_locked(self) -> dict[str, object]:
         path = self._worker_state_path()
@@ -541,6 +549,7 @@ class AsyncUpdateStore:
             {
                 "status": status,
                 "pid": pid,
+                "identity": process_identity(pid) if pid is not None else None,
                 "started_at": _now(),
                 "batch_id": batch_id,
                 "session_ids": session_ids,
@@ -578,7 +587,8 @@ class AsyncUpdateStore:
         pid = state.get("pid")
         if not isinstance(pid, int):
             return _WorkerSnapshot()
-        if not _is_async_worker_process(pid, self.role):
+        identity = state.get("identity")
+        if not _is_async_worker_process(pid, self.role, identity=identity if isinstance(identity, str) else None):
             self._clear_worker_locked()
             return _WorkerSnapshot(dead_pid=pid)
         batch_id = state.get("batch_id")
@@ -597,7 +607,12 @@ class AsyncUpdateStore:
             self._increment_wake_counter_locked()
             state = self._read_worker_locked()
             pid = state.get("pid")
-            if isinstance(pid, int) and _is_async_worker_process(pid, self.role):
+            identity = state.get("identity")
+            if isinstance(pid, int) and _is_async_worker_process(
+                pid,
+                self.role,
+                identity=identity if isinstance(identity, str) else None,
+            ):
                 return
             if isinstance(pid, int):
                 self._clear_worker_locked()
@@ -607,9 +622,9 @@ class AsyncUpdateStore:
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    start_new_session=True,
                     cwd=self.memory_root,
                     env=os.environ.copy(),
+                    **detached_process_kwargs(),
                 )
             except Exception as exc:
                 self._fail(session_id, str(exc))
@@ -802,11 +817,11 @@ class AsyncUpdateStore:
         self.root.mkdir(parents=True, exist_ok=True)
         lock_path = self._lock_path(session_id)
         with lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            lock_file(handle)
             try:
                 yield
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                unlock_file(handle)
 
 
 def _state_from_json(data: dict[str, object]) -> AsyncUpdateState:
@@ -991,35 +1006,21 @@ def _format_time(value: datetime) -> str:
 
 
 def _process_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    return process_exists(pid)
 
 
-def _is_async_worker_process(pid: int, role: str | None = None) -> bool:
+def _is_async_worker_process(pid: int, role: str | None = None, *, identity: str | None = None) -> bool:
     if not _process_exists(pid):
         return False
+    if identity is not None:
+        return process_identity(pid) == identity
     if pid == os.getpid():
         return True
-    cmdline = _read_process_cmdline(pid)
-    if cmdline is None:
+    command = process_command(pid)
+    if command is None:
         return True
-    if "_async-worker" not in cmdline:
+    if "_async-worker" not in command:
         return False
-    if "rightmemory.cli" not in cmdline:
+    if "rightmemory.cli" not in command:
         return False
-    return role is None or role in cmdline
-
-
-def _read_process_cmdline(pid: int) -> list[str] | None:
-    try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return None
-    return [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
+    return role is None or role in command

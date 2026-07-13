@@ -1,4 +1,3 @@
-import fcntl
 import json
 import os
 import tempfile
@@ -13,6 +12,7 @@ from rightmemory.async_update import (
     AsyncUpdateStore,
     _is_async_worker_process,
 )
+from rightmemory.platform import lock_file_nonblocking, unlock_file
 
 
 class AsyncUpdateStateTests(unittest.TestCase):
@@ -45,7 +45,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
     def test_async_worker_process_check_rejects_unrelated_pid(self):
         with (
             patch("rightmemory.async_update._process_exists", return_value=True),
-            patch("rightmemory.async_update._read_process_cmdline", return_value=["[kworker/R-rcu_g]"]),
+            patch("rightmemory.async_update.process_command", return_value="[kworker/R-rcu_g]"),
         ):
             active = _is_async_worker_process(4, "update")
 
@@ -67,7 +67,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with (
                 patch("rightmemory.async_update.subprocess.Popen", return_value=process) as popen,
                 patch("rightmemory.async_update._process_exists", return_value=True),
-                patch("rightmemory.async_update._read_process_cmdline", return_value=["[kworker/R-rcu_g]"]),
+                patch("rightmemory.async_update.process_command", return_value="[kworker/R-rcu_g]"),
             ):
                 state = store.submit("agent-1", "first")
 
@@ -168,6 +168,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with (
                 patch("rightmemory.async_update.subprocess.Popen", return_value=process) as popen,
                 patch("rightmemory.async_update._process_exists", return_value=True),
+                patch("rightmemory.async_update.process_command", return_value="python -m rightmemory.cli update _async-worker"),
             ):
                 first = store.submit("agent-1", "first")
                 second = store.submit("agent-2", "second")
@@ -726,7 +727,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             calls = []
 
             with lock_path.open("a+", encoding="utf-8") as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_file_nonblocking(handle)
                 try:
                     result = store.run_pending_batches(
                         lambda batch_session_id, message: calls.append((batch_session_id, message)) or "processed",
@@ -734,7 +735,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
                         max_wait_seconds=86400,
                     )
                 finally:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    unlock_file(handle)
             state = store.read("agent-1")
 
         self.assertEqual(result.status, "idle")
@@ -1026,6 +1027,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with (
                 patch("rightmemory.async_update.subprocess.Popen", return_value=process) as popen,
                 patch("rightmemory.async_update._process_exists", return_value=True),
+                patch("rightmemory.async_update.process_command", return_value="python -m rightmemory.cli update _async-worker"),
                 patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T04:00:00+00:00")),
             ):
                 result = store.retry_manual_recovery()
@@ -1069,6 +1071,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with (
                 patch("rightmemory.async_update.subprocess.Popen", return_value=process),
                 patch("rightmemory.async_update._process_exists", return_value=True),
+                patch("rightmemory.async_update.process_command", return_value="python -m rightmemory.cli update _async-worker"),
                 patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T04:00:00+00:00")),
             ):
                 result = store.retry_manual_recovery()

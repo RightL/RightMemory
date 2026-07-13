@@ -163,7 +163,7 @@ class StatusDashboardTests(unittest.TestCase):
 
         output = format_status_dashboard(dashboard)
 
-        self.assertIn("RightMemory\n  root: /memory/root\n  git: clean on main @ abc1234", output)
+        self.assertIn(f"RightMemory\n  root: {Path('/memory/root')}\n  git: clean on main @ abc1234", output)
         self.assertIn("Managed Watches", output)
         self.assertIn("review: running pid 123", output)
         self.assertIn("Insight", output)

@@ -16,7 +16,7 @@ from rightmemory.insight_trigger import InsightTriggerStore
 from rightmemory.share_results import ShareOperationResult
 from rightmemory.shared_view_files import FileViewPullResult
 from rightmemory.shared_view_models import SharedViewConnection, SharedViewTarget, load_shared_view_credential, save_connections
-from rightmemory.watch import MANAGED_WATCH_TARGETS, WATCH_COMMANDS, _process_command
+from rightmemory.watch import MANAGED_WATCH_TARGETS, WATCH_COMMANDS, _process_command, _write_pid, watch_stop_path
 
 
 class FakeRuntime:
@@ -48,10 +48,7 @@ def _fake_async_worker_process(pid: int = 123):
     # Tests that fake Popen must also satisfy the production cmdline identity check.
     with (
         patch("rightmemory.async_update._process_exists", return_value=True),
-        patch(
-            "rightmemory.async_update._read_process_cmdline",
-            return_value=["python", "-m", "rightmemory.cli", "update", "_async-worker"],
-        ),
+        patch("rightmemory.async_update.process_command", return_value="python -m rightmemory.cli update _async-worker"),
     ):
         yield pid
 
@@ -429,7 +426,7 @@ class JsonRequestTests(unittest.TestCase):
             profile_root.mkdir(parents=True)
             default_root.mkdir()
             (default_root / "profiles.toml").write_text(
-                f'[profiles.alpha]\nroot = "{profile_root}"\n',
+                f"[profiles.alpha]\nroot = {json.dumps(str(profile_root))}\n",
                 encoding="utf-8",
             )
 
@@ -458,7 +455,7 @@ class JsonRequestTests(unittest.TestCase):
             project.mkdir()
             default_root.mkdir()
             (default_root / "profiles.toml").write_text(
-                f'[profiles.alpha]\nroot = "{profile_root}"\n',
+                f"[profiles.alpha]\nroot = {json.dumps(str(profile_root))}\n",
                 encoding="utf-8",
             )
             (project / ".rightmemory-profile").write_text("alpha\n", encoding="utf-8")
@@ -1156,7 +1153,7 @@ class JsonRequestTests(unittest.TestCase):
             default_root.mkdir()
             (project / ".rightmemory-profile").write_text("missing\n", encoding="utf-8")
             (default_root / "profiles.toml").write_text(
-                f'[profiles.alpha]\nroot = "{profile_root}"\n',
+                f"[profiles.alpha]\nroot = {json.dumps(str(profile_root))}\n",
                 encoding="utf-8",
             )
 
@@ -1183,7 +1180,7 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         create_profile.assert_called_once_with(Path("/default"), "alpha", root=Path("/profiles/alpha"))
-        self.assertIn("alpha\t/profiles/alpha", stdout.getvalue())
+        self.assertIn(f"alpha\t{Path('/profiles/alpha')}", stdout.getvalue())
 
     def test_profile_command_rejects_global_profile_flag(self):
         with self.assertRaises(ValueError) as caught:
@@ -1223,7 +1220,7 @@ class JsonRequestTests(unittest.TestCase):
             result = main(["prune"])
 
         self.assertEqual(result, 0)
-        self.assertEqual(stdout.getvalue().strip(), "prune session pruner: /memory")
+        self.assertEqual(stdout.getvalue().strip(), f"prune session pruner: {Path('/memory')}")
 
     def test_prune_command_uses_requested_session(self):
         stdout = io.StringIO()
@@ -1244,7 +1241,7 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(roles, ["pruner"])
-        self.assertIn("prune session prune-1: /memory", stdout.getvalue())
+        self.assertIn(f"prune session prune-1: {Path('/memory')}", stdout.getvalue())
 
     def test_prune_watch_help_does_not_load_config(self):
         stdout = io.StringIO()
@@ -1752,7 +1749,7 @@ class JsonRequestTests(unittest.TestCase):
             default_root.mkdir()
             profile_root.mkdir()
             (default_root / "profiles.toml").write_text(
-                f'[profiles.alpha]\nroot = "{profile_root}"\n',
+                f"[profiles.alpha]\nroot = {json.dumps(str(profile_root))}\n",
                 encoding="utf-8",
             )
 
@@ -1916,7 +1913,10 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("sync: stopped", stdout.getvalue())
 
     def test_watch_process_command_prefers_proc_cmdline(self):
-        with patch("rightmemory.watch.Path.read_bytes", return_value=b"python\0-m\0rightmemory.cli\0review\0watch\0"):
+        with (
+            patch("rightmemory.platform.IS_WINDOWS", False),
+            patch("rightmemory.watch.Path.read_bytes", return_value=b"python\0-m\0rightmemory.cli\0review\0watch\0"),
+        ):
             command = _process_command(123)
 
         self.assertEqual(command, "python -m rightmemory.cli review watch")
@@ -1958,7 +1958,7 @@ class JsonRequestTests(unittest.TestCase):
             result = main(["watch", "status", "review"])
 
         self.assertEqual(result, 0)
-        self.assertIn("review: running pid 123, log /memory/.runtime/watch/review.log", stdout.getvalue())
+        self.assertIn(f"review: running pid 123, log {Path('/memory/.runtime/watch/review.log')}", stdout.getvalue())
         self.assertNotIn("Async Update", stdout.getvalue())
 
     def test_sync_watch_help_does_not_load_config(self):
@@ -2243,7 +2243,7 @@ class JsonRequestTests(unittest.TestCase):
         sleep.assert_called_once_with(60)
         self.assertIn("sync-reconciler memory root mismatch", stderr.getvalue())
 
-    def test_watch_stop_sends_graceful_term_and_removes_pid(self):
+    def test_watch_stop_writes_graceful_request_and_removes_pid(self):
         stdout = io.StringIO()
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -2254,14 +2254,14 @@ class JsonRequestTests(unittest.TestCase):
             with (
                 patch("rightmemory.cli.default_memory_root", return_value=memory_root),
                 patch("rightmemory.watch._is_managed_watch_process", side_effect=[True, False]),
-                patch("rightmemory.watch.os.kill") as kill,
+                patch("rightmemory.watch._write_pid", wraps=_write_pid) as write_pid,
                 patch("sys.stdout", stdout),
             ):
                 result = main(["watch", "stop", "dreamer"])
             pid_exists = pid_path.exists()
 
         self.assertEqual(result, 0)
-        kill.assert_called_once()
+        write_pid.assert_called_once_with(watch_stop_path(memory_root, "dreamer"), 123)
         self.assertFalse(pid_exists)
         self.assertIn("dreamer: stopped pid 123", stdout.getvalue())
 

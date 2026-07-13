@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import fcntl
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from .platform import lock_file, unlock_file
 
 
 @dataclass(frozen=True)
@@ -41,14 +42,14 @@ class MemoryWriteLock:
         _ensure_memory_gitignore(self.runtime_root.parent)
         _ensure_runtime_gitignore(self.runtime_root)
         self._lock_handle = self.lock_path.open("a+", encoding="utf-8")
-        fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
+        lock_file(self._lock_handle)
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         if self._lock_handle is None:
             return
         try:
-            fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_UN)
+            unlock_file(self._lock_handle)
         finally:
             self._lock_handle.close()
             self._lock_handle = None
@@ -63,14 +64,14 @@ class LockedMessageSession:
         _ensure_runtime_gitignore(self.paths.runtime_root)
         self.paths.lock.parent.mkdir(parents=True, exist_ok=True)
         self._lock_handle = self.paths.lock.open("a+", encoding="utf-8")
-        fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
+        lock_file(self._lock_handle)
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         if self._lock_handle is None:
             return
         try:
-            fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_UN)
+            unlock_file(self._lock_handle)
         finally:
             self._lock_handle.close()
             self._lock_handle = None
@@ -108,6 +109,8 @@ def _safe_session_id(session_id: str) -> str:
 
 
 def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)

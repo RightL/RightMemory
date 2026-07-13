@@ -41,6 +41,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 sudo dnf install git
 ```
 
+On native Windows, install Git for Windows and uv, then run the installer from
+PowerShell 5.1 or newer. WSL can use the Linux commands above.
+
 More options: [uv install](https://docs.astral.sh/uv/getting-started/installation/),
 [git install](https://git-scm.com/book/en/v2/Getting-Started-Installing-Git).
 
@@ -50,12 +53,23 @@ cd RightMemory
 ./install.sh
 ```
 
-The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs the command-backed orchestrator skill into both `~/.codex/skills` and `~/.claude/skills`. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
+```powershell
+git clone https://github.com/RightL/RightMemory.git
+cd RightMemory
+.\install.ps1
+```
+
+The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs the command-backed orchestrator skill into both `~/.codex/skills` and `~/.claude/skills`. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
 
 If you already use Codex CLI or Claude Code CLI and want RightMemory roles to run through those tools:
 
 ```bash
 ./install.sh --mode cli-agent ~/.rightmemory ~/.codex/skills
+rightmemory doctor agent-cli
+```
+
+```powershell
+.\install.ps1 --mode cli-agent ~\.rightmemory ~\.codex\skills
 rightmemory doctor agent-cli
 ```
 
@@ -118,10 +132,18 @@ For a custom memory root or skill target:
 ./install.sh ~/.rightmemory ~/.codex/skills
 ```
 
+```powershell
+.\install.ps1 ~\.rightmemory ~\.codex\skills
+```
+
 CLI-agent mode delegates role execution to Codex CLI or Claude Code CLI while preserving the same `rightmemory` command surface:
 
 ```bash
 ./install.sh --mode cli-agent ~/.rightmemory ~/.codex/skills
+```
+
+```powershell
+.\install.ps1 --mode cli-agent ~\.rightmemory ~\.codex\skills
 ```
 
 Fresh installs baseline the current semantic upgrade notes because the seeded memory already matches the current schema. Re-run the installer after pulling updates; existing real memory is preserved, the managed example block refreshes when present, and pending semantic upgrade notes are reported for the next dreamer cycle. Semantic upgrade notes are maintainer-authored prompts for dreamer to revisit older memory under the current schema and role model; install does not run dreamer or edit user memory to apply them.
@@ -372,14 +394,30 @@ The installer arguments are:
 ./install.sh [--mode cli-agent|standalone] [<memory-root> <skills-target>]
 ```
 
+```powershell
+.\install.ps1 [--mode cli-agent|standalone] [<memory-root> <skills-target>]
+```
+
 - `<memory-root>` is where `MEMORY.md`, `MEMORY_*.md`, and `insight_logs/` live.
 - `<skills-target>` is where your agent loads skills from, such as `~/.claude/skills` or `~/.codex/skills`.
 - With no path arguments, the installer uses `~/.rightmemory` and installs the orchestrator skill into both `~/.codex/skills` and `~/.claude/skills`.
 
-Both modes require `git` and `uv`. The runtime is installed under
-`${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`, and the `rightmemory`
-command is written to `~/.local/bin/rightmemory`. If `~/.local/bin` is not on
-`PATH`, the installer prints shell-profile guidance after install.
+Both modes require `git` and `uv`. On macOS, Linux, and WSL, the runtime is
+installed under `${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`, and the
+`rightmemory` command is written to `~/.local/bin/rightmemory`. On native
+Windows, the runtime is installed under `$env:LOCALAPPDATA\RightMemory\venv`,
+and the command shim is written to
+`$env:LOCALAPPDATA\RightMemory\bin\rightmemory.cmd`. If the command directory is
+not on `PATH`, the installer prints shell or PowerShell guidance after install.
+The PowerShell installer also prepends that directory for the current session,
+so the next `rightmemory` command works immediately; persisting the user `PATH`
+remains an explicit user choice.
+The Bash and PowerShell entrypoints are small platform bootstraps; both delegate
+the install transaction to the same stdlib-only Python core, so memory
+migration, Git setup, runtime installation, skills, and semantic upgrades have
+one implementation. On Windows, CLI-agent mode supports native provider
+executables and standard npm `.cmd` shims that include their matching `.ps1`
+shim.
 
 RightMemory can keep the same memory root available across laptops, desktops,
 and agent clients. The current managed sync implementation uses a private Git
@@ -697,7 +735,16 @@ Successful async update batches add Dreamer and Insight points after semantic su
 
 Review, dreamer, insight, and pruner watchers hold per-role watch locks under `.runtime/watch/`, so a duplicate watcher exits instead of creating a competing background loop. Isolated roles may do model work in temporary checkouts, and the landing phase uses the shared memory write lock before changing the main memory repo.
 
-`rightmemory watch stop` sends a graceful terminate signal. A sleeping watcher exits within a few seconds; a watcher doing model work finishes the current cycle first. When `install.sh` finishes, it updates `<memory-root>/.runtime/install.stamp`. Watchers check that stamp between runs and while sleeping; if it changes, they re-exec themselves with the same arguments. Re-exec updates existing target processes; run `rightmemory watch start` or `rightmemory watch restart` after an upgrade to start any newly introduced managed target.
+`rightmemory watch stop` writes a PID-bound cooperative stop request. A sleeping
+watcher exits within a few seconds; a watcher doing model work finishes the
+current cycle first. When `install.sh` or `install.ps1` finishes, it updates
+`<memory-root>/.runtime/install.stamp`. Watchers check that stamp between runs
+and while sleeping, then replace themselves with the updated runtime. POSIX
+keeps the process identity through `exec`; Windows starts a hidden replacement
+and hands over the lock, stop request, PID, and process-creation identity. The
+manager therefore continues to recognize and stop the replacement safely even
+when Windows assigns it a new PID. Run `rightmemory watch start` or
+`rightmemory watch restart` after an upgrade to start newly introduced targets.
 
 ### Isolated Automatic Writes
 
@@ -733,6 +780,14 @@ uv --cache-dir .uv-cache pip install -e . --python .venv/bin/python
 rightmemory retrieve chat
 ```
 
+On Windows PowerShell:
+
+```powershell
+uv --cache-dir .uv-cache venv .venv
+uv --cache-dir .uv-cache pip install -e . --python .venv\Scripts\python.exe
+rightmemory retrieve chat
+```
+
 The standalone runtime exposes sandboxed tools rooted at the configured memory root. It does not provide an OS-level jail.
 
 ## File Layout
@@ -746,8 +801,11 @@ RightMemory/
 │   ├── DEMO.md
 │   └── assets/
 ├── install.sh
+├── install.ps1
 ├── MEMORY.example.md
 ├── rightmemory/
+│   ├── install_core.py
+│   ├── platform.py
 │   └── prompts/
 └── skills/
     ├── rightmemory-schema.md
@@ -768,6 +826,9 @@ After install:
 ├── rightmemory-schema.md
 └── memory-orchestrator/SKILL.md
 ```
+
+On native Windows, the default memory root is `~\.rightmemory`, and the CLI shim
+is `%LOCALAPPDATA%\RightMemory\bin\rightmemory.cmd`.
 
 ## Design Notes
 

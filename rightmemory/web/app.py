@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
+import threading
+import time
 from pathlib import Path
 
 import uvicorn
@@ -18,6 +21,7 @@ from .auth import (
     verify_operator_token,
 )
 from .models import error_detail, ok_response
+from .process import MANAGED_WEB_ENV, clear_web_process_files, consume_web_stop_request, register_web_process
 from .service import WebStudioService, resolve_allowed_memory_root
 from ..shared_view_questions import question_response_payload, verify_question_view_token
 
@@ -500,7 +504,26 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.serve:
         parser.error("--serve is required")
-    uvicorn.run(create_web_app(args.memory_root), host=args.host, port=args.port)
+    root = args.memory_root.resolve()
+    server = uvicorn.Server(uvicorn.Config(create_web_app(root), host=args.host, port=args.port))
+    if os.environ.get(MANAGED_WEB_ENV) == "1":
+        register_web_process(root, os.getpid(), ready=True)
+
+    def monitor_stop_request() -> None:
+        while not server.should_exit:
+            if consume_web_stop_request(root, os.getpid()):
+                server.should_exit = True
+                return
+            time.sleep(0.1)
+
+    monitor = threading.Thread(target=monitor_stop_request, name="rightmemory-web-stop", daemon=True)
+    monitor.start()
+    try:
+        server.run()
+    finally:
+        server.should_exit = True
+        monitor.join(timeout=1)
+        clear_web_process_files(root, os.getpid())
     return 0
 
 

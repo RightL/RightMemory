@@ -1,4 +1,5 @@
 import subprocess
+import sys
 import tempfile
 import unittest
 import os
@@ -10,6 +11,7 @@ EXAMPLE_START = "rightmemory:example:start"
 EXAMPLE_END = "rightmemory:example:end"
 
 
+@unittest.skipIf(os.name == "nt", "install.sh tests exercise the POSIX installer")
 class InstallScriptTests(unittest.TestCase):
     def _env_with_fake_uv(self, root: Path) -> dict[str, str]:
         fake_bin = root / "bin"
@@ -18,7 +20,7 @@ class InstallScriptTests(unittest.TestCase):
         fake_uv.write_text(
             "#!/usr/bin/env sh\n"
             "if [ \"$1\" = \"python\" ] && [ \"$2\" = \"find\" ]; then\n"
-            "  echo '/fake/rightmemory-python'\n"
+            "  echo \"$RIGHTMEMORY_TEST_PYTHON\"\n"
             "  exit 0\n"
             "fi\n"
             "if [ \"$1\" = \"venv\" ]; then\n"
@@ -66,6 +68,7 @@ class InstallScriptTests(unittest.TestCase):
             "HOME": str(root / "home"),
             "XDG_DATA_HOME": str(root / "data"),
             "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "RIGHTMEMORY_TEST_PYTHON": sys.executable,
         }
 
     def _env_with_fake_git_no_uv(self, root: Path) -> dict[str, str]:
@@ -270,6 +273,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("Provider question context", orchestrator)
         self.assertIn("rightmemory shared-view ask <mq-id>", orchestrator)
         self.assertIn("do not forward a question invented by retrieve", orchestrator)
+        self.assertIn("export PYTHONUTF8=1", wrapper)
         self.assertIn('export RIGHTMEMORY_ROOT="', wrapper)
         self.assertIn('exec "', wrapper)
         self.assertIn(' -m rightmemory.cli "$@"', wrapper)
@@ -491,6 +495,7 @@ class InstallScriptTests(unittest.TestCase):
             result = subprocess.run(
                 ["bash", "install.sh", "--mode", "subagent", str(memory_root), str(skills_target)],
                 cwd=REPO_ROOT,
+                env=self._env_with_fake_uv(root),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

@@ -44,6 +44,7 @@ from .profiles import (
     resolve_memory_root,
     validate_profile_name,
 )
+from .platform import restart_current_process
 from .review import ReviewScanner, normalize_transcript
 from .runtime import RightMemoryRuntime
 from .session import MemoryWriteLock
@@ -67,10 +68,12 @@ from .status import collect_status, format_status_dashboard
 from .sync import SyncManager
 from .watch import (
     MANAGED_WATCH_TARGETS,
+    WATCH_HANDOFF_PID_ENV,
     InstallStamp,
     ManagedWatchStatus,
     StopWatchResult,
     WatchLock,
+    consume_watch_stop_request,
     managed_watch_status,
     start_managed_watch,
     stop_managed_watch,
@@ -890,23 +893,43 @@ def _is_help_request(args: list[str]) -> bool:
 
 
 class _WatchStopToken:
-    requested = False
+    def __init__(self, memory_root: Path, name: str):
+        self.memory_root = memory_root
+        self.name = name
+        self._requested = False
+
+    @property
+    def requested(self) -> bool:
+        if not self._requested and consume_watch_stop_request(self.memory_root, self.name, os.getpid()):
+            self.request()
+        return self._requested
+
+    def request(self) -> None:
+        if self._requested:
+            return
+        self._requested = True
+        print(f"rightmemory {self.name} watch stopping after current work", file=sys.stderr, flush=True)
 
 
 @contextmanager
-def _watch_stop_signal(label: str):
-    token = _WatchStopToken()
-    previous = signal.getsignal(signal.SIGTERM)
+def _watch_stop_signal(label: str, memory_root: Path):
+    token = _WatchStopToken(memory_root, label)
+    signals = [signal.SIGTERM]
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is not None and sigbreak not in signals:
+        signals.append(sigbreak)
+    previous = {signum: signal.getsignal(signum) for signum in signals}
 
     def handle_stop(signum, frame):
-        token.requested = True
-        print(f"rightmemory {label} watch stopping after current work", file=sys.stderr, flush=True)
+        token.request()
 
-    signal.signal(signal.SIGTERM, handle_stop)
+    for signum in signals:
+        signal.signal(signum, handle_stop)
     try:
         yield token
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def _watch_manager_main(argv: list[str], memory_root: Path) -> int:
@@ -1291,7 +1314,9 @@ def _review_watch(interval: int, since_days: int | None, memory_root: Path) -> i
     consecutive_failures = 0
     exit_code = 0
     try:
-        with _watch_stop_signal("review") as stop, WatchLock(reviewer_config.memory_root, "review"):
+        with _watch_stop_signal("review", reviewer_config.memory_root) as stop, WatchLock(
+            reviewer_config.memory_root, "review"
+        ):
             next_config: Any | None = reviewer_config
             while not stop.requested:
                 _reexec_if_install_changed(refresh, stop)
@@ -1368,7 +1393,9 @@ def _dreamer_watch(interval: int | None, session_id: str, memory_root: Path) -> 
     consecutive_failures = 0
     exit_code = 0
     try:
-        with _watch_stop_signal("dreamer") as stop, WatchLock(watch_config.memory_root, "dreamer"):
+        with _watch_stop_signal("dreamer", watch_config.memory_root) as stop, WatchLock(
+            watch_config.memory_root, "dreamer"
+        ):
             next_config: Any | None = dreamer_config
             while not stop.requested:
                 _reexec_if_install_changed(refresh, stop)
@@ -1461,7 +1488,9 @@ def _insight_watch(interval: int | None, session_id: str, memory_root: Path) -> 
     consecutive_failures = 0
     exit_code = 0
     try:
-        with _watch_stop_signal("insight") as stop, WatchLock(watch_config.memory_root, "insight"):
+        with _watch_stop_signal("insight", watch_config.memory_root) as stop, WatchLock(
+            watch_config.memory_root, "insight"
+        ):
             next_config: Any | None = insight_config
             while not stop.requested:
                 _reexec_if_install_changed(refresh, stop)
@@ -1522,7 +1551,9 @@ def _prune_watch(interval: int, session_id: str, memory_root: Path) -> int:
     consecutive_failures = 0
     exit_code = 0
     try:
-        with _watch_stop_signal("pruner") as stop, WatchLock(pruner_config.memory_root, "pruner"):
+        with _watch_stop_signal("pruner", pruner_config.memory_root) as stop, WatchLock(
+            pruner_config.memory_root, "pruner"
+        ):
             next_pruner_config: Any | None = pruner_config
             next_runtime_config: Any | None = runtime_config
             while not stop.requested:
@@ -1575,7 +1606,9 @@ def _sync_watch(interval: int, memory_root: Path) -> int:
     consecutive_failures = 0
     exit_code = 0
     try:
-        with _watch_stop_signal("sync") as stop, WatchLock(sync_config.memory_root, "sync"):
+        with _watch_stop_signal("sync", sync_config.memory_root) as stop, WatchLock(
+            sync_config.memory_root, "sync"
+        ):
             while not stop.requested:
                 _reexec_if_install_changed(refresh, stop)
                 timestamp = datetime.now(UTC).isoformat()
@@ -1654,7 +1687,15 @@ def _reexec_if_install_changed(refresh: InstallStamp, stop: _WatchStopToken | No
     if not refresh.changed():
         return
     print("rightmemory install changed; restarting watch process", file=sys.stderr, flush=True)
-    os.execv(sys.executable, [sys.executable, "-m", "rightmemory.cli", *sys.argv[1:]])
+    previous_handoff = os.environ.get(WATCH_HANDOFF_PID_ENV)
+    os.environ[WATCH_HANDOFF_PID_ENV] = str(os.getpid())
+    try:
+        restart_current_process([sys.executable, "-m", "rightmemory.cli", *sys.argv[1:]])
+    finally:
+        if previous_handoff is None:
+            os.environ.pop(WATCH_HANDOFF_PID_ENV, None)
+        else:
+            os.environ[WATCH_HANDOFF_PID_ENV] = previous_handoff
 
 
 def _review_normalize(source: str, path: str) -> int:

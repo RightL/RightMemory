@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-import fcntl
 import json
 import os
 from pathlib import Path
 
 from .async_update import AsyncUpdateJob, AsyncUpdateState, AsyncUpdateStore
+from .platform import lock_file, unlock_file
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
 
 
@@ -70,11 +70,11 @@ class RecentSubmittedMemoryDeliveryStore:
         self.root.mkdir(parents=True, exist_ok=True)
         lock_path = self._lock_path(retrieve_session_id)
         with lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            lock_file(handle)
             try:
                 yield
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                unlock_file(handle)
 
     def _read_delivered_locked(self, retrieve_session_id: str) -> set[str]:
         state_path = self._state_path(retrieve_session_id)

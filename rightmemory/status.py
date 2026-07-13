@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import json
 import math
 import re
@@ -14,6 +13,7 @@ from typing import Any
 
 from .async_update import STATUS_MANUAL_RECOVERY, _is_async_worker_process, _is_legacy_failed_pending_state, _state_from_json
 from .config import load_dreamer_watch_config, load_insight_watch_config, load_sync_config
+from .platform import lock_file_nonblocking, process_identity, unlock_file
 from .watch import MANAGED_WATCH_TARGETS, ManagedWatchStatus, _is_managed_watch_process, watch_log_path, watch_pid_path
 
 
@@ -180,7 +180,7 @@ def read_only_managed_watch_status(memory_root: Path, name: str) -> ManagedWatch
     log_path = watch_log_path(memory_root, name)
     pid = _read_watch_pid(watch_pid_path(memory_root, name))
     if pid is not None:
-        if _is_managed_watch_process(pid, name):
+        if _is_managed_watch_process(pid, name, memory_root=memory_root):
             return ManagedWatchStatus(name=name, state="running", pid=pid, log_path=log_path)
         if _watch_lock_held_read_only(memory_root, name):
             return ManagedWatchStatus(name=name, state="external", pid=None, log_path=log_path)
@@ -618,15 +618,15 @@ def _watch_lock_held_read_only(memory_root: Path, name: str) -> bool:
         return False
     try:
         with path.open("r", encoding="utf-8") as handle:
+            locked = False
             try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_file_nonblocking(handle)
+                locked = True
             except BlockingIOError:
                 return True
             finally:
-                try:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
+                if locked:
+                    unlock_file(handle)
     except OSError:
         return False
     return False
@@ -646,6 +646,7 @@ def _read_worker_state(async_root: Path, process_exists: Callable[[int], bool]) 
         data = _read_json(path)
         status = _required_worker_str(data, "status")
         pid = _optional_worker_int(data, "pid")
+        identity = _optional_worker_str(data, "identity")
         batch_id = _optional_worker_str(data, "batch_id")
         session_ids = _required_worker_str_list(data, "session_ids")
     except Exception as exc:
@@ -658,6 +659,9 @@ def _read_worker_state(async_root: Path, process_exists: Callable[[int], bool]) 
         issue = f"update worker: state error: {error}"
         return _WorkerSummary(state=f"worker: state error: {error}"), issue
     if not process_exists(pid):
+        issue = f"update worker: stale pid {pid}"
+        return _WorkerSummary(state=f"worker: stale pid {pid}"), issue
+    if identity is not None and process_identity(pid) != identity:
         issue = f"update worker: stale pid {pid}"
         return _WorkerSummary(state=f"worker: stale pid {pid}"), issue
     detail_parts = []
@@ -798,6 +802,8 @@ def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
             command,
             cwd=root,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

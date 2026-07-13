@@ -61,8 +61,9 @@ class ProviderSessionStoreTests(unittest.TestCase):
 class AgentCliCommandTests(unittest.TestCase):
     def test_build_codex_first_command_uses_memory_root_and_read_only_sandbox(self):
         config = AgentCliConfig(provider="codex", model="gpt-5")
+        memory_root = Path("/memory/root")
 
-        command = build_codex_command(Path("/memory/root"), "retrieve", config, "prompt", None)
+        command = build_codex_command(memory_root, "retrieve", config, "prompt", None)
 
         self.assertEqual(
             command,
@@ -71,7 +72,7 @@ class AgentCliCommandTests(unittest.TestCase):
                 "exec",
                 "--json",
                 "--cd",
-                "/memory/root",
+                str(memory_root),
                 "--skip-git-repo-check",
                 "--sandbox",
                 "read-only",
@@ -82,8 +83,9 @@ class AgentCliCommandTests(unittest.TestCase):
         )
 
     def test_build_codex_first_command_uses_workspace_write_for_write_role(self):
+        memory_root = Path("/memory/root")
         command = build_codex_command(
-            Path("/memory/root"),
+            memory_root,
             "update",
             AgentCliConfig(provider="codex"),
             "prompt",
@@ -97,7 +99,7 @@ class AgentCliCommandTests(unittest.TestCase):
                 "exec",
                 "--json",
                 "--cd",
-                "/memory/root",
+                str(memory_root),
                 "--skip-git-repo-check",
                 "--sandbox",
                 "workspace-write",
@@ -154,8 +156,9 @@ class AgentCliCommandTests(unittest.TestCase):
 
     def test_build_codex_resume_command_uses_provider_session_id(self):
         config = AgentCliConfig(provider="codex", model="gpt-5")
+        memory_root = Path("/memory/root")
 
-        command = build_codex_command(Path("/memory/root"), "retrieve", config, "prompt", "thread-1")
+        command = build_codex_command(memory_root, "retrieve", config, "prompt", "thread-1")
 
         self.assertEqual(
             command,
@@ -164,7 +167,7 @@ class AgentCliCommandTests(unittest.TestCase):
                 "exec",
                 "--json",
                 "--cd",
-                "/memory/root",
+                str(memory_root),
                 "--skip-git-repo-check",
                 "--sandbox",
                 "read-only",
@@ -177,8 +180,9 @@ class AgentCliCommandTests(unittest.TestCase):
         )
 
     def test_build_codex_resume_command_uses_workspace_write_for_write_role(self):
+        memory_root = Path("/memory/root")
         command = build_codex_command(
-            Path("/memory/root"),
+            memory_root,
             "update",
             AgentCliConfig(provider="codex"),
             "prompt",
@@ -192,7 +196,7 @@ class AgentCliCommandTests(unittest.TestCase):
                 "exec",
                 "--json",
                 "--cd",
-                "/memory/root",
+                str(memory_root),
                 "--skip-git-repo-check",
                 "--sandbox",
                 "workspace-write",
@@ -385,6 +389,11 @@ class AgentCliParserTests(unittest.TestCase):
 
 
 class CliAgentExecutorTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("rightmemory.agent_cli.prepare_command", side_effect=lambda command: list(command))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_run_turn_saves_provider_session_record(self):
         def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
             return subprocess.CompletedProcess(
@@ -392,9 +401,9 @@ class CliAgentExecutorTests(unittest.TestCase):
                 0,
                 stdout=(
                     '{"type":"thread.started","thread_id":"thread-chat"}\n'
-                    '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n'
-                ),
-                stderr="",
+                    '{"type":"item.completed","item":{"type":"agent_message","text":"done 中文"}}\n'
+                ).encode("utf-8"),
+                stderr=b"",
             )
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -407,7 +416,7 @@ class CliAgentExecutorTests(unittest.TestCase):
             record = ProviderSessionStore(root, "retrieve").load(NO_SESSION_RIGHTMEMORY_SESSION_ID)
             is_internal = ProviderSessionStore.is_internal_provider_session(root, "codex", "thread-chat")
 
-        self.assertEqual(result, "done")
+        self.assertEqual(result, "done 中文")
         self.assertIsNotNone(record)
         self.assertEqual(record.provider_session_id, "thread-chat")
         self.assertEqual(record.rightmemory_session_id, NO_SESSION_RIGHTMEMORY_SESSION_ID)
@@ -671,7 +680,7 @@ class AgentCliDoctorTests(unittest.TestCase):
 
         with (
             patch("rightmemory.doctor.load_config", side_effect=_doctor_config),
-            patch("rightmemory.doctor.shutil.which", return_value="/usr/bin/codex"),
+            patch("rightmemory.doctor.prepare_command", return_value=["/usr/bin/codex"]),
             patch("rightmemory.doctor.RightMemoryRuntime", FakeRuntime),
         ):
             checks = run_agent_cli_doctor()
@@ -762,7 +771,7 @@ class AgentCliDoctorTests(unittest.TestCase):
 
         with (
             patch("rightmemory.doctor.load_config", side_effect=_doctor_config),
-            patch("rightmemory.doctor.shutil.which", return_value="/usr/bin/codex"),
+            patch("rightmemory.doctor.prepare_command", return_value=["/usr/bin/codex"]),
             patch("rightmemory.doctor.RightMemoryRuntime", FakeRuntime),
         ):
             checks = run_agent_cli_doctor()
@@ -815,7 +824,7 @@ class AgentCliDoctorTests(unittest.TestCase):
 
         with (
             patch("rightmemory.doctor.load_config", side_effect=_doctor_config),
-            patch("rightmemory.doctor.shutil.which", return_value="/usr/bin/codex"),
+            patch("rightmemory.doctor.prepare_command", return_value=["/usr/bin/codex"]),
             patch("rightmemory.doctor.RightMemoryRuntime", FakeRuntime),
         ):
             checks = run_agent_cli_doctor()
@@ -868,7 +877,7 @@ class AgentCliDoctorTests(unittest.TestCase):
 
         with (
             patch("rightmemory.doctor.load_config", side_effect=_doctor_config),
-            patch("rightmemory.doctor.shutil.which", return_value="/usr/bin/codex"),
+            patch("rightmemory.doctor.prepare_command", return_value=["/usr/bin/codex"]),
             patch("rightmemory.doctor.RightMemoryRuntime", FakeRuntime),
         ):
             checks = run_agent_cli_doctor()

@@ -282,6 +282,8 @@ def _run_git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedP
         ["git", *args],
         cwd=Path(cwd),
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

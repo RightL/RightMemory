@@ -1005,10 +1005,14 @@ class MemoryTools:
         args = self._exclude_runtime_shared_view_rg_paths(args)
         if "--files" not in args and "--with-filename" not in args and "--no-filename" not in args:
             args = [args[0], "--with-filename", *args[1:]]
+        end_options = args.index("--") if "--" in args else len(args)
+        args = [*args[:end_options], "--path-separator=/", *args[end_options:]]
         process = subprocess.run(
             args,
             cwd=self.memory_root,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -1129,6 +1133,7 @@ class MemoryTools:
         return self._cap_command_output(selected)
 
     def _cap_command_output(self, output: str) -> str:
+        output = output.replace("\r\n", "\n").replace("\r", "\n")
         if len(output) <= COMMAND_OUTPUT_CHAR_LIMIT:
             return output
         return (
@@ -1639,6 +1644,8 @@ class MemoryTools:
             ["git", "cat-file", "-t", f"{revision}:{path}"],
             cwd=self.memory_root,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -1712,6 +1719,8 @@ class MemoryTools:
             command,
             cwd=self.memory_root,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -1725,6 +1734,8 @@ class MemoryTools:
             ["git", "rev-parse", "--verify", "HEAD"],
             cwd=self.memory_root,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -1735,6 +1746,8 @@ class MemoryTools:
             ["git", "cat-file", "-t", f"HEAD:{path}"],
             cwd=self.memory_root,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -1747,6 +1760,8 @@ class MemoryTools:
             ["git", "ls-files", "-z", "--", path],
             cwd=self.memory_root,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )

@@ -8,10 +8,11 @@ import secrets
 import shutil
 import sqlite3
 import tomllib
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .models import AuditEvent, HubConfig, HubStoredPackage, HubToken, TokenActor
 from .packages import DEFAULT_MAX_PACKAGE_BYTES, copy_package_version
@@ -1192,11 +1193,16 @@ class HubStore:
             raise
         return stored
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _apply_migrations(self, connection: sqlite3.Connection) -> None:
         connection.execute(

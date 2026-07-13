@@ -3,7 +3,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
-import fcntl
 import json
 import math
 import os
@@ -11,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .platform import lock_file, unlock_file
 from .session import _ensure_runtime_gitignore, _fsync_directory
 
 
@@ -69,11 +69,11 @@ class DreamerTriggerStore:
         _ensure_runtime_gitignore(self.runtime_root)
         self.root.mkdir(parents=True, exist_ok=True)
         with self.lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            lock_file(handle)
             try:
                 yield
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                unlock_file(handle)
 
     def _read_locked(self) -> DreamerTriggerState:
         if not self.state_path.exists():

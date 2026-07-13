@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, replace
@@ -9,6 +8,7 @@ from uuid import uuid4
 
 from .agent_cli import WRITE_ROLES
 from .config import ROLES, RuntimeConfig, SyncConfig, load_config
+from .platform import prepare_command
 from .runtime import RightMemoryRuntime
 
 
@@ -31,11 +31,19 @@ def run_agent_cli_doctor(memory_root: Path | None = None) -> list[DoctorCheck]:
         return checks
 
     providers = sorted({config.agent_cli.provider for config in configs.values() if config.agent_cli is not None})
-    missing = [provider for provider in providers if shutil.which(provider) is None]
-    if missing:
-        checks.append(DoctorCheck("provider CLI binaries", False, f"missing: {', '.join(missing)}"))
+    unavailable = []
+    resolved = []
+    for provider in providers:
+        try:
+            command = prepare_command([provider])
+        except (FileNotFoundError, RuntimeError) as exc:
+            unavailable.append(f"{provider}: {exc}")
+        else:
+            resolved.append(f"{provider}:{command[0]}")
+    if unavailable:
+        checks.append(DoctorCheck("provider CLI binaries", False, "; ".join(unavailable)))
         return checks
-    checks.append(DoctorCheck("provider CLI binaries", True, f"found: {', '.join(providers)}"))
+    checks.append(DoctorCheck("provider CLI binaries", True, f"found: {', '.join(resolved)}"))
 
     with tempfile.TemporaryDirectory(prefix="rightmemory-doctor-") as tempdir:
         temp_root = Path(tempdir)
@@ -302,6 +310,8 @@ def _run_git(memory_root: Path, *args: str) -> str:
         cwd=str(memory_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if completed.returncode != 0:

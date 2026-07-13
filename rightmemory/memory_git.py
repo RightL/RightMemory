@@ -45,6 +45,8 @@ def _run_git(root: Path, *args: str, check: bool = True) -> subprocess.Completed
         ["git", *args],
         cwd=root,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

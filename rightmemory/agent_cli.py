@@ -9,6 +9,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from .config import ROLES, AgentCliConfig
+from .platform import prepare_command
 from .prompt import build_cli_agent_instructions
 from .provider_sessions import ProviderSessionRecord, ProviderSessionStore
 from .semantic_upgrades import SemanticUpgradeContext
@@ -198,16 +199,26 @@ def _turn_prompt(
 
 def _run_cli(command: list[str], memory_root: Path, label: str) -> str:
     completed = subprocess.run(
-        command,
+        prepare_command(command),
         cwd=str(memory_root),
         capture_output=True,
-        text=True,
+        text=False,
         check=False,
     )
+    stdout = _decode_cli_output(completed.stdout)
+    stderr = _decode_cli_output(completed.stderr)
     if completed.returncode != 0:
-        detail = _command_failure_detail(completed.stdout, completed.stderr)
+        detail = _command_failure_detail(stdout, stderr)
         raise RuntimeError(f"{label} CLI exited with status {completed.returncode}{detail}")
-    return completed.stdout
+    return stdout
+
+
+def _decode_cli_output(value: bytes | str | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return value.decode("utf-8", errors="replace")
 
 
 def _command_failure_detail(stdout: str, stderr: str) -> str:

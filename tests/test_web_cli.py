@@ -12,6 +12,7 @@ from rightmemory.web.process import (
     web_log_path,
     web_pid_path,
     web_settings_path,
+    web_stop_path,
 )
 
 
@@ -93,6 +94,25 @@ class WebCliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("web: removed stale pid 12345", stdout.getvalue())
         self.assertFalse(web_pid_path(root).exists())
+
+    def test_web_stop_uses_cooperative_request(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            running = WebServiceStatus("running", 12345, "127.0.0.1", 8766, web_log_path(root))
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.web.process.web_service_status", return_value=running),
+                patch("rightmemory.web.process._wait_for_exit", return_value=False),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["web", "stop", "--timeout", "0"])
+
+            request = web_stop_path(root).read_text(encoding="utf-8")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(request, "12345\n")
+        self.assertIn("web: stopping pid 12345", stdout.getvalue())
 
     def test_web_restart_stops_then_starts(self):
         stdout = io.StringIO()
