@@ -2887,6 +2887,32 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(roles, ["retrieve"])
         self.assertEqual(stdout.getvalue().strip(), "session agent-1: hello there")
 
+    def test_retrieve_include_returned_is_forwarded_for_one_call(self):
+        calls = []
+
+        class IncludeReturnedRuntime(FakeRuntime):
+            def run_session_turn(self, session_id: str, message: str, *, include_returned: bool = False) -> str:
+                calls.append((session_id, message, include_returned))
+                return "repeated context"
+
+        with (
+            patch("rightmemory.cli.load_config", return_value=object()),
+            patch("rightmemory.cli.RightMemoryRuntime", IncludeReturnedRuntime),
+            patch("sys.stdout", io.StringIO()),
+        ):
+            result = main(
+                [
+                    "retrieve",
+                    "--include-returned",
+                    "--session",
+                    "agent-1",
+                    "show it again",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, [("agent-1", "show it again", True)])
+
     def test_main_records_one_pressure_unit_for_memory_changing_update_turn(self):
         stdout = io.StringIO()
         memory_root = Path("/memory")

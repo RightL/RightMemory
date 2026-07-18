@@ -103,7 +103,7 @@ rightmemory-orchestrator conditionally calls:
   rightmemory retrieve --session <id> "project sync decisions and open issues"
 
 RightMemory returns:
-  relevant Markdown headings, node ids, and graph-linked facts
+  deterministic source Markdown selected by graph ids or free-form line ranges
 
 When work begins:
   rightmemory update submit --session <id> "sync task: current state and evidence"
@@ -127,6 +127,7 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 - Multi-device memory continuity across laptops, desktops, agent clients, and project-specific roots.
 - Independent command-backed `memory-retriever` and `rightmemory-orchestrator` skills, selected by the user.
 - Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex/Claude CLI role execution.
+- Model-selected, runtime-rendered retrieval output without model-authored summaries or commentary.
 - One updater for Memory and Pursuit, automatic transcript-review candidate extraction, and local Markdown review documents for updater edits.
 
 ## Install Options And Updates
@@ -255,7 +256,7 @@ Memory also supports linked resources that are not parsed as graph content: `{M#
 
 Shared views connect one memory root to collaboration context owned somewhere else: another person, team space, project, or agent memory root. RightMemory now uses two explicit heading types:
 
-- `{MF#slug}` records a mirrored file shared view. Retrieve silently pulls the latest HTTP package into `.runtime/shared_views/imports/<slug>/` before the retrieve agent starts, then the retrieve agent uses ordinary read/search tools on that local mirror.
+- `{MF#slug}` records a mirrored file shared view. Retrieve silently pulls the latest HTTP package before the model starts and exposes only its canonical `.runtime/shared_views/imports/<slug>/dist/MEMORY.md`; addressable view items use source-scoped ids and unaddressable text uses line ranges.
 - `{MQ#slug}` records a provider question shared view. Retrieve may report that provider-question context is relevant, but the main agent, CLI, or Web Studio calls the question endpoint explicitly with `rightmemory shared-view ask`.
 
 For a practical provider/consumer walkthrough, see [docs/shared-views-usage.md](docs/shared-views-usage.md).
@@ -304,7 +305,7 @@ rightmemory shared-view credential set alice-publish \
   --token-prompt
 ```
 
-Approved `MF#` file views rebuild and publish automatically after successful memory-write roles. `rightmemory retrieve` silently syncs accepted `MF#` packages before it searches, without adding sync output to retrieve session history.
+Approved `MF#` file views rebuild and publish automatically after successful memory-write roles. `rightmemory retrieve` silently syncs accepted `MF#` packages before it searches, without adding sync output to retrieve session history or exposing package metadata as retrieval content.
 
 Create an `MF#` invitation by publishing the current file package and asking the hub for an invitation URL:
 
@@ -527,7 +528,7 @@ The runtime is intentionally small:
 
 - Standalone mode uses `pydantic_ai.Agent` as a chat-like agent loop.
 - CLI-agent mode delegates the same role turn to Codex CLI or Claude Code CLI and records the provider session under `<memory-root>/.runtime/agent_cli_sessions/`.
-- In standalone mode, retrieve uses Claude-shaped read-only tools (`read`, `grep`, `glob`) plus a restricted `read_command` for familiar forms such as `cat`, `sed -n`, `rg`, and read-only `git`; historian adds bounded Git history reads; write-capable roles also get exact `edit_file` replacements, file lifecycle tools, and narrow role-scoped git tools.
+- Standalone retrieve uses typed progressive reads for F#, line-numbered M#/S# content, and the canonical MF# view, then finishes through a native structured selector. CLI-agent emits the same selector as strict JSON. The shared runtime resolves ids and ranges, restores hierarchy, and returns source-authored Markdown.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different no-profile root, or use `--profile <name>` / `.rightmemory-profile` for project-specific roots.
 - Retrieve, unified update, update-review correction, transcript-review extraction, history, dreamer, insight, pruner, and sync repair have separate runtime boundaries selected by command line, queue, scanner, or watcher.
 - Role-specific executor settings are read from `<memory-root>/rightmemory.toml`.
@@ -597,6 +598,9 @@ Use `rightmemory doctor agent-cli` after configuring CLI-agent mode. It checks t
 OpenAI-compatible retrieve/update config:
 
 ```toml
+[retrieve]
+max_output_chars = 100000
+
 [retrieve.model]
 model_id = "hosted_vllm//models/example-fast-model"
 api_base = "http://127.0.0.1:8000/v1"
@@ -610,6 +614,8 @@ api_key = "<token>"
 [update.model.kwargs]
 extra_body = { chat_template_kwargs = { thinking = true, preserve_thinking = true } }
 ```
+
+Retrieve omits unchanged content already returned in the same session. Use `rightmemory retrieve --include-returned --session <id> "<query>"` to bypass that omission for one call without clearing session coverage. `max_output_chars` is a safety limit: oversized selections are rejected for model retry rather than truncated.
 
 Anthropic-compatible dreamer/reviewer config:
 

@@ -15,13 +15,13 @@ description: "Use when the user explicitly chooses read-only RightMemory retriev
 - Call `rightmemory retrieve --session <stable-session-id> "<memory need>"`.
 - Describe the context needed from the user's intent instead of blindly forwarding the user's message.
 - Give the retrieve command up to 3 minutes to return. Await or poll that command; do not run a separate blocking wait, explore files, or advance the task while it is pending.
-- The retriever skips items already returned in this session. Ask explicitly when the same item is needed again.
+- The retriever skips unchanged content already returned in this session. When the user needs matching content repeated, add `--include-returned` for that call; do not change the session id.
 - Treat Memory as durable context and Pursuit as live intent or continuity. Do not blur their lifecycle meanings in the answer.
-- A returned `F#...` heading points to parsed graph detail. A returned `M#...` heading points to free-form Markdown evidence. A returned `S#...` heading points to reusable instruction.
-- Broad retrieval usually returns only a linked-resource heading and its brief body. Retrieve a specific M# or S# item when its full content is actually needed.
+- Retrieval output is authoritative source Markdown selected by the model and rendered by RightMemory, not a model-written summary.
+- A selected F# heading includes its parsed detail subtree. A local M#, S#, or MF# heading does not by itself expand linked content; M# evidence uses source ranges, S# expands only as a complete instruction, and MF# uses source-scoped ids or ranges.
 - Writing and Design correction M# collections are second-pass evidence. Unless the user asks for them directly, retrieve their full contents only after an initial draft, design, or implementation direction exists.
 - Apply retrieved preferences, workflow guidance, and memory skills when the fit is clear. If retrieved state appears stale, wrong, or misleading, report the discrepancy without submitting a correction.
-- Treat an `Open context questions` block as agent-facing questions, not settled facts, and do not investigate merely because a question was surfaced.
+- Treat retrieved open-context questions as agent-facing questions, not settled facts, and do not investigate merely because one was surfaced.
 - Treat `Provider question context` for an `MQ#` heading as an optional external ask opportunity, not a known answer.
 - When provider context would materially help, call `rightmemory shared-view ask <mq-id> "<question>"` after retrieve returns. Phrase the question from the actual task; do not forward a question invented by retrieve.
 - If the provider question endpoint is unavailable, continue with local context and tell the user.

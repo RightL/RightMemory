@@ -60,8 +60,9 @@ class MemoryToolsTests(unittest.TestCase):
 
         result = tools.read_skill("alpha")
 
-        self.assertIn("# Alpha Skill", result)
-        self.assertIn("Use alpha.", result)
+        self.assertIn("Source: S#alpha", result)
+        self.assertIn("1: # Alpha Skill", result)
+        self.assertIn("3: Use alpha.", result)
 
     def test_retrieve_read_skill_failure_lists_available_ids_without_paths(self):
         (self.root / "MEMORY_SKILL_beta.md").write_text("# Beta Skill\n", encoding="utf-8")
@@ -86,19 +87,20 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("Skill not found: alpha", result)
         self.assertNotIn("secret", result)
 
-    def test_retrieve_read_mf_returns_whole_import_package_by_id(self):
+    def test_retrieve_read_mf_returns_only_line_numbered_canonical_view_by_id(self):
         import_root = self.root / ".runtime" / "shared_views" / "imports" / "auth-api"
-        import_root.mkdir(parents=True)
-        (import_root / "MEMORY.md").write_text("# Auth API\n\nToken expiry.\n", encoding="utf-8")
+        (import_root / "dist").mkdir(parents=True)
+        (import_root / "dist" / "MEMORY.md").write_text("# Auth API\n\nToken expiry.\n", encoding="utf-8")
         (import_root / "manifest.toml").write_text("view_id = \"auth-api\"\n", encoding="utf-8")
         tools = MemoryTools(self.root, role="retrieve")
 
         result = tools.read_mf("auth-api")
 
-        self.assertIn("MF import: auth-api", result)
-        self.assertIn("===== MEMORY.md =====", result)
-        self.assertIn("Token expiry.", result)
-        self.assertIn("===== manifest.toml =====", result)
+        self.assertIn("Source: MF#auth-api", result)
+        self.assertIn("1: # Auth API", result)
+        self.assertIn("3: Token expiry.", result)
+        self.assertNotIn("manifest.toml", result)
+        self.assertNotIn("view_id", result)
 
     def test_retrieve_read_mf_failure_lists_available_ids_without_paths(self):
         (self.root / ".runtime" / "shared_views" / "imports" / "billing-api").mkdir(parents=True)
@@ -113,16 +115,16 @@ class MemoryToolsTests(unittest.TestCase):
     @unittest.skipIf(not hasattr(os, "symlink"), "symlink is not available")
     def test_retrieve_read_mf_does_not_follow_symlink_outside_root(self):
         import_root = self.root / ".runtime" / "shared_views" / "imports" / "auth-api"
-        import_root.mkdir(parents=True)
+        (import_root / "dist").mkdir(parents=True)
         outside = self.root.parent / f"{self.root.name}-outside-mf.md"
         self.addCleanup(outside.unlink, missing_ok=True)
         outside.write_text("external secret\n", encoding="utf-8")
-        self._symlink_or_skip(import_root / "secret.md", outside)
+        self._symlink_or_skip(import_root / "dist" / "MEMORY.md", outside)
         tools = MemoryTools(self.root, role="retrieve")
 
         result = tools.read_mf("auth-api")
 
-        self.assertIn("MF import is empty: auth-api", result)
+        self.assertIn("MF import not found: auth-api", result)
         self.assertNotIn("external secret", result)
 
     @unittest.skipIf(not hasattr(os, "symlink"), "symlink is not available")

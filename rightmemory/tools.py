@@ -130,31 +130,28 @@ class MemoryTools:
             output += f"\n[truncated: showing lines {offset}-{end} of {len(lines)}; use offset/limit for more]"
         return output
 
-    def read_skill(self, skill_id: str) -> str:
-        """Read a MEMORY_SKILL body by S# id."""
+    def read_skill(self, skill_id: str, offset: int = 1, limit: int = READ_TOOL_LINE_LIMIT) -> str:
+        """Read a line-numbered MEMORY_SKILL body by S# id."""
         clean_id = self._validate_memory_reference_id(skill_id)
         relative = f"MEMORY_SKILL_{clean_id}.md"
         path = self.memory_root / relative
         if not self._is_safe_read_file(path):
             return self._missing_skill_message(clean_id)
-        return self._cap_command_output(self._read_text(path))
+        return self._read_numbered_source(path, f"S#{clean_id}", offset, limit)
 
-    def read_mf(self, mf_id: str) -> str:
-        """Read external file context for an MF# id."""
+    def read_mf(self, mf_id: str, offset: int = 1, limit: int = READ_TOOL_LINE_LIMIT) -> str:
+        """Read a mirrored view's line-numbered canonical dist/MEMORY.md."""
         clean_id = self._validate_memory_reference_id(mf_id)
-        root = self.memory_root / RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX / clean_id
-        if not root.is_dir() or not self._is_under_root(root):
+        path = (
+            self.memory_root
+            / RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX
+            / clean_id
+            / "dist"
+            / "MEMORY.md"
+        )
+        if not self._is_safe_read_file(path):
             return self._missing_mf_message(clean_id)
-        files = sorted(path for path in root.rglob("*") if self._is_safe_read_file(path))
-        if not files:
-            return f"MF import is empty: {clean_id}\n\n{self._available_mf_imports_block()}"
-        parts = [f"MF import: {clean_id}", ""]
-        for path in files:
-            relative = path.relative_to(root).as_posix()
-            parts.append(f"===== {relative} =====")
-            parts.append(self._read_text(path).rstrip())
-            parts.append("")
-        return self._cap_command_output("\n".join(parts).rstrip())
+        return self._read_numbered_source(path, f"MF#{clean_id}", offset, limit)
 
     def read_detail(self, detail_id: str) -> str:
         """Read the root-relative graph detail file for an F# heading id."""
@@ -166,15 +163,13 @@ class MemoryTools:
         text = self._read_text(reference.path).rstrip()
         return self._cap_command_output(f"===== {relative} =====\n{text}")
 
-    def read_markdown(self, markdown_id: str) -> str:
-        """Read the free-form Markdown backing file for an M# heading id."""
+    def read_markdown(self, markdown_id: str, offset: int = 1, limit: int = READ_TOOL_LINE_LIMIT) -> str:
+        """Read line-numbered free-form Markdown for an M# heading id."""
         clean_id = self._validate_memory_reference_id(markdown_id)
         reference = resolve_backing_reference(self.memory_root, clean_id, "M#")
         if reference is None or not self._is_safe_read_file(reference.path):
             return self._missing_typed_backing_message("M# Markdown", clean_id, "M#")
-        relative = reference.path.relative_to(self.memory_root).as_posix()
-        text = self._read_text(reference.path).rstrip()
-        return self._cap_command_output(f"===== {relative} =====\n{text}")
+        return self._read_numbered_source(reference.path, f"M#{clean_id}", offset, limit)
 
     def read_file(
         self,
@@ -891,6 +886,20 @@ class MemoryTools:
         if mark_read:
             self._mark_read_text(resolved, text)
         return text.splitlines()
+
+    def _read_numbered_source(self, path: Path, label: str, offset: int, limit: int) -> str:
+        lines = self._read_lines(path, label)
+        self._validate_positive("offset", offset)
+        self._validate_positive("limit", limit)
+        if not lines:
+            return f"Source: {label}\n\n[empty source]"
+        if offset > len(lines):
+            return f"Source: {label}\n\n[empty: offset {offset} exceeds source length {len(lines)}]"
+        end = min(len(lines), offset + limit - 1)
+        output = f"Source: {label}\n\n{self._format_lines(lines, offset, end)}"
+        if end < len(lines):
+            output += f"\n[truncated: showing lines {offset}-{end} of {len(lines)}; use offset/limit for more]"
+        return self._cap_command_output(output)
 
     def _read_text(self, path: Path) -> str:
         with path.open("r", encoding="utf-8", newline="") as handle:

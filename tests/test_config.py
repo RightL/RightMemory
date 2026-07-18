@@ -27,9 +27,13 @@ from rightmemory.prompt import build_cli_agent_instructions, build_instructions
 from rightmemory.provider_sessions import ProviderSessionStore
 from rightmemory.prune import PruneDueStatus
 from rightmemory.runtime import RightMemoryRuntime, build_model
+from rightmemory.retrieve_selection import RetrieveSelection
 from rightmemory.semantic_upgrades import SemanticUpgradeContext, SemanticUpgradeNote
 from rightmemory.shared_view_files import FileViewPublishResult
 from rightmemory.sync import SyncResult
+
+
+EMPTY_RETRIEVE_SELECTION_JSON = '{"ids": [], "sources": [], "recent_candidates": []}'
 
 
 class ConfigTests(unittest.TestCase):
@@ -49,6 +53,24 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.memory_root, root)
         self.assertEqual(config.state_root, root)
         self.assertEqual(config.model_id, "openai/project")
+
+    def test_load_config_accepts_retrieve_output_safety_limit(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            (root / "rightmemory.toml").write_text(
+                """
+                [retrieve]
+                max_output_chars = 12345
+
+                [retrieve.model]
+                model_id = "openai/project"
+                """,
+                encoding="utf-8",
+            )
+
+            config = load_config("retrieve", memory_root=root)
+
+        self.assertEqual(config.retrieve_max_output_chars, 12345)
 
     def test_load_review_config_accepts_explicit_memory_root(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -851,7 +873,7 @@ class ConfigTests(unittest.TestCase):
     def test_retrieve_prompt_uses_context_first_contract(self):
         instructions = build_instructions(Path("/memory"), "retrieve")
 
-        self.assertIn("supplies a daily root snapshot", instructions)
+        self.assertIn("supplies a daily snapshot", instructions)
         self.assertIn("MEMORY.md", instructions)
         self.assertIn("PURSUITS.md", instructions)
         self.assertIn("read_detail", instructions)
@@ -859,16 +881,17 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("read_skill", instructions)
         self.assertIn("read_mf", instructions)
         self.assertIn("MQ#", instructions)
-        self.assertIn("provider-question context", instructions)
+        self.assertIn("provider question", instructions.lower())
         self.assertIn("reusable instruction", instructions)
         self.assertIn("Available retrieve tools", instructions)
         self.assertIn(
             "`read_detail(detail_id)` resolves a relevant `F#` id",
             instructions,
         )
-        self.assertIn("`read_markdown(markdown_id)` reads free-form evidence", instructions)
-        self.assertIn("`read_mf(mf_id)` reads external file context", instructions)
-        self.assertIn("Never re-return an item already sent in this retrieve session", instructions)
+        self.assertIn("`read_markdown(markdown_id, offset, limit)`", instructions)
+        self.assertIn("`read_mf(mf_id, offset, limit)`", instructions)
+        self.assertIn("terminal retrieve-selection output type", instructions)
+        self.assertIn('"recent_candidates"', instructions)
         self.assertNotIn("Read `MEMORY.md` before retrieval", instructions)
         self.assertNotIn("Follow each with a one-line note", instructions)
         self.assertNotIn("read_command", instructions)
@@ -984,6 +1007,18 @@ class RuntimeTests(unittest.TestCase):
             {"base_url": "https://api.example.com/anthropic", "api_key": "token"},
         )
 
+    def test_standalone_retrieve_uses_native_terminal_selection_type(self):
+        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+        self.assertIs(runtime.agent.kwargs["output_type"], RetrieveSelection)
+        self.assertEqual(
+            {tool.__name__ for tool in runtime.agent.tools},
+            {"read_detail", "read_markdown", "read_skill", "read_mf"},
+        )
+
     def test_cli_agent_runtime_uses_executor_without_pydantic_agent(self):
         config = RuntimeConfig(
             role="retrieve",
@@ -993,11 +1028,11 @@ class RuntimeTests(unittest.TestCase):
         )
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.run_stateless_turn.return_value = "cli reply"
+            executor_class.return_value.run_stateless_turn.return_value = EMPTY_RETRIEVE_SELECTION_JSON
             runtime = RightMemoryRuntime(config)
             result = runtime.run_session_turn("agent-session", "remember one")
 
-        self.assertEqual(result, "cli reply")
+        self.assertEqual(result, "no strong match")
         executor_class.assert_called_once_with(
             Path(self.tempdir.name),
             "retrieve",
@@ -1013,7 +1048,7 @@ class RuntimeTests(unittest.TestCase):
         captured: dict[str, str] = {}
 
         class FakeResult:
-            output = "answer"
+            output = RetrieveSelection()
 
             def all_messages_json(self):
                 return b"[]"
@@ -1029,7 +1064,7 @@ class RuntimeTests(unittest.TestCase):
             with patch("rightmemory.runtime.pull_all_file_views", return_value=[]):
                 output = runtime.run_session_turn("agent-session", "what do we know?")
 
-        self.assertEqual(output, "answer")
+        self.assertEqual(output, "no strong match")
         self.assertTrue(captured["message"].startswith("Daily RightMemory root snapshot\n"))
         self.assertIn("===== MEMORY.md =====", captured["message"])
         self.assertTrue(captured["message"].rstrip().endswith("# Query\n\nwhat do we know?"))
@@ -1750,7 +1785,7 @@ class RuntimeTests(unittest.TestCase):
 
         def run_stateless_turn(message):
             events.append(("agent", message))
-            return "cli reply"
+            return EMPTY_RETRIEVE_SELECTION_JSON
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
             executor_class.return_value.run_stateless_turn.side_effect = run_stateless_turn
@@ -1758,7 +1793,7 @@ class RuntimeTests(unittest.TestCase):
             runtime.sessions.locked = locked
             result = runtime.run_turn("remember one")
 
-        self.assertEqual(result, "cli reply")
+        self.assertEqual(result, "no strong match")
         self.assertEqual(
             events,
             [
@@ -1830,20 +1865,20 @@ class RuntimeTests(unittest.TestCase):
             first = runtime.run_turn("remember one")
             second = runtime.run_turn("what was that?")
 
-        self.assertEqual(first, "reply 1")
-        self.assertEqual(second, "reply 2")
+        self.assertEqual(first, "no strong match")
+        self.assertEqual(second, "no strong match")
         self.assertIsNone(runtime.agent.calls[0]["message_history"])
         self.assertIsNone(runtime.agent.calls[1]["message_history"])
         self.assertIn("# Prior retrieve conversation", runtime.agent.calls[1]["message"])
         self.assertIn("User: remember one", runtime.agent.calls[1]["message"])
-        self.assertIn("Assistant: reply 1", runtime.agent.calls[1]["message"])
+        self.assertIn("Assistant: no strong match", runtime.agent.calls[1]["message"])
         self.assertEqual(
             runtime.agent.calls[0]["model_settings"],
             {"extra_body": {"chat_template_kwargs": {"thinking": True}}},
         )
         self.assertEqual(runtime.agent.calls[0]["usage_limits"].request_limit, 100)
 
-    def test_retrieve_turn_appends_recent_submitted_memory_once_per_session(self):
+    def test_retrieve_turn_keeps_unselected_recent_submitted_memory_visible(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
         self._write_async_update_state(
             "update-a",
@@ -1877,9 +1912,9 @@ class RuntimeTests(unittest.TestCase):
             second = runtime.run_session_turn("agent-session", "find two")
             other_session = runtime.run_session_turn("other-session", "find three")
 
-        self.assertEqual(first, "reply 1")
-        self.assertEqual(second, "reply 2")
-        self.assertEqual(other_session, "reply 3")
+        self.assertEqual(first, "no strong match")
+        self.assertEqual(second, "no strong match")
+        self.assertEqual(other_session, "no strong match")
         self.assertIn("Recent submitted RightMemory candidates", runtime.agent.calls[0]["message"])
         self.assertIn("remember first submitted detail", runtime.agent.calls[0]["message"])
         self.assertLess(
@@ -1889,7 +1924,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(runtime.agent.calls[0]["message"].rstrip().endswith("# Query\n\nfind one"))
         self.assertIn("Recent submitted RightMemory candidates", runtime.agent.calls[1]["message"])
         self.assertIn("remember second submitted detail", runtime.agent.calls[1]["message"])
-        self.assertNotIn("remember first submitted detail", runtime.agent.calls[1]["message"])
+        self.assertIn("remember first submitted detail", runtime.agent.calls[1]["message"])
         self.assertLess(
             runtime.agent.calls[1]["message"].index("# Recent submitted RightMemory candidates"),
             runtime.agent.calls[1]["message"].index("# Query"),
@@ -1914,8 +1949,8 @@ class RuntimeTests(unittest.TestCase):
             first = runtime.run_session_turn("agent-session", "find root")
             second = runtime.run_session_turn("agent-session", "find again")
 
-        self.assertEqual(first, "reply 1")
-        self.assertEqual(second, "reply 2")
+        self.assertEqual(first, "no strong match")
+        self.assertEqual(second, "no strong match")
         self.assertTrue(runtime.agent.calls[0]["message"].startswith("Daily RightMemory root snapshot\n"))
         self.assertIn("===== MEMORY.md =====", runtime.agent.calls[0]["message"])
         self.assertTrue(runtime.agent.calls[0]["message"].rstrip().endswith("# Query\n\nfind root"))
@@ -1923,13 +1958,16 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(runtime.agent.calls[1]["message_history"])
         self.assertIn("# Prior retrieve conversation", runtime.agent.calls[1]["message"])
         self.assertIn("User: find root", runtime.agent.calls[1]["message"])
-        self.assertIn("Assistant: reply 1", runtime.agent.calls[1]["message"])
+        self.assertIn("Assistant: no strong match", runtime.agent.calls[1]["message"])
 
         state_path = root / ".runtime" / "retrieve_context" / "sessions" / "agent-session.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(
             state["turns"],
-            [{"query": "find root", "answer": "reply 1"}, {"query": "find again", "answer": "reply 2"}],
+            [
+                {"query": "find root", "answer": "no strong match"},
+                {"query": "find again", "answer": "no strong match"},
+            ],
         )
         self.assertNotIn("Daily RightMemory root snapshot", state_path.read_text(encoding="utf-8"))
 
@@ -2005,6 +2043,15 @@ class RuntimeTests(unittest.TestCase):
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
+
+            def select_candidate(message, **kwargs):
+                return type(
+                    "Result",
+                    (),
+                    {"output": RetrieveSelection(recent_candidates=["update-a:1"])},
+                )()
+
+            runtime.agent.run_sync = select_candidate
             runtime.run_session_turn("agent-session", "find one")
 
         state_path = Path(self.tempdir.name) / ".runtime" / "recent_submitted" / "retrieve" / "agent-session.json"
@@ -2060,11 +2107,11 @@ class RuntimeTests(unittest.TestCase):
         )
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.run_stateless_turn.return_value = "cli reply"
+            executor_class.return_value.run_stateless_turn.return_value = EMPTY_RETRIEVE_SELECTION_JSON
             runtime = RightMemoryRuntime(config)
             result = runtime.run_session_turn("agent-session", "find one")
 
-        self.assertEqual(result, "cli reply")
+        self.assertEqual(result, "no strong match")
         executor_class.return_value.run_stateless_turn.assert_called_once()
         (message,) = executor_class.return_value.run_stateless_turn.call_args.args
         self.assertTrue(message.startswith("Daily RightMemory root snapshot\n"))
@@ -2072,8 +2119,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(message.rstrip().endswith("# Query\n\nfind one"))
         self.assertIn("remember cli submitted detail", message)
         state_path = Path(self.tempdir.name) / ".runtime" / "recent_submitted" / "retrieve" / "agent-session.json"
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        self.assertEqual(state["delivered"], ["update-a:1:2026-05-19T00:00:00+00:00"])
+        self.assertFalse(state_path.exists())
 
     def test_write_role_creates_memory_lock_and_gitignore(self):
         config = RuntimeConfig(
@@ -2587,13 +2633,13 @@ class RuntimeTests(unittest.TestCase):
             second_runtime = RightMemoryRuntime(config)
             second = second_runtime.run_session_turn("agent-session", "what was that?")
 
-        self.assertEqual(first, "reply 1")
-        self.assertEqual(second, "reply 1")
+        self.assertEqual(first, "no strong match")
+        self.assertEqual(second, "no strong match")
         self.assertIsNone(first_runtime.agent.calls[0]["message_history"])
         self.assertIsNone(second_runtime.agent.calls[0]["message_history"])
         self.assertIn("# Prior retrieve conversation", second_runtime.agent.calls[0]["message"])
         self.assertIn("User: remember one", second_runtime.agent.calls[0]["message"])
-        self.assertIn("Assistant: reply 1", second_runtime.agent.calls[0]["message"])
+        self.assertIn("Assistant: no strong match", second_runtime.agent.calls[0]["message"])
         history_path = Path(self.tempdir.name) / ".runtime" / "sessions" / "retrieve" / "agent-session.json"
         self.assertFalse(history_path.exists())
         retrieve_state_path = (
@@ -2602,7 +2648,10 @@ class RuntimeTests(unittest.TestCase):
         retrieve_state = json.loads(retrieve_state_path.read_text(encoding="utf-8"))
         self.assertEqual(
             retrieve_state["turns"],
-            [{"query": "remember one", "answer": "reply 1"}, {"query": "what was that?", "answer": "reply 1"}],
+            [
+                {"query": "remember one", "answer": "no strong match"},
+                {"query": "what was that?", "answer": "no strong match"},
+            ],
         )
         gitignore_path = Path(self.tempdir.name) / ".runtime" / ".gitignore"
         self.assertEqual(gitignore_path.read_text(encoding="utf-8"), "*\n")
@@ -2719,7 +2768,7 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
             result = runtime.run_session_turn("agent-session", "remember one")
 
-        self.assertEqual(result, "reply 1")
+        self.assertEqual(result, "no strong match")
         history_path = Path(self.tempdir.name) / ".runtime" / "sessions" / "retrieve" / "agent-session.json"
         self.assertFalse(history_path.exists())
         retrieve_state_path = (
@@ -2727,7 +2776,7 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(
             json.loads(retrieve_state_path.read_text(encoding="utf-8"))["turns"],
-            [{"query": "remember one", "answer": "reply 1"}],
+            [{"query": "remember one", "answer": "no strong match"}],
         )
         trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "retrieve" / "agent-session.jsonl"
         events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
@@ -2737,7 +2786,7 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(events[0]["message"], "remember one")
         self.assertEqual(events[0]["model_id"], "openai/test")
-        self.assertEqual(events[3]["output"], "reply 1")
+        self.assertEqual(events[3]["output"], "no strong match")
 
     def test_cli_agent_debug_trace_uses_cli_model_id(self):
         config = RuntimeConfig(
@@ -2749,16 +2798,16 @@ class RuntimeTests(unittest.TestCase):
         )
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.run_stateless_turn.return_value = "cli reply"
+            executor_class.return_value.run_stateless_turn.return_value = EMPTY_RETRIEVE_SELECTION_JSON
             runtime = RightMemoryRuntime(config)
             result = runtime.run_session_turn("agent-session", "remember one")
 
-        self.assertEqual(result, "cli reply")
+        self.assertEqual(result, "no strong match")
         trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "retrieve" / "agent-session.jsonl"
         events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([event["event"] for event in events], ["run_started", "model_started", "model_finished", "run_finished"])
         self.assertEqual(events[0]["model_id"], "gpt-5")
-        self.assertEqual(events[2]["output"], "cli reply")
+        self.assertEqual(events[2]["output"], "no strong match")
 
     def test_debug_trace_records_tool_events(self):
         config = RuntimeConfig(
@@ -2941,6 +2990,7 @@ class RuntimeTests(unittest.TestCase):
                 self.calls = []
                 self.model = kwargs["model"]
                 self.tools = kwargs["tools"]
+                self.output_type = kwargs.get("output_type")
 
             def run_sync(self, message, message_history=None, model_settings=None, usage_limits=None):
                 self.calls.append(
@@ -2952,16 +3002,16 @@ class RuntimeTests(unittest.TestCase):
                     }
                 )
                 call_count = len(self.calls)
+                output = self.output_type() if self.output_type is not None else f"reply {call_count}"
 
                 class FakeResult:
-                    output = f"reply {call_count}"
-
                     def all_messages(self):
                         return [f"message {call_count}"]
 
                     def all_messages_json(self):
                         return json.dumps(self.all_messages()).encode()
 
+                FakeResult.output = output
                 return FakeResult()
 
         class FakeProvider:
@@ -3060,14 +3110,15 @@ class PromptTests(unittest.TestCase):
             self.assertNotIn("{{MEMORY_ROOT}}", prompt)
             self.assertNotIn("{{SKILLS_ROOT}}", prompt)
 
-    def test_cli_agent_retrieve_prompt_mentions_mq_recommendation_without_ask_command(self):
+    def test_cli_agent_retrieve_prompt_requires_strict_selection_without_ask_command(self):
         prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), "retrieve")
 
         self.assertIn("MF#", prompt)
         self.assertIn("MQ#", prompt)
-        self.assertIn("provider-question context", prompt)
-        self.assertNotIn("read_skill", prompt)
-        self.assertNotIn("read_mf", prompt)
+        self.assertIn("exactly one JSON object", prompt)
+        self.assertIn(".runtime/shared_views/imports/<mf-id>/dist/MEMORY.md", prompt)
+        self.assertIn("The `read_*` names", prompt)
+        self.assertIn("provider CLI's read-only file tools", prompt)
         self.assertNotIn("rightmemory shared-view retrieve", prompt)
         self.assertNotIn("rightmemory shared-view ask", prompt)
         self.assertNotIn("retrieve_shared_view", prompt)
@@ -3128,7 +3179,7 @@ class PromptTests(unittest.TestCase):
         retrieve_instructions = build_instructions(Path("/memory"), "retrieve")
         self.assertIn("S#", retrieve_instructions)
         self.assertIn("MEMORY_SKILL_<slug>.md", retrieve_instructions)
-        self.assertIn("progressive disclosure", retrieve_instructions)
+        self.assertIn("complete S# instruction", retrieve_instructions)
 
         for role in ("update", "reviewer", "dreamer"):
             with self.subTest(role=role):

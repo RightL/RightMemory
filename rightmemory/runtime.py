@@ -34,6 +34,13 @@ from .retrieve_context import (
     load_daily_snapshot,
     memory_diff_since,
 )
+from .retrieve_selection import (
+    RenderedRetrieveSelection,
+    RetrieveSelection,
+    RetrieveSelectionError,
+    RetrieveSelectionRenderer,
+    parse_retrieve_selection_json,
+)
 from .semantic_upgrades import SemanticUpgradeContext, mark_absorbed, pending_context
 from .session import MemoryWriteLock, MessageSessionStore, _ensure_runtime_gitignore, _fsync_directory
 from .shared_view_files import publish_approved_file_views, pull_all_file_views, record_file_view_publish_results
@@ -140,18 +147,30 @@ class RightMemoryRuntime:
             NO_SESSION_RIGHTMEMORY_SESSION_ID,
             message,
         )
-        result, post_sync = self._run_locked_turn(
-            lambda: self.agent.run_sync(
-                prepared.message,
-                message_history=None if self.config.role == "retrieve" else self._message_history or None,
-                model_settings=self._model_settings(),
-                usage_limits=self._usage_limits(),
-            )
-        )
-        output = self._result_output(result)
         if self.config.role == "retrieve":
-            self._record_successful_retrieve_turn(NO_SESSION_RIGHTMEMORY_SESSION_ID, prepared, output)
+            rendered, post_sync = self._run_locked_turn(
+                lambda: self._run_retrieve_model(
+                    NO_SESSION_RIGHTMEMORY_SESSION_ID,
+                    prepared,
+                    include_returned=False,
+                )
+            )
+            output = rendered.text
+            self._record_successful_retrieve_turn(
+                NO_SESSION_RIGHTMEMORY_SESSION_ID,
+                prepared,
+                rendered,
+            )
         else:
+            result, post_sync = self._run_locked_turn(
+                lambda: self.agent.run_sync(
+                    prepared.message,
+                    message_history=self._message_history or None,
+                    model_settings=self._model_settings(),
+                    usage_limits=self._usage_limits(),
+                )
+            )
+            output = self._result_output(result)
             self._store_message_history_from_result(result)
         if post_sync is not None:
             self._run_sync_reconciler(post_sync)
@@ -159,12 +178,24 @@ class RightMemoryRuntime:
         self._mark_semantic_upgrades_absorbed()
         return output
 
-    def run_session_turn(self, session_id: str, message: str, *, on_started: Callable[[], None] | None = None) -> str:
+    def run_session_turn(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        on_started: Callable[[], None] | None = None,
+        include_returned: bool = False,
+    ) -> str:
         with self._update_execution_lock():
             self._last_write_result = None
             self._last_reviewed_update_commit = None
             base_commit = self._review_base_commit()
-            output = self._run_session_turn_unlocked(session_id, message, on_started=on_started)
+            output = self._run_session_turn_unlocked(
+                session_id,
+                message,
+                on_started=on_started,
+                include_returned=include_returned,
+            )
             self._create_update_review(base_commit, output)
             return output
 
@@ -175,6 +206,7 @@ class RightMemoryRuntime:
         *,
         on_started: Callable[[], None] | None = None,
         allow_internal_session: bool = False,
+        include_returned: bool = False,
     ) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
@@ -194,11 +226,15 @@ class RightMemoryRuntime:
                     if self.config.runtime_mode == "cli-agent"
                     else self._run_session_model
                 )
+                direct_kwargs: dict[str, object] = {}
+                if on_started is not None:
+                    direct_kwargs["on_started"] = on_started
+                if include_returned:
+                    direct_kwargs["include_returned"] = True
+                direct_callback = lambda: run_session(session_id, message, **direct_kwargs)
                 if on_started is None:
-                    direct_callback = lambda: run_session(session_id, message)
                     isolated_callback = lambda: self._run_session_turn_isolated(session_id, message)
                 else:
-                    direct_callback = lambda: run_session(session_id, message, on_started=on_started)
                     isolated_callback = lambda: self._run_session_turn_isolated(
                         session_id,
                         message,
@@ -263,47 +299,163 @@ class RightMemoryRuntime:
             self._trace("run_finished", output=output)
         return output
 
-    def _run_session_model(self, session_id: str, message: str, *, on_started: Callable[[], None] | None = None):
+    def _run_session_model(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        on_started: Callable[[], None] | None = None,
+        include_returned: bool = False,
+    ):
         with self.sessions.locked(session_id) as session:
             self._pull_file_views_for_retrieve()
-            prepared = self._prepare_retrieve_turn(session_id, message)
+            prepared = self._prepare_retrieve_turn(
+                session_id,
+                message,
+                include_returned=include_returned,
+            )
             history_json = session.load_json()
             history = self._load_message_history(history_json) if history_json is not None else None
             self._trace("history_loaded", message_count=len(history or []))
             if on_started is not None:
                 on_started()
             self._trace("model_started")
+            if self.config.role == "retrieve":
+                rendered = self._run_retrieve_model(
+                    session_id,
+                    prepared,
+                    include_returned=include_returned,
+                )
+                self._trace("model_finished", output=rendered.text)
+                self._record_successful_retrieve_turn(session_id, prepared, rendered)
+                return rendered.text
             result = self.agent.run_sync(
                 prepared.message,
-                message_history=None if self.config.role == "retrieve" else history,
+                message_history=history,
                 model_settings=self._model_settings(),
                 usage_limits=self._usage_limits(),
             )
             output = self._result_output(result)
             self._trace("model_finished", output=output)
-            if self.config.role == "retrieve":
-                self._record_successful_retrieve_turn(session_id, prepared, output)
-            else:
-                session.save_json(self._dump_message_history(result))
-                self._trace("history_saved", path=str(session.paths.history))
+            session.save_json(self._dump_message_history(result))
+            self._trace("history_saved", path=str(session.paths.history))
             return result
 
-    def _run_session_cli_agent(self, session_id: str, message: str, *, on_started: Callable[[], None] | None = None) -> str:
+    def _run_session_cli_agent(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        on_started: Callable[[], None] | None = None,
+        include_returned: bool = False,
+    ) -> str:
         with self.sessions.locked(session_id):
             self._pull_file_views_for_retrieve()
-            prepared = self._prepare_retrieve_turn(session_id, message)
+            prepared = self._prepare_retrieve_turn(
+                session_id,
+                message,
+                include_returned=include_returned,
+            )
             if on_started is not None:
                 on_started()
             self._trace("model_started")
             if self.config.role == "retrieve":
-                result = self.agent.run_stateless_turn(prepared.message)
-                self._trace("model_finished", output=str(result))
-                self._record_successful_retrieve_turn(session_id, prepared, str(result))
-                return result
+                rendered = self._run_retrieve_cli_agent(
+                    session_id,
+                    prepared,
+                    include_returned=include_returned,
+                )
+                self._trace("model_finished", output=rendered.text)
+                self._record_successful_retrieve_turn(session_id, prepared, rendered)
+                return rendered.text
             result = self.agent.run_session_turn(session_id, prepared.message)
             self._trace("model_finished", output=str(result))
-            self._record_successful_retrieve_turn(session_id, prepared, str(result))
             return result
+
+    def _run_retrieve_model(
+        self,
+        session_id: str,
+        prepared: PreparedRetrieveTurn,
+        *,
+        include_returned: bool,
+    ) -> RenderedRetrieveSelection:
+        request = prepared.message
+        for attempt in range(self.config.max_tool_retries + 1):
+            result = self.agent.run_sync(
+                request,
+                message_history=None,
+                model_settings=self._model_settings(),
+                usage_limits=self._usage_limits(),
+            )
+            try:
+                selection = self._coerce_retrieve_selection(getattr(result, "output", result))
+                return self._render_retrieve_selection(
+                    session_id,
+                    prepared,
+                    selection,
+                    include_returned=include_returned,
+                )
+            except RetrieveSelectionError as exc:
+                if attempt >= self.config.max_tool_retries:
+                    raise
+                request = _retrieve_retry_request(prepared.message, str(exc))
+        raise AssertionError("unreachable retrieve retry state")
+
+    def _run_retrieve_cli_agent(
+        self,
+        session_id: str,
+        prepared: PreparedRetrieveTurn,
+        *,
+        include_returned: bool,
+    ) -> RenderedRetrieveSelection:
+        request = prepared.message
+        for attempt in range(self.config.max_tool_retries + 1):
+            raw = self.agent.run_stateless_turn(request)
+            try:
+                selection = parse_retrieve_selection_json(str(raw))
+                return self._render_retrieve_selection(
+                    session_id,
+                    prepared,
+                    selection,
+                    include_returned=include_returned,
+                )
+            except RetrieveSelectionError as exc:
+                if attempt >= self.config.max_tool_retries:
+                    raise
+                request = _retrieve_retry_request(prepared.message, str(exc))
+        raise AssertionError("unreachable retrieve retry state")
+
+    def _coerce_retrieve_selection(self, value: object) -> RetrieveSelection:
+        if isinstance(value, RetrieveSelection):
+            return value
+        if isinstance(value, str):
+            raise RetrieveSelectionError(
+                "standalone retrieve must finish through the native terminal selector, not text"
+            )
+        try:
+            return RetrieveSelection.model_validate(value)
+        except Exception as exc:
+            raise RetrieveSelectionError(f"terminal output is not a valid retrieve selection: {exc}") from exc
+
+    def _render_retrieve_selection(
+        self,
+        session_id: str,
+        prepared: PreparedRetrieveTurn,
+        selection: RetrieveSelection,
+        *,
+        include_returned: bool,
+    ) -> RenderedRetrieveSelection:
+        state = self.retrieve_context.load(session_id)
+        renderer = RetrieveSelectionRenderer(
+            self.config.memory_root,
+            max_output_chars=self.config.retrieve_max_output_chars,
+        )
+        return renderer.render(
+            selection,
+            delivered=state.delivery_coverage,
+            recent_entries=prepared.recent_submitted_entries,
+            include_returned=include_returned,
+        )
 
     def _run_prune_turn_direct(self, session_id: str, pruner_config: PrunerConfig):
         status = prune_due_status(
@@ -546,6 +698,8 @@ class RightMemoryRuntime:
         self,
         session_id: str,
         message: str,
+        *,
+        include_returned: bool = False,
     ) -> PreparedRetrieveTurn:
         if self.config.role != "retrieve":
             return PreparedRetrieveTurn(message, message, [], None)
@@ -557,7 +711,7 @@ class RightMemoryRuntime:
         diff_block = format_memory_diff_block(diff)
 
         entries = collect_recent_submitted_memory(self.config.memory_root)
-        if entries:
+        if entries and not include_returned:
             entries = self.recent_submitted_delivery.new_entries(session_id, entries)
         recent_block = format_recent_submitted_context_block(entries)
         request = build_retrieve_request_text(
@@ -573,17 +727,18 @@ class RightMemoryRuntime:
         self,
         session_id: str,
         prepared: PreparedRetrieveTurn,
-        output: str,
+        rendered: RenderedRetrieveSelection,
     ) -> None:
         if self.config.role != "retrieve":
             return
         self.retrieve_context.record_success(
             session_id,
             query=prepared.query,
-            answer=output,
+            answer=rendered.text,
             memory_commit=prepared.memory_commit,
+            delivery=rendered.delivery,
         )
-        self._record_recent_submitted_delivery(session_id, prepared.recent_submitted_entries)
+        self._record_recent_submitted_delivery(session_id, rendered.recent_entries)
 
     def _record_recent_submitted_delivery(
         self,
@@ -626,16 +781,19 @@ class RightMemoryRuntime:
         except ImportError as exc:
             raise RuntimeError("install standalone dependencies with: pip install -e .") from exc
 
-        return Agent(
-            model=build_model(self.config),
-            instructions=build_instructions(
+        kwargs: dict[str, Any] = {
+            "model": build_model(self.config),
+            "instructions": build_instructions(
                 self.config.memory_root,
                 self.config.role,
                 semantic_upgrades=self.semantic_upgrades,
             ),
-            tools=self._agent_tools(),
-            retries=self.config.max_tool_retries,
-        )
+            "tools": self._agent_tools(),
+            "retries": self.config.max_tool_retries,
+        }
+        if self.config.role == "retrieve":
+            kwargs["output_type"] = RetrieveSelection
+        return Agent(**kwargs)
 
     def _build_cli_agent(self) -> CliAgentExecutor:
         if self.config.agent_cli is None:
@@ -1072,6 +1230,16 @@ def _short_trace_value(value: Any) -> str:
     if len(text) > 1000:
         return text[:1000] + "...[truncated]"
     return text
+
+
+def _retrieve_retry_request(original: str, error: str) -> str:
+    return (
+        f"{original.rstrip()}\n\n"
+        "# Retrieve selection validation error\n\n"
+        f"{error}\n\n"
+        "Inspect more source context if needed, then submit one replacement selection. "
+        "Do not add prose or reuse the invalid selection.\n"
+    )
 
 
 def _sanitize_message_history_value(value: Any, *, in_model_response: bool = False) -> Any:

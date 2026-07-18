@@ -18,11 +18,11 @@ description: "Use when the user explicitly chooses full RightMemory orchestratio
 - Retrieve preference, workflow, and behavior guidance more proactively when it will shape collaboration, implementation, verification, communication, or completion choices. Treat phase and topic changes as strong triggers.
 - Writing and Design correction M# collections are an exception: unless the user asks for them directly, retrieve their full contents only after an initial draft, design, or implementation direction exists.
 - Give the retrieve command up to 3 minutes to return. Await or poll that command; do not run a separate blocking wait, explore files, or advance the task while it is pending.
-- The retriever skips items already returned in this session. Ask explicitly when the same item is needed again.
-- Treat Memory as durable context and Pursuit as live intent or continuity. A returned F# heading points to graph detail, M# to free-form evidence, and S# to reusable instruction.
-- Broad retrieval usually returns only a linked-resource heading and brief body. Retrieve a specific M# or S# item before using its full evidence or instruction.
+- The retriever skips unchanged content already returned in this session. When the user needs matching content repeated, add `--include-returned` for that call; do not change the session id.
+- Treat Memory as durable context and Pursuit as live intent or continuity. Retrieval output is authoritative source Markdown selected by the model and rendered by RightMemory, not a model-written summary.
+- A selected F# heading includes its parsed detail subtree. A local M#, S#, or MF# heading does not by itself expand linked content; M# evidence uses source ranges, S# expands only as a complete instruction, and MF# uses source-scoped ids or ranges.
 - Apply retrieved guidance when the fit is clear. If it is stale, wrong, too broad, or misleading, include the correction in the next candidate.
-- Treat `Open context questions` as questions rather than facts. If current task context already answers one, include its id and answer in the next candidate; do not investigate solely because it appeared.
+- Treat retrieved open-context questions as questions rather than facts. If current task context already answers one, include its id and answer in the next candidate; do not investigate solely because it appeared.
 - Treat `Provider question context` for an `MQ#` heading as an optional external ask opportunity. When it would materially help, call `rightmemory shared-view ask <mq-id> "<question>"` using the actual task context. If unavailable, continue with local context and tell the user.
 
 ## Task-State Candidates

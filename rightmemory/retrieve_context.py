@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .retrieve_selection import DeliveredRange, RetrieveDeliveryCoverage
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
 
 
@@ -42,6 +43,7 @@ class RetrieveSessionState:
     session_id: str
     delivered_memory_commit: str | None = None
     turns: list[RetrieveTurn] = field(default_factory=list)
+    delivery_coverage: RetrieveDeliveryCoverage = field(default_factory=RetrieveDeliveryCoverage)
 
 
 class RetrieveContextStore:
@@ -71,14 +73,29 @@ class RetrieveContextStore:
             ):
                 raise ValueError("retrieve context turn entries must contain query and answer strings")
             turns.append(RetrieveTurn(query=item["query"], answer=item["answer"]))
-        return RetrieveSessionState(session_id=session_id, delivered_memory_commit=delivered, turns=turns)
+        coverage = _coverage_from_dict(data.get("delivery_coverage", {}))
+        return RetrieveSessionState(
+            session_id=session_id,
+            delivered_memory_commit=delivered,
+            turns=turns,
+            delivery_coverage=coverage,
+        )
 
-    def record_success(self, session_id: str, *, query: str, answer: str, memory_commit: str | None) -> None:
+    def record_success(
+        self,
+        session_id: str,
+        *,
+        query: str,
+        answer: str,
+        memory_commit: str | None,
+        delivery: RetrieveDeliveryCoverage | None = None,
+    ) -> None:
         state = self.load(session_id)
         next_state = RetrieveSessionState(
             session_id=session_id,
             delivered_memory_commit=memory_commit,
             turns=[*state.turns, RetrieveTurn(query=query, answer=answer)],
+            delivery_coverage=state.delivery_coverage.merged(delivery or RetrieveDeliveryCoverage()),
         )
         self._write(next_state)
 
@@ -90,6 +107,7 @@ class RetrieveContextStore:
             "session_id": state.session_id,
             "delivered_memory_commit": state.delivered_memory_commit,
             "turns": [asdict(turn) for turn in state.turns],
+            "delivery_coverage": _coverage_to_dict(state.delivery_coverage),
         }
         _write_json(self.memory_root, self._state_path(state.session_id), data)
 
@@ -199,7 +217,8 @@ def format_recent_submitted_context_block(entries: list[object]) -> str:
     lines = [f"# {RECENT_SUBMITTED_CONTEXT_HEADER}", ""]
     for entry in entries:
         lines.append(
-            f"[update session: {entry.update_session_id} | "
+            f"[selection_id: {entry.update_session_id}:{entry.candidate_id} | "
+            f"update session: {entry.update_session_id} | "
             f"candidate: {entry.candidate_id} | submitted_at: {entry.submitted_at}]"
         )
         lines.extend(entry.message.splitlines() or [""])
@@ -266,6 +285,70 @@ def _snapshot_from_dict(data: dict[str, object]) -> DailySnapshot:
     if scope != SNAPSHOT_SCOPE:
         raise ValueError("daily snapshot scope is unsupported")
     return DailySnapshot(day=day, base_commit=base_commit, content_hash=content_hash, text=text, paths=paths)
+
+
+def _coverage_from_dict(value: object) -> RetrieveDeliveryCoverage:
+    if value is None:
+        return RetrieveDeliveryCoverage()
+    if not isinstance(value, dict):
+        raise ValueError("retrieve delivery_coverage must be an object")
+    allowed = {"local_items", "source_items", "complete_sources", "ranges", "recent_candidates"}
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(f"retrieve delivery_coverage has unknown field(s): {', '.join(sorted(unknown))}")
+
+    def string_map(name: str) -> dict[str, str]:
+        raw = value.get(name, {})
+        if not isinstance(raw, dict) or any(
+            not isinstance(key, str) or not isinstance(item, str) for key, item in raw.items()
+        ):
+            raise ValueError(f"retrieve delivery_coverage.{name} must be a string map")
+        return dict(raw)
+
+    raw_ranges = value.get("ranges", [])
+    if not isinstance(raw_ranges, list):
+        raise ValueError("retrieve delivery_coverage.ranges must be a list")
+    ranges: list[DeliveredRange] = []
+    for raw in raw_ranges:
+        if not isinstance(raw, dict) or set(raw) != {"source_id", "start", "end", "source_hash"}:
+            raise ValueError("retrieve delivery_coverage range entries are malformed")
+        source_id = raw.get("source_id")
+        start = raw.get("start")
+        end = raw.get("end")
+        source_hash = raw.get("source_hash")
+        if (
+            not isinstance(source_id, str)
+            or isinstance(start, bool)
+            or not isinstance(start, int)
+            or isinstance(end, bool)
+            or not isinstance(end, int)
+            or start < 1
+            or end < start
+            or not isinstance(source_hash, str)
+        ):
+            raise ValueError("retrieve delivery_coverage range entries are malformed")
+        ranges.append(DeliveredRange(source_id, start, end, source_hash))
+
+    recent = value.get("recent_candidates", [])
+    if not isinstance(recent, list) or any(not isinstance(item, str) for item in recent):
+        raise ValueError("retrieve delivery_coverage.recent_candidates must be a string list")
+    return RetrieveDeliveryCoverage(
+        local_items=string_map("local_items"),
+        source_items=string_map("source_items"),
+        complete_sources=string_map("complete_sources"),
+        ranges=ranges,
+        recent_candidates=list(recent),
+    )
+
+
+def _coverage_to_dict(coverage: RetrieveDeliveryCoverage) -> dict[str, object]:
+    return {
+        "local_items": dict(coverage.local_items),
+        "source_items": dict(coverage.source_items),
+        "complete_sources": dict(coverage.complete_sources),
+        "ranges": [asdict(item) for item in coverage.ranges],
+        "recent_candidates": list(coverage.recent_candidates),
+    }
 
 
 def _write_json(memory_root: Path, path: Path, data: dict[str, object]) -> None:
