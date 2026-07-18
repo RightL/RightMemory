@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
   <title id="title">How one RightMemory root works</title>
-  <desc id="desc">A diagram showing agent sessions retrieving context from and submitting memory candidates to one RightMemory root with a tree and graph structure.</desc>
+  <desc id="desc">A diagram showing an agent retrieving context from and submitting evidence to one RightMemory root where durable Memory and live Pursuit form one graph.</desc>
   <rect width="1200" height="620" rx="28" fill="#10151f"/>
   <rect x="36" y="36" width="1128" height="548" rx="18" fill="#17202c" stroke="#2d3a4e" stroke-width="2"/>
 
-  <text x="64" y="90" fill="#f8fafc" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif" font-size="34" font-weight="700">One memory root</text>
-  <text x="64" y="128" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="20">A local agent reads focused context, submits durable updates, and leaves memory in reviewable files.</text>
+  <text x="64" y="90" fill="#f8fafc" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif" font-size="34" font-weight="700">One RightMemory root</text>
+  <text x="64" y="128" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="20">An agent retrieves relevant context, submits evidence, and lets one updater reconcile both trees.</text>
 
   <rect x="70" y="205" width="270" height="95" rx="14" fill="#121b26" stroke="#2f4058"/>
   <text x="205" y="242" text-anchor="middle" fill="#ffd166" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="22" font-weight="700">Agent session</text>
@@ -13,24 +13,24 @@
 
   <rect x="70" y="340" width="270" height="95" rx="14" fill="#121b26" stroke="#2f4058"/>
   <text x="205" y="377" text-anchor="middle" fill="#ffd166" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="22" font-weight="700">After work</text>
-  <text x="205" y="405" text-anchor="middle" fill="#d7e1ee" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="17">submits memory candidates</text>
+  <text x="205" y="405" text-anchor="middle" fill="#d7e1ee" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="17">submits state candidates</text>
 
   <rect x="450" y="175" width="350" height="295" rx="18" fill="#0f1722" stroke="#8bd3ff" stroke-width="2"/>
   <text x="625" y="218" text-anchor="middle" fill="#8bd3ff" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="25" font-weight="700">RightMemory root</text>
 
   <rect x="486" y="248" width="128" height="135" rx="12" fill="#17202c" stroke="#2f4058"/>
-  <text x="550" y="282" text-anchor="middle" fill="#e5edf7" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="20" font-weight="700">Tree</text>
-  <text x="550" y="314" text-anchor="middle" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">ordered</text>
-  <text x="550" y="338" text-anchor="middle" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">local</text>
-  <text x="550" y="362" text-anchor="middle" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">context</text>
+  <text x="550" y="282" text-anchor="middle" fill="#e5edf7" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="20" font-weight="700">Memory</text>
+  <text x="550" y="314" text-anchor="middle" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">durable</text>
+  <text x="550" y="338" text-anchor="middle" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">context and</text>
+  <text x="550" y="362" text-anchor="middle" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">guidance</text>
 
   <rect x="636" y="248" width="128" height="135" rx="12" fill="#17202c" stroke="#2f4058"/>
-  <text x="700" y="282" text-anchor="middle" fill="#e5edf7" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="20" font-weight="700">Graph</text>
-  <text x="700" y="314" text-anchor="middle" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">flexible</text>
-  <text x="700" y="338" text-anchor="middle" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">cross-links</text>
-  <text x="700" y="362" text-anchor="middle" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">between facts</text>
+  <text x="700" y="282" text-anchor="middle" fill="#e5edf7" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="20" font-weight="700">Pursuit</text>
+  <text x="700" y="314" text-anchor="middle" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">live intent</text>
+  <text x="700" y="338" text-anchor="middle" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">state and next</text>
+  <text x="700" y="362" text-anchor="middle" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">movement</text>
 
-  <text x="625" y="425" text-anchor="middle" fill="#d7e1ee" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">MEMORY.md + MEMORY_*.md</text>
+  <text x="625" y="425" text-anchor="middle" fill="#d7e1ee" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">one graph · global ids + typed edges</text>
 
   <rect x="900" y="205" width="240" height="95" rx="14" fill="#121b26" stroke="#2f4058"/>
   <text x="1020" y="242" text-anchor="middle" fill="#9be7c3" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="22" font-weight="700">Focused context</text>
@@ -50,5 +50,5 @@
   <path d="M800 388 C836 388 856 388 892 388" stroke="#ffd166" stroke-width="3" fill="none"/>
   <path d="M892 388 L876 379 L876 397 Z" fill="#ffd166"/>
 
-  <text x="64" y="535" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="18">The tree gives attention an orderly path. The graph gives it useful jumps. Sync keeps context available.</text>
+  <text x="64" y="535" fill="#9fb0c5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="18">Two document trees preserve distinct lifecycles; one graph connects what future agents need.</text>
 </svg>

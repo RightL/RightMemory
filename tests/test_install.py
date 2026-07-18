@@ -9,6 +9,61 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_START = "rightmemory:example:start"
 EXAMPLE_END = "rightmemory:example:end"
+PURSUIT_EXAMPLE_START = "rightmemory:pursuit-example:start"
+PURSUIT_EXAMPLE_END = "rightmemory:pursuit-example:end"
+LEGACY_ORCHESTRATOR_TEMPLATE = """---
+name: memory-orchestrator
+description: "Use when the user's request may depend on long-term context from earlier sessions, or when the current turn may create long-term context worth preserving, such as durable user context, user preferences, project facts, workflow expectations, blockers, or repeated failure patterns."
+---
+
+# Memory Orchestrator CLI
+
+## Access Rules
+
+- The memory root is `{{MEMORY_ROOT}}`; the main agent must not read or edit files there by any means unless the user explicitly permits direct access.
+- Pick one stable session id for this agent conversation and reuse it for every retrieve/update call.
+
+## Retrieval
+
+- For retrieval, call `rightmemory retrieve --session <stable-session-id> "<memory need>"`.
+- Describe the memory needed based on the user's intent instead of blindly forwarding the user's message verbatim.
+- For factual, project, or domain context, do not retrieve on every turn. Retrieve when the current conversation lacks the background needed to answer or work well.
+- Skip this factual/context retrieval when the message is clearly self-contained and answerable from the conversation alone.
+- For preference-, workflow-, and behavior-related memory, retrieve proactively and very frequently when the agent is about to make choices that affect how it collaborates, implements, verifies, communicates, or finishes work.
+- Treat phase and topic changes as strong retrieval triggers for preference, workflow, and behavior memory, especially transitions between discussion, implementation, and finishing work.
+- When running retrieve, give the actual retrieve command/session up to 3 minutes to return before acting without memory. This means awaiting or polling the tool result; do not run a separate blocking wait such as `sleep 180` after a successful retrieve. During the pending retrieve, do not explore files or advance the task independently.
+- The retriever skips items already returned in this session; ask explicitly if you need something again.
+- A returned `S#...` heading is a memory skill: reusable instruction backed by a separate skill body, not an ordinary memory fact.
+- Broad retrieval usually returns only the skill heading and brief body paragraph.
+- Before using a memory skill, retrieve that specific skill again to get its full body.
+- Treat retrieved behavior guidance and memory skills seriously: apply them directly when the fit is clear, briefly say how they will guide the work when useful, and ask the user when the fit is unclear.
+- If current work shows retrieved memory is stale, wrong, too broad, or misleading, send the correction in the next update brief. This matters because bad memory can keep steering future agents wrong.
+- Retrieval may include an `Open context questions` block after ordinary memory matches. Treat those lines as agent-facing questions, not memory facts.
+- If the current task or workspace context already answers one, include the question id and answer in the next memory update brief.
+- Do not start extra investigation just because a question was surfaced.
+- Retrieval may include `Provider question context` lines for relevant `MQ#` headings. Treat these as optional external ask opportunities, not memory facts.
+- If provider-question context would materially help the current task, call `rightmemory shared-view ask <mq-id> "<question>"` yourself after retrieve returns.
+- Phrase the question from the actual task context; do not forward a question invented by retrieve.
+- If the ask reports unavailable, continue with available local context and tell the user the provider question endpoint is currently unavailable.
+
+## Updates
+
+- After completing work, judge whether this turn produced durable context that should change how a future agent acts, decides, retrieves context, or avoids repeating a mistake. If not, skip the update.
+- Before submitting an update, check whether the same useful information is already durably captured in a natural artifact that future agents are likely to inspect, such as a git commit message, design doc, code comment, experiment report, run log, or project-local notes.
+- If a natural artifact already captures the useful information, skip the memory update unless memory adds retrieval value that the artifact alone does not provide.
+- For recurring project artifacts, prefer one compact lookup rule over repeated updates. For example, remember that future agents should inspect the local experiment log/report directory when they need run details, rather than remembering every new experiment report path.
+- If a user context, preference, workflow, or behavior update may be durable but is uncertain, submit it as a candidate brief with the uncertainty and surrounding context included. The command-backed update role will triage candidate briefs before editing memory.
+- Submit an update when previous work involved a significant amount of effort or reasoning, and reproducing that work later would take substantial effort.
+- Memory-worthy context may include durable user context, user preferences, workflow expectations, emergent reusable workflows discovered through iteration, environment/tooling constraints, repeated agent failure patterns and their fixes, project facts, decisions, blockers, or domain working knowledge.
+- Domain working knowledge is reusable understanding about a project, company, product, data model, terminology, conventions, or local artifact semantics that helps future agents interpret things correctly without rediscovering them.
+- Capture domain working knowledge when remembering it would help future agents avoid rediscovering how to interpret the same kind of thing.
+- For updates, call `rightmemory update submit --session <stable-session-id> "<concrete candidate brief>"` and proceed without waiting or pulling for the update result.
+- The first update for a stable session id should include fuller surrounding context: meaning, relevance, uncertainty, and relationship to existing memory.
+- Later updates with the same session id may be shorter when earlier submitted context or queued candidates are enough. Include fresh context when the meaning changed or depends on details not yet submitted.
+- For corrections to retrieved memory, describe the stale or wrong memory well enough for the updater to find it, and say whether it should be revised, narrowed, or deleted.
+- When the user asks for a memory-update result or status, call `rightmemory update pull --session <stable-session-id>`.
+- To cancel a submitted update candidate that is still pending, call `rightmemory update undo --session <stable-session-id> <candidate-id>`.
+"""
 
 
 @unittest.skipIf(os.name == "nt", "install.sh tests exercise the POSIX installer")
@@ -117,6 +172,8 @@ class InstallScriptTests(unittest.TestCase):
             self._install(memory_root, skills_target)
 
             memory = (memory_root / "MEMORY.md").read_text(encoding="utf-8")
+            pursuits = (memory_root / "PURSUITS.md").read_text(encoding="utf-8")
+            pursuit_rules = (memory_root / "PURSUIT_RULES.md").read_text(encoding="utf-8")
             state = (memory_root / ".runtime" / "semantic-upgrades.json").read_text(encoding="utf-8")
             install_stamp_exists = (memory_root / ".runtime" / "install.stamp").exists()
             insight_logs_exists = (memory_root / "insight_logs").is_dir()
@@ -126,6 +183,9 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn(EXAMPLE_END, memory)
         self.assertIn("# Open Context Questions {#open-context-questions}", memory)
         self.assertIn("q-rightmemory-project-context", memory)
+        self.assertIn(PURSUIT_EXAMPLE_START, pursuits)
+        self.assertIn(PURSUIT_EXAMPLE_END, pursuits)
+        self.assertIn("# Pursuit Rules", pursuit_rules)
         self.assertIn("user-context-agent-behavior-split", state)
         self.assertIn("open-context-questions", state)
         self.assertTrue(install_stamp_exists)
@@ -216,6 +276,36 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(git_email, "existing@example.com")
         self.assertIn("git author configured", result.stdout)
 
+    def test_install_adds_missing_current_documents_without_committing_existing_repo(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=memory_root, check=True)
+            subprocess.run(["git", "config", "--local", "user.name", "Existing User"], cwd=memory_root, check=True)
+            subprocess.run(
+                ["git", "config", "--local", "user.email", "existing@example.com"], cwd=memory_root, check=True
+            )
+            (memory_root / "MEMORY.md").write_text("# Existing Memory\n", encoding="utf-8")
+            subprocess.run(["git", "add", "MEMORY.md"], cwd=memory_root, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "memory: user baseline"], cwd=memory_root, check=True)
+            before = self._git(memory_root, "rev-parse", "HEAD")
+
+            result = self._install(memory_root, skills_target)
+
+            after = self._git(memory_root, "rev-parse", "HEAD")
+            status = self._git(memory_root, "status", "--short").splitlines()
+            memory = (memory_root / "MEMORY.md").read_text(encoding="utf-8")
+
+        self.assertEqual(after, before)
+        self.assertEqual(memory, "# Existing Memory\n")
+        self.assertEqual(status, ["?? PURSUITS.md", "?? PURSUIT_RULES.md"])
+        self.assertIn(
+            "new managed state files left uncommitted for review: PURSUITS.md, PURSUIT_RULES.md",
+            result.stdout,
+        )
+
     def test_install_refreshes_memory_gitignore_to_current_allowlist(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -236,6 +326,10 @@ class InstallScriptTests(unittest.TestCase):
             "*\n"
             "!MEMORY.md\n"
             "!MEMORY_*.md\n"
+            "!PURSUITS.md\n"
+            "!PURSUIT_*.md\n"
+            "!PURSUIT_RULES.md\n"
+            "!corrections.md\n"
             "!shared_views.toml\n"
             "!shares.toml\n"
             "!shared_views/\n"
@@ -249,40 +343,42 @@ class InstallScriptTests(unittest.TestCase):
             "!insight_logs/*.md\n",
         )
 
-    def test_cli_agent_installs_command_backed_orchestrator_without_role_skills(self):
+    def test_cli_agent_installs_exactly_two_independent_command_backed_skills(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
             skills_target = root / "skills"
 
             result = self._install(memory_root, skills_target)
-            orchestrator = (skills_target / "memory-orchestrator" / "SKILL.md").read_text(encoding="utf-8")
+            retriever = (skills_target / "memory-retriever" / "SKILL.md").read_text(encoding="utf-8")
+            orchestrator = (skills_target / "rightmemory-orchestrator" / "SKILL.md").read_text(encoding="utf-8")
             install_stamp = (memory_root / ".runtime" / "install.stamp").read_text(encoding="utf-8")
             wrapper = (root / "home" / ".local" / "bin" / "rightmemory").read_text(encoding="utf-8")
-            curator_exists = (skills_target / "memory-curator").exists()
-            dreamer_exists = (skills_target / "memory-dreamer").exists()
+            installed_skill_directories = sorted(path.name for path in skills_target.iterdir() if path.is_dir())
 
         self.assertIn("MODE         = cli-agent", result.stdout)
         self.assertIn("Write [agent_cli], [retrieve.agent_cli], and a default writer [update.agent_cli] config", result.stdout)
         self.assertNotIn("Write [retrieve.model] and a default writer [update.model] config", result.stdout)
         self.assertIn("mode=cli-agent", install_stamp)
+        self.assertIn("user explicitly chooses read-only RightMemory retrieval", retriever)
+        self.assertIn("This skill never submits updates", retriever)
+        self.assertNotIn("rightmemory update submit", retriever)
+        self.assertIn("user explicitly chooses full RightMemory orchestration", orchestrator)
         self.assertIn("rightmemory retrieve --session <stable-session-id>", orchestrator)
-        self.assertIn("do not run a separate blocking wait such as `sleep 180`", orchestrator)
-        self.assertNotIn("wait at least 3 minutes", orchestrator)
+        self.assertIn("rightmemory update submit --session <stable-session-id>", orchestrator)
+        self.assertIn("including initially small work", orchestrator)
         self.assertIn("Open context questions", orchestrator)
         self.assertIn("Provider question context", orchestrator)
         self.assertIn("rightmemory shared-view ask <mq-id>", orchestrator)
-        self.assertIn("do not forward a question invented by retrieve", orchestrator)
         self.assertIn("export PYTHONUTF8=1", wrapper)
         self.assertIn('export RIGHTMEMORY_ROOT="', wrapper)
         self.assertIn('exec "', wrapper)
         self.assertIn(' -m rightmemory.cli "$@"', wrapper)
         self.assertNotIn("standalone mode", orchestrator)
         self.assertNotIn("standalone runtime", orchestrator)
-        self.assertFalse(curator_exists)
-        self.assertFalse(dreamer_exists)
+        self.assertEqual(installed_skill_directories, ["memory-retriever", "rightmemory-orchestrator"])
 
-    def test_rerun_refreshes_marked_example_and_preserves_user_memory(self):
+    def test_rerun_refreshes_both_managed_examples_and_preserves_user_state(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
@@ -292,20 +388,52 @@ class InstallScriptTests(unittest.TestCase):
             memory_path = memory_root / "MEMORY.md"
             memory = memory_path.read_text(encoding="utf-8")
             memory_path.write_text(
-                "# Real Memory {#real-memory}\n\n- `real-node` keep me. → []\n\n"
+                "# Real Memory {#real-memory}\n\n- `real-node` keep me.\n\n"
                 + memory.replace("Example Application", "Stale Example Application"),
+                encoding="utf-8",
+            )
+            pursuits_path = memory_root / "PURSUITS.md"
+            pursuits = pursuits_path.read_text(encoding="utf-8")
+            pursuits_path.write_text(
+                "# User Pursuits\n\n## Continue Release {#continue-release}\n\nKeep this live intent.\n\n"
+                + pursuits.replace("Example Release Readiness", "Stale Release Readiness"),
                 encoding="utf-8",
             )
 
             self._install(memory_root, skills_target)
-            refreshed = memory_path.read_text(encoding="utf-8")
+            refreshed_memory = memory_path.read_text(encoding="utf-8")
+            refreshed_pursuits = pursuits_path.read_text(encoding="utf-8")
 
-        self.assertIn("# Real Memory {#real-memory}", refreshed)
-        self.assertIn("- `real-node` keep me. → []", refreshed)
-        self.assertIn("Example Application", refreshed)
-        self.assertNotIn("Stale Example Application", refreshed)
-        self.assertEqual(refreshed.count(EXAMPLE_START), 1)
-        self.assertEqual(refreshed.count(EXAMPLE_END), 1)
+        self.assertIn("# Real Memory {#real-memory}", refreshed_memory)
+        self.assertIn("- `real-node` keep me.", refreshed_memory)
+        self.assertIn("Example Application", refreshed_memory)
+        self.assertNotIn("Stale Example Application", refreshed_memory)
+        self.assertEqual(refreshed_memory.count(EXAMPLE_START), 1)
+        self.assertEqual(refreshed_memory.count(EXAMPLE_END), 1)
+        self.assertIn("## Continue Release {#continue-release}", refreshed_pursuits)
+        self.assertIn("Keep this live intent.", refreshed_pursuits)
+        self.assertIn("Example Release Readiness", refreshed_pursuits)
+        self.assertNotIn("Stale Release Readiness", refreshed_pursuits)
+        self.assertEqual(refreshed_pursuits.count(PURSUIT_EXAMPLE_START), 1)
+        self.assertEqual(refreshed_pursuits.count(PURSUIT_EXAMPLE_END), 1)
+
+    def test_rerun_preserves_unmanaged_pursuit_and_rules_files(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            (memory_root / "MEMORY.md").write_text("# User Memory\n", encoding="utf-8")
+            (memory_root / "PURSUITS.md").write_text("# User Pursuits\n\nDo not replace.\n", encoding="utf-8")
+            (memory_root / "PURSUIT_RULES.md").write_text("# Custom Rules\n\nDo not replace.\n", encoding="utf-8")
+
+            self._install(memory_root, skills_target)
+
+            pursuits = (memory_root / "PURSUITS.md").read_text(encoding="utf-8")
+            rules = (memory_root / "PURSUIT_RULES.md").read_text(encoding="utf-8")
+
+        self.assertEqual(pursuits, "# User Pursuits\n\nDo not replace.\n")
+        self.assertEqual(rules, "# Custom Rules\n\nDo not replace.\n")
 
     def test_rerun_migrates_known_old_starter_block(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -348,9 +476,13 @@ class InstallScriptTests(unittest.TestCase):
 
             home = root / "home"
             self.assertTrue((home / ".rightmemory" / "MEMORY.md").exists())
+            self.assertTrue((home / ".rightmemory" / "PURSUITS.md").exists())
+            self.assertTrue((home / ".rightmemory" / "PURSUIT_RULES.md").exists())
             self.assertTrue((home / ".rightmemory" / ".runtime" / "install.stamp").exists())
-            self.assertTrue((home / ".codex" / "skills" / "memory-orchestrator" / "SKILL.md").exists())
-            self.assertTrue((home / ".claude" / "skills" / "memory-orchestrator" / "SKILL.md").exists())
+            for target in (home / ".codex" / "skills", home / ".claude" / "skills"):
+                self.assertTrue((target / "memory-retriever" / "SKILL.md").exists())
+                self.assertTrue((target / "rightmemory-orchestrator" / "SKILL.md").exists())
+                self.assertFalse((target / "memory-orchestrator").exists())
             self.assertFalse((home / ".codex" / "skills" / "memory-curator").exists())
             self.assertFalse((home / ".claude" / "skills" / "memory-dreamer").exists())
             self.assertIn("MODE         = standalone", result.stdout)
@@ -513,8 +645,10 @@ class InstallScriptTests(unittest.TestCase):
             skills_target = root / "skills"
             old_curator = skills_target / "memory-curator"
             old_dreamer = skills_target / "memory-dreamer"
+            old_orchestrator = skills_target / "memory-orchestrator"
             old_curator.mkdir(parents=True)
             old_dreamer.mkdir(parents=True)
+            old_orchestrator.mkdir(parents=True)
             old_curator.joinpath("SKILL.md").write_text(
                 "---\nname: memory-curator\n---\n"
                 "You are the subagent execution wrapper for RightMemory retrieval and update work.\n",
@@ -525,17 +659,24 @@ class InstallScriptTests(unittest.TestCase):
                 "You are the subagent execution wrapper for RightMemory dream cycles.\n",
                 encoding="utf-8",
             )
+            old_orchestrator.joinpath("SKILL.md").write_text(
+                LEGACY_ORCHESTRATOR_TEMPLATE.replace("{{MEMORY_ROOT}}", str(memory_root)),
+                encoding="utf-8",
+            )
 
             self._install(memory_root, skills_target)
             old_curator_exists = old_curator.exists()
             old_dreamer_exists = old_dreamer.exists()
+            old_orchestrator_exists = old_orchestrator.exists()
 
             user_memory_root = root / "user-memory"
             user_skills_target = root / "user-skills"
             user_curator = user_skills_target / "memory-curator"
             user_dreamer = user_skills_target / "memory-dreamer"
+            user_orchestrator = user_skills_target / "memory-orchestrator"
             user_curator.mkdir(parents=True)
             user_dreamer.mkdir(parents=True)
+            user_orchestrator.mkdir(parents=True)
             user_curator.joinpath("SKILL.md").write_text(
                 "---\nname: memory-curator\n---\nUser-owned memory-curator helper.\n",
                 encoding="utf-8",
@@ -544,19 +685,29 @@ class InstallScriptTests(unittest.TestCase):
                 "---\nname: memory-dreamer\n---\nUser-owned memory-dreamer helper.\n",
                 encoding="utf-8",
             )
+            customized_orchestrator = (
+                LEGACY_ORCHESTRATOR_TEMPLATE.replace("{{MEMORY_ROOT}}", str(user_memory_root))
+                + "\n# User customization\n"
+            )
+            user_orchestrator.joinpath("SKILL.md").write_text(customized_orchestrator, encoding="utf-8")
 
             self._install(user_memory_root, user_skills_target)
             user_curator_exists = user_curator.exists()
             user_dreamer_exists = user_dreamer.exists()
+            user_orchestrator_exists = user_orchestrator.exists()
             user_curator_text = user_curator.joinpath("SKILL.md").read_text(encoding="utf-8")
             user_dreamer_text = user_dreamer.joinpath("SKILL.md").read_text(encoding="utf-8")
+            user_orchestrator_text = user_orchestrator.joinpath("SKILL.md").read_text(encoding="utf-8")
 
         self.assertFalse(old_curator_exists)
         self.assertFalse(old_dreamer_exists)
+        self.assertFalse(old_orchestrator_exists)
         self.assertTrue(user_curator_exists)
         self.assertTrue(user_dreamer_exists)
+        self.assertTrue(user_orchestrator_exists)
         self.assertIn("User-owned", user_curator_text)
         self.assertIn("User-owned", user_dreamer_text)
+        self.assertEqual(user_orchestrator_text, customized_orchestrator)
 
     def _install(self, memory_root: Path, skills_target: Path) -> subprocess.CompletedProcess[str]:
         root = memory_root.parent

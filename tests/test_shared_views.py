@@ -49,6 +49,7 @@ from rightmemory.shared_view_questions import (
     write_question_view,
 )
 from rightmemory.shared_views import (
+    accept_shared_view,
     accept_http_shared_view_invitation,
     list_shared_view_notes,
     record_shared_view_note,
@@ -255,6 +256,26 @@ class SharedViewModelTests(unittest.TestCase):
 
         self.assertIn("question_token", str(caught.exception))
 
+    def test_accept_shared_view_rejects_id_already_owned_by_pursuit(self):
+        (self.root / "MEMORY.md").write_text("# Memory {#memory}\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text(
+            "# Pursuits\n\n## Auth API Work {#auth-api-ask}\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, r"shared view id `auth-api-ask` already exists as a pursuit heading"):
+            accept_shared_view(
+                self.root,
+                heading_id="auth-api-ask",
+                view_type="question",
+                title="Auth API Questions",
+                body="Ask the provider.",
+                ref="rightmemory://mq/auth-api-ask",
+            )
+
+        self.assertNotIn("{MQ#auth-api-ask}", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
+        self.assertNotIn("auth-api-ask", load_connections(self.root))
+
 
 class SharedFileViewRecipeTests(unittest.TestCase):
     def setUp(self):
@@ -291,6 +312,67 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         self.assertIn("Tokens expire after one hour.", exported.read_text(encoding="utf-8"))
         self.assertNotIn("Payroll details", exported.read_text(encoding="utf-8"))
         self.assertIn('kind = "file"', recipe.read_text(encoding="utf-8"))
+
+    def test_file_recipe_discovers_both_graphs_without_parsing_m_or_s_bodies(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Project {#project}\n\n"
+            "## Public Context {#public-context}\n\n"
+            "Public memory context.\n\n"
+            "## Curated Notes {M#curated-notes}\n\n"
+            "## Review Skill {S#review-skill}\n",
+            encoding="utf-8",
+        )
+        (self.root / "PURSUITS.md").write_text(
+            "# Pursuits\n\n## Live Work {#live-work}\n\nLive Pursuit context.\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_curated-notes.md").write_text(
+            "## Forged Public Context {#public-context}\n\nsecret M body\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_SKILL_review-skill.md").write_text(
+            "## Forged Public Context {#public-context}\n\nsecret S body\n",
+            encoding="utf-8",
+        )
+        write_extractive_file_view_recipe(
+            self.root,
+            view_id="combined-context",
+            title="Combined Context",
+            intent="Expose selected global graph context.",
+            include_headings=["public-context", "live-work"],
+            approved=True,
+        )
+
+        render_file_view(self.root, "combined-context")
+
+        exported = (self.root / "shared_views" / "combined-context" / "dist" / "MEMORY.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Public memory context.", exported)
+        self.assertIn("Live Pursuit context.", exported)
+        self.assertNotIn("secret M body", exported)
+        self.assertNotIn("secret S body", exported)
+
+    def test_file_recipe_rejects_m_and_s_backing_files_as_graph_sources(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Project {#project}\n\n"
+            "## Curated Notes {M#curated-notes}\n\n"
+            "## Review Skill {S#review-skill}\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_curated-notes.md").write_text("secret M body\n", encoding="utf-8")
+        (self.root / "MEMORY_SKILL_review-skill.md").write_text("secret S body\n", encoding="utf-8")
+
+        for path in ("MEMORY_curated-notes.md", "MEMORY_SKILL_review-skill.md"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(ValueError, "RightMemory graph file"):
+                    write_extractive_file_view_recipe(
+                        self.root,
+                        view_id="bad-source",
+                        title="Bad Source",
+                        intent="Must not expose backing bodies.",
+                        include_files=[path],
+                    )
 
     def test_extractive_recipe_writes_clean_render_and_refresh_metadata(self):
         write_extractive_file_view_recipe(

@@ -25,7 +25,8 @@ class SyncManagerTests(unittest.TestCase):
             self._git(repo, "config", "user.email", "test@example.com")
             self._git(repo, "config", "user.name", "Test User")
         (self.device / "MEMORY.md").write_text("# Domain\n\n- `one` first → []\n", encoding="utf-8")
-        self._git(self.device, "add", "MEMORY.md")
+        (self.device / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+        self._git(self.device, "add", "MEMORY.md", "PURSUITS.md")
         self._git(self.device, "commit", "-m", "initial memory")
         self._git(self.device, "push", "-u", "origin", "HEAD:main")
         self._git(self.device, "branch", "--set-upstream-to", "origin/main")
@@ -48,6 +49,10 @@ class SyncManagerTests(unittest.TestCase):
         self.assertIn("shared_views/*/retriever.md", MEMORY_SYNC_PATHS)
         self.assertIn("shared_views/*/recipe.toml", MEMORY_SYNC_PATHS)
         self.assertIn("shared_views/*/question.toml", MEMORY_SYNC_PATHS)
+        self.assertIn("PURSUITS.md", MEMORY_SYNC_PATHS)
+        self.assertIn("PURSUIT_*.md", MEMORY_SYNC_PATHS)
+        self.assertIn("PURSUIT_RULES.md", MEMORY_SYNC_PATHS)
+        self.assertIn("corrections.md", MEMORY_SYNC_PATHS)
 
     def test_preflight_rejects_memory_root_nested_in_outer_git_repo(self):
         outer_remote = self.root / "outer.git"
@@ -117,6 +122,62 @@ class SyncManagerTests(unittest.TestCase):
         memory = (self.device / "MEMORY.md").read_text(encoding="utf-8")
         self.assertIn("local dirty", memory)
         self.assertNotIn("remote only", memory)
+
+    def test_preflight_reports_each_new_synchronized_state_path_as_dirty(self):
+        for name in ("PURSUITS.md", "PURSUIT_RULES.md", "corrections.md"):
+            with self.subTest(name=name):
+                path = self.device / name
+                existed = path.exists()
+                original = path.read_text(encoding="utf-8") if existed else None
+                path.write_text("local synchronized state\n", encoding="utf-8")
+
+                result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+                self.assertEqual(result.status, "dirty")
+                self.assertEqual(result.files, [name])
+                if original is None:
+                    path.unlink()
+                else:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_clean_git_merge_with_duplicate_cross_tree_id_reports_semantic_conflict(self):
+        (self.other / "PURSUITS.md").write_text(
+            "# Pursuits\n\n## Duplicate {#one}\n",
+            encoding="utf-8",
+        )
+        self._git(self.other, "add", "PURSUITS.md")
+        self._git(self.other, "commit", "-m", "pursuit: add duplicate id")
+        self._git(self.other, "push")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+        self.assertEqual(result.status, "conflict")
+        self.assertIn("duplicate id `one`", result.message)
+
+    def test_sync_transports_structured_corrections_over_updater_ceiling(self):
+        (self.other / "corrections.md").write_text(
+            self._corrections_markdown(16),
+            encoding="utf-8",
+        )
+        self._git(self.other, "add", "corrections.md")
+        self._git(self.other, "commit", "-m", "sync: transport correction union")
+        self._git(self.other, "push")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+        self.assertEqual(result.status, "synced")
+        text = (self.device / "corrections.md").read_text(encoding="utf-8")
+        self.assertEqual(text.count("## Entry "), 16)
+
+    def test_sync_reconciler_prompt_preserves_distinct_corrections_without_ranking(self):
+        prompt_path = Path(__file__).parents[1] / "rightmemory" / "prompts" / "sync-reconciler.md"
+        prompt = prompt_path.read_text(encoding="utf-8").casefold()
+
+        self.assertIn("non-identical complete entries", prompt)
+        self.assertIn("exactly duplicated", prompt)
+        self.assertIn("do not rank", prompt)
+        self.assertIn("may exceed that ceiling", prompt)
+        self.assertIn("unresolved updater-owned semantic maintenance", prompt)
 
     def test_preflight_reports_dirty_shared_view_registry_and_ignores_runtime_shared_views(self):
         runtime_cache = self.device / ".runtime" / "shared_views" / "cache" / "alice-auth-api.txt"
@@ -406,3 +467,14 @@ class SyncManagerTests(unittest.TestCase):
         if process.returncode != 0:
             raise AssertionError(process.stderr)
         return process.stdout.strip()
+
+    def _corrections_markdown(self, count: int) -> str:
+        entries = []
+        for index in range(count):
+            entries.append(
+                f"## Entry {index}\n\n"
+                "### Background\n\nBackground.\n\n"
+                "### Proposed edit\n\nProposed.\n\n"
+                "### Accepted edit\n\nAccepted.\n"
+            )
+        return "# RightMemory Update Corrections\n\n" + "\n".join(entries)

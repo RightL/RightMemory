@@ -15,8 +15,8 @@ from .provider_sessions import ProviderSessionRecord, ProviderSessionStore
 from .semantic_upgrades import SemanticUpgradeContext
 
 
-READ_ROLES = {"historian", "retrieve"}
-WRITE_ROLES = {"dreamer", "insight", "pruner", "reviewer", "shared-view-builder", "sync-reconciler", "update"}
+READ_ROLES = {"historian", "retrieve", "reviewer"}
+WRITE_ROLES = {"dreamer", "insight", "pruner", "shared-view-builder", "sync-reconciler", "update"}
 NO_SESSION_RIGHTMEMORY_SESSION_ID = "__rightmemory_cli_chat__"
 
 

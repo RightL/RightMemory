@@ -4,7 +4,7 @@ This is a short recording plan for a first public demo. It is written for a 90-s
 
 ## Story
 
-Show the problem first: a fresh coding-agent session should know relevant prior project context without the user pasting a long summary. Then show RightMemory retrieving a small tree + graph slice, submitting a durable update after the task, and leaving the memory as ordinary Git-syncable state that another agent client or device can reuse.
+Show the problem first: a fresh coding-agent session should know relevant durable context and live intent without the user pasting a long summary. Then show RightMemory retrieving a small cross-tree graph slice, submitting task evidence, and leaving Memory plus Pursuit as ordinary Git-syncable state that another agent client or device can reuse.
 
 ## Setup
 
@@ -14,31 +14,54 @@ Use a small demo memory root so the video stays legible:
 ./install.sh --mode cli-agent /tmp/rightmemory-demo ~/.codex/skills
 ```
 
-Seed `/tmp/rightmemory-demo/MEMORY.md` with a compact project memory entry:
+Choose `rightmemory-orchestrator` for this full-state demo. Replace
+`/tmp/rightmemory-demo/MEMORY.md` with compact durable project context:
 
 ```md
 # Project Context {#project-context}
 
 ## Sync Design {#sync-design}
 
-- `sync-preflight` Runtime pulls clean upstream memory before update, reviewer, and dreamer work. → [cfg:sync-runtime]
+- `sync-preflight` Runtime checks clean upstream state before automatic semantic work. → []
 - `sync-reconciler` Dirty or conflicted memory state is repaired by a bounded sync-reconciler role. → [dep:sync-preflight]
-- `sync-git-scope` Runtime commits are limited to MEMORY.md, MEMORY_*.md, and dream_logs/*.md. → [ver:sync-reconciler]
+- `sync-conflict-policy` Sync repair preserves non-identical updater-correction entries without ranking them. → [rel:sync-reconciler]
+```
+
+Replace `/tmp/rightmemory-demo/PURSUITS.md` with the live continuation:
+
+```md
+# Pursuits
+
+## Focus
+
+- `sync-continuity` — finish the sync lifecycle demonstration.
+
+## Finish Sync Continuity {#sync-continuity} → [dep:sync-design]
+
+Make the demo show how durable sync context guides work that still needs continuation.
+
+**State:** The durable sync policy is recorded; the demo flow still needs verification.
+
+**Next:**
+- `do` Verify the retrieval and update sequence in a fresh agent session.
+
+**Done when:** The recording shows retrieval, candidate submission, and one coherent updater result.
 ```
 
 ## Recording Beats
 
 1. Open a fresh Codex or Claude Code session in the RightMemory repo.
 2. Ask: `Continue the sync design from last time without requiring me to paste prior context.`
-3. Show the agent calling `rightmemory retrieve` through the installed `memory-orchestrator`.
-4. Show a small retrieved result: the `Sync Design` heading and its three linked facts.
+3. Show the user-selected `rightmemory-orchestrator` calling `rightmemory retrieve`.
+4. Show a small retrieved result containing the `Sync Design` Memory context and the linked `Finish Sync Continuity` Pursuit.
 5. Ask the agent to make a tiny doc edit or explain the next implementation step.
-6. Show the agent submitting a memory update with `rightmemory update submit`.
-7. End on `git diff`, `MEMORY.md`, or `rightmemory status` so viewers see this is structured memory in normal Git-managed files, not opaque vendor storage.
+6. Show the agent submitting start and terminal evidence with `rightmemory update submit`.
+7. Explain that the unified updater may change Memory, Pursuit, both, or neither after reconciling the evidence.
+8. End on `git diff`, the two root files, or `rightmemory status` so viewers see ordinary Git-managed state rather than opaque vendor storage.
 
 ## Narration
 
-> RightMemory gives coding agents a tree + graph memory they can retrieve, update, and consolidate across sessions, agent clients, and devices. The tree gives local context, graph edges connect related facts, Git sync keeps the memory portable, and separate memory roles keep retrieval and edits from becoming tangled with ordinary coding work.
+> RightMemory keeps durable Memory and live Pursuit in one addressable graph. Agents retrieve only the context they need, submit evidence as work changes, and let one updater reconcile both trees. Git sync keeps the state portable, while explicit role boundaries keep retrieval, updates, and review from becoming tangled with ordinary coding work.
 
 ## README GIF Placeholder
 

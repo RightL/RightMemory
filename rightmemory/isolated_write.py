@@ -9,11 +9,29 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .session import MemoryWriteLock, _ensure_runtime_gitignore
-from .tools import INSIGHT_LOG_FILE_RE, MEMORY_DETAIL_FILE_RE, MemoryTools
+from .graph import MEMORY_DETAIL_FILE_RE, PURSUIT_DETAIL_FILE_RE
+from .tools import (
+    CORRECTIONS_PATH,
+    FIXED_CORRECTION_COLLECTION_PATHS,
+    INSIGHT_LOG_FILE_RE,
+    PURSUIT_RULES_PATH,
+    SHARED_VIEW_DEFINITION_FILE_RE,
+    SHARE_REGISTRY_PATH,
+    SHARED_VIEW_REGISTRY_PATH,
+    MemoryTools,
+)
+from .update_review import validate_corrections_markdown
 
 
 GIT_TIMEOUT_SECONDS = 30
 ACTIVE_MEMORY_WRITE_PATHS = ("MEMORY.md", "MEMORY_*.md")
+ACTIVE_PURSUIT_WRITE_PATHS = ("PURSUITS.md", "PURSUIT_*.md")
+PROTECTED_RIGHTMEMORY_PATHS = (
+    *ACTIVE_MEMORY_WRITE_PATHS,
+    *ACTIVE_PURSUIT_WRITE_PATHS,
+    PURSUIT_RULES_PATH,
+    CORRECTIONS_PATH,
+)
 INSIGHT_WRITE_PATHS = ("insight_logs/*.md",)
 ROLE_SAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 TEMP_BRANCH_PREFIX = "rightmemory-isolated-"
@@ -30,12 +48,20 @@ class MainMemoryDirtyError(RuntimeError):
 class IsolatedWriteResult:
     output: Any
     commits_landed: int
+    start_commit: str = ""
+    landed_commit: str = ""
+    changed_paths: tuple[str, ...] = ()
 
 
 class IsolatedWriteSupervisor:
-    def __init__(self, memory_root: Path, role: str):
+    def __init__(self, memory_root: Path, role: str, *, update_mode: str = "normal"):
         self.memory_root = Path(memory_root).resolve()
         self.role = role
+        self.update_mode = update_mode
+        if update_mode not in {"normal", "review-correction"}:
+            raise ValueError("update_mode must be normal or review-correction")
+        if update_mode != "normal" and role != "update":
+            raise ValueError("non-normal update modes require the update role")
 
     def run(self, run_in_worktree: Callable[[Path], Any]) -> IsolatedWriteResult:
         self._ensure_repo_root()
@@ -58,12 +84,31 @@ class IsolatedWriteSupervisor:
                 raise RuntimeError(f"isolated worktree has uncommitted changes:\n{status}")
 
             commits = self._temp_commits(worktree, start_head)
+            if self.role == "update" and self.update_mode == "review-correction":
+                outcome = _output_text(output).strip()
+                if outcome.startswith(("Needs input:", "No correction needed:")):
+                    commits = []
+                elif not commits:
+                    raise RuntimeError(
+                        "review correction made no state commit; reply `Needs input: ...` or "
+                        "`No correction needed: ...` when a commit is intentionally unnecessary"
+                    )
             if commits:
                 self._validate_commits(worktree, commits)
                 if self.role != "insight":
-                    validation = MemoryTools(worktree, role=self.role).validate_memory()
+                    tool_role = "update-correction" if self.update_mode == "review-correction" else self.role
+                    validator = MemoryTools(worktree, role=tool_role)
+                    validation = validator.validate_memory(
+                        enforce_correction_capacity=(
+                            self.role == "update" and self.update_mode == "review-correction"
+                        )
+                    )
                     if validation.startswith("validation failed:"):
                         raise RuntimeError(validation)
+
+            changed_paths = tuple(
+                sorted({path for commit in commits for path in self._commit_paths(worktree, commit)})
+            )
 
             with MemoryWriteLock(self.memory_root):
                 dirty = self._dirty_memory_files()
@@ -74,7 +119,14 @@ class IsolatedWriteSupervisor:
                     raise RuntimeError("main HEAD changed during isolated memory write")
                 if commits:
                     self._land_commits(commits)
-            return IsolatedWriteResult(output=output, commits_landed=len(commits))
+                landed_commit = self._git_stdout(self.memory_root, "rev-parse", "HEAD")
+            return IsolatedWriteResult(
+                output=output,
+                commits_landed=len(commits),
+                start_commit=start_head,
+                landed_commit=landed_commit,
+                changed_paths=changed_paths,
+            )
         finally:
             self._cleanup(worktree, branch)
 
@@ -107,14 +159,16 @@ class IsolatedWriteSupervisor:
 
     def _write_paths(self) -> tuple[str, ...]:
         if self.role == "insight":
-            return (*ACTIVE_MEMORY_WRITE_PATHS, *INSIGHT_WRITE_PATHS)
-        return ACTIVE_MEMORY_WRITE_PATHS
+            return (*PROTECTED_RIGHTMEMORY_PATHS, *INSIGHT_WRITE_PATHS)
+        return PROTECTED_RIGHTMEMORY_PATHS
 
     def _temp_commits(self, worktree: Path, start_head: str) -> list[str]:
         output = self._git_stdout(worktree, "rev-list", "--reverse", f"{start_head}..HEAD")
         return [line.strip() for line in output.splitlines() if line.strip()]
 
     def _validate_commits(self, worktree: Path, commits: list[str]) -> None:
+        if self.role == "update" and len(commits) > 1:
+            raise RuntimeError("one update turn must land at most one commit")
         for commit in commits:
             changed_paths = self._commit_paths(worktree, commit)
             if not changed_paths:
@@ -125,6 +179,15 @@ class IsolatedWriteSupervisor:
                 label = "non-insight paths" if self.role == "insight" else "non-memory paths"
                 raise RuntimeError(f"isolated commit touches {label}: {paths}")
             self._validate_commit_tree(worktree, commit, set(changed_paths))
+        if self.role == "update" and self.update_mode == "review-correction" and commits:
+            changed_paths = set(self._commit_paths(worktree, commits[0]))
+            if not any(self._is_rightmemory_path(path) for path in changed_paths):
+                raise RuntimeError(
+                    "review correction must change Memory or Pursuit; "
+                    "corrections.md-only commits are not allowed"
+                )
+            if CORRECTIONS_PATH in changed_paths:
+                self._validate_corrections_file(worktree, commits[0])
 
     def _validate_empty_commit(self, worktree: Path, commit: str) -> None:
         subject = self._git_stdout(worktree, "log", "--max-count=1", "--format=%s", commit)
@@ -135,13 +198,47 @@ class IsolatedWriteSupervisor:
     def _validate_commit_tree(self, worktree: Path, commit: str, changed_paths: set[str]) -> None:
         if self.role != "insight":
             self._validate_regular_memory_path(worktree, commit, "MEMORY.md", required=True)
-        for path in sorted(changed_paths - {"MEMORY.md"}):
+            self._validate_regular_memory_path(worktree, commit, "PURSUITS.md", required=True)
+        for path in sorted(changed_paths - {"MEMORY.md", "PURSUITS.md"}):
             self._validate_regular_memory_path(worktree, commit, path, required=False)
 
     def _is_role_write_path(self, path: str) -> bool:
         if self.role == "insight":
             return bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
+        if self.role == "reviewer":
+            return False
+        if self.role == "update":
+            return self._is_rightmemory_path(path) or (
+                self.update_mode == "review-correction" and path == CORRECTIONS_PATH
+            )
+        if self.role == "sync-reconciler":
+            return (
+                self._is_rightmemory_path(path)
+                or path in {PURSUIT_RULES_PATH, CORRECTIONS_PATH}
+                or path in {SHARED_VIEW_REGISTRY_PATH, SHARE_REGISTRY_PATH}
+                or bool(SHARED_VIEW_DEFINITION_FILE_RE.fullmatch(path))
+                or bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
+            )
+        if path in FIXED_CORRECTION_COLLECTION_PATHS:
+            return False
         return path == "MEMORY.md" or bool(MEMORY_DETAIL_FILE_RE.fullmatch(path))
+
+    def _is_rightmemory_path(self, path: str) -> bool:
+        return (
+            path == "MEMORY.md"
+            or bool(MEMORY_DETAIL_FILE_RE.fullmatch(path))
+            or path == "PURSUITS.md"
+            or bool(PURSUIT_DETAIL_FILE_RE.fullmatch(path))
+        )
+
+    def _validate_corrections_file(self, worktree: Path, commit: str) -> None:
+        tree_entry = self._tree_entry(worktree, commit, CORRECTIONS_PATH)
+        if tree_entry is None:
+            return
+        text = self._git_stdout(worktree, "show", f"{commit}:{CORRECTIONS_PATH}")
+        errors = validate_corrections_markdown(text)
+        if errors:
+            raise RuntimeError("invalid corrections.md:\n" + "\n".join(f"- {error}" for error in errors))
 
     def _validate_regular_memory_path(self, worktree: Path, commit: str, path: str, required: bool) -> None:
         tree_entry = self._tree_entry(worktree, commit, path)
@@ -255,6 +352,14 @@ class IsolatedWriteSupervisor:
         if check and result.returncode != 0:
             raise RuntimeError(_git_error_message(result))
         return result
+
+
+def _output_text(output: Any) -> str:
+    value = getattr(output, "output", None)
+    text = str(value if value is not None else output)
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    return text.lstrip()
 
 
 def _safe_role_slug(role: str) -> str:

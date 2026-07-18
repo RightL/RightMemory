@@ -505,7 +505,7 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.memory_root, Path("/home/example/.rightmemory"))
         self.assertEqual(config.target_batch_candidates, 15)
-        self.assertEqual(config.max_wait_seconds, 86400)
+        self.assertEqual(config.max_wait_seconds, 24 * 60 * 60)
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_async_update_config_parses_custom_values(self):
@@ -533,7 +533,7 @@ class ConfigTests(unittest.TestCase):
         cases = [
             ("target_batch_candidates = 0", "[update.async].target_batch_candidates must be a positive integer"),
             ("target_batch_candidates = true", "[update.async].target_batch_candidates must be a positive integer"),
-            ("max_wait_seconds = 0", "[update.async].max_wait_seconds must be a positive integer"),
+            ("max_wait_seconds = -1", "[update.async].max_wait_seconds must be a positive integer"),
             ("max_wait_seconds = true", "[update.async].max_wait_seconds must be a positive integer"),
         ]
         for body, message in cases:
@@ -577,7 +577,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.memory_root, Path("/home/example/.rightmemory"))
         self.assertEqual(config.trigger_points, 50.0)
         self.assertEqual(config.update_candidate_points, 1.0)
-        self.assertEqual(config.review_session_points, 1.5)
+        self.assertFalse(hasattr(config, "review_session_points"))
         self.assertEqual(config.check_interval_seconds, 3000)
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
@@ -601,7 +601,7 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.trigger_points, 75.5)
         self.assertEqual(config.update_candidate_points, 2)
-        self.assertEqual(config.review_session_points, 3.25)
+        self.assertFalse(hasattr(config, "review_session_points"))
         self.assertEqual(config.check_interval_seconds, 120)
         self.assertEqual(runtime_config.model_id, "openai/dreamer")
 
@@ -643,7 +643,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.memory_root, Path("/home/example/.rightmemory"))
         self.assertEqual(config.trigger_points, 150.0)
         self.assertEqual(config.update_candidate_points, 1.0)
-        self.assertEqual(config.review_session_points, 1.5)
+        self.assertFalse(hasattr(config, "review_session_points"))
         self.assertEqual(config.check_interval_seconds, 3000)
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
@@ -667,7 +667,7 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.trigger_points, 225.0)
         self.assertEqual(config.update_candidate_points, 2.5)
-        self.assertEqual(config.review_session_points, 4.0)
+        self.assertFalse(hasattr(config, "review_session_points"))
         self.assertEqual(config.check_interval_seconds, 600)
         self.assertEqual(runtime_config.model_id, "openai/insight")
 
@@ -851,20 +851,24 @@ class ConfigTests(unittest.TestCase):
     def test_retrieve_prompt_uses_context_first_contract(self):
         instructions = build_instructions(Path("/memory"), "retrieve")
 
-        self.assertIn("supplies a daily root-memory snapshot", instructions)
-        self.assertIn("read_memory_file", instructions)
+        self.assertIn("supplies a daily root snapshot", instructions)
+        self.assertIn("MEMORY.md", instructions)
+        self.assertIn("PURSUITS.md", instructions)
+        self.assertIn("read_detail", instructions)
+        self.assertIn("read_markdown", instructions)
         self.assertIn("read_skill", instructions)
         self.assertIn("read_mf", instructions)
         self.assertIn("MQ#", instructions)
         self.assertIn("provider-question context", instructions)
-        self.assertIn("reusable instruction assets", instructions)
+        self.assertIn("reusable instruction", instructions)
         self.assertIn("Available retrieve tools", instructions)
         self.assertIn(
-            "`read_memory_file(slug)` reads the `MEMORY_<slug>.md` detail file for a relevant `F#` heading",
+            "`read_detail(detail_id)` resolves a relevant `F#` id",
             instructions,
         )
+        self.assertIn("`read_markdown(markdown_id)` reads free-form evidence", instructions)
         self.assertIn("`read_mf(mf_id)` reads external file context", instructions)
-        self.assertIn("Never re-return a node or heading already sent in this session", instructions)
+        self.assertIn("Never re-return an item already sent in this retrieve session", instructions)
         self.assertNotIn("Read `MEMORY.md` before retrieval", instructions)
         self.assertNotIn("Follow each with a one-line note", instructions)
         self.assertNotIn("read_command", instructions)
@@ -872,11 +876,12 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("rightmemory shared-view ask", instructions)
 
     def test_write_role_prompts_preserve_shared_view_boundary(self):
-        for role in ("update", "dreamer", "reviewer"):
+        for role in ("update", "dreamer"):
             prompt = build_instructions(Path("/memory"), role)
             self.assertIn("MF#", prompt)
             self.assertIn("MQ#", prompt)
-            self.assertIn("do not absorb provider content", prompt)
+            self.assertIn("provider", prompt)
+            self.assertNotIn("rightmemory shared-view retrieve", prompt)
 
     def test_retrieve_runtime_does_not_expose_shared_view_tool(self):
         config = RuntimeConfig(
@@ -891,7 +896,7 @@ class ConfigTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
 
         tool_names = {tool.__name__ for tool in runtime._agent_tools()}
-        self.assertEqual(tool_names, {"read_memory_file", "read_skill", "read_mf"})
+        self.assertEqual(tool_names, {"read_detail", "read_markdown", "read_skill", "read_mf"})
         self.assertNotIn("retrieve_shared_view", tool_names)
         self.assertNotIn("read_command", tool_names)
         self.assertNotIn("grep", tool_names)
@@ -1025,7 +1030,7 @@ class RuntimeTests(unittest.TestCase):
                 output = runtime.run_session_turn("agent-session", "what do we know?")
 
         self.assertEqual(output, "answer")
-        self.assertTrue(captured["message"].startswith("Daily root-memory snapshot\n"))
+        self.assertTrue(captured["message"].startswith("Daily RightMemory root snapshot\n"))
         self.assertIn("===== MEMORY.md =====", captured["message"])
         self.assertTrue(captured["message"].rstrip().endswith("# Query\n\nwhat do we know?"))
 
@@ -1084,16 +1089,6 @@ class RuntimeTests(unittest.TestCase):
                 patch.dict("sys.modules", self._fake_pydantic_modules()),
                 "_run_session_model",
             ),
-            (
-                RuntimeConfig(
-                    role="reviewer",
-                    runtime_mode="cli-agent",
-                    agent_cli=AgentCliConfig(provider="codex"),
-                    memory_root=Path(self.tempdir.name),
-                ),
-                patch("rightmemory.runtime.CliAgentExecutor"),
-                "_run_session_cli_agent",
-            ),
         ]
 
         for config, build_context, direct_method in cases:
@@ -1112,6 +1107,46 @@ class RuntimeTests(unittest.TestCase):
 
                 self.assertEqual(result, "isolated reply")
                 isolated.assert_called_once_with("agent-session", "remember one")
+
+    def test_reviewer_session_turn_is_read_only_and_not_isolated(self):
+        config = RuntimeConfig(
+            role="reviewer",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=Path(self.tempdir.name),
+        )
+
+        with (
+            patch("rightmemory.runtime.CliAgentExecutor"),
+            patch.object(RightMemoryRuntime, "_run_session_cli_agent", return_value="candidate bundle") as direct,
+            patch.object(
+                RightMemoryRuntime,
+                "_run_session_turn_isolated",
+                side_effect=AssertionError("reviewer must not use a write worktree"),
+            ),
+        ):
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_session_turn("review-session", "extract candidates")
+
+        self.assertEqual(result, "candidate bundle")
+        direct.assert_called_once_with("review-session", "extract candidates")
+
+    def test_reviewer_tools_are_read_only(self):
+        config = RuntimeConfig(
+            role="reviewer",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+        tool_names = {tool.__name__ for tool in runtime.agent.tools}
+        self.assertIn("read", tool_names)
+        self.assertIn("validate_memory", tool_names)
+        self.assertNotIn("edit_file", tool_names)
+        self.assertNotIn("git_add", tool_names)
+        self.assertNotIn("git_commit", tool_names)
 
     def test_run_cycle_passes_operator_hint_message(self):
         config = RuntimeConfig(
@@ -1348,6 +1383,98 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(state_root.is_relative_to(main_root / ".runtime" / "isolated-state"))
         self.assertEqual((nested_session_id, nested_message), ("agent-session", "remember one"))
         self.assertFalse(state_root.exists())
+
+    def test_isolated_update_creates_review_before_state_promotion(self):
+        main_root = Path(self.tempdir.name)
+        worktree = main_root / ".runtime" / "worktrees" / "update-123"
+        events = []
+
+        class FakeSupervisor:
+            def __init__(self, memory_root, role):
+                pass
+
+            def run(self, callback):
+                output = callback(worktree)
+                events.append("landed")
+                return IsolatedWriteResult(
+                    output=output,
+                    commits_landed=1,
+                    start_commit="base123",
+                    landed_commit="tip456",
+                    changed_paths=("MEMORY.md",),
+                )
+
+        class FakeState:
+            def __init__(self, *args, **kwargs):
+                self.root = main_root / ".runtime" / "fake-state"
+
+            def __enter__(self):
+                return self.root
+
+            def __exit__(self, exc_type, exc, traceback):
+                return None
+
+            def promote(self):
+                events.append("promote")
+
+            def archive_failed_provider_session(self):
+                events.append("archive")
+
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=main_root)
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.IsolatedWriteSupervisor", FakeSupervisor),
+            patch("rightmemory.runtime._IsolatedStateOverlay", FakeState),
+            patch.object(RightMemoryRuntime, "_run_session_turn_in_worktree", return_value="updated"),
+        ):
+            runtime = RightMemoryRuntime(config)
+            with patch.object(runtime, "_create_update_review", side_effect=lambda *_args: events.append("review")):
+                result = runtime._run_session_turn_isolated("agent-session", "remember one")
+
+        self.assertEqual(result, "updated")
+        self.assertEqual(events, ["landed", "review", "promote"])
+
+    def test_normal_update_review_uses_actual_isolated_landing_metadata(self):
+        root = Path(self.tempdir.name)
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+        runtime._last_write_result = IsolatedWriteResult(
+            output="updated",
+            commits_landed=1,
+            start_commit="base123",
+            landed_commit="tip456",
+            changed_paths=("MEMORY.md",),
+        )
+
+        with (
+            patch("rightmemory.runtime._git_rightmemory_diff", return_value="diff text") as diff,
+            patch("rightmemory.runtime.UpdateReviewStore.create_review") as create,
+        ):
+            runtime._create_update_review("unrelated-head", "updated summary")
+
+        diff.assert_called_once_with(root, "base123", "tip456")
+        self.assertEqual(create.call_args.kwargs["base_commit"], "base123")
+        self.assertEqual(create.call_args.kwargs["update_commit"], "tip456")
+        self.assertEqual(create.call_args.kwargs["write_surface"], "Memory")
+
+    def test_review_correction_mode_never_creates_another_review(self):
+        root = Path(self.tempdir.name)
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config, update_mode="review-correction")
+        runtime._last_write_result = IsolatedWriteResult(
+            output="corrected",
+            commits_landed=1,
+            start_commit="base123",
+            landed_commit="tip456",
+            changed_paths=("MEMORY.md", "corrections.md"),
+        )
+
+        with patch("rightmemory.runtime.UpdateReviewStore.create_review") as create:
+            runtime._create_update_review("base123", "corrected")
+
+        create.assert_not_called()
 
     def test_isolated_run_holds_main_session_lock_around_supervisor_execution(self):
         main_root = Path(self.tempdir.name)
@@ -1637,7 +1764,7 @@ class RuntimeTests(unittest.TestCase):
             [
                 ("locked", NO_SESSION_RIGHTMEMORY_SESSION_ID),
                 "lock_enter",
-                ("agent", "Daily root-memory snapshot\n\n# Query\n\nremember one\n"),
+                ("agent", "Daily RightMemory root snapshot\n\n# Query\n\nremember one\n"),
                 "lock_exit",
             ],
         )
@@ -1666,6 +1793,29 @@ class RuntimeTests(unittest.TestCase):
                         runtime.run_session_turn(NO_SESSION_RIGHTMEMORY_SESSION_ID, "remember one")
 
                 self.assertIn("reserved", str(caught.exception))
+
+    def test_update_run_turn_uses_reserved_internal_session_path(self):
+        config = RuntimeConfig(
+            role="update",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+        )
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+        with (
+            patch.object(runtime, "_run_session_turn_unlocked", return_value="updated") as run,
+            patch.object(runtime, "_create_update_review") as create_review,
+        ):
+            result = runtime.run_turn("remember one")
+
+        self.assertEqual(result, "updated")
+        run.assert_called_once_with(
+            NO_SESSION_RIGHTMEMORY_SESSION_ID,
+            "remember one",
+            allow_internal_session=True,
+        )
+        create_review.assert_called_once()
 
     def test_run_turn_preserves_message_history(self):
         config = RuntimeConfig(
@@ -1730,26 +1880,26 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(first, "reply 1")
         self.assertEqual(second, "reply 2")
         self.assertEqual(other_session, "reply 3")
-        self.assertIn("Recent submitted memory", runtime.agent.calls[0]["message"])
+        self.assertIn("Recent submitted RightMemory candidates", runtime.agent.calls[0]["message"])
         self.assertIn("remember first submitted detail", runtime.agent.calls[0]["message"])
         self.assertLess(
-            runtime.agent.calls[0]["message"].index("# Recent submitted memory"),
+            runtime.agent.calls[0]["message"].index("# Recent submitted RightMemory candidates"),
             runtime.agent.calls[0]["message"].index("# Query"),
         )
         self.assertTrue(runtime.agent.calls[0]["message"].rstrip().endswith("# Query\n\nfind one"))
-        self.assertIn("Recent submitted memory", runtime.agent.calls[1]["message"])
+        self.assertIn("Recent submitted RightMemory candidates", runtime.agent.calls[1]["message"])
         self.assertIn("remember second submitted detail", runtime.agent.calls[1]["message"])
         self.assertNotIn("remember first submitted detail", runtime.agent.calls[1]["message"])
         self.assertLess(
-            runtime.agent.calls[1]["message"].index("# Recent submitted memory"),
+            runtime.agent.calls[1]["message"].index("# Recent submitted RightMemory candidates"),
             runtime.agent.calls[1]["message"].index("# Query"),
         )
         self.assertTrue(runtime.agent.calls[1]["message"].rstrip().endswith("# Query\n\nfind two"))
-        self.assertIn("Recent submitted memory", runtime.agent.calls[2]["message"])
+        self.assertIn("Recent submitted RightMemory candidates", runtime.agent.calls[2]["message"])
         self.assertIn("remember first submitted detail", runtime.agent.calls[2]["message"])
         self.assertIn("remember second submitted detail", runtime.agent.calls[2]["message"])
         self.assertLess(
-            runtime.agent.calls[2]["message"].index("# Recent submitted memory"),
+            runtime.agent.calls[2]["message"].index("# Recent submitted RightMemory candidates"),
             runtime.agent.calls[2]["message"].index("# Query"),
         )
         self.assertTrue(runtime.agent.calls[2]["message"].rstrip().endswith("# Query\n\nfind three"))
@@ -1766,7 +1916,7 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(first, "reply 1")
         self.assertEqual(second, "reply 2")
-        self.assertTrue(runtime.agent.calls[0]["message"].startswith("Daily root-memory snapshot\n"))
+        self.assertTrue(runtime.agent.calls[0]["message"].startswith("Daily RightMemory root snapshot\n"))
         self.assertIn("===== MEMORY.md =====", runtime.agent.calls[0]["message"])
         self.assertTrue(runtime.agent.calls[0]["message"].rstrip().endswith("# Query\n\nfind root"))
         self.assertIsNone(runtime.agent.calls[0]["message_history"])
@@ -1781,7 +1931,7 @@ class RuntimeTests(unittest.TestCase):
             state["turns"],
             [{"query": "find root", "answer": "reply 1"}, {"query": "find again", "answer": "reply 2"}],
         )
-        self.assertNotIn("Daily root-memory snapshot", state_path.read_text(encoding="utf-8"))
+        self.assertNotIn("Daily RightMemory root snapshot", state_path.read_text(encoding="utf-8"))
 
     def test_retrieve_turn_does_not_record_context_state_after_failure(self):
         root = Path(self.tempdir.name)
@@ -1821,9 +1971,9 @@ class RuntimeTests(unittest.TestCase):
 
         second_message = runtime.agent.calls[1]["message"]
         third_message = runtime.agent.calls[2]["message"]
-        self.assertIn("# Memory changes since previous retrieve turn", second_message)
+        self.assertIn("# RightMemory root changes since previous retrieve turn", second_message)
         self.assertIn("+second", second_message)
-        self.assertNotIn("# Memory changes since previous retrieve turn", third_message)
+        self.assertNotIn("# RightMemory root changes since previous retrieve turn", third_message)
 
     def test_retrieve_request_prefix_is_byte_identical_before_first_volatile_block(self):
         root = Path(self.tempdir.name)
@@ -1917,8 +2067,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result, "cli reply")
         executor_class.return_value.run_stateless_turn.assert_called_once()
         (message,) = executor_class.return_value.run_stateless_turn.call_args.args
-        self.assertTrue(message.startswith("Daily root-memory snapshot\n"))
-        self.assertLess(message.index("# Recent submitted memory"), message.index("# Query"))
+        self.assertTrue(message.startswith("Daily RightMemory root snapshot\n"))
+        self.assertLess(message.index("# Recent submitted RightMemory candidates"), message.index("# Query"))
         self.assertTrue(message.rstrip().endswith("# Query\n\nfind one"))
         self.assertIn("remember cli submitted detail", message)
         state_path = Path(self.tempdir.name) / ".runtime" / "recent_submitted" / "retrieve" / "agent-session.json"
@@ -1943,6 +2093,10 @@ class RuntimeTests(unittest.TestCase):
             "*\n"
             "!MEMORY.md\n"
             "!MEMORY_*.md\n"
+            "!PURSUITS.md\n"
+            "!PURSUIT_*.md\n"
+            "!PURSUIT_RULES.md\n"
+            "!corrections.md\n"
             "!shared_views.toml\n"
             "!shares.toml\n"
             "!shared_views/\n"
@@ -2411,6 +2565,17 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("local memory", retrieve_instructions)
         self.assertIn("does not perform sync preflight by default", retrieve_instructions)
 
+    def test_update_prompt_owns_unified_lifecycle_and_bounded_correction_surfaces(self):
+        instructions = build_instructions(Path("/memory"), "update")
+
+        self.assertIn("evolving account", instructions)
+        self.assertIn("MEMORY_agent-corrections-writing.md", instructions)
+        self.assertIn("MEMORY_agent-corrections-design.md", instructions)
+        self.assertIn("corrections.md", instructions)
+        self.assertIn("15", instructions)
+        self.assertIn("MEMORY.md", instructions)
+        self.assertIn("PURSUITS.md", instructions)
+
     def test_run_session_turn_preserves_message_history_on_disk(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
 
@@ -2607,7 +2772,8 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
             (Path(self.tempdir.name) / "MEMORY_SKILL_alpha.md").write_text("# Alpha\n", encoding="utf-8")
             with runtime._debug_trace("agent-session"):
-                runtime.agent.kwargs["tools"][0]("alpha")
+                read_skill = next(tool for tool in runtime.agent.kwargs["tools"] if tool.__name__ == "read_skill")
+                read_skill("alpha")
 
         trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "retrieve" / "agent-session.jsonl"
         events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
@@ -2713,7 +2879,7 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
 
         tool_names = {tool.__name__ for tool in runtime.agent.kwargs["tools"]}
-        self.assertEqual(tool_names, {"read_memory_file", "read_skill", "read_mf"})
+        self.assertEqual(tool_names, {"read_detail", "read_markdown", "read_skill", "read_mf"})
         self.assertNotIn("read", tool_names)
         self.assertNotIn("grep", tool_names)
         self.assertNotIn("glob", tool_names)
@@ -2935,6 +3101,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("Insight Role", prompt)
         self.assertIn("insight_logs/", prompt)
         self.assertIn("operator hint", prompt)
+        self.assertIn("Transcript review only extracts updater candidates", prompt)
         self.assertNotIn("validate_memory", prompt)
         self.assertNotIn("dream_logs", prompt)
 
@@ -2955,7 +3122,7 @@ class PromptTests(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertNotIn("/home/example/.rightmemory", first)
-        self.assertIn("memory-store-relative paths", first)
+        self.assertIn("store-relative paths", first)
 
     def test_schema_level_memory_skill_guidance_is_in_role_prompts(self):
         retrieve_instructions = build_instructions(Path("/memory"), "retrieve")

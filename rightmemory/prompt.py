@@ -32,15 +32,19 @@ def build_cli_agent_instructions(
     role_guidance = _read_prompt_file(f"prompts/{role}.md")
     cli_agent_guidance = _cli_agent_guidance(memory_root, role)
     semantic_guidance = _semantic_upgrade_guidance(role, semantic_upgrades)
+    corrections_store = "- corrections.md\n" if role in {"update", "sync-reconciler"} else ""
 
     return f"""You are RightMemory {role} mode.
 
 Work in the configured memory root. The configured memory root is {memory_root}.
 
-Memory store:
+RightMemory store:
 - MEMORY.md
 - MEMORY_*.md
-- shared_views.toml
+- PURSUITS.md
+- PURSUIT_*.md
+- PURSUIT_RULES.md
+{corrections_store}- shared_views.toml
 - shares.toml
 - shared_views/<view-id>/view.md, recipe.toml, question.toml, retriever.md
 - insight_logs/
@@ -82,19 +86,21 @@ Command-selected behavior:
 
 Workspace rule:
 - The provided tools are rooted at the RightMemory memory store.
-- Use memory-store-relative paths such as `MEMORY.md`, `MEMORY_*.md`, and `insight_logs/*.md` when they are allowed for the selected role.
+- Use store-relative paths such as `MEMORY.md`, `PURSUITS.md`, and `insight_logs/*.md` when they are allowed for the selected role.
 - Do not read, write, inspect, or run commands against paths outside the memory store.
 {tool_guidance}
 - Return concise natural-language answers to the caller.
 
-Memory source of truth:
-- The root file is MEMORY.md.
-- Optional detail files are named MEMORY_<slug>.md.
+RightMemory source of truth:
+- Durable Memory begins at MEMORY.md; live Pursuit begins at PURSUITS.md.
+- F# detail files use the containing tree's MEMORY_<slug>.md or PURSUIT_<slug>.md name.
+- PURSUIT_RULES.md defines Pursuit-specific maintenance judgment.
+- corrections.md is updater-only feedback, not graph content or ordinary retrieval context.
 - Insight logs are stored under insight_logs/.
 - Share relationships are stored in shares.toml.
 - Shared-view resolver metadata is stored in shared_views.toml.
 - Provider-owned shared-view source files live under shared_views/<view-id>/; dist/ output there is generated preview or publishing output, not active memory.
-- MEMORY.md is normal memory, not a routing-only index.
+- MEMORY.md and PURSUITS.md are normal content roots, not routing-only indexes.
 
 RightMemory schema:
 {schema}
@@ -134,7 +140,7 @@ def _command_guidance(role: str) -> str:
         return (
             "- The `rightmemory retrieve` command selected retrieval. Treat every caller message as a read-only "
             "retrieval request without requiring or expecting a dispatch prefix.\n"
-            "- Do not edit memory files or use git write tools in this mode. If the caller asks you to remember "
+            "- Do not edit RightMemory files or use git write tools in this mode. If the caller asks you to preserve "
             "or change memory, ask them to use `rightmemory update`."
         )
     if role == "historian":
@@ -145,10 +151,10 @@ def _command_guidance(role: str) -> str:
         )
     if role == "update":
         return (
-            "- The `rightmemory update` command selected updating. Treat every caller message as a read-write "
-            "memory update request without requiring or expecting a dispatch prefix.\n"
-            "- A caller message may contain one update candidate or a batch of submitted candidates. Treat them "
-            "as candidate memory, not final memory text."
+            "- The `rightmemory update` command selected unified updating. Treat every caller message as a "
+            "RightMemory candidate or review correction without requiring a dispatch prefix.\n"
+            "- A caller message may contain one candidate or an ordered batch. Reconcile live Pursuit, durable "
+            "Memory, both, or neither instead of treating candidate text as final stored content."
         )
     if role == "pruner":
         return (
@@ -170,7 +176,8 @@ def _command_guidance(role: str) -> str:
         return (
             "- The automatic transcript review scanner selected reviewer behavior. Treat the normalized transcript "
             "batch JSON in the caller message as the review input.\n"
-            "- Review the ordered batch for durable memory."
+            "- Extract concise, provenance-preserving RightMemory candidates for the unified updater. Do not edit "
+            "or commit RightMemory state."
         )
     if role == "sync-reconciler":
         return (
@@ -199,6 +206,11 @@ def _sync_guidance(role: str) -> str:
             "before model start and does not add pull results to session history. Do not mention pull results "
             "unless imported file content is relevant."
         )
+    if role == "reviewer":
+        return (
+            "- Use only the provided read, search, outline, and validation tools to understand current context.\n"
+            "- Reviewer is an extractor, not a graph writer: do not edit files, stage changes, or commit."
+        )
     if role == "sync-reconciler":
         return (
             "- The runtime supplies repair context in the caller message. If the caller message "
@@ -216,7 +228,8 @@ def _tool_guidance(role: str) -> str:
     if role == "retrieve":
         return (
             "Available retrieve tools:\n"
-            "- `read_memory_file(slug)` reads the `MEMORY_<slug>.md` detail file for a relevant `F#` heading.\n"
+            "- `read_detail(detail_id)` resolves a relevant `F#` id and reads its Memory or Pursuit graph detail.\n"
+            "- `read_markdown(markdown_id)` reads free-form evidence for a relevant Memory `M#` heading.\n"
             "- `read_skill(skill_id)` reads a full memory skill body for a relevant `S#` heading.\n"
             "- `read_mf(mf_id)` reads external file context for a relevant `MF#` heading."
         )
@@ -266,12 +279,19 @@ def _tool_guidance(role: str) -> str:
         )
     if role == "sync-reconciler":
         guidance += (
-            "\n- Commit and edit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `shared_views.toml`, `shares.toml`, "
+            "\n- Commit and edit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`, `PURSUIT_*.md`, "
+            "`PURSUIT_RULES.md`, `corrections.md`, `shared_views.toml`, `shares.toml`, "
             "`shared_views/<view-id>/view.md`, `shared_views/<view-id>/retriever.md`, "
             "`shared_views/<view-id>/recipe.toml`, `shared_views/<view-id>/question.toml`, and `insight_logs/*.md` for sync repair; keep unrelated untracked files out of repair commits "
             "unless the caller explicitly asks about them.\n"
             "- `git_discard(paths)` is destructive. Use it for invalid, partial, or unsafe memory-owned "
             "changes after inspecting the diff."
+        )
+    elif role == "update":
+        guidance += (
+            "\n- Commit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`, `PURSUIT_*.md`, "
+            "and their graph state. `PURSUIT_RULES.md` is read-only. A runtime review-correction turn may "
+            "additionally change `corrections.md`, but a normal update may not; keep unrelated files out of commits."
         )
     else:
         guidance += (

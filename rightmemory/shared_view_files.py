@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 
+from .graph import GraphItem, build_graph_manifest
 from .hub.client import HubClient, HubClientError
 from .shared_view_models import (
     PROVIDER_VIEWS_DIR,
@@ -58,8 +59,7 @@ FILE_VIEW_RENDER_VALUES = {FILE_VIEW_RENDER_EXTRACTIVE, FILE_VIEW_RENDER_GENERAT
 DEFAULT_SEMANTIC_REFRESH_DAYS = 7
 
 
-HEADING_ID_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|S#|MF#|MQ#|#)([A-Za-z0-9_.-]+)\}")
-NODE_ID_RE = re.compile(r"^\s*-\s+`([^`]+)`")
+MARKDOWN_HEADING_RE = re.compile(r"^(#{1,})\s+")
 MANAGED_EXAMPLE_START = "<!-- rightmemory:example:start -->"
 MANAGED_EXAMPLE_END = "<!-- rightmemory:example:end -->"
 
@@ -121,7 +121,7 @@ def write_extractive_file_view_recipe(
         render=FILE_VIEW_RENDER_EXTRACTIVE,
         include_headings=tuple(validate_heading_id(item) for item in include_headings),
         include_nodes=tuple(validate_heading_id(item) for item in include_nodes),
-        include_files=tuple(_validate_memory_source_file(item) for item in include_files),
+        include_files=tuple(_validate_graph_source_file(root, item) for item in include_files),
         exclude_ids=tuple(validate_heading_id(item) for item in exclude_ids),
         approved=bool(approved),
         publish_hub_url=_optional_text(publish_hub_url),
@@ -204,7 +204,11 @@ def load_file_view_recipe(memory_root: Path, view_id: str) -> FileViewRecipe:
         render=render,
         include_headings=tuple(validate_heading_id(str(item)) for item in data.get("include_headings", []) if isinstance(item, str)),
         include_nodes=tuple(validate_heading_id(str(item)) for item in data.get("include_nodes", []) if isinstance(item, str)),
-        include_files=tuple(_validate_memory_source_file(item) for item in data.get("include_files", []) if isinstance(item, str)),
+        include_files=tuple(
+            _validate_graph_source_file(root, item)
+            for item in data.get("include_files", [])
+            if isinstance(item, str)
+        ),
         exclude_ids=tuple(validate_heading_id(str(item)) for item in data.get("exclude_ids", []) if isinstance(item, str)),
         approved=bool(data.get("approved", False)),
         publish_hub_url=str(publish.get("hub_url")).strip() if publish.get("hub_url") else None,
@@ -545,14 +549,23 @@ def _import_exists(root: Path, heading_id: str) -> bool:
 def _render_selected_memory(root: Path, recipe: FileViewRecipe) -> str:
     sections: list[str] = []
     excluded = set(recipe.exclude_ids)
+    manifest = build_graph_manifest(root)
+    graph_files = {
+        path.relative_to(manifest.root).as_posix(): path
+        for path in manifest.graph_files
+    }
+    items_by_location = {
+        (item.file, item.line_number): item
+        for item in manifest.items.values()
+    }
     for relative in recipe.include_files:
-        path = root / relative
-        if path.is_file():
-            sections.extend([f"### {relative}", "", path.read_text(encoding="utf-8").rstrip(), ""])
-    sources = sorted(root.glob("MEMORY*.md"))
-    for source in sources:
+        path = graph_files.get(relative)
+        if path is None:
+            raise ValueError(f"file view include_files entry must be a RightMemory graph file: {relative}")
+        sections.extend([f"### {relative}", "", path.read_text(encoding="utf-8").rstrip(), ""])
+    for source in manifest.graph_files:
         lines = source.read_text(encoding="utf-8").splitlines()
-        sections.extend(_selected_lines_from_source(lines, recipe, excluded))
+        sections.extend(_selected_lines_from_source(source, lines, recipe, excluded, items_by_location))
     return _render_shared_view_memory(recipe, "\n".join(line for line in sections).rstrip())
 
 
@@ -594,13 +607,19 @@ def _require_generated_file_view_output(root: Path, recipe: FileViewRecipe) -> N
         raise ValueError(f"generative file view output is empty: shared_views/{recipe.view_id}/dist/MEMORY.md")
 
 
-def _selected_lines_from_source(lines: list[str], recipe: FileViewRecipe, excluded: set[str]) -> list[str]:
+def _selected_lines_from_source(
+    source: Path,
+    lines: list[str],
+    recipe: FileViewRecipe,
+    excluded: set[str],
+    items_by_location: dict[tuple[Path, int], GraphItem],
+) -> list[str]:
     output: list[str] = []
     heading_depth: int | None = None
     excluded_subtree_depth: int | None = None
     include_subtree = False
     in_managed_example = False
-    for line in lines:
+    for line_number, line in enumerate(lines, start=1):
         if MANAGED_EXAMPLE_START in line:
             in_managed_example = MANAGED_EXAMPLE_END not in line
             continue
@@ -608,10 +627,10 @@ def _selected_lines_from_source(lines: list[str], recipe: FileViewRecipe, exclud
             if MANAGED_EXAMPLE_END in line:
                 in_managed_example = False
             continue
-        heading_match = HEADING_ID_RE.match(line)
+        item = items_by_location.get((source, line_number))
+        heading_match = MARKDOWN_HEADING_RE.match(line)
         if heading_match:
             depth = len(heading_match.group(1))
-            item_id = heading_match.group(2)
             if excluded_subtree_depth is not None:
                 if depth > excluded_subtree_depth:
                     continue
@@ -619,6 +638,7 @@ def _selected_lines_from_source(lines: list[str], recipe: FileViewRecipe, exclud
             if heading_depth is not None and depth <= heading_depth:
                 include_subtree = False
                 heading_depth = None
+            item_id = item.id if item is not None and item.item_kind == "heading" else None
             if item_id in excluded:
                 excluded_subtree_depth = depth
                 continue
@@ -629,10 +649,10 @@ def _selected_lines_from_source(lines: list[str], recipe: FileViewRecipe, exclud
                 continue
         elif excluded_subtree_depth is not None:
             continue
-        node_match = NODE_ID_RE.match(line)
-        if node_match and node_match.group(1) in excluded:
+        node_id = item.id if item is not None and item.item_kind == "node" else None
+        if node_id in excluded:
             continue
-        if node_match and node_match.group(1) in recipe.include_nodes:
+        if node_id in recipe.include_nodes:
             output.append(line)
             continue
         if include_subtree:
@@ -768,11 +788,15 @@ def _view_dir(root: Path, view_id: str) -> Path:
     return root / PROVIDER_VIEWS_DIR / validate_heading_id(view_id)
 
 
-def _validate_memory_source_file(value: str) -> str:
-    path = Path(value)
+def _validate_graph_source_file(root: Path, value: str) -> str:
+    path = PurePosixPath(value)
+    if "\\" in value or path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"file view include_files entry must be a RightMemory graph file: {value}")
     text = path.as_posix()
-    if path.is_absolute() or ".." in path.parts or not re.fullmatch(r"MEMORY(?:_[A-Za-z0-9_.-]+)?\.md", text):
-        raise ValueError(f"file view include_files entry must be a memory file: {value}")
+    manifest = build_graph_manifest(root)
+    graph_files = {graph_file.relative_to(manifest.root).as_posix() for graph_file in manifest.graph_files}
+    if text not in graph_files:
+        raise ValueError(f"file view include_files entry must be a RightMemory graph file: {value}")
     return text
 
 

@@ -11,10 +11,10 @@ from pathlib import Path
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
 
 
-SNAPSHOT_HEADER = "Daily root-memory snapshot"
-SNAPSHOT_SCOPE = "root-memory-v1"
-DIFF_HEADER = "Memory changes since previous retrieve turn"
-RECENT_SUBMITTED_CONTEXT_HEADER = "Recent submitted memory"
+SNAPSHOT_HEADER = "Daily RightMemory root snapshot"
+SNAPSHOT_SCOPE = "rightmemory-roots-v2"
+DIFF_HEADER = "RightMemory root changes since previous retrieve turn"
+RECENT_SUBMITTED_CONTEXT_HEADER = "Recent submitted RightMemory candidates"
 QUERY_HEADER = "Query"
 HISTORY_HEADER = "Prior retrieve conversation"
 SNAPSHOT_STATE = ".runtime/retrieve_context/daily-snapshot.json"
@@ -96,8 +96,7 @@ class RetrieveContextStore:
 
 def root_memory_paths(memory_root: Path) -> list[str]:
     root = Path(memory_root)
-    memory_path = root / "MEMORY.md"
-    return ["MEMORY.md"] if memory_path.is_file() else []
+    return [name for name in ("MEMORY.md", "PURSUITS.md") if (root / name).is_file()]
 
 
 def load_daily_snapshot(memory_root: Path, *, now: datetime | None = None) -> DailySnapshot:
@@ -166,8 +165,8 @@ def format_memory_diff_block(diff: str) -> str:
         return ""
     return (
         f"# {DIFF_HEADER}\n\n"
-        "Apply this patch mentally to the daily memory snapshot. "
-        "Added lines are newer memory. Removed lines are obsolete.\n\n"
+        "Apply this patch mentally to the daily RightMemory root snapshot. "
+        "Added lines are current. Removed lines are obsolete.\n\n"
         "```diff\n"
         f"{clean}\n"
         "```"
@@ -220,7 +219,7 @@ def _render_snapshot_text(memory_root: Path, paths: list[str]) -> str:
 
 def _changed_root_memory_paths(memory_root: Path, old_commit: str, new_commit: str) -> list[str]:
     result = subprocess.run(
-        ["git", "diff", "--name-only", old_commit, new_commit, "--", "MEMORY.md"],
+        ["git", "diff", "--name-only", old_commit, new_commit, "--", "MEMORY.md", "PURSUITS.md"],
         cwd=memory_root,
         text=True,
         encoding="utf-8",
@@ -231,7 +230,8 @@ def _changed_root_memory_paths(memory_root: Path, old_commit: str, new_commit: s
     )
     if result.returncode != 0:
         raise RuntimeError(f"git diff --name-only failed: {result.stderr.strip()}")
-    paths = [raw.strip() for raw in result.stdout.splitlines() if raw.strip() == "MEMORY.md"]
+    root_names = {"MEMORY.md", "PURSUITS.md"}
+    paths = [raw.strip() for raw in result.stdout.splitlines() if raw.strip() in root_names]
     return sorted(set(paths))
 
 

@@ -22,7 +22,8 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
             "- `one` initial memory\n",
             encoding="utf-8",
         )
-        self._git("add", "MEMORY.md")
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+        self._git("add", "MEMORY.md", "PURSUITS.md")
         self._git("commit", "-m", "initial memory")
         self.initial_head = self._git("rev-parse", "HEAD")
 
@@ -376,6 +377,256 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertEqual(self._git("status", "--short"), "")
         self.assertEqual(self._git("log", "-1", "--format=%s"), "initial memory")
 
+    def test_update_lands_memory_and_pursuit_as_one_transaction(self):
+        def callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `durable` durable result\n")
+            (worktree / "PURSUITS.md").write_text(
+                "# Pursuits\n\n## Continue {#continue} \u2192 [dep:durable]\n",
+                encoding="utf-8",
+            )
+            self._git("add", "MEMORY.md", "PURSUITS.md", cwd=worktree)
+            self._git("commit", "-m", "rightmemory: unified update", cwd=worktree)
+            return "updated"
+
+        result = IsolatedWriteSupervisor(self.root, "update").run(callback)
+
+        self.assertEqual(result.commits_landed, 1)
+        self.assertEqual(result.start_commit, self._git("rev-parse", f"{result.landed_commit}^"))
+        self.assertEqual(result.changed_paths, ("MEMORY.md", "PURSUITS.md"))
+        self.assertIn("continue", (self.root / "PURSUITS.md").read_text(encoding="utf-8"))
+
+    def test_update_rejects_multiple_commits(self):
+        def callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `first` first state\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "rightmemory: first", cwd=worktree)
+            (worktree / "PURSUITS.md").write_text(
+                "# Pursuits\n\n## Continue {#continue}\n",
+                encoding="utf-8",
+            )
+            self._git("add", "PURSUITS.md", cwd=worktree)
+            self._git("commit", "-m", "rightmemory: second", cwd=worktree)
+            return "updated"
+
+        with self.assertRaisesRegex(RuntimeError, "at most one commit"):
+            IsolatedWriteSupervisor(self.root, "update").run(callback)
+
+        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
+
+    def test_normal_update_rejects_corrections_file(self):
+        def callback(worktree: Path) -> str:
+            (worktree / "corrections.md").write_text(
+                "# RightMemory Update Corrections\n",
+                encoding="utf-8",
+            )
+            self._git("add", "corrections.md", cwd=worktree)
+            self._git("commit", "-m", "rightmemory: invalid normal correction", cwd=worktree)
+            return "updated"
+
+        with self.assertRaisesRegex(RuntimeError, "non-memory paths: corrections\\.md"):
+            IsolatedWriteSupervisor(self.root, "update").run(callback)
+
+    def test_review_correction_lands_state_and_feedback_in_one_commit(self):
+        def callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `corrected` accepted state\n")
+            (worktree / "corrections.md").write_text(
+                "# RightMemory Update Corrections\n\n"
+                "## Keep accepted scope\n\n"
+                "### Background\n\nThe updater broadened the edit.\n\n"
+                "### Proposed edit\n\nRewrite unrelated state.\n\n"
+                "### Accepted edit\n\nChange only the reviewed state.\n",
+                encoding="utf-8",
+            )
+            self._git("add", "MEMORY.md", "corrections.md", cwd=worktree)
+            self._git("commit", "-m", "rightmemory: apply reviewed correction", cwd=worktree)
+            return "corrected"
+
+        result = IsolatedWriteSupervisor(
+            self.root,
+            "update",
+            update_mode="review-correction",
+        ).run(callback)
+
+        self.assertEqual(result.commits_landed, 1)
+        self.assertEqual(result.changed_paths, ("MEMORY.md", "corrections.md"))
+        self.assertTrue((self.root / "corrections.md").is_file())
+
+    def test_review_correction_rejects_feedback_only_commit(self):
+        def callback(worktree: Path) -> str:
+            (worktree / "corrections.md").write_text(
+                "# RightMemory Update Corrections\n",
+                encoding="utf-8",
+            )
+            self._git("add", "corrections.md", cwd=worktree)
+            self._git("commit", "-m", "rightmemory: feedback only", cwd=worktree)
+            return "corrected"
+
+        with self.assertRaisesRegex(RuntimeError, "corrections.md-only"):
+            IsolatedWriteSupervisor(
+                self.root,
+                "update",
+                update_mode="review-correction",
+            ).run(callback)
+
+    def test_review_correction_enforces_updater_correction_ceiling(self):
+        def callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `corrected` accepted state\n")
+            (worktree / "corrections.md").write_text(
+                self._corrections_markdown(16),
+                encoding="utf-8",
+            )
+            self._git("add", "MEMORY.md", "corrections.md", cwd=worktree)
+            self._git("commit", "-m", "rightmemory: oversized correction curation", cwd=worktree)
+            return "corrected"
+
+        with self.assertRaisesRegex(RuntimeError, "at most 15 are allowed"):
+            IsolatedWriteSupervisor(
+                self.root,
+                "update",
+                update_mode="review-correction",
+            ).run(callback)
+
+    def test_review_correction_discards_speculative_commit_when_input_is_needed(self):
+        def callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `speculative` must not land\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "rightmemory: speculative correction", cwd=worktree)
+            return "Needs input: Which scope should change?"
+
+        result = IsolatedWriteSupervisor(
+            self.root,
+            "update",
+            update_mode="review-correction",
+        ).run(callback)
+
+        self.assertEqual(result.commits_landed, 0)
+        self.assertEqual(result.landed_commit, self.initial_head)
+        self.assertNotIn("speculative", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
+
+    def test_dreamer_rejects_pursuit_write(self):
+        def callback(worktree: Path) -> None:
+            (worktree / "PURSUITS.md").write_text(
+                "# Pursuits\n\n## Changed {#changed}\n",
+                encoding="utf-8",
+            )
+            self._git("add", "PURSUITS.md", cwd=worktree)
+            self._git("commit", "-m", "dreamer: invalid pursuit edit", cwd=worktree)
+
+        with self.assertRaisesRegex(RuntimeError, "non-memory paths: PURSUITS\\.md"):
+            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+
+    def test_dreamer_rejects_fixed_correction_collection_write(self):
+        def callback(worktree: Path) -> None:
+            path = worktree / "MEMORY_agent-corrections-writing.md"
+            path.write_text("# Curated writing corrections\n", encoding="utf-8")
+            self._git("add", path.name, cwd=worktree)
+            self._git("commit", "-m", "dreamer: invalid correction curation", cwd=worktree)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "non-memory paths: MEMORY_agent-corrections-writing\\.md",
+        ):
+            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+
+    def test_narrow_memory_role_preserves_pursuit_cross_tree_reference(self):
+        (self.root / "PURSUITS.md").write_text(
+            "# Pursuits\n\n## Continue {#continue} \u2192 [dep:one]\n",
+            encoding="utf-8",
+        )
+        self._git("add", "PURSUITS.md")
+        self._git("commit", "-m", "pursuit: depend on memory")
+        current_head = self._git("rev-parse", "HEAD")
+
+        def callback(worktree: Path) -> None:
+            memory = (worktree / "MEMORY.md").read_text(encoding="utf-8")
+            (worktree / "MEMORY.md").write_text(memory.replace("`one`", "`renamed`"), encoding="utf-8")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "dreamer: break pursuit edge", cwd=worktree)
+
+        with self.assertRaisesRegex(RuntimeError, "dangling edge `dep:one`"):
+            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+
+        self.assertEqual(self._git("rev-parse", "HEAD"), current_head)
+
+    def test_dirty_pursuit_rules_or_corrections_blocks_narrow_writer(self):
+        for name in ("PURSUITS.md", "PURSUIT_RULES.md", "corrections.md"):
+            with self.subTest(name=name):
+                path = self.root / name
+                existed = path.exists()
+                original = path.read_text(encoding="utf-8") if existed else None
+                path.write_text("local synchronized state\n", encoding="utf-8")
+
+                with self.assertRaises(MainMemoryDirtyError) as caught:
+                    IsolatedWriteSupervisor(self.root, "dreamer").run(lambda _worktree: None)
+
+                self.assertEqual(caught.exception.paths, (name,))
+                if original is None:
+                    path.unlink()
+                else:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_reviewer_cannot_land_graph_edits(self):
+        def callback(worktree: Path) -> None:
+            self._append_memory(worktree, "- `reviewed` invalid reviewer edit\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "reviewer: invalid graph write", cwd=worktree)
+
+        with self.assertRaisesRegex(RuntimeError, "non-memory paths: MEMORY\\.md"):
+            IsolatedWriteSupervisor(self.root, "reviewer").run(callback)
+
+    def test_sync_reconciler_preserves_structured_corrections_over_updater_ceiling(self):
+        def callback(worktree: Path) -> str:
+            (worktree / "corrections.md").write_text(
+                self._corrections_markdown(16),
+                encoding="utf-8",
+            )
+            self._git("add", "corrections.md", cwd=worktree)
+            self._git("commit", "-m", "sync: preserve correction union", cwd=worktree)
+            return "repaired"
+
+        result = IsolatedWriteSupervisor(self.root, "sync-reconciler").run(callback)
+
+        self.assertEqual(result.commits_landed, 1)
+        text = (self.root / "corrections.md").read_text(encoding="utf-8")
+        self.assertEqual(text.count("## Entry "), 16)
+
+    def test_correction_overflow_does_not_block_unrelated_normal_update(self):
+        (self.root / "corrections.md").write_text(
+            self._corrections_markdown(16),
+            encoding="utf-8",
+        )
+        self._git("add", "corrections.md")
+        self._git("commit", "-m", "sync: preserve unresolved correction union")
+
+        def callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `later` unrelated durable state\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "rightmemory: unrelated update", cwd=worktree)
+            return "updated"
+
+        result = IsolatedWriteSupervisor(self.root, "update").run(callback)
+
+        self.assertEqual(result.commits_landed, 1)
+        self.assertIn("later", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
+        self.assertEqual(
+            (self.root / "corrections.md").read_text(encoding="utf-8").count("## Entry "),
+            16,
+        )
+
+    def test_sync_reconciler_still_rejects_malformed_correction_entries(self):
+        def callback(worktree: Path) -> str:
+            (worktree / "corrections.md").write_text(
+                "# RightMemory Update Corrections\n\n"
+                "## Incomplete\n\n### Background\n\nOnly one section.\n",
+                encoding="utf-8",
+            )
+            self._git("add", "corrections.md", cwd=worktree)
+            self._git("commit", "-m", "sync: malformed correction", cwd=worktree)
+            return "repaired"
+
+        with self.assertRaisesRegex(RuntimeError, "missing `### Proposed edit`"):
+            IsolatedWriteSupervisor(self.root, "sync-reconciler").run(callback)
+
     def test_cleanup_stale_removes_temp_branch_and_worktree(self):
         branch, worktree = self._add_isolated_worktree("dreamer", "0123456789abcdef0123456789abcdef")
 
@@ -432,6 +683,17 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
     def _append_memory(self, root: Path, text: str) -> None:
         memory = root / "MEMORY.md"
         memory.write_text(memory.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+    def _corrections_markdown(self, count: int) -> str:
+        entries = []
+        for index in range(count):
+            entries.append(
+                f"## Entry {index}\n\n"
+                "### Background\n\nBackground.\n\n"
+                "### Proposed edit\n\nProposed.\n\n"
+                "### Accepted edit\n\nAccepted.\n"
+            )
+        return "# RightMemory Update Corrections\n\n" + "\n".join(entries)
 
     def _assert_isolated_cleanup(self) -> None:
         worktrees = self._git("worktree", "list", "--porcelain")

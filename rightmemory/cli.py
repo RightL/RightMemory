@@ -66,6 +66,13 @@ from .share_results import format_share_operation_result
 from .shares import approve_share, create_share, join_share, list_shares, publish_share, revise_share, share_status
 from .status import collect_status, format_status_dashboard
 from .sync import SyncManager
+from .update_review import (
+    DEFAULT_STABLE_SECONDS,
+    UpdateReviewOutcome,
+    UpdateReviewProcessResult,
+    UpdateReviewRequest,
+    UpdateReviewStore,
+)
 from .watch import (
     MANAGED_WATCH_TARGETS,
     WATCH_HANDOFF_PID_ENV,
@@ -93,6 +100,7 @@ DEFAULT_INSIGHT_WATCH_RETRY_SECONDS = 60
 DEFAULT_PRUNER_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 DEFAULT_PRUNER_WATCH_RETRY_SECONDS = 60
 DEFAULT_SYNC_WATCH_INTERVAL_SECONDS = 60 * 60
+DEFAULT_UPDATE_REVIEW_WATCH_INTERVAL_SECONDS = 60
 DEFAULT_WATCH_MAX_CONSECUTIVE_FAILURES = 3
 DEFAULT_HUB_ROOT = Path("rightmemory-hub")
 WATCH_REFRESH_POLL_SECONDS = 5
@@ -152,6 +160,8 @@ def main(argv: list[str] | None = None) -> int:
         return _web_main(argv[1:], memory_root)
     if argv and argv[0] == "review":
         return _review_main(argv[1:], memory_root)
+    if argv and argv[0] == "update-review":
+        return _update_review_main(argv[1:], memory_root)
     if argv and argv[0] == "sync":
         return _sync_main(argv[1:], memory_root)
     if argv and argv[0] == "doctor":
@@ -1010,6 +1020,8 @@ def _watch_targets(target: str) -> list[str]:
 def _watch_role(name: str) -> str:
     if name == "review":
         return "reviewer"
+    if name == "update-review":
+        return "update"
     if name == "dreamer":
         return "dreamer"
     if name == "pruner":
@@ -1204,6 +1216,144 @@ def _review_main(argv: list[str], memory_root: Path) -> int:
     raise ValueError(f"unknown review command: {args.command}")
 
 
+def _update_review_main(argv: list[str], memory_root: Path) -> int:
+    parser = argparse.ArgumentParser(
+        prog="rightmemory update-review",
+        description="Process human comments on local Markdown reviews of unified RightMemory updates.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    scan = subparsers.add_parser("scan", help="process one ready update-review comment")
+    scan.add_argument("--once", action="store_true", help="process at most one ready comment and exit")
+    scan.add_argument("--stable-seconds", type=int, default=DEFAULT_STABLE_SECONDS)
+    watch = subparsers.add_parser("watch", help="periodically process ready update-review comments")
+    watch.add_argument("--interval", type=int, default=DEFAULT_UPDATE_REVIEW_WATCH_INTERVAL_SECONDS)
+    watch.add_argument("--stable-seconds", type=int, default=DEFAULT_STABLE_SECONDS)
+    args = parser.parse_args(argv)
+
+    if args.command == "scan":
+        if not args.once:
+            raise ValueError("update-review scan currently requires --once")
+        with WatchLock(memory_root, "update-review"):
+            result = _run_update_review_scan(memory_root, args.stable_seconds)
+        print(_format_update_review_result(result))
+        return 0
+    if args.command == "watch":
+        return _update_review_watch(args.interval, args.stable_seconds, memory_root)
+    raise ValueError(f"unknown update-review command: {args.command}")
+
+
+def _run_update_review_scan(memory_root: Path, stable_seconds: int = DEFAULT_STABLE_SECONDS):
+    store = UpdateReviewStore(memory_root, stable_seconds=stable_seconds)
+    return store.process_ready(
+        lambda request: _run_update_review_correction(memory_root, request),
+        limit=1,
+    )
+
+
+def _run_update_review_correction(memory_root: Path, request: UpdateReviewRequest) -> UpdateReviewOutcome:
+    message = "\n".join(
+        (
+            "<rightmemory_update_correction>",
+            f"review_id: {request.review_id}",
+            f"original_base_commit: {request.base_commit}",
+            f"original_update_commit: {request.update_commit}",
+            f"original_write_surface: {request.write_surface}",
+            "authority: Apply the human comment semantically to the current RightMemory state. Preserve unrelated later work.",
+            "The verified original diff supplied separately below is authoritative for what the original update changed. "
+            "Do not rely on an editable copy of the review document.",
+            "If clarification is required, make no commit and reply exactly `Needs input: <concise question>`.",
+            "If the current state already satisfies the comment, make no commit and reply exactly "
+            "`No correction needed: <concise reason>`.",
+            "The requested state correction and any admitted corrections.md feedback must share one commit.",
+            "</rightmemory_update_correction>",
+            "",
+            "Verified original diff JSON:",
+            json.dumps(request.original_diff, ensure_ascii=False),
+            "",
+            "Human review comment JSON:",
+            json.dumps(request.comment, ensure_ascii=False),
+        )
+    )
+    config = load_config("update", memory_root=memory_root)
+    runtime = RightMemoryRuntime(config, update_mode="review-correction")
+    session_id = f"update-review-{request.review_id[:48]}-{request.comment_sha256[:12]}"
+    try:
+        output = runtime.run_session_turn(session_id, message)
+        write_result = runtime.last_write_result
+    finally:
+        runtime.cleanup()
+    clean_output = output.strip()
+    if clean_output.startswith(("Needs input:", "No correction needed:")) and (
+        write_result is not None and write_result.commits_landed
+    ):
+        raise RuntimeError("review correction reported a no-commit outcome after landing a state commit")
+    if clean_output.startswith("Needs input:"):
+        question = clean_output.removeprefix("Needs input:").strip() or "Please clarify the requested correction."
+        return UpdateReviewOutcome.needs_input(question)
+    if clean_output.startswith("No correction needed:"):
+        return UpdateReviewOutcome.resolved(message=clean_output)
+    if write_result is None or write_result.commits_landed != 1:
+        raise RuntimeError("review correction did not land exactly one validated state commit")
+    if _changed_memory_paths(write_result.changed_paths):
+        _record_memory_change_pressure(memory_root)
+    return UpdateReviewOutcome.resolved(
+        correction_commit=write_result.landed_commit,
+        message=clean_output or None,
+    )
+
+
+def _format_update_review_result(result: UpdateReviewProcessResult) -> str:
+    lines = [
+        f"processed: {result.processed}",
+        f"resolved: {result.resolved}",
+        f"needs_input: {result.needs_input}",
+        f"failed: {result.failed}",
+        f"blank: {result.blank}",
+        f"unstable: {result.unstable}",
+        f"unchanged: {result.unchanged}",
+        f"malformed: {result.malformed}",
+        f"missing: {result.missing}",
+        f"pruned_blank: {result.pruned_blank}",
+    ]
+    lines.extend(f"error: {error}" for error in result.errors)
+    return "\n".join(lines)
+
+
+def _update_review_watch(interval: int, stable_seconds: int, memory_root: Path) -> int:
+    if interval < 1:
+        raise ValueError("--interval must be a positive integer")
+    if stable_seconds < 0:
+        raise ValueError("--stable-seconds must be a nonnegative integer")
+    refresh = InstallStamp(memory_root)
+    consecutive_failures = 0
+    exit_code = 0
+    try:
+        with _watch_stop_signal("update-review", memory_root) as stop, WatchLock(memory_root, "update-review"):
+            while not stop.requested:
+                _reexec_if_install_changed(refresh, stop)
+                timestamp = datetime.now(UTC).isoformat()
+                print(f"[{timestamp}] rightmemory update-review scan", flush=True)
+                result = _run_update_review_scan(memory_root, stable_seconds)
+                print(_format_update_review_result(result), flush=True)
+                _reexec_if_install_changed(refresh, stop)
+                if result.failed:
+                    consecutive_failures += 1
+                    if _watch_failure_limit_reached("update-review", consecutive_failures):
+                        exit_code = 1
+                        break
+                else:
+                    consecutive_failures = 0
+                if not stop.requested and result.processed:
+                    continue
+                if not _sleep_with_refresh_check(interval, refresh, stop):
+                    break
+        print("rightmemory update-review watch stopped", file=sys.stderr)
+        return exit_code
+    except KeyboardInterrupt:
+        print("rightmemory update-review watch stopped", file=sys.stderr)
+        return 130
+
+
 def _status_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory status")
     parser.parse_args(argv)
@@ -1269,7 +1419,8 @@ def _run_review_scan(
     memory_root: Path | None = None,
 ):
     reviewer_config = load_config("reviewer", memory_root=memory_root)
-    return _run_review_scan_with_config(reviewer_config, since_days, require_full_batch=require_full_batch)
+    with WatchLock(reviewer_config.memory_root, "review"):
+        return _run_review_scan_with_config(reviewer_config, since_days, require_full_batch=require_full_batch)
 
 
 def _run_review_scan_with_config(
@@ -1283,24 +1434,9 @@ def _run_review_scan_with_config(
         if since_days < 1:
             raise ValueError("--since-days must be a positive integer")
         review_config = replace(review_config, since_days=since_days)
-    dreamer_watch_config = load_dreamer_watch_config(memory_root=reviewer_config.memory_root)
-    insight_watch_config = load_insight_watch_config(memory_root=reviewer_config.memory_root)
     runtime = RightMemoryRuntime(reviewer_config)
     try:
-        scanner = ReviewScanner(
-            review_config,
-            runtime.run_session_turn,
-            on_review_success=_combined_trigger_incrementer(
-                _dreamer_trigger_incrementer(
-                    reviewer_config.memory_root,
-                    dreamer_watch_config.review_session_points,
-                ),
-                _insight_trigger_incrementer(
-                    reviewer_config.memory_root,
-                    insight_watch_config.review_session_points,
-                ),
-            ),
-        )
+        scanner = ReviewScanner(review_config, runtime.run_session_turn)
         return scanner.scan_once(require_full_batch=require_full_batch)
     finally:
         runtime.cleanup()
@@ -1323,10 +1459,9 @@ def _review_watch(interval: int, since_days: int | None, memory_root: Path) -> i
                 timestamp = datetime.now(UTC).isoformat()
                 print(f"[{timestamp}] rightmemory review scan", flush=True)
                 if next_config is None:
-                    result = _run_review_scan(since_days, require_full_batch=True)
-                else:
-                    result = _run_review_scan_with_config(next_config, since_days, require_full_batch=True)
-                    next_config = None
+                    next_config = load_config("reviewer", memory_root=reviewer_config.memory_root)
+                result = _run_review_scan_with_config(next_config, since_days, require_full_batch=True)
+                next_config = None
                 print(result.format(), flush=True)
                 _reexec_if_install_changed(refresh, stop)
                 if result.failed > 0:
@@ -1719,9 +1854,9 @@ def _chat(runtime: RightMemoryRuntime, session_id: str | None = None) -> int:
         if not message.strip():
             continue
         if session_id is None:
-            print(runtime.run_turn(message))
+            print(_run_accounted_update_turn(runtime, lambda: runtime.run_turn(message)))
         else:
-            print(runtime.run_session_turn(session_id, message))
+            print(_run_accounted_update_turn(runtime, lambda: runtime.run_session_turn(session_id, message)))
 
 
 def _daemon_stdio_json(runtime: RightMemoryRuntime) -> int:
@@ -1741,15 +1876,30 @@ def _handle_json_request(runtime: RightMemoryRuntime, request: dict[str, Any]) -
     message = request.get("message")
     if not isinstance(message, str):
         raise ValueError("JSON request must contain string field: message")
-    return {"type": "assistant", "message": runtime.run_turn(message)}
+    output = _run_accounted_update_turn(runtime, lambda: runtime.run_turn(message))
+    return {"type": "assistant", "message": output}
 
 
 def _session_turn(runtime: RightMemoryRuntime, session_id: str, message_parts: list[str]) -> int:
     message = " ".join(message_parts).strip()
     if not message:
         raise ValueError("message must not be empty")
-    print(runtime.run_session_turn(session_id, message))
+    print(_run_accounted_update_turn(runtime, lambda: runtime.run_session_turn(session_id, message)))
     return 0
+
+
+def _run_accounted_update_turn(runtime: RightMemoryRuntime, run_turn: Callable[[], str]) -> str:
+    output = run_turn()
+    config = getattr(runtime, "config", None)
+    write_result = getattr(runtime, "last_write_result", None)
+    if (
+        getattr(config, "role", None) == "update"
+        and write_result is not None
+        and write_result.commits_landed == 1
+        and _changed_memory_paths(write_result.changed_paths)
+    ):
+        _record_memory_change_pressure(config.memory_root)
+    return output
 
 
 def _submit(memory_root, role: str, session_id: str, message_parts: list[str]) -> int:
@@ -1788,36 +1938,49 @@ def _retry(memory_root, role: str) -> int:
 
 
 def _async_worker(memory_root, role: str) -> int:
-    dreamer_watch_config = load_dreamer_watch_config(memory_root=memory_root)
-    insight_watch_config = load_insight_watch_config(memory_root=memory_root)
     async_update_config = load_async_update_config(memory_root=memory_root)
     store = AsyncUpdateStore(memory_root, role)
+
+    batch_changed_memory = False
+
+    def run_batch(batch_session_id: str, message: str) -> str:
+        nonlocal batch_changed_memory
+        batch_changed_memory = False
+        output, batch_changed_memory = _run_async_update_batch(memory_root, role, batch_session_id, message)
+        return output
+
+    def record_batch_pressure(_accepted_count: int) -> None:
+        nonlocal batch_changed_memory
+        try:
+            if batch_changed_memory:
+                _record_memory_change_pressure(memory_root)
+        finally:
+            batch_changed_memory = False
+
     result = store.run_pending_batches(
-        lambda batch_session_id, message: _run_async_update_batch(memory_root, role, batch_session_id, message),
+        run_batch,
         target_batch_candidates=async_update_config.target_batch_candidates,
         max_wait_seconds=async_update_config.max_wait_seconds,
-        on_batch_success=_combined_trigger_incrementer(
-            _dreamer_trigger_incrementer(
-                memory_root,
-                dreamer_watch_config.update_candidate_points,
-            ),
-            _insight_trigger_incrementer(
-                memory_root,
-                insight_watch_config.update_candidate_points,
-            ),
-        ),
+        on_batch_success=record_batch_pressure,
     )
     if result.status == "failed":
         return 1
     return 0
 
 
-def _run_async_update_batch(memory_root, role: str, batch_session_id: str, message: str) -> str:
+def _run_async_update_batch(memory_root, role: str, batch_session_id: str, message: str) -> tuple[str, bool]:
     # Reload per batch so queued retries use current model and executor settings.
     config = load_config(role, memory_root=memory_root)
     runtime = RightMemoryRuntime(config)
     try:
-        return runtime.run_session_turn(batch_session_id, message)
+        output = runtime.run_session_turn(batch_session_id, message)
+        write_result = runtime.last_write_result
+        changed_memory = (
+            write_result is not None
+            and write_result.commits_landed == 1
+            and _changed_memory_paths(write_result.changed_paths)
+        )
+        return output, changed_memory
     finally:
         runtime.cleanup()
 
@@ -1828,6 +1991,26 @@ def _combined_trigger_incrementer(*incrementers: Callable[[int], None]) -> Calla
             item(count)
 
     return increment
+
+
+def _changed_memory_paths(paths: tuple[str, ...] | list[str]) -> bool:
+    return any(path == "MEMORY.md" or (path.startswith("MEMORY_") and path.endswith(".md")) for path in paths)
+
+
+def _record_memory_change_pressure(memory_root: Path) -> None:
+    try:
+        dreamer = load_dreamer_watch_config(memory_root=memory_root)
+        insight = load_insight_watch_config(memory_root=memory_root)
+        _combined_trigger_incrementer(
+            _dreamer_trigger_incrementer(memory_root, dreamer.update_candidate_points),
+            _insight_trigger_incrementer(memory_root, insight.update_candidate_points),
+        )(1)
+    except Exception as exc:
+        print(
+            f"Warning: could not update Memory-change trigger state: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _dreamer_trigger_incrementer(memory_root: Path, points_per_item: float) -> Callable[[int], None]:

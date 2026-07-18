@@ -17,6 +17,12 @@ class MemoryToolsTests(unittest.TestCase):
         self.root = Path(self.tempdir.name)
         self.tools = MemoryTools(self.root)
 
+    def _validate_complete_graph(self) -> str:
+        pursuits = self.root / "PURSUITS.md"
+        if not pursuits.exists():
+            pursuits.write_text("# Pursuits\n", encoding="utf-8")
+        return self.tools.validate_memory()
+
     def _symlink_or_skip(self, link: Path, target: Path, *, target_is_directory: bool = False) -> None:
         try:
             link.symlink_to(target, target_is_directory=target_is_directory)
@@ -66,51 +72,6 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("Skill not found: alpha", result)
         self.assertIn("Available skills:\n- beta", result)
         self.assertNotIn("MEMORY_SKILL_beta.md", result)
-
-    def test_retrieve_read_memory_file_returns_detail_file_by_slug(self):
-        (self.root / "MEMORY_alpha.md").write_text("# Alpha Detail\n\nUse alpha detail.\n", encoding="utf-8")
-        (self.root / "MEMORY_SKILL_alpha.md").write_text("# Alpha Skill\n\nsecret skill.\n", encoding="utf-8")
-        tools = MemoryTools(self.root, role="retrieve")
-
-        result = tools.read_memory_file("alpha")
-
-        self.assertIn("===== MEMORY_alpha.md =====", result)
-        self.assertIn("# Alpha Detail", result)
-        self.assertIn("Use alpha detail.", result)
-        self.assertNotIn("secret skill", result)
-
-    def test_retrieve_read_memory_file_failure_lists_available_slugs_without_paths(self):
-        (self.root / "MEMORY_beta.md").write_text("# Beta Detail\n", encoding="utf-8")
-        (self.root / "MEMORY_SKILL_gamma.md").write_text("# Gamma Skill\n", encoding="utf-8")
-        tools = MemoryTools(self.root, role="retrieve")
-
-        result = tools.read_memory_file("alpha")
-
-        self.assertIn("Memory file not found: alpha", result)
-        self.assertIn("Available memory files:\n- beta", result)
-        self.assertNotIn("MEMORY_beta.md", result)
-        self.assertNotIn("gamma", result)
-
-    def test_retrieve_read_memory_file_rejects_invalid_slugs(self):
-        tools = MemoryTools(self.root, role="retrieve")
-
-        for slug in ("", "../alpha", "/tmp/alpha", ".hidden", "..", "SKILL_alpha"):
-            with self.subTest(slug=slug):
-                with self.assertRaises(ValueError):
-                    tools.read_memory_file(slug)
-
-    @unittest.skipIf(not hasattr(os, "symlink"), "symlink is not available")
-    def test_retrieve_read_memory_file_does_not_follow_symlink_outside_root(self):
-        outside = self.root.parent / f"{self.root.name}-outside-memory.md"
-        self.addCleanup(outside.unlink, missing_ok=True)
-        outside.write_text("# Outside\n\nsecret\n", encoding="utf-8")
-        self._symlink_or_skip(self.root / "MEMORY_alpha.md", outside)
-        tools = MemoryTools(self.root, role="retrieve")
-
-        result = tools.read_memory_file("alpha")
-
-        self.assertIn("Memory file not found: alpha", result)
-        self.assertNotIn("secret", result)
 
     @unittest.skipIf(not hasattr(os, "symlink"), "symlink is not available")
     def test_retrieve_read_skill_does_not_follow_symlink_outside_root(self):
@@ -444,6 +405,67 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.tools.git_add(["rightmemory.toml"])
 
+    def test_only_review_correction_tools_can_write_corrections(self):
+        self._git("init")
+        corrections = self.root / "corrections.md"
+        corrections.write_text("# RightMemory Update Corrections\n", encoding="utf-8")
+
+        normal = MemoryTools(self.root, role="update")
+        normal.read("corrections.md")
+        with self.assertRaisesRegex(ValueError, "PURSUIT_\\*\\.md"):
+            normal.edit_file("corrections.md", "RightMemory", "WrongMemory")
+        with self.assertRaisesRegex(ValueError, "PURSUIT_\\*\\.md"):
+            normal.git_add(["corrections.md"])
+
+        tools = MemoryTools(self.root, role="update-correction")
+        self.assertEqual(tools.git_add(["corrections.md"]), "staged: corrections.md")
+
+    def test_update_roles_treat_pursuit_rules_as_read_only(self):
+        rules = self.root / "PURSUIT_RULES.md"
+        rules.write_text("# Pursuit Rules\n", encoding="utf-8")
+
+        for role in ("update", "update-correction"):
+            with self.subTest(role=role):
+                tools = MemoryTools(self.root, role=role)
+                tools.read("PURSUIT_RULES.md")
+                with self.assertRaisesRegex(ValueError, "PURSUIT_\\*\\.md"):
+                    tools.edit_file("PURSUIT_RULES.md", "Pursuit", "Changed")
+
+    def test_non_updater_roles_cannot_read_updater_corrections(self):
+        (self.root / "corrections.md").write_text("private updater feedback\n", encoding="utf-8")
+
+        with self.assertRaises(ValueError):
+            MemoryTools(self.root, role="dreamer").read("corrections.md")
+        self.assertIn("private updater feedback", MemoryTools(self.root, role="update").read("corrections.md"))
+
+    def test_narrow_memory_roles_cannot_modify_fixed_agent_correction_collections(self):
+        paths = (
+            "MEMORY_agent-corrections-writing.md",
+            "MEMORY_agent-corrections-design.md",
+        )
+        for path in paths:
+            (self.root / path).write_text("# Curated corrections\n", encoding="utf-8")
+            for role in (None, "dreamer", "pruner", "reviewer"):
+                with self.subTest(path=path, role=role):
+                    tools = MemoryTools(self.root, role=role)
+                    tools.read(path)
+                    with self.assertRaisesRegex(ValueError, r"MEMORY\.md or MEMORY_\*\.md"):
+                        tools.edit_file(path, "Curated", "Changed")
+                    with self.assertRaisesRegex(ValueError, r"MEMORY\.md or MEMORY_\*\.md"):
+                        tools.delete_file(path)
+
+        updater = MemoryTools(self.root, role="update")
+        updater.read(paths[0])
+        self.assertIn("edited", updater.edit_file(paths[0], "Curated", "Updater-owned"))
+
+    def test_dreamer_can_modify_ordinary_m_and_s_backing_files(self):
+        for path in ("MEMORY_research-notes.md", "MEMORY_SKILL_two-pass-review.md"):
+            with self.subTest(path=path):
+                (self.root / path).write_text("# Linked resource\n", encoding="utf-8")
+                tools = MemoryTools(self.root, role="dreamer")
+                tools.read(path)
+                self.assertIn("edited", tools.edit_file(path, "Linked", "Maintained"))
+
     def test_insight_tools_commit_only_insight_logs(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")
@@ -489,7 +511,7 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertEqual(result, "staged: MEMORY.md, insight_logs/2026-05-30-143012.md")
         with self.assertRaisesRegex(
             ValueError,
-            r"MEMORY.md, MEMORY_\*\.md, shared_views\.toml, shares\.toml, shared_views/<id> source files, or insight_logs/\*\.md",
+            r"RightMemory state files, shared-view source files, or insight_logs/\*\.md",
         ):
             tools.git_add(["rightmemory.toml"])
 
@@ -1141,6 +1163,7 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("dangling edge `rel:missing`", result)
 
     def test_validate_memory_allows_one_way_edges(self):
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
             "- `one` first → [rel:two]\n"
@@ -1153,14 +1176,15 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("validation passed", result)
 
     def test_validate_memory_accepts_file_backed_heading_marker(self):
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
-            "## Runtime {F#runtime} → [rel:domain]\n"
-            "- `runtime-python` Uses Python 3.11. → [cfg:runtime]\n",
+            "## Runtime {F#runtime} → [rel:domain]\n",
             encoding="utf-8",
         )
         (self.root / "MEMORY_runtime.md").write_text(
             "# Runtime Details\n\n"
+            "- `runtime-python` Uses Python 3.11. → [cfg:runtime]\n"
             "- `runtime-install` Install dependencies with uv. → [rel:runtime-python]\n",
             encoding="utf-8",
         )
@@ -1170,6 +1194,7 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("validation passed", result)
 
     def test_validate_memory_accepts_skill_heading_marker(self):
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
             "## Two-Side Review {S#two-side-review} → [rel:domain]\n\n"
@@ -1187,6 +1212,7 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("validation passed", result)
 
     def test_validate_memory_accepts_file_and_question_shared_view_heading_markers(self):
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY.md").write_text(
             "# Project {#project}\n\n"
             "## Auth API Files {MF#auth-api-files} → [rel:project]\n\n"
@@ -1200,17 +1226,54 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertIn("validation passed", result)
 
-    def test_validate_memory_rejects_legacy_m_heading_marker(self):
+    def test_validate_memory_accepts_m_heading_and_ignores_freeform_body(self):
         (self.root / "MEMORY.md").write_text(
             "# Project {#project}\n\n"
-            "## Legacy View {M#legacy-view}\n",
+            "## Markdown Notes {M#markdown-notes}\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_markdown-notes.md").write_text(
+            "# Free-form notes\n\n"
+            "- `project` is ordinary Markdown here. → [rel:missing]\n",
             encoding="utf-8",
         )
 
+        result = self._validate_complete_graph()
+
+        self.assertIn("validation passed", result)
+        self.assertIn("Free-form notes", self.tools.read_markdown("markdown-notes"))
+
+    def test_validate_memory_rejects_case_insensitive_backing_path_collisions(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Project {#project}\n\n"
+            "## Detail {F#Notes}\n\n"
+            "## Free-form Notes {M#notes}\n",
+            encoding="utf-8",
+        )
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+        (self.root / "MEMORY_Notes.md").write_text("# Detail\n", encoding="utf-8")
+
         result = self.tools.validate_memory()
 
-        self.assertIn("validation failed", result)
-        self.assertIn("unsupported heading marker `M#`", result)
+        self.assertIn("backing file `MEMORY_notes.md` is claimed by", result)
+        self.assertIn("F# heading `Notes`", result)
+        self.assertIn("M# heading `notes`", result)
+
+    def test_validate_memory_rejects_children_left_under_file_backed_heading(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Domain {#domain}\n\n"
+            "## Runtime {F#runtime}\n\n"
+            "- `left-behind` This node should be in the detail file. → []\n\n"
+            "### Left Behind Topic {#left-behind-topic}\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_runtime.md").write_text("# Runtime Details\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("F# heading cannot retain child node lines", result)
+        self.assertIn("F# heading cannot retain child headings", result)
 
     def test_validate_memory_requires_skill_backing_file(self):
         (self.root / "MEMORY.md").write_text(
@@ -1224,6 +1287,7 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("missing skill file `MEMORY_SKILL_two-side-review.md`", result)
 
     def test_validate_memory_treats_skill_file_body_as_freeform_markdown(self):
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
             "## Two-Side Review {S#two-side-review} → [rel:domain]\n",
@@ -1242,6 +1306,7 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("validation passed", result)
 
     def test_validate_memory_allows_four_hash_skill_pointer(self):
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
             "### Agent Behavior\n\n"
@@ -1261,6 +1326,7 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("validation passed", result)
 
     def test_validate_memory_allows_four_hash_shared_view_references(self):
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY.md").write_text(
             "# Project {#project}\n\n"
             "### Integrations\n\n"
@@ -1317,6 +1383,7 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("headings deeper than `####` are not allowed", result)
 
     def test_validate_memory_allows_body_under_four_hash_pointer(self):
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
             "### Topic\n\n"
@@ -1326,10 +1393,161 @@ class MemoryToolsTests(unittest.TestCase):
             "### Next Topic\n",
             encoding="utf-8",
         )
+        (self.root / "MEMORY_detail.md").write_text("- `detail-fact` Backed detail. → []\n", encoding="utf-8")
 
         result = self.tools.validate_memory()
 
         self.assertIn("validation passed", result)
+
+    def test_validate_memory_uses_one_global_namespace_and_cross_root_edges(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Durable Project {#project}\n",
+            encoding="utf-8",
+        )
+        (self.root / "PURSUITS.md").write_text(
+            "# Pursuits\n\n"
+            "## Focus\n\n"
+            "- `ship-project` Ship the project.\n\n"
+            "## Ship Project {#ship-project} → [dep:project]\n",
+            encoding="utf-8",
+        )
+
+        result = self._validate_complete_graph()
+
+        self.assertIn("validation passed", result)
+
+        (self.root / "PURSUITS.md").write_text(
+            "# Pursuits\n\n## Duplicate {#project}\n",
+            encoding="utf-8",
+        )
+        result = self._validate_complete_graph()
+        self.assertIn("duplicate id `project`", result)
+
+    def test_validate_memory_does_not_parse_pursuit_next_actions_as_graph_nodes(self):
+        (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text(
+            "# Pursuits\n\n"
+            "## First {#first}\n\n"
+            "**Next:**\n"
+            "- `do` Continue the first task.\n"
+            "- `ask` Confirm the first choice.\n\n"
+            "## Second {#second}\n\n"
+            "**Next:**\n"
+            "- `do` Continue the second task.\n"
+            "- `wait` Wait for an external result.\n",
+            encoding="utf-8",
+        )
+
+        result = self._validate_complete_graph()
+
+        self.assertIn("validation passed", result)
+
+    def test_validate_memory_rejects_unknown_pursuit_next_action(self):
+        (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text(
+            "# Pursuits\n\n"
+            "## Investigate {#investigate}\n\n"
+            "**Next:**\n"
+            "- `research` Inspect the evidence.\n",
+            encoding="utf-8",
+        )
+
+        result = self._validate_complete_graph()
+
+        self.assertIn("invalid Pursuit Next action `research`", result)
+
+    def test_validate_memory_reserves_pursuit_rules_from_f_backing(self):
+        (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text(
+            "# Pursuits\n\n## Invalid {F#rules}\n",
+            encoding="utf-8",
+        )
+        (self.root / "PURSUIT_RULES.md").write_text("# Pursuit Rules\n", encoding="utf-8")
+
+        result = self._validate_complete_graph()
+
+        self.assertIn("reserved for PURSUIT_RULES.md", result)
+
+    def test_validate_memory_requires_both_canonical_roots(self):
+        (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("missing canonical RightMemory root `PURSUITS.md`", result)
+
+    def test_validate_memory_ignores_graph_syntax_inside_fenced_examples(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Durable {#durable}\n\n"
+            "```md\n"
+            "# Fake Duplicate {#durable}\n"
+            "- `fake` ignored → [rel:missing]\n"
+            "##### Fake deep heading\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+
+        result = self._validate_complete_graph()
+
+        self.assertIn("validation passed", result)
+
+    def test_packaged_memory_and_pursuit_examples_form_a_valid_graph(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        shutil.copyfile(repo_root / "MEMORY.example.md", self.root / "MEMORY.md")
+        shutil.copyfile(repo_root / "PURSUITS.example.md", self.root / "PURSUITS.md")
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("validation passed", result)
+
+    def test_validate_memory_rejects_overfull_updater_corrections(self):
+        (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+        entries = []
+        for index in range(16):
+            entries.append(
+                f"## Correction {index}\n\n"
+                "### Background\n\ncontext\n\n"
+                "### Proposed edit\n\nproposal\n\n"
+                "### Accepted edit\n\naccepted\n"
+            )
+        (self.root / "corrections.md").write_text("\n".join(entries), encoding="utf-8")
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("at most 15 are allowed", result)
+        self.assertIn(
+            "validation passed",
+            self.tools.validate_memory(enforce_correction_capacity=False),
+        )
+
+    def test_validate_memory_resolves_f_backing_relative_to_document_root(self):
+        (self.root / "MEMORY.md").write_text("# Durable {F#durable}\n", encoding="utf-8")
+        (self.root / "MEMORY_durable.md").write_text("- `durable-fact` Durable. → []\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n\n## Live {F#live}\n", encoding="utf-8")
+        (self.root / "PURSUIT_live.md").write_text("- `live-next` Continue. → [dep:durable-fact]\n", encoding="utf-8")
+
+        result = self._validate_complete_graph()
+
+        self.assertIn("validation passed", result)
+        self.assertIn("PURSUIT_live.md", self.tools.read_detail("live"))
+        self.assertIn("MEMORY_durable.md", self.tools.read_detail("durable"))
+
+    def test_validate_memory_rejects_memory_only_backing_kinds_in_pursuit(self):
+        (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n\n## Notes {M#notes}\n", encoding="utf-8")
+        (self.root / "MEMORY_notes.md").write_text("free form\n", encoding="utf-8")
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("M# heading `notes` is only valid in Memory", result)
+
+    def test_validate_memory_requires_f_backing_file(self):
+        (self.root / "MEMORY.md").write_text("# Missing {F#missing}\n", encoding="utf-8")
+
+        result = self.tools.validate_memory()
+
+        self.assertIn("missing F# backing file `MEMORY_missing.md`", result)
 
     def test_validate_memory_catches_nodes_and_child_headings_under_four_hash_pointer(self):
         (self.root / "MEMORY.md").write_text(

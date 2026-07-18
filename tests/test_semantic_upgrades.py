@@ -95,6 +95,7 @@ class SemanticUpgradeParserTests(unittest.TestCase):
         self.assertIn("uncertain-memory-marker", notes_by_id)
         self.assertIn("schema-level-memory-skills", notes_by_id)
         self.assertIn("shared-view-headings", notes_by_id)
+        self.assertIn("memory-pursuit-unified-graph", notes_by_id)
         self.assertIn("# Open Context Questions {#open-context-questions}", notes_by_id["open-context-questions"].body)
         self.assertIn("not declarative memory facts", notes_by_id["open-context-questions"].body)
         self.assertIn("Uncertain:", notes_by_id["uncertain-memory-marker"].body)
@@ -103,6 +104,10 @@ class SemanticUpgradeParserTests(unittest.TestCase):
         self.assertIn("MF#slug", notes_by_id["shared-view-headings"].body)
         self.assertIn("MQ#slug", notes_by_id["shared-view-headings"].body)
         self.assertIn("shared view", notes_by_id["shared-view-headings"].body)
+        self.assertIn("every legacy sibling `MEMORY_*.md`", notes_by_id["memory-pursuit-unified-graph"].body)
+        self.assertIn("Do not delete, overwrite, truncate", notes_by_id["memory-pursuit-unified-graph"].body)
+        self.assertIn("cross-tree references", notes_by_id["memory-pursuit-unified-graph"].body)
+        self.assertIn("Memory-only authority", notes_by_id["memory-pursuit-unified-graph"].body)
         self.assertEqual([], result.warnings)
 
 
@@ -128,6 +133,7 @@ class SemanticUpgradeStateTests(unittest.TestCase):
         self.assertIn("open-context-questions", baseline.ids)
         self.assertIn("uncertain-memory-marker", baseline.ids)
         self.assertIn("schema-level-memory-skills", baseline.ids)
+        self.assertIn("memory-pursuit-unified-graph", baseline.ids)
         self.assertEqual([], context.ids)
 
     def test_corrupt_state_warns_and_treats_notes_as_pending(self):
@@ -296,6 +302,7 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
                         "schema-level-memory-skills",
                         "future-facing-behavior-memory",
                         "shared-view-headings",
+                        "memory-pursuit-unified-graph",
                     ],
                 )
             ],
@@ -306,6 +313,7 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
         self.assertIn("schema-level-memory-skills", state["absorbed"])
         self.assertIn("future-facing-behavior-memory", state["absorbed"])
         self.assertIn("shared-view-headings", state["absorbed"])
+        self.assertIn("memory-pursuit-unified-graph", state["absorbed"])
 
     def test_dreamer_success_marks_semantic_upgrades_absorbed_under_state_root(self):
         class FakeDreamerExecutor:
@@ -353,6 +361,7 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
         self.assertIn("open-context-questions", state["absorbed"])
         self.assertIn("uncertain-memory-marker", state["absorbed"])
         self.assertIn("schema-level-memory-skills", state["absorbed"])
+        self.assertIn("memory-pursuit-unified-graph", state["absorbed"])
         self.assertFalse((memory_root / ".runtime" / "semantic-upgrades.json").exists())
 
     def test_dreamer_failure_leaves_semantic_upgrades_pending(self):

@@ -154,6 +154,18 @@ class AgentCliCommandTests(unittest.TestCase):
         self.assertIn("--sandbox", command)
         self.assertIn("read-only", command)
 
+    def test_build_codex_uses_read_only_for_reviewer(self):
+        command = build_codex_command(
+            Path("/memory/root"),
+            "reviewer",
+            AgentCliConfig(provider="codex"),
+            "prompt",
+            None,
+        )
+
+        self.assertIn("--sandbox", command)
+        self.assertIn("read-only", command)
+
     def test_build_codex_resume_command_uses_provider_session_id(self):
         config = AgentCliConfig(provider="codex", model="gpt-5")
         memory_root = Path("/memory/root")
@@ -228,6 +240,20 @@ class AgentCliCommandTests(unittest.TestCase):
                 "prompt",
             ],
         )
+
+    def test_build_claude_uses_plan_permission_for_reviewer(self):
+        session_id = "123e4567-e89b-12d3-a456-426614174000"
+
+        command = build_claude_command(
+            "reviewer",
+            AgentCliConfig(provider="claude"),
+            "prompt",
+            session_id,
+            False,
+        )
+
+        self.assertIn("--permission-mode", command)
+        self.assertIn("plan", command)
 
     def test_cli_agent_executor_includes_semantic_upgrades_for_dreamer_prompt(self):
         context = SemanticUpgradeContext(

@@ -5,11 +5,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.watch import (
+    MANAGED_WATCH_TARGETS,
     MANAGED_WATCH_ENV,
+    WATCH_COMMANDS,
     WATCH_HANDOFF_PID_ENV,
     ManagedWatchStatus,
     WatchLock,
     consume_watch_stop_request,
+    start_managed_watch,
     stop_managed_watch,
     watch_log_path,
     watch_identity_path,
@@ -19,6 +22,29 @@ from rightmemory.watch import (
 
 
 class WatchControlTests(unittest.TestCase):
+    def test_transcript_and_update_reviews_are_independent_managed_targets(self):
+        self.assertIn("review", MANAGED_WATCH_TARGETS)
+        self.assertIn("update-review", MANAGED_WATCH_TARGETS)
+        self.assertEqual(WATCH_COMMANDS["review"], ("review", "watch"))
+        self.assertEqual(WATCH_COMMANDS["update-review"], ("update-review", "watch"))
+
+    def test_starting_update_review_does_not_clean_update_worktrees(self):
+        class FakeProcess:
+            pid = 456
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale") as cleanup,
+                patch("rightmemory.watch.subprocess.Popen", return_value=FakeProcess()) as popen,
+            ):
+                status = start_managed_watch(root, "update-review", "python")
+
+        self.assertEqual(status.state, "running")
+        self.assertEqual(status.pid, 456)
+        cleanup.assert_not_called()
+        self.assertEqual(popen.call_args.args[0], ["python", "-m", "rightmemory.cli", "update-review", "watch"])
+
     def test_managed_watch_registers_and_cleans_its_own_pid(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

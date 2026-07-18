@@ -44,11 +44,9 @@ DEFAULT_PRUNER_GENERATION_COMMITS = 70
 DEFAULT_PRUNER_REVIVAL_GRACE_CHECKPOINTS = 2
 DEFAULT_DREAMER_TRIGGER_POINTS = 50.0
 DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS = 1.0
-DEFAULT_DREAMER_REVIEW_SESSION_POINTS = 1.5
 DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS = 3000
 DEFAULT_INSIGHT_TRIGGER_POINTS = 150.0
 DEFAULT_INSIGHT_UPDATE_CANDIDATE_POINTS = 1.0
-DEFAULT_INSIGHT_REVIEW_SESSION_POINTS = 1.5
 DEFAULT_INSIGHT_CHECK_INTERVAL_SECONDS = 3000
 
 
@@ -100,7 +98,6 @@ class DreamerWatchConfig:
     memory_root: Path = MEMORY_ROOT
     trigger_points: float = DEFAULT_DREAMER_TRIGGER_POINTS
     update_candidate_points: float = DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS
-    review_session_points: float = DEFAULT_DREAMER_REVIEW_SESSION_POINTS
     check_interval_seconds: int = DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS
 
 
@@ -109,7 +106,6 @@ class InsightWatchConfig:
     memory_root: Path = MEMORY_ROOT
     trigger_points: float = DEFAULT_INSIGHT_TRIGGER_POINTS
     update_candidate_points: float = DEFAULT_INSIGHT_UPDATE_CANDIDATE_POINTS
-    review_session_points: float = DEFAULT_INSIGHT_REVIEW_SESSION_POINTS
     check_interval_seconds: int = DEFAULT_INSIGHT_CHECK_INTERVAL_SECONDS
 
 
@@ -317,6 +313,9 @@ def load_dreamer_watch_config(memory_root: Path | None = None) -> DreamerWatchCo
         {"trigger_points", "update_candidate_points", "review_session_points", "check_interval_seconds"},
         "[dreamer.watch]",
     )
+    if "review_session_points" in watch:
+        # Keep older user config loadable, but transcript extraction no longer creates pressure directly.
+        _positive_number(watch, "review_session_points", 1.0, "[dreamer.watch]")
 
     return DreamerWatchConfig(
         memory_root=root,
@@ -330,12 +329,6 @@ def load_dreamer_watch_config(memory_root: Path | None = None) -> DreamerWatchCo
             watch,
             "update_candidate_points",
             DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS,
-            "[dreamer.watch]",
-        ),
-        review_session_points=_positive_number(
-            watch,
-            "review_session_points",
-            DEFAULT_DREAMER_REVIEW_SESSION_POINTS,
             "[dreamer.watch]",
         ),
         check_interval_seconds=_positive_integer(
@@ -372,6 +365,9 @@ def load_insight_watch_config(memory_root: Path | None = None) -> InsightWatchCo
         {"trigger_points", "update_candidate_points", "review_session_points", "check_interval_seconds"},
         "[insight.watch]",
     )
+    if "review_session_points" in watch:
+        # Keep older user config loadable, but transcript extraction no longer creates pressure directly.
+        _positive_number(watch, "review_session_points", 1.0, "[insight.watch]")
 
     return InsightWatchConfig(
         memory_root=root,
@@ -385,12 +381,6 @@ def load_insight_watch_config(memory_root: Path | None = None) -> InsightWatchCo
             watch,
             "update_candidate_points",
             DEFAULT_INSIGHT_UPDATE_CANDIDATE_POINTS,
-            "[insight.watch]",
-        ),
-        review_session_points=_positive_number(
-            watch,
-            "review_session_points",
-            DEFAULT_INSIGHT_REVIEW_SESSION_POINTS,
             "[insight.watch]",
         ),
         check_interval_seconds=_positive_integer(

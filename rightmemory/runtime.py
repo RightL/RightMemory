@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import sys
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
@@ -14,7 +16,7 @@ from typing import Any
 from .agent_cli import CliAgentExecutor, NO_SESSION_RIGHTMEMORY_SESSION_ID
 from .config import PrunerConfig, RuntimeConfig, load_config
 from .debug import DebugTrace
-from .isolated_write import IsolatedWriteSupervisor, MainMemoryDirtyError
+from .isolated_write import IsolatedWriteResult, IsolatedWriteSupervisor, MainMemoryDirtyError
 from .prompt import build_instructions
 from .prune import build_pruner_message, prune_due_status
 from .provider_sessions import ProviderSessionStore
@@ -37,9 +39,10 @@ from .session import MemoryWriteLock, MessageSessionStore, _ensure_runtime_gitig
 from .shared_view_files import publish_approved_file_views, pull_all_file_views, record_file_view_publish_results
 from .sync import SyncManager, SyncResult
 from .tools import MemoryTools
+from .update_review import UpdateExecutionLock, UpdateReviewStore
 
 
-AUTOMATIC_WRITE_ROLES = {"dreamer", "insight", "pruner", "reviewer", "update"}
+AUTOMATIC_WRITE_ROLES = {"dreamer", "insight", "pruner", "update"}
 CYCLE_ROLES = {"dreamer", "insight"}
 HISTORY_READ_ROLES = {"historian", "pruner"}
 SYNC_TOOL_ROLES = {"sync-reconciler"}
@@ -64,6 +67,7 @@ RECOVERABLE_TOOL_ERRORS = (ValueError, FileNotFoundError)
 MODEL_REQUEST_LIMIT = 100
 THINK_START_TAG = "<think>"
 THINK_END_TAG = "</think>"
+UPDATE_MODES = {"normal", "review-correction"}
 
 
 @dataclass(frozen=True)
@@ -75,22 +79,51 @@ class PreparedRetrieveTurn:
 
 
 class RightMemoryRuntime:
-    def __init__(self, config: RuntimeConfig):
+    def __init__(self, config: RuntimeConfig, *, update_mode: str = "normal"):
         if config.runtime_mode not in {"standalone", "cli-agent"}:
             raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
+        if update_mode not in UPDATE_MODES:
+            raise ValueError(f"update mode must be one of: {', '.join(sorted(UPDATE_MODES))}")
+        if update_mode != "normal" and config.role != "update":
+            raise ValueError("non-normal update modes require the update role")
         self.config = config
-        self.tools = MemoryTools(config.memory_root, role=config.role)
+        self.update_mode = update_mode
+        tool_role = "update-correction" if config.role == "update" and update_mode == "review-correction" else config.role
+        self.tools = MemoryTools(config.memory_root, role=tool_role)
         self.sessions = MessageSessionStore(config.state_root, config.role)
         self.retrieve_context = RetrieveContextStore(config.state_root)
         self.recent_submitted_delivery = RecentSubmittedMemoryDeliveryStore(config.state_root)
         self._message_history: list[Any] = []
         self._active_trace: DebugTrace | None = None
         self._sync_manager: SyncManager | None = None
+        self._last_write_result: IsolatedWriteResult | None = None
+        self._last_reviewed_update_commit: str | None = None
         self.semantic_upgrades = self._semantic_upgrade_context()
         self._semantic_upgrade_ids = self.semantic_upgrades.ids if self.semantic_upgrades is not None else []
         self.agent = self._build_cli_agent() if config.runtime_mode == "cli-agent" else self._build_agent()
 
     def run_turn(self, message: str) -> str:
+        if self.config.role == "update":
+            with self._update_execution_lock():
+                self._last_write_result = None
+                self._last_reviewed_update_commit = None
+                base_commit = self._review_base_commit()
+                output = self._run_session_turn_unlocked(
+                    NO_SESSION_RIGHTMEMORY_SESSION_ID,
+                    message,
+                    allow_internal_session=True,
+                )
+                self._create_update_review(base_commit, output)
+                return output
+        with self._update_execution_lock():
+            self._last_write_result = None
+            self._last_reviewed_update_commit = None
+            base_commit = self._review_base_commit()
+            output = self._run_turn_unlocked(message)
+            self._create_update_review(base_commit, output)
+            return output
+
+    def _run_turn_unlocked(self, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
         if self.config.runtime_mode == "cli-agent":
@@ -127,9 +160,25 @@ class RightMemoryRuntime:
         return output
 
     def run_session_turn(self, session_id: str, message: str, *, on_started: Callable[[], None] | None = None) -> str:
+        with self._update_execution_lock():
+            self._last_write_result = None
+            self._last_reviewed_update_commit = None
+            base_commit = self._review_base_commit()
+            output = self._run_session_turn_unlocked(session_id, message, on_started=on_started)
+            self._create_update_review(base_commit, output)
+            return output
+
+    def _run_session_turn_unlocked(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        on_started: Callable[[], None] | None = None,
+        allow_internal_session: bool = False,
+    ) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
-        if session_id == NO_SESSION_RIGHTMEMORY_SESSION_ID:
+        if session_id == NO_SESSION_RIGHTMEMORY_SESSION_ID and not allow_internal_session:
             raise ValueError(f"session id is reserved for internal no-session turns: {session_id}")
         with self._debug_trace(session_id) as trace:
             self._trace(
@@ -275,7 +324,8 @@ class RightMemoryRuntime:
         *,
         on_started: Callable[[], None] | None = None,
     ):
-        supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
+        supervisor_kwargs = {"update_mode": self.update_mode} if self.update_mode != "normal" else {}
+        supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role, **supervisor_kwargs)
         state = _IsolatedStateOverlay(
             self.config.state_root,
             self.config.role,
@@ -303,6 +353,8 @@ class RightMemoryRuntime:
                     result = supervisor.run(
                         run_in_worktree
                     )
+                    self._last_write_result = result
+                    self._create_update_review(result.start_commit, str(result.output))
                     state.promote()
                     return result.output
                 except Exception:
@@ -362,7 +414,8 @@ class RightMemoryRuntime:
             fresh_provider_session=self.config.runtime_mode == "cli-agent",
             sync=replace(self.config.sync, memory_root=worktree, enabled=False),
         )
-        nested = RightMemoryRuntime(nested_config)
+        nested_kwargs = {"update_mode": self.update_mode} if self.update_mode != "normal" else {}
+        nested = RightMemoryRuntime(nested_config, **nested_kwargs)
         nested._active_trace = self._active_trace
         try:
             if nested.config.runtime_mode == "cli-agent":
@@ -485,7 +538,7 @@ class RightMemoryRuntime:
         self._run_sync_reconciler(result)
 
     def _memory_write_lock(self):
-        if self.config.role in {"historian", "retrieve"}:
+        if self.config.role in {"historian", "retrieve", "reviewer"}:
             return nullcontext()
         return MemoryWriteLock(self.config.memory_root)
 
@@ -603,8 +656,9 @@ class RightMemoryRuntime:
     def _agent_tools(self) -> list[Callable[..., Any]]:
         if self.config.role == "retrieve":
             return [
+                self._agent_tool(self.tools.read_detail),
+                self._agent_tool(self.tools.read_markdown),
                 self._agent_tool(self.tools.read_skill),
-                self._agent_tool(self.tools.read_memory_file),
                 self._agent_tool(self.tools.read_mf),
             ]
         read_tools = [
@@ -623,7 +677,7 @@ class RightMemoryRuntime:
                     self._agent_tool(self.tools.git_show_file),
                 ]
             )
-        if self.config.role == "historian":
+        if self.config.role in {"historian", "reviewer"}:
             return read_tools
         write_tools = [
             *read_tools,
@@ -686,6 +740,66 @@ class RightMemoryRuntime:
             raise RuntimeError("install standalone dependencies with: pip install -e .") from exc
 
         return UsageLimits(request_limit=MODEL_REQUEST_LIMIT)
+
+    def _update_execution_lock(self):
+        if self.config.role == "update":
+            return UpdateExecutionLock(self.config.memory_root)
+        return nullcontext()
+
+    def _review_base_commit(self) -> str | None:
+        if self.config.role != "update" or self.update_mode != "normal":
+            return None
+        return current_memory_head(self.config.memory_root)
+
+    def _create_update_review(self, base_commit: str | None, summary: str) -> None:
+        if self.config.role != "update" or self.update_mode != "normal":
+            return
+        landed = self._last_write_result
+        if landed is not None:
+            if landed.commits_landed == 0:
+                return
+            base_commit = landed.start_commit
+            update_commit = landed.landed_commit
+            write_surface = _rightmemory_write_surface(landed.changed_paths)
+        else:
+            update_commit = current_memory_head(self.config.memory_root)
+            write_surface = "Memory + Pursuit"
+        if base_commit is None:
+            return
+        if update_commit is None or update_commit == base_commit:
+            return
+        if update_commit == self._last_reviewed_update_commit:
+            return
+        try:
+            diff = _git_rightmemory_diff(self.config.memory_root, base_commit, update_commit)
+            store = UpdateReviewStore(self.config.memory_root)
+            store.queue_review(
+                base_commit=base_commit,
+                update_commit=update_commit,
+                write_surface=write_surface,
+                summary=summary,
+                diff=diff,
+            )
+            store.create_review(
+                base_commit=base_commit,
+                update_commit=update_commit,
+                write_surface=write_surface,
+                summary=summary,
+                diff=diff,
+            )
+            self._last_reviewed_update_commit = update_commit
+        except Exception as exc:
+            self._trace("update_review_failed", error_type=type(exc).__name__, error=str(exc))
+            print(
+                f"Warning: update commit {update_commit} landed, but its local review document could not be created: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    @property
+    def last_write_result(self) -> IsolatedWriteResult | None:
+        return self._last_write_result
 
     def cleanup(self) -> None:
         cleanup = getattr(self.agent, "cleanup", None)
@@ -840,6 +954,45 @@ def _write_state_json_file(data: dict[str, Any], destination: Path) -> None:
         tmp_path.unlink(missing_ok=True)
         raise
     _fsync_directory(destination.parent)
+
+
+def _git_rightmemory_diff(memory_root: Path, base_commit: str, update_commit: str) -> str:
+    result = subprocess.run(
+        [
+            "git",
+            "diff",
+            base_commit,
+            update_commit,
+            "--",
+            "MEMORY.md",
+            ":(glob)MEMORY_*.md",
+            "PURSUITS.md",
+            ":(glob)PURSUIT_*.md",
+        ],
+        cwd=memory_root,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"git diff failed: {result.stderr.strip()}")
+    return result.stdout.rstrip()
+
+
+def _rightmemory_write_surface(paths: tuple[str, ...]) -> str:
+    changed_memory = any(path == "MEMORY.md" or path.startswith("MEMORY_") for path in paths)
+    changed_pursuit = any(path == "PURSUITS.md" or path.startswith("PURSUIT_") for path in paths)
+    if changed_memory and changed_pursuit:
+        return "Memory + Pursuit"
+    if changed_memory:
+        return "Memory"
+    if changed_pursuit:
+        return "Pursuit"
+    return "RightMemory"
 
 
 def build_model(config: RuntimeConfig):

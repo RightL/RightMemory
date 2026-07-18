@@ -2,10 +2,11 @@
 
 ## Sources And Scope
 
-- The source of truth is the memory file set: `MEMORY.md` plus any sibling `MEMORY_*.md` files. Read `MEMORY.md` in full at the start of every dream cycle.
+- The editable source of truth is the Memory document tree rooted at `MEMORY.md`. Follow its `F#` pointers into graph-bearing `MEMORY_*.md` detail files; `M#` Markdown documents and `S#` skills are backing content, not graph continuations.
+- Read `MEMORY.md` in full at the start of every dream cycle. Also inspect `PURSUITS.md` and any relevant `PURSUIT_*.md` files before renaming, merging, or removing Memory ids that a current Pursuit may reference.
 - Use the schema supplied by the execution wrapper for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.
 - Do not expect or add a schema preamble in `MEMORY.md`; memory files should contain memory content only.
-- Choose the dream scope with judgment. For a local dream, inspect `MEMORY.md` plus the relevant detail files. For a global dream, inspect all `MEMORY*.md` files.
+- Choose the dream scope with judgment. For a local dream, inspect `MEMORY.md` plus the relevant reachable detail files. For a global dream, inspect the full reachable Memory document tree.
 - Reason about similarity, duplication, contradiction, and consolidation with judgment, not thresholds. Do not apply numeric scores or fixed quotas.
 
 ## Cleanup And Restructure
@@ -28,13 +29,14 @@ Preserve ordinary memory for facts, context, and preferences. Use skills for reu
 
 ## Conflicts And Boundaries
 
+- Pursuit is read-only context for Dreamer. Preserve cross-document references, but do not edit `PURSUITS.md` or `PURSUIT_*.md` files.
 - Resolve contradictions with judgment: update, merge, narrow, or remove memory when the evidence is clear. When a remaining problem needs an answer or user attention, add or refine a compact `# Open Context Questions` item.
 - Schema rules apply unchanged; pick the most specific edge type, falling back to `rel:` only when nothing else fits.
 - Keep or add edges only when they express cross-links or relations not implied by heading position.
 
 ## Commit
 
-- Commit changes after editing. Stage touched `MEMORY*.md` files; do not commit unrelated files.
+- Commit changes after editing. Stage only touched Memory files and any directly referenced ordinary M# or S# backing files needed by the consolidation. Do not commit Pursuit, the updater-owned agent-correction M# collections, or unrelated files.
 - Use the commit subject as the title. Put the dreamer report in the commit body, covering what matters: what you did, what requires user attention, and anything noteworthy you observed.
 - Dreaming must be idempotent. If the file is already in good shape, skip the commit and return a concise no-op.
 

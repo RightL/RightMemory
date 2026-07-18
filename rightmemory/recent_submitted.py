@@ -11,10 +11,10 @@ from .platform import lock_file, unlock_file
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
 
 
-RECENT_SUBMITTED_HEADER = "Recent submitted memory"
+RECENT_SUBMITTED_HEADER = "Recent submitted RightMemory candidates"
 RECENT_SUBMITTED_INTRO = (
-    "These are memory update submissions that have not been consolidated into MEMORY.md yet. "
-    "Use them as short-term working memory when relevant."
+    "These are pending updater submissions, not settled Memory or Pursuit. "
+    "Use relevant entries as short-term continuity while preserving their candidate status."
 )
 
 
