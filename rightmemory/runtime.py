@@ -65,10 +65,11 @@ from .shared_view_files import (
 )
 from .sync import SyncManager, SyncRepairOutcome, SyncResult
 from .tools import MemoryTools
+from .update_corrector import UpdateCorrectionResult, render_update_correction_result
 from .update_review import UpdateExecutionLock, UpdateReviewStore
 
 
-AUTOMATIC_WRITE_ROLES = {"dreamer", "insight", "pruner", "update"}
+AUTOMATIC_WRITE_ROLES = {"dreamer", "insight", "pruner", "update", "update-corrector"}
 CYCLE_ROLES = {"dreamer", "insight"}
 HISTORY_READ_ROLES = {"historian", "pruner"}
 SYNC_TOOL_ROLES = {"sync-reconciler"}
@@ -93,7 +94,6 @@ RECOVERABLE_TOOL_ERRORS = (ValueError, FileNotFoundError)
 MODEL_REQUEST_LIMIT = 100
 THINK_START_TAG = "<think>"
 THINK_END_TAG = "</think>"
-UPDATE_MODES = {"normal", "review-correction"}
 STATE_EFFECT = "session-state"
 REVIEW_EFFECT = "update-review"
 PRESSURE_EFFECT = "memory-pressure"
@@ -110,17 +110,11 @@ class PreparedRetrieveTurn:
 
 
 class RightMemoryRuntime:
-    def __init__(self, config: RuntimeConfig, *, update_mode: str = "normal"):
+    def __init__(self, config: RuntimeConfig):
         if config.runtime_mode not in {"standalone", "cli-agent"}:
             raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
-        if update_mode not in UPDATE_MODES:
-            raise ValueError(f"update mode must be one of: {', '.join(sorted(UPDATE_MODES))}")
-        if update_mode != "normal" and config.role != "update":
-            raise ValueError("non-normal update modes require the update role")
         self.config = config
-        self.update_mode = update_mode
-        tool_role = "update-correction" if config.role == "update" and update_mode == "review-correction" else config.role
-        self.tools = MemoryTools(config.memory_root, role=tool_role)
+        self.tools = MemoryTools(config.memory_root, role=config.role)
         self.sessions = MessageSessionStore(config.state_root, config.role)
         self.retrieve_context = RetrieveContextStore(config.state_root)
         self.recent_submitted_delivery = RecentSubmittedMemoryDeliveryStore(config.state_root)
@@ -138,7 +132,6 @@ class RightMemoryRuntime:
             with self._update_execution_lock():
                 self._last_write_result = None
                 self._last_reviewed_update_commit = None
-                base_commit = self._review_base_commit()
                 turn_kwargs: dict[str, object] = {"allow_internal_session": True}
                 if operation_id is not None:
                     turn_kwargs["operation_id"] = operation_id
@@ -148,14 +141,13 @@ class RightMemoryRuntime:
                     **turn_kwargs,
                 )
                 if not self._should_isolate_write_turn():
-                    self._create_update_review(base_commit, output)
+                    self._create_update_review(output)
                 return output
         with self._update_execution_lock():
             self._last_write_result = None
             self._last_reviewed_update_commit = None
-            base_commit = self._review_base_commit()
             output = self._run_turn_unlocked(message)
-            self._create_update_review(base_commit, output)
+            self._create_update_review(output)
             return output
 
     def run_chat_turn(
@@ -176,9 +168,8 @@ class RightMemoryRuntime:
         with self._update_execution_lock():
             self._last_write_result = None
             self._last_reviewed_update_commit = None
-            base_commit = self._review_base_commit()
             output = self._run_cli_process_turn_unlocked(message)
-            self._create_update_review(base_commit, output)
+            self._create_update_review(output)
             return output
 
     def _run_turn_unlocked(self, message: str) -> str:
@@ -257,7 +248,6 @@ class RightMemoryRuntime:
         with self._update_execution_lock():
             self._last_write_result = None
             self._last_reviewed_update_commit = None
-            base_commit = self._review_base_commit()
             turn_kwargs: dict[str, object] = {
                 "on_started": on_started,
                 "include_returned": include_returned,
@@ -266,7 +256,7 @@ class RightMemoryRuntime:
                 turn_kwargs["operation_id"] = operation_id
             output = self._run_session_turn_unlocked(session_id, message, **turn_kwargs)
             if not self._should_isolate_write_turn():
-                self._create_update_review(base_commit, output)
+                self._create_update_review(output)
             return output
 
     def _run_session_turn_unlocked(
@@ -649,15 +639,13 @@ class RightMemoryRuntime:
             **operation_input,
             "role": self.config.role,
             "session_id": session_id,
-            "update_mode": self.update_mode,
         }
         pressure_points = (
             memory_change_pressure_points(self.config.memory_root)
-            if self.config.role == "update"
+            if self.config.role in {"update", "update-corrector"}
             else None
         )
-        supervisor_kwargs = {"update_mode": self.update_mode} if self.update_mode != "normal" else {}
-        supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role, **supervisor_kwargs)
+        supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
         state = _IsolatedStateOverlay(
             self.config.state_root,
             self.config.role,
@@ -699,7 +687,7 @@ class RightMemoryRuntime:
                 self._last_write_result = result
                 if store.read(clean_operation_id) is None:
                     # Keep test/custom supervisors compatible with the runtime seam.
-                    self._create_update_review(result.start_commit, str(result.output))
+                    self._create_update_review(str(result.output))
                     state.promote()
                     cleanup = getattr(state, "cleanup", None)
                     if callable(cleanup):
@@ -739,9 +727,13 @@ class RightMemoryRuntime:
     ) -> tuple[OperationEffect, ...]:
         effects = [OperationEffect(STATE_EFFECT, metadata={"session_id": session_id})]
         effects.append(OperationEffect(PUBLISH_EFFECT))
-        if self.config.role == "update" and self.update_mode == "normal" and commits_landed:
+        if self.config.role == "update" and commits_landed:
             effects.append(OperationEffect(REVIEW_EFFECT))
-        if self.config.role == "update" and commits_landed and _changed_memory_paths(changed_paths):
+        if (
+            self.config.role in {"update", "update-corrector"}
+            and commits_landed
+            and _changed_memory_paths(changed_paths)
+        ):
             if pressure_points is None:
                 raise RuntimeError("update pressure points were not prepared")
             dreamer_points, insight_points = pressure_points
@@ -1017,8 +1009,7 @@ class RightMemoryRuntime:
             fresh_provider_session=self.config.runtime_mode == "cli-agent",
             sync=replace(self.config.sync, memory_root=worktree, enabled=False),
         )
-        nested_kwargs = {"update_mode": self.update_mode} if self.update_mode != "normal" else {}
-        nested = RightMemoryRuntime(nested_config, **nested_kwargs)
+        nested = RightMemoryRuntime(nested_config)
         nested._active_trace = self._active_trace
         try:
             if nested.config.runtime_mode == "cli-agent":
@@ -1405,6 +1396,8 @@ class RightMemoryRuntime:
         }
         if self.config.role == "retrieve":
             kwargs["output_type"] = RetrieveSelection
+        elif self.config.role == "update-corrector":
+            kwargs["output_type"] = UpdateCorrectionResult
         return Agent(**kwargs)
 
     def _build_cli_agent(self) -> CliAgentExecutor:
@@ -1512,38 +1505,22 @@ class RightMemoryRuntime:
         return UsageLimits(request_limit=MODEL_REQUEST_LIMIT)
 
     def _update_execution_lock(self):
-        if self.config.role == "update":
+        if self.config.role in {"update", "update-corrector"}:
             return UpdateExecutionLock(self.config.memory_root)
         return nullcontext()
 
-    def _review_base_commit(self) -> str | None:
-        if self.config.role != "update" or self.update_mode != "normal":
-            return None
-        return current_memory_head(self.config.memory_root)
-
     def _create_update_review(
         self,
-        base_commit: str | None,
         summary: str,
         *,
         raise_errors: bool = False,
     ) -> None:
-        if self.config.role != "update" or self.update_mode != "normal":
+        if self.config.role != "update":
             return
         landed = self._last_write_result
-        if landed is not None:
-            self._create_update_review_for_result(landed, summary, raise_errors=raise_errors)
+        if landed is None:
             return
-        update_commit = current_memory_head(self.config.memory_root)
-        if base_commit is None:
-            return
-        self._write_update_review(
-            base_commit,
-            update_commit,
-            "Memory + Pursuit",
-            summary,
-            raise_errors=raise_errors,
-        )
+        self._create_update_review_for_result(landed, summary, raise_errors=raise_errors)
 
     def _create_update_review_for_result(
         self,
@@ -1554,7 +1531,10 @@ class RightMemoryRuntime:
     ) -> None:
         if landed.commits_landed == 0:
             return
+        if landed.operation_id is None:
+            return
         self._write_update_review(
+            landed.operation_id,
             landed.start_commit,
             landed.landed_commit,
             _rightmemory_write_surface(landed.changed_paths),
@@ -1564,6 +1544,7 @@ class RightMemoryRuntime:
 
     def _write_update_review(
         self,
+        origin_operation_id: str,
         base_commit: str,
         update_commit: str | None,
         write_surface: str,
@@ -1576,21 +1557,13 @@ class RightMemoryRuntime:
         if update_commit == self._last_reviewed_update_commit:
             return
         try:
-            diff = _git_rightmemory_diff(self.config.memory_root, base_commit, update_commit)
-            store = UpdateReviewStore(self.config.memory_root)
-            store.queue_review(
+            _create_update_review_document(
+                self.config.memory_root,
+                origin_operation_id=origin_operation_id,
                 base_commit=base_commit,
                 update_commit=update_commit,
                 write_surface=write_surface,
                 summary=summary,
-                diff=diff,
-            )
-            store.create_review(
-                base_commit=base_commit,
-                update_commit=update_commit,
-                write_surface=write_surface,
-                summary=summary,
-                diff=diff,
             )
             self._last_reviewed_update_commit = update_commit
         except Exception as exc:
@@ -1661,7 +1634,10 @@ class RightMemoryRuntime:
 
     def _result_output(self, result: Any) -> str:
         output = getattr(result, "output", None)
-        text = str(output if output is not None else result)
+        output = output if output is not None else result
+        if isinstance(output, UpdateCorrectionResult):
+            return render_update_correction_result(output)
+        text = str(output)
         return _strip_visible_thinking(text)
 
     def _sanitize_message_history_json(self, data: bytes) -> bytes:
@@ -1884,6 +1860,79 @@ def _rightmemory_write_surface(paths: tuple[str, ...]) -> str:
 
 def _changed_memory_paths(paths: tuple[str, ...]) -> bool:
     return any(path == "MEMORY.md" or (path.startswith("MEMORY_") and path.endswith(".md")) for path in paths)
+
+
+def recover_pending_update_review_effect(memory_root: Path) -> str | None:
+    """Materialize one stranded Update review effect without constructing an agent."""
+    store = SemanticOperationStore(memory_root)
+    candidates = [
+        record
+        for record in store.list_outstanding_records()
+        if record.phase == "committed"
+        and record.input_data.get("role") == "update"
+        and record.input_data.get("kind") == "semantic-turn"
+        and any(effect.name == REVIEW_EFFECT and effect.status != "done" for effect in record.effects)
+    ]
+    record = store.choose_effect_retry("effect:update-review", candidates)
+    if record is None:
+        return None
+
+    with store.effects_locked(record.operation_id):
+        current = store.read(record.operation_id)
+        if current is None:
+            raise FileNotFoundError(f"semantic operation does not exist: {record.operation_id}")
+        pending = any(
+            effect.name == REVIEW_EFFECT and effect.status != "done" for effect in current.effects
+        )
+        if not pending:
+            return None
+        try:
+            if current.phase != "committed" or current.outcome is None:
+                raise RuntimeError("update-review effect requires a committed Update outcome")
+            outcome = current.outcome
+            if outcome.landed_commit is None:
+                raise RuntimeError("committed Update outcome has no landed commit")
+            _create_update_review_document(
+                Path(memory_root).resolve(),
+                origin_operation_id=current.operation_id,
+                base_commit=outcome.start_commit,
+                update_commit=outcome.landed_commit,
+                write_surface=_rightmemory_write_surface(outcome.changed_paths),
+                summary=outcome.output,
+            )
+            store.mark_effect(current.operation_id, REVIEW_EFFECT, "done")
+        except Exception as exc:
+            try:
+                store.mark_effect(
+                    current.operation_id,
+                    REVIEW_EFFECT,
+                    "failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            except Exception:
+                pass
+            raise
+    return record.operation_id
+
+
+def _create_update_review_document(
+    memory_root: Path,
+    *,
+    origin_operation_id: str,
+    base_commit: str,
+    update_commit: str,
+    write_surface: str,
+    summary: str,
+) -> None:
+    diff = _git_rightmemory_diff(memory_root, base_commit, update_commit)
+    UpdateReviewStore(memory_root).create_review(
+        origin_operation_id=origin_operation_id,
+        base_commit=base_commit,
+        update_commit=update_commit,
+        write_surface=write_surface,
+        summary=summary,
+        diff=diff,
+    )
 
 
 def _write_result_from_operation(record: SemanticOperationRecord) -> IsolatedWriteResult:

@@ -18,6 +18,7 @@ ROLE_PROMPTS = {
     "shared-view-builder",
     "sync-reconciler",
     "update",
+    "update-corrector",
 }
 
 
@@ -32,12 +33,16 @@ def build_cli_agent_instructions(
     role_guidance = _read_prompt_file(f"prompts/{role}.md")
     cli_agent_guidance = _cli_agent_guidance(memory_root, role)
     semantic_guidance = _semantic_upgrade_guidance(role, semantic_upgrades)
-    corrections_store = "- corrections.md\n" if role in {"update", "sync-reconciler"} else ""
-    final_reply = (
-        "Return only the strict JSON retrieve selection required below."
-        if role == "retrieve"
-        else "Return a concise final reply."
-    )
+    corrections_store = "- corrections.md\n" if role in {"update", "update-corrector", "sync-reconciler"} else ""
+    if role == "retrieve":
+        final_reply = "Return only the strict JSON retrieve selection required below."
+    elif role == "update-corrector":
+        final_reply = (
+            "Return exactly one JSON object with only `status` and `message`; "
+            "status must be `applied`, `no_change`, or `needs_input`."
+        )
+    else:
+        final_reply = "Return a concise final reply."
 
     return f"""You are RightMemory {role} mode.
 
@@ -80,11 +85,12 @@ def build_instructions(
     sync_guidance = _sync_guidance(role)
     tool_guidance = _tool_guidance(role)
     semantic_guidance = _semantic_upgrade_guidance(role, semantic_upgrades)
-    final_reply = (
-        "- Finish through the terminal retrieve-selection output type; do not return natural-language prose."
-        if role == "retrieve"
-        else "- Return concise natural-language answers to the caller."
-    )
+    if role == "retrieve":
+        final_reply = "- Finish through the terminal retrieve-selection output type; do not return natural-language prose."
+    elif role == "update-corrector":
+        final_reply = "- Finish through the typed correction result; do not return unstructured prose."
+    else:
+        final_reply = "- Return concise natural-language answers to the caller."
 
     return f"""You are RightMemory standalone {role} mode.
 
@@ -147,6 +153,13 @@ def _cli_agent_guidance(memory_root: Path, role: str) -> str:
             "`dist/MEMORY_SKILL_<id>.md` resources; package metadata is not retrieval content.\n"
             "- Use one-based line numbers from the exact source content when selecting ranges.\n"
         )
+    if role == "update-corrector":
+        return (
+            "\nCLI-agent adaptation:\n"
+            "- Your final response must be exactly one JSON object with only `status` and `message`; "
+            "do not wrap it in Markdown or add prose.\n"
+            "- Use only `applied`, `no_change`, or `needs_input` as the status.\n"
+        )
     return ""
 
 
@@ -167,9 +180,14 @@ def _command_guidance(role: str) -> str:
     if role == "update":
         return (
             "- The `rightmemory update` command selected unified updating. Treat every caller message as a "
-            "RightMemory candidate or review correction without requiring a dispatch prefix.\n"
+            "RightMemory candidate without requiring a dispatch prefix.\n"
             "- A caller message may contain one candidate or an ordered batch. Reconcile live Pursuit, durable "
             "Memory, both, or neither instead of treating candidate text as final stored content."
+        )
+    if role == "update-corrector":
+        return (
+            "- The runtime selected the internal Update Corrector for one explicitly submitted review revision.\n"
+            "- Treat the caller message only as the structured, verified review request described by the role prompt."
         )
     if role == "pruner":
         return (
@@ -306,8 +324,14 @@ def _tool_guidance(role: str) -> str:
     elif role == "update":
         guidance += (
             "\n- Commit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`, `PURSUIT_*.md`, "
-            "and their graph state. `PURSUIT_RULES.md` is read-only. A runtime review-correction turn may "
-            "additionally change `corrections.md`, but a normal update may not; keep unrelated files out of commits."
+            "and their graph state. `PURSUIT_RULES.md` and `corrections.md` are read-only; keep unrelated "
+            "files out of commits."
+        )
+    elif role == "update-corrector":
+        guidance += (
+            "\n- Commit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`, `PURSUIT_*.md`, "
+            "and optional updater feedback in `corrections.md`. `PURSUIT_RULES.md` and the fixed writing/design "
+            "correction collections are read-only; keep unrelated files out of commits."
         )
     else:
         guidance += (

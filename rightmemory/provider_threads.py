@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .config import ROLES
+from .config import RUNTIME_ROLES
 from .session import (
     _ensure_durable_directory,
     _ensure_runtime_gitignore,
@@ -254,8 +254,8 @@ def _thread_policy(value: object) -> str:
 
 def _role(value: object) -> str:
     role = _required_string(value, "role")
-    if role not in ROLES:
-        raise ValueError(f"provider thread role must be one of: {', '.join(sorted(ROLES))}")
+    if role not in RUNTIME_ROLES:
+        raise ValueError(f"provider thread role must be one of: {', '.join(sorted(RUNTIME_ROLES))}")
     return role
 
 

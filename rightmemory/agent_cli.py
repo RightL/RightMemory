@@ -10,7 +10,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from .agent_cli_cleanup import AgentCliThreadCleanup, provider_thread_is_expired
-from .config import ROLES, AgentCliConfig
+from .config import RUNTIME_ROLES, AgentCliConfig
 from .platform import prepare_command
 from .prompt import build_cli_agent_instructions
 from .provider_sessions import ProviderSessionRecord, ProviderSessionStore
@@ -19,7 +19,15 @@ from .semantic_upgrades import SemanticUpgradeContext
 
 
 READ_ROLES = {"historian", "retrieve", "reviewer"}
-WRITE_ROLES = {"dreamer", "insight", "pruner", "shared-view-builder", "sync-reconciler", "update"}
+WRITE_ROLES = {
+    "dreamer",
+    "insight",
+    "pruner",
+    "shared-view-builder",
+    "sync-reconciler",
+    "update",
+    "update-corrector",
+}
 NO_SESSION_RIGHTMEMORY_SESSION_ID = "__rightmemory_cli_chat__"
 PERSISTENT_POLICY = "persistent"
 ONE_SHOT_POLICY = "one-shot"
@@ -418,7 +426,7 @@ def _claude_permission_mode(role: str) -> str:
 
 
 def _validate_role(role: str) -> None:
-    if role not in ROLES:
+    if role not in RUNTIME_ROLES:
         raise ValueError(f"unknown RightMemory role: {role}")
 
 

@@ -85,11 +85,11 @@ Importance reflects likely recurrence, cost if repeated, applicability across fu
 
 ### Offline update review
 
-Every normal unified-updater commit produces one local Markdown review document; correction and maintenance commits do not. Its generated portion explains the update naturally and may include the relevant diff, but it has one free-form human comment area for the whole update. There are no per-group comment fields, checkboxes, or required web UI.
+Every normal unified-updater commit produces one local Markdown review document; correction and maintenance commits do not. Its generated portion explains the update naturally and may include the relevant diff, but it has one free-form human comment area for the whole update and one visible `Ready for correction` checkbox. There are no per-group comment fields or required web UI.
 
-Review files remain under runtime state and are checked periodically. A stable non-empty comment requests semantic correction; a blank comment requests nothing. Each stable comment revision is processed at most once. If the request needs clarification, the review remains in a needs-input state until the comment changes. Review files form a disposable bounded inbox: resolved files are removed, untouched blank files expire under runtime retention, and unresolved needs-input files remain available.
+Review files remain under runtime state and are checked periodically. A non-empty comment is inert until Ready is checked; no file-age or modification-time heuristic infers submission. The Markdown owns the human text and submission intent, while the single process lock carries only the bounded fairness cursor needed to attempt one Ready revision per scan. A review id plus normalized-comment hash identifies the correction operation, so retries replay one semantic transaction instead of running duplicate corrections.
 
-Semantic correction receives the complete review document, original update diff, current RightMemory state, and human comment. It preserves unrelated later work and commits nothing when the requested result is ambiguous.
+The separate internal update-corrector receives the submitted comment plus original-update context re-derived from the durable operation receipt and Git; it does not trust the editable displayed diff. It preserves unrelated later work and commits nothing when the requested result is ambiguous or already satisfied. A clarification question is written back only if the exact submitted document is unchanged, and Ready is cleared so the human can revise and explicitly resubmit. Resolved documents are removed with the same exact-document comparison, failures leave Ready checked for retry, and untouched blank documents expire under bounded retention.
 
 ### Updater correction feedback
 

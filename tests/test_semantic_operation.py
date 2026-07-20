@@ -46,6 +46,27 @@ class SemanticOperationStoreTests(unittest.TestCase):
         self.assertNotIn("remember this", self.store.record_path("operation-1").read_text(encoding="utf-8"))
         self.assertEqual(self.store.read("operation-1"), record)
 
+    def test_update_corrector_retains_its_verified_replay_message(self):
+        record = self.store.begin(
+            "correction-operation",
+            {
+                "kind": "semantic-turn",
+                "role": "update-corrector",
+                "session_id": "correction-operation",
+                "message": "verified correction request",
+            },
+        )
+
+        self.assertEqual(
+            record.input_data,
+            {
+                "kind": "semantic-turn",
+                "role": "update-corrector",
+                "session_id": "correction-operation",
+                "message": "verified correction request",
+            },
+        )
+
     def test_begin_is_idempotent_for_same_input_and_rejects_same_id_with_different_input(self):
         first = self.store.begin("operation-1", {"candidate": "one"})
         second = self.store.begin("operation-1", {"candidate": "one"})
