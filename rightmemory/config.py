@@ -34,6 +34,7 @@ MODEL_FALLBACK_ROLES = (
     "shared-view-builder",
 )
 DEFAULT_MAX_TOOL_RETRIES = 10
+DEFAULT_RETRIEVE_MAX_OUTPUT_CHARS = 100_000
 DEFAULT_REVIEW_IDLE_SECONDS = 6 * 60 * 60
 DEFAULT_REVIEW_SINCE_DAYS = 3
 DEFAULT_REVIEW_BATCH_SIZE = 3
@@ -134,6 +135,7 @@ class RuntimeConfig:
     memory_root: Path = MEMORY_ROOT
     state_root: Path = _STATE_ROOT_UNSET
     max_tool_retries: int = DEFAULT_MAX_TOOL_RETRIES
+    retrieve_max_output_chars: int = DEFAULT_RETRIEVE_MAX_OUTPUT_CHARS
     debug_trace: bool = False
     sync: SyncConfig = field(default_factory=SyncConfig)
     fresh_provider_session: bool = False
@@ -200,6 +202,7 @@ def load_config(role: str, memory_root: Path | None = None) -> RuntimeConfig:
         memory_root=root,
         state_root=root,
         max_tool_retries=DEFAULT_MAX_TOOL_RETRIES,
+        retrieve_max_output_chars=_retrieve_max_output_chars(role, role_section),
         debug_trace=_debug_trace(data.get("debug", {})),
         sync=_sync_config(data.get("sync", {}), memory_root=root),
     )
@@ -474,6 +477,8 @@ def _allowed_role_keys(role: str) -> set[str]:
         allowed.update({"generation_commits", "revival_grace_checkpoints"})
     if role == "update":
         allowed.add("async")
+    if role == "retrieve":
+        allowed.add("max_output_chars")
     return allowed
 
 
@@ -565,6 +570,7 @@ def _agent_cli_runtime_config(
         memory_root=memory_root,
         state_root=memory_root,
         max_tool_retries=DEFAULT_MAX_TOOL_RETRIES,
+        retrieve_max_output_chars=_retrieve_max_output_chars(role, role_section),
         debug_trace=_debug_trace(data.get("debug", {})),
         sync=_sync_config(data.get("sync", {}), memory_root=memory_root),
     )
@@ -576,6 +582,17 @@ def _optional_agent_cli_model(role: str, value: object) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"[{role}.agent_cli].model must be a non-empty string when set")
     return value.strip()
+
+
+def _retrieve_max_output_chars(role: str, role_section: dict[str, object]) -> int:
+    if role != "retrieve":
+        return DEFAULT_RETRIEVE_MAX_OUTPUT_CHARS
+    return _positive_integer(
+        role_section,
+        "max_output_chars",
+        DEFAULT_RETRIEVE_MAX_OUTPUT_CHARS,
+        "[retrieve]",
+    )
 
 
 def _debug_trace(value: object) -> bool:

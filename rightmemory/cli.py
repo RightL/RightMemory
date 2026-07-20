@@ -262,7 +262,12 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("daemon currently requires --stdio-json")
             return _daemon_stdio_json(runtime)
         turn_args = _turn_parser(args.role).parse_args(remaining)
-        return _session_turn(runtime, turn_args.session, turn_args.message)
+        return _session_turn(
+            runtime,
+            turn_args.session,
+            turn_args.message,
+            include_returned=getattr(turn_args, "include_returned", False),
+        )
     finally:
         runtime.cleanup()
 
@@ -1108,6 +1113,12 @@ def _insight_watch_parser() -> argparse.ArgumentParser:
 def _turn_parser(role: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=f"rightmemory {role}")
     parser.add_argument("--session", required=True, help="persist Pydantic AI message history under this session id")
+    if role == "retrieve":
+        parser.add_argument(
+            "--include-returned",
+            action="store_true",
+            help="include matching content already returned in this retrieve session for this call only",
+        )
     parser.add_argument("message", nargs=argparse.REMAINDER)
     return parser
 
@@ -1948,11 +1959,21 @@ def _handle_json_request(runtime: RightMemoryRuntime, request: dict[str, Any]) -
     return {"type": "assistant", "message": output}
 
 
-def _session_turn(runtime: RightMemoryRuntime, session_id: str, message_parts: list[str]) -> int:
+def _session_turn(
+    runtime: RightMemoryRuntime,
+    session_id: str,
+    message_parts: list[str],
+    *,
+    include_returned: bool = False,
+) -> int:
     message = " ".join(message_parts).strip()
     if not message:
         raise ValueError("message must not be empty")
-    print(_run_accounted_update_turn(runtime, lambda: runtime.run_session_turn(session_id, message)))
+    if include_returned:
+        run_turn = lambda: runtime.run_session_turn(session_id, message, include_returned=True)
+    else:
+        run_turn = lambda: runtime.run_session_turn(session_id, message)
+    print(_run_accounted_update_turn(runtime, run_turn))
     return 0
 
 

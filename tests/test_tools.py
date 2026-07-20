@@ -1,3 +1,4 @@
+import inspect
 import os
 import subprocess
 import shutil
@@ -60,8 +61,34 @@ class MemoryToolsTests(unittest.TestCase):
 
         result = tools.read_skill("alpha")
 
-        self.assertIn("# Alpha Skill", result)
-        self.assertIn("Use alpha.", result)
+        self.assertEqual(result.splitlines(), ["# Alpha Skill", "", "Use alpha."])
+        self.assertNotIn("Source:", result)
+
+    def test_retrieve_typed_reads_take_only_their_id(self):
+        self.assertEqual(list(inspect.signature(MemoryTools.read_markdown).parameters), ["self", "markdown_id"])
+        self.assertEqual(list(inspect.signature(MemoryTools.read_skill).parameters), ["self", "skill_id"])
+        self.assertEqual(list(inspect.signature(MemoryTools.read_mf).parameters), ["self", "mf_id"])
+
+    def test_retrieve_typed_reads_do_not_silently_truncate(self):
+        payload = f"{'x' * 35_000}\nEND\n"
+        (self.root / "MEMORY.md").write_text(
+            "# Root {#root}\n\n"
+            "## Detail {F#detail}\n\n"
+            "## Markdown {M#markdown}\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_detail.md").write_text(payload, encoding="utf-8")
+        (self.root / "MEMORY_markdown.md").write_text(payload, encoding="utf-8")
+        (self.root / "MEMORY_SKILL_alpha.md").write_text(payload, encoding="utf-8")
+        mf_path = self.root / ".runtime" / "shared_views" / "imports" / "auth-api" / "dist" / "MEMORY.md"
+        mf_path.parent.mkdir(parents=True)
+        mf_path.write_text(payload, encoding="utf-8")
+        tools = MemoryTools(self.root, role="retrieve")
+
+        self.assertTrue(tools.read_detail("detail").endswith("END"))
+        self.assertEqual(tools.read_skill("alpha").splitlines()[-1], "END")
+        self.assertTrue(tools.read_markdown("markdown").endswith("2: END"))
+        self.assertTrue(tools.read_mf("auth-api").endswith("2: END"))
 
     def test_retrieve_read_skill_failure_lists_available_ids_without_paths(self):
         (self.root / "MEMORY_SKILL_beta.md").write_text("# Beta Skill\n", encoding="utf-8")
@@ -86,19 +113,20 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("Skill not found: alpha", result)
         self.assertNotIn("secret", result)
 
-    def test_retrieve_read_mf_returns_whole_import_package_by_id(self):
+    def test_retrieve_read_mf_returns_only_line_numbered_canonical_view_by_id(self):
         import_root = self.root / ".runtime" / "shared_views" / "imports" / "auth-api"
-        import_root.mkdir(parents=True)
-        (import_root / "MEMORY.md").write_text("# Auth API\n\nToken expiry.\n", encoding="utf-8")
+        (import_root / "dist").mkdir(parents=True)
+        (import_root / "dist" / "MEMORY.md").write_text("# Auth API\n\nToken expiry.\n", encoding="utf-8")
         (import_root / "manifest.toml").write_text("view_id = \"auth-api\"\n", encoding="utf-8")
         tools = MemoryTools(self.root, role="retrieve")
 
         result = tools.read_mf("auth-api")
 
-        self.assertIn("MF import: auth-api", result)
-        self.assertIn("===== MEMORY.md =====", result)
-        self.assertIn("Token expiry.", result)
-        self.assertIn("===== manifest.toml =====", result)
+        self.assertIn("Source: MF#auth-api", result)
+        self.assertIn("1: # Auth API", result)
+        self.assertIn("3: Token expiry.", result)
+        self.assertNotIn("manifest.toml", result)
+        self.assertNotIn("view_id", result)
 
     def test_retrieve_read_mf_failure_lists_available_ids_without_paths(self):
         (self.root / ".runtime" / "shared_views" / "imports" / "billing-api").mkdir(parents=True)
@@ -113,16 +141,16 @@ class MemoryToolsTests(unittest.TestCase):
     @unittest.skipIf(not hasattr(os, "symlink"), "symlink is not available")
     def test_retrieve_read_mf_does_not_follow_symlink_outside_root(self):
         import_root = self.root / ".runtime" / "shared_views" / "imports" / "auth-api"
-        import_root.mkdir(parents=True)
+        (import_root / "dist").mkdir(parents=True)
         outside = self.root.parent / f"{self.root.name}-outside-mf.md"
         self.addCleanup(outside.unlink, missing_ok=True)
         outside.write_text("external secret\n", encoding="utf-8")
-        self._symlink_or_skip(import_root / "secret.md", outside)
+        self._symlink_or_skip(import_root / "dist" / "MEMORY.md", outside)
         tools = MemoryTools(self.root, role="retrieve")
 
         result = tools.read_mf("auth-api")
 
-        self.assertIn("MF import is empty: auth-api", result)
+        self.assertIn("MF import not found: auth-api", result)
         self.assertNotIn("external secret", result)
 
     @unittest.skipIf(not hasattr(os, "symlink"), "symlink is not available")

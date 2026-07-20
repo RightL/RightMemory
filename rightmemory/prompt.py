@@ -33,6 +33,11 @@ def build_cli_agent_instructions(
     cli_agent_guidance = _cli_agent_guidance(memory_root, role)
     semantic_guidance = _semantic_upgrade_guidance(role, semantic_upgrades)
     corrections_store = "- corrections.md\n" if role in {"update", "sync-reconciler"} else ""
+    final_reply = (
+        "Return only the strict JSON retrieve selection required below."
+        if role == "retrieve"
+        else "Return a concise final reply."
+    )
 
     return f"""You are RightMemory {role} mode.
 
@@ -50,7 +55,7 @@ RightMemory store:
 - insight_logs/
 
 Follow the canonical role instructions below. Use the embedded schema as the schema source of truth.
-Return a concise final reply.
+{final_reply}
 {cli_agent_guidance}
 
 RightMemory schema:
@@ -75,6 +80,11 @@ def build_instructions(
     sync_guidance = _sync_guidance(role)
     tool_guidance = _tool_guidance(role)
     semantic_guidance = _semantic_upgrade_guidance(role, semantic_upgrades)
+    final_reply = (
+        "- Finish through the terminal retrieve-selection output type; do not return natural-language prose."
+        if role == "retrieve"
+        else "- Return concise natural-language answers to the caller."
+    )
 
     return f"""You are RightMemory standalone {role} mode.
 
@@ -89,7 +99,7 @@ Workspace rule:
 - Use store-relative paths such as `MEMORY.md`, `PURSUITS.md`, and `insight_logs/*.md` when they are allowed for the selected role.
 - Do not read, write, inspect, or run commands against paths outside the memory store.
 {tool_guidance}
-- Return concise natural-language answers to the caller.
+{final_reply}
 
 RightMemory source of truth:
 - Durable Memory begins at MEMORY.md; live Pursuit begins at PURSUITS.md.
@@ -128,9 +138,13 @@ def _cli_agent_guidance(memory_root: Path, role: str) -> str:
     if role == "retrieve":
         return (
             "\nCLI-agent adaptation:\n"
-            "- Follow the embedded schema for `MF#` and `MQ#` headings.\n"
-            "- For relevant `MF#` headings, inspect synced external file context when it is visible in the memory store.\n"
-            "- For relevant `MQ#` headings, report that provider-question context may help with the local `mq_id` and relationship context.\n"
+            "- Your final response must be exactly one JSON object with only `ids`, `sources`, and "
+            "`recent_candidates`; do not wrap it in Markdown or add prose.\n"
+            "- The `read_*` names in the canonical instructions describe standalone tools. In CLI-agent mode, "
+            "inspect the equivalent files with the provider CLI's read-only file tools instead of emitting those tool calls.\n"
+            "- Inspect M# and S# backing files only through their schema-derived filenames. Inspect MF# content "
+            "only at `.runtime/shared_views/imports/<mf-id>/dist/MEMORY.md`; package metadata is not retrieval content.\n"
+            "- Use one-based line numbers from the exact source content when selecting ranges.\n"
         )
     return ""
 
@@ -229,9 +243,9 @@ def _tool_guidance(role: str) -> str:
         return (
             "Available retrieve tools:\n"
             "- `read_detail(detail_id)` resolves a relevant `F#` id and reads its Memory or Pursuit graph detail.\n"
-            "- `read_markdown(markdown_id)` reads free-form evidence for a relevant Memory `M#` heading.\n"
-            "- `read_skill(skill_id)` reads a full memory skill body for a relevant `S#` heading.\n"
-            "- `read_mf(mf_id)` reads external file context for a relevant `MF#` heading."
+            "- `read_markdown(markdown_id)` reads the complete line-numbered free-form source for an `M#` heading.\n"
+            "- `read_skill(skill_id)` reads the complete skill for an `S#` heading.\n"
+            "- `read_mf(mf_id)` reads only the complete line-numbered canonical mirrored `dist/MEMORY.md`."
         )
     if role == "historian":
         return (
