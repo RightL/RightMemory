@@ -12,6 +12,7 @@ from .graph import (
     PURSUIT_DETAIL_FILE_RE,
     build_graph_manifest,
     resolve_backing_reference,
+    validate_item_id,
 )
 from .share_models import ShareFilePart, ShareQuestionPart, ShareRelationship, load_shares, save_shares, validate_share_id
 from .share_results import normalize_share_capability
@@ -37,12 +38,7 @@ MAX_CLOSE_MATCHES = 3
 MAX_EDIT_MATCH_LINES = 8
 MAX_MATCH_PREVIEW_CHARS = 180
 
-ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{(F#|M#|S#|MF#|MQ#|#)([A-Za-z0-9_.-]+)\}(?:\s*(?:\u2192|->)\s*\[(.*?)\])?")
-UNSUPPORTED_ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{([A-Za-z]+#)([A-Za-z0-9_.-]+)\}")
-TERMINAL_HEADING_KINDS = {"F#", "M#", "S#", "MF#", "MQ#"}
-ANY_HEADING_RE = re.compile(r"^(#+)\s+(.+?)\s*$")
 HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$")
-NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*(?:\u2192|->)\s*\[(.*?)\])?\s*$")
 MEMORY_DETAIL_FILE_RE = re.compile(r"^MEMORY_[A-Za-z0-9_.-]+\.md$")
 MEMORY_SKILL_FILE_RE = re.compile(r"^MEMORY_SKILL_[A-Za-z0-9_.-]+\.md$")
 INSIGHT_LOG_FILE_RE = re.compile(r"^insight_logs/[A-Za-z0-9_.-]+\.md$")
@@ -133,11 +129,10 @@ class MemoryTools:
     def read_skill(self, skill_id: str) -> str:
         """Read a complete MEMORY_SKILL body by S# id."""
         clean_id = self._validate_memory_reference_id(skill_id)
-        relative = f"MEMORY_SKILL_{clean_id}.md"
-        path = self.memory_root / relative
-        if not self._is_safe_read_file(path):
+        reference = resolve_backing_reference(self.memory_root, clean_id, "S#")
+        if reference is None or not self._is_safe_read_file(reference.path):
             return self._missing_skill_message(clean_id)
-        return self._read_text(path)
+        return self._read_text(reference.path)
 
     def read_mf(self, mf_id: str) -> str:
         """Read a mirrored view's complete line-numbered canonical dist/MEMORY.md."""
@@ -800,7 +795,7 @@ class MemoryTools:
     def validate_memory(self, *, enforce_correction_capacity: bool = True) -> str:
         """Validate the complete RightMemory graph and updater correction file."""
         manifest = build_graph_manifest(self.memory_root)
-        errors = [*manifest.errors, *self._structure_errors(manifest.graph_files)]
+        errors = [*manifest.errors]
         corrections_path = self.memory_root / CORRECTIONS_PATH
         if corrections_path.is_file():
             correction_errors = validate_corrections_markdown(corrections_path.read_text(encoding="utf-8"))
@@ -1099,18 +1094,18 @@ class MemoryTools:
 
     def _validate_memory_reference_id(self, value: str) -> str:
         clean = value.strip()
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", clean):
-            raise ValueError("id must contain only letters, numbers, dot, underscore, or dash")
-        return clean
+        return validate_item_id(clean)
 
     def _missing_skill_message(self, skill_id: str) -> str:
         return f"Skill not found: {skill_id}\n\n{self._available_skills_block()}"
 
     def _available_skills_block(self) -> str:
-        ids = []
-        for path in sorted(self.memory_root.glob("MEMORY_SKILL_*.md")):
-            if self._is_safe_read_file(path):
-                ids.append(path.stem.removeprefix("MEMORY_SKILL_"))
+        manifest = build_graph_manifest(self.memory_root)
+        ids = sorted(
+            reference.id
+            for reference in manifest.backing.values()
+            if reference.kind == "S#" and self._is_safe_read_file(reference.path)
+        )
         if not ids:
             return "Available skills:\n- none"
         return "Available skills:\n" + "\n".join(f"- {item}" for item in ids)
@@ -1237,63 +1232,6 @@ class MemoryTools:
     def _validate_positive(self, name: str, value: int) -> None:
         if value < 1:
             raise ValueError(f"{name} must be >= 1")
-
-    def _structure_errors(self, files: list[Path]) -> list[str]:
-        errors: list[str] = []
-        for path in files:
-            heading_stack: list[tuple[int, int]] = []
-            active_terminal: tuple[int, int] | None = None
-            fence_char: str | None = None
-            fence_length = 0
-            relative_path = path.relative_to(self.memory_root)
-            for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-                fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
-                if fence is not None:
-                    marker = fence.group(1)
-                    if fence_char is None:
-                        fence_char = marker[0]
-                        fence_length = len(marker)
-                    elif marker[0] == fence_char and len(marker) >= fence_length:
-                        fence_char = None
-                        fence_length = 0
-                    continue
-                if fence_char is not None:
-                    continue
-                heading_match = ANY_HEADING_RE.match(line)
-                if heading_match is None:
-                    if active_terminal is not None and NODE_RE.match(line):
-                        errors.append(
-                            f"terminal `####` heading cannot contain node lines at {relative_path}:{line_number}"
-                        )
-                    continue
-
-                depth = len(heading_match.group(1))
-                unsupported = UNSUPPORTED_ANCHOR_KIND_RE.match(line)
-                if unsupported is not None and ANCHOR_KIND_RE.match(line) is None:
-                    errors.append(
-                        f"unsupported heading marker `{unsupported.group(2)}` at {relative_path}:{line_number}"
-                    )
-                while heading_stack and heading_stack[-1][0] >= depth:
-                    heading_stack.pop()
-                parent_depth = heading_stack[-1][0] if heading_stack else None
-                if active_terminal is not None and depth <= active_terminal[0]:
-                    active_terminal = None
-
-                if depth > 4:
-                    errors.append(f"headings deeper than `####` are not allowed at {relative_path}:{line_number}")
-                elif depth == 4:
-                    anchor_match = ANCHOR_KIND_RE.match(line)
-                    if anchor_match is None or anchor_match.group(2) not in TERMINAL_HEADING_KINDS:
-                        errors.append(
-                            f"`####` terminal reference must use `{{F#slug}}`, `{{M#slug}}`, `{{S#slug}}`, `{{MF#slug}}`, or `{{MQ#slug}}` at {relative_path}:{line_number}"
-                        )
-                    if parent_depth != 3:
-                        errors.append(f"`####` terminal reference must be under a `###` heading at {relative_path}:{line_number}")
-                    if anchor_match is not None and anchor_match.group(2) in TERMINAL_HEADING_KINDS:
-                        active_terminal = (depth, line_number)
-
-                heading_stack.append((depth, line_number))
-        return errors
 
     def _replacement_inputs(self, text: str, old_string: str, new_string: str) -> tuple[str, str, int, bool]:
         count = text.count(old_string)

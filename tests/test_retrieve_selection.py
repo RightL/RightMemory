@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import rightmemory.retrieve_selection as retrieve_selection_module
 from rightmemory.recent_submitted import RecentSubmittedMemoryEntry
 from rightmemory.retrieve_selection import (
     LineRange,
@@ -102,6 +103,19 @@ class RetrieveSelectionRendererTests(unittest.TestCase):
         self.assertIn("- `child-fact`", node.text)
         self.assertNotIn("Project body.", node.text)
         self.assertNotIn("Child body.", node.text)
+
+    def test_local_rendering_uses_the_canonical_index_without_shadow_parsers(self):
+        rendered = self.renderer.render(RetrieveSelection(ids=["child-fact"]))
+
+        self.assertEqual(
+            rendered.text,
+            "# Memory\n\n"
+            "## Project {#project}\n\n"
+            "### Child {#child}\n\n"
+            "- `child-fact` A child fact. → []",
+        )
+        self.assertFalse(hasattr(retrieve_selection_module, "_TreeParser"))
+        self.assertFalse(hasattr(retrieve_selection_module, "_LogicalGraph"))
 
     def test_f_detail_and_pursuit_focus_are_resolved(self):
         detail = self.renderer.render(RetrieveSelection(ids=["detail"]))

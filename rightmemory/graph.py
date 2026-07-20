@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterable
 
 
 KNOWN_EDGE_TYPES = {
@@ -23,26 +25,99 @@ KNOWN_EDGE_TYPES = {
     "todo",
 }
 
+ITEM_ID_PATTERN = r"[A-Za-z0-9_.-]+"
+ITEM_ID_RE = re.compile(rf"^{ITEM_ID_PATTERN}$")
 ANCHOR_RE = re.compile(
-    r"^(#{1,4})\s+.*?\{(F#|M#|S#|MF#|MQ#|#)([A-Za-z0-9_.-]+)\}"
-    r"(?:\s*(?:\u2192|->)\s*\[(.*?)\])?"
+    rf"^(#{{1,}})\s+.*?\{{(F#|M#|S#|MF#|MQ#|#)({ITEM_ID_PATTERN})\}}"
+    r"(?:\s*(?:\u2192|->)\s*\[(.*?)\])?\s*$"
 )
-NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*(?:\u2192|->)\s*\[(.*?)\])?\s*$")
+ANCHOR_CANDIDATE_RE = re.compile(
+    r"^(#{1,})\s+.*?\{(F#|M#|S#|MF#|MQ#|#)([^}]*)\}"
+)
+UNSUPPORTED_ANCHOR_RE = re.compile(r"^(#{1,})\s+.*?\{([A-Za-z]+#)([^}]*)\}")
+NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s(?:\u2192|->)\s*\[(.*?)\])\s*$")
+NODE_CANDIDATE_RE = re.compile(r"^\s*-\s+`([^`]+)`(?:\s|$)")
 PURSUIT_ACTION_RE = re.compile(r"^\s*-\s+`([^`]+)`(?:\s|$)")
 PURSUIT_FIELD_RE = re.compile(r"^\s*\*\*(State|Next|Done when|Status):\*\*", re.IGNORECASE)
-EDGE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*([A-Za-z0-9_.-]+)\s*$")
+EDGE_RE = re.compile(rf"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*({ITEM_ID_PATTERN})\s*$")
 FOCUS_HEADING_RE = re.compile(r"^##\s+Focus\s*$", re.IGNORECASE)
-FOCUS_REFERENCE_RE = re.compile(r"^\s*-\s+`([A-Za-z0-9_.-]+)`(?:\s|$)")
+FOCUS_REFERENCE_RE = re.compile(rf"^\s*-\s+`({ITEM_ID_PATTERN})`(?:\s|$)")
+FOCUS_CANDIDATE_RE = re.compile(r"^\s*-\s+`([^`]+)`(?:\s|$)")
+HEADING_RE = re.compile(r"^(#+)\s+")
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
-MEMORY_DETAIL_FILE_RE = re.compile(r"^MEMORY_[A-Za-z0-9_.-]+\.md$")
-MEMORY_SKILL_FILE_RE = re.compile(r"^MEMORY_SKILL_[A-Za-z0-9_.-]+\.md$")
-PURSUIT_DETAIL_FILE_RE = re.compile(r"^PURSUIT_(?!(?i:RULES)\.md$)[A-Za-z0-9_.-]+\.md$")
+MEMORY_DETAIL_FILE_RE = re.compile(rf"^MEMORY_{ITEM_ID_PATTERN}\.md$")
+MEMORY_SKILL_FILE_RE = re.compile(rf"^MEMORY_SKILL_{ITEM_ID_PATTERN}\.md$")
+PURSUIT_DETAIL_FILE_RE = re.compile(
+    rf"^PURSUIT_(?!(?i:RULES)\.md$){ITEM_ID_PATTERN}\.md$"
+)
 
 ROOT_FILES = (("MEMORY.md", "memory"), ("PURSUITS.md", "pursuit"))
 MEMORY_ONLY_ANCHOR_KINDS = {"M#", "S#", "MF#", "MQ#"}
+TERMINAL_HEADING_KINDS = {"F#", "M#", "S#", "MF#", "MQ#"}
+
+BlockKey = tuple[Path, int]
+
+
+def is_valid_item_id(value: str) -> bool:
+    """Return whether value is a canonical RightMemory short slug."""
+    return ITEM_ID_RE.fullmatch(value) is not None
+
+
+def validate_item_id(value: str) -> str:
+    """Validate a caller-supplied item id without changing its identity."""
+    if not is_valid_item_id(value):
+        raise ValueError("id must contain only letters, numbers, dot, underscore, or dash")
+    return value
 
 
 @dataclass(frozen=True)
+class SourceSpan:
+    path: Path
+    start_line: int
+    end_line: int
+
+
+@dataclass
+class DocumentBlock:
+    key: BlockKey
+    kind: str
+    source_path: Path
+    family: str
+    line: str = ""
+    depth: int = 0
+    line_number: int = 0
+    end_line: int = 0
+    body_span: SourceSpan | None = None
+    item_id: str | None = None
+    item_kind: str | None = None
+    anchor_kind: str | None = None
+    focus_target: str | None = None
+    physical_parent: BlockKey | None = None
+    logical_parent: BlockKey | None = None
+    physical_children: list[BlockKey] = field(default_factory=list)
+    logical_children: list[BlockKey] = field(default_factory=list)
+    physical_parts: list[str | BlockKey] = field(default_factory=list)
+    logical_parts: list[str | BlockKey] = field(default_factory=list)
+    traversal_rank: int = -1
+
+    @property
+    def span(self) -> SourceSpan:
+        return SourceSpan(self.source_path, self.line_number, self.end_line)
+
+
+@dataclass(frozen=True)
+class ParsedDocument:
+    path: Path
+    relative_path: str
+    text: str
+    lines: tuple[str, ...]
+    family: str
+    source_order: int
+    root_key: BlockKey
+
+
+@dataclass
 class GraphItem:
     id: str
     file: Path
@@ -52,6 +127,17 @@ class GraphItem:
     anchor_kind: str | None
     edges: tuple[tuple[str, str], ...]
     malformed_edges: tuple[str, ...] = ()
+    block_key: BlockKey | None = None
+    end_line: int = 0
+    body_span: SourceSpan | None = None
+    physical_parent: BlockKey | None = None
+    logical_parent: BlockKey | None = None
+    traversal_rank: int = -1
+    content_hash: str = ""
+
+    @property
+    def span(self) -> SourceSpan:
+        return SourceSpan(self.file, self.line_number, self.end_line or self.line_number)
 
 
 @dataclass(frozen=True)
@@ -64,52 +150,92 @@ class BackingReference:
     path: Path
 
 
+@dataclass(frozen=True)
+class GraphDiagnostic:
+    message: str
+    namespace: str
+    path: str | None = None
+    line_number: int | None = None
+
+
 @dataclass
 class GraphManifest:
     root: Path
+    namespace: str = "local"
+    profile: str = "local"
     graph_files: list[Path] = field(default_factory=list)
     non_graph_files: list[Path] = field(default_factory=list)
+    documents: dict[Path, ParsedDocument] = field(default_factory=dict)
+    blocks: dict[BlockKey, DocumentBlock] = field(default_factory=dict)
+    root_blocks: list[BlockKey] = field(default_factory=list)
+    document_roots: list[BlockKey] = field(default_factory=list)
     items: dict[str, GraphItem] = field(default_factory=dict)
     headings: dict[str, GraphItem] = field(default_factory=dict)
     backing: dict[str, BackingReference] = field(default_factory=dict)
     backing_paths: dict[str, BackingReference] = field(default_factory=dict)
     focus_ids: list[tuple[str, Path, int]] = field(default_factory=list)
+    focus_blocks: list[BlockKey] = field(default_factory=list)
+    duplicates: set[str] = field(default_factory=set)
+    diagnostics: list[GraphDiagnostic] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     @property
     def files(self) -> list[Path]:
         return sorted(set((*self.graph_files, *self.non_graph_files)))
 
+    def block_for_id(self, item_id: str) -> DocumentBlock | None:
+        item = self.items.get(item_id)
+        if item is None or item.block_key is None:
+            return None
+        return self.blocks[item.block_key]
+
+    def walk_logical(self, key: BlockKey, *, include_self: bool = False) -> Iterable[DocumentBlock]:
+        block = self.blocks[key]
+        if include_self and block.kind != "root":
+            yield block
+        for part in block.logical_parts:
+            if isinstance(part, tuple):
+                child = self.blocks[part]
+                yield child
+                yield from self.walk_logical(part)
+
+
+@dataclass(frozen=True)
+class _ParseProfile:
+    name: str
+    namespace: str
+    roots: tuple[tuple[str, str], ...]
+    allowed_memory_kinds: frozenset[str]
+    allow_focus: bool
+    require_addressed_body: bool
+
 
 def build_graph_manifest(memory_root: Path) -> GraphManifest:
     root = Path(memory_root).resolve()
-    manifest = GraphManifest(root=root)
-    pending: list[tuple[Path, str]] = []
-    for name, family in ROOT_FILES:
-        path = root / name
-        if path.exists():
-            pending.append((path, family))
-        else:
-            manifest.errors.append(f"missing canonical RightMemory root `{name}`")
+    profile = _ParseProfile(
+        name="local",
+        namespace="local",
+        roots=ROOT_FILES,
+        allowed_memory_kinds=frozenset({"#", "F#", "M#", "S#", "MF#", "MQ#"}),
+        allow_focus=True,
+        require_addressed_body=False,
+    )
+    return _build_manifest(root, profile)
 
-    visited: set[Path] = set()
-    while pending:
-        file_path, family = pending.pop(0)
-        relative = _relative(root, file_path)
-        if file_path in visited:
-            continue
-        visited.add(file_path)
-        if not _is_regular_file_under_root(root, file_path):
-            manifest.errors.append(f"graph file `{relative}` must be a regular file inside the RightMemory root")
-            continue
-        manifest.graph_files.append(file_path)
-        _scan_graph_file(manifest, file_path, family, pending)
 
-    _validate_items(manifest)
-    _validate_focus(manifest)
-    manifest.graph_files.sort()
-    manifest.non_graph_files = sorted(set(manifest.non_graph_files))
-    return manifest
+def build_mf_manifest(package_root: Path, view_id: str) -> GraphManifest:
+    """Build an MF-local graph from a package's dist directory."""
+    validate_item_id(view_id)
+    root = Path(package_root).resolve()
+    profile = _ParseProfile(
+        name="mf",
+        namespace=f"MF#{view_id}",
+        roots=(("MEMORY.md", "memory"),),
+        allowed_memory_kinds=frozenset({"#", "F#", "M#", "S#"}),
+        allow_focus=False,
+        require_addressed_body=True,
+    )
+    return _build_manifest(root, profile)
 
 
 def resolve_backing_reference(memory_root: Path, item_id: str, kind: str) -> BackingReference | None:
@@ -120,21 +246,122 @@ def resolve_backing_reference(memory_root: Path, item_id: str, kind: str) -> Bac
     return reference
 
 
-def _scan_graph_file(
+def _build_manifest(root: Path, profile: _ParseProfile) -> GraphManifest:
+    manifest = GraphManifest(root=root, namespace=profile.namespace, profile=profile.name)
+    for name, family in profile.roots:
+        path = root / name
+        if not path.exists():
+            if profile.name == "local":
+                _add_error(manifest, f"missing canonical RightMemory root `{name}`")
+            else:
+                _add_error(manifest, "missing canonical MF Memory document `MEMORY.md`")
+            continue
+        root_key = _load_document(manifest, profile, path, family, path_stack=())
+        if root_key is not None:
+            manifest.root_blocks.append(root_key)
+
+    _validate_items(manifest)
+    if profile.allow_focus:
+        _validate_focus(manifest)
+    if profile.require_addressed_body:
+        _validate_addressed_body(manifest)
+    _assign_logical_metadata(manifest)
+    manifest.graph_files.sort()
+    manifest.non_graph_files = sorted(set(manifest.non_graph_files))
+    return manifest
+
+
+def _load_document(
     manifest: GraphManifest,
+    profile: _ParseProfile,
     file_path: Path,
     family: str,
-    pending: list[tuple[Path, str]],
-) -> None:
+    *,
+    path_stack: tuple[Path, ...],
+) -> BlockKey | None:
+    relative = _relative(manifest.root, file_path)
+    if not _is_regular_file_under_root(manifest.root, file_path):
+        _add_error(
+            manifest,
+            f"graph file `{relative}` must be a regular file inside the RightMemory root",
+            file_path,
+        )
+        return None
+    resolved = file_path.resolve(strict=True)
+    existing = manifest.documents.get(resolved)
+    if existing is not None:
+        return existing.root_key
+
+    text = _read_text(resolved)
+    lines = tuple(text.splitlines())
+    root_key = (resolved, 0)
+    root_block = DocumentBlock(
+        key=root_key,
+        kind="root",
+        source_path=resolved,
+        family=family,
+        end_line=len(lines),
+    )
+    manifest.blocks[root_key] = root_block
+    document = ParsedDocument(
+        path=resolved,
+        relative_path=relative,
+        text=text,
+        lines=lines,
+        family=family,
+        source_order=len(manifest.documents),
+        root_key=root_key,
+    )
+    manifest.documents[resolved] = document
+    manifest.document_roots.append(root_key)
+    manifest.graph_files.append(resolved)
+
+    f_references = _parse_document(manifest, profile, document)
+    _finalize_document(manifest, document)
+    next_stack = (*path_stack, resolved)
+    for owner_key, reference in f_references:
+        if not _is_regular_file_under_root(manifest.root, reference.path):
+            continue
+        target = reference.path.resolve(strict=True)
+        if target in next_stack:
+            owner = manifest.blocks[owner_key]
+            _add_error(
+                manifest,
+                f"cyclic F# backing path `{_relative(manifest.root, reference.path)}` "
+                f"for heading `{reference.id}` at {_block_loc(manifest, owner)}",
+                owner.source_path,
+                owner.line_number,
+            )
+            continue
+        detail_root = _load_document(
+            manifest,
+            profile,
+            reference.path,
+            reference.family,
+            path_stack=next_stack,
+        )
+        if detail_root is not None:
+            _attach_detail_document(manifest, owner_key, detail_root)
+    return root_key
+
+
+def _parse_document(
+    manifest: GraphManifest,
+    profile: _ParseProfile,
+    document: ParsedDocument,
+) -> list[tuple[BlockKey, BackingReference]]:
+    stack: list[BlockKey] = []
     in_focus = False
     in_pursuit_next = False
-    file_backed_heading: GraphItem | None = None
-    file_backed_depth: int | None = None
     fence_char: str | None = None
     fence_length = 0
-    for line_number, line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), start=1):
-        fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+    f_references: list[tuple[BlockKey, BackingReference]] = []
+
+    for line_number, line in enumerate(document.lines, start=1):
+        parent_key = stack[-1] if stack else document.root_key
+        fence = FENCE_RE.match(line)
         if fence is not None:
+            _append_text(manifest.blocks[parent_key], line)
             marker = fence.group(1)
             if fence_char is None:
                 fence_char = marker[0]
@@ -144,140 +371,428 @@ def _scan_graph_file(
                 fence_length = 0
             continue
         if fence_char is not None:
+            _append_text(manifest.blocks[parent_key], line)
             continue
-        heading_text = re.match(r"^(#+)\s+", line)
-        if heading_text:
-            depth = len(heading_text.group(1))
-            if file_backed_depth is not None:
-                if depth > file_backed_depth:
-                    manifest.errors.append(
-                        f"F# heading cannot retain child headings at "
-                        f"{_relative(manifest.root, file_path)}:{line_number}; "
-                        f"move them to the backing file for `{file_backed_heading.id}`"
+
+        heading_match = HEADING_RE.match(line)
+        if heading_match is not None:
+            depth = len(heading_match.group(1))
+            while stack and manifest.blocks[stack[-1]].depth >= depth:
+                manifest.blocks[stack.pop()].end_line = line_number - 1
+            parent_key = stack[-1] if stack else document.root_key
+            parent = manifest.blocks[parent_key]
+            anchor = ANCHOR_RE.match(line)
+            candidate = ANCHOR_CANDIDATE_RE.match(line)
+            unsupported = UNSUPPORTED_ANCHOR_RE.match(line)
+            anchor_kind: str | None = None
+            item_id: str | None = None
+            edge_text = ""
+            if anchor is not None:
+                anchor_kind = anchor.group(2)
+                item_id = anchor.group(3)
+                edge_text = anchor.group(4) or ""
+            elif candidate is not None:
+                anchor_kind = candidate.group(2)
+                candidate_id = candidate.group(3)
+                if is_valid_item_id(candidate_id):
+                    item_id = candidate_id
+                    _add_error(
+                        manifest,
+                        f"malformed heading edge list at {document.relative_path}:{line_number}",
+                        document.path,
+                        line_number,
                     )
                 else:
-                    file_backed_heading = None
-                    file_backed_depth = None
-            if depth <= 2:
-                in_focus = bool(family == "pursuit" and FOCUS_HEADING_RE.match(line))
-            if family == "pursuit":
+                    _add_error(
+                        manifest,
+                        f"invalid heading id `{candidate_id}` at {document.relative_path}:{line_number}; "
+                        "use only letters, numbers, dot, underscore, or dash",
+                        document.path,
+                        line_number,
+                    )
+            elif unsupported is not None:
+                _add_error(
+                    manifest,
+                    f"unsupported heading marker `{unsupported.group(2)}` at "
+                    f"{document.relative_path}:{line_number}",
+                    document.path,
+                    line_number,
+                )
+
+            key = (document.path, line_number)
+            block = DocumentBlock(
+                key=key,
+                kind="heading",
+                line=line,
+                depth=depth,
+                line_number=line_number,
+                end_line=line_number,
+                item_id=item_id,
+                item_kind="heading" if item_id is not None else None,
+                anchor_kind=anchor_kind,
+                family=document.family,
+                source_path=document.path,
+                physical_parent=parent_key,
+                logical_parent=parent_key,
+            )
+            manifest.blocks[key] = block
+            _append_child(parent, key)
+
+            f_ancestor = _nearest_ancestor(manifest, stack, lambda item: item.anchor_kind == "F#")
+            if f_ancestor is not None:
+                _add_error(
+                    manifest,
+                    f"F# heading cannot retain child headings at {document.relative_path}:{line_number}; "
+                    f"move them to the backing file for `{f_ancestor.item_id}`",
+                    document.path,
+                    line_number,
+                )
+            terminal_ancestor = _nearest_ancestor(
+                manifest,
+                stack,
+                lambda item: item.depth == 4 and item.anchor_kind in TERMINAL_HEADING_KINDS,
+            )
+            if terminal_ancestor is not None:
+                _add_error(
+                    manifest,
+                    f"terminal `####` heading cannot contain child headings at "
+                    f"{document.relative_path}:{line_number}",
+                    document.path,
+                    line_number,
+                )
+
+            if depth > 4:
+                _add_error(
+                    manifest,
+                    f"headings deeper than `####` are not allowed at {document.relative_path}:{line_number}",
+                    document.path,
+                    line_number,
+                )
+            elif depth == 4:
+                if anchor_kind not in TERMINAL_HEADING_KINDS or item_id is None:
+                    _add_error(
+                        manifest,
+                        "`####` terminal reference must use `{F#slug}`, `{M#slug}`, `{S#slug}`, "
+                        f"`{{MF#slug}}`, or `{{MQ#slug}}` at {document.relative_path}:{line_number}",
+                        document.path,
+                        line_number,
+                    )
+                if parent.depth != 3:
+                    _add_error(
+                        manifest,
+                        f"`####` terminal reference must be under a `###` heading at "
+                        f"{document.relative_path}:{line_number}",
+                        document.path,
+                        line_number,
+                    )
+
+            if document.family == "pursuit" and depth <= 2:
+                in_focus = bool(profile.allow_focus and FOCUS_HEADING_RE.match(line))
+            if document.family == "pursuit":
                 in_pursuit_next = False
-        if family == "pursuit":
-            field = PURSUIT_FIELD_RE.match(line)
-            if field:
-                in_pursuit_next = field.group(1).casefold() == "next"
+
+            if item_id is not None:
+                edges, malformed = _parse_edges(edge_text)
+                item = GraphItem(
+                    id=item_id,
+                    file=document.path,
+                    line_number=line_number,
+                    family=document.family,
+                    item_kind="heading",
+                    anchor_kind=anchor_kind,
+                    edges=tuple(edges),
+                    malformed_edges=tuple(malformed),
+                    block_key=key,
+                    physical_parent=parent_key,
+                    logical_parent=parent_key,
+                )
+                _record_item(manifest, item)
+                if anchor_kind not in profile.allowed_memory_kinds and document.family == "memory":
+                    _add_error(
+                        manifest,
+                        f"{anchor_kind} heading `{item_id}` is not valid in {profile.namespace} at "
+                        f"{_loc(manifest.root, item)}",
+                        document.path,
+                        line_number,
+                    )
+                if anchor_kind in MEMORY_ONLY_ANCHOR_KINDS and document.family != "memory":
+                    _add_error(
+                        manifest,
+                        f"{anchor_kind} heading `{item_id}` is only valid in Memory at {_loc(manifest.root, item)}",
+                        document.path,
+                        line_number,
+                    )
+                if anchor_kind == "F#" and document.family == "pursuit" and item_id.casefold() == "rules":
+                    _add_error(
+                        manifest,
+                        f"Pursuit F# id `{item_id}` is reserved for PURSUIT_RULES.md at "
+                        f"{_loc(manifest.root, item)}",
+                        document.path,
+                        line_number,
+                    )
+                else:
+                    reference = _backing_reference(manifest.root, item)
+                    if reference is not None:
+                        _record_backing(manifest, reference, item)
+                        if reference.kind == "F#":
+                            f_references.append((key, reference))
+
+            stack.append(key)
+            continue
+
+        parent_key = stack[-1] if stack else document.root_key
+        parent = manifest.blocks[parent_key]
+        if document.family == "pursuit":
+            field_match = PURSUIT_FIELD_RE.match(line)
+            if field_match:
+                in_pursuit_next = field_match.group(1).casefold() == "next"
+                _append_text(parent, line)
                 continue
         if in_focus:
-            focus = FOCUS_REFERENCE_RE.match(line)
-            if focus:
-                manifest.focus_ids.append((focus.group(1), file_path, line_number))
-                continue
-
-        anchor = ANCHOR_RE.match(line)
-        if anchor:
-            anchor_kind = anchor.group(2)
-            item_id = anchor.group(3)
-            edges, malformed = _parse_edges(anchor.group(4) or "")
-            item = GraphItem(
-                id=item_id,
-                file=file_path,
-                line_number=line_number,
-                family=family,
-                item_kind="heading",
-                anchor_kind=anchor_kind,
-                edges=tuple(edges),
-                malformed_edges=tuple(malformed),
-            )
-            _record_item(manifest, item)
-            if anchor_kind == "F#":
-                file_backed_heading = item
-                file_backed_depth = len(anchor.group(1))
-            if anchor_kind in MEMORY_ONLY_ANCHOR_KINDS and family != "memory":
-                manifest.errors.append(
-                    f"{anchor_kind} heading `{item_id}` is only valid in Memory at {_loc(manifest.root, item)}"
-                )
-            if anchor_kind == "F#" and family == "pursuit" and item_id.casefold() == "rules":
-                manifest.errors.append(
-                    f"Pursuit F# id `{item_id}` is reserved for PURSUIT_RULES.md at {_loc(manifest.root, item)}"
-                )
-                continue
-            reference = _backing_reference(manifest.root, item)
-            if reference is not None:
-                manifest.backing.setdefault(item_id, reference)
-                backing_path_key = _backing_path_key(manifest.root, reference.path)
-                previous_reference = manifest.backing_paths.get(backing_path_key)
-                if previous_reference is not None and (
-                    previous_reference.id != reference.id or previous_reference.kind != reference.kind
-                ):
-                    manifest.errors.append(
-                        f"backing file `{_relative(manifest.root, reference.path)}` is claimed by "
-                        f"{previous_reference.kind} heading `{previous_reference.id}` at "
-                        f"{_relative(manifest.root, previous_reference.source_file)}:"
-                        f"{previous_reference.line_number} and {reference.kind} heading `{reference.id}` at "
-                        f"{_relative(manifest.root, reference.source_file)}:{reference.line_number}"
+            focus_candidate = FOCUS_CANDIDATE_RE.match(line)
+            if focus_candidate is not None:
+                focus_id = focus_candidate.group(1)
+                if not is_valid_item_id(focus_id):
+                    _add_error(
+                        manifest,
+                        f"invalid Focus reference id `{focus_id}` at {document.relative_path}:{line_number}",
+                        document.path,
+                        line_number,
                     )
-                else:
-                    manifest.backing_paths[backing_path_key] = reference
-                if not _is_regular_file_under_root(manifest.root, reference.path):
-                    relative = _relative(manifest.root, reference.path)
-                    if anchor_kind == "S#":
-                        message = f"missing skill file `{relative}`"
-                    elif anchor_kind == "M#":
-                        message = f"missing Markdown backing file `{relative}`"
-                    else:
-                        message = f"missing F# backing file `{relative}`"
-                    manifest.errors.append(f"{message} for heading at {_loc(manifest.root, item)}")
-                elif anchor_kind == "F#":
-                    pending.append((reference.path, family))
-                else:
-                    manifest.non_graph_files.append(reference.path)
-            continue
+                    _append_text(parent, line)
+                    continue
+                key = (document.path, line_number)
+                block = DocumentBlock(
+                    key=key,
+                    kind="focus",
+                    line=line,
+                    line_number=line_number,
+                    end_line=line_number,
+                    family=document.family,
+                    source_path=document.path,
+                    focus_target=focus_id,
+                    physical_parent=parent_key,
+                    logical_parent=parent_key,
+                )
+                manifest.blocks[key] = block
+                _append_child(parent, key)
+                manifest.focus_ids.append((focus_id, document.path, line_number))
+                manifest.focus_blocks.append(key)
+                continue
 
-        if family == "pursuit" and in_pursuit_next:
+        if document.family == "pursuit" and in_pursuit_next:
             action = PURSUIT_ACTION_RE.match(line)
-            if action:
+            if action is not None:
                 if action.group(1) not in {"do", "ask", "wait"}:
-                    relative = _relative(manifest.root, file_path)
-                    manifest.errors.append(
-                        f"invalid Pursuit Next action `{action.group(1)}` at {relative}:{line_number}; "
-                        "use `do`, `ask`, or `wait`"
+                    _add_error(
+                        manifest,
+                        f"invalid Pursuit Next action `{action.group(1)}` at "
+                        f"{document.relative_path}:{line_number}; use `do`, `ask`, or `wait`",
+                        document.path,
+                        line_number,
                     )
+                _append_text(parent, line)
                 continue
 
-        node = NODE_RE.match(line)
-        if node:
-            if file_backed_heading is not None:
-                manifest.errors.append(
-                    f"F# heading cannot retain child node lines at "
-                    f"{_relative(manifest.root, file_path)}:{line_number}; "
-                    f"move them to the backing file for `{file_backed_heading.id}`"
+        node_candidate = NODE_CANDIDATE_RE.match(line)
+        if node_candidate is not None:
+            terminal_ancestor = _nearest_ancestor(
+                manifest,
+                stack,
+                lambda item: item.depth == 4 and item.anchor_kind in TERMINAL_HEADING_KINDS,
+            )
+            if terminal_ancestor is not None:
+                _add_error(
+                    manifest,
+                    f"terminal `####` heading cannot contain node lines at "
+                    f"{document.relative_path}:{line_number}",
+                    document.path,
+                    line_number,
                 )
+            f_ancestor = _nearest_ancestor(manifest, stack, lambda item: item.anchor_kind == "F#")
+            if f_ancestor is not None:
+                _add_error(
+                    manifest,
+                    f"F# heading cannot retain child node lines at {document.relative_path}:{line_number}; "
+                    f"move them to the backing file for `{f_ancestor.item_id}`",
+                    document.path,
+                    line_number,
+                )
+            node = NODE_RE.match(line)
+            node_id = node_candidate.group(1)
+            if not is_valid_item_id(node_id):
+                _add_error(
+                    manifest,
+                    f"invalid node id `{node_id}` at {document.relative_path}:{line_number}; "
+                    "use only letters, numbers, dot, underscore, or dash",
+                    document.path,
+                    line_number,
+                )
+                _append_text(parent, line)
+                continue
+            if node is None:
+                _add_error(
+                    manifest,
+                    f"node `{node_id}` must include an edge list such as `\u2192 []` at "
+                    f"{document.relative_path}:{line_number}",
+                    document.path,
+                    line_number,
+                )
+                _append_text(parent, line)
+                continue
             edges, malformed = _parse_edges(node.group(2) or "")
+            key = (document.path, line_number)
+            block = DocumentBlock(
+                key=key,
+                kind="node",
+                line=line,
+                line_number=line_number,
+                end_line=line_number,
+                item_id=node_id,
+                item_kind="node",
+                family=document.family,
+                source_path=document.path,
+                physical_parent=parent_key,
+                logical_parent=parent_key,
+            )
+            manifest.blocks[key] = block
+            _append_child(parent, key)
             _record_item(
                 manifest,
                 GraphItem(
-                    id=node.group(1),
-                    file=file_path,
+                    id=node_id,
+                    file=document.path,
                     line_number=line_number,
-                    family=family,
+                    family=document.family,
                     item_kind="node",
                     anchor_kind=None,
                     edges=tuple(edges),
                     malformed_edges=tuple(malformed),
+                    block_key=key,
+                    end_line=line_number,
+                    physical_parent=parent_key,
+                    logical_parent=parent_key,
                 ),
             )
+            continue
+
+        _append_text(parent, line)
+
+    for key in stack:
+        manifest.blocks[key].end_line = len(document.lines)
+    return f_references
+
+
+def _append_text(block: DocumentBlock, line: str) -> None:
+    block.physical_parts.append(line)
+    block.logical_parts.append(line)
+
+
+def _append_child(parent: DocumentBlock, key: BlockKey) -> None:
+    parent.physical_children.append(key)
+    parent.logical_children.append(key)
+    parent.physical_parts.append(key)
+    parent.logical_parts.append(key)
+
+
+def _nearest_ancestor(
+    manifest: GraphManifest,
+    stack: list[BlockKey],
+    predicate,
+) -> DocumentBlock | None:
+    for key in reversed(stack):
+        block = manifest.blocks[key]
+        if predicate(block):
+            return block
+    return None
+
+
+def _finalize_document(manifest: GraphManifest, document: ParsedDocument) -> None:
+    root = manifest.blocks[document.root_key]
+    first_root_heading = next(
+        (
+            manifest.blocks[child].line_number
+            for child in root.physical_children
+            if manifest.blocks[child].kind == "heading"
+        ),
+        None,
+    )
+    root_body_end = (first_root_heading - 1) if first_root_heading is not None else len(document.lines)
+    if root_body_end >= 1:
+        root.body_span = SourceSpan(document.path, 1, root_body_end)
+    for key, block in manifest.blocks.items():
+        if key[0] != document.path or block.kind == "root":
+            continue
+        if block.kind == "heading":
+            first_child_heading = next(
+                (
+                    manifest.blocks[child].line_number
+                    for child in block.physical_children
+                    if manifest.blocks[child].kind == "heading"
+                ),
+                None,
+            )
+            body_start = block.line_number + 1
+            body_end = (first_child_heading - 1) if first_child_heading is not None else block.end_line
+            if body_start <= body_end:
+                block.body_span = SourceSpan(document.path, body_start, body_end)
+        item = manifest.items.get(block.item_id or "")
+        if item is not None and item.block_key == key:
+            item.end_line = block.end_line
+            item.body_span = block.body_span
 
 
 def _record_item(manifest: GraphManifest, item: GraphItem) -> None:
     previous = manifest.items.get(item.id)
     if previous is not None:
-        manifest.errors.append(
-            f"duplicate id `{item.id}` at {_loc(manifest.root, item)}; first seen at {_loc(manifest.root, previous)}"
+        manifest.duplicates.add(item.id)
+        _add_error(
+            manifest,
+            f"duplicate id `{item.id}` at {_loc(manifest.root, item)}; "
+            f"first seen at {_loc(manifest.root, previous)}",
+            item.file,
+            item.line_number,
         )
         return
     manifest.items[item.id] = item
     if item.item_kind == "heading":
         manifest.headings[item.id] = item
+
+
+def _record_backing(manifest: GraphManifest, reference: BackingReference, item: GraphItem) -> None:
+    manifest.backing.setdefault(item.id, reference)
+    backing_path_key = _backing_path_key(manifest.root, reference.path)
+    previous = manifest.backing_paths.get(backing_path_key)
+    if previous is not None and (previous.id != reference.id or previous.kind != reference.kind):
+        _add_error(
+            manifest,
+            f"backing file `{_relative(manifest.root, reference.path)}` is claimed by "
+            f"{previous.kind} heading `{previous.id}` at "
+            f"{_relative(manifest.root, previous.source_file)}:{previous.line_number} and "
+            f"{reference.kind} heading `{reference.id}` at "
+            f"{_relative(manifest.root, reference.source_file)}:{reference.line_number}",
+            reference.source_file,
+            reference.line_number,
+        )
+    else:
+        manifest.backing_paths[backing_path_key] = reference
+
+    if not _is_regular_file_under_root(manifest.root, reference.path):
+        relative = _relative(manifest.root, reference.path)
+        if reference.kind == "S#":
+            message = f"missing skill file `{relative}`"
+        elif reference.kind == "M#":
+            message = f"missing Markdown backing file `{relative}`"
+        else:
+            message = f"missing F# backing file `{relative}`"
+        _add_error(
+            manifest,
+            f"{message} for heading at {_loc(manifest.root, item)}",
+            item.file,
+            item.line_number,
+        )
+    elif reference.kind != "F#":
+        manifest.non_graph_files.append(reference.path.resolve(strict=True))
 
 
 def _backing_reference(root: Path, item: GraphItem) -> BackingReference | None:
@@ -300,23 +815,81 @@ def _backing_reference(root: Path, item: GraphItem) -> BackingReference | None:
     )
 
 
+def _attach_detail_document(manifest: GraphManifest, owner_key: BlockKey, detail_root_key: BlockKey) -> None:
+    owner = manifest.blocks[owner_key]
+    detail_root = manifest.blocks[detail_root_key]
+    detail_parts = list(detail_root.logical_parts)
+    if not detail_parts:
+        return
+    if not owner.logical_parts or not isinstance(owner.logical_parts[-1], str) or owner.logical_parts[-1].strip():
+        owner.logical_parts.append("")
+    for part in detail_parts:
+        if isinstance(part, tuple):
+            child = manifest.blocks[part]
+            if child.logical_parent not in {detail_root_key, owner_key}:
+                _add_error(
+                    manifest,
+                    f"graph file `{_relative(manifest.root, child.source_path)}` is attached by more than one F# heading",
+                    owner.source_path,
+                    owner.line_number,
+                )
+                continue
+            child.logical_parent = owner_key
+            owner.logical_children.append(part)
+            _update_item_logical_parent(manifest, child)
+        owner.logical_parts.append(part)
+
+
+def _update_item_logical_parent(manifest: GraphManifest, block: DocumentBlock) -> None:
+    if block.item_id is None:
+        return
+    item = manifest.items.get(block.item_id)
+    if item is not None and item.block_key == block.key:
+        item.logical_parent = block.logical_parent
+
+
 def _validate_items(manifest: GraphManifest) -> None:
     for item in manifest.items.values():
         seen_edges: set[tuple[str, str]] = set()
         for malformed_edge in item.malformed_edges:
-            manifest.errors.append(f"malformed edge `{malformed_edge}` at {_loc(manifest.root, item)}")
+            _add_error(
+                manifest,
+                f"malformed edge `{malformed_edge}` at {_loc(manifest.root, item)}",
+                item.file,
+                item.line_number,
+            )
         for edge_type, target in item.edges:
             edge = (edge_type, target)
             if edge in seen_edges:
-                manifest.errors.append(f"duplicate edge `{edge_type}:{target}` at {_loc(manifest.root, item)}")
+                _add_error(
+                    manifest,
+                    f"duplicate edge `{edge_type}:{target}` at {_loc(manifest.root, item)}",
+                    item.file,
+                    item.line_number,
+                )
                 continue
             seen_edges.add(edge)
             if target == item.id:
-                manifest.errors.append(f"self-edge `{edge_type}:{target}` at {_loc(manifest.root, item)}")
+                _add_error(
+                    manifest,
+                    f"self-edge `{edge_type}:{target}` at {_loc(manifest.root, item)}",
+                    item.file,
+                    item.line_number,
+                )
             elif edge_type not in KNOWN_EDGE_TYPES:
-                manifest.errors.append(f"unknown edge type `{edge_type}` at {_loc(manifest.root, item)}")
+                _add_error(
+                    manifest,
+                    f"unknown edge type `{edge_type}` at {_loc(manifest.root, item)}",
+                    item.file,
+                    item.line_number,
+                )
             elif target not in manifest.items:
-                manifest.errors.append(f"dangling edge `{edge_type}:{target}` at {_loc(manifest.root, item)}")
+                _add_error(
+                    manifest,
+                    f"dangling edge `{edge_type}:{target}` at {_loc(manifest.root, item)}",
+                    item.file,
+                    item.line_number,
+                )
 
 
 def _validate_focus(manifest: GraphManifest) -> None:
@@ -324,16 +897,100 @@ def _validate_focus(manifest: GraphManifest) -> None:
     for item_id, path, line_number in manifest.focus_ids:
         relative = _relative(manifest.root, path)
         if item_id in seen:
-            manifest.errors.append(f"duplicate Focus reference `{item_id}` at {relative}:{line_number}")
+            _add_error(
+                manifest,
+                f"duplicate Focus reference `{item_id}` at {relative}:{line_number}",
+                path,
+                line_number,
+            )
             continue
         seen.add(item_id)
         item = manifest.items.get(item_id)
         if item is None:
-            manifest.errors.append(f"dangling Focus reference `{item_id}` at {relative}:{line_number}")
-        elif item.item_kind != "heading" or item.family != "pursuit":
-            manifest.errors.append(
-                f"Focus reference `{item_id}` must target a Pursuit heading at {relative}:{line_number}"
+            _add_error(
+                manifest,
+                f"dangling Focus reference `{item_id}` at {relative}:{line_number}",
+                path,
+                line_number,
             )
+        elif item.item_kind != "heading" or item.family != "pursuit":
+            _add_error(
+                manifest,
+                f"Focus reference `{item_id}` must target a Pursuit heading at {relative}:{line_number}",
+                path,
+                line_number,
+            )
+
+
+def _validate_addressed_body(manifest: GraphManifest) -> None:
+    for document in manifest.documents.values():
+        structured_lines = {
+            block.line_number
+            for key, block in manifest.blocks.items()
+            if key[0] == document.path and block.kind in {"node", "focus"}
+        }
+        for key, block in manifest.blocks.items():
+            if key[0] != document.path or block.kind not in {"root", "heading"}:
+                continue
+            if block.kind == "heading" and block.item_id is not None:
+                continue
+            offending_line = _first_nonblank_body_line(block, document, structured_lines)
+            if offending_line is not None:
+                _add_error(
+                    manifest,
+                    f"MF document prose must belong to an addressable heading at "
+                    f"{document.relative_path}:{offending_line}",
+                    document.path,
+                    offending_line,
+                )
+
+
+def _first_nonblank_body_line(
+    block: DocumentBlock,
+    document: ParsedDocument,
+    structured_lines: set[int],
+) -> int | None:
+    if block.body_span is None:
+        return None
+    for line_number in range(block.body_span.start_line, block.body_span.end_line + 1):
+        if line_number in structured_lines:
+            continue
+        if document.lines[line_number - 1].strip():
+            return line_number
+    return None
+
+
+def _assign_logical_metadata(manifest: GraphManifest) -> None:
+    rank = 0
+    seen: set[BlockKey] = set()
+    for root_key in manifest.root_blocks:
+        for block in manifest.walk_logical(root_key):
+            if block.key in seen:
+                continue
+            seen.add(block.key)
+            block.traversal_rank = rank
+            rank += 1
+            if block.item_id is not None:
+                item = manifest.items.get(block.item_id)
+                if item is not None and item.block_key == block.key:
+                    item.traversal_rank = block.traversal_rank
+                    item.logical_parent = block.logical_parent
+    for item in manifest.items.values():
+        if item.block_key is not None:
+            item.content_hash = hashlib.sha256(
+                _flatten_logical_block(manifest, item.block_key).rstrip("\r\n").encode("utf-8")
+            ).hexdigest()
+
+
+def _flatten_logical_block(manifest: GraphManifest, key: BlockKey) -> str:
+    block = manifest.blocks[key]
+    lines = [block.line] if block.kind != "root" else []
+    for part in block.logical_parts:
+        if isinstance(part, tuple):
+            lines.extend(_flatten_logical_block(manifest, part).splitlines())
+        else:
+            lines.append(part)
+    return "\n".join(lines)
 
 
 def _parse_edges(edge_text: str) -> tuple[list[tuple[str, str]], list[str]]:
@@ -349,6 +1006,27 @@ def _parse_edges(edge_text: str) -> tuple[list[tuple[str, str]], list[str]]:
         else:
             edges.append((match.group(1), match.group(2)))
     return edges, malformed
+
+
+def _add_error(
+    manifest: GraphManifest,
+    message: str,
+    path: Path | None = None,
+    line_number: int | None = None,
+) -> None:
+    manifest.errors.append(message)
+    manifest.diagnostics.append(
+        GraphDiagnostic(
+            message=message,
+            namespace=manifest.namespace,
+            path=_relative(manifest.root, path) if path is not None else None,
+            line_number=line_number,
+        )
+    )
+
+
+def _block_loc(manifest: GraphManifest, block: DocumentBlock) -> str:
+    return f"{_relative(manifest.root, block.source_path)}:{block.line_number}"
 
 
 def _loc(root: Path, item: GraphItem) -> str:
@@ -375,3 +1053,8 @@ def _is_regular_file_under_root(root: Path, path: Path) -> bool:
     except (OSError, ValueError):
         return False
     return True
+
+
+def _read_text(path: Path) -> str:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return handle.read()

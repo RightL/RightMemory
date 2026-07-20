@@ -56,6 +56,8 @@ class MemoryToolsTests(unittest.TestCase):
             self.assertIn("Tokens expire after one hour.", rg_result)
 
     def test_retrieve_read_skill_returns_skill_body_by_id(self):
+        (self.root / "MEMORY.md").write_text("# Skills\n\n## Alpha {S#alpha}\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY_SKILL_alpha.md").write_text("# Alpha Skill\n\nUse alpha.\n", encoding="utf-8")
         tools = MemoryTools(self.root, role="retrieve")
 
@@ -74,9 +76,11 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "MEMORY.md").write_text(
             "# Root {#root}\n\n"
             "## Detail {F#detail}\n\n"
-            "## Markdown {M#markdown}\n",
+            "## Markdown {M#markdown}\n\n"
+            "## Alpha {S#alpha}\n",
             encoding="utf-8",
         )
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY_detail.md").write_text(payload, encoding="utf-8")
         (self.root / "MEMORY_markdown.md").write_text(payload, encoding="utf-8")
         (self.root / "MEMORY_SKILL_alpha.md").write_text(payload, encoding="utf-8")
@@ -91,6 +95,8 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertTrue(tools.read_mf("auth-api").endswith("2: END"))
 
     def test_retrieve_read_skill_failure_lists_available_ids_without_paths(self):
+        (self.root / "MEMORY.md").write_text("# Skills\n\n## Beta {S#beta}\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY_SKILL_beta.md").write_text("# Beta Skill\n", encoding="utf-8")
         tools = MemoryTools(self.root, role="retrieve")
 
@@ -105,6 +111,8 @@ class MemoryToolsTests(unittest.TestCase):
         outside = self.root.parent / f"{self.root.name}-outside-skill.md"
         self.addCleanup(outside.unlink, missing_ok=True)
         outside.write_text("# Outside\n\nsecret\n", encoding="utf-8")
+        (self.root / "MEMORY.md").write_text("# Skills\n\n## Alpha {S#alpha}\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         self._symlink_or_skip(self.root / "MEMORY_SKILL_alpha.md", outside)
         tools = MemoryTools(self.root, role="retrieve")
 

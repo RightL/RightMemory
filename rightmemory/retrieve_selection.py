@@ -9,13 +9,20 @@ from typing import Iterable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .graph import ANCHOR_RE, NODE_RE, GraphManifest, build_graph_manifest
+from .graph import (
+    ITEM_ID_PATTERN,
+    BlockKey,
+    DocumentBlock,
+    GraphManifest,
+    build_graph_manifest,
+    build_mf_manifest,
+    is_valid_item_id,
+)
 from .recent_submitted import RecentSubmittedMemoryEntry
 
 
 NO_STRONG_MATCH = "no strong match"
-SOURCE_ID_RE = re.compile(r"^(M#|S#|MF#)([A-Za-z0-9_.-]+)$")
-PLAIN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+SOURCE_ID_RE = re.compile(rf"^(M#|S#|MF#)({ITEM_ID_PATTERN})$")
 HEADING_RE = re.compile(r"^(#{1,})\s+")
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 MF_CANONICAL_PATH = Path(".runtime/shared_views/imports")
@@ -56,7 +63,7 @@ class SourceSelection(BaseModel):
     @classmethod
     def validate_ids(cls, values: list[str]) -> list[str]:
         for value in values:
-            if PLAIN_ID_RE.fullmatch(value) is None:
+            if not is_valid_item_id(value):
                 raise ValueError(f"invalid source-scoped id: {value!r}")
         return values
 
@@ -72,7 +79,7 @@ class RetrieveSelection(BaseModel):
     @classmethod
     def validate_local_ids(cls, values: list[str]) -> list[str]:
         for value in values:
-            if PLAIN_ID_RE.fullmatch(value) is None:
+            if not is_valid_item_id(value):
                 raise ValueError(f"invalid local graph id: {value!r}")
         return values
 
@@ -139,202 +146,6 @@ class RenderedRetrieveSelection:
     recent_entries: list[RecentSubmittedMemoryEntry]
 
 
-@dataclass(eq=False)
-class _Entry:
-    kind: str
-    line: str = ""
-    depth: int = 0
-    line_number: int = 0
-    end_line: int = 0
-    item_id: str | None = None
-    item_kind: str | None = None
-    anchor_kind: str | None = None
-    family: str = ""
-    source_path: Path | None = None
-    focus_target: str | None = None
-    parent: _Entry | None = None
-    parts: list[str | _Entry] = field(default_factory=list)
-    rank: int = -1
-
-
-class _TreeParser:
-    def __init__(self, manifest: GraphManifest | None = None):
-        self.manifest = manifest
-        self.by_id: dict[str, _Entry] = {}
-        self.duplicates: set[str] = set()
-        self._items_by_location: dict[tuple[Path, int], object] = {}
-        self._focus_by_location: dict[tuple[Path, int], str] = {}
-        if manifest is not None:
-            self._items_by_location = {
-                (item.file.resolve(), item.line_number): item for item in manifest.items.values()
-            }
-            self._focus_by_location = {
-                (path.resolve(), line_number): item_id
-                for item_id, path, line_number in manifest.focus_ids
-            }
-
-    def parse(self, path: Path, family: str, *, scoped: bool = False) -> _Entry:
-        root = _Entry(kind="root", family=family, source_path=path)
-        stack: list[_Entry] = []
-        fence_char: str | None = None
-        fence_length = 0
-        text = _read_text(path)
-        lines = text.splitlines()
-        for line_number, line in enumerate(lines, start=1):
-            parent = stack[-1] if stack else root
-            fence = FENCE_RE.match(line)
-            if fence is not None:
-                parent.parts.append(line)
-                marker = fence.group(1)
-                if fence_char is None:
-                    fence_char = marker[0]
-                    fence_length = len(marker)
-                elif marker[0] == fence_char and len(marker) >= fence_length:
-                    fence_char = None
-                    fence_length = 0
-                continue
-            if fence_char is not None:
-                parent.parts.append(line)
-                continue
-
-            heading = HEADING_RE.match(line)
-            if heading is not None:
-                depth = len(heading.group(1))
-                while stack and stack[-1].depth >= depth:
-                    stack.pop().end_line = line_number - 1
-                parent = stack[-1] if stack else root
-                graph_item = self._items_by_location.get((path.resolve(), line_number))
-                item_id = getattr(graph_item, "id", None)
-                anchor_kind = getattr(graph_item, "anchor_kind", None)
-                item_kind = getattr(graph_item, "item_kind", None)
-                if scoped:
-                    anchor = ANCHOR_RE.match(line)
-                    if anchor is not None:
-                        anchor_kind = anchor.group(2)
-                        item_id = anchor.group(3)
-                        item_kind = "heading"
-                entry = _Entry(
-                    kind="heading",
-                    line=line,
-                    depth=depth,
-                    line_number=line_number,
-                    end_line=line_number,
-                    item_id=item_id,
-                    item_kind=item_kind,
-                    anchor_kind=anchor_kind,
-                    family=family,
-                    source_path=path,
-                    parent=parent,
-                )
-                parent.parts.append(entry)
-                stack.append(entry)
-                self._register(entry)
-                continue
-
-            focus_target = self._focus_by_location.get((path.resolve(), line_number))
-            if focus_target is not None:
-                entry = _Entry(
-                    kind="focus",
-                    line=line,
-                    line_number=line_number,
-                    end_line=line_number,
-                    family=family,
-                    source_path=path,
-                    focus_target=focus_target,
-                    parent=parent,
-                )
-                parent.parts.append(entry)
-                continue
-
-            graph_item = self._items_by_location.get((path.resolve(), line_number))
-            item_id = getattr(graph_item, "id", None)
-            item_kind = getattr(graph_item, "item_kind", None)
-            if scoped:
-                node = NODE_RE.match(line)
-                if node is not None:
-                    item_id = node.group(1)
-                    item_kind = "node"
-            if item_id is not None and item_kind == "node":
-                entry = _Entry(
-                    kind="node",
-                    line=line,
-                    line_number=line_number,
-                    end_line=line_number,
-                    item_id=item_id,
-                    item_kind="node",
-                    family=family,
-                    source_path=path,
-                    parent=parent,
-                )
-                parent.parts.append(entry)
-                self._register(entry)
-            else:
-                parent.parts.append(line)
-        for entry in stack:
-            entry.end_line = len(lines)
-        root.end_line = len(lines)
-        return root
-
-    def _register(self, entry: _Entry) -> None:
-        if entry.item_id is None:
-            return
-        if entry.item_id in self.by_id:
-            self.duplicates.add(entry.item_id)
-            return
-        self.by_id[entry.item_id] = entry
-
-
-class _LogicalGraph:
-    def __init__(self, memory_root: Path, manifest: GraphManifest):
-        self.memory_root = memory_root
-        self.manifest = manifest
-        self.parser = _TreeParser(manifest)
-        self.roots: list[_Entry] = []
-        for name, family in (("MEMORY.md", "memory"), ("PURSUITS.md", "pursuit")):
-            path = memory_root / name
-            if _safe_source_file(memory_root, path):
-                root = self.parser.parse(path, family)
-                self._expand_f_backing(root, set())
-                self.roots.append(root)
-        rank = 0
-        for root in self.roots:
-            for entry in _walk_entries(root):
-                entry.rank = rank
-                rank += 1
-
-    @property
-    def by_id(self) -> dict[str, _Entry]:
-        return self.parser.by_id
-
-    def _expand_f_backing(self, root: _Entry, path_stack: set[Path]) -> None:
-        for part in list(root.parts):
-            if not isinstance(part, _Entry):
-                continue
-            self._expand_f_backing(part, path_stack)
-            if part.anchor_kind != "F#" or part.item_id is None:
-                continue
-            reference = self.manifest.backing.get(part.item_id)
-            if (
-                reference is None
-                or reference.kind != "F#"
-                or not _safe_source_file(self.memory_root, reference.path)
-            ):
-                continue
-            resolved = reference.path.resolve()
-            if resolved in path_stack:
-                raise RetrieveSelectionError(f"cyclic F# backing path for local id `{part.item_id}`")
-            detail_root = self.parser.parse(reference.path, part.family)
-            self._expand_f_backing(detail_root, {*path_stack, resolved})
-            detail_parts = list(detail_root.parts)
-            if detail_parts:
-                if not part.parts or not isinstance(part.parts[-1], str) or part.parts[-1].strip():
-                    part.parts.append("")
-                for child in detail_parts:
-                    if isinstance(child, _Entry):
-                        child.parent = part
-                    part.parts.append(child)
-
-
 @dataclass(frozen=True)
 class _ResolvedRanges:
     text: str
@@ -367,17 +178,15 @@ class RetrieveSelectionRenderer:
         delivered = delivered or RetrieveDeliveryCoverage()
         recent_entries = recent_entries or []
         manifest = build_graph_manifest(self.memory_root)
-        graph = _LogicalGraph(self.memory_root, manifest)
 
         local_text, local_delivery = self._render_local(
             selection.ids,
-            graph,
+            manifest,
             delivered,
             include_returned=include_returned,
         )
         source_sections = self._render_sources(
             selection.sources,
-            graph,
             manifest,
             delivered,
             include_returned=include_returned,
@@ -427,49 +236,55 @@ class RetrieveSelectionRenderer:
     def _render_local(
         self,
         requested_ids: list[str],
-        graph: _LogicalGraph,
+        manifest: GraphManifest,
         delivered: RetrieveDeliveryCoverage,
         *,
         include_returned: bool,
     ) -> tuple[str, dict[str, str]]:
-        full_entries: set[_Entry] = set()
-        exact_entries: set[_Entry] = set()
+        full_entries: set[BlockKey] = set()
+        exact_entries: set[BlockKey] = set()
         selected_pursuits: set[str] = set()
         delivery: dict[str, str] = {}
         for item_id in _unique(requested_ids):
-            duplicate_prefix = f"duplicate id `{item_id}` "
-            if item_id in graph.parser.duplicates or any(
-                error.startswith(duplicate_prefix) for error in graph.manifest.errors
-            ):
+            if item_id in manifest.duplicates:
                 raise RetrieveSelectionError(f"local graph id `{item_id}` is duplicated")
-            entry = graph.by_id.get(item_id)
-            if entry is None:
+            item = manifest.items.get(item_id)
+            entry = manifest.block_for_id(item_id)
+            if item is None or entry is None:
                 raise RetrieveSelectionError(f"unknown local graph id `{item_id}`")
-            version = _entry_hash(entry, mq_notice=True)
+            version = item.content_hash
             if not include_returned and delivered.local_items.get(item_id) == version:
                 continue
             if entry.kind == "heading":
-                full_entries.add(entry)
+                full_entries.add(entry.key)
                 if entry.family == "pursuit":
                     selected_pursuits.add(item_id)
-                for descendant in _walk_entries(entry, include_self=True):
+                for descendant in manifest.walk_logical(entry.key, include_self=True):
                     if descendant.item_id is not None:
-                        delivery[descendant.item_id] = _entry_hash(descendant, mq_notice=True)
+                        descendant_item = manifest.items.get(descendant.item_id)
+                        if descendant_item is not None:
+                            delivery[descendant.item_id] = descendant_item.content_hash
             else:
-                exact_entries.add(entry)
+                exact_entries.add(entry.key)
                 delivery[item_id] = version
 
-        focus_entries: set[_Entry] = set()
+        focus_entries: set[BlockKey] = set()
         if selected_pursuits:
-            for root in graph.roots:
-                for entry in _walk_entries(root):
-                    if entry.kind == "focus" and entry.focus_target in selected_pursuits:
-                        focus_entries.add(entry)
+            for key in manifest.focus_blocks:
+                entry = manifest.blocks[key]
+                if entry.focus_target in selected_pursuits:
+                    focus_entries.add(key)
         text = "\n\n".join(
             part
             for part in (
-                _render_selected_tree(root, full_entries, exact_entries | focus_entries, mq_notice=True)
-                for root in graph.roots
+                _render_selected_tree(
+                    manifest,
+                    root,
+                    full_entries,
+                    exact_entries | focus_entries,
+                    mq_notice=True,
+                )
+                for root in manifest.root_blocks
             )
             if part
         )
@@ -478,7 +293,6 @@ class RetrieveSelectionRenderer:
     def _render_sources(
         self,
         requested_sources: list[SourceSelection],
-        graph: _LogicalGraph,
         manifest: GraphManifest,
         delivered: RetrieveDeliveryCoverage,
         *,
@@ -495,12 +309,9 @@ class RetrieveSelectionRenderer:
             match = SOURCE_ID_RE.fullmatch(source_id)
             assert match is not None
             marker, owner_id = match.groups()
-            duplicate_prefix = f"duplicate id `{owner_id}` "
-            if owner_id in graph.parser.duplicates or any(
-                error.startswith(duplicate_prefix) for error in manifest.errors
-            ):
+            if owner_id in manifest.duplicates:
                 raise RetrieveSelectionError(f"linked source owner id `{owner_id}` is duplicated")
-            owner = graph.by_id.get(owner_id)
+            owner = manifest.block_for_id(owner_id)
             if owner is None or owner.kind != "heading":
                 raise RetrieveSelectionError(f"unknown linked source `{source_id}`")
             if owner.anchor_kind != marker:
@@ -548,7 +359,7 @@ class RetrieveSelectionRenderer:
     def _render_markdown_source(
         self,
         source_id: str,
-        owner: _Entry,
+        owner: DocumentBlock,
         ids: list[str],
         ranges: list[LineRange],
         manifest: GraphManifest,
@@ -571,12 +382,12 @@ class RetrieveSelectionRenderer:
             delivered.ranges,
             include_returned=include_returned,
         )
-        return _RenderedSource(owner.rank, source_id, resolved.text, ranges=resolved.delivered)
+        return _RenderedSource(owner.traversal_rank, source_id, resolved.text, ranges=resolved.delivered)
 
     def _render_skill_source(
         self,
         source_id: str,
-        owner: _Entry,
+        owner: DocumentBlock,
         ids: list[str],
         ranges: list[LineRange],
         manifest: GraphManifest,
@@ -592,9 +403,9 @@ class RetrieveSelectionRenderer:
         text = _read_text(reference.path).rstrip("\r\n")
         version = _hash_text(text)
         if not include_returned and delivered.complete_sources.get(source_id) == version:
-            return _RenderedSource(owner.rank, source_id, "")
+            return _RenderedSource(owner.traversal_rank, source_id, "")
         return _RenderedSource(
-            owner.rank,
+            owner.traversal_rank,
             source_id,
             text,
             complete_sources={source_id: version},
@@ -603,7 +414,7 @@ class RetrieveSelectionRenderer:
     def _render_mf_source(
         self,
         source_id: str,
-        owner: _Entry,
+        owner: DocumentBlock,
         ids: list[str],
         ranges: list[LineRange],
         delivered: RetrieveDeliveryCoverage,
@@ -617,52 +428,63 @@ class RetrieveSelectionRenderer:
         if not _safe_source_file(self.memory_root, path):
             raise RetrieveSelectionError(f"missing canonical mirrored view `{source_id}`")
         text = _read_text(path)
-        parser = _TreeParser()
-        root = parser.parse(path, "external", scoped=True)
-        rank = 0
-        for entry in _walk_entries(root):
-            entry.rank = rank
-            rank += 1
+        mf_manifest = build_mf_manifest(path.parent, owner_id)
 
-        full_entries: set[_Entry] = set()
-        exact_entries: set[_Entry] = set()
+        full_entries: set[BlockKey] = set()
+        exact_entries: set[BlockKey] = set()
         requested_item_ids: set[str] = set()
         requested_item_intervals: list[tuple[int, int]] = []
         source_delivery: dict[str, str] = {}
         for item_id in _unique(ids):
-            if item_id in parser.duplicates:
+            if item_id in mf_manifest.duplicates:
                 raise RetrieveSelectionError(f"source-scoped id `{item_id}` is duplicated in `{source_id}`")
-            entry = parser.by_id.get(item_id)
-            if entry is None:
+            item = mf_manifest.items.get(item_id)
+            entry = mf_manifest.block_for_id(item_id)
+            if item is None or entry is None:
                 raise RetrieveSelectionError(f"unknown source-scoped id `{item_id}` in `{source_id}`")
             key = f"{source_id}:{item_id}"
-            version = _entry_hash(entry, mq_notice=False)
+            version = item.content_hash
             selected_entries = (
-                list(_walk_entries(entry, include_self=True))
+                list(mf_manifest.walk_logical(entry.key, include_self=True))
                 if entry.kind == "heading"
                 else [entry]
             )
             for selected_entry in selected_entries:
                 if selected_entry.item_id is not None:
                     requested_item_ids.add(selected_entry.item_id)
-            requested_item_intervals.append((entry.line_number, entry.end_line))
+            if entry.source_path == path.resolve():
+                requested_item_intervals.append((entry.line_number, entry.end_line))
             if not include_returned and delivered.source_items.get(key) == version:
                 continue
             if entry.kind == "heading":
-                full_entries.add(entry)
-                for descendant in _walk_entries(entry, include_self=True):
+                full_entries.add(entry.key)
+                for descendant in mf_manifest.walk_logical(entry.key, include_self=True):
                     if descendant.item_id is not None:
                         descendant_key = f"{source_id}:{descendant.item_id}"
-                        source_delivery[descendant_key] = _entry_hash(descendant, mq_notice=False)
+                        descendant_item = mf_manifest.items.get(descendant.item_id)
+                        if descendant_item is not None:
+                            source_delivery[descendant_key] = descendant_item.content_hash
             else:
-                exact_entries.add(entry)
+                exact_entries.add(entry.key)
                 source_delivery[key] = version
-        tree_text = _render_selected_tree(root, full_entries, exact_entries, mq_notice=False)
+        tree_text = "\n\n".join(
+            rendered
+            for root in mf_manifest.root_blocks
+            if (
+                rendered := _render_selected_tree(
+                    mf_manifest,
+                    root,
+                    full_entries,
+                    exact_entries,
+                    mq_notice=False,
+                )
+            )
+        )
 
         addressable_by_line = {
-            entry.line_number: entry.item_id
-            for entry in _walk_entries(root)
-            if entry.item_id is not None
+            item.line_number: item.id
+            for item in mf_manifest.items.values()
+            if item.file == path.resolve()
         }
         for selected_range in ranges:
             invalid_lines = [
@@ -678,12 +500,12 @@ class RetrieveSelectionRenderer:
                 )
         previously_delivered_item_intervals = []
         if not include_returned:
-            for entry in _walk_entries(root):
-                if entry.item_id is None:
+            for item in mf_manifest.items.values():
+                if item.file != path.resolve():
                     continue
-                key = f"{source_id}:{entry.item_id}"
-                if delivered.source_items.get(key) == _entry_hash(entry, mq_notice=False):
-                    previously_delivered_item_intervals.append((entry.line_number, entry.end_line))
+                key = f"{source_id}:{item.id}"
+                if delivered.source_items.get(key) == item.content_hash:
+                    previously_delivered_item_intervals.append((item.line_number, item.end_line))
         resolved = _resolve_line_ranges(
             source_id,
             text,
@@ -694,7 +516,7 @@ class RetrieveSelectionRenderer:
         ) if ranges else _ResolvedRanges("", [])
         source_text = "\n\n".join(part for part in (tree_text, resolved.text) if part)
         return _RenderedSource(
-            owner.rank,
+            owner.traversal_rank,
             source_id,
             source_text,
             source_items=source_delivery,
@@ -748,68 +570,59 @@ def parse_retrieve_selection_json(value: str) -> RetrieveSelection:
 
 
 def _render_selected_tree(
-    root: _Entry,
-    full_entries: set[_Entry],
-    exact_entries: set[_Entry],
+    manifest: GraphManifest,
+    root: BlockKey,
+    full_entries: set[BlockKey],
+    exact_entries: set[BlockKey],
     *,
     mq_notice: bool,
 ) -> str:
-    memo: dict[_Entry, bool] = {}
+    memo: dict[BlockKey, bool] = {}
 
-    def relevant(entry: _Entry) -> bool:
-        if entry in full_entries or entry in exact_entries:
+    def relevant(key: BlockKey) -> bool:
+        if key in full_entries or key in exact_entries:
             return True
-        if entry in memo:
-            return memo[entry]
-        value = any(relevant(part) for part in entry.parts if isinstance(part, _Entry))
-        memo[entry] = value
+        if key in memo:
+            return memo[key]
+        block = manifest.blocks[key]
+        value = any(relevant(part) for part in block.logical_parts if isinstance(part, tuple))
+        memo[key] = value
         return value
 
-    def render_entry(entry: _Entry) -> str:
-        if entry in full_entries:
-            return _flatten_entry(entry, mq_notice=mq_notice).rstrip("\r\n")
-        if entry in exact_entries and entry.kind in {"node", "focus"}:
-            return entry.line
+    def render_entry(key: BlockKey) -> str:
+        block = manifest.blocks[key]
+        if key in full_entries:
+            return _flatten_block(manifest, key, mq_notice=mq_notice).rstrip("\r\n")
+        if key in exact_entries and block.kind in {"node", "focus"}:
+            return block.line
         children = [
             render_entry(part)
-            for part in entry.parts
-            if isinstance(part, _Entry) and relevant(part)
+            for part in block.logical_parts
+            if isinstance(part, tuple) and relevant(part)
         ]
         children = [child for child in children if child]
-        if entry.kind == "root":
+        if block.kind == "root":
             return "\n\n".join(children)
         if not children:
-            return entry.line if entry in exact_entries else ""
-        return "\n\n".join((entry.line, *children))
+            return block.line if key in exact_entries else ""
+        return "\n\n".join((block.line, *children))
 
     return render_entry(root).strip("\r\n")
 
 
-def _flatten_entry(entry: _Entry, *, mq_notice: bool) -> str:
-    lines = [entry.line] if entry.kind != "root" else []
-    for part in entry.parts:
-        if isinstance(part, _Entry):
-            lines.extend(_flatten_entry(part, mq_notice=mq_notice).splitlines())
+def _flatten_block(manifest: GraphManifest, key: BlockKey, *, mq_notice: bool) -> str:
+    block = manifest.blocks[key]
+    lines = [block.line] if block.kind != "root" else []
+    for part in block.logical_parts:
+        if isinstance(part, tuple):
+            lines.extend(_flatten_block(manifest, part, mq_notice=mq_notice).splitlines())
         else:
             lines.append(part)
-    if mq_notice and entry.anchor_kind == "MQ#" and entry.item_id is not None:
+    if mq_notice and block.anchor_kind == "MQ#" and block.item_id is not None:
         if lines and lines[-1].strip():
             lines.append("")
-        lines.append(f"Provider question context is available for `MQ#{entry.item_id}`.")
+        lines.append(f"Provider question context is available for `MQ#{block.item_id}`.")
     return "\n".join(lines)
-
-
-def _entry_hash(entry: _Entry, *, mq_notice: bool) -> str:
-    return _hash_text(_flatten_entry(entry, mq_notice=mq_notice).rstrip("\r\n"))
-
-
-def _walk_entries(root: _Entry, *, include_self: bool = False) -> Iterable[_Entry]:
-    if include_self and root.kind != "root":
-        yield root
-    for part in root.parts:
-        if isinstance(part, _Entry):
-            yield part
-            yield from _walk_entries(part)
 
 
 def _resolve_line_ranges(
