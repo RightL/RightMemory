@@ -63,7 +63,7 @@ from .shared_view_files import (
     pull_all_file_views,
     record_file_view_publish_results,
 )
-from .sync import SyncManager, SyncResult
+from .sync import SyncManager, SyncRepairOutcome, SyncResult
 from .tools import MemoryTools
 from .update_review import UpdateExecutionLock, UpdateReviewStore
 
@@ -72,7 +72,7 @@ AUTOMATIC_WRITE_ROLES = {"dreamer", "insight", "pruner", "update"}
 CYCLE_ROLES = {"dreamer", "insight"}
 HISTORY_READ_ROLES = {"historian", "pruner"}
 SYNC_TOOL_ROLES = {"sync-reconciler"}
-SYNC_REPAIR_STATUSES = {"conflict", "dirty"}
+SYNC_DIRTY_STATUS = "dirty"
 SYNC_REPAIR_SESSION_ID = "runtime-sync-repair"
 SUPPORTED_MODEL_SETTINGS = {
     "max_tokens",
@@ -1048,11 +1048,12 @@ class RightMemoryRuntime:
 
         repaired = False
         while True:
-            with self._memory_write_lock():
-                preflight_repair = self._sync_preflight_locked()
-                if preflight_repair is None:
+            preflight_repair = self._sync_preflight_locked()
+            if preflight_repair is None:
+                with self._memory_write_lock():
                     result = run_model()
-                    return result, self._sync_after_semantic_turn()
+                self._sync_after_semantic_turn()
+                return result, None
             if repaired:
                 raise RuntimeError(
                     f"sync repair did not clear {preflight_repair.status} state: {preflight_repair.message}"
@@ -1068,8 +1069,7 @@ class RightMemoryRuntime:
         repaired = False
         while True:
             if self.config.sync.enabled:
-                with self._memory_write_lock():
-                    preflight_repair = self._sync_preflight_locked()
+                preflight_repair = self._sync_preflight_locked()
                 if preflight_repair is not None:
                     if repaired:
                         raise RuntimeError(
@@ -1088,8 +1088,7 @@ class RightMemoryRuntime:
                 dirty_main_repaired = True
                 continue
             if self.config.sync.enabled:
-                with self._memory_write_lock():
-                    return result, self._sync_after_semantic_turn()
+                self._sync_after_semantic_turn()
             return result, None
 
     def _should_isolate_write_turn(self) -> bool:
@@ -1101,23 +1100,105 @@ class RightMemoryRuntime:
         return self._sync_manager
 
     def _sync_preflight_locked(self):
-        result = self._sync().preflight()
-        if result.status in SYNC_REPAIR_STATUSES:
+        result = self._sync().pull(repair=self._repair_sync_candidate)
+        self._finish_sync_repair(result)
+        if result.status == SYNC_DIRTY_STATUS:
             return result
+        if result.status == "conflict":
+            raise RuntimeError(result.message)
         return None
 
     def _sync_after_semantic_turn(self):
         if self.config.role not in AUTOMATIC_WRITE_ROLES or not self.config.sync.enabled:
             return None
-        result = self._sync().push()
-        if result.status in SYNC_REPAIR_STATUSES:
-            return result
+        result = self._sync().push(repair=self._repair_sync_candidate)
+        self._finish_sync_repair(result)
         return None
 
     def sync_push(self) -> str:
         """Push committed memory changes to the configured Git upstream."""
-        result = self._sync().push()
+        result = self._sync().push(repair=self._repair_sync_candidate)
+        self._finish_sync_repair(result)
         return result.context_block()
+
+    def _repair_sync_candidate(
+        self,
+        candidate_root: Path,
+        result: SyncResult,
+        operation_id: str,
+    ) -> SyncRepairOutcome:
+        reconciler_config = load_config("sync-reconciler", memory_root=self.config.memory_root)
+        if reconciler_config.memory_root != self.config.memory_root:
+            raise ValueError(
+                "sync-reconciler memory root mismatch: "
+                f"current runtime uses {self.config.memory_root}, "
+                f"sync-reconciler uses {reconciler_config.memory_root}"
+            )
+        runtime = RightMemoryRuntime(reconciler_config)
+        state = _IsolatedStateOverlay(
+            reconciler_config.state_root,
+            "sync-reconciler",
+            SYNC_REPAIR_SESSION_ID,
+            operation_id=operation_id,
+            seed_provider_session=reconciler_config.runtime_mode != "cli-agent",
+        )
+        try:
+            with state as state_root:
+                output = runtime._run_session_turn_in_worktree(
+                    candidate_root,
+                    state_root,
+                    SYNC_REPAIR_SESSION_ID,
+                    self._sync().repair_message(result),
+                )
+        finally:
+            runtime.cleanup()
+        return SyncRepairOutcome(
+            str(output),
+            effects=(
+                OperationEffect(
+                    STATE_EFFECT,
+                    metadata={"role": "sync-reconciler", "session_id": SYNC_REPAIR_SESSION_ID},
+                ),
+            ),
+        )
+
+    def _finish_sync_repair(self, result: SyncResult) -> None:
+        operation_id = result.operation_id
+        if not isinstance(operation_id, str) or not operation_id:
+            return
+        store = SemanticOperationStore(self.config.memory_root)
+        record = store.read(operation_id)
+        if record is None or record.phase not in FINAL_PHASES or record.outcome is None:
+            return
+        pending = {effect.name for effect in store.list_pending_effects(operation_id)}
+        if STATE_EFFECT not in pending:
+            return
+        state = _IsolatedStateOverlay(
+            self.config.state_root,
+            "sync-reconciler",
+            SYNC_REPAIR_SESSION_ID,
+            operation_id=operation_id,
+            seed_provider_session=self.config.runtime_mode != "cli-agent",
+        )
+        sessions = MessageSessionStore(self.config.state_root, "sync-reconciler")
+        try:
+            with sessions.locked(SYNC_REPAIR_SESSION_ID):
+                state.promote_if_current(operation_id, record.outcome.sequence)
+            store.mark_effect(operation_id, STATE_EFFECT, "done")
+        except Exception as exc:
+            try:
+                store.mark_effect(
+                    operation_id,
+                    STATE_EFFECT,
+                    "failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            except Exception:
+                pass
+            print(
+                f"warning: sync repair state remains pending for {operation_id}: {exc}",
+                file=sys.stderr,
+            )
 
     def _run_sync_reconciler(self, result) -> None:
         reconciler_config = load_config("sync-reconciler", memory_root=self.config.memory_root)

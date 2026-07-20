@@ -50,6 +50,42 @@ OPERATION_TRAILER = "RightMemory-Operation"
 WORKTREE_LEASE_DIR = "worktree-leases"
 
 
+class WorktreeLease:
+    """PID-identity lease shared by every temporary RightMemory worktree."""
+
+    def __init__(self, memory_root: Path, role: str, identifier: str):
+        self.memory_root = Path(memory_root).resolve()
+        self.role = _safe_role_slug(role)
+        self.identifier = identifier.strip()
+        if not self.identifier or any(character in self.identifier for character in "/\\\0\r\n"):
+            raise ValueError("worktree lease identifier must be one safe path segment")
+        self.path = (
+            self.memory_root
+            / ".runtime"
+            / WORKTREE_LEASE_DIR
+            / f"{self.role}-{self.identifier}.json"
+        )
+        self._owned = False
+
+    def acquire(self) -> None:
+        if _worktree_lease_is_live(self.path) and not _worktree_lease_owned_by_current_process(
+            self.path
+        ):
+            raise RuntimeError(f"temporary worktree is owned by another live process: {self.identifier}")
+        _write_worktree_lease(self.path)
+        self._owned = True
+
+    def release(self) -> None:
+        if not self._owned:
+            return
+        if _worktree_lease_owned_by_current_process(self.path):
+            self.path.unlink(missing_ok=True)
+        self._owned = False
+
+    def is_live(self) -> bool:
+        return _worktree_lease_is_live(self.path)
+
+
 class MainMemoryDirtyError(RuntimeError):
     def __init__(self, paths: list[str]):
         self.paths = tuple(paths)
@@ -148,10 +184,10 @@ class IsolatedWriteSupervisor:
         identifier = uuid.uuid4().hex
         branch = f"{TEMP_BRANCH_PREFIX}{role_slug}-{identifier}"
         worktree = self.memory_root / ".runtime" / "worktrees" / f"{role_slug}-{identifier}"
-        lease = self._lease_path(role_slug, identifier)
+        lease = WorktreeLease(self.memory_root, role_slug, identifier)
 
         self._ensure_runtime_ignored(worktree)
-        self._write_lease(lease)
+        lease.acquire()
         try:
             self._run_git(self.memory_root, "worktree", "add", "-b", branch, str(worktree), start_head)
             self._seed_untracked_publish_artifacts(worktree)
@@ -247,7 +283,7 @@ class IsolatedWriteSupervisor:
             try:
                 self._cleanup(worktree, branch)
             finally:
-                lease.unlink(missing_ok=True)
+                lease.release()
 
     def _resume_prepared_operation(
         self,
@@ -332,6 +368,9 @@ class IsolatedWriteSupervisor:
         ]
         prepared.sort(key=lambda record: (record.outcome.sequence, record.operation_id))
         for record in prepared:
+            if record.input_data.get("kind") == "sync-repair":
+                # Sync owns candidate validation and exact fast-forward publication.
+                continue
             role = record.input_data.get("role")
             update_mode = record.input_data.get("update_mode", "normal")
             if not isinstance(role, str) or not isinstance(update_mode, str):
@@ -664,40 +703,10 @@ class IsolatedWriteSupervisor:
         return self.memory_root / ".runtime" / WORKTREE_LEASE_DIR / f"{role_slug}-{identifier}.json"
 
     def _write_lease(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pid = os.getpid()
-        payload = {"pid": pid, "process_identity": process_identity(pid)}
-        tmp_path = path.with_name(f".{path.name}.{pid}.{uuid.uuid4().hex}.tmp")
-        try:
-            with tmp_path.open("w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_path, path)
-            _fsync_directory(path.parent)
-        finally:
-            tmp_path.unlink(missing_ok=True)
+        _write_worktree_lease(path)
 
     def _lease_is_live(self, role_slug: str, identifier: str) -> bool:
-        path = self._lease_path(role_slug, identifier)
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
-            return False
-        if not isinstance(payload, dict):
-            return False
-        pid = payload.get("pid")
-        owner_identity = payload.get("process_identity")
-        if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
-            return False
-        if owner_identity is not None and (not isinstance(owner_identity, str) or not owner_identity):
-            return False
-        current_identity = process_identity(pid)
-        if owner_identity is None or current_identity is None:
-            # A temporary identity lookup failure must not delete a live writer.
-            return process_exists(pid)
-        return current_identity == owner_identity
+        return _worktree_lease_is_live(self._lease_path(role_slug, identifier))
 
     def _cleanup_orphaned_leases(self, role_slug: str) -> None:
         lease_root = self.memory_root / ".runtime" / WORKTREE_LEASE_DIR
@@ -758,6 +767,64 @@ def _output_text(output: Any) -> str:
     if "</think>" in text:
         text = text.rsplit("</think>", 1)[1]
     return text.lstrip()
+
+
+def _write_worktree_lease(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+    payload = {"pid": pid, "process_identity": process_identity(pid)}
+    tmp_path = path.with_name(f".{path.name}.{pid}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        _fsync_directory(path.parent)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _read_worktree_lease(path: Path) -> tuple[int, str | None] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    pid = payload.get("pid")
+    owner_identity = payload.get("process_identity")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
+        return None
+    if owner_identity is not None and (not isinstance(owner_identity, str) or not owner_identity):
+        return None
+    return pid, owner_identity
+
+
+def _worktree_lease_is_live(path: Path) -> bool:
+    owner = _read_worktree_lease(path)
+    if owner is None:
+        return False
+    pid, owner_identity = owner
+    current_identity = process_identity(pid)
+    if owner_identity is None or current_identity is None:
+        # A temporary identity lookup failure must not delete a live writer.
+        return process_exists(pid)
+    return current_identity == owner_identity
+
+
+def _worktree_lease_owned_by_current_process(path: Path) -> bool:
+    owner = _read_worktree_lease(path)
+    if owner is None:
+        return False
+    pid, owner_identity = owner
+    if pid != os.getpid():
+        return False
+    current_identity = process_identity(pid)
+    if owner_identity is None or current_identity is None:
+        return True
+    return owner_identity == current_identity
 
 
 def _operation_ref(operation_id: str) -> str:

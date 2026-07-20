@@ -927,6 +927,21 @@ def _json_sha256(value: dict[str, Any]) -> str:
 
 def _input_metadata(value: dict[str, Any]) -> dict[str, Any]:
     """Keep only the routing data needed for effect replay, not user content."""
+    if value.get("kind") == "sync-repair":
+        keys = (
+            "role",
+            "kind",
+            "active_start_commit",
+            "upstream_commit",
+            "candidate_branch",
+            "candidate_worktree",
+            "pre_repair_tip",
+            "expected_merge_parent",
+            "merge_conflicted",
+            "repair_input_sha256",
+            "policy_sha256",
+        )
+        return {key: value[key] for key in keys if key in value}
     keys = ("role", "session_id", "update_mode", "kind")
     return {key: value[key] for key in keys if key in value}
 

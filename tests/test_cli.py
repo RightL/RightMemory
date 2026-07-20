@@ -2325,52 +2325,42 @@ class JsonRequestTests(unittest.TestCase):
                 patch("sys.stdout", stdout),
                 patch("sys.stderr", stderr),
             ):
-                manager_class.return_value.background_pull.return_value = result_obj
+                manager_class.return_value.background_sync.return_value = result_obj
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)
         sleep.assert_called_once_with(60)
         self.assertIn("rightmemory sync watch stopped", stderr.getvalue())
 
-    def test_sync_watch_background_pull_runs_while_write_lock_is_held(self):
+    def test_sync_watch_delegates_lock_ownership_to_manager(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
         events = []
-
-        class FakeMemoryWriteLock:
-            def __init__(self, memory_root):
-                self.memory_root = memory_root
-
-            def __enter__(self):
-                events.append("lock_enter")
-                return self
-
-            def __exit__(self, exc_type, exc, traceback):
-                events.append("lock_exit")
 
         with tempfile.TemporaryDirectory() as tempdir:
             sync_config = type("SyncConfig", (), {"memory_root": Path(tempdir), "enabled": True, "stale_pull_after_hours": 24})()
             result_obj = type("Result", (), {"status": "synced", "message": "local memory is current", "files": []})()
 
-            def background_pull():
-                events.append("background_pull")
+            def background_sync(*, repair):
+                self.assertTrue(callable(repair))
+                events.append("background_sync")
                 return result_obj
 
             with (
                 patch("rightmemory.cli.load_config", side_effect=AssertionError("config should not load")),
                 patch("rightmemory.cli.load_sync_config", return_value=sync_config),
                 patch("rightmemory.cli.SyncManager") as manager_class,
-                patch("rightmemory.cli.MemoryWriteLock", FakeMemoryWriteLock),
+                patch("rightmemory.cli.MemoryWriteLock", side_effect=AssertionError("CLI must not own the sync lock")),
                 patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
                 patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt),
                 patch("sys.stdout", stdout),
                 patch("sys.stderr", stderr),
             ):
-                manager_class.return_value.background_pull.side_effect = background_pull
+                manager_class.return_value.background_sync.side_effect = background_sync
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)
-        self.assertEqual(events, ["lock_enter", "background_pull", "lock_exit"])
+        self.assertEqual(events, ["background_sync"])
 
     def test_sync_watch_background_pull_failure_logs_and_sleeps(self):
         stdout = io.StringIO()
@@ -2388,7 +2378,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("sys.stdout", stdout),
                 patch("sys.stderr", stderr),
             ):
-                manager_class.return_value.background_pull.side_effect = RuntimeError("boom")
+                manager_class.return_value.background_sync.side_effect = RuntimeError("boom")
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)
@@ -2411,7 +2401,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("sys.stdout", stdout),
                 patch("sys.stderr", stderr),
             ):
-                manager_class.return_value.background_pull.side_effect = RuntimeError("boom")
+                manager_class.return_value.background_sync.side_effect = RuntimeError("boom")
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 1)
@@ -2437,7 +2427,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("sys.stdout", stdout),
                 patch("sys.stderr", stderr),
             ):
-                manager_class.return_value.background_pull.return_value = result_obj
+                manager_class.return_value.background_sync.return_value = result_obj
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)
@@ -2448,99 +2438,74 @@ class JsonRequestTests(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
         calls = []
-        cleanup_calls = []
-        events = []
-
-        class FakeMemoryWriteLock:
-            def __init__(self, memory_root):
-                self.memory_root = memory_root
-
-            def __enter__(self):
-                events.append("lock_enter")
-                return self
-
-            def __exit__(self, exc_type, exc, traceback):
-                events.append("lock_exit")
-
-        class RecordingRuntime(FakeRuntime):
-            def run_session_turn(self, session_id: str, message: str, **_kwargs) -> str:
-                events.append("reconciler")
-                calls.append((session_id, message))
-                return "resolved"
-
-            def cleanup(self):
-                cleanup_calls.append("cleanup")
 
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
+            candidate = memory_root / ".runtime" / "worktrees" / "candidate"
             sync_config = type("SyncConfig", (), {"memory_root": memory_root, "enabled": True, "stale_pull_after_hours": 24})()
-            reconciler_config = type("Config", (), {"memory_root": memory_root})()
-            result_obj = type("Result", (), {"status": "conflict", "message": "conflict", "files": ["MEMORY.md"]})()
+            diagnostic = type("Result", (), {"status": "conflict", "message": "conflict", "files": ["MEMORY.md"]})()
+            result_obj = type(
+                "Result",
+                (),
+                {"status": "synced", "message": "candidate published", "files": ["MEMORY.md"], "operation_id": "sync-op"},
+            )()
 
-            def background_pull():
-                events.append("background_pull")
+            def background_sync(*, repair):
+                repair(candidate, diagnostic, "sync-op")
                 return result_obj
+
+            def reconcile(manager, received_candidate, received_result, operation_id, received_root):
+                calls.append((manager, received_candidate, received_result, operation_id, received_root))
+                return "resolved"
 
             with (
                 patch("rightmemory.cli.load_sync_config", return_value=sync_config),
-                patch("rightmemory.cli.load_config", return_value=reconciler_config) as load_config,
                 patch("rightmemory.cli.SyncManager") as manager_class,
-                patch("rightmemory.cli.MemoryWriteLock", FakeMemoryWriteLock),
-                patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
+                patch("rightmemory.cli._run_sync_reconciler", side_effect=reconcile),
+                patch("rightmemory.cli._finish_sync_repair") as finish,
                 patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
                 patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt),
                 patch("sys.stdout", stdout),
                 patch("sys.stderr", stderr),
             ):
                 manager_class.return_value.memory_root = memory_root
-                manager_class.return_value.background_pull.side_effect = background_pull
-                manager_class.return_value.repair_message.return_value = "resolve MEMORY.md"
+                manager_class.return_value.background_sync.side_effect = background_sync
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)
-        load_config.assert_called_with("sync-reconciler", memory_root=memory_root)
-        self.assertEqual(calls, [("sync-watch", "resolve MEMORY.md")])
-        self.assertEqual(cleanup_calls, ["cleanup"])
-        self.assertEqual(events, ["lock_enter", "background_pull", "lock_exit", "reconciler"])
-        self.assertIn("resolved", stdout.getvalue())
+        self.assertEqual(
+            calls,
+            [(manager_class.return_value, candidate, diagnostic, "sync-op", memory_root)],
+        )
+        finish.assert_called_once_with(memory_root, result_obj)
+        self.assertIn("candidate published", stdout.getvalue())
 
     def test_sync_watch_reconciler_failure_logs_and_sleeps(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
-        cleanup_calls = []
-
-        class FailingRuntime(FakeRuntime):
-            def run_session_turn(self, session_id: str, message: str, **_kwargs) -> str:
-                raise RuntimeError("boom")
-
-            def cleanup(self):
-                cleanup_calls.append("cleanup")
-
         with tempfile.TemporaryDirectory() as tempdir:
             memory_root = Path(tempdir)
             sync_config = type("SyncConfig", (), {"memory_root": memory_root, "enabled": True, "stale_pull_after_hours": 24})()
-            reconciler_config = type("Config", (), {"memory_root": memory_root})()
-            result_obj = type("Result", (), {"status": "conflict", "message": "conflict", "files": ["MEMORY.md"]})()
+
+            def background_sync(*, repair):
+                return repair(memory_root / "candidate", object(), "sync-op")
 
             with (
                 patch("rightmemory.cli.load_sync_config", return_value=sync_config),
-                patch("rightmemory.cli.load_config", return_value=reconciler_config),
                 patch("rightmemory.cli.SyncManager") as manager_class,
-                patch("rightmemory.cli.RightMemoryRuntime", FailingRuntime),
+                patch("rightmemory.cli._run_sync_reconciler", side_effect=RuntimeError("boom")),
                 patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
                 patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
                 patch("sys.stdout", stdout),
                 patch("sys.stderr", stderr),
             ):
                 manager_class.return_value.memory_root = memory_root
-                manager_class.return_value.background_pull.return_value = result_obj
-                manager_class.return_value.repair_message.return_value = "resolve MEMORY.md"
+                manager_class.return_value.background_sync.side_effect = background_sync
                 result = main(["sync", "watch", "--interval", "60"])
 
         self.assertEqual(result, 130)
         sleep.assert_called_once_with(60)
-        self.assertEqual(cleanup_calls, ["cleanup"])
-        self.assertIn("rightmemory sync reconciler failed: RuntimeError: boom", stderr.getvalue())
+        self.assertIn("rightmemory sync check failed: RuntimeError: boom", stderr.getvalue())
 
     def test_sync_watch_reconciler_root_mismatch_logs_and_sleeps(self):
         stdout = io.StringIO()
@@ -2553,6 +2518,9 @@ class JsonRequestTests(unittest.TestCase):
             reconciler_config = type("Config", (), {"memory_root": other_root})()
             result_obj = type("Result", (), {"status": "conflict", "message": "conflict", "files": ["MEMORY.md"]})()
 
+            def background_sync(*, repair):
+                return repair(memory_root / "candidate", result_obj, "sync-op")
+
             with (
                 patch("rightmemory.cli.load_sync_config", return_value=sync_config),
                 patch("rightmemory.cli.load_config", return_value=reconciler_config),
@@ -2564,7 +2532,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("sys.stderr", stderr),
             ):
                 manager_class.return_value.memory_root = memory_root
-                manager_class.return_value.background_pull.return_value = result_obj
+                manager_class.return_value.background_sync.side_effect = background_sync
                 manager_class.return_value.repair_message.return_value = "resolve MEMORY.md"
                 result = main(["sync", "watch", "--interval", "60"])
 

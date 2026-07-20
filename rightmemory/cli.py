@@ -117,7 +117,6 @@ _INSIGHT_WATCH_SKIPPED = "skipped"
 _INSIGHT_WATCH_SUCCEEDED = "succeeded"
 _INSIGHT_WATCH_FAILED = "failed"
 PRUNER_WATCH_SESSION_ID = "pruner-watch"
-SYNC_WATCH_SESSION_ID = "sync-watch"
 
 
 def _watch_failure_limit_reached(label: str, failures: int) -> bool:
@@ -1869,8 +1868,16 @@ def _sync_watch(interval: int, memory_root: Path) -> int:
                 manager = SyncManager(sync_config)
                 cycle_failed = False
                 try:
-                    with MemoryWriteLock(sync_config.memory_root):
-                        result = manager.background_pull()
+                    result = manager.background_sync(
+                        repair=lambda candidate, diagnostic, operation_id: _run_sync_reconciler(
+                            manager,
+                            candidate,
+                            diagnostic,
+                            operation_id,
+                            sync_config.memory_root,
+                        )
+                    )
+                    _finish_sync_repair(sync_config.memory_root, result)
                 except Exception as exc:
                     print(
                         f"rightmemory sync check failed: {type(exc).__name__}: {exc}",
@@ -1880,16 +1887,6 @@ def _sync_watch(interval: int, memory_root: Path) -> int:
                     cycle_failed = True
                 else:
                     print(result.message, flush=True)
-                    if result.status in {"conflict", "dirty"}:
-                        try:
-                            _run_sync_reconciler(manager, result, sync_config.memory_root)
-                        except Exception as exc:
-                            print(
-                                f"rightmemory sync reconciler failed: {type(exc).__name__}: {exc}",
-                                file=sys.stderr,
-                                flush=True,
-                            )
-                            cycle_failed = True
                 if cycle_failed:
                     consecutive_failures += 1
                     if _watch_failure_limit_reached("sync", consecutive_failures):
@@ -1907,7 +1904,13 @@ def _sync_watch(interval: int, memory_root: Path) -> int:
         return 130
 
 
-def _run_sync_reconciler(manager: SyncManager, result: Any, memory_root: Path | None = None) -> None:
+def _run_sync_reconciler(
+    manager: SyncManager,
+    candidate_root: Path,
+    result: Any,
+    operation_id: str,
+    memory_root: Path | None = None,
+):
     reconciler_config = load_config("sync-reconciler", memory_root=memory_root)
     reconciler_root = Path(reconciler_config.memory_root)
     if reconciler_root != manager.memory_root:
@@ -1917,7 +1920,19 @@ def _run_sync_reconciler(manager: SyncManager, result: Any, memory_root: Path | 
         )
     runtime = RightMemoryRuntime(reconciler_config)
     try:
-        print(runtime.run_session_turn(SYNC_WATCH_SESSION_ID, manager.repair_message(result)), flush=True)
+        return runtime._repair_sync_candidate(candidate_root, result, operation_id)
+    finally:
+        runtime.cleanup()
+
+
+def _finish_sync_repair(memory_root: Path, result: Any) -> None:
+    operation_id = getattr(result, "operation_id", None)
+    if not isinstance(operation_id, str) or not operation_id:
+        return
+    reconciler_config = load_config("sync-reconciler", memory_root=memory_root)
+    runtime = RightMemoryRuntime(reconciler_config)
+    try:
+        runtime._finish_sync_repair(result)
     finally:
         runtime.cleanup()
 
