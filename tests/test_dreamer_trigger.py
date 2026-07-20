@@ -20,6 +20,7 @@ class DreamerTriggerStoreTests(unittest.TestCase):
         self.assertIsNone(state.updated_at)
         self.assertIsNone(state.last_successful_dream_at)
         self.assertIsNone(state.last_recovery_at)
+        self.assertEqual(state.applied_operation_ids, ())
 
     def test_minimal_valid_state_loads_points_with_empty_timestamps(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -36,6 +37,7 @@ class DreamerTriggerStoreTests(unittest.TestCase):
         self.assertIsNone(state.updated_at)
         self.assertIsNone(state.last_successful_dream_at)
         self.assertIsNone(state.last_recovery_at)
+        self.assertEqual(state.applied_operation_ids, ())
         self.assertEqual(backups, [])
 
     def test_increment_preserves_fractional_points(self):
@@ -55,6 +57,57 @@ class DreamerTriggerStoreTests(unittest.TestCase):
         self.assertIsNotNone(state.updated_at)
         self.assertIsNone(state.last_successful_dream_at)
         self.assertEqual(gitignore, "*\n")
+
+    def test_increment_once_persists_receipt_and_does_not_repeat_points(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = DreamerTriggerStore(root)
+
+            first = store.increment_once("update-op-1", 1.25)
+            repeated = DreamerTriggerStore(root).increment_once("update-op-1", 1.25)
+            second = store.increment_once("update-op-2", 0.5)
+            store.forget_operation("update-op-1")
+            persisted = store.load()
+
+        self.assertAlmostEqual(first.points, 1.25)
+        self.assertEqual(repeated, first)
+        self.assertAlmostEqual(second.points, 1.75)
+        self.assertAlmostEqual(persisted.points, 1.75)
+        self.assertEqual(persisted.applied_operation_ids, ("update-op-2",))
+
+    def test_claimed_watch_operation_survives_restart_until_completed(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = DreamerTriggerStore(root)
+            store.increment(12.0)
+
+            first = store.claim_operation(10.0)
+            recovered = DreamerTriggerStore(root).claim_operation(10.0)
+            completed = DreamerTriggerStore(root).complete_operation(first, 10.0)
+            state = store.read()
+
+        self.assertIsNotNone(first)
+        self.assertEqual(recovered, first)
+        self.assertTrue(completed)
+        self.assertEqual(state.points, 2.0)
+        self.assertIsNone(state.active_operation_id)
+        self.assertIsNone(state.active_operation_points)
+        self.assertIsNotNone(state.last_successful_dream_at)
+
+    def test_active_claim_keeps_its_original_threshold_after_config_change(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = DreamerTriggerStore(root)
+            store.increment(12.0)
+
+            operation_id = store.claim_operation(10.0)
+            recovered = DreamerTriggerStore(root).claim_operation(20.0)
+            completed = DreamerTriggerStore(root).complete_operation(operation_id, 20.0)
+            state = store.read()
+
+        self.assertEqual(recovered, operation_id)
+        self.assertTrue(completed)
+        self.assertEqual(state.points, 2.0)
 
     def test_consume_threshold_keeps_excess(self):
         with tempfile.TemporaryDirectory() as tempdir:

@@ -28,7 +28,9 @@ from rightmemory.provider_sessions import ProviderSessionStore
 from rightmemory.provider_threads import ProviderThreadStore
 from rightmemory.prune import PruneDueStatus
 from rightmemory.recent_submitted import RecentSubmittedMemoryEntry
-from rightmemory.runtime import RightMemoryRuntime, build_model
+from rightmemory.runtime import RightMemoryRuntime, _IsolatedStateOverlay, build_model
+from rightmemory.session import MessageSessionStore
+from rightmemory.semantic_operation import OperationEffect, SemanticOperationStore
 from rightmemory.retrieve_selection import RetrieveSelection
 from rightmemory.semantic_upgrades import SemanticUpgradeContext, SemanticUpgradeNote
 from rightmemory.shared_view_files import FileViewPublishResult
@@ -1401,7 +1403,7 @@ class RuntimeTests(unittest.TestCase):
             def __init__(self, memory_root, role):
                 calls.append(("supervisor", memory_root, role))
 
-            def run(self, callback):
+            def run(self, callback, **_kwargs):
                 calls.append(("run",))
                 return IsolatedWriteResult(output=callback(worktree), commits_landed=1)
 
@@ -1420,9 +1422,314 @@ class RuntimeTests(unittest.TestCase):
         nested.assert_called_once()
         nested_worktree, state_root, nested_session_id, nested_message = nested.call_args.args
         self.assertEqual(nested_worktree, worktree)
-        self.assertTrue(state_root.is_relative_to(main_root / ".runtime" / "isolated-state"))
+        self.assertTrue(state_root.is_relative_to(main_root / ".runtime" / "operations" / "state"))
         self.assertEqual((nested_session_id, nested_message), ("agent-session", "remember one"))
         self.assertFalse(state_root.exists())
+
+    def test_runtime_recovers_completed_semantic_operation_without_running_model_again(self):
+        root = Path(self.tempdir.name)
+        self._git(root, "init")
+        self._git(root, "config", "user.email", "test@example.com")
+        self._git(root, "config", "user.name", "Test User")
+        (root / "MEMORY.md").write_text("# Domain {#domain}\n\n- `one` initial\n", encoding="utf-8")
+        (root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+        self._git(root, "add", "MEMORY.md", "PURSUITS.md")
+        self._git(root, "commit", "-m", "initial memory")
+        calls = []
+
+        def nested(worktree, _state_root, _session_id, _message):
+            calls.append("model")
+            memory = worktree / "MEMORY.md"
+            memory.write_text(memory.read_text(encoding="utf-8") + "- `two` remembered\n", encoding="utf-8")
+            self._git(worktree, "add", "MEMORY.md")
+            self._git(worktree, "commit", "-m", "memory: remember two")
+            return "updated once"
+
+        config = RuntimeConfig(role="dreamer", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+        with patch.object(runtime, "_run_session_turn_in_worktree", side_effect=nested):
+            first = runtime.run_session_turn("dream-session", "dream", operation_id="dream-op-1")
+            second = runtime.run_session_turn("dream-session", "dream", operation_id="dream-op-1")
+
+        self.assertEqual((first, second), ("updated once", "updated once"))
+        self.assertEqual(calls, ["model"])
+        self.assertEqual(self._git(root, "rev-list", "--count", "HEAD~1..HEAD"), "1")
+        self.assertIn("RightMemory-Operation: dream-op-1", self._git(root, "log", "-1", "--format=%B"))
+
+    def test_terminal_operation_pressure_effect_is_idempotently_applied(self):
+        root = Path(self.tempdir.name)
+        store = SemanticOperationStore(root)
+        input_data = {"role": "update", "session_id": "agent-session", "message": "remember"}
+        store.begin("update-op-1", input_data)
+        store.prepare_outcome(
+            "update-op-1",
+            output="updated",
+            start_commit="base123",
+            changed_paths=("MEMORY.md",),
+            effects=(
+                OperationEffect(
+                    "memory-pressure",
+                    metadata={"dreamer_points": 2.0, "insight_points": 3.0},
+                ),
+            ),
+        )
+        store.complete_commit("update-op-1", "tip456")
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+        state = type("State", (), {})()
+
+        with patch("rightmemory.runtime.record_memory_change_pressure_once") as pressure:
+            runtime._run_operation_effects("update-op-1", state)
+            runtime._run_operation_effects("update-op-1", state)
+
+        pressure.assert_called_once_with(
+            root,
+            "update-op-1",
+            dreamer_points=2.0,
+            insight_points=3.0,
+        )
+        self.assertEqual(store.list_pending_effects("update-op-1"), ())
+
+    def test_older_session_state_effect_cannot_overwrite_newer_state(self):
+        root = Path(self.tempdir.name)
+        store = SemanticOperationStore(root)
+        states = []
+        for operation_id, content in (("update-state-old", "old"), ("update-state-new", "new")):
+            store.begin(operation_id, {"role": "update", "session_id": "agent-session"})
+            store.prepare_outcome(
+                operation_id,
+                output=content,
+                start_commit="base123",
+                changed_paths=(),
+                effects=(OperationEffect("session-state", metadata={"session_id": "agent-session"}),),
+            )
+            store.complete_no_change(operation_id)
+            state = _IsolatedStateOverlay(root, "update", "agent-session", operation_id=operation_id)
+            history = MessageSessionStore(state.overlay_root, "update").paths("agent-session").history
+            history.parent.mkdir(parents=True, exist_ok=True)
+            history.write_text(content, encoding="utf-8")
+            states.append(state)
+
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+        runtime._run_operation_effects("update-state-new", states[1])
+        runtime._run_operation_effects("update-state-old", states[0])
+
+        main_history = MessageSessionStore(root, "update").paths("agent-session").history
+        self.assertEqual(main_history.read_text(encoding="utf-8"), "new")
+
+    def test_effect_order_follows_preparation_not_initial_failed_attempt(self):
+        root = Path(self.tempdir.name)
+        store = SemanticOperationStore(root)
+        store.begin("created-first-landed-last", {"role": "update", "session_id": "agent-session"})
+        store.begin("created-last-landed-first", {"role": "update", "session_id": "agent-session"})
+        states = {}
+
+        for operation_id, content in (
+            ("created-last-landed-first", "first landing"),
+            ("created-first-landed-last", "last landing"),
+        ):
+            store.prepare_outcome(
+                operation_id,
+                output=content,
+                start_commit="base123",
+                changed_paths=(),
+                effects=(OperationEffect("session-state", metadata={"session_id": "agent-session"}),),
+            )
+            store.complete_no_change(operation_id)
+            state = _IsolatedStateOverlay(root, "update", "agent-session", operation_id=operation_id)
+            history = MessageSessionStore(state.overlay_root, "update").paths("agent-session").history
+            history.parent.mkdir(parents=True, exist_ok=True)
+            history.write_text(content, encoding="utf-8")
+            states[operation_id] = state
+
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+        runtime._run_operation_effects("created-first-landed-last", states["created-first-landed-last"])
+        runtime._run_operation_effects("created-last-landed-first", states["created-last-landed-first"])
+
+        main_history = MessageSessionStore(root, "update").paths("agent-session").history
+        self.assertEqual(main_history.read_text(encoding="utf-8"), "last landing")
+
+    def test_pending_state_from_the_same_session_blocks_the_next_turn_until_recovered(self):
+        root = Path(self.tempdir.name)
+        store = SemanticOperationStore(root)
+        store.begin(
+            "update-state-pending",
+            {"role": "update", "session_id": "agent-session", "update_mode": "normal"},
+        )
+        store.prepare_outcome(
+            "update-state-pending",
+            output="saved",
+            start_commit="base123",
+            changed_paths=(),
+            effects=(OperationEffect("session-state", metadata={"session_id": "agent-session"}),),
+        )
+        store.complete_no_change("update-state-pending", "base123")
+        state = _IsolatedStateOverlay(
+            root,
+            "update",
+            "agent-session",
+            operation_id="update-state-pending",
+        )
+        history = MessageSessionStore(state.overlay_root, "update").paths("agent-session").history
+        history.parent.mkdir(parents=True, exist_ok=True)
+        history.write_text("recovered history", encoding="utf-8")
+
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+        with (
+            patch.object(_IsolatedStateOverlay, "promote_if_current", side_effect=OSError("disk full")),
+            patch.object(runtime, "_warn_operation_effect_failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "previous semantic session state is still pending"):
+                runtime._recover_pending_session_state("agent-session", exclude="next-operation")
+
+        runtime._recover_pending_session_state("agent-session", exclude="next-operation")
+
+        main_history = MessageSessionStore(root, "update").paths("agent-session").history
+        self.assertEqual(main_history.read_text(encoding="utf-8"), "recovered history")
+        self.assertEqual(store.list_pending_effects("update-state-pending"), ())
+
+    def test_invalid_pending_effect_record_does_not_starve_the_next_retry(self):
+        root = Path(self.tempdir.name)
+        store = SemanticOperationStore(root)
+        for operation_id, input_data in (
+            ("update-effect-poison", {"role": "update"}),
+            ("update-effect-ready", {"role": "update", "session_id": "agent-session"}),
+        ):
+            store.begin(operation_id, input_data)
+            store.prepare_outcome(
+                operation_id,
+                output="saved",
+                start_commit="base123",
+                changed_paths=(),
+                effects=(OperationEffect("session-state", metadata={"session_id": "agent-session"}),),
+            )
+            store.complete_no_change(operation_id, "base123")
+
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+        runtime._retry_pending_operation_effects(exclude="current-operation")
+        runtime._retry_pending_operation_effects(exclude="current-operation")
+
+        self.assertTrue(store.list_pending_effects("update-effect-poison"))
+        self.assertEqual(store.list_pending_effects("update-effect-ready"), ())
+
+    def test_old_review_effect_uses_its_record_without_mutating_current_result(self):
+        root = Path(self.tempdir.name)
+        store = SemanticOperationStore(root)
+        store.begin(
+            "update-review-old",
+            {"role": "update", "session_id": "review-session", "update_mode": "normal"},
+        )
+        store.prepare_outcome(
+            "update-review-old",
+            output="old summary",
+            start_commit="base123",
+            changed_paths=("MEMORY.md",),
+            effects=(OperationEffect("update-review"),),
+        )
+        store.complete_commit("update-review-old", "tip456")
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config, update_mode="review-correction")
+        current = IsolatedWriteResult("current", 1, "current-base", "current-tip", ("MEMORY.md",))
+        runtime._last_write_result = current
+
+        with patch.object(runtime, "_create_update_review_for_result") as create_review:
+            runtime._run_operation_effects("update-review-old", type("State", (), {})())
+
+        create_review.assert_called_once()
+        self.assertIs(runtime.last_write_result, current)
+        self.assertEqual(store.list_pending_effects("update-review-old"), ())
+
+    def test_failed_follow_up_effect_does_not_change_terminal_outcome(self):
+        root = Path(self.tempdir.name)
+        store = SemanticOperationStore(root)
+        input_data = {"role": "dreamer", "session_id": "dream-session", "message": "dream"}
+        store.begin("dream-op-1", input_data)
+        store.prepare_outcome(
+            "dream-op-1",
+            output="no change",
+            start_commit="base123",
+            changed_paths=(),
+            effects=(OperationEffect("file-view-publish"),),
+        )
+        store.complete_no_change("dream-op-1")
+        config = RuntimeConfig(role="dreamer", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+        state = type("State", (), {})()
+
+        with patch.object(runtime, "_publish_file_views_after_write", side_effect=OSError("hub offline")):
+            runtime._run_operation_effects("dream-op-1", state)
+
+        record = store.read("dream-op-1")
+        self.assertEqual(record.phase, "no_change")
+        self.assertEqual(record.outcome.output, "no change")
+        self.assertEqual(store.list_pending_effects("dream-op-1")[0].status, "failed")
+
+    def test_older_publish_effect_is_superseded_after_newer_publish(self):
+        root = Path(self.tempdir.name)
+        store = SemanticOperationStore(root)
+        for operation_id in ("publish-old", "publish-new"):
+            store.begin(operation_id, {"role": "dreamer", "session_id": operation_id})
+            store.prepare_outcome(
+                operation_id,
+                output="saved",
+                start_commit="base123",
+                changed_paths=(),
+                effects=(OperationEffect("file-view-publish"),),
+            )
+            store.complete_no_change(operation_id)
+        config = RuntimeConfig(role="dreamer", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+
+        with patch.object(runtime, "_publish_file_views_after_write") as publish:
+            runtime._run_operation_effects("publish-new", type("State", (), {})())
+            runtime._run_operation_effects("publish-old", type("State", (), {})())
+
+        publish.assert_called_once_with(raise_on_failure=True, operation_id="publish-new")
+        self.assertEqual(store.list_pending_effects("publish-old"), ())
+
+    def test_publish_effect_reads_the_durable_operation_outbox(self):
+        root = Path(self.tempdir.name)
+        store = SemanticOperationStore(root)
+        store.begin("publish-snapshot", {"role": "dreamer", "session_id": "dream-session"})
+        store.prepare_outcome(
+            "publish-snapshot",
+            output="saved",
+            start_commit="base123",
+            changed_paths=(),
+            effects=(OperationEffect("file-view-publish"),),
+        )
+        config = RuntimeConfig(role="dreamer", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+        runtime._prepare_operation_effects("publish-snapshot", root)
+        store.complete_no_change("publish-snapshot", "base123")
+
+        with (
+            patch("rightmemory.runtime.publish_file_view_outbox", return_value=[]) as publish,
+            patch("rightmemory.runtime.record_file_view_publish_results"),
+        ):
+            runtime._publish_file_views_after_write(operation_id="publish-snapshot")
+
+        publish.assert_called_once_with(
+            store.effect_state_root("publish-snapshot", "file-view-publish"),
+            operation_id="publish-snapshot",
+            credential_root=root,
+        )
 
     def test_isolated_update_creates_review_before_state_promotion(self):
         main_root = Path(self.tempdir.name)
@@ -1433,7 +1740,7 @@ class RuntimeTests(unittest.TestCase):
             def __init__(self, memory_root, role):
                 pass
 
-            def run(self, callback):
+            def run(self, callback, **_kwargs):
                 output = callback(worktree)
                 events.append("landed")
                 return IsolatedWriteResult(
@@ -1533,7 +1840,7 @@ class RuntimeTests(unittest.TestCase):
             def __init__(self, memory_root, role):
                 pass
 
-            def run(self, callback):
+            def run(self, callback, **_kwargs):
                 events.append("supervisor_start")
                 output = callback(worktree)
                 events.append("supervisor_end")
@@ -1582,7 +1889,7 @@ class RuntimeTests(unittest.TestCase):
             def __init__(self, memory_root, role):
                 pass
 
-            def run(self, callback):
+            def run(self, callback, **_kwargs):
                 return IsolatedWriteResult(output=callback(worktree), commits_landed=1)
 
         def nested(_runtime, _worktree, state_root, session_id, _message):
@@ -1635,7 +1942,7 @@ class RuntimeTests(unittest.TestCase):
             def __init__(self, memory_root, role):
                 pass
 
-            def run(self, callback):
+            def run(self, callback, **_kwargs):
                 callback(worktree)
                 raise RuntimeError("validation failed")
 
@@ -1684,7 +1991,7 @@ class RuntimeTests(unittest.TestCase):
             def __init__(self, memory_root, role):
                 pass
 
-            def run(self, callback):
+            def run(self, callback, **_kwargs):
                 return IsolatedWriteResult(output=callback(worktree), commits_landed=1)
 
         def nested(_runtime, _worktree, state_root, session_id, _message):
@@ -1741,7 +2048,7 @@ class RuntimeTests(unittest.TestCase):
             def __init__(self, memory_root, role):
                 pass
 
-            def run(self, callback):
+            def run(self, callback, **_kwargs):
                 callback(worktree)
                 raise RuntimeError("validation failed")
 
@@ -1853,28 +2160,30 @@ class RuntimeTests(unittest.TestCase):
 
                 self.assertIn("reserved", str(caught.exception))
 
-    def test_update_run_turn_uses_reserved_internal_session_path(self):
-        config = RuntimeConfig(
-            role="update",
-            model_id="openai/test",
-            memory_root=Path(self.tempdir.name),
-        )
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
+    def test_automatic_write_run_turn_uses_reserved_internal_session_path(self):
+        for role in ("dreamer", "insight", "pruner", "update"):
+            with self.subTest(role=role):
+                config = RuntimeConfig(
+                    role=role,
+                    model_id="openai/test",
+                    memory_root=Path(self.tempdir.name),
+                )
+                with patch.dict("sys.modules", self._fake_pydantic_modules()):
+                    runtime = RightMemoryRuntime(config)
 
-        with (
-            patch.object(runtime, "_run_session_turn_unlocked", return_value="updated") as run,
-            patch.object(runtime, "_create_update_review") as create_review,
-        ):
-            result = runtime.run_turn("remember one")
+                with (
+                    patch.object(runtime, "_run_session_turn_unlocked", return_value="updated") as run,
+                    patch.object(runtime, "_create_update_review") as create_review,
+                ):
+                    result = runtime.run_turn("remember one")
 
-        self.assertEqual(result, "updated")
-        run.assert_called_once_with(
-            NO_SESSION_RIGHTMEMORY_SESSION_ID,
-            "remember one",
-            allow_internal_session=True,
-        )
-        create_review.assert_called_once()
+                self.assertEqual(result, "updated")
+                run.assert_called_once_with(
+                    NO_SESSION_RIGHTMEMORY_SESSION_ID,
+                    "remember one",
+                    allow_internal_session=True,
+                )
+                create_review.assert_not_called()
 
     def test_run_turn_preserves_message_history(self):
         config = RuntimeConfig(

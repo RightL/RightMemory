@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import shutil
 import tempfile
 import zipfile
@@ -214,11 +215,22 @@ def create_hub_app(hub_root: Path) -> FastAPI:
         _require_actor_provider(actor.provider_id)
         _ensure_view_provider_scope(store, view_id, actor.provider_id)
         config = store.load_config()
+        idempotency_key = request.query_params.get("idempotency_key")
+        if idempotency_key is not None and (not idempotency_key.strip() or len(idempotency_key) > 1024):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="idempotency_key must be a non-empty string of at most 1024 characters",
+            )
+        version_id = None
+        if idempotency_key is not None:
+            identity = "\0".join((actor.provider_id, view_id, idempotency_key)).encode("utf-8")
+            version_id = "op_" + hashlib.sha256(identity).hexdigest()
         package_root, cleanup = await _request_package_root(request, max_package_bytes=config.max_package_bytes)
         try:
             stored = store.store_package_version(
                 package_root,
                 view_id=view_id,
+                version_id=version_id,
                 provider_id=actor.provider_id,
                 created_by_token_id=actor.token_id,
             )
@@ -228,11 +240,12 @@ def create_hub_app(hub_root: Path) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         finally:
             cleanup()
+        view = store.get_view(view_id)
         return {
             "view_id": stored.manifest.view_id,
             "provider_id": actor.provider_id,
             "version_id": stored.version_id,
-            "current_version_id": stored.version_id,
+            "current_version_id": view["current_version_id"] if view is not None else None,
             "package_hash": stored.manifest.package_hash,
             "title": stored.manifest.title,
         }

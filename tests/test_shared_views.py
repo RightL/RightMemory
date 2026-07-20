@@ -19,8 +19,10 @@ from rightmemory.shared_view_files import (
     invite_file_view,
     list_file_view_publish_events,
     load_file_view_recipe,
+    prepare_file_view_publish_outbox,
     publish_file_view_package,
     publish_approved_file_views,
+    publish_file_view_outbox,
     pull_file_view,
     record_file_view_publish_results,
     render_file_view,
@@ -904,6 +906,40 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
         self.assertEqual(clients[0].base_url, "https://hub.example.test")
         self.assertIn("dist/MEMORY.md", clients[0].publish_calls[0]["files"])
 
+    def test_automatic_publish_uses_stable_per_view_idempotency_key(self):
+        clients = []
+
+        with patch(
+            "rightmemory.shared_view_files.HubClient",
+            side_effect=lambda base_url, token: _record_fake_client(clients, base_url, token),
+        ):
+            publish_approved_file_views(self.root, operation_id="update-operation-1")
+
+        self.assertEqual(
+            clients[0].publish_calls[0]["idempotency_key"],
+            "update-operation-1:auth-api-files",
+        )
+
+    def test_automatic_publish_reads_content_from_snapshot_and_credentials_from_live_root(self):
+        snapshot = self.root / "snapshot"
+        snapshot.mkdir()
+        shutil.copy2(self.root / "MEMORY.md", snapshot / "MEMORY.md")
+        shutil.copytree(self.root / "shared_views", snapshot / "shared_views")
+        clients = []
+
+        with patch(
+            "rightmemory.shared_view_files.HubClient",
+            side_effect=lambda base_url, token: _record_fake_client(clients, base_url, token),
+        ):
+            results = publish_approved_file_views(
+                snapshot,
+                operation_id="update-operation-1",
+                credential_root=self.root,
+            )
+
+        self.assertEqual(results[0].status, "published")
+        self.assertEqual(clients[0].token, "publish-token")
+
     def test_publish_file_view_package_does_not_create_invitation(self):
         save_shared_view_credential(
             self.root,
@@ -1000,6 +1036,38 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
 
         self.assertEqual(results[0].status, "failed")
         self.assertIn("generative file view output is missing", results[0].message)
+
+    def test_generative_publish_retry_uses_frozen_outbox_package(self):
+        shutil.rmtree(self.root / "shared_views" / "auth-api-files")
+        write_generative_file_view(
+            self.root,
+            view_id="auth-api-files",
+            title="Auth API Files",
+            intent="Expose auth API integration context.",
+            published_context="Original generated context.",
+            approved=True,
+            publish_hub_url="https://hub.example.test",
+            publish_credential_id="alice-publish",
+        )
+        outbox = self.root / ".runtime" / "test-publish-outbox"
+        prepare_file_view_publish_outbox(self.root, outbox)
+        generated = self.root / "shared_views" / "auth-api-files" / "dist" / "MEMORY.md"
+        generated.write_text("# Later generated context\n", encoding="utf-8")
+        clients = []
+
+        with patch(
+            "rightmemory.shared_view_files.HubClient",
+            side_effect=lambda base_url, token: _record_fake_client(clients, base_url, token),
+        ):
+            results = publish_file_view_outbox(
+                outbox,
+                credential_root=self.root,
+                operation_id="dreamer-operation-1",
+            )
+
+        self.assertEqual(results[0].status, "published")
+        self.assertIn("Original generated context", clients[0].publish_calls[0]["memory"])
+        self.assertNotIn("Later generated context", clients[0].publish_calls[0]["memory"])
 
 
 class SharedQuestionViewTests(unittest.TestCase):
@@ -1420,11 +1488,13 @@ class _FakeHubClient:
         self.question_registrations = []
         self.invitation_calls = []
 
-    def publish_package(self, view_id: str, package_root: Path):
+    def publish_package(self, view_id: str, package_root: Path, *, idempotency_key: str | None = None):
         self.publish_calls.append(
             {
                 "view_id": view_id,
+                "idempotency_key": idempotency_key,
                 "files": sorted(path.relative_to(package_root).as_posix() for path in package_root.rglob("*") if path.is_file()),
+                "memory": (package_root / "dist" / "MEMORY.md").read_text(encoding="utf-8"),
             }
         )
         return {"version_id": "ver_1"}

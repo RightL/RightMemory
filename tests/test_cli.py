@@ -22,6 +22,7 @@ from rightmemory.doctor import DoctorCheck
 from rightmemory.hub.store import HubStore
 from rightmemory.insight_trigger import InsightTriggerStore
 from rightmemory.isolated_write import IsolatedWriteResult
+from rightmemory.semantic_operation import SemanticOperationStore
 from rightmemory.share_results import ShareOperationResult
 from rightmemory.shared_view_files import FileViewPullResult
 from rightmemory.shared_view_models import SharedViewConnection, SharedViewTarget, load_shared_view_credential, save_connections
@@ -35,18 +36,18 @@ class FakeRuntime:
         self.session_turns = []
         self.last_write_result = None
 
-    def run_turn(self, message: str) -> str:
+    def run_turn(self, message: str, *, operation_id=None) -> str:
         return f"handled: {message}"
 
-    def run_session_turn(self, session_id: str, message: str) -> str:
+    def run_session_turn(self, session_id: str, message: str, **_kwargs) -> str:
         self.session_turns.append((session_id, message))
         return f"session {session_id}: {message}"
 
-    def run_cycle(self, session_id: str, operator_hint=None) -> str:
+    def run_cycle(self, session_id: str, operator_hint=None, *, operation_id=None) -> str:
         self.session_turns.append((session_id, operator_hint))
         return f"cycle {session_id}: {operator_hint}"
 
-    def run_prune_turn(self, session_id: str, pruner_config) -> str:
+    def run_prune_turn(self, session_id: str, pruner_config, *, operation_id=None) -> str:
         self.session_turns.append((session_id, f"prune:{pruner_config.memory_root}"))
         return f"prune session {session_id}: {pruner_config.memory_root}"
 
@@ -360,10 +361,43 @@ class JsonRequestTests(unittest.TestCase):
         )
 
         with patch("rightmemory.cli._record_memory_change_pressure") as pressure:
-            response = _handle_json_request(runtime, {"message": "hello"})
+            response = _handle_json_request(
+                runtime,
+                {"message": "hello", "operation_id": "daemon-update-1"},
+            )
 
-        self.assertEqual(response, {"type": "assistant", "message": "handled: hello"})
+        self.assertEqual(
+            response,
+            {
+                "type": "assistant",
+                "message": "handled: hello",
+                "operation_id": "daemon-update-1",
+            },
+        )
         pressure.assert_called_once_with(memory_root)
+
+    def test_automatic_writer_json_request_requires_reusable_operation_id(self):
+        runtime = FakeRuntime(type("Config", (), {"role": "dreamer"})())
+
+        with self.assertRaisesRegex(ValueError, "require string field: operation_id"):
+            _handle_json_request(runtime, {"message": "dream"})
+
+    def test_json_request_passes_operation_id_to_runtime_and_returns_it(self):
+        calls = []
+
+        class Runtime(FakeRuntime):
+            def run_turn(self, message: str, *, operation_id=None) -> str:
+                calls.append((message, operation_id))
+                return "saved"
+
+        runtime = Runtime(type("Config", (), {"role": "dreamer"})())
+        response = _handle_json_request(
+            runtime,
+            {"message": "dream", "operation_id": "daemon-dream-1"},
+        )
+
+        self.assertEqual(calls, [("dream", "daemon-dream-1")])
+        self.assertEqual(response["operation_id"], "daemon-dream-1")
 
     def test_handle_json_request_requires_message(self):
         with self.assertRaises(ValueError):
@@ -1318,7 +1352,7 @@ class JsonRequestTests(unittest.TestCase):
         stderr = io.StringIO()
 
         class FailingRuntime(FakeRuntime):
-            def run_prune_turn(self, session_id: str, pruner_config) -> str:
+            def run_prune_turn(self, session_id: str, pruner_config, *, operation_id=None) -> str:
                 raise RuntimeError(f"boom for {session_id}")
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1346,9 +1380,11 @@ class JsonRequestTests(unittest.TestCase):
     def test_prune_watch_stops_after_consecutive_failures(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
+        operation_ids = []
 
         class FailingRuntime(FakeRuntime):
-            def run_prune_turn(self, session_id: str, pruner_config) -> str:
+            def run_prune_turn(self, session_id: str, pruner_config, *, operation_id=None) -> str:
+                operation_ids.append(operation_id)
                 raise RuntimeError(f"boom for {session_id}")
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1369,6 +1405,7 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         sleep.assert_called_once()
+        self.assertEqual(len(set(operation_ids)), 1)
         self.assertEqual(stdout.getvalue().count("rightmemory prune check"), 2)
         self.assertIn("rightmemory pruner watch stopping after 2 consecutive failed cycles", stderr.getvalue())
         self.assertIn("rightmemory pruner watch stopped", stderr.getvalue())
@@ -1449,7 +1486,7 @@ class JsonRequestTests(unittest.TestCase):
                     changed_paths=("MEMORY.md",),
                 )
 
-            def run_session_turn(self, session_id, message):
+            def run_session_turn(self, session_id, message, **_kwargs):
                 calls.append(("run", session_id, message))
                 return "corrected"
 
@@ -1494,7 +1531,7 @@ class JsonRequestTests(unittest.TestCase):
                     changed_paths=("PURSUITS.md",),
                 )
 
-            def run_session_turn(self, session_id, message):
+            def run_session_turn(self, session_id, message, **_kwargs):
                 return "corrected"
 
             def cleanup(self):
@@ -1529,7 +1566,7 @@ class JsonRequestTests(unittest.TestCase):
             def __init__(self, config, *, update_mode):
                 self.config = config
 
-            def run_session_turn(self, session_id, message):
+            def run_session_turn(self, session_id, message, **_kwargs):
                 return "Needs input: Which preference should win?"
 
             def cleanup(self):
@@ -1566,7 +1603,7 @@ class JsonRequestTests(unittest.TestCase):
                     changed_paths=("MEMORY.md",),
                 )
 
-            def run_session_turn(self, session_id, message):
+            def run_session_turn(self, session_id, message, **_kwargs):
                 return "Needs input: Which preference should win?"
 
             def cleanup(self):
@@ -2426,7 +2463,7 @@ class JsonRequestTests(unittest.TestCase):
                 events.append("lock_exit")
 
         class RecordingRuntime(FakeRuntime):
-            def run_session_turn(self, session_id: str, message: str) -> str:
+            def run_session_turn(self, session_id: str, message: str, **_kwargs) -> str:
                 events.append("reconciler")
                 calls.append((session_id, message))
                 return "resolved"
@@ -2473,7 +2510,7 @@ class JsonRequestTests(unittest.TestCase):
         cleanup_calls = []
 
         class FailingRuntime(FakeRuntime):
-            def run_session_turn(self, session_id: str, message: str) -> str:
+            def run_session_turn(self, session_id: str, message: str, **_kwargs) -> str:
                 raise RuntimeError("boom")
 
             def cleanup(self):
@@ -2571,7 +2608,7 @@ class JsonRequestTests(unittest.TestCase):
                 result = _dreamer_watch_once(
                     watch_config,
                     "dreamer-watch",
-                    lambda session_id: calls.append(session_id) or "dream output",
+                    lambda session_id, _operation_id: calls.append(session_id) or "dream output",
                 )
             trigger = DreamerTriggerStore(memory_root).read()
 
@@ -2591,7 +2628,7 @@ class JsonRequestTests(unittest.TestCase):
             DreamerTriggerStore(memory_root).increment(12.0)
             watch_config = _dreamer_watch_config(memory_root=memory_root, trigger_points=10.0)
 
-            def run_cycle(session_id: str) -> str:
+            def run_cycle(session_id: str, _operation_id: str) -> str:
                 calls.append(session_id)
                 return f"session {session_id}: dream"
 
@@ -2617,7 +2654,7 @@ class JsonRequestTests(unittest.TestCase):
             InsightTriggerStore(memory_root).increment(155.0)
             watch_config = _insight_watch_config(memory_root=memory_root, trigger_points=150.0)
 
-            def run_cycle(session_id: str) -> str:
+            def run_cycle(session_id: str, _operation_id: str) -> str:
                 calls.append(session_id)
                 return f"session {session_id}: insight"
 
@@ -2643,7 +2680,7 @@ class JsonRequestTests(unittest.TestCase):
             InsightTriggerStore(memory_root).increment(155.0)
             watch_config = _insight_watch_config(memory_root=memory_root, trigger_points=150.0)
 
-            def run_cycle(session_id: str) -> str:
+            def run_cycle(session_id: str, _operation_id: str) -> str:
                 insight = memory_root / "insight_logs" / "2026-05-30-143012.md"
                 insight.parent.mkdir()
                 insight.write_text(f"# Insight\n\n{session_id}\n", encoding="utf-8")
@@ -2658,6 +2695,43 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(trigger.last_successful_insight_result, "artifact")
         self.assertEqual(stderr.getvalue(), "")
 
+    def test_insight_watch_once_recovers_artifact_result_from_terminal_receipt(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            trigger_store = InsightTriggerStore(memory_root)
+            trigger_store.increment(155.0)
+            operation_id = trigger_store.claim_operation(150.0)
+            self.assertIsNotNone(operation_id)
+
+            insight_path = memory_root / "insight_logs" / "2026-05-30-143012.md"
+            insight_path.parent.mkdir()
+            insight_path.write_text("# Recovered insight\n", encoding="utf-8")
+            operation_store = SemanticOperationStore(memory_root)
+            operation_store.begin(operation_id, {"role": "insight"})
+            operation_store.prepare_outcome(
+                operation_id,
+                output="recovered insight",
+                start_commit="base123",
+                changed_paths=("insight_logs/2026-05-30-143012.md",),
+            )
+            operation_store.complete_commit(operation_id, "tip456")
+            watch_config = _insight_watch_config(memory_root=memory_root, trigger_points=150.0)
+
+            with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+                result = _insight_watch_once(
+                    watch_config,
+                    "insight-watch",
+                    lambda _session_id, received_id: f"recovered {received_id}",
+                )
+            trigger = trigger_store.read()
+
+        self.assertEqual(result, "succeeded")
+        self.assertEqual(trigger.last_successful_insight_result, "artifact")
+        self.assertEqual(stderr.getvalue(), "")
+
     def test_dreamer_watch_once_does_not_consume_on_failure(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -2667,7 +2741,7 @@ class JsonRequestTests(unittest.TestCase):
             DreamerTriggerStore(memory_root).increment(12.0)
             watch_config = _dreamer_watch_config(memory_root=memory_root, trigger_points=10.0)
 
-            def run_cycle(session_id: str) -> str:
+            def run_cycle(session_id: str, _operation_id: str) -> str:
                 raise RuntimeError(f"boom for {session_id}")
 
             with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
@@ -2710,7 +2784,7 @@ class JsonRequestTests(unittest.TestCase):
         calls = []
 
         class RecordingRuntime(FakeRuntime):
-            def run_cycle(self, session_id: str, operator_hint=None) -> str:
+            def run_cycle(self, session_id: str, operator_hint=None, *, operation_id=None) -> str:
                 calls.append((session_id, operator_hint))
                 return f"cycle {session_id}: {operator_hint}"
 
@@ -2751,7 +2825,7 @@ class JsonRequestTests(unittest.TestCase):
         calls = []
 
         class RecordingRuntime(FakeRuntime):
-            def run_cycle(self, session_id: str, operator_hint=None) -> str:
+            def run_cycle(self, session_id: str, operator_hint=None, *, operation_id=None) -> str:
                 calls.append((session_id, operator_hint))
                 return f"cycle {session_id}: {operator_hint}"
 
@@ -2784,7 +2858,7 @@ class JsonRequestTests(unittest.TestCase):
         stderr = io.StringIO()
 
         class FailingRuntime(FakeRuntime):
-            def run_cycle(self, session_id: str, operator_hint=None) -> str:
+            def run_cycle(self, session_id: str, operator_hint=None, *, operation_id=None) -> str:
                 raise RuntimeError("boom")
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -2820,7 +2894,7 @@ class JsonRequestTests(unittest.TestCase):
         stderr = io.StringIO()
 
         class FailingRuntime(FakeRuntime):
-            def run_cycle(self, session_id: str, operator_hint=None) -> str:
+            def run_cycle(self, session_id: str, operator_hint=None, *, operation_id=None) -> str:
                 raise RuntimeError("boom")
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -2962,7 +3036,7 @@ class JsonRequestTests(unittest.TestCase):
         config = type("Config", (), {"role": "update", "memory_root": memory_root})()
 
         class UpdateRuntime(FakeRuntime):
-            def run_session_turn(self, session_id: str, message: str) -> str:
+            def run_session_turn(self, session_id: str, message: str, **_kwargs) -> str:
                 self.last_write_result = IsolatedWriteResult(
                     output="updated",
                     commits_landed=1,
@@ -3321,7 +3395,7 @@ class JsonRequestTests(unittest.TestCase):
         calls = []
 
         class RecordingRuntime(FakeRuntime):
-            def run_session_turn(self, session_id: str, message: str) -> str:
+            def run_session_turn(self, session_id: str, message: str, **_kwargs) -> str:
                 calls.append((session_id, message))
                 return f"session {session_id}: {message}"
 
@@ -3376,7 +3450,7 @@ class JsonRequestTests(unittest.TestCase):
                 super().__init__(config)
                 runtime_models.append(config.model)
 
-            def run_session_turn(self, session_id: str, message: str) -> str:
+            def run_session_turn(self, session_id: str, message: str, **_kwargs) -> str:
                 return f"model {self.config.model}"
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -3439,9 +3513,9 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(first.result, "model fresh-a")
         self.assertEqual(second.result, "model fresh-b")
 
-    def test_async_worker_increments_dreamer_and_insight_trigger_points(self):
+    def test_async_worker_leaves_pressure_to_runtime_operation_effects(self):
         class RecordingRuntime(FakeRuntime):
-            def run_session_turn(self, session_id: str, message: str) -> str:
+            def run_session_turn(self, session_id: str, message: str, **_kwargs) -> str:
                 self.last_write_result = IsolatedWriteResult(
                     output="updated",
                     commits_landed=1,
@@ -3487,12 +3561,12 @@ class JsonRequestTests(unittest.TestCase):
             insight_trigger = InsightTriggerStore(memory_root).read()
 
         self.assertEqual(result, 0)
-        self.assertEqual(trigger.points, 2.5)
-        self.assertEqual(insight_trigger.points, 2.5)
+        self.assertEqual(trigger.points, 0.0)
+        self.assertEqual(insight_trigger.points, 0.0)
 
     def test_async_worker_does_not_add_pressure_for_pursuit_only_update(self):
         class RecordingRuntime(FakeRuntime):
-            def run_session_turn(self, session_id: str, message: str) -> str:
+            def run_session_turn(self, session_id: str, message: str, **_kwargs) -> str:
                 self.last_write_result = IsolatedWriteResult(
                     output="updated",
                     commits_landed=1,
@@ -3534,9 +3608,9 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(trigger.points, 0.0)
         self.assertEqual(insight_trigger.points, 0.0)
 
-    def test_async_worker_warns_when_trigger_increment_fails_without_failing(self):
+    def test_async_worker_does_not_reapply_runtime_pressure(self):
         class RecordingRuntime(FakeRuntime):
-            def run_session_turn(self, session_id: str, message: str) -> str:
+            def run_session_turn(self, session_id: str, message: str, **_kwargs) -> str:
                 self.last_write_result = IsolatedWriteResult(
                     output="updated",
                     commits_landed=1,
@@ -3575,12 +3649,11 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
                 patch("sys.stderr", stderr),
             ):
-                trigger_store.return_value.increment.side_effect = OSError("disk full")
                 result = main(["update", "_async-worker"])
 
         self.assertEqual(result, 0)
-        self.assertIn("Warning: could not update dreamer trigger state", stderr.getvalue())
-        self.assertIn("disk full", stderr.getvalue())
+        trigger_store.assert_not_called()
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_submitted_worker_private_command_is_removed(self):
         with tempfile.TemporaryDirectory() as tempdir:

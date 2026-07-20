@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from .agent_cli import CliAgentExecutor, NO_SESSION_RIGHTMEMORY_SESSION_ID
+from .automatic_effects import (
+    forget_memory_change_pressure_operation,
+    memory_change_pressure_points,
+    record_memory_change_pressure_once,
+)
 from .config import PrunerConfig, RuntimeConfig, load_config
 from .debug import DebugTrace
 from .isolated_write import IsolatedWriteResult, IsolatedWriteSupervisor, MainMemoryDirtyError
@@ -43,8 +48,21 @@ from .retrieve_selection import (
     parse_retrieve_selection_json,
 )
 from .semantic_upgrades import SemanticUpgradeContext, mark_absorbed, pending_context
-from .session import MemoryWriteLock, MessageSessionStore, _ensure_runtime_gitignore, _fsync_directory
-from .shared_view_files import publish_approved_file_views, pull_all_file_views, record_file_view_publish_results
+from .session import (
+    MemoryWriteLock,
+    MessageSessionStore,
+    _ensure_durable_directory,
+    _ensure_runtime_gitignore,
+    _fsync_directory,
+)
+from .semantic_operation import FINAL_PHASES, OperationEffect, SemanticOperationRecord, SemanticOperationStore
+from .shared_view_files import (
+    prepare_file_view_publish_outbox,
+    publish_approved_file_views,
+    publish_file_view_outbox,
+    pull_all_file_views,
+    record_file_view_publish_results,
+)
 from .sync import SyncManager, SyncResult
 from .tools import MemoryTools
 from .update_review import UpdateExecutionLock, UpdateReviewStore
@@ -76,6 +94,11 @@ MODEL_REQUEST_LIMIT = 100
 THINK_START_TAG = "<think>"
 THINK_END_TAG = "</think>"
 UPDATE_MODES = {"normal", "review-correction"}
+STATE_EFFECT = "session-state"
+REVIEW_EFFECT = "update-review"
+PRESSURE_EFFECT = "memory-pressure"
+PUBLISH_EFFECT = "file-view-publish"
+SEMANTIC_UPGRADE_EFFECT = "semantic-upgrades"
 
 
 @dataclass(frozen=True)
@@ -110,18 +133,22 @@ class RightMemoryRuntime:
         self._semantic_upgrade_ids = self.semantic_upgrades.ids if self.semantic_upgrades is not None else []
         self.agent = self._build_cli_agent() if config.runtime_mode == "cli-agent" else self._build_agent()
 
-    def run_turn(self, message: str) -> str:
-        if self.config.role == "update":
+    def run_turn(self, message: str, *, operation_id: str | None = None) -> str:
+        if self.config.role in AUTOMATIC_WRITE_ROLES:
             with self._update_execution_lock():
                 self._last_write_result = None
                 self._last_reviewed_update_commit = None
                 base_commit = self._review_base_commit()
+                turn_kwargs: dict[str, object] = {"allow_internal_session": True}
+                if operation_id is not None:
+                    turn_kwargs["operation_id"] = operation_id
                 output = self._run_session_turn_unlocked(
                     NO_SESSION_RIGHTMEMORY_SESSION_ID,
                     message,
-                    allow_internal_session=True,
+                    **turn_kwargs,
                 )
-                self._create_update_review(base_commit, output)
+                if not self._should_isolate_write_turn():
+                    self._create_update_review(base_commit, output)
                 return output
         with self._update_execution_lock():
             self._last_write_result = None
@@ -131,15 +158,21 @@ class RightMemoryRuntime:
             self._create_update_review(base_commit, output)
             return output
 
-    def run_chat_turn(self, message: str, session_id: str | None = None) -> str:
+    def run_chat_turn(
+        self,
+        message: str,
+        session_id: str | None = None,
+        *,
+        operation_id: str | None = None,
+    ) -> str:
         if self.config.runtime_mode != "cli-agent":
             if session_id is None:
-                return self.run_turn(message)
-            return self.run_session_turn(session_id, message)
+                return self.run_turn(message, operation_id=operation_id)
+            return self.run_session_turn(session_id, message, operation_id=operation_id)
         if self.config.role == "retrieve" and session_id is not None:
             return self.run_session_turn(session_id, message)
         if self._should_isolate_write_turn():
-            return self.run_turn(message)
+            return self.run_turn(message, operation_id=operation_id)
         with self._update_execution_lock():
             self._last_write_result = None
             self._last_reviewed_update_commit = None
@@ -219,18 +252,21 @@ class RightMemoryRuntime:
         *,
         on_started: Callable[[], None] | None = None,
         include_returned: bool = False,
+        operation_id: str | None = None,
     ) -> str:
         with self._update_execution_lock():
             self._last_write_result = None
             self._last_reviewed_update_commit = None
             base_commit = self._review_base_commit()
-            output = self._run_session_turn_unlocked(
-                session_id,
-                message,
-                on_started=on_started,
-                include_returned=include_returned,
-            )
-            self._create_update_review(base_commit, output)
+            turn_kwargs: dict[str, object] = {
+                "on_started": on_started,
+                "include_returned": include_returned,
+            }
+            if operation_id is not None:
+                turn_kwargs["operation_id"] = operation_id
+            output = self._run_session_turn_unlocked(session_id, message, **turn_kwargs)
+            if not self._should_isolate_write_turn():
+                self._create_update_review(base_commit, output)
             return output
 
     def _run_session_turn_unlocked(
@@ -241,6 +277,7 @@ class RightMemoryRuntime:
         on_started: Callable[[], None] | None = None,
         allow_internal_session: bool = False,
         include_returned: bool = False,
+        operation_id: str | None = None,
     ) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
@@ -266,13 +303,19 @@ class RightMemoryRuntime:
                 if include_returned:
                     direct_kwargs["include_returned"] = True
                 direct_callback = lambda: run_session(session_id, message, **direct_kwargs)
+                operation_kwargs = {} if operation_id is None else {"operation_id": operation_id}
                 if on_started is None:
-                    isolated_callback = lambda: self._run_session_turn_isolated(session_id, message)
+                    isolated_callback = lambda: self._run_session_turn_isolated(
+                        session_id,
+                        message,
+                        **operation_kwargs,
+                    )
                 else:
                     isolated_callback = lambda: self._run_session_turn_isolated(
                         session_id,
                         message,
                         on_started=on_started,
+                        **operation_kwargs,
                     )
                 if isolate_write:
                     run_callback = isolated_callback
@@ -284,13 +327,20 @@ class RightMemoryRuntime:
                 raise
             if post_sync is not None:
                 self._run_sync_reconciler(post_sync)
-            self._publish_file_views_after_write()
-            self._mark_semantic_upgrades_absorbed()
+            if not isolate_write:
+                self._publish_file_views_after_write()
+                self._mark_semantic_upgrades_absorbed()
             output = self._result_output(result)
             self._trace("run_finished", output=output)
         return output
 
-    def run_cycle(self, session_id: str, operator_hint: str | None = None) -> str:
+    def run_cycle(
+        self,
+        session_id: str,
+        operator_hint: str | None = None,
+        *,
+        operation_id: str | None = None,
+    ) -> str:
         if self.config.role not in CYCLE_ROLES:
             raise ValueError("run_cycle requires dreamer or insight role")
         hint = (operator_hint or "none").strip() or "none"
@@ -302,9 +352,15 @@ class RightMemoryRuntime:
                 "</rightmemory_cycle>",
             )
         )
-        return self.run_session_turn(session_id, message)
+        return self.run_session_turn(session_id, message, operation_id=operation_id)
 
-    def run_prune_turn(self, session_id: str, pruner_config: PrunerConfig) -> str:
+    def run_prune_turn(
+        self,
+        session_id: str,
+        pruner_config: PrunerConfig,
+        *,
+        operation_id: str | None = None,
+    ) -> str:
         if self.config.role != "pruner":
             raise ValueError("run_prune_turn requires pruner role")
         if session_id == NO_SESSION_RIGHTMEMORY_SESSION_ID:
@@ -319,7 +375,11 @@ class RightMemoryRuntime:
             try:
                 isolate_write = self._should_isolate_write_turn()
                 if isolate_write:
-                    run_callback = lambda: self._run_prune_turn_isolated(session_id, pruner_config)
+                    run_callback = lambda: self._run_prune_turn_isolated(
+                        session_id,
+                        pruner_config,
+                        operation_id=operation_id,
+                    )
                 else:
                     run_callback = lambda: self._run_prune_turn_direct(session_id, pruner_config)
                 result, post_sync = self._run_locked_turn(run_callback, isolate_write=isolate_write)
@@ -328,7 +388,8 @@ class RightMemoryRuntime:
                 raise
             if post_sync is not None:
                 self._run_sync_reconciler(post_sync)
-            self._publish_file_views_after_write()
+            if not isolate_write:
+                self._publish_file_views_after_write()
             output = self._result_output(result)
             self._trace("run_finished", output=output)
         return output
@@ -537,68 +598,396 @@ class RightMemoryRuntime:
         message: str,
         *,
         on_started: Callable[[], None] | None = None,
+        operation_id: str | None = None,
     ):
+        def run_in_operation(worktree: Path, state_root: Path):
+            if on_started is None:
+                return self._run_session_turn_in_worktree(worktree, state_root, session_id, message)
+            return self._run_session_turn_in_worktree(
+                worktree,
+                state_root,
+                session_id,
+                message,
+                on_started=on_started,
+            )
+
+        return self._run_isolated_operation(
+            session_id,
+            operation_id,
+            {"kind": "semantic-turn", "message": message},
+            run_in_operation,
+        )
+
+    def _run_prune_turn_isolated(
+        self,
+        session_id: str,
+        pruner_config: PrunerConfig,
+        *,
+        operation_id: str | None = None,
+    ):
+        return self._run_isolated_operation(
+            session_id,
+            operation_id,
+            {"kind": "prune-turn"},
+            lambda worktree, state_root: self._run_prune_turn_in_worktree(
+                worktree,
+                state_root,
+                session_id,
+                pruner_config,
+            ),
+        )
+
+    def _run_isolated_operation(
+        self,
+        session_id: str,
+        operation_id: str | None,
+        operation_input: dict[str, object],
+        run_in_operation: Callable[[Path, Path], Any],
+    ):
+        clean_operation_id = operation_id or f"{self.config.role}-{uuid.uuid4().hex}"
+        operation_input = {
+            **operation_input,
+            "role": self.config.role,
+            "session_id": session_id,
+            "update_mode": self.update_mode,
+        }
+        pressure_points = (
+            memory_change_pressure_points(self.config.memory_root)
+            if self.config.role == "update"
+            else None
+        )
         supervisor_kwargs = {"update_mode": self.update_mode} if self.update_mode != "normal" else {}
         supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role, **supervisor_kwargs)
         state = _IsolatedStateOverlay(
             self.config.state_root,
             self.config.role,
             session_id,
+            operation_id=clean_operation_id,
             seed_provider_session=self.config.runtime_mode != "cli-agent",
         )
-        with self.sessions.locked(session_id):
+        store = SemanticOperationStore(self.config.memory_root)
+
+        def run_in_worktree(worktree: Path):
             with state as state_root:
-                try:
-                    if on_started is None:
-                        run_in_worktree = lambda worktree: self._run_session_turn_in_worktree(
-                            worktree,
-                            state_root,
-                            session_id,
-                            message,
-                        )
-                    else:
-                        run_in_worktree = lambda worktree: self._run_session_turn_in_worktree(
-                            worktree,
-                            state_root,
-                            session_id,
-                            message,
-                            on_started=on_started,
-                        )
-                    result = supervisor.run(
-                        run_in_worktree
-                    )
-                    self._last_write_result = result
+                return run_in_operation(worktree, state_root)
+
+        tracked_operation = False
+        with self.sessions.locked(session_id):
+            try:
+                recover_prepared = getattr(supervisor, "recover_prepared", None)
+                if callable(recover_prepared):
+                    recover_prepared()
+                self._recover_pending_session_state(
+                    session_id,
+                    exclude=clean_operation_id,
+                )
+                existing = store.read(clean_operation_id)
+                if existing is None or existing.phase == "running":
+                    store.clear_effect_state(clean_operation_id, PUBLISH_EFFECT)
+                result = supervisor.run(
+                    run_in_worktree,
+                    operation_id=clean_operation_id,
+                    operation_input=operation_input,
+                    effects_for_outcome=lambda paths, commits: self._operation_effect_plan(
+                        session_id,
+                        paths,
+                        commits,
+                        pressure_points=pressure_points,
+                    ),
+                    prepare_effects=self._prepare_operation_effects,
+                )
+                self._last_write_result = result
+                if store.read(clean_operation_id) is None:
+                    # Keep test/custom supervisors compatible with the runtime seam.
                     self._create_update_review(result.start_commit, str(result.output))
                     state.promote()
-                    return result.output
-                except Exception:
+                    cleanup = getattr(state, "cleanup", None)
+                    if callable(cleanup):
+                        cleanup()
+                else:
+                    tracked_operation = True
+                    self._run_operation_effects(
+                        clean_operation_id,
+                        state,
+                        effect_names={STATE_EFFECT},
+                    )
+            except Exception:
+                record = store.read(clean_operation_id)
+                if record is None or record.phase == "running":
                     state.archive_failed_provider_session()
-                    raise
+                    cleanup = getattr(state, "cleanup", None)
+                    if callable(cleanup):
+                        cleanup()
+                raise
 
-    def _run_prune_turn_isolated(self, session_id: str, pruner_config: PrunerConfig):
-        supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
+        if tracked_operation:
+            self._run_operation_effects(
+                clean_operation_id,
+                state,
+                exclude_effects={STATE_EFFECT},
+            )
+            self._retry_pending_operation_effects(exclude=clean_operation_id)
+        return result.output
+
+    def _operation_effect_plan(
+        self,
+        session_id: str,
+        changed_paths: tuple[str, ...],
+        commits_landed: int,
+        *,
+        pressure_points: tuple[float, float] | None,
+    ) -> tuple[OperationEffect, ...]:
+        effects = [OperationEffect(STATE_EFFECT, metadata={"session_id": session_id})]
+        effects.append(OperationEffect(PUBLISH_EFFECT))
+        if self.config.role == "update" and self.update_mode == "normal" and commits_landed:
+            effects.append(OperationEffect(REVIEW_EFFECT))
+        if self.config.role == "update" and commits_landed and _changed_memory_paths(changed_paths):
+            if pressure_points is None:
+                raise RuntimeError("update pressure points were not prepared")
+            dreamer_points, insight_points = pressure_points
+            effects.append(
+                OperationEffect(
+                    PRESSURE_EFFECT,
+                    metadata={
+                        "dreamer_points": dreamer_points,
+                        "insight_points": insight_points,
+                    },
+                )
+            )
+        if self.config.role == "dreamer" and self._semantic_upgrade_ids:
+            effects.append(
+                OperationEffect(
+                    SEMANTIC_UPGRADE_EFFECT,
+                    metadata={"upgrade_ids": list(self._semantic_upgrade_ids)},
+                )
+            )
+        return tuple(effects)
+
+    def _run_operation_effects(
+        self,
+        operation_id: str,
+        state: _IsolatedStateOverlay,
+        *,
+        effect_names: set[str] | None = None,
+        exclude_effects: set[str] | None = None,
+    ) -> None:
+        store = SemanticOperationStore(self.config.memory_root)
+        try:
+            with store.effects_locked(operation_id):
+                record = store.read(operation_id)
+                if record is None:
+                    raise FileNotFoundError(f"semantic operation does not exist: {operation_id}")
+                if record.phase not in FINAL_PHASES:
+                    return
+                effects = store.list_pending_effects(operation_id)
+                for effect in effects:
+                    if effect_names is not None and effect.name not in effect_names:
+                        continue
+                    if exclude_effects is not None and effect.name in exclude_effects:
+                        continue
+                    try:
+                        self._apply_operation_effect(record, effect, state)
+                        store.mark_effect(operation_id, effect.name, "done")
+                        if effect.name == PRESSURE_EFFECT:
+                            try:
+                                forget_memory_change_pressure_operation(
+                                    self.config.memory_root,
+                                    operation_id,
+                                )
+                            except Exception:
+                                pass
+                    except Exception as exc:
+                        try:
+                            store.mark_effect(
+                                operation_id,
+                                effect.name,
+                                "failed",
+                                error=f"{type(exc).__name__}: {exc}",
+                            )
+                        except Exception:
+                            pass
+                        self._warn_operation_effect_failure(operation_id, effect.name, exc)
+                latest = store.read(operation_id)
+                if latest is not None and any(
+                    effect.name == PUBLISH_EFFECT and effect.status == "done"
+                    for effect in latest.effects
+                ):
+                    try:
+                        store.clear_effect_state(operation_id, PUBLISH_EFFECT)
+                    except Exception:
+                        pass
+        except Exception as exc:
+            self._warn_operation_effect_failure(operation_id, "effect-replay", exc)
+
+    def _recover_pending_session_state(self, session_id: str, *, exclude: str) -> None:
+        store = SemanticOperationStore(self.config.memory_root)
+
+        def pending_state_records() -> list[SemanticOperationRecord]:
+            records = []
+            for record in store.list_outstanding_records():
+                if (
+                    record.operation_id == exclude
+                    or record.phase not in FINAL_PHASES
+                    or record.input_data.get("role") != self.config.role
+                    or record.input_data.get("session_id") != session_id
+                    or not any(
+                        effect.name == STATE_EFFECT and effect.status != "done"
+                        for effect in record.effects
+                    )
+                ):
+                    continue
+                records.append(record)
+            return records
+
+        records = pending_state_records()
+        records.sort(
+            key=lambda record: (
+                record.outcome.sequence if record.outcome is not None else 0,
+                record.operation_id,
+            )
+        )
+        for record in records:
+            state = _IsolatedStateOverlay(
+                self.config.state_root,
+                self.config.role,
+                session_id,
+                operation_id=record.operation_id,
+                seed_provider_session=self.config.runtime_mode != "cli-agent",
+            )
+            self._run_operation_effects(
+                record.operation_id,
+                state,
+                effect_names={STATE_EFFECT},
+            )
+
+        if pending_state_records():
+            raise RuntimeError(
+                f"previous semantic session state is still pending for {self.config.role}/{session_id}"
+            )
+
+    def _warn_operation_effect_failure(self, operation_id: str, effect_name: str, exc: Exception) -> None:
+        self._trace(
+            "operation_effect_failed",
+            operation_id=operation_id,
+            effect=effect_name,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        print(
+            f"Warning: semantic operation {operation_id} is saved, but effect "
+            f"{effect_name} is pending: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    def _apply_operation_effect(
+        self,
+        record: SemanticOperationRecord,
+        effect: OperationEffect,
+        state: _IsolatedStateOverlay,
+    ) -> None:
+        outcome = record.outcome
+        if outcome is None:
+            raise RuntimeError(f"completed operation has no outcome: {record.operation_id}")
+        if effect.name == STATE_EFFECT:
+            state.promote_if_current(record.operation_id, outcome.sequence)
+            return
+        if effect.name == REVIEW_EFFECT:
+            self._create_update_review_for_result(
+                _write_result_from_operation(record),
+                outcome.output,
+                raise_errors=True,
+            )
+            return
+        if effect.name == PRESSURE_EFFECT:
+            dreamer_points = effect.metadata.get("dreamer_points")
+            insight_points = effect.metadata.get("insight_points")
+            if (
+                not isinstance(dreamer_points, (int, float))
+                or isinstance(dreamer_points, bool)
+                or dreamer_points <= 0
+                or not isinstance(insight_points, (int, float))
+                or isinstance(insight_points, bool)
+                or insight_points <= 0
+            ):
+                raise ValueError("memory-pressure effect requires positive point values")
+            record_memory_change_pressure_once(
+                self.config.memory_root,
+                record.operation_id,
+                dreamer_points=float(dreamer_points),
+                insight_points=float(insight_points),
+            )
+            return
+        if effect.name == PUBLISH_EFFECT:
+            store = SemanticOperationStore(self.config.memory_root)
+            with store.publish_locked():
+                if not _advance_effect_watermark(
+                    self.config.memory_root,
+                    "file-view-publish",
+                    record.operation_id,
+                    outcome.sequence,
+                ):
+                    return
+                self._publish_file_views_after_write(
+                    raise_on_failure=True,
+                    operation_id=record.operation_id,
+                )
+            return
+        if effect.name == SEMANTIC_UPGRADE_EFFECT:
+            upgrade_ids = effect.metadata.get("upgrade_ids")
+            if not isinstance(upgrade_ids, list) or not all(isinstance(item, str) for item in upgrade_ids):
+                raise ValueError("semantic-upgrades effect requires string upgrade_ids")
+            mark_absorbed(self.config.state_root, upgrade_ids)
+            self._semantic_upgrade_ids = [item for item in self._semantic_upgrade_ids if item not in upgrade_ids]
+            return
+        raise ValueError(f"unknown semantic operation effect: {effect.name}")
+
+    def _retry_pending_operation_effects(self, *, exclude: str) -> None:
+        store = SemanticOperationStore(self.config.memory_root)
+        try:
+            candidates = [
+                record
+                for record in store.list_outstanding_records()
+                if record.operation_id != exclude
+                and record.phase in FINAL_PHASES
+                and record.input_data.get("role") == self.config.role
+                and store.list_pending_effects(record.operation_id)
+            ]
+        except Exception as exc:
+            self._warn_operation_effect_failure(exclude, "pending-effect-scan", exc)
+            return
+        if not candidates:
+            return
+
+        # One durable round-robin step keeps retries bounded without starvation.
+        try:
+            record = store.choose_effect_retry(f"role:{self.config.role}", candidates)
+        except Exception as exc:
+            self._warn_operation_effect_failure(exclude, "effect-retry-cursor", exc)
+            return
+        if record is None:
+            return
+        session_id = record.input_data.get("session_id")
+        if not isinstance(session_id, str):
+            return
         state = _IsolatedStateOverlay(
             self.config.state_root,
             self.config.role,
             session_id,
+            operation_id=record.operation_id,
             seed_provider_session=self.config.runtime_mode != "cli-agent",
         )
         with self.sessions.locked(session_id):
-            with state as state_root:
-                try:
-                    result = supervisor.run(
-                        lambda worktree: self._run_prune_turn_in_worktree(
-                            worktree,
-                            state_root,
-                            session_id,
-                            pruner_config,
-                        )
-                    )
-                    state.promote()
-                    return result.output
-                except Exception:
-                    state.archive_failed_provider_session()
-                    raise
+            self._run_operation_effects(
+                record.operation_id,
+                state,
+                effect_names={STATE_EFFECT},
+            )
+        self._run_operation_effects(
+            record.operation_id,
+            state,
+            exclude_effects={STATE_EFFECT},
+        )
 
     def _run_prune_turn_in_worktree(
         self,
@@ -823,11 +1212,38 @@ class RightMemoryRuntime:
         with MemoryWriteLock(self.config.memory_root):
             pull_all_file_views(self.config.memory_root)
 
-    def _publish_file_views_after_write(self) -> None:
+    def _publish_file_views_after_write(
+        self,
+        *,
+        raise_on_failure: bool = False,
+        operation_id: str | None = None,
+    ) -> None:
         if self.config.role not in AUTOMATIC_WRITE_ROLES:
             return
-        results = publish_approved_file_views(self.config.memory_root)
+        if operation_id is None:
+            results = publish_approved_file_views(self.config.memory_root)
+        else:
+            store = SemanticOperationStore(self.config.memory_root)
+            record = store.read(operation_id)
+            if record is None or record.outcome is None or record.phase not in FINAL_PHASES:
+                raise RuntimeError(f"semantic operation has no durable publish outbox: {operation_id}")
+            results = publish_file_view_outbox(
+                store.effect_state_root(operation_id, PUBLISH_EFFECT),
+                operation_id=operation_id,
+                credential_root=self.config.memory_root,
+            )
         record_file_view_publish_results(self.config.memory_root, results, trigger=f"{self.config.role}-write")
+        failures = [result for result in results if getattr(result, "status", None) == "failed"]
+        if raise_on_failure and failures:
+            detail = "; ".join(f"{result.view_id}: {result.message}" for result in failures)
+            raise RuntimeError(f"file-view publish failed: {detail}")
+
+    def _prepare_operation_effects(self, operation_id: str, source_root: Path) -> None:
+        store = SemanticOperationStore(self.config.memory_root)
+        prepare_file_view_publish_outbox(
+            source_root,
+            store.effect_state_root(operation_id, PUBLISH_EFFECT),
+        )
 
     def _semantic_upgrade_context(self) -> SemanticUpgradeContext | None:
         if self.config.role != "dreamer":
@@ -977,21 +1393,56 @@ class RightMemoryRuntime:
             return None
         return current_memory_head(self.config.memory_root)
 
-    def _create_update_review(self, base_commit: str | None, summary: str) -> None:
+    def _create_update_review(
+        self,
+        base_commit: str | None,
+        summary: str,
+        *,
+        raise_errors: bool = False,
+    ) -> None:
         if self.config.role != "update" or self.update_mode != "normal":
             return
         landed = self._last_write_result
         if landed is not None:
-            if landed.commits_landed == 0:
-                return
-            base_commit = landed.start_commit
-            update_commit = landed.landed_commit
-            write_surface = _rightmemory_write_surface(landed.changed_paths)
-        else:
-            update_commit = current_memory_head(self.config.memory_root)
-            write_surface = "Memory + Pursuit"
+            self._create_update_review_for_result(landed, summary, raise_errors=raise_errors)
+            return
+        update_commit = current_memory_head(self.config.memory_root)
         if base_commit is None:
             return
+        self._write_update_review(
+            base_commit,
+            update_commit,
+            "Memory + Pursuit",
+            summary,
+            raise_errors=raise_errors,
+        )
+
+    def _create_update_review_for_result(
+        self,
+        landed: IsolatedWriteResult,
+        summary: str,
+        *,
+        raise_errors: bool = False,
+    ) -> None:
+        if landed.commits_landed == 0:
+            return
+        self._write_update_review(
+            landed.start_commit,
+            landed.landed_commit,
+            _rightmemory_write_surface(landed.changed_paths),
+            summary,
+            raise_errors=raise_errors,
+        )
+
+    def _write_update_review(
+        self,
+        base_commit: str,
+        update_commit: str | None,
+        write_surface: str,
+        summary: str,
+        *,
+        raise_errors: bool,
+    ) -> None:
         if update_commit is None or update_commit == base_commit:
             return
         if update_commit == self._last_reviewed_update_commit:
@@ -1016,6 +1467,8 @@ class RightMemoryRuntime:
             self._last_reviewed_update_commit = update_commit
         except Exception as exc:
             self._trace("update_review_failed", error_type=type(exc).__name__, error=str(exc))
+            if raise_errors:
+                raise
             print(
                 f"Warning: update commit {update_commit} landed, but its local review document could not be created: "
                 f"{type(exc).__name__}: {exc}",
@@ -1092,20 +1545,66 @@ class RightMemoryRuntime:
 
 
 class _IsolatedStateOverlay:
-    def __init__(self, state_root: Path, role: str, session_id: str, *, seed_provider_session: bool = True):
+    def __init__(
+        self,
+        state_root: Path,
+        role: str,
+        session_id: str,
+        *,
+        operation_id: str | None = None,
+        seed_provider_session: bool = True,
+    ):
         self.state_root = state_root
         self.role = role
         self.session_id = session_id
         self.seed_provider_session = seed_provider_session
-        self.overlay_root = state_root / ".runtime" / "isolated-state" / f"{role}-{uuid.uuid4().hex}"
+        if operation_id is None:
+            self.overlay_root = state_root / ".runtime" / "isolated-state" / f"{role}-{uuid.uuid4().hex}"
+        else:
+            self.overlay_root = SemanticOperationStore(state_root).state_root(operation_id)
 
     def __enter__(self) -> Path:
         _ensure_runtime_gitignore(self.state_root / ".runtime")
+        shutil.rmtree(self.overlay_root, ignore_errors=True)
         self._seed()
         return self.overlay_root
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    def cleanup(self) -> None:
         shutil.rmtree(self.overlay_root, ignore_errors=True)
+
+    def promote_if_current(self, operation_id: str, sequence: int) -> bool:
+        history = MessageSessionStore(self.state_root, self.role).paths(self.session_id).history
+        watermark = (
+            self.state_root
+            / ".runtime"
+            / "operations"
+            / "session-state"
+            / self.role
+            / f"{history.stem}.json"
+        )
+        current_key: tuple[int, str] | None = None
+        if watermark.exists():
+            data = json.loads(watermark.read_text(encoding="utf-8"))
+            current_id = data.get("operation_id") if isinstance(data, dict) else None
+            current_sequence = data.get("sequence") if isinstance(data, dict) else None
+            if not isinstance(current_id, str) or type(current_sequence) is not int or current_sequence < 1:
+                raise ValueError(f"invalid semantic session-state watermark: {watermark}")
+            current_key = (current_sequence, current_id)
+        if current_key is not None and current_key > (sequence, operation_id):
+            self.cleanup()
+            return False
+
+        # Write the ordering fence first. A crash then safely retries the same promotion.
+        _write_state_json_file(
+            {"operation_id": operation_id, "sequence": sequence},
+            watermark,
+        )
+        self.promote()
+        self.cleanup()
+        return True
 
     def promote(self) -> None:
         _ensure_runtime_gitignore(self.state_root / ".runtime")
@@ -1158,15 +1657,41 @@ class _IsolatedStateOverlay:
         return [path.relative_to(self.overlay_root) for path in sorted(root.glob("*/*.json"))]
 
 
+def _advance_effect_watermark(
+    state_root: Path,
+    effect_name: str,
+    operation_id: str,
+    sequence: int,
+) -> bool:
+    path = state_root / ".runtime" / "operations" / "effects" / f"{effect_name}.json"
+    current_key: tuple[int, str] | None = None
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        current_id = data.get("operation_id") if isinstance(data, dict) else None
+        current_sequence = data.get("sequence") if isinstance(data, dict) else None
+        if not isinstance(current_id, str) or type(current_sequence) is not int or current_sequence < 1:
+            raise ValueError(f"invalid semantic effect watermark: {path}")
+        current_key = (current_sequence, current_id)
+    if current_key is not None and current_key > (sequence, operation_id):
+        return False
+    _write_state_json_file(
+        {"operation_id": operation_id, "sequence": sequence},
+        path,
+    )
+    return True
+
+
 def _copy_state_file(source: Path, destination: Path) -> None:
     if not source.exists():
         return
     if not source.is_file():
         raise RuntimeError(f"runtime state path is not a file: {source}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_durable_directory(destination.parent)
     tmp_path = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
     try:
         shutil.copy2(source, tmp_path)
+        with tmp_path.open("rb") as handle:
+            os.fsync(handle.fileno())
         os.replace(tmp_path, destination)
     except OSError:
         tmp_path.unlink(missing_ok=True)
@@ -1175,7 +1700,7 @@ def _copy_state_file(source: Path, destination: Path) -> None:
 
 
 def _write_state_json_file(data: dict[str, Any], destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_durable_directory(destination.parent)
     tmp_path = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
     content = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     try:
@@ -1227,6 +1752,24 @@ def _rightmemory_write_surface(paths: tuple[str, ...]) -> str:
     if changed_pursuit:
         return "Pursuit"
     return "RightMemory"
+
+
+def _changed_memory_paths(paths: tuple[str, ...]) -> bool:
+    return any(path == "MEMORY.md" or (path.startswith("MEMORY_") and path.endswith(".md")) for path in paths)
+
+
+def _write_result_from_operation(record: SemanticOperationRecord) -> IsolatedWriteResult:
+    outcome = record.outcome
+    if outcome is None:
+        raise RuntimeError(f"completed operation has no outcome: {record.operation_id}")
+    return IsolatedWriteResult(
+        output=outcome.output,
+        commits_landed=1 if record.phase == "committed" else 0,
+        start_commit=outcome.start_commit,
+        landed_commit=outcome.landed_commit or outcome.start_commit,
+        changed_paths=outcome.changed_paths,
+        operation_id=record.operation_id,
+    )
 
 
 def build_model(config: RuntimeConfig):

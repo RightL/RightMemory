@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -10,9 +11,11 @@ from rightmemory.async_update import (
     AsyncUpdateSessionBatch,
     AsyncUpdateState,
     AsyncUpdateStore,
+    _batch_session_id,
     _is_async_worker_process,
 )
 from rightmemory.platform import lock_file_nonblocking, unlock_file
+from rightmemory.semantic_operation import OperationEffect, SemanticOperationStore
 
 
 class AsyncUpdateStateTests(unittest.TestCase):
@@ -102,11 +105,14 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
         self.assertEqual(paths, ["agent-1.json"])
 
-    def test_dead_worker_running_batch_returns_batch_to_pending(self):
+    def test_dead_worker_running_batch_preserves_reserved_batch_for_retry(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
             interrupted = _job(1, "interrupted")
             already_pending = _job(2, "already pending")
+            operation_id = _batch_session_id(
+                [AsyncUpdateSessionBatch("agent-1", _dt("2026-05-15T00:00:00+00:00"), [interrupted])]
+            )
             store._write(
                 "agent-1",
                 AsyncUpdateState(
@@ -116,6 +122,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
                     phase="running",
                     started_at="2026-05-15T00:00:00+00:00",
                     pid=12345,
+                    current_operation_id=operation_id,
                     current_batch=[interrupted],
                     pending=[already_pending],
                     next_id=3,
@@ -130,10 +137,391 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(recovered.attempts, 1)
         self.assertIsNotNone(recovered.next_retry_at)
         self.assertIsNone(recovered.next_flush_at)
-        self.assertEqual(recovered.current_batch, [])
-        self.assertEqual([job.id for job in recovered.pending], [1, 2])
-        self.assertEqual(recovered.pending[0].message, "interrupted")
+        self.assertEqual([job.id for job in recovered.current_batch], [1])
+        self.assertEqual([job.id for job in recovered.pending], [2])
+        self.assertEqual(recovered.current_batch[0].message, "interrupted")
+        self.assertEqual(recovered.current_operation_id, operation_id)
         self.assertIn("worker process exited before writing result", recovered.error or "")
+
+    def test_terminal_operation_acknowledges_dead_batch_without_callback(self):
+        for phase in ("committed", "no_change"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tempdir:
+                root = Path(tempdir)
+                store = AsyncUpdateStore(root, "update")
+                job = _job(1, f"{phase} candidate")
+                batch = [AsyncUpdateSessionBatch("agent-1", _dt("2000-01-01T00:00:00+00:00"), [job])]
+                operation_id = _batch_session_id(batch)
+                store._write(
+                    "agent-1",
+                    AsyncUpdateState(
+                        status="running",
+                        session_id="agent-1",
+                        role="update",
+                        phase="running",
+                        pid=12345,
+                        current_operation_id=operation_id,
+                        current_batch=[job],
+                        next_id=2,
+                    ),
+                )
+                _record_terminal_operation(root, operation_id, phase=phase, output=f"{phase} output")
+                callback = Mock(side_effect=AssertionError("terminal operation must not rerun"))
+
+                result = store.run_pending_batches(
+                    callback,
+                    target_batch_candidates=1,
+                    max_wait_seconds=0,
+                )
+                state = store.read("agent-1")
+
+            callback.assert_not_called()
+            self.assertEqual(result.status, "idle")
+            self.assertEqual(state.status, "succeeded")
+            self.assertEqual(state.result, f"{phase} output")
+            self.assertEqual(state.current_batch, [])
+            self.assertIsNone(state.current_operation_id)
+            self.assertEqual(state.last_operation_id, operation_id)
+
+    def test_terminal_operation_completed_during_start_skips_callback(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = AsyncUpdateStore(root, "update")
+            job = _job(1, "already handled during start")
+            batch = [
+                AsyncUpdateSessionBatch("agent-1", _dt("2000-01-01T00:00:00+00:00"), [job])
+            ]
+            operation_id = _batch_session_id(batch)
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    pending=[job],
+                    next_id=2,
+                ),
+            )
+            original_start = store._start_cross_session_batch
+
+            def start_and_complete(start_batch, batch_id):
+                started = original_start(start_batch, batch_id)
+                _record_terminal_operation(
+                    root,
+                    batch_id,
+                    phase="committed",
+                    output="completed during start",
+                )
+                return started
+
+            callback = Mock(side_effect=AssertionError("terminal operation must not rerun"))
+            with patch.object(store, "_start_cross_session_batch", side_effect=start_and_complete):
+                result = store.run_pending_batches(
+                    callback,
+                    target_batch_candidates=1,
+                    max_wait_seconds=0,
+                )
+            state = store.read("agent-1")
+
+        callback.assert_not_called()
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(state.result, "completed during start")
+        self.assertEqual(state.last_operation_id, operation_id)
+
+    def test_terminal_operation_recovers_partial_ack_and_preserves_new_pending(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = AsyncUpdateStore(root, "update")
+            first_job = _job(1, "first")
+            second_job = _job(1, "second")
+            new_job = _job(2, "newer")
+            batch = [
+                AsyncUpdateSessionBatch("agent-1", _dt("2000-01-01T00:00:00+00:00"), [first_job]),
+                AsyncUpdateSessionBatch("agent-2", _dt("2000-01-01T00:00:00+00:00"), [second_job]),
+            ]
+            operation_id = _batch_session_id(batch)
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="succeeded",
+                    session_id="agent-1",
+                    role="update",
+                    result="saved output",
+                    last_operation_id=operation_id,
+                    next_id=2,
+                ),
+            )
+            store._write(
+                "agent-2",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-2",
+                    role="update",
+                    phase="running",
+                    pid=12345,
+                    next_flush_at="2099-01-01T00:00:00+00:00",
+                    current_operation_id=operation_id,
+                    current_batch=[second_job],
+                    pending=[new_job],
+                    next_id=3,
+                ),
+            )
+            store._reserve_cross_session_batch(batch, operation_id)
+            _record_terminal_operation(root, operation_id, phase="committed", output="saved output")
+            reservation_path = store._reservation_path(operation_id)
+            self.assertTrue(reservation_path.exists())
+
+            recovered = store.read("agent-2")
+            already_finished = store.read("agent-1")
+            self.assertFalse(reservation_path.exists())
+
+        self.assertEqual(already_finished.last_operation_id, operation_id)
+        self.assertEqual(recovered.status, "running")
+        self.assertEqual(recovered.phase, "waiting")
+        self.assertEqual(recovered.current_batch, [])
+        self.assertIsNone(recovered.current_operation_id)
+        self.assertEqual(recovered.last_operation_id, operation_id)
+        self.assertEqual([job.message for job in recovered.pending], ["newer"])
+
+    def test_batch_identity_includes_full_message_content(self):
+        first = [AsyncUpdateSessionBatch("agent-1", _dt("2000-01-01T00:00:00+00:00"), [_job(1, "alpha")])]
+        second = [AsyncUpdateSessionBatch("agent-1", _dt("2000-01-01T00:00:00+00:00"), [_job(1, "beta")])]
+
+        first_id = _batch_session_id(first)
+        second_id = _batch_session_id(second)
+
+        self.assertNotEqual(first_id, second_id)
+        self.assertTrue(first_id.startswith("update-batch-"))
+        self.assertEqual(len(first_id), len("update-batch-") + 64)
+
+    def test_missing_operation_receipt_retries_same_reserved_batch(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = AsyncUpdateStore(root, "update")
+            job = _job(1, "retry only this")
+            batch = [AsyncUpdateSessionBatch("agent-1", _dt("2000-01-01T00:00:00+00:00"), [job])]
+            operation_id = _batch_session_id(batch)
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="failed",
+                    session_id="agent-1",
+                    role="update",
+                    attempts=1,
+                    next_retry_at="2000-01-01T00:00:00+00:00",
+                    current_operation_id=operation_id,
+                    current_batch=[job],
+                    next_id=2,
+                ),
+            )
+
+            result = store.run_pending_batches(
+                lambda batch_id, message: calls.append((batch_id, message)) or "retried output",
+                target_batch_candidates=15,
+                max_wait_seconds=86400,
+            )
+            state = store.read("agent-1")
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], operation_id)
+        self.assertIn("retry only this", calls[0][1])
+        self.assertEqual(state.status, "succeeded")
+        self.assertEqual(state.last_operation_id, operation_id)
+
+    def test_cross_session_operation_waits_for_every_participant_before_retry(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            first_job = _job(1, "first")
+            second_job = _job(1, "second")
+            batch = [
+                AsyncUpdateSessionBatch("agent-1", _dt("2000-01-01T00:00:00+00:00"), [first_job]),
+                AsyncUpdateSessionBatch("agent-2", _dt("2000-01-01T00:00:00+00:00"), [second_job]),
+            ]
+            operation_id = _batch_session_id(batch)
+            for session_id, job, retry_at in (
+                ("agent-1", first_job, "2000-01-01T00:00:00+00:00"),
+                ("agent-2", second_job, "2099-01-01T00:00:00+00:00"),
+            ):
+                store._write(
+                    session_id,
+                    AsyncUpdateState(
+                        status="failed",
+                        session_id=session_id,
+                        role="update",
+                        attempts=1,
+                        next_retry_at=retry_at,
+                        current_operation_id=operation_id,
+                        current_batch=[job],
+                        next_id=2,
+                    ),
+                )
+            store._reserve_cross_session_batch(batch, operation_id)
+
+            selected, deadline = store._next_batch(target_batch_candidates=15, max_wait_seconds=86400)
+
+        self.assertIsNone(selected)
+        self.assertEqual(deadline, _dt("2099-01-01T00:00:00+00:00"))
+
+    def test_reserved_batch_recovers_exact_participants_after_crash_mid_start(self):
+        class StopAfterRecovery(Exception):
+            pass
+
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            first_job = _job(1, "first original")
+            second_job = _job(1, "second original")
+            newer_job = _job(2, "newer candidate")
+            batch = [
+                AsyncUpdateSessionBatch("agent-1", _dt("2000-01-01T00:00:00+00:00"), [first_job]),
+                AsyncUpdateSessionBatch("agent-2", _dt("2000-01-01T00:00:00+00:00"), [second_job]),
+            ]
+            operation_id = _batch_session_id(batch)
+            for session_id, job in (("agent-1", first_job), ("agent-2", second_job)):
+                store._write(
+                    session_id,
+                    AsyncUpdateState(
+                        status="running",
+                        session_id=session_id,
+                        role="update",
+                        phase="waiting",
+                        next_flush_at="2000-01-01T00:00:00+00:00",
+                        pending=[job],
+                        next_id=2,
+                    ),
+                )
+
+            original_write = store._write
+
+            def crash_on_second_start(session_id, state):
+                if session_id == "agent-2" and state.current_operation_id == operation_id:
+                    raise RuntimeError("simulated crash during batch start")
+                original_write(session_id, state)
+
+            with patch.object(store, "_write", side_effect=crash_on_second_start):
+                with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                    store.run_pending_batches(
+                        lambda _batch_id, _message: "must not run",
+                        target_batch_candidates=2,
+                        max_wait_seconds=0,
+                    )
+
+            reservation_path = store._reservation_path(operation_id)
+            first_after_crash = store._read_raw("agent-1")
+            second_after_crash = store._read_raw("agent-2")
+            self.assertTrue(reservation_path.exists())
+            self.assertEqual(first_after_crash.current_batch, [first_job])
+            self.assertEqual(first_after_crash.current_operation_id, operation_id)
+            self.assertEqual(second_after_crash.pending, [second_job])
+
+            original_write(
+                "agent-1",
+                replace(
+                    first_after_crash,
+                    pending=[newer_job],
+                    next_flush_at="2099-01-01T00:00:00+00:00",
+                    next_id=3,
+                ),
+            )
+
+            def run_message(batch_id, message):
+                calls.append((batch_id, message))
+                return "recovered"
+
+            def stop_after_recovery(_deadline):
+                raise StopAfterRecovery
+
+            with self.assertRaises(StopAfterRecovery):
+                store.run_pending_batches(
+                    run_message,
+                    target_batch_candidates=2,
+                    max_wait_seconds=0,
+                    sleep_until=stop_after_recovery,
+                )
+
+            first = store._read_raw("agent-1")
+            second = store._read_raw("agent-2")
+            reservation_cleared = not reservation_path.exists()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], operation_id)
+        self.assertIn("first original", calls[0][1])
+        self.assertIn("second original", calls[0][1])
+        self.assertNotIn("newer candidate", calls[0][1])
+        self.assertEqual(first.last_operation_id, operation_id)
+        self.assertEqual(first.pending, [newer_job])
+        self.assertEqual(second.last_operation_id, operation_id)
+        self.assertTrue(reservation_cleared)
+
+    def test_reserved_batch_recovers_legacy_operation_id_assignment_gap(self):
+        calls = []
+        callback_states = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            first_job = _job(1, "already moved")
+            second_job = _job(1, "not moved yet")
+            batch = [
+                AsyncUpdateSessionBatch("agent-1", _dt("2000-01-01T00:00:00+00:00"), [first_job]),
+                AsyncUpdateSessionBatch("agent-2", _dt("2000-01-01T00:00:00+00:00"), [second_job]),
+            ]
+            operation_id = _batch_session_id(batch)
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="failed",
+                    session_id="agent-1",
+                    role="update",
+                    attempts=1,
+                    next_retry_at="2000-01-01T00:00:00+00:00",
+                    current_batch=[first_job],
+                    next_id=2,
+                ),
+            )
+            store._write(
+                "agent-2",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-2",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    pending=[second_job],
+                    next_id=2,
+                ),
+            )
+            store._reserve_cross_session_batch(batch, operation_id)
+
+            def run_message(batch_id, message):
+                calls.append((batch_id, message))
+                callback_states.extend((store._read_raw("agent-1"), store._read_raw("agent-2")))
+                return "recovered"
+
+            result = store.run_pending_batches(
+                run_message,
+                target_batch_candidates=2,
+                max_wait_seconds=0,
+            )
+            first = store.read("agent-1")
+            second = store.read("agent-2")
+            reservation_cleared = not store._reservation_path(operation_id).exists()
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.processed, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], operation_id)
+        self.assertIn("already moved", calls[0][1])
+        self.assertIn("not moved yet", calls[0][1])
+        self.assertEqual(
+            [state.current_operation_id for state in callback_states],
+            [operation_id, operation_id],
+        )
+        self.assertEqual(first.last_operation_id, operation_id)
+        self.assertEqual(second.last_operation_id, operation_id)
+        self.assertTrue(reservation_cleared)
 
     def test_legacy_failed_pending_state_becomes_manual_recovery(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -242,12 +630,12 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(state.status, "needs_manual_recovery")
         self.assertIsNone(state.phase)
         self.assertEqual(state.attempts, 2)
-        self.assertEqual(state.current_batch, [])
+        self.assertEqual([job.id for job in state.current_batch], [1, 2])
         self.assertEqual(
             [job.message for job in state.pending],
-            ["interrupted first", "interrupted second", "already pending", "new update"],
+            ["already pending", "new update"],
         )
-        self.assertEqual([job.id for job in state.pending], [1, 2, 3, 4])
+        self.assertEqual([job.id for job in state.pending], [3, 4])
 
     def test_submit_to_empty_failed_state_starts_fresh_pending_work(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -303,13 +691,16 @@ class AsyncUpdateStateTests(unittest.TestCase):
                     session_ids=["agent-1"],
                     error=None,
                 )
-            started = store._start_cross_session_batch(
-                [AsyncUpdateSessionBatch("agent-1", _dt("2000-01-01T00:00:00+00:00"), [original])]
-            )
+            selected = [
+                AsyncUpdateSessionBatch("agent-1", _dt("2000-01-01T00:00:00+00:00"), [original])
+            ]
+            operation_id = _batch_session_id(selected)
+            reserved = store._reserve_cross_session_batch(selected, operation_id)
+            started = store._start_cross_session_batch(reserved.participants, operation_id)
 
             with patch("rightmemory.async_update.subprocess.Popen") as popen:
                 submitted = store.submit("agent-1", "new while running")
-            accepted = store._finish_cross_session_batch(started, "ok")
+            accepted = store._finish_cross_session_batch(started, operation_id, "ok")
             final = store.read("agent-1")
 
         popen.assert_not_called()
@@ -350,8 +741,10 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
             with patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T00:00:00+00:00")):
                 submitted = store.submit("agent-1", "new while selected")
-            started = store._start_cross_session_batch(selected)
-            accepted = store._finish_cross_session_batch(started, "ok")
+            operation_id = _batch_session_id(selected)
+            reserved = store._reserve_cross_session_batch(selected, operation_id)
+            started = store._start_cross_session_batch(reserved.participants, operation_id)
+            accepted = store._finish_cross_session_batch(started, operation_id, "ok")
             final = store.read("agent-1")
 
         self.assertEqual([job.id for job in submitted.pending], [1, 2])
@@ -410,10 +803,10 @@ class AsyncUpdateStateTests(unittest.TestCase):
             recovered = store.read("agent-1")
 
         self.assertEqual(recovered.status, "failed")
-        self.assertEqual(recovered.current_batch, [])
+        self.assertEqual([job.id for job in recovered.current_batch], [1])
         self.assertEqual(recovered.attempts, 1)
         self.assertIsNotNone(recovered.next_retry_at)
-        self.assertEqual([job.id for job in recovered.pending], [1, 2])
+        self.assertEqual([job.id for job in recovered.pending], [2])
         self.assertIn("worker process exited before writing result", recovered.error or "")
 
     def test_cancel_pending_removes_matching_candidate(self):
@@ -468,6 +861,87 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertFalse(canceled)
         self.assertEqual([job.id for job in state.current_batch], [1])
         self.assertEqual([job.id for job in state.pending], [2])
+
+    def test_cancel_pending_does_not_remove_a_reserved_candidate(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            reserved_job = _job(1, "reserved")
+            newer_job = _job(2, "not reserved")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    pending=[reserved_job, newer_job],
+                    next_id=3,
+                ),
+            )
+            batch = [
+                AsyncUpdateSessionBatch(
+                    "agent-1",
+                    _dt("2000-01-01T00:00:00+00:00"),
+                    [reserved_job],
+                )
+            ]
+            operation_id = _batch_session_id(batch)
+            store._reserve_cross_session_batch(batch, operation_id)
+
+            reserved_state, reserved_canceled = store.cancel_pending("agent-1", 1)
+            final_state, newer_canceled = store.cancel_pending("agent-1", 2)
+
+        self.assertFalse(reserved_canceled)
+        self.assertEqual(reserved_state.pending, [reserved_job, newer_job])
+        self.assertTrue(newer_canceled)
+        self.assertEqual(final_state.pending, [reserved_job])
+
+    def test_cancel_between_selection_and_reservation_reselects_remaining_candidate(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    pending=[_job(1, "cancel me"), _job(2, "keep me")],
+                    next_id=3,
+                ),
+            )
+            original_reserve = store._reserve_cross_session_batch
+            canceled = False
+
+            def cancel_before_first_reservation(batch, operation_id):
+                nonlocal canceled
+                if not canceled:
+                    canceled = True
+                    _, did_cancel = store.cancel_pending("agent-1", 1)
+                    self.assertTrue(did_cancel)
+                return original_reserve(batch, operation_id)
+
+            with patch.object(
+                store,
+                "_reserve_cross_session_batch",
+                side_effect=cancel_before_first_reservation,
+            ):
+                result = store.run_pending_batches(
+                    lambda operation_id, message: calls.append((operation_id, message)) or "processed",
+                    target_batch_candidates=2,
+                    max_wait_seconds=0,
+                )
+            state = store.read("agent-1")
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("cancel me", calls[0][1])
+        self.assertIn("keep me", calls[0][1])
+        self.assertEqual(state.current_batch, [])
+        self.assertEqual(state.pending, [])
 
     def test_cancel_pending_missing_candidate_leaves_state_unchanged(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -953,8 +1427,8 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(state.status, "needs_manual_recovery")
         self.assertEqual(state.attempts, 2)
         self.assertIsNone(state.next_retry_at)
-        self.assertEqual(state.current_batch, [])
-        self.assertEqual([job.message for job in state.pending], ["retry me"])
+        self.assertEqual([job.message for job in state.current_batch], ["retry me"])
+        self.assertEqual(state.pending, [])
         self.assertEqual(state.error, "second failure")
         self.assertEqual(state.last_error, "second failure")
 
@@ -1300,6 +1774,23 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
 def _job(job_id: int, message: str) -> AsyncUpdateJob:
     return AsyncUpdateJob(id=job_id, message=message, submitted_at="2026-05-15T00:00:00+00:00")
+
+
+def _record_terminal_operation(root: Path, operation_id: str, *, phase: str, output: str) -> None:
+    operation_store = SemanticOperationStore(root)
+    effects = (OperationEffect("pending-test-effect"),)
+    operation_store.begin(operation_id, {"test_operation": operation_id}, effects=effects)
+    changed_paths = ("MEMORY.md",) if phase == "committed" else ()
+    operation_store.prepare_outcome(
+        operation_id,
+        output=output,
+        start_commit="base-commit",
+        changed_paths=changed_paths,
+    )
+    if phase == "committed":
+        operation_store.complete_commit(operation_id, "landed-commit")
+    else:
+        operation_store.complete_no_change(operation_id)
 
 
 def _dt(value: str):

@@ -62,7 +62,7 @@ class LockedMessageSession:
 
     def __enter__(self) -> LockedMessageSession:
         _ensure_runtime_gitignore(self.paths.runtime_root)
-        self.paths.lock.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_durable_directory(self.paths.lock.parent)
         self._lock_handle = self.paths.lock.open("a+", encoding="utf-8")
         lock_file(self._lock_handle)
         return self
@@ -87,7 +87,7 @@ class LockedMessageSession:
     def save_json(self, data: bytes) -> None:
         if not data:
             raise ValueError("session history must not be empty")
-        self.paths.history.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_durable_directory(self.paths.history.parent)
         tmp_path = self.paths.history.with_name(f".{self.paths.history.name}.{os.getpid()}.tmp")
         with tmp_path.open("wb") as handle:
             handle.write(data)
@@ -116,6 +116,25 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _ensure_durable_directory(path: Path) -> None:
+    """Create a directory tree and durably link every new component."""
+    directory = Path(path)
+    missing: list[Path] = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    if current.exists() and not current.is_dir():
+        raise NotADirectoryError(current)
+    for item in reversed(missing):
+        item.mkdir(exist_ok=True)
+        if not item.is_dir():
+            raise NotADirectoryError(item)
+        _fsync_directory(item.parent)
 
 
 def _ensure_memory_gitignore(memory_root: Path) -> None:
@@ -149,7 +168,7 @@ def _ensure_runtime_gitignore(runtime_root: Path) -> None:
 
 
 def _write_gitignore_if_missing(directory: Path, content: bytes) -> None:
-    directory.mkdir(parents=True, exist_ok=True)
+    _ensure_durable_directory(directory)
     gitignore = directory / ".gitignore"
     if gitignore.exists():
         return

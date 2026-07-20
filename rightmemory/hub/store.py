@@ -14,8 +14,14 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterator
 
+from ..platform import lock_file, unlock_file
 from .models import AuditEvent, HubConfig, HubStoredPackage, HubToken, TokenActor
-from .packages import DEFAULT_MAX_PACKAGE_BYTES, copy_package_version
+from .packages import (
+    DEFAULT_MAX_PACKAGE_BYTES,
+    PackageValidationError,
+    copy_package_version,
+    load_package_manifest,
+)
 
 
 HUB_DB_FILE = "hub.db"
@@ -1117,47 +1123,177 @@ class HubStore:
         clean_version_id = _validate_hub_id(version_id or _new_id("ver"), "version_id")
         clean_provider_id = _validate_hub_id(provider_id, "provider_id") if provider_id else None
         config = self.load_config()
-        stored = copy_package_version(
+        incoming = load_package_manifest(
             package_root,
-            self.storage_root,
-            view_id=clean_view_id,
-            version_id=clean_version_id,
+            expected_view_id=clean_view_id,
             max_package_bytes=config.max_package_bytes,
         )
+        with self._publish_view_locked(clean_view_id):
+            intent_sequence = self._record_publish_intent(
+                view_id=clean_view_id,
+                version_id=clean_version_id,
+                provider_id=clean_provider_id,
+                package_hash=incoming.package_hash,
+            )
+            existing_path = self.storage_root / "views" / clean_view_id / "versions" / clean_version_id
+            created_storage = False
+            if existing_path.exists():
+                stored = _matching_stored_package(
+                    package_root,
+                    existing_path,
+                    view_id=clean_view_id,
+                    version_id=clean_version_id,
+                    max_package_bytes=config.max_package_bytes,
+                )
+            else:
+                stored = copy_package_version(
+                    package_root,
+                    self.storage_root,
+                    view_id=clean_view_id,
+                    version_id=clean_version_id,
+                    max_package_bytes=config.max_package_bytes,
+                )
+                created_storage = True
+
+            if stored.manifest.package_hash != incoming.package_hash:
+                if created_storage and stored.path.exists():
+                    shutil.rmtree(stored.path)
+                raise PackageValidationError("package changed while it was being published")
+
+            self._finalize_package_version(
+                stored,
+                view_id=clean_view_id,
+                version_id=clean_version_id,
+                provider_id=clean_provider_id,
+                created_by_token_id=created_by_token_id,
+                intent_sequence=intent_sequence,
+            )
+            return stored
+
+    @contextmanager
+    def _publish_view_locked(self, view_id: str):
+        locks_root = self.runtime_root / "view-publish-locks"
+        locks_root.mkdir(parents=True, exist_ok=True)
+        lock_path = locks_root / f"{sha256(view_id.encode('utf-8')).hexdigest()}.lock"
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            lock_file(handle)
+            try:
+                yield
+            finally:
+                unlock_file(handle)
+
+    def _record_publish_intent(
+        self,
+        *,
+        view_id: str,
+        version_id: str,
+        provider_id: str | None,
+        package_hash: str,
+    ) -> int:
+        now = _now_iso()
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT view_id, provider_id, package_hash, publish_sequence
+                FROM view_publish_intents
+                WHERE version_id = ?
+                """,
+                (version_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["view_id"] != view_id
+                    or existing["provider_id"] != provider_id
+                    or existing["package_hash"] != package_hash
+                ):
+                    raise ValueError(f"idempotent view version conflicts with publish intent: {version_id}")
+                return int(existing["publish_sequence"])
+
+            row = connection.execute(
+                """
+                SELECT COALESCE(MAX(publish_sequence), 0) + 1 AS next_sequence
+                FROM view_publish_intents
+                WHERE view_id = ?
+                """,
+                (view_id,),
+            ).fetchone()
+            sequence = int(row["next_sequence"])
+            connection.execute(
+                """
+                INSERT INTO view_publish_intents(
+                    version_id, view_id, provider_id, package_hash, publish_sequence, created_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (version_id, view_id, provider_id, package_hash, sequence, now),
+            )
+            return sequence
+
+    def _finalize_package_version(
+        self,
+        stored: HubStoredPackage,
+        *,
+        view_id: str,
+        version_id: str,
+        provider_id: str | None,
+        created_by_token_id: str | None,
+        intent_sequence: int,
+    ) -> None:
         relative_storage_path = stored.path.relative_to(self.root).as_posix()
         now = _now_iso()
-        try:
-            with self._connect() as connection:
-                self._apply_migrations(connection)
-                if clean_provider_id:
-                    connection.execute(
-                        """
-                        INSERT INTO providers(id, label, created_at, updated_at)
-                        VALUES(?, NULL, ?, ?)
-                        ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at
-                        """,
-                        (clean_provider_id, now, now),
-                    )
+        with self._connect() as connection:
+            self._apply_migrations(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            if provider_id:
+                connection.execute(
+                    """
+                    INSERT INTO providers(id, label, created_at, updated_at)
+                    VALUES(?, NULL, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at
+                    """,
+                    (provider_id, now, now),
+                )
+            latest_intent = connection.execute(
+                """
+                SELECT MAX(publish_sequence) AS publish_sequence
+                FROM view_publish_intents
+                WHERE view_id = ?
+                """,
+                (view_id,),
+            ).fetchone()
+            is_latest = int(latest_intent["publish_sequence"]) == intent_sequence
+            existing_version = connection.execute(
+                """
+                SELECT view_id, package_hash, storage_path
+                FROM view_versions
+                WHERE id = ?
+                """,
+                (version_id,),
+            ).fetchone()
+            if existing_version is not None:
+                if (
+                    existing_version["view_id"] != view_id
+                    or existing_version["package_hash"] != stored.manifest.package_hash
+                    or existing_version["storage_path"] != relative_storage_path
+                ):
+                    raise ValueError(f"idempotent view version conflicts with stored data: {version_id}")
+            else:
                 connection.execute(
                     """
                     INSERT INTO views(
                         id, provider_id, title, ref, description, current_version_id, created_at, updated_at
                     )
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        title = excluded.title,
-                        ref = excluded.ref,
-                        description = excluded.description,
-                        current_version_id = excluded.current_version_id,
-                        updated_at = excluded.updated_at
+                    VALUES(?, ?, ?, ?, ?, NULL, ?, ?)
+                    ON CONFLICT(id) DO NOTHING
                     """,
                     (
-                        clean_view_id,
-                        clean_provider_id,
+                        view_id,
+                        provider_id,
                         stored.manifest.title,
                         stored.manifest.ref,
                         stored.manifest.description,
-                        clean_version_id,
                         now,
                         now,
                     ),
@@ -1170,8 +1306,8 @@ class HubStore:
                     VALUES(?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        clean_version_id,
-                        clean_view_id,
+                        version_id,
+                        view_id,
                         stored.manifest.package_hash,
                         relative_storage_path,
                         json.dumps(_manifest_json(stored), sort_keys=True),
@@ -1183,15 +1319,32 @@ class HubStore:
                     connection,
                     "view.version.created",
                     actor_id=created_by_token_id,
-                    provider_id=clean_provider_id,
-                    view_id=clean_view_id,
-                    details={"version_id": clean_version_id, "package_hash": stored.manifest.package_hash},
+                    provider_id=provider_id,
+                    view_id=view_id,
+                    details={"version_id": version_id, "package_hash": stored.manifest.package_hash},
                 )
-        except BaseException:
-            if stored.path.exists():
-                shutil.rmtree(stored.path)
-            raise
-        return stored
+            if is_latest:
+                connection.execute(
+                    """
+                    UPDATE views
+                    SET provider_id = COALESCE(provider_id, ?),
+                        title = ?,
+                        ref = ?,
+                        description = ?,
+                        current_version_id = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        provider_id,
+                        stored.manifest.title,
+                        stored.manifest.ref,
+                        stored.manifest.description,
+                        version_id,
+                        now,
+                        view_id,
+                    ),
+                )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -1228,6 +1381,12 @@ class HubStore:
             connection.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)",
                 (2, _now_iso()),
+            )
+        if 3 not in applied:
+            connection.executescript(_MIGRATION_3)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)",
+                (3, _now_iso()),
             )
         connection.commit()
 
@@ -1446,6 +1605,29 @@ def _render_config(config: HubConfig) -> str:
         "[limits]\n"
         f"max_package_bytes = {config.max_package_bytes}\n"
     )
+
+
+def _matching_stored_package(
+    package_root: Path,
+    stored_path: Path,
+    *,
+    view_id: str,
+    version_id: str,
+    max_package_bytes: int,
+) -> HubStoredPackage:
+    incoming = load_package_manifest(
+        package_root,
+        expected_view_id=view_id,
+        max_package_bytes=max_package_bytes,
+    )
+    existing = load_package_manifest(
+        stored_path,
+        expected_view_id=view_id,
+        max_package_bytes=max_package_bytes,
+    )
+    if incoming.package_hash != existing.package_hash:
+        raise ValueError(f"idempotent view version has different content: {version_id}")
+    return HubStoredPackage(path=stored_path, version_id=version_id, manifest=existing)
 
 
 def _manifest_json(stored: HubStoredPackage) -> dict[str, Any]:
@@ -1919,4 +2101,32 @@ CREATE TABLE IF NOT EXISTS share_invitations(
 
 CREATE INDEX IF NOT EXISTS idx_share_invitations_token ON share_invitations(token_id);
 CREATE INDEX IF NOT EXISTS idx_share_invitations_provider ON share_invitations(provider_id, created_at);
+"""
+
+_MIGRATION_3 = """
+CREATE TABLE IF NOT EXISTS view_publish_intents(
+    version_id TEXT PRIMARY KEY,
+    view_id TEXT NOT NULL,
+    provider_id TEXT,
+    package_hash TEXT NOT NULL,
+    publish_sequence INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(view_id, publish_sequence)
+);
+
+INSERT OR IGNORE INTO view_publish_intents(
+    version_id, view_id, provider_id, package_hash, publish_sequence, created_at
+)
+SELECT
+    vv.id,
+    vv.view_id,
+    v.provider_id,
+    vv.package_hash,
+    ROW_NUMBER() OVER (PARTITION BY vv.view_id ORDER BY vv.rowid),
+    vv.created_at
+FROM view_versions vv
+JOIN views v ON v.id = vv.view_id;
+
+CREATE INDEX IF NOT EXISTS idx_view_publish_intents_view
+ON view_publish_intents(view_id, publish_sequence);
 """

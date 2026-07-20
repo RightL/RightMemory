@@ -6,7 +6,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
+from .session import (
+    _ensure_durable_directory,
+    _ensure_runtime_gitignore,
+    _fsync_directory,
+    _safe_session_id,
+)
 
 
 @dataclass(frozen=True)
@@ -39,7 +44,7 @@ class ProviderSessionStore:
         if record.role != self.role:
             raise ValueError(f"provider session role does not match store role: {record.role}")
         _ensure_runtime_gitignore(self.runtime_root)
-        self.root.mkdir(parents=True, exist_ok=True)
+        _ensure_durable_directory(self.root)
         path = self.path(record.rightmemory_session_id)
         tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         content = json.dumps(asdict(record), ensure_ascii=False, indent=2, sort_keys=True) + "\n"

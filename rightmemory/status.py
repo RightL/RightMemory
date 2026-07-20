@@ -14,6 +14,7 @@ from typing import Any
 from .async_update import STATUS_MANUAL_RECOVERY, _is_async_worker_process, _is_legacy_failed_pending_state, _state_from_json
 from .config import load_dreamer_watch_config, load_insight_watch_config, load_sync_config
 from .platform import lock_file_nonblocking, process_identity, unlock_file
+from .semantic_operation import FINAL_PHASES, SemanticOperationStore
 from .watch import MANAGED_WATCH_TARGETS, ManagedWatchStatus, _is_managed_watch_process, watch_log_path, watch_pid_path
 
 
@@ -50,6 +51,7 @@ class DashboardStatus:
     dreamer: SectionStatus | None = None
     insight: SectionStatus | None = None
     update: SectionStatus | None = None
+    operations: SectionStatus | None = None
     issues: list[str] = field(default_factory=list)
 
 
@@ -360,6 +362,38 @@ def collect_async_update_section(
     )
 
 
+def collect_semantic_operation_section(memory_root: Path) -> tuple[SectionStatus, list[str]]:
+    records = SemanticOperationStore(memory_root).list_outstanding_records()
+    active = sum(record.phase not in FINAL_PHASES for record in records)
+    pending = []
+    issues: list[str] = []
+    for record in records:
+        if record.phase not in FINAL_PHASES:
+            continue
+        for effect in record.effects:
+            if effect.status == "done":
+                continue
+            pending.append((record.operation_id, effect))
+            if effect.status == "failed":
+                issues.append(
+                    f"semantic effect: {record.operation_id}: {effect.name}: {effect.error or 'failed'}"
+                )
+    if pending:
+        state = f"{len(pending)} {_plural('effect', len(pending))} pending"
+    elif active:
+        state = f"{active} active"
+    else:
+        state = "settled"
+    detail = "\n".join(
+        (
+            f"active operations: {active}",
+            f"pending effects: {len(pending)}",
+            "state: .runtime/operations/records",
+        )
+    )
+    return SectionStatus(name="operations", state=state, detail=detail), issues
+
+
 def collect_status(
     memory_root: Path,
     *,
@@ -367,6 +401,7 @@ def collect_status(
     dreamer_collector: Callable[[Path], SectionStatus] = collect_dreamer_section,
     insight_collector: Callable[[Path], SectionStatus] = collect_insight_section,
     update_collector: Callable[[Path], tuple[SectionStatus, list[str]]] = collect_async_update_section,
+    operation_collector: Callable[[Path], tuple[SectionStatus, list[str]]] = collect_semantic_operation_section,
 ) -> DashboardStatus:
     root = Path(memory_root)
     git = collect_git_status(root)
@@ -408,7 +443,24 @@ def collect_status(
         update = SectionStatus(name="update", state=message, issue=message)
         issues.append(message)
 
-    return DashboardStatus(root=root, git=git, watches=watches, dreamer=dreamer, insight=insight, update=update, issues=issues)
+    try:
+        operations, operation_issues = operation_collector(root)
+        issues.extend(operation_issues)
+    except Exception as exc:
+        message = f"semantic operations: status error: {type(exc).__name__}: {exc}"
+        operations = SectionStatus(name="operations", state=message, issue=message)
+        issues.append(message)
+
+    return DashboardStatus(
+        root=root,
+        git=git,
+        watches=watches,
+        dreamer=dreamer,
+        insight=insight,
+        update=update,
+        operations=operations,
+        issues=issues,
+    )
 
 
 def format_status_dashboard(status: DashboardStatus) -> str:
@@ -439,6 +491,11 @@ def format_status_dashboard(status: DashboardStatus) -> str:
         lines.append("")
         lines.append("Async Update")
         lines.extend(_format_section(status.update))
+
+    if status.operations is not None:
+        lines.append("")
+        lines.append("Semantic Operations")
+        lines.extend(_format_section(status.operations))
 
     issues = _dashboard_issues(status)
     if issues:
@@ -500,6 +557,10 @@ def _recovery_hint_for_issue(issue: str) -> str | None:
         return "insight: rerun `rightmemory status`; inspect insight state if it persists"
     if issue.startswith("update: status error:"):
         return "update: rerun `rightmemory status`; inspect async update state if it persists"
+    if issue.startswith("semantic operations: status error:"):
+        return "semantic operations: inspect `.runtime/operations/records/`"
+    if issue.startswith("semantic effect:"):
+        return "semantic effects: inspect `.runtime/operations/records/`; later semantic turns retry pending effects"
     update_hint = _update_recovery_hint(issue)
     if update_hint:
         return update_hint

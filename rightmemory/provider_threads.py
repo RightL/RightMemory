@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from .config import ROLES
-from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
+from .session import (
+    _ensure_durable_directory,
+    _ensure_runtime_gitignore,
+    _fsync_directory,
+    _safe_session_id,
+)
 
 
 PROVIDER_THREAD_SCHEMA_VERSION = 1
@@ -75,7 +80,7 @@ class ProviderThreadStore:
         _validate_record(record)
         _ensure_runtime_gitignore(self.runtime_root)
         path = self.path(record.provider, record.provider_session_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_durable_directory(path.parent)
         tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         content = json.dumps(asdict(record), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         try:
