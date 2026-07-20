@@ -23,7 +23,7 @@ class WebStudioReadApiTests(unittest.TestCase):
         view = self.root / "shared_views" / "alice-auth-api"
         (view / "dist").mkdir(parents=True)
         (view / "view.md").write_text("# Alice Auth API\n", encoding="utf-8")
-        (view / "dist" / "MEMORY.md").write_text("# Published Context\n", encoding="utf-8")
+        (view / "dist" / "MEMORY.md").write_text("# Auth API {#auth-api} → []\n", encoding="utf-8")
         insight = self.root / "insight_logs"
         insight.mkdir()
         (insight / "2026-06-13.md").write_text("# Insight\n\nUseful pattern.\n", encoding="utf-8")

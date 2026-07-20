@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import tomllib
+import uuid
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
@@ -11,6 +12,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 from .share_models import ShareRelationship, validate_share_id
 from .shared_view_models import SharedViewTarget, validate_heading_id
+from .shared_view_package import promote_directory_candidate, validate_file_view_package
 
 
 GIT_TIMEOUT_SECONDS = 60
@@ -152,6 +154,8 @@ def read_git_file_share(memory_root: Path, reference: GitShareReference) -> GitF
         raise ValueError("Git share manifest requires [file]")
     package_path = _safe_relative_path(str(file_section.get("path") or "package"))
     package_root = share_dir / package_path
+    if package_root.is_symlink():
+        raise ValueError(f"Git share package must not be a symlink: {package_path}")
     required = {"view.md", "recipe.toml", "rightmemory-shared-view.toml", "dist/MEMORY.md", "dist/manifest.toml"}
     missing = sorted(path for path in required if not (package_root / path).is_file())
     if missing:
@@ -171,23 +175,33 @@ def read_git_file_share(memory_root: Path, reference: GitShareReference) -> GitF
     )
 
 
-def import_git_file_package(memory_root: Path, view_id: str, package_root: Path) -> None:
+def import_git_file_package(
+    memory_root: Path,
+    view_id: str,
+    package_root: Path,
+    *,
+    expected_view_id: str | None = None,
+) -> None:
     clean_view_id = validate_heading_id(view_id)
+    clean_expected_view_id = validate_heading_id(expected_view_id or clean_view_id)
+    source = Path(package_root)
+    if source.is_symlink() or not source.is_dir():
+        raise ValueError("Git file package must be a regular directory")
     root = Path(memory_root).expanduser()
     imports_root = root / ".runtime" / "shared_views" / "imports"
     imports_root.mkdir(parents=True, exist_ok=True)
     final = imports_root / clean_view_id
-    temp = imports_root / f".{clean_view_id}.git-tmp-{os.getpid()}"
-    if temp.exists():
-        shutil.rmtree(temp)
+    temp = imports_root / f".{clean_view_id}.git-candidate-{uuid.uuid4().hex}"
     try:
-        shutil.copytree(package_root, temp)
-        if final.exists():
-            shutil.rmtree(final)
-        temp.rename(final)
+        shutil.copytree(source, temp, symlinks=True)
+        validate_file_view_package(
+            temp,
+            expected_view_id=clean_expected_view_id,
+            namespace_id=clean_view_id,
+        )
+        promote_directory_candidate(temp, final)
     except BaseException:
-        if temp.exists():
-            shutil.rmtree(temp)
+        shutil.rmtree(temp, ignore_errors=True)
         raise
 
 
@@ -205,7 +219,12 @@ def pull_git_file_view(memory_root: Path, target: SharedViewTarget, heading_id: 
     expected_view_id = target.view_id or heading_id
     if share.view_id != expected_view_id:
         raise ValueError(f"Git share view_id mismatch: expected {expected_view_id}, got {share.view_id}")
-    import_git_file_package(memory_root, heading_id, share.package_root)
+    import_git_file_package(
+        memory_root,
+        heading_id,
+        share.package_root,
+        expected_view_id=expected_view_id,
+    )
 
 
 def _single_fragment_value(fragment: dict[str, list[str]], key: str) -> str | None:

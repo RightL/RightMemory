@@ -143,7 +143,8 @@ def _cli_agent_guidance(memory_root: Path, role: str) -> str:
             "- The `read_*` names in the canonical instructions describe standalone tools. In CLI-agent mode, "
             "inspect the equivalent files with the provider CLI's read-only file tools instead of emitting those tool calls.\n"
             "- Inspect M# and S# backing files only through their schema-derived filenames. Inspect MF# content "
-            "only at `.runtime/shared_views/imports/<mf-id>/dist/MEMORY.md`; package metadata is not retrieval content.\n"
+            "only through its schema-valid `dist/MEMORY.md` and referenced `dist/MEMORY_<id>.md` or "
+            "`dist/MEMORY_SKILL_<id>.md` resources; package metadata is not retrieval content.\n"
             "- Use one-based line numbers from the exact source content when selecting ranges.\n"
         )
     return ""
@@ -245,7 +246,8 @@ def _tool_guidance(role: str) -> str:
             "- `read_detail(detail_id)` resolves a relevant `F#` id and reads its Memory or Pursuit graph detail.\n"
             "- `read_markdown(markdown_id)` reads the complete line-numbered free-form source for an `M#` heading.\n"
             "- `read_skill(skill_id)` reads the complete skill for an `S#` heading.\n"
-            "- `read_mf(mf_id)` reads only the complete line-numbered canonical mirrored `dist/MEMORY.md`."
+            "- `read_mf(mf_id, resource_id=None)` reads a validated mirrored Memory document or one of its "
+            "referenced F#, M#, or S# resources."
         )
     if role == "historian":
         return (

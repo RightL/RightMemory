@@ -15,7 +15,12 @@ First rewrite the caller's rough intent into a durable internal intent. Pass tha
 Do not hand-write `recipe.toml` and do not commit. Use exactly one file-view compiler tool:
 
 - Call `create_extractive_file_view` with `include_headings`, `include_nodes`, `include_files`, and `exclude_ids`.
-- Call `create_generative_file_view` with `published_context`, containing only the body for `## Published Context`.
+- Call `create_generative_file_view` with `memory_document`, containing a complete schema-valid RightMemory Memory document.
+
+The generated Memory document must use addressable ordinary headings or nodes
+with valid edge lists. This compiler version does not accept generated backing
+files, so use extractive mode when the result needs `F#`, `M#`, or `S#`.
+Never place `MF#` or `MQ#` inside a mirrored file view.
 
 If the tool returns `failed: ...`, fix the arguments and call it again. Never finish a file-view build until the matching tool returns `success: ...`.
 

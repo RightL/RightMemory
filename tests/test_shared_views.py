@@ -60,6 +60,30 @@ from rightmemory.shared_views import (
 )
 
 
+GENERATED_MEMORY = (
+    "# Auth API {#auth-api} → []\n\n"
+    "- `token-expiry` Tokens expire after one hour. → []\n"
+)
+
+
+def _write_valid_import_package(root: Path, *, memory: str = GENERATED_MEMORY) -> None:
+    (root / "dist").mkdir(parents=True, exist_ok=True)
+    (root / "view.md").write_text("# Auth API Files\n", encoding="utf-8")
+    (root / "recipe.toml").write_text(
+        'version = 1\nview_id = "auth-api-files"\nkind = "file"\n',
+        encoding="utf-8",
+    )
+    (root / "rightmemory-shared-view.toml").write_text(
+        'version = 2\nview_id = "auth-api-files"\nkind = "file"\n',
+        encoding="utf-8",
+    )
+    (root / "dist" / "MEMORY.md").write_text(memory, encoding="utf-8")
+    (root / "dist" / "manifest.toml").write_text(
+        'version = 2\nview_id = "auth-api-files"\ndocument_kind = "rightmemory-memory"\n',
+        encoding="utf-8",
+    )
+
+
 class SharedViewModelTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -291,6 +315,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
             "- `private-payroll` Payroll details stay private. -> [rel:auth-api]\n",
             encoding="utf-8",
         )
+        (self.root / "PURSUITS.md").write_text("# Pursuits {#pursuits} → []\n", encoding="utf-8")
 
     def test_file_recipe_renders_selected_context_without_excluded_ids(self):
         write_extractive_file_view_recipe(
@@ -526,7 +551,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
             view_id="auth-api-files",
             title="Auth API Files",
             intent="Expose auth API integration context.",
-            published_context="Tokens expire after one hour.",
+            memory_document=GENERATED_MEMORY,
             approved=True,
         )
         package = self.root / "package"
@@ -536,7 +561,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         exported = (package / "dist" / "MEMORY.md").read_text(encoding="utf-8")
         recipe = (package / "recipe.toml").read_text(encoding="utf-8")
         self.assertIn('render = "generative"', recipe)
-        self.assertIn("## Published Context", exported)
+        self.assertIn("# Auth API {#auth-api}", exported)
         self.assertIn("Tokens expire after one hour.", exported)
 
     def test_generative_package_fails_when_generated_memory_missing(self):
@@ -545,7 +570,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
             view_id="auth-api-files",
             title="Auth API Files",
             intent="Expose auth API integration context.",
-            published_context="Tokens expire after one hour.",
+            memory_document=GENERATED_MEMORY,
             approved=True,
         )
         shutil.rmtree(self.root / "shared_views" / "auth-api-files" / "dist")
@@ -607,7 +632,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
                 view_id=view_id,
                 title="Auth API Files",
                 intent="Expose sanitized auth context.",
-                published_context="Tokens expire after one hour.",
+                memory_document=GENERATED_MEMORY,
                 approved=False,
                 publish_hub_url="https://hub.example.test",
                 publish_credential_id="alice-publish",
@@ -649,7 +674,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
                 view_id=view_id,
                 title="Auth API Files",
                 intent="Expose sanitized auth context.",
-                published_context="Tokens expire after one hour.",
+                memory_document=GENERATED_MEMORY,
                 approved=False,
             )
             return "refreshed"
@@ -718,7 +743,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
                 view_id=view_id,
                 title="Auth API Files",
                 intent="Expose sanitized auth context.",
-                published_context="Tokens expire after one hour.",
+                memory_document=GENERATED_MEMORY,
                 approved=False,
             )
             return "refreshed"
@@ -766,7 +791,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         subprocess.run(["git", "init"], cwd=self.root, check=True, stdout=subprocess.PIPE)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.root, check=True)
         subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.root, check=True)
-        subprocess.run(["git", "add", "MEMORY.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "add", "MEMORY.md", "PURSUITS.md"], cwd=self.root, check=True)
         subprocess.run(["git", "commit", "-m", "memory: initial"], cwd=self.root, check=True, stdout=subprocess.PIPE)
 
     def _git(self, *args: str) -> str:
@@ -841,9 +866,12 @@ class SharedFileViewPullTests(unittest.TestCase):
             {
                 "view.md": "# Auth API Files\n",
                 "recipe.toml": 'version = 1\nview_id = "auth-api-files"\nkind = "file"\n',
-                "rightmemory-shared-view.toml": 'version = 1\nview_id = "auth-api-files"\nkind = "file"\n',
-                "dist/MEMORY.md": "# Published Context\n\nTokens expire after one hour.\n",
-                "dist/manifest.toml": 'version = 1\nview_id = "auth-api-files"\n',
+                "rightmemory-shared-view.toml": 'version = 2\nview_id = "auth-api-files"\nkind = "file"\n',
+                "dist/MEMORY.md": GENERATED_MEMORY,
+                "dist/manifest.toml": (
+                    'version = 2\nview_id = "auth-api-files"\n'
+                    'document_kind = "rightmemory-memory"\n'
+                ),
             }
         )
 
@@ -856,9 +884,12 @@ class SharedFileViewPullTests(unittest.TestCase):
         self.assertIn("Tokens expire", (imported / "dist" / "MEMORY.md").read_text(encoding="utf-8"))
 
     def test_pull_file_view_falls_back_to_stale_import(self):
-        imported = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"
-        imported.mkdir(parents=True)
-        (imported / "MEMORY.md").write_text("stale but usable\n", encoding="utf-8")
+        package = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files"
+        _write_valid_import_package(
+            package,
+            memory="# Auth API {#auth-api} → []\n\n- `stale` stale but usable → []\n",
+        )
+        imported = package / "dist"
 
         with patch("rightmemory.shared_view_files.HubClient") as client_type:
             client_type.return_value.download_package.side_effect = HubClientError("offline")
@@ -877,6 +908,7 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
             "# Project {#project}\n\n## Auth API {#auth-api}\n\n- `token-expiry` Tokens expire. -> [rel:auth-api]\n",
             encoding="utf-8",
         )
+        (self.root / "PURSUITS.md").write_text("# Pursuits {#pursuits} → []\n", encoding="utf-8")
         save_shared_view_credential(
             self.root,
             "alice-publish",
@@ -924,6 +956,7 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
         snapshot = self.root / "snapshot"
         snapshot.mkdir()
         shutil.copy2(self.root / "MEMORY.md", snapshot / "MEMORY.md")
+        shutil.copy2(self.root / "PURSUITS.md", snapshot / "PURSUITS.md")
         shutil.copytree(self.root / "shared_views", snapshot / "shared_views")
         clients = []
 
@@ -957,7 +990,10 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
             include_nodes=("token-expiry",),
             approved=True,
         )
-        (self.root / "MEMORY.md").write_text("# Auth {#auth}\n\n- `token-expiry` Tokens expire.\n", encoding="utf-8")
+        (self.root / "MEMORY.md").write_text(
+            "# Auth {#auth} → []\n\n- `token-expiry` Tokens expire. → []\n",
+            encoding="utf-8",
+        )
         clients = []
 
         with patch("rightmemory.shared_view_files.HubClient", side_effect=lambda base_url, token: _record_fake_client(clients, base_url, token)):
@@ -1024,7 +1060,7 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
             view_id="auth-api-files",
             title="Auth API Files",
             intent="Expose auth API integration context.",
-            published_context="Tokens expire after one hour.",
+            memory_document=GENERATED_MEMORY,
             approved=True,
             publish_hub_url="https://hub.example.test",
             publish_credential_id="alice-publish",
@@ -1044,7 +1080,10 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
             view_id="auth-api-files",
             title="Auth API Files",
             intent="Expose auth API integration context.",
-            published_context="Original generated context.",
+            memory_document=(
+                "# Auth API {#auth-api} → []\n\n"
+                "- `original-generated` Original generated context. → []\n"
+            ),
             approved=True,
             publish_hub_url="https://hub.example.test",
             publish_credential_id="alice-publish",
@@ -1362,9 +1401,8 @@ class SharedQuestionViewTests(unittest.TestCase):
                 ),
             },
         )
-        imported = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"
-        imported.mkdir(parents=True)
-        (imported / "MEMORY.md").write_text("published context\n", encoding="utf-8")
+        imported = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files"
+        _write_valid_import_package(imported)
 
         file_status = shared_view_connection_status(self.root, "auth-api-files")
         question_status = shared_view_connection_status(self.root, "auth-api-ask")

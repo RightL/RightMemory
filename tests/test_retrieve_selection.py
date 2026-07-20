@@ -79,13 +79,39 @@ class RetrieveSelectionRendererTests(unittest.TestCase):
         canonical.mkdir(parents=True)
         (canonical / "MEMORY.md").write_text(
             "# External\n\n"
-            "## Tokens {#tokens}\n\n"
+            "## Tokens {#tokens} → []\n\n"
             "Token body.\n\n"
             "- `token-expiry` Tokens expire hourly. → []\n\n"
-            "Unaddressable tail.\n",
+            "## Detail {F#mf-detail} → []\n\n"
+            "## Incident Evidence {M#incident-evidence} → []\n\n"
+            "## Review Checklist {S#review-checklist} → []\n",
             encoding="utf-8",
         )
-        (canonical.parent / "manifest.toml").write_text("secret = true\n", encoding="utf-8")
+        (canonical / "MEMORY_mf-detail.md").write_text(
+            "# Deep Detail {#deep-detail} → []\n\nDeep body.\n",
+            encoding="utf-8",
+        )
+        (canonical / "MEMORY_incident-evidence.md").write_text(
+            "# Evidence\n\nLine one.\nLine two.\nLine three.\n",
+            encoding="utf-8",
+        )
+        (canonical / "MEMORY_SKILL_review-checklist.md").write_text(
+            "# Checklist\n\nReview every item.\n",
+            encoding="utf-8",
+        )
+        (canonical / "manifest.toml").write_text(
+            'version = 2\nview_id = "external-api"\ndocument_kind = "rightmemory-memory"\n',
+            encoding="utf-8",
+        )
+        (canonical.parent / "view.md").write_text("# External API\n", encoding="utf-8")
+        (canonical.parent / "recipe.toml").write_text(
+            'version = 1\nview_id = "external-api"\nkind = "file"\nsecret = true\n',
+            encoding="utf-8",
+        )
+        (canonical.parent / "rightmemory-shared-view.toml").write_text(
+            'version = 2\nview_id = "external-api"\nkind = "file"\n',
+            encoding="utf-8",
+        )
         self.renderer = RetrieveSelectionRenderer(self.root, max_output_chars=100_000)
 
     def test_heading_and_node_selection_have_tree_semantics(self):
@@ -179,15 +205,130 @@ class RetrieveSelectionRendererTests(unittest.TestCase):
         self.assertIn("## Tokens {#tokens}", rendered.text)
         self.assertIn("Token body.", rendered.text)
         self.assertIn("- `token-expiry`", rendered.text)
-        self.assertNotIn("manifest.toml", rendered.text)
+        self.assertNotIn("recipe.toml", rendered.text)
         self.assertNotIn("secret = true", rendered.text)
+
+    def test_mf_delivery_is_namespaced_by_view(self):
+        memory = self.root / "MEMORY.md"
+        memory.write_text(
+            memory.read_text(encoding="utf-8")
+            + "\n## Billing API {MF#billing-api}\n\nMirrored billing relationship.\n",
+            encoding="utf-8",
+        )
+        package = self.root / ".runtime" / "shared_views" / "imports" / "billing-api"
+        dist = package / "dist"
+        dist.mkdir(parents=True)
+        (package / "view.md").write_text("# Billing API\n", encoding="utf-8")
+        (package / "recipe.toml").write_text(
+            'version = 1\nview_id = "billing-api"\nkind = "file"\n',
+            encoding="utf-8",
+        )
+        (package / "rightmemory-shared-view.toml").write_text(
+            'version = 2\nview_id = "billing-api"\nkind = "file"\n',
+            encoding="utf-8",
+        )
+        (dist / "manifest.toml").write_text(
+            'version = 2\nview_id = "billing-api"\ndocument_kind = "rightmemory-memory"\n',
+            encoding="utf-8",
+        )
+        (dist / "MEMORY.md").write_text(
+            "# Billing Tokens {#tokens} → []\n\nBilling token body.\n",
+            encoding="utf-8",
+        )
+        first = self.renderer.render(
+            RetrieveSelection(
+                sources=[SourceSelection(source_id="MF#external-api", ids=["tokens"])]
+            )
+        )
+
+        second = self.renderer.render(
+            RetrieveSelection(
+                sources=[SourceSelection(source_id="MF#billing-api", ids=["tokens"])]
+            ),
+            delivered=first.delivery,
+        )
+
+        self.assertIn("Billing token body.", second.text)
+
+    def test_mf_f_detail_and_qualified_resources(self):
+        detail = self.renderer.render(
+            RetrieveSelection(
+                sources=[SourceSelection(source_id="MF#external-api", ids=["deep-detail"])]
+            )
+        )
+        evidence = self.renderer.render(
+            RetrieveSelection(
+                sources=[
+                    SourceSelection(
+                        source_id="MF#external-api/M#incident-evidence",
+                        ranges=[LineRange(start=3, end=4)],
+                    )
+                ]
+            )
+        )
+        skill = self.renderer.render(
+            RetrieveSelection(
+                sources=[SourceSelection(source_id="MF#external-api/S#review-checklist")]
+            )
+        )
+
+        self.assertIn("# Deep Detail {#deep-detail}", detail.text)
+        self.assertIn("Line one.", evidence.text)
+        self.assertIn("Line two.", evidence.text)
+        self.assertIn("Review every item.", skill.text)
+
+    def test_direct_mf_ranges_and_invalid_qualification_are_rejected(self):
+        with self.assertRaisesRegex(RetrieveSelectionError, "not line ranges"):
+            self.renderer.render(
+                RetrieveSelection(
+                    sources=[
+                        SourceSelection(
+                            source_id="MF#external-api",
+                            ranges=[LineRange(start=1, end=1)],
+                        )
+                    ]
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "qualified"):
+            SourceSelection(source_id="MF#external-api/M#incident-evidence/deeper")
+        with self.assertRaisesRegex(RetrieveSelectionError, "mismatched"):
+            self.renderer.render(
+                RetrieveSelection(
+                    sources=[SourceSelection(source_id="MF#external-api/S#incident-evidence")]
+                )
+            )
+
+    def test_selecting_outer_mf_heading_does_not_expand_import(self):
+        rendered = self.renderer.render(RetrieveSelection(ids=["external-api"]))
+
+        self.assertIn("Mirrored relationship.", rendered.text)
+        self.assertNotIn("Token body.", rendered.text)
+
+    def test_locally_modified_mf_package_fails_closed(self):
+        path = (
+            self.root
+            / ".runtime"
+            / "shared_views"
+            / "imports"
+            / "external-api"
+            / "dist"
+            / "MEMORY.md"
+        )
+        path.write_text("# Broken wrapper\n\nunaddressed text\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(RetrieveSelectionError, "invalid canonical mirrored view"):
+            self.renderer.render(
+                RetrieveSelection(
+                    sources=[SourceSelection(source_id="MF#external-api", ids=["tokens"])]
+                )
+            )
 
     def test_mq_selection_is_local_and_deterministic(self):
         rendered = self.renderer.render(RetrieveSelection(ids=["provider-context"]))
 
         self.assertIn("Question relationship.", rendered.text)
         self.assertIn("Provider question context is available for `MQ#provider-context`.", rendered.text)
-        with self.assertRaisesRegex(ValueError, "source_id must be an M#, S#, or MF# id"):
+        with self.assertRaisesRegex(ValueError, "source_id must be an M#, S#, MF#"):
             SourceSelection(source_id="MQ#provider-context")
 
     def test_delivery_omits_unchanged_items_and_override_repeats_them(self):

@@ -15,14 +15,17 @@ from .graph import (
     DocumentBlock,
     GraphManifest,
     build_graph_manifest,
-    build_mf_manifest,
     is_valid_item_id,
 )
 from .recent_submitted import RecentSubmittedMemoryEntry
+from .shared_view_models import load_connections
+from .shared_view_package import FileViewPackageError, ValidatedFileViewPackage, validate_file_view_package
 
 
 NO_STRONG_MATCH = "no strong match"
-SOURCE_ID_RE = re.compile(rf"^(M#|S#|MF#)({ITEM_ID_PATTERN})$")
+SOURCE_ID_RE = re.compile(
+    rf"^(?:(M#|S#|MF#)({ITEM_ID_PATTERN})|MF#({ITEM_ID_PATTERN})/(M#|S#)({ITEM_ID_PATTERN}))$"
+)
 HEADING_RE = re.compile(r"^(#{1,})\s+")
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 MF_CANONICAL_PATH = Path(".runtime/shared_views/imports")
@@ -56,7 +59,9 @@ class SourceSelection(BaseModel):
     @classmethod
     def validate_source_id(cls, value: str) -> str:
         if SOURCE_ID_RE.fullmatch(value) is None:
-            raise ValueError("source_id must be an M#, S#, or MF# id")
+            raise ValueError(
+                "source_id must be an M#, S#, MF#, or qualified MF#/M# or MF#/S# id"
+            )
         return value
 
     @field_validator("ids")
@@ -308,17 +313,34 @@ class RetrieveSelectionRenderer:
         for source_id, (ids, ranges) in merged.items():
             match = SOURCE_ID_RE.fullmatch(source_id)
             assert match is not None
-            marker, owner_id = match.groups()
-            if owner_id in manifest.duplicates:
-                raise RetrieveSelectionError(f"linked source owner id `{owner_id}` is duplicated")
-            owner = manifest.block_for_id(owner_id)
-            if owner is None or owner.kind != "heading":
-                raise RetrieveSelectionError(f"unknown linked source `{source_id}`")
-            if owner.anchor_kind != marker:
-                actual = owner.anchor_kind or "#"
-                raise RetrieveSelectionError(
-                    f"source marker mismatch for `{source_id}`; local heading uses `{actual}{owner_id}`"
+            marker, owner_id, qualified_owner_id, nested_marker, nested_id = match.groups()
+            if qualified_owner_id is not None:
+                owner = self._require_local_source_owner(
+                    manifest,
+                    qualified_owner_id,
+                    "MF#",
+                    source_id,
                 )
+                rendered.append(
+                    self._render_mf_linked_source(
+                        source_id,
+                        owner,
+                        nested_marker or "",
+                        nested_id or "",
+                        ids,
+                        ranges,
+                        delivered,
+                        include_returned=include_returned,
+                    )
+                )
+                continue
+            assert marker is not None and owner_id is not None
+            owner = self._require_local_source_owner(
+                manifest,
+                owner_id,
+                marker,
+                source_id,
+            )
             if marker == "M#":
                 rendered.append(
                     self._render_markdown_source(
@@ -355,6 +377,25 @@ class RetrieveSelectionRenderer:
                     )
                 )
         return rendered
+
+    def _require_local_source_owner(
+        self,
+        manifest: GraphManifest,
+        owner_id: str,
+        marker: str,
+        source_id: str,
+    ) -> DocumentBlock:
+        if owner_id in manifest.duplicates:
+            raise RetrieveSelectionError(f"linked source owner id `{owner_id}` is duplicated")
+        owner = manifest.block_for_id(owner_id)
+        if owner is None or owner.kind != "heading":
+            raise RetrieveSelectionError(f"unknown linked source `{source_id}`")
+        if owner.anchor_kind != marker:
+            actual = owner.anchor_kind or "#"
+            raise RetrieveSelectionError(
+                f"source marker mismatch for `{source_id}`; local heading uses `{actual}{owner_id}`"
+            )
+        return owner
 
     def _render_markdown_source(
         self,
@@ -421,19 +462,18 @@ class RetrieveSelectionRenderer:
         *,
         include_returned: bool,
     ) -> _RenderedSource:
-        if not ids and not ranges:
-            raise RetrieveSelectionError(f"`{source_id}` requires a source-scoped id or line range")
+        if ranges:
+            raise RetrieveSelectionError(
+                f"`{source_id}` is a schema-valid MF graph; select source-scoped ids, not line ranges"
+            )
+        if not ids:
+            raise RetrieveSelectionError(f"`{source_id}` requires at least one source-scoped id")
         owner_id = owner.item_id or ""
-        path = self.memory_root / MF_CANONICAL_PATH / owner_id / "dist" / "MEMORY.md"
-        if not _safe_source_file(self.memory_root, path):
-            raise RetrieveSelectionError(f"missing canonical mirrored view `{source_id}`")
-        text = _read_text(path)
-        mf_manifest = build_mf_manifest(path.parent, owner_id)
+        validated = self._validated_mf_package(owner_id, source_id)
+        mf_manifest = validated.manifest
 
         full_entries: set[BlockKey] = set()
         exact_entries: set[BlockKey] = set()
-        requested_item_ids: set[str] = set()
-        requested_item_intervals: list[tuple[int, int]] = []
         source_delivery: dict[str, str] = {}
         for item_id in _unique(ids):
             if item_id in mf_manifest.duplicates:
@@ -444,16 +484,6 @@ class RetrieveSelectionRenderer:
                 raise RetrieveSelectionError(f"unknown source-scoped id `{item_id}` in `{source_id}`")
             key = f"{source_id}:{item_id}"
             version = item.content_hash
-            selected_entries = (
-                list(mf_manifest.walk_logical(entry.key, include_self=True))
-                if entry.kind == "heading"
-                else [entry]
-            )
-            for selected_entry in selected_entries:
-                if selected_entry.item_id is not None:
-                    requested_item_ids.add(selected_entry.item_id)
-            if entry.source_path == path.resolve():
-                requested_item_intervals.append((entry.line_number, entry.end_line))
             if not include_returned and delivered.source_items.get(key) == version:
                 continue
             if entry.kind == "heading":
@@ -480,48 +510,96 @@ class RetrieveSelectionRenderer:
                 )
             )
         )
-
-        addressable_by_line = {
-            item.line_number: item.id
-            for item in mf_manifest.items.values()
-            if item.file == path.resolve()
-        }
-        for selected_range in ranges:
-            invalid_lines = [
-                line
-                for line, item_id in addressable_by_line.items()
-                if selected_range.start <= line <= selected_range.end
-                and item_id not in requested_item_ids
-            ]
-            if invalid_lines:
-                raise RetrieveSelectionError(
-                    f"line range {selected_range.start}-{selected_range.end} in `{source_id}` contains an "
-                    "addressable item; select its source-scoped id"
-                )
-        previously_delivered_item_intervals = []
-        if not include_returned:
-            for item in mf_manifest.items.values():
-                if item.file != path.resolve():
-                    continue
-                key = f"{source_id}:{item.id}"
-                if delivered.source_items.get(key) == item.content_hash:
-                    previously_delivered_item_intervals.append((item.line_number, item.end_line))
-        resolved = _resolve_line_ranges(
-            source_id,
-            text,
-            ranges,
-            delivered.ranges,
-            include_returned=include_returned,
-            omit_intervals=[*requested_item_intervals, *previously_delivered_item_intervals],
-        ) if ranges else _ResolvedRanges("", [])
-        source_text = "\n\n".join(part for part in (tree_text, resolved.text) if part)
         return _RenderedSource(
             owner.traversal_rank,
             source_id,
-            source_text,
+            tree_text,
             source_items=source_delivery,
-            ranges=resolved.delivered,
         )
+
+    def _render_mf_linked_source(
+        self,
+        source_id: str,
+        owner: DocumentBlock,
+        marker: str,
+        nested_id: str,
+        ids: list[str],
+        ranges: list[LineRange],
+        delivered: RetrieveDeliveryCoverage,
+        *,
+        include_returned: bool,
+    ) -> _RenderedSource:
+        owner_id = owner.item_id or ""
+        validated = self._validated_mf_package(owner_id, source_id)
+        nested = validated.manifest.block_for_id(nested_id)
+        reference = validated.manifest.backing.get(nested_id)
+        if nested is None or nested.kind != "heading" or nested.anchor_kind != marker:
+            raise RetrieveSelectionError(f"unknown or mismatched qualified MF source `{source_id}`")
+        if reference is None or reference.kind != marker:
+            raise RetrieveSelectionError(f"missing qualified MF backing source `{source_id}`")
+        if not _safe_source_file(validated.root, reference.path):
+            raise RetrieveSelectionError(f"unsafe qualified MF backing source `{source_id}`")
+
+        if marker == "M#":
+            if ids:
+                raise RetrieveSelectionError(
+                    f"`{source_id}` is free-form Markdown; select line ranges, not ids"
+                )
+            if not ranges:
+                raise RetrieveSelectionError(f"`{source_id}` requires at least one line range")
+            resolved = _resolve_line_ranges(
+                source_id,
+                _read_text(reference.path),
+                ranges,
+                delivered.ranges,
+                include_returned=include_returned,
+            )
+            return _RenderedSource(
+                owner.traversal_rank,
+                source_id,
+                resolved.text,
+                ranges=resolved.delivered,
+            )
+
+        if marker != "S#":
+            raise RetrieveSelectionError(f"unsupported qualified MF source `{source_id}`")
+        if ids or ranges:
+            raise RetrieveSelectionError(
+                f"`{source_id}` is selected as one complete skill; ids and ranges are invalid"
+            )
+        text = _read_text(reference.path).rstrip("\r\n")
+        version = _hash_text(text)
+        if not include_returned and delivered.complete_sources.get(source_id) == version:
+            return _RenderedSource(owner.traversal_rank, source_id, "")
+        return _RenderedSource(
+            owner.traversal_rank,
+            source_id,
+            text,
+            complete_sources={source_id: version},
+        )
+
+    def _validated_mf_package(
+        self,
+        owner_id: str,
+        source_id: str,
+    ) -> ValidatedFileViewPackage:
+        package_root = self.memory_root / MF_CANONICAL_PATH / owner_id
+        connection = load_connections(self.memory_root).get(owner_id)
+        expected_view_id = (
+            connection.target.view_id
+            if connection is not None and connection.target.view_id
+            else owner_id
+        )
+        try:
+            return validate_file_view_package(
+                package_root,
+                expected_view_id=expected_view_id,
+                namespace_id=owner_id,
+            )
+        except (FileNotFoundError, OSError, FileViewPackageError) as exc:
+            raise RetrieveSelectionError(
+                f"missing or invalid canonical mirrored view `{source_id}`: {exc}"
+            ) from exc
 
     def _render_recent(
         self,

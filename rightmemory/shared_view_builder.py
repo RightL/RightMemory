@@ -20,6 +20,7 @@ from .shared_view_files import (
     write_file_view_source_from_recipe,
 )
 from .shared_view_models import validate_heading_id
+from .shared_view_package import FileViewPackageError, validate_mf_dist
 from .shared_view_questions import validate_question_view_source
 
 
@@ -33,6 +34,7 @@ def run_file_view_builder(
     credential_id: str | None = None,
 ) -> str:
     clean_view_id = validate_heading_id(view_id)
+    root = Path(memory_root).expanduser()
     lines = [
         "<shared_view_build>",
         "kind: file",
@@ -48,23 +50,40 @@ def run_file_view_builder(
             ]
         )
     message = "\n".join([*lines, "</shared_view_build>"])
-    output = _run_builder(memory_root, clean_view_id, message)
-    _require_artifact(memory_root, clean_view_id, "view.md")
-    _require_artifact(memory_root, clean_view_id, "recipe.toml")
-    require_publish = bool(hub_url or credential_id)
-    recipe = validate_file_view_recipe_source(
-        memory_root,
-        clean_view_id,
-        require_selection=False,
-        require_publish=require_publish,
-    )
-    if recipe.render == FILE_VIEW_RENDER_EXTRACTIVE:
-        validate_file_view_recipe_source(memory_root, clean_view_id, require_selection=True, require_publish=require_publish)
-        render_file_view(memory_root, clean_view_id)
-    else:
-        _require_nonempty_file_view_context(memory_root, clean_view_id)
-    _require_nonempty_file_view_context(memory_root, clean_view_id)
-    return output
+    view_dir = root / "shared_views" / clean_view_id
+    with TemporaryDirectory() as tempdir:
+        backup_dir = Path(tempdir) / clean_view_id
+        existed = view_dir.exists()
+        if existed:
+            shutil.copytree(view_dir, backup_dir, symlinks=True)
+        try:
+            output = _run_builder(root, clean_view_id, message)
+            _require_artifact(root, clean_view_id, "view.md")
+            _require_artifact(root, clean_view_id, "recipe.toml")
+            require_publish = bool(hub_url or credential_id)
+            recipe = validate_file_view_recipe_source(
+                root,
+                clean_view_id,
+                require_selection=False,
+                require_publish=require_publish,
+            )
+            if recipe.render == FILE_VIEW_RENDER_EXTRACTIVE:
+                validate_file_view_recipe_source(
+                    root,
+                    clean_view_id,
+                    require_selection=True,
+                    require_publish=require_publish,
+                )
+                render_file_view(root, clean_view_id)
+            _require_valid_file_view_dist(root, clean_view_id)
+            return output
+        except BaseException:
+            with MemoryWriteLock(root):
+                if view_dir.exists():
+                    shutil.rmtree(view_dir)
+                if existed:
+                    shutil.copytree(backup_dir, view_dir, symlinks=True)
+            raise
 
 
 def file_view_refresh_due(memory_root: Path, view_id: str, *, force: bool = False) -> bool:
@@ -110,7 +129,7 @@ def refresh_file_view(memory_root: Path, view_id: str, *, force: bool = False, p
                 if refreshed.render == FILE_VIEW_RENDER_EXTRACTIVE:
                     validate_file_view_recipe_source(root, clean_view_id, require_selection=True)
                     render_file_view(root, clean_view_id)
-                _require_nonempty_file_view_context(root, clean_view_id)
+                _require_valid_file_view_dist(root, clean_view_id)
                 _commit_refresh_if_changed(root, clean_view_id)
         except BaseException:
             with MemoryWriteLock(root):
@@ -172,16 +191,18 @@ def _require_artifact(memory_root: Path, view_id: str, relative: str) -> None:
         raise RuntimeError(f"shared-view builder did not create required artifact: {path.relative_to(root)}")
 
 
-def _require_nonempty_file_view_context(memory_root: Path, view_id: str) -> None:
+def _require_valid_file_view_dist(memory_root: Path, view_id: str) -> None:
     root = Path(memory_root).expanduser()
-    path = root / "shared_views" / view_id / "dist" / "MEMORY.md"
-    text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    marker = "## Published Context"
-    if marker not in text or not text.split(marker, 1)[1].strip():
-        raise RuntimeError(
-            "shared-view builder rendered an empty file view; "
-            "call the file-view compiler tool with content that produces Published Context"
+    try:
+        validate_mf_dist(
+            root / "shared_views" / view_id / "dist",
+            expected_view_id=view_id,
         )
+    except (FileNotFoundError, OSError, FileViewPackageError) as exc:
+        raise RuntimeError(
+            "shared-view builder did not produce a valid schema-compatible Memory document: "
+            f"{exc}"
+        ) from exc
 
 
 def _refresh_message(recipe: FileViewRecipe) -> str:

@@ -21,6 +21,7 @@ from .shared_view_models import (
     save_shared_view_credential,
     validate_heading_id,
 )
+from .shared_view_package import valid_file_view_package
 
 
 def accept_http_shared_view_invitation(
@@ -291,10 +292,19 @@ def shared_view_connection_status(memory_root: Path, heading_id: str) -> dict[st
     if connection.target.view_id:
         status["remote_view_id"] = connection.target.view_id
     if connection.view_type == "file":
-        import_path = root / RUNTIME_DIR / "imports" / clean_heading_id / "dist" / "MEMORY.md"
-        status["imported"] = import_path.is_file()
-        status["status"] = "imported" if import_path.is_file() else "not_pulled"
-        status["message"] = "file view import is available" if import_path.is_file() else "file view has not been pulled"
+        package = root / RUNTIME_DIR / "imports" / clean_heading_id
+        imported = valid_file_view_package(
+            package,
+            expected_view_id=connection.target.view_id or clean_heading_id,
+            namespace_id=clean_heading_id,
+        )
+        status["imported"] = imported
+        status["status"] = "imported" if imported else "not_pulled"
+        status["message"] = (
+            "file view import is available"
+            if imported
+            else "file view has not been pulled or is invalid"
+        )
     else:
         status["message"] = "question view endpoint is configured"
     return status

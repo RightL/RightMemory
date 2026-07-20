@@ -22,7 +22,8 @@ from .shared_view_files import (
     write_extractive_file_view_recipe,
     write_generative_file_view,
 )
-from .shared_view_models import validate_heading_id
+from .shared_view_models import load_connections, validate_heading_id
+from .shared_view_package import FileViewPackageError, validate_file_view_package
 from .shared_view_questions import validate_question_view_source, write_question_view
 from .update_review import validate_corrections_markdown
 
@@ -134,19 +135,56 @@ class MemoryTools:
             return self._missing_skill_message(clean_id)
         return self._read_text(reference.path)
 
-    def read_mf(self, mf_id: str) -> str:
-        """Read a mirrored view's complete line-numbered canonical dist/MEMORY.md."""
+    def read_mf(self, mf_id: str, resource_id: str | None = None) -> str:
+        """Read a validated MF document or one referenced F#, M#, or S# resource."""
         clean_id = self._validate_memory_reference_id(mf_id)
-        path = (
+        package_root = (
             self.memory_root
             / RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX
             / clean_id
-            / "dist"
-            / "MEMORY.md"
         )
-        if not self._is_safe_read_file(path):
+        connection = load_connections(self.memory_root).get(clean_id)
+        expected_view_id = (
+            connection.target.view_id
+            if connection is not None and connection.target.view_id
+            else clean_id
+        )
+        try:
+            validated = validate_file_view_package(
+                package_root,
+                expected_view_id=expected_view_id,
+                namespace_id=clean_id,
+            )
+        except (FileNotFoundError, OSError, FileViewPackageError):
             return self._missing_mf_message(clean_id)
-        return self._read_numbered_source(path, f"MF#{clean_id}")
+        if resource_id is None:
+            result = self._read_numbered_source(
+                package_root / "dist" / "MEMORY.md",
+                f"MF#{clean_id}",
+            )
+            resources = sorted(
+                f"{reference.kind}{reference.id}"
+                for reference in validated.manifest.backing.values()
+            )
+            available = "\n".join(f"- {value}" for value in resources) if resources else "- none"
+            return f"{result}\n\nAvailable MF resources:\n{available}"
+
+        match = re.fullmatch(r"(F#|M#|S#)([A-Za-z0-9_.-]+)", str(resource_id))
+        if match is None:
+            raise ValueError("resource_id must be an F#, M#, or S# id")
+        marker, inner_id = match.groups()
+        validate_item_id(inner_id)
+        reference = validated.manifest.backing.get(inner_id)
+        if (
+            reference is None
+            or reference.kind != marker
+            or not self._is_safe_read_file(reference.path)
+        ):
+            raise ValueError(f"unknown or mismatched MF resource: {resource_id}")
+        label = f"MF#{clean_id}/{marker}{inner_id}"
+        if marker == "S#":
+            return self._read_text(reference.path)
+        return self._read_numbered_source(reference.path, label)
 
     def read_detail(self, detail_id: str) -> str:
         """Read the root-relative graph detail file for an F# heading id."""
@@ -452,7 +490,7 @@ class MemoryTools:
             render_file_view(self.memory_root, recipe.view_id)
             rendered = self.memory_root / "shared_views" / recipe.view_id / "dist" / "MEMORY.md"
             if not self._file_view_rendered_context(rendered):
-                return "failed: selected ids rendered an empty Published Context; choose ids that match memory content"
+                return "failed: selected ids rendered an empty Memory document; choose ids that match memory content"
         except (OSError, ValueError) as exc:
             return f"failed: {exc}"
         return (
@@ -466,21 +504,21 @@ class MemoryTools:
         view_id: str,
         title: str,
         intent: str,
-        published_context: str,
+        memory_document: str,
         publish_hub_url: str | None = None,
         publish_credential_id: str | None = None,
     ) -> str:
-        """Create and render a canonical generative MF# file view."""
+        """Create a generative MF# view from a complete schema-valid Memory document."""
         self._require_shared_view_builder_tool()
-        if not str(published_context).strip():
-            return "failed: published_context must not be empty"
+        if not str(memory_document).strip():
+            return "failed: memory_document must not be empty"
         try:
             write_generative_file_view(
                 self.memory_root,
                 view_id=view_id,
                 title=title,
                 intent=intent,
-                published_context=published_context,
+                memory_document=memory_document,
                 approved=False,
                 publish_hub_url=publish_hub_url,
                 publish_credential_id=publish_credential_id,
@@ -493,7 +531,7 @@ class MemoryTools:
             )
             rendered = self.memory_root / "shared_views" / recipe.view_id / "dist" / "MEMORY.md"
             if not self._file_view_rendered_context(rendered):
-                return "failed: published_context rendered an empty Published Context"
+                return "failed: memory_document rendered an empty Memory document"
         except (OSError, ValueError) as exc:
             return f"failed: {exc}"
         return f"success: wrote generative file view {recipe.view_id}"
@@ -868,11 +906,7 @@ class MemoryTools:
     def _file_view_rendered_context(self, path: Path) -> str:
         if not path.is_file():
             return ""
-        marker = "## Published Context"
-        text = path.read_text(encoding="utf-8")
-        if marker not in text:
-            return ""
-        return text.split(marker, 1)[1].strip()
+        return path.read_text(encoding="utf-8").strip()
 
     def _read_lines(self, resolved: Path, original_path: str, mark_read: bool = True) -> list[str]:
         if not resolved.is_file():
@@ -1124,7 +1158,27 @@ class MemoryTools:
         if not imports_root.is_dir() or not self._is_under_root(imports_root):
             ids = []
         else:
-            ids = sorted(path.name for path in imports_root.iterdir() if path.is_dir() and self._is_under_root(path))
+            connections = load_connections(self.memory_root)
+            ids = []
+            for path in imports_root.iterdir():
+                if not path.is_dir() or not self._is_under_root(path):
+                    continue
+                connection = connections.get(path.name)
+                expected_view_id = (
+                    connection.target.view_id
+                    if connection is not None and connection.target.view_id
+                    else path.name
+                )
+                try:
+                    validate_file_view_package(
+                        path,
+                        expected_view_id=expected_view_id,
+                        namespace_id=path.name,
+                    )
+                except (FileNotFoundError, OSError, FileViewPackageError):
+                    continue
+                ids.append(path.name)
+            ids.sort()
         if not ids:
             return "Available MF imports:\n- none"
         return "Available MF imports:\n" + "\n".join(f"- {item}" for item in ids)
@@ -1145,8 +1199,7 @@ class MemoryTools:
             resolved = self._resolve_path(token)
             relative_path = resolved.relative_to(self.memory_root).as_posix()
             if self._is_runtime_shared_view_path(relative_path):
-                if not self._is_runtime_shared_view_import_path(relative_path):
-                    raise ValueError("runtime shared-view imports are only readable by retrieve")
+                raise ValueError("runtime shared-view packages are only readable through read_mf")
             if self._has_role_read_scope():
                 self._check_allowed_read_command_path(token)
 
@@ -1173,12 +1226,9 @@ class MemoryTools:
     def _reject_runtime_shared_view_glob(self, pattern: str) -> None:
         normalized = pattern[1:] if pattern.startswith("!") else pattern
         if normalized.startswith(RUNTIME_SHARED_VIEW_PATH_PREFIX) or f"/{RUNTIME_SHARED_VIEW_PATH_PREFIX}" in normalized:
-            if not self._is_runtime_shared_view_import_path(normalized):
-                raise ValueError("runtime shared-view imports are only readable by retrieve")
+            raise ValueError("runtime shared-view packages are only readable through read_mf")
 
     def _exclude_runtime_shared_view_rg_paths(self, args: list[str]) -> list[str]:
-        if self.role == "retrieve":
-            return args
         insert_at = args.index("--") if "--" in args else len(args)
         return [*args[:insert_at], "--glob", f"!{RUNTIME_SHARED_VIEW_PATH_PREFIX}**", *args[insert_at:]]
 
@@ -1189,7 +1239,6 @@ class MemoryTools:
             line
             for line in output.splitlines()
             if not line.startswith(RUNTIME_SHARED_VIEW_PATH_PREFIX)
-            or (self.role == "retrieve" and line.startswith(RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX))
         ]
         return "\n".join(kept)
 
@@ -1206,10 +1255,6 @@ class MemoryTools:
                 expanded.append(token)
                 continue
             relative_path = resolved.relative_to(self.memory_root).as_posix()
-            if self.role == "retrieve" and self._is_runtime_shared_view_import_path(relative_path):
-                expanded_path_indices.add(len(expanded))
-                expanded.append(relative_path)
-                continue
             self._check_allowed_read_search_dir(resolved, token)
             for relative_path in self._existing_role_read_paths_under(resolved):
                 expanded_path_indices.add(len(expanded))
@@ -1388,7 +1433,7 @@ class MemoryTools:
         if self._is_allowed_read_relative_file(relative_path):
             return resolved
         if self._is_runtime_shared_view_path(relative_path):
-            raise ValueError("runtime shared-view imports are only readable by retrieve")
+            raise ValueError("runtime shared-view packages are only readable through read_mf")
         raise ValueError(f"can only read {self._read_policy_label()}: {relative_path}")
 
     def _has_role_read_scope(self) -> bool:
@@ -1404,8 +1449,6 @@ class MemoryTools:
         if relative_path == CORRECTIONS_PATH and self.role not in CORRECTIONS_READ_ROLES:
             return False
         if self._is_runtime_shared_view_path(relative_path):
-            if self._is_runtime_shared_view_import_path(relative_path):
-                return self.role == "retrieve"
             return False
         if not self._has_role_read_scope():
             return True
@@ -1415,8 +1458,6 @@ class MemoryTools:
         if relative_path == CORRECTIONS_PATH and self.role not in CORRECTIONS_READ_ROLES:
             return False
         if self._is_runtime_shared_view_path(relative_path):
-            if self._is_runtime_shared_view_import_path(relative_path):
-                return self.role == "retrieve"
             return False
         if not self._has_role_read_scope():
             return True
@@ -1427,11 +1468,9 @@ class MemoryTools:
     def _check_allowed_read_search_dir(self, path: Path, original_path: str) -> None:
         relative_path = path.relative_to(self.memory_root).as_posix()
         if self._is_runtime_shared_view_import_path(relative_path):
-            if self.role == "retrieve":
-                return
-            raise ValueError("runtime shared-view imports are only readable by retrieve")
+            raise ValueError("runtime shared-view packages are only readable through read_mf")
         if self._is_runtime_shared_view_path(relative_path):
-            raise ValueError("runtime shared-view imports are only readable by retrieve")
+            raise ValueError("runtime shared-view packages are only readable through read_mf")
         if not self._has_role_read_scope():
             return
         if relative_path in {".", "insight_logs"}:
@@ -1443,8 +1482,6 @@ class MemoryTools:
             return True
         relative_path = path.relative_to(self.memory_root).as_posix()
         if path.is_dir():
-            if self._is_runtime_shared_view_import_path(relative_path):
-                return self.role == "retrieve"
             return relative_path == "insight_logs"
         return self._is_allowed_read_relative_file(relative_path)
 

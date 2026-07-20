@@ -666,9 +666,27 @@ class JsonRequestTests(unittest.TestCase):
                     )
                 },
             )
-            imported = root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"
+            package = root / ".runtime" / "shared_views" / "imports" / "auth-api-files"
+            imported = package / "dist"
             imported.mkdir(parents=True)
-            (imported / "MEMORY.md").write_text("published context\n", encoding="utf-8")
+            (package / "view.md").write_text("# Auth API Files\n", encoding="utf-8")
+            (package / "recipe.toml").write_text(
+                'version = 1\nview_id = "auth-api-files"\nkind = "file"\n',
+                encoding="utf-8",
+            )
+            (package / "rightmemory-shared-view.toml").write_text(
+                'version = 2\nview_id = "auth-api-files"\nkind = "file"\n',
+                encoding="utf-8",
+            )
+            (imported / "MEMORY.md").write_text(
+                "# Auth API {#auth-api} → []\n\nPublished context.\n",
+                encoding="utf-8",
+            )
+            (imported / "manifest.toml").write_text(
+                'version = 2\nview_id = "auth-api-files"\n'
+                'document_kind = "rightmemory-memory"\n',
+                encoding="utf-8",
+            )
 
             with (
                 patch("rightmemory.cli.default_memory_root", return_value=root),

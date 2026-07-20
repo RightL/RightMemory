@@ -355,7 +355,11 @@ class ShareProviderFlowTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
-        (self.root / "MEMORY.md").write_text("# Auth {#auth}\n\n- `token-expiry` Tokens expire.\n", encoding="utf-8")
+        (self.root / "MEMORY.md").write_text(
+            "# Auth {#auth} → []\n\n- `token-expiry` Tokens expire. → []\n",
+            encoding="utf-8",
+        )
+        (self.root / "PURSUITS.md").write_text("# Pursuits {#pursuits} → []\n", encoding="utf-8")
         save_shared_view_credential(
             self.root,
             "alice-publish",
@@ -648,7 +652,8 @@ class ShareConsumerFlowTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
-        (self.root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+        (self.root / "MEMORY.md").write_text("# Memory {#memory} → []\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text("# Pursuits {#pursuits} → []\n", encoding="utf-8")
 
     def test_join_share_accepts_bundle_and_creates_relationship_and_connections(self):
         with (
@@ -990,10 +995,12 @@ class GitShareJoinTests(unittest.TestCase):
         self.provider.mkdir()
         self.consumer.mkdir()
         (self.provider / "MEMORY.md").write_text(
-            "# Auth {#auth}\n\n- `token-expiry` Tokens expire.\n",
+            "# Auth {#auth} → []\n\n- `token-expiry` Tokens expire. → []\n",
             encoding="utf-8",
         )
-        (self.consumer / "MEMORY.md").write_text("# Consumer\n", encoding="utf-8")
+        (self.provider / "PURSUITS.md").write_text("# Pursuits {#pursuits} → []\n", encoding="utf-8")
+        (self.consumer / "MEMORY.md").write_text("# Consumer {#consumer} → []\n", encoding="utf-8")
+        (self.consumer / "PURSUITS.md").write_text("# Pursuits {#pursuits} → []\n", encoding="utf-8")
         self.remote = self.root / "remote.git"
         self._init_remote()
 
@@ -1023,7 +1030,7 @@ class GitShareJoinTests(unittest.TestCase):
         invitation_url = self._publish_provider()
         join_share(self.consumer, invitation_url)
         (self.provider / "MEMORY.md").write_text(
-            "# Auth {#auth}\n\n- `token-expiry` Tokens now expire after two hours.\n",
+            "# Auth {#auth} → []\n\n- `token-expiry` Tokens now expire after two hours. → []\n",
             encoding="utf-8",
         )
         render_file_view(self.provider, "auth-api-files")
@@ -1114,10 +1121,12 @@ class ShareEndToEndTests(unittest.TestCase):
         self.provider.mkdir()
         self.consumer.mkdir()
         (self.provider / "MEMORY.md").write_text(
-            "# Auth {#auth}\n\n- `token-expiry` Tokens expire after one hour. -> [rel:auth-api]\n",
+            "# Auth {#auth} → []\n\n- `token-expiry` Tokens expire after one hour. → []\n",
             encoding="utf-8",
         )
-        (self.consumer / "MEMORY.md").write_text("# Frontend\n", encoding="utf-8")
+        (self.provider / "PURSUITS.md").write_text("# Pursuits {#pursuits} → []\n", encoding="utf-8")
+        (self.consumer / "MEMORY.md").write_text("# Frontend {#frontend} → []\n", encoding="utf-8")
+        (self.consumer / "PURSUITS.md").write_text("# Pursuits {#pursuits} → []\n", encoding="utf-8")
         self.store = HubStore(self.hub)
         self.store.initialize(admin_token="admin-secret", public_base_url="https://hub.example.test")
         self.provider_token = self.store.create_provider_token("alice", label="publish")

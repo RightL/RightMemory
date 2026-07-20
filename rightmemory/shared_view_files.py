@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import io
 import os
-import re
 import shutil
 import tomllib
 import uuid
@@ -11,9 +9,9 @@ import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, mkdtemp
 
-from .graph import GraphItem, build_graph_manifest
+from .graph import BlockKey, DocumentBlock, GraphManifest, build_graph_manifest
 from .hub.client import HubClient, HubClientError
 from .shared_view_models import (
     PROVIDER_VIEWS_DIR,
@@ -23,6 +21,15 @@ from .shared_view_models import (
     validate_heading_id,
 )
 from .session import _ensure_durable_directory, _fsync_directory
+from .shared_view_package import (
+    DOCUMENT_KIND,
+    PACKAGE_VERSION,
+    extract_package_archive,
+    promote_directory_candidate,
+    valid_file_view_package,
+    validate_file_view_package,
+    validate_mf_dist,
+)
 
 FILE_RECIPE_KEYS = {
     "version",
@@ -61,7 +68,6 @@ FILE_VIEW_RENDER_VALUES = {FILE_VIEW_RENDER_EXTRACTIVE, FILE_VIEW_RENDER_GENERAT
 DEFAULT_SEMANTIC_REFRESH_DAYS = 7
 
 
-MARKDOWN_HEADING_RE = re.compile(r"^(#{1,})\s+")
 MANAGED_EXAMPLE_START = "<!-- rightmemory:example:start -->"
 MANAGED_EXAMPLE_END = "<!-- rightmemory:example:end -->"
 
@@ -139,6 +145,10 @@ def write_extractive_file_view_recipe(
 def _write_file_view_source(root: Path, recipe: FileViewRecipe) -> None:
     view_dir = _view_dir(root, recipe.view_id)
     view_dir.mkdir(parents=True, exist_ok=True)
+    _write_file_view_source_files(view_dir, recipe)
+
+
+def _write_file_view_source_files(view_dir: Path, recipe: FileViewRecipe) -> None:
     _write_text(view_dir / ".gitignore", "dist/\n")
     _write_text(view_dir / "view.md", f"# {recipe.title}\n\n{recipe.intent}\n")
     _write_text(view_dir / "recipe.toml", _render_recipe_toml(recipe))
@@ -156,7 +166,7 @@ def write_generative_file_view(
     view_id: str,
     title: str,
     intent: str,
-    published_context: str,
+    memory_document: str,
     approved: bool = False,
     publish_hub_url: str | None = None,
     publish_credential_id: str | None = None,
@@ -164,7 +174,7 @@ def write_generative_file_view(
     last_semantic_refresh_at: str = "",
     last_semantic_refresh_memory_commit: str = "",
 ) -> str:
-    body = _required_text(published_context, "published_context")
+    body = _required_text(memory_document, "memory_document")
     root = Path(memory_root).expanduser()
     recipe = FileViewRecipe(
         view_id=validate_heading_id(view_id),
@@ -178,7 +188,6 @@ def write_generative_file_view(
         last_semantic_refresh_at=str(last_semantic_refresh_at),
         last_semantic_refresh_memory_commit=str(last_semantic_refresh_memory_commit),
     )
-    _write_file_view_source(root, recipe)
     _write_generated_file_view(root, recipe, body)
     return f"wrote generative file view {recipe.view_id}"
 
@@ -269,16 +278,17 @@ def render_file_view(memory_root: Path, view_id: str) -> str:
         return f"generated file view {recipe.view_id} already exists"
     rendered = _render_selected_memory(root, recipe)
     view_dir = _view_dir(root, recipe.view_id)
-    temp = view_dir / f".dist.tmp-{os.getpid()}"
-    if temp.exists():
-        shutil.rmtree(temp)
-    temp.mkdir(parents=True)
-    _write_text(temp / "MEMORY.md", rendered)
-    _write_text(temp / "manifest.toml", f'version = 1\nview_id = "{recipe.view_id}"\n')
+    view_dir.mkdir(parents=True, exist_ok=True)
+    temp = Path(mkdtemp(prefix=".dist.candidate-", dir=view_dir))
+    for relative, text in rendered.items():
+        _write_text(temp / relative, text)
+    _write_text(temp / "manifest.toml", _render_dist_manifest(recipe.view_id))
     final = view_dir / "dist"
-    if final.exists():
-        shutil.rmtree(final)
-    temp.rename(final)
+    try:
+        validate_mf_dist(temp, expected_view_id=recipe.view_id)
+        promote_directory_candidate(temp, final)
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
     return f"rendered file view {recipe.view_id}"
 
 
@@ -288,34 +298,46 @@ def export_file_view_package(memory_root: Path, view_id: str, target_path: Path)
     render_file_view(root, recipe.view_id)
     source = _view_dir(root, recipe.view_id)
     target = Path(target_path).expanduser()
-    if target.exists():
-        if not target.is_dir():
-            raise ValueError(f"file view package target is not a directory: {target}")
-        shutil.rmtree(target)
-    target.mkdir(parents=True)
-    shutil.copy2(source / "view.md", target / "view.md")
-    shutil.copy2(source / "recipe.toml", target / "recipe.toml")
-    shutil.copytree(source / "dist", target / "dist")
-    _write_text(
-        target / "rightmemory-shared-view.toml",
-        "\n".join(
-            [
-                "version = 1",
-                f'view_id = "{recipe.view_id}"',
-                'kind = "file"',
-                f'ref = "rightmemory://mf/{recipe.view_id}"',
-                f"title = {_toml_string(recipe.title)}",
-                f"description = {_toml_string(recipe.intent)}",
-                "",
-            ]
-        ),
-    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and not target.is_dir():
+        raise ValueError(f"file view package target is not a directory: {target}")
+    candidate = Path(mkdtemp(prefix=f".{target.name}.candidate-", dir=target.parent))
+    try:
+        shutil.copy2(source / "view.md", candidate / "view.md")
+        shutil.copy2(source / "recipe.toml", candidate / "recipe.toml")
+        shutil.copytree(source / "dist", candidate / "dist", symlinks=True)
+        _write_text(
+            candidate / "rightmemory-shared-view.toml",
+            "\n".join(
+                [
+                    f"version = {PACKAGE_VERSION}",
+                    f'view_id = "{recipe.view_id}"',
+                    'kind = "file"',
+                    f'ref = "rightmemory://mf/{recipe.view_id}"',
+                    f"title = {_toml_string(recipe.title)}",
+                    f"description = {_toml_string(recipe.intent)}",
+                    "",
+                ]
+            ),
+        )
+        validate_file_view_package(candidate, expected_view_id=recipe.view_id)
+        promote_directory_candidate(candidate, target)
+    finally:
+        shutil.rmtree(candidate, ignore_errors=True)
     return f"exported file view {recipe.view_id} to {target}"
 
 
 def approve_file_view(memory_root: Path, view_id: str) -> str:
     root = Path(memory_root).expanduser()
     recipe = validate_file_view_recipe_source(root, view_id, require_selection=True)
+    if recipe.render == FILE_VIEW_RENDER_GENERATIVE:
+        _require_generated_file_view_output(root, recipe)
+    else:
+        render_file_view(root, recipe.view_id)
+    validate_mf_dist(
+        _view_dir(root, recipe.view_id) / "dist",
+        expected_view_id=recipe.view_id,
+    )
     _write_text(_view_dir(root, recipe.view_id) / "recipe.toml", _render_recipe_toml(_replace_recipe(recipe, approved=True)))
     return f"approved file view {recipe.view_id}"
 
@@ -406,15 +428,28 @@ def pull_file_view(memory_root: Path, heading_id: str) -> FileViewPullResult:
             pull_git_file_view(root, connection.target, clean_heading_id)
             return FileViewPullResult(clean_heading_id, "pulled", "Git file view pulled")
         except (ValueError, OSError, RuntimeError) as exc:
-            if _import_exists(root, clean_heading_id):
+            if _import_exists(
+                root,
+                clean_heading_id,
+                expected_view_id=connection.target.view_id or clean_heading_id,
+            ):
                 return FileViewPullResult(clean_heading_id, "stale", f"using stale file view import: {exc}")
             return FileViewPullResult(clean_heading_id, "unavailable", f"file view unavailable: {exc}")
     try:
         archive = _download_file_view_archive(root, connection)
-        _replace_import_from_zip(root, clean_heading_id, archive)
+        _replace_import_from_zip(
+            root,
+            clean_heading_id,
+            connection.target.view_id or clean_heading_id,
+            archive,
+        )
         return FileViewPullResult(clean_heading_id, "pulled", "file view pulled")
     except (KeyError, ValueError, OSError, HubClientError, zipfile.BadZipFile) as exc:
-        if _import_exists(root, clean_heading_id):
+        if _import_exists(
+            root,
+            clean_heading_id,
+            expected_view_id=connection.target.view_id or clean_heading_id,
+        ):
             return FileViewPullResult(clean_heading_id, "stale", f"using stale file view import: {exc}")
         return FileViewPullResult(clean_heading_id, "unavailable", f"file view unavailable: {exc}")
 
@@ -653,154 +688,256 @@ def _download_file_view_archive(root: Path, connection: SharedViewConnection) ->
     return client.download_package(target.view_id or connection.heading_id)
 
 
-def _replace_import_from_zip(root: Path, heading_id: str, archive_bytes: bytes) -> None:
+def _replace_import_from_zip(
+    root: Path,
+    heading_id: str,
+    expected_view_id: str,
+    archive_bytes: bytes,
+) -> None:
     imports_root = root / ".runtime" / "shared_views" / "imports"
     imports_root.mkdir(parents=True, exist_ok=True)
     final = imports_root / heading_id
-    temp = imports_root / f".{heading_id}.tmp-{os.getpid()}"
-    if temp.exists():
-        shutil.rmtree(temp)
-    temp.mkdir()
+    temp = imports_root / f".{heading_id}.candidate-{uuid.uuid4().hex}"
     try:
-        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
-            names = archive.namelist()
-            required = {"view.md", "recipe.toml", "rightmemory-shared-view.toml", "dist/MEMORY.md", "dist/manifest.toml"}
-            missing = sorted(required - set(names))
-            if missing:
-                raise ValueError(f"file view package missing required files: {', '.join(missing)}")
-            for name in names:
-                relative = _validate_package_relative_path(name)
-                if relative.endswith("/"):
-                    continue
-                target = temp / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(archive.read(name))
-        if final.exists():
-            shutil.rmtree(final)
-        temp.rename(final)
+        extract_package_archive(archive_bytes, temp)
+        validate_file_view_package(
+            temp,
+            expected_view_id=expected_view_id,
+            namespace_id=heading_id,
+        )
+        promote_directory_candidate(temp, final)
     except BaseException:
-        if temp.exists():
-            shutil.rmtree(temp)
+        shutil.rmtree(temp, ignore_errors=True)
         raise
 
-def _import_exists(root: Path, heading_id: str) -> bool:
-    return (root / ".runtime" / "shared_views" / "imports" / heading_id / "dist" / "MEMORY.md").is_file()
-
-
-def _render_selected_memory(root: Path, recipe: FileViewRecipe) -> str:
-    sections: list[str] = []
-    excluded = set(recipe.exclude_ids)
-    manifest = build_graph_manifest(root)
-    graph_files = {
-        path.relative_to(manifest.root).as_posix(): path
-        for path in manifest.graph_files
-    }
-    items_by_location = {
-        (item.file, item.line_number): item
-        for item in manifest.items.values()
-    }
-    for relative in recipe.include_files:
-        path = graph_files.get(relative)
-        if path is None:
-            raise ValueError(f"file view include_files entry must be a RightMemory graph file: {relative}")
-        sections.extend([f"### {relative}", "", path.read_text(encoding="utf-8").rstrip(), ""])
-    for source in manifest.graph_files:
-        lines = source.read_text(encoding="utf-8").splitlines()
-        sections.extend(_selected_lines_from_source(source, lines, recipe, excluded, items_by_location))
-    return _render_shared_view_memory(recipe, "\n".join(line for line in sections).rstrip())
-
-
-def _write_generated_file_view(root: Path, recipe: FileViewRecipe, published_context: str) -> None:
-    view_dir = _view_dir(root, recipe.view_id)
-    temp = view_dir / f".dist.tmp-{os.getpid()}"
-    if temp.exists():
-        shutil.rmtree(temp)
-    temp.mkdir(parents=True)
-    _write_text(temp / "MEMORY.md", _render_shared_view_memory(recipe, published_context))
-    _write_text(temp / "manifest.toml", f'version = 1\nview_id = "{recipe.view_id}"\n')
-    final = view_dir / "dist"
-    if final.exists():
-        shutil.rmtree(final)
-    temp.rename(final)
-
-
-def _render_shared_view_memory(recipe: FileViewRecipe, published_context: str) -> str:
-    return "\n".join(
-        [
-            f"# {recipe.title} Shared View",
-            "",
-            recipe.intent,
-            "",
-            "## Published Context",
-            "",
-            published_context.strip(),
-            "",
-        ]
+def _import_exists(root: Path, heading_id: str, *, expected_view_id: str | None = None) -> bool:
+    return valid_file_view_package(
+        root / ".runtime" / "shared_views" / "imports" / heading_id,
+        expected_view_id=expected_view_id or heading_id,
+        namespace_id=heading_id,
     )
 
 
+def _render_selected_memory(root: Path, recipe: FileViewRecipe) -> dict[str, str]:
+    manifest = build_graph_manifest(root)
+    if manifest.errors:
+        raise ValueError(
+            "cannot render file view from invalid RightMemory graph:\n"
+            + "\n".join(f"- {message}" for message in manifest.errors)
+        )
+    projection = _FileViewProjection(manifest, recipe)
+    rendered = projection.render()
+    if not rendered.get("MEMORY.md", "").strip():
+        raise ValueError("file view selection produced an empty Memory document")
+    return rendered
+
+
+def _write_generated_file_view(root: Path, recipe: FileViewRecipe, memory_document: str) -> None:
+    views_dir = root / PROVIDER_VIEWS_DIR
+    views_dir.mkdir(parents=True, exist_ok=True)
+    candidate = Path(mkdtemp(prefix=f".{recipe.view_id}.candidate-", dir=views_dir))
+    try:
+        _write_file_view_source_files(candidate, recipe)
+        dist = candidate / "dist"
+        dist.mkdir()
+        _write_text(dist / "MEMORY.md", memory_document.strip() + "\n")
+        _write_text(dist / "manifest.toml", _render_dist_manifest(recipe.view_id))
+        validate_mf_dist(dist, expected_view_id=recipe.view_id)
+        promote_directory_candidate(candidate, _view_dir(root, recipe.view_id))
+    finally:
+        shutil.rmtree(candidate, ignore_errors=True)
+
+
 def _require_generated_file_view_output(root: Path, recipe: FileViewRecipe) -> None:
-    path = _view_dir(root, recipe.view_id) / "dist" / "MEMORY.md"
-    if not path.is_file():
+    dist = _view_dir(root, recipe.view_id) / "dist"
+    if not (dist / "MEMORY.md").is_file():
         raise ValueError(f"generative file view output is missing: shared_views/{recipe.view_id}/dist/MEMORY.md")
-    text = path.read_text(encoding="utf-8")
-    if "## Published Context" not in text or not text.split("## Published Context", 1)[1].strip():
-        raise ValueError(f"generative file view output is empty: shared_views/{recipe.view_id}/dist/MEMORY.md")
+    validate_mf_dist(dist, expected_view_id=recipe.view_id)
 
 
-def _selected_lines_from_source(
-    source: Path,
-    lines: list[str],
-    recipe: FileViewRecipe,
-    excluded: set[str],
-    items_by_location: dict[tuple[Path, int], GraphItem],
-) -> list[str]:
+class _FileViewProjection:
+    def __init__(self, manifest: GraphManifest, recipe: FileViewRecipe):
+        self.manifest = manifest
+        self.recipe = recipe
+        self.full_roots: set[BlockKey] = set()
+        self.exact_nodes: set[BlockKey] = set()
+        self.excluded_roots = {
+            item.block_key
+            for item_id in recipe.exclude_ids
+            if (item := manifest.items.get(item_id)) is not None and item.block_key is not None
+        }
+        self.f_owner_by_path = {
+            reference.path.resolve(): self.manifest.items[reference.id].block_key
+            for reference in self.manifest.backing.values()
+            if reference.kind == "F#" and reference.id in self.manifest.items
+        }
+        self.needed: set[BlockKey] = set()
+        self._select_recipe_content()
+
+    def render(self) -> dict[str, str]:
+        documents: dict[str, list[str]] = {"MEMORY.md": []}
+        f_backings = {
+            reference.path.resolve(): reference
+            for reference in self.manifest.backing.values()
+            if reference.kind == "F#"
+        }
+        for document in sorted(
+            self.manifest.documents.values(),
+            key=lambda item: item.source_order,
+        ):
+            owner_key = self.f_owner_by_path.get(document.path.resolve())
+            document_full = document.root_key in self.full_roots or bool(
+                owner_key is not None and self._is_under_full(owner_key)
+            )
+            document_needed = document.root_key in self.needed or any(
+                block.source_path == document.path and self._is_included(block.key)
+                for block in self.manifest.blocks.values()
+                if block.kind != "root"
+            )
+            if not document_full and not document_needed:
+                continue
+            text = self._render_block(
+                document.root_key,
+                inherited_full=document_full,
+                force_include=True,
+            ).strip()
+            if not text:
+                continue
+            text = _strip_managed_examples(text).strip()
+            if not text:
+                continue
+            reference = f_backings.get(document.path.resolve())
+            if reference is None:
+                documents["MEMORY.md"].append(text)
+            else:
+                documents[f"MEMORY_{reference.id}.md"] = [text]
+
+        output = {
+            relative: "\n\n".join(parts).rstrip() + "\n"
+            for relative, parts in documents.items()
+            if parts
+        }
+        for item in self.manifest.items.values():
+            if item.block_key is None or not self._is_included(item.block_key):
+                continue
+            reference = self.manifest.backing.get(item.id)
+            if reference is None or reference.kind not in {"M#", "S#"}:
+                continue
+            if reference.kind == "M#":
+                relative = f"MEMORY_{reference.id}.md"
+            else:
+                relative = f"MEMORY_SKILL_{reference.id}.md"
+            output[relative] = reference.path.read_text(encoding="utf-8")
+        return output
+
+    def _select_recipe_content(self) -> None:
+        for item_id in self.recipe.include_headings:
+            item = self.manifest.items.get(item_id)
+            if (
+                item is None
+                or item.block_key is None
+                or self.manifest.blocks[item.block_key].kind != "heading"
+            ):
+                raise ValueError(f"file view include_headings references unknown heading: {item_id}")
+            self.full_roots.add(item.block_key)
+        for item_id in self.recipe.include_nodes:
+            item = self.manifest.items.get(item_id)
+            if (
+                item is None
+                or item.block_key is None
+                or self.manifest.blocks[item.block_key].kind != "node"
+            ):
+                raise ValueError(f"file view include_nodes references unknown node: {item_id}")
+            self.exact_nodes.add(item.block_key)
+
+        documents_by_relative = {
+            document.relative_path: document
+            for document in self.manifest.documents.values()
+        }
+        for relative in self.recipe.include_files:
+            document = documents_by_relative.get(relative)
+            if document is None:
+                raise ValueError(
+                    f"file view include_files entry must be a RightMemory graph file: {relative}"
+                )
+            self.full_roots.add(document.root_key)
+            owner_key = self.f_owner_by_path.get(document.path.resolve())
+            if owner_key is not None:
+                self.full_roots.add(owner_key)
+
+        selected = {*self.full_roots, *self.exact_nodes}
+        for key in selected:
+            current: BlockKey | None = key
+            while current is not None:
+                self.needed.add(current)
+                block = self.manifest.blocks[current]
+                current = block.logical_parent
+
+    def _render_block(
+        self,
+        key: BlockKey,
+        *,
+        inherited_full: bool,
+        force_include: bool = False,
+    ) -> str:
+        if self._is_excluded(key):
+            return ""
+        block = self.manifest.blocks[key]
+        full = inherited_full or key in self.full_roots
+        include = force_include or full or key in self.needed or key in self.exact_nodes
+        if not include:
+            return ""
+        if block.kind == "node":
+            return block.line if full or key in self.exact_nodes else ""
+
+        pieces: list[str] = []
+        if block.kind != "root":
+            pieces.append(block.line)
+        for part in block.physical_parts:
+            if isinstance(part, tuple):
+                rendered = self._render_block(part, inherited_full=full)
+                if rendered:
+                    pieces.append(rendered)
+            elif full:
+                pieces.append(part)
+        return "\n".join(pieces).strip("\n")
+
+    def _is_included(self, key: BlockKey) -> bool:
+        if self._is_excluded(key):
+            return False
+        if key in self.exact_nodes or key in self.needed:
+            return True
+        return self._is_under_full(key)
+
+    def _is_under_full(self, key: BlockKey) -> bool:
+        current: BlockKey | None = key
+        while current is not None:
+            if current in self.full_roots:
+                return True
+            current = self.manifest.blocks[current].logical_parent
+        return False
+
+    def _is_excluded(self, key: BlockKey) -> bool:
+        current: BlockKey | None = key
+        while current is not None:
+            if current in self.excluded_roots:
+                return True
+            current = self.manifest.blocks[current].logical_parent
+        return False
+
+def _strip_managed_examples(text: str) -> str:
     output: list[str] = []
-    heading_depth: int | None = None
-    excluded_subtree_depth: int | None = None
-    include_subtree = False
-    in_managed_example = False
-    for line_number, line in enumerate(lines, start=1):
+    in_example = False
+    for line in text.splitlines():
         if MANAGED_EXAMPLE_START in line:
-            in_managed_example = MANAGED_EXAMPLE_END not in line
+            in_example = MANAGED_EXAMPLE_END not in line
             continue
-        if in_managed_example:
+        if in_example:
             if MANAGED_EXAMPLE_END in line:
-                in_managed_example = False
+                in_example = False
             continue
-        item = items_by_location.get((source, line_number))
-        heading_match = MARKDOWN_HEADING_RE.match(line)
-        if heading_match:
-            depth = len(heading_match.group(1))
-            if excluded_subtree_depth is not None:
-                if depth > excluded_subtree_depth:
-                    continue
-                excluded_subtree_depth = None
-            if heading_depth is not None and depth <= heading_depth:
-                include_subtree = False
-                heading_depth = None
-            item_id = item.id if item is not None and item.item_kind == "heading" else None
-            if item_id in excluded:
-                excluded_subtree_depth = depth
-                continue
-            if item_id in recipe.include_headings and item_id not in excluded:
-                include_subtree = True
-                heading_depth = depth
-                output.append(line)
-                continue
-        elif excluded_subtree_depth is not None:
-            continue
-        node_id = item.id if item is not None and item.item_kind == "node" else None
-        if node_id in excluded:
-            continue
-        if node_id in recipe.include_nodes:
-            output.append(line)
-            continue
-        if include_subtree:
-            output.append(line)
-    if output and output[-1] != "":
-        output.append("")
-    return output
+        output.append(line)
+    return "\n".join(output)
 
 
 def _render_recipe_toml(recipe: FileViewRecipe) -> str:
@@ -837,6 +974,14 @@ def _render_recipe_toml(recipe: FileViewRecipe) -> str:
             ]
         )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_dist_manifest(view_id: str) -> str:
+    return (
+        f"version = {PACKAGE_VERSION}\n"
+        f"view_id = {_toml_string(view_id)}\n"
+        f"document_kind = {_toml_string(DOCUMENT_KIND)}\n"
+    )
 
 
 def _file_view_recipe_schema_errors(data: dict[str, object], *, require_publish: bool) -> list[str]:
@@ -914,15 +1059,6 @@ def _replace_recipe(recipe: FileViewRecipe, *, approved: bool) -> FileViewRecipe
         last_semantic_refresh_at=recipe.last_semantic_refresh_at,
         last_semantic_refresh_memory_commit=recipe.last_semantic_refresh_memory_commit,
     )
-
-
-def _validate_package_relative_path(relative_path: str) -> str:
-    path = PurePosixPath(relative_path)
-    if "\\" in relative_path or path.is_absolute() or ".." in path.parts:
-        raise ValueError(f"package path traversal entry: {relative_path}")
-    if not relative_path or relative_path == ".":
-        raise ValueError("package path must not be empty")
-    return path.as_posix()
 
 
 def _view_dir(root: Path, view_id: str) -> Path:

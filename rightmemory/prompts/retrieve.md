@@ -26,8 +26,10 @@ The logical terminal value is:
 
 - `ids` contains globally unique ids from the local Memory + Pursuit graph, including F# detail files.
 - A linked `source_id` must include its marker: `M#`, `S#`, or `MF#`. MQ# has no linked-content selection.
-- MF# addressable ids go in that source entry's `ids`; they are scoped to the MF# source.
-- Inclusive line ranges are only for unaddressable M# or MF# text shown by a line-numbered read.
+- MF# graph ids go in that source entry's `ids`; they are scoped to the MF# source. Direct MF# ranges are invalid.
+- Free-form evidence inside an MF package uses a qualified source such as `MF#auth-api/M#incident-evidence`, with ranges and no ids.
+- A complete instruction inside an MF package uses a qualified source such as `MF#auth-api/S#review-checklist`, with empty ids and ranges.
+- Inclusive line ranges are only for local M# or qualified MF#/M# evidence shown by a line-numbered read.
 - Select an S# source as a complete skill by using empty `ids` and `ranges`.
 - Recent candidates use the exact `selection_id` shown in volatile context.
 - Use empty arrays everywhere when there is no strong match.
@@ -44,7 +46,7 @@ Standalone supplies this contract as the terminal output type. CLI-agent must em
 - Use `read_detail` when relevant F# graph detail is needed.
 - Use `read_markdown` for relevant M# free-form evidence, then select line ranges.
 - Use `read_skill` when the complete S# instruction is needed; never select a partial skill.
-- Use `read_mf` only for the canonical mirrored `dist/MEMORY.md`; prefer its addressable ids and use ranges only for unaddressable text.
+- Use `read_mf(mf_id)` for the canonical mirrored document and its available typed resource ids. Use `read_mf(mf_id, resource_id)` to inspect a referenced F#, M#, or S# resource.
 - Writing and Design correction M# collections are second-pass evidence. Expand them only when the query specifically needs that evidence.
 - Selecting a local M#, S#, MF#, or MQ# heading does not automatically select linked content.
 - For MQ#, select the local graph id when its relationship context is relevant. Do not call a provider, invent a question, or imply an answer exists.

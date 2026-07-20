@@ -30,6 +30,33 @@ class MemoryToolsTests(unittest.TestCase):
         except (OSError, NotImplementedError) as exc:
             self.skipTest(f"symlink is not permitted: {exc}")
 
+    def _write_mf_package(
+        self,
+        view_id: str,
+        memory_document: str,
+        resources: dict[str, str] | None = None,
+    ) -> Path:
+        package = self.root / ".runtime" / "shared_views" / "imports" / view_id
+        dist = package / "dist"
+        dist.mkdir(parents=True)
+        (package / "view.md").write_text(f"# {view_id}\n", encoding="utf-8")
+        (package / "recipe.toml").write_text(
+            f'version = 1\nview_id = "{view_id}"\nkind = "file"\n',
+            encoding="utf-8",
+        )
+        (package / "rightmemory-shared-view.toml").write_text(
+            f'version = 2\nview_id = "{view_id}"\nkind = "file"\n',
+            encoding="utf-8",
+        )
+        (dist / "manifest.toml").write_text(
+            f'version = 2\nview_id = "{view_id}"\ndocument_kind = "rightmemory-memory"\n',
+            encoding="utf-8",
+        )
+        (dist / "MEMORY.md").write_text(memory_document, encoding="utf-8")
+        for name, content in (resources or {}).items():
+            (dist / name).write_text(content, encoding="utf-8")
+        return package
+
     def test_rejects_paths_outside_memory_root(self):
         outside = self.root.parent / "outside.md"
 
@@ -39,21 +66,17 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.tools.list_files("../*.md")
 
-    def test_retrieve_role_can_read_mf_import_files(self):
-        imported = self.root / ".runtime" / "shared_views" / "imports" / "auth-api-files" / "dist"
-        imported.mkdir(parents=True)
-        (imported / "MEMORY.md").write_text("Tokens expire after one hour.\n", encoding="utf-8")
+    def test_retrieve_role_cannot_raw_read_mf_import_files(self):
+        self._write_mf_package(
+            "auth-api-files",
+            "# Tokens {#tokens} → []\n\nTokens expire after one hour.\n",
+        )
         tools = MemoryTools(self.root, role="retrieve")
 
-        result = tools.read(".runtime/shared_views/imports/auth-api-files/dist/MEMORY.md")
-        grep_result = tools.grep("Tokens expire", ".runtime/shared_views/imports/auth-api-files")
-
-        self.assertIn("Tokens expire after one hour.", result)
-        self.assertIn("MEMORY.md", grep_result)
-        if shutil.which("rg") is not None:
-            rg_result = tools.read_command("rg Tokens .runtime/shared_views/imports/auth-api-files")
-            self.assertIn(".runtime/shared_views/imports/auth-api-files/dist/MEMORY.md", rg_result)
-            self.assertIn("Tokens expire after one hour.", rg_result)
+        with self.assertRaisesRegex(ValueError, "read_mf"):
+            tools.read(".runtime/shared_views/imports/auth-api-files/dist/MEMORY.md")
+        with self.assertRaisesRegex(ValueError, "read_mf"):
+            tools.grep("Tokens expire", ".runtime/shared_views/imports/auth-api-files")
 
     def test_retrieve_read_skill_returns_skill_body_by_id(self):
         (self.root / "MEMORY.md").write_text("# Skills\n\n## Alpha {S#alpha}\n", encoding="utf-8")
@@ -69,7 +92,10 @@ class MemoryToolsTests(unittest.TestCase):
     def test_retrieve_typed_reads_take_only_their_id(self):
         self.assertEqual(list(inspect.signature(MemoryTools.read_markdown).parameters), ["self", "markdown_id"])
         self.assertEqual(list(inspect.signature(MemoryTools.read_skill).parameters), ["self", "skill_id"])
-        self.assertEqual(list(inspect.signature(MemoryTools.read_mf).parameters), ["self", "mf_id"])
+        self.assertEqual(
+            list(inspect.signature(MemoryTools.read_mf).parameters),
+            ["self", "mf_id", "resource_id"],
+        )
 
     def test_retrieve_typed_reads_do_not_silently_truncate(self):
         payload = f"{'x' * 35_000}\nEND\n"
@@ -84,15 +110,16 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "MEMORY_detail.md").write_text(payload, encoding="utf-8")
         (self.root / "MEMORY_markdown.md").write_text(payload, encoding="utf-8")
         (self.root / "MEMORY_SKILL_alpha.md").write_text(payload, encoding="utf-8")
-        mf_path = self.root / ".runtime" / "shared_views" / "imports" / "auth-api" / "dist" / "MEMORY.md"
-        mf_path.parent.mkdir(parents=True)
-        mf_path.write_text(payload, encoding="utf-8")
+        self._write_mf_package(
+            "auth-api",
+            f"# Large {{#large}} → []\n\n{payload}",
+        )
         tools = MemoryTools(self.root, role="retrieve")
 
         self.assertTrue(tools.read_detail("detail").endswith("END"))
         self.assertEqual(tools.read_skill("alpha").splitlines()[-1], "END")
         self.assertTrue(tools.read_markdown("markdown").endswith("2: END"))
-        self.assertTrue(tools.read_mf("auth-api").endswith("2: END"))
+        self.assertIn("END", tools.read_mf("auth-api"))
 
     def test_retrieve_read_skill_failure_lists_available_ids_without_paths(self):
         (self.root / "MEMORY.md").write_text("# Skills\n\n## Beta {S#beta}\n", encoding="utf-8")
@@ -122,22 +149,25 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertNotIn("secret", result)
 
     def test_retrieve_read_mf_returns_only_line_numbered_canonical_view_by_id(self):
-        import_root = self.root / ".runtime" / "shared_views" / "imports" / "auth-api"
-        (import_root / "dist").mkdir(parents=True)
-        (import_root / "dist" / "MEMORY.md").write_text("# Auth API\n\nToken expiry.\n", encoding="utf-8")
-        (import_root / "manifest.toml").write_text("view_id = \"auth-api\"\n", encoding="utf-8")
+        self._write_mf_package(
+            "auth-api",
+            "# Auth API {#auth-api} → []\n\nToken expiry.\n",
+        )
         tools = MemoryTools(self.root, role="retrieve")
 
         result = tools.read_mf("auth-api")
 
         self.assertIn("Source: MF#auth-api", result)
-        self.assertIn("1: # Auth API", result)
+        self.assertIn("1: # Auth API {#auth-api}", result)
         self.assertIn("3: Token expiry.", result)
         self.assertNotIn("manifest.toml", result)
         self.assertNotIn("view_id", result)
 
     def test_retrieve_read_mf_failure_lists_available_ids_without_paths(self):
-        (self.root / ".runtime" / "shared_views" / "imports" / "billing-api").mkdir(parents=True)
+        self._write_mf_package(
+            "billing-api",
+            "# Billing API {#billing-api} → []\n",
+        )
         tools = MemoryTools(self.root, role="retrieve")
 
         result = tools.read_mf("auth-api")
@@ -145,6 +175,32 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("MF import not found: auth-api", result)
         self.assertIn("Available MF imports:\n- billing-api", result)
         self.assertNotIn(".runtime", result)
+
+    def test_retrieve_read_mf_reads_only_referenced_typed_resources(self):
+        self._write_mf_package(
+            "auth-api",
+            "# Auth {#auth} → []\n\n"
+            "## Detail {F#detail} → []\n\n"
+            "## Evidence {M#evidence} → []\n\n"
+            "## Checklist {S#checklist} → []\n",
+            {
+                "MEMORY_detail.md": "# Detail Topic {#detail-topic} → []\n",
+                "MEMORY_evidence.md": "# Evidence\n\nRaw line.\n",
+                "MEMORY_SKILL_checklist.md": "# Checklist\n\nReview all.\n",
+            },
+        )
+        tools = MemoryTools(self.root, role="retrieve")
+
+        direct = tools.read_mf("auth-api")
+        detail = tools.read_mf("auth-api", "F#detail")
+        evidence = tools.read_mf("auth-api", "M#evidence")
+        skill = tools.read_mf("auth-api", "S#checklist")
+
+        self.assertIn("Available MF resources", direct)
+        self.assertIn("F#detail", direct)
+        self.assertIn("1: # Detail Topic", detail)
+        self.assertIn("3: Raw line.", evidence)
+        self.assertEqual(skill, "# Checklist\n\nReview all.\n")
 
     @unittest.skipIf(not hasattr(os, "symlink"), "symlink is not available")
     def test_retrieve_read_mf_does_not_follow_symlink_outside_root(self):
@@ -186,13 +242,13 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             tools.read(".runtime/shared_views/imports/auth-api-files/dist/MEMORY.md")
 
-        self.assertIn("runtime shared-view imports are only readable by retrieve", str(caught.exception))
+        self.assertIn("only readable through read_mf", str(caught.exception))
         self.assertEqual(tools.list_files(".runtime/shared_views/imports/**/*.md"), [])
         self.assertNotIn(".runtime/shared_views/imports", "\n".join(tools.glob("**/*.md")))
         self.assertEqual(tools.grep("External", glob=".runtime/shared_views/imports/**/*.md"), "no matches")
         with self.assertRaises(ValueError) as grep_error:
             tools.grep("External", ".runtime/shared_views/imports/auth-api-files")
-        self.assertIn("runtime shared-view imports are only readable by retrieve", str(grep_error.exception))
+        self.assertIn("only readable through read_mf", str(grep_error.exception))
 
     def test_read_file_truncates_large_full_reads(self):
         memory = self.root / "MEMORY.md"
@@ -605,6 +661,7 @@ class MemoryToolsTests(unittest.TestCase):
             "- `token-expiry` Tokens expire after one hour. -> [rel:auth-api]\n",
             encoding="utf-8",
         )
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         tools = MemoryTools(self.root, role="shared-view-builder")
 
         result = tools.create_extractive_file_view(
@@ -646,7 +703,10 @@ class MemoryToolsTests(unittest.TestCase):
             view_id="auth-api-files",
             title="Auth API Files",
             intent="Expose sanitized auth context.",
-            published_context="Tokens expire after one hour.",
+            memory_document=(
+                "# Auth Tokens {#auth-tokens} → []\n\n"
+                "- `token-expiry` Tokens expire after one hour. → []\n"
+            ),
             publish_hub_url="https://hub.example.test",
             publish_credential_id="alice-publish",
         )
@@ -681,7 +741,7 @@ class MemoryToolsTests(unittest.TestCase):
             "auth-api-files",
             "Auth API Files",
             "Share stable auth API context.",
-            "## Auth API\nUse POST /auth/refresh on token expiry.",
+            "# Auth API {#auth-api} → []\n\nUse POST /auth/refresh on token expiry.\n",
             publish_hub_url="https://hub.example.test",
             publish_credential_id="alice-publish",
         )
