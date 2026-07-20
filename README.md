@@ -152,7 +152,9 @@ CLI-agent mode delegates role execution to Codex CLI or Claude Code CLI while pr
 .\install.ps1 --mode cli-agent ~\.rightmemory ~\.codex\skills
 ```
 
-Fresh installs baseline the current semantic upgrade notes because their seeds already match the current model. Re-run the installer after pulling updates; existing user-authored roots and backing files are preserved, managed example blocks refresh only when their markers remain present, and pending semantic upgrade notes are reported for the next Dreamer cycle. Install does not run Dreamer or rewrite user state to apply those notes. Legacy `MEMORY_*.md` files are protected even when they are not currently reachable from `MEMORY.md`; they must be inspected and classified safely before any later reorganization.
+Install creates semantic state only when bootstrapping a new root. A fresh root receives `MEMORY.md`, `PURSUITS.md`, and `PURSUIT_RULES.md`, then Git baselines the complete synchronized state. A complete pre-existing root is preserved byte-for-byte; reinstall may refresh package-owned runtime files and installed skills, but it does not refresh examples, synthesize missing semantic files, or migrate user state. A complete pre-existing Markdown root without Git history is committed exactly as found.
+
+If an existing root has a Git commit or any recognized semantic state but lacks a regular, non-symlink required root document, install refuses it before making any change. The memory root, runtime installation, installed skills, and install stamp remain untouched so the user can perform an explicit, reviewed migration first. Fresh installs still baseline current semantic-upgrade notes, while a successful reinstall may report pending notes for a later Dreamer cycle without applying them. Legacy `MEMORY_*.md` files remain protected even when they are not currently reachable from `MEMORY.md`.
 
 Reinstall replaces the superseded managed Memory-only orchestrator with the current two-skill surface; it does not keep an alias or a second behavior path. Removal is limited to content recognized as RightMemory-managed.
 
@@ -202,6 +204,8 @@ RightMemory is one graph organized into two ordinary Markdown document trees:
 - `PURSUITS.md` and `PURSUIT_<id>.md` hold live intent, Focus, current state, and next movements that should still shape future action.
 
 All addressable headings and nodes share one globally unique id namespace, and typed edges may cross between Memory and Pursuit. The trees differ by lifecycle, not graph membership. `PURSUIT_RULES.md` defines the additional Pursuit structure and maintenance judgment.
+
+RightMemory parses this syntax once per operation into one canonical in-memory document index. Validation, structured retrieval, graph-aware tools, sync validation, and shared-view extraction all use that index for ids, hierarchy, F# expansion, backing references, source spans, and diagnostics. The index is rebuilt from the authoritative Markdown rather than persisted as a second database.
 
 A Memory fragment looks like this:
 
@@ -256,14 +260,16 @@ Memory also supports linked resources that are not parsed as graph content: `{M#
 
 Shared views connect one memory root to collaboration context owned somewhere else: another person, team space, project, or agent memory root. RightMemory now uses two explicit heading types:
 
-- `{MF#slug}` records a mirrored file shared view. Retrieve silently pulls the latest HTTP package before the model starts and exposes only its canonical `.runtime/shared_views/imports/<slug>/dist/MEMORY.md`; addressable view items use source-scoped ids and unaddressable text uses line ranges.
+- `{MF#slug}` records a mirrored file shared view. Retrieve silently pulls the latest valid HTTP package before the model starts. Its version-two `dist/MEMORY.md` is a schema-valid Memory document with a view-local id namespace; imported graph items are selected by ids scoped to that MF# source, not by direct file ranges.
 - `{MQ#slug}` records a provider question shared view. Retrieve may report that provider-question context is relevant, but the main agent, CLI, or Web Studio calls the question endpoint explicitly with `rightmemory shared-view ask`.
+
+An MF document may contain ordinary, F#, M#, and S# content with all referenced backings packaged under `dist/`. F# participates in the imported graph, M# remains range-addressable evidence through a qualified source such as `MF#auth-api/M#incident-evidence`, and S# returns a complete instruction through a qualified source such as `MF#auth-api/S#review-checklist`. Nested MF# and MQ# connections are invalid. Provider builds validate before replacing preview output or publishing; consumer pulls validate the downloaded candidate before atomically replacing the last valid import.
 
 For a practical provider/consumer walkthrough, see [docs/shared-views-usage.md](docs/shared-views-usage.md).
 
 `rightmemory share` is the normal relationship-level workflow. A share groups one optional file part and one optional question part under one relationship and one bundled invitation. The lower-level `rightmemory shared-view` commands remain available for advanced use and debugging.
 
-The provider owns source files under `shared_views/<view-id>/`. File views use `view.md` and `recipe.toml`, then render generated `dist/` packages for HTTP publication. Question views use `view.md`, `question.toml`, and provider-private `retriever.md`. Share relationships live in `shares.toml`; consumers record low-level resolver metadata in `shared_views.toml`; credentials, imports, and interaction records stay under `.runtime/shared_views/`.
+The provider owns source files under `shared_views/<view-id>/`. File views use `view.md` and `recipe.toml`, then render version-two `dist/` packages containing a schema-valid `MEMORY.md`, `manifest.toml`, and any referenced `MEMORY_<id>.md` or `MEMORY_SKILL_<id>.md` backings for HTTP publication. Question views use `view.md`, `question.toml`, and provider-private `retriever.md`. Share relationships live in `shares.toml`; consumers record low-level resolver metadata in `shared_views.toml`; credentials, imports, and interaction records stay under `.runtime/shared_views/`.
 
 ```bash
 rightmemory share create auth-api \
@@ -529,7 +535,7 @@ The runtime is intentionally small:
 
 - Standalone mode uses `pydantic_ai.Agent` as a chat-like agent loop.
 - CLI-agent mode delegates the same role turn to Codex CLI or Claude Code CLI. Retrieve may keep one active provider mapping under `<memory-root>/.runtime/agent_cli_sessions/`; other independent role commands are one-shot.
-- Standalone retrieve uses complete typed reads for F# details and S# skills, plus complete line-numbered reads for M# and canonical MF# content, then finishes through a native structured selector. CLI-agent emits the same selector as strict JSON. The shared runtime resolves ids and ranges, restores hierarchy, and returns source-authored Markdown.
+- Standalone retrieve uses complete typed reads for local F# details and S# skills, line-numbered reads for local M# evidence, and typed progressive reads for validated MF# graphs and their F#/M#/S# resources, then finishes through a native structured selector. CLI-agent emits the same selector as strict JSON. The shared runtime uses the canonical index to resolve ids, permitted ranges, hierarchy, and source-authored Markdown.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different no-profile root, or use `--profile <name>` / `.rightmemory-profile` for project-specific roots.
 - Retrieve, unified update, update-review correction, transcript-review extraction, history, dreamer, insight, pruner, and sync repair have separate runtime boundaries selected by command line, queue, scanner, or watcher.
 - Role-specific executor settings are read from `<memory-root>/rightmemory.toml`.
@@ -839,11 +845,11 @@ enabled = true
 stale_pull_after_hours = 24
 ```
 
-When sync is enabled, runtime code handles remote Git synchronization around automatic semantic work. It checks upstream state before model work, pushes after successful synchronized-state commits land, and can invoke `sync-reconciler` for dirty or conflicted state. The isolated-write dirty-main check is separate from remote sync: local synchronized files can block automatic semantic writes even when `[sync].enabled` is false. Retrieval and historical retrieval stay local by default for speed.
+When sync is enabled, runtime code handles remote Git synchronization around automatic semantic work. It checks upstream state before model work and pushes after successful synchronized-state commits land. Incoming commits never merge directly into the active checkout: RightMemory merges the exact fetched commit in a leased candidate worktree, invokes `sync-reconciler` there only for synchronized conflicts or semantic validation failures, validates the complete candidate, and then fast-forwards the active root to that exact commit. The isolated-write dirty-main check is separate from remote sync: local synchronized files can block automatic semantic writes even when `[sync].enabled` is false. Retrieval and historical retrieval stay local by default for speed.
 
 Managed watch includes a `sync` target. `rightmemory watch start` starts it when sync is enabled, and `rightmemory watch start sync` runs that target by itself. The sync watcher pulls when no successful pull is recorded or when the last successful pull is older than `stale_pull_after_hours`; clean pulls and fresh checks stay deterministic and do not call a model.
 
-If a scheduled pull finds dirty files or creates a conflict, RightMemory invokes `sync-reconciler` with the affected files and bounded repair context. The reconciler repairs and validates synchronized state, commits the result, and calls `sync_push`. For `corrections.md`, sync repair preserves non-identical entries without ranking them; semantic merging, replacement, or rejection remains updater-owned.
+Pre-existing dirty or already-invalid active state blocks incoming sync before a candidate can land. If candidate merge, repair, validation, or final publication checks fail, the active branch and semantic files remain unchanged; conflict markers exist only in the candidate. A prepared repair is durably recoverable without another model turn. For `corrections.md`, candidate repair preserves non-identical entries without ranking them; semantic merging, replacement, or rejection remains updater-owned. A network push failure after local publication leaves the valid local commit in place and can retry without repeating repair.
 
 Run standalone mode from this repository during development:
 

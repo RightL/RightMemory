@@ -6,7 +6,7 @@ Shared views let one RightMemory root use collaboration context owned by another
 
 There are two sharing modes:
 
-- `MF#`: mirrored file context. The provider publishes a scoped file package to an HTTP hub. The consumer accepts an invitation, pulls the package into `.runtime/shared_views/imports/<mf-id>/`, and retrieve reads the mirrored files with normal file tools.
+- `MF#`: mirrored file context. The provider publishes a scoped, schema-valid Memory package to an HTTP hub. The consumer accepts an invitation, pulls a validated package into `.runtime/shared_views/imports/<mf-id>/`, and retrieve addresses its graph and typed backing resources progressively.
 - `MQ#`: live provider questions. The provider publishes a question view invitation. The consumer accepts it, stores a provider question token, and asks the provider Web Studio endpoint synchronously when needed.
 
 All normal sharing goes through HTTP, even on one machine. Direct provider filesystem access, mounted provider roots, local package invitations, and generic `M#` shared-view headings are not part of the product path.
@@ -121,7 +121,33 @@ shared_views/auth-api-files/
   .gitignore
 ```
 
-Alice reviews the recipe, then approves it:
+A successful build also creates the generated version-two `dist/` surface:
+
+```text
+shared_views/auth-api-files/
+  dist/
+    MEMORY.md
+    MEMORY_<id>.md
+    MEMORY_SKILL_<id>.md
+    manifest.toml
+```
+
+Only `dist/MEMORY.md` and `dist/manifest.toml` are always present. The other
+files appear when referenced by F#, M#, or S# headings. `dist/MEMORY.md` is a
+schema-valid Memory document, not a prose wrapper: ordinary headings and nodes
+plus F#, M#, and S# are allowed, and every typed heading must have its
+package-local backing. Plain headings may group addressable descendants, but
+arbitrary prose under an unaddressable wrapper is invalid. Nested MF# and MQ#
+headings are invalid. The package has one view-local id namespace, so its ids
+cannot collide with local memory or a different MF# view and its edges cannot
+target either one.
+
+Export and publish assemble `view.md`, `recipe.toml`, this `dist/` surface, and
+a generated version-two `rightmemory-shared-view.toml` into the transport
+package. That transport metadata is not provider Memory or retrieval content.
+
+Alice reviews the recipe and rendered Memory document, then approves it. A
+file view cannot be approved without a valid current version-two package:
 
 ```bash
 rightmemory --profile alice shared-view approve auth-api-files --type file
@@ -133,7 +159,7 @@ Alice creates an invitation:
 rightmemory --profile alice shared-view invite auth-api-files --label frontend
 ```
 
-`invite` publishes the current file-view package to the hub and prints an invitation URL. After approval, future successful memory-write roles also rebuild and publish approved file views automatically. Generated `dist/` output is runtime output and should not be committed.
+`invite` validates and publishes the current file-view package to the hub, then prints an invitation URL. After approval, future successful memory-write roles also rebuild, validate, and publish approved file views automatically. Rendering happens in a temporary directory and replaces `dist/` only after the complete candidate passes validation. Generated `dist/` output is runtime output and should not be committed.
 
 Semantic refresh is separate from ordinary auto-publish. To rerun the builder
 from the stored refined intent:
@@ -168,7 +194,44 @@ rightmemory --profile frontend retrieve --session codex-frontend \
   "Find auth API context for login token expiry"
 ```
 
-The pull result is intentionally not added to retrieve session history, which keeps cache hits stable. Retrieve exposes only the mirrored package's canonical `dist/MEMORY.md`; addressable items are selected by ids scoped to that MF# source, while unaddressable text uses line ranges. Package metadata is not retrieval content.
+The pull result is intentionally not added to retrieve session history, which keeps cache hits stable. Retrieve exposes only the validated mirrored Memory surface; package metadata is not retrieval content. The direct MF graph is selected by ids scoped to the view:
+
+```json
+{
+  "source_id": "MF#auth-api-files",
+  "ids": ["token-refresh"],
+  "ranges": []
+}
+```
+
+F# detail items use the same MF-scoped graph source. Direct ranges over
+`dist/MEMORY.md` are invalid because its semantic content must be addressable.
+Free-form M# evidence and complete S# instructions use qualified sources:
+
+```json
+{
+  "source_id": "MF#auth-api-files/M#incident-evidence",
+  "ids": [],
+  "ranges": [{"start": 12, "end": 24}]
+}
+```
+
+```json
+{
+  "source_id": "MF#auth-api-files/S#review-checklist",
+  "ids": [],
+  "ranges": []
+}
+```
+
+The S# form returns the complete instruction and never installs or executes it
+automatically. Selecting the consumer's outer local MF# heading still returns
+only its local relationship context; it does not implicitly expand the import.
+
+HTTP and Git pulls validate the exact temporary candidate before replacing an
+import. An invalid candidate leaves a previously validated version-two import
+available as stale context. Without one, the view is unavailable rather than
+falling back to free-form reads of an invalid package.
 
 ## Ask Live Questions With `MQ#`
 
@@ -298,7 +361,16 @@ Automatic file-view publish events are appended to:
 .runtime/shared_views/publish-events.jsonl
 ```
 
-If an automatic publish fails, the approved file view remains locally renderable, but consumers only see the last successfully published package until the provider fixes the hub or credential problem and republishes.
+If rendering or package validation fails, the last valid local `dist/` and the
+last published remote package remain unchanged. If upload fails after a valid
+render, consumers still see the last successfully published package until the
+provider fixes the hub or credential problem and republishes.
+
+Version-one MF packages are not interpreted as Memory graphs. Existing
+provider `view.md` and `recipe.toml` remain source, but the next build, refresh,
+export, or publish regenerates version-two derived output. Generative views
+must rerun the builder. Consumer version-one imports are cache only and are
+ignored until a valid version-two pull replaces them.
 
 ## Web Studio
 

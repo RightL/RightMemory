@@ -13,6 +13,16 @@ The parsed graph starts from `MEMORY.md` and `PURSUITS.md` and follows F# backin
 
 M# and S# headings remain addressable Memory objects, but their backing files are linked resources rather than graph content. M# preserves free-form evidence; S# preserves directly executable instruction. This boundary prevents graph-looking Markdown inside a correction example or skill body from silently becoming graph structure.
 
+One canonical parser owns that grammar and produces an ordinary in-memory document index with physical and logical hierarchy, source spans, F# ownership, backing references, hashes, and diagnostics. Validation, retrieval, graph-aware tools, sync, and shared-view extraction consume the same interpretation. Rebuilding the index from authoritative Markdown keeps the design simpler than a persistent parser cache while preventing independent consumers from quietly disagreeing about an id or subtree.
+
+### Schema-valid MF graphs
+
+An MF# heading is a local relationship object, while its imported version-two package is a separate read-only Memory graph. Each view gets its own id namespace: providers can write natural ids without colliding with the consumer or another view, edges cannot escape the package, and only the outer local MF# heading relates imported context to the consumer graph.
+
+The package's direct `dist/MEMORY.md` follows the same canonical Memory grammar and may use ordinary, F#, M#, and S# content with package-local backing files. Nested MF# and MQ# connections are rejected because a mirrored package carries no authority for transitive live resolution. Requiring all direct semantic prose to be addressable removes ambiguous whole-file ranges; qualified nested sources preserve progressive M# range reads and complete S# reads without merging linked resources into the MF graph.
+
+Provider rendering and publication validate an exact temporary package before promotion. HTTP and Git consumers validate the exact downloaded candidate before replacing their last valid import. This validate-before-replace boundary lets a failed refresh remain stale instead of turning a previously usable connection into invalid runtime state, while deliberately treating old free-form version-one packages as derived cache that must be regenerated.
+
 ### Addressable headings
 
 Addressable headings and fact nodes share the global RightMemory id namespace because relations may apply to an entire subtree rather than one leaf fact. Edges can therefore connect headings or nodes in either document root without fake hub nodes, duplicated identifiers, or root-qualified reference syntax.
@@ -99,6 +109,8 @@ RightMemory exposes explicit command roles because operations still have differe
 
 Both install modes expose the same two independently selected skills: read-only `memory-retriever` and full `rightmemory-orchestrator`. The difference between install modes remains the executor behind their commands. Standalone mode runs RightMemory's local Pydantic AI agent and bounded tools; CLI-agent mode delegates the same canonical role behavior while preserving RightMemory's prompts, session records, root, and command surface.
 
+Installation has a strict bootstrap boundary. A genuinely new root receives the semantic seed, while a complete existing root is preserved byte-for-byte and an incomplete existing root is refused before the installer changes either the root or external runtime and skill targets. Runtime refresh and user-state migration are separate responsibilities; letting reinstall synthesize missing documents or refresh examples would turn a package update into an unreviewed semantic edit.
+
 ### CLI-agent conversation lifecycle
 
 Retrieve keeps a provider conversation across independent commands because follow-up questions benefit from conversational continuity and provider prefix caching. Other roles are semantic transactions rather than chats, so resuming them would mix unrelated evidence and maintenance cycles; they use fresh provider conversations instead. Explicit interactive chat may retain context only for that process, which gives the operator continuity without turning a temporary chat into a later command's hidden input.
@@ -121,9 +133,9 @@ Standalone commit tools are role-aware. Unified update may commit Memory and Pur
 
 Global sync remains local-first: every device keeps a complete RightMemory root, and Git provides distributed transport between those roots. Memory, Pursuit, and `corrections.md` are synchronized state; offline review documents remain local runtime artifacts. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
 
-Runtime code owns deterministic sync mechanics where they belong in the workflow. Sync preflight handles upstream freshness before automatic semantic work, and push handling publishes completed role-owned commits. Dirty or conflicted synchronized state routes to `sync-reconciler`; the isolated-write dirty-main guard remains local even when remote sync is disabled. Retrieval and historical retrieval keep the fast local path by default.
+Runtime code owns deterministic sync mechanics where they belong in the workflow. It fetches and captures exact commits, then merges incoming history in a leased candidate worktree while the active root remains unchanged. Only a complete candidate whose paths and canonical graph validate may be published, and publication is one guarded fast-forward from the captured active commit. A concurrent active change or failed merge, repair, or validation refuses publication instead of requiring rollback.
 
-Graph-aware repair stays in `sync-reconciler` because conflicts across Memory, Pursuit, and their relationships require schema judgment rather than Git mechanics alone. For `corrections.md`, repair preserves non-identical entries without ranking them; semantic merging and replacement remain updater-owned. `sync-reconciler` stays separate from Dreamer because repair is a narrow integrity responsibility, while Dreamer owns broader Memory consolidation.
+Graph-aware repair stays in `sync-reconciler` because conflicts across Memory, Pursuit, and their relationships require schema judgment rather than Git mechanics alone, but that role edits and commits only the candidate. Durable prepared-operation records make a completed repair recoverable after a crash without another model turn. For `corrections.md`, repair preserves non-identical entries without ranking them; semantic merging and replacement remain updater-owned. Push transport remains a retryable follow-up after local publication, and `sync-reconciler` stays separate from Dreamer because repair is a narrow integrity responsibility while Dreamer owns broader Memory consolidation.
 
 ### Standalone tool retry behavior
 

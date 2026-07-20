@@ -16,6 +16,7 @@
 ## Repository Map
 
 - Core runtime code lives in `rightmemory/`; tests live in `tests/`.
+- `rightmemory/graph.py` owns the canonical RightMemory grammar and in-memory document index. Graph-aware validation, retrieval, tools, sync, and shared-view code must consume that index rather than parse the Markdown structure again.
 - Canonical role prompts live in `rightmemory/prompts/`. Edit role behavior there first; installed skills are not the source of truth for role prompts.
 - `skills/rightmemory-schema.md` defines the shared Memory and Pursuit graph and file schema; `PURSUIT_RULES.md` defines Pursuit lifecycle judgment.
 - `MEMORY.example.md` and `PURSUITS.example.md` are installer seeds and sources of their managed example blocks.
@@ -29,6 +30,12 @@
 - When a change intentionally breaks an old format or behavior, update the implementation, tests, examples, and documentation together, and report the breakage in the handoff.
 - Backward compatibility is optional; data safety is not. Never silently delete or overwrite a user's real memory data, and use disposable roots or fixtures for destructive verification.
 - Do not create semantic upgrade notes merely to preserve hypothetical compatibility. Add or update one only when the task explicitly requires existing memory roots to be upgraded.
+
+## State Admission Invariants
+
+- Install may create semantic state only when bootstrapping a new root. A reinstall must preserve a complete existing root byte-for-byte or refuse an incomplete root before changing the root, runtime installation, installed skills, or install stamp. Do not restore managed-example refresh or implicit existing-root migration.
+- Incoming sync state must merge, receive any model repair, and pass complete validation in a leased candidate worktree. Publish only by fast-forwarding the unchanged active root to the exact validated candidate; a failed merge, repair, validation, or publication check must leave active state unchanged.
+- An `MF#` import is a version-two, schema-valid Memory document in a view-local namespace, not free-form Markdown. It may contain ordinary, F#, M#, and S# content with package-local backings; nested MF# and MQ# connections are invalid. Direct MF ranges are invalid, while imported M# and S# resources use qualified sources.
 
 ## Verification
 
