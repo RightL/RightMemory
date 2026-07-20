@@ -888,8 +888,10 @@ class ConfigTests(unittest.TestCase):
             "`read_detail(detail_id)` resolves a relevant `F#` id",
             instructions,
         )
-        self.assertIn("`read_markdown(markdown_id, offset, limit)`", instructions)
-        self.assertIn("`read_mf(mf_id, offset, limit)`", instructions)
+        self.assertIn("`read_markdown(markdown_id)`", instructions)
+        self.assertIn("`read_skill(skill_id)`", instructions)
+        self.assertIn("`read_mf(mf_id)`", instructions)
+        self.assertNotIn("offset, limit", instructions)
         self.assertIn("terminal retrieve-selection output type", instructions)
         self.assertIn('"recent_candidates"', instructions)
         self.assertNotIn("Read `MEMORY.md` before retrieval", instructions)

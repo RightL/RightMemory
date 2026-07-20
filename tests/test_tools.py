@@ -1,3 +1,4 @@
+import inspect
 import os
 import subprocess
 import shutil
@@ -60,9 +61,34 @@ class MemoryToolsTests(unittest.TestCase):
 
         result = tools.read_skill("alpha")
 
-        self.assertIn("Source: S#alpha", result)
-        self.assertIn("1: # Alpha Skill", result)
-        self.assertIn("3: Use alpha.", result)
+        self.assertEqual(result.splitlines(), ["# Alpha Skill", "", "Use alpha."])
+        self.assertNotIn("Source:", result)
+
+    def test_retrieve_typed_reads_take_only_their_id(self):
+        self.assertEqual(list(inspect.signature(MemoryTools.read_markdown).parameters), ["self", "markdown_id"])
+        self.assertEqual(list(inspect.signature(MemoryTools.read_skill).parameters), ["self", "skill_id"])
+        self.assertEqual(list(inspect.signature(MemoryTools.read_mf).parameters), ["self", "mf_id"])
+
+    def test_retrieve_typed_reads_do_not_silently_truncate(self):
+        payload = f"{'x' * 35_000}\nEND\n"
+        (self.root / "MEMORY.md").write_text(
+            "# Root {#root}\n\n"
+            "## Detail {F#detail}\n\n"
+            "## Markdown {M#markdown}\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_detail.md").write_text(payload, encoding="utf-8")
+        (self.root / "MEMORY_markdown.md").write_text(payload, encoding="utf-8")
+        (self.root / "MEMORY_SKILL_alpha.md").write_text(payload, encoding="utf-8")
+        mf_path = self.root / ".runtime" / "shared_views" / "imports" / "auth-api" / "dist" / "MEMORY.md"
+        mf_path.parent.mkdir(parents=True)
+        mf_path.write_text(payload, encoding="utf-8")
+        tools = MemoryTools(self.root, role="retrieve")
+
+        self.assertTrue(tools.read_detail("detail").endswith("END"))
+        self.assertEqual(tools.read_skill("alpha").splitlines()[-1], "END")
+        self.assertTrue(tools.read_markdown("markdown").endswith("2: END"))
+        self.assertTrue(tools.read_mf("auth-api").endswith("2: END"))
 
     def test_retrieve_read_skill_failure_lists_available_ids_without_paths(self):
         (self.root / "MEMORY_SKILL_beta.md").write_text("# Beta Skill\n", encoding="utf-8")

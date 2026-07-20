@@ -173,10 +173,8 @@ class RetrieveSelectionRendererTests(unittest.TestCase):
 
         self.assertIn("Question relationship.", rendered.text)
         self.assertIn("Provider question context is available for `MQ#provider-context`.", rendered.text)
-        with self.assertRaisesRegex(RetrieveSelectionError, "no linked selectable content"):
-            self.renderer.render(
-                RetrieveSelection(sources=[SourceSelection(source_id="MQ#provider-context")])
-            )
+        with self.assertRaisesRegex(ValueError, "source_id must be an M#, S#, or MF# id"):
+            SourceSelection(source_id="MQ#provider-context")
 
     def test_delivery_omits_unchanged_items_and_override_repeats_them(self):
         first = self.renderer.render(RetrieveSelection(ids=["project-fact"]))

@@ -243,9 +243,9 @@ def _tool_guidance(role: str) -> str:
         return (
             "Available retrieve tools:\n"
             "- `read_detail(detail_id)` resolves a relevant `F#` id and reads its Memory or Pursuit graph detail.\n"
-            "- `read_markdown(markdown_id, offset, limit)` reads line-numbered free-form evidence for an `M#` heading.\n"
-            "- `read_skill(skill_id, offset, limit)` reads a line-numbered skill for an `S#` heading; selection still returns it whole.\n"
-            "- `read_mf(mf_id, offset, limit)` reads only the line-numbered canonical mirrored `dist/MEMORY.md`."
+            "- `read_markdown(markdown_id)` reads the complete line-numbered free-form source for an `M#` heading.\n"
+            "- `read_skill(skill_id)` reads the complete skill for an `S#` heading.\n"
+            "- `read_mf(mf_id)` reads only the complete line-numbered canonical mirrored `dist/MEMORY.md`."
         )
     if role == "historian":
         return (

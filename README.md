@@ -528,7 +528,7 @@ The runtime is intentionally small:
 
 - Standalone mode uses `pydantic_ai.Agent` as a chat-like agent loop.
 - CLI-agent mode delegates the same role turn to Codex CLI or Claude Code CLI and records the provider session under `<memory-root>/.runtime/agent_cli_sessions/`.
-- Standalone retrieve uses typed progressive reads for F#, line-numbered M#/S# content, and the canonical MF# view, then finishes through a native structured selector. CLI-agent emits the same selector as strict JSON. The shared runtime resolves ids and ranges, restores hierarchy, and returns source-authored Markdown.
+- Standalone retrieve uses complete typed reads for F# details and S# skills, plus complete line-numbered reads for M# and canonical MF# content, then finishes through a native structured selector. CLI-agent emits the same selector as strict JSON. The shared runtime resolves ids and ranges, restores hierarchy, and returns source-authored Markdown.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different no-profile root, or use `--profile <name>` / `.rightmemory-profile` for project-specific roots.
 - Retrieve, unified update, update-review correction, transcript-review extraction, history, dreamer, insight, pruner, and sync repair have separate runtime boundaries selected by command line, queue, scanner, or watcher.
 - Role-specific executor settings are read from `<memory-root>/rightmemory.toml`.

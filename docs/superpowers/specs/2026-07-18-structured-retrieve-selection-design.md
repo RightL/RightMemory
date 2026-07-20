@@ -155,10 +155,10 @@ selectable by ordinary retrieve.
 
 ### S# Skills
 
-S# backing files are coherent executable instructions. A typed read shows line
-numbers for inspection consistency, but selecting an S# source always
-returns the complete original skill. Partial skill ranges are rejected because
-they could omit constraints or change the instruction's meaning.
+S# backing files are coherent executable instructions. A typed read returns the
+complete original skill without line-number coordinates. Partial skill ranges
+are rejected because they could omit constraints or change the instruction's
+meaning.
 
 Broad retrieval may select only the local S# heading. The model expands the S#
 source only when the caller asks for the skill or its full instruction is
@@ -281,7 +281,7 @@ Selection validation rejects:
 - unknown or malformed local ids;
 - a source marker that does not match the resolved heading kind;
 - unknown MF# source-scoped ids;
-- ranges on S# or MQ# sources;
+- ids or ranges on S# sources, and any MQ# linked-source selection;
 - ranges with invalid or stale bounds;
 - recent candidate ids not present in supplied volatile context;
 - additional model-authored fields or prose;

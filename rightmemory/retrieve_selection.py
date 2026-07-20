@@ -14,7 +14,7 @@ from .recent_submitted import RecentSubmittedMemoryEntry
 
 
 NO_STRONG_MATCH = "no strong match"
-SOURCE_ID_RE = re.compile(r"^(M#|S#|MF#|MQ#)([A-Za-z0-9_.-]+)$")
+SOURCE_ID_RE = re.compile(r"^(M#|S#|MF#)([A-Za-z0-9_.-]+)$")
 PLAIN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 HEADING_RE = re.compile(r"^(#{1,})\s+")
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
@@ -49,7 +49,7 @@ class SourceSelection(BaseModel):
     @classmethod
     def validate_source_id(cls, value: str) -> str:
         if SOURCE_ID_RE.fullmatch(value) is None:
-            raise ValueError("source_id must be an M#, S#, MF#, or MQ# id")
+            raise ValueError("source_id must be an M#, S#, or MF# id")
         return value
 
     @field_validator("ids")
@@ -507,10 +507,6 @@ class RetrieveSelectionRenderer:
                 actual = owner.anchor_kind or "#"
                 raise RetrieveSelectionError(
                     f"source marker mismatch for `{source_id}`; local heading uses `{actual}{owner_id}`"
-                )
-            if marker == "MQ#":
-                raise RetrieveSelectionError(
-                    f"`{source_id}` has no linked selectable content; select local id `{owner_id}` instead"
                 )
             if marker == "M#":
                 rendered.append(
