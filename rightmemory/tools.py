@@ -53,9 +53,9 @@ RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX = ".runtime/shared_views/imports/"
 GIT_REVISION_RE = re.compile(r"^[A-Za-z0-9_.^~/-]+$")
 PRUNE_SUBJECT_PREFIX = "prune:"
 ACTIVE_MEMORY_ROLES = {"dreamer", "pruner", "reviewer", "sync-reconciler", "update"}
-FULL_RIGHTMEMORY_WRITE_ROLES = {"update", "update-correction"}
-CORRECTION_WRITE_ROLES = {"update-correction"}
-CORRECTIONS_READ_ROLES = {"update", "update-correction", "sync-reconciler"}
+FULL_RIGHTMEMORY_WRITE_ROLES = {"update", "update-corrector"}
+CORRECTION_WRITE_ROLES = {"update-corrector"}
+CORRECTIONS_READ_ROLES = {"update", "update-corrector", "sync-reconciler"}
 INSIGHT_ROLES = {"insight"}
 RETRIEVE_ROLES = {"retrieve"}
 SYNC_RECONCILER_ROLES = {"sync-reconciler"}
@@ -64,9 +64,12 @@ INSIGHT_READ_PATHS = ("MEMORY.md", "MEMORY_*.md", "insight_logs/*.md")
 RETRIEVE_READ_PATHS = ("MEMORY.md", "MEMORY_*.md", "PURSUITS.md", "PURSUIT_*.md")
 PURSUIT_RULES_PATH = "PURSUIT_RULES.md"
 CORRECTIONS_PATH = "corrections.md"
+FIXED_CORRECTION_COLLECTION_IDS = {
+    "agent-corrections-design",
+    "agent-corrections-writing",
+}
 FIXED_CORRECTION_COLLECTION_PATHS = {
-    "MEMORY_agent-corrections-design.md",
-    "MEMORY_agent-corrections-writing.md",
+    f"MEMORY_{collection_id}.md" for collection_id in FIXED_CORRECTION_COLLECTION_IDS
 }
 CORRECTIONS_CAPACITY_ERROR_RE = re.compile(
     r"^corrections\.md contains \d+ entries; at most 15 are allowed$"
@@ -1389,7 +1392,10 @@ class MemoryTools:
     def _is_allowed_write_path(self, relative_path: str) -> bool:
         if (
             relative_path in FIXED_CORRECTION_COLLECTION_PATHS
-            and self.role not in FULL_RIGHTMEMORY_WRITE_ROLES | SYNC_RECONCILER_ROLES
+            and (
+                self.role == "update-corrector"
+                or self.role not in FULL_RIGHTMEMORY_WRITE_ROLES | SYNC_RECONCILER_ROLES
+            )
         ):
             return False
         if self.role in INSIGHT_ROLES:

@@ -13,7 +13,11 @@ from rightmemory.cli import (
     _finish_sync_repair,
     _handle_json_request,
     _insight_watch_once,
+    _require_completed_correction_operation,
+    _run_update_review_scan,
     _run_update_review_correction,
+    _stored_correction_message,
+    _verified_update_operation,
     cli_main,
     main,
 )
@@ -1513,31 +1517,64 @@ class JsonRequestTests(unittest.TestCase):
                 patch("rightmemory.cli._run_update_review_scan", return_value=scan_result) as scan,
                 patch("sys.stdout", stdout),
             ):
-                result = main(["update-review", "scan", "--once", "--stable-seconds", "0"])
+                result = main(["update-review", "scan", "--once"])
 
         self.assertEqual(result, 0)
-        scan.assert_called_once_with(root, 0)
+        scan.assert_called_once_with(root)
         self.assertIn("processed: 1", stdout.getvalue())
         self.assertIn("resolved: 1", stdout.getvalue())
         self.assertIn("malformed: 0", stdout.getvalue())
 
-    def test_update_review_correction_uses_correction_mode_and_landed_commit(self):
+    def test_update_review_scan_recovers_a_stranded_review_effect_before_scanning(self):
+        expected = UpdateReviewProcessResult(blank=1)
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.recover_pending_update_review_effect") as recover,
+                patch("rightmemory.cli.UpdateReviewStore") as store_class,
+            ):
+                store_class.return_value.process_ready.return_value = expected
+                result = _run_update_review_scan(root)
+
+        self.assertEqual(result, expected)
+        recover.assert_called_once_with(root)
+        store_class.return_value.process_ready.assert_called_once()
+
+    def test_update_review_scan_reports_review_effect_recovery_failure(self):
+        expected = UpdateReviewProcessResult()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch(
+                    "rightmemory.cli.recover_pending_update_review_effect",
+                    side_effect=OSError("disk full"),
+                ),
+                patch("rightmemory.cli.UpdateReviewStore") as store_class,
+            ):
+                store_class.return_value.process_ready.return_value = expected
+                result = _run_update_review_scan(root)
+
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(result.errors, ("effect recovery: OSError: disk full",))
+
+    def test_update_review_correction_uses_internal_role_verified_context_and_landed_commit(self):
         calls = []
 
         class CorrectionRuntime:
-            def __init__(self, config, *, update_mode):
-                calls.append(("init", config, update_mode))
+            def __init__(self, config):
+                calls.append(("init", config))
                 self.last_write_result = IsolatedWriteResult(
-                    output="corrected",
+                    output='{"status":"applied","message":"corrected"}',
                     commits_landed=1,
                     start_commit="base",
                     landed_commit="fix-commit",
                     changed_paths=("MEMORY.md",),
+                    operation_id="correction-operation",
                 )
 
-            def run_session_turn(self, session_id, message, **_kwargs):
-                calls.append(("run", session_id, message))
-                return "corrected"
+            def run_session_turn(self, session_id, message, *, operation_id):
+                calls.append(("run", session_id, operation_id, message))
+                return '{"status":"applied","message":"corrected"}'
 
             def cleanup(self):
                 calls.append(("cleanup",))
@@ -1545,78 +1582,66 @@ class JsonRequestTests(unittest.TestCase):
         request = UpdateReviewRequest(
             review_id="review-1",
             document_path=Path("review.md"),
+            origin_operation_id="original-operation",
             base_commit="base",
             update_commit="update",
             write_surface="Memory + Pursuit",
             document="# RightMemory Update Review\n\nUNTRUSTED EMBEDDED DIFF\n",
             comment="Human comment here.",
             comment_sha256="a" * 64,
-            original_diff="- before\n+ after",
+            operation_id="correction-operation",
         )
         config = object()
+        operation = type(
+            "Operation",
+            (),
+            {
+                "operation_id": "original-operation",
+                "outcome": type(
+                    "Outcome",
+                    (),
+                    {
+                        "start_commit": "base",
+                        "landed_commit": "update",
+                        "changed_paths": ("MEMORY.md",),
+                        "output": "trusted update summary",
+                    },
+                )(),
+            },
+        )()
         with (
-            patch("rightmemory.cli.load_config", return_value=config),
+            patch("rightmemory.cli.load_update_corrector_config", return_value=config),
+            patch("rightmemory.cli._verified_update_operation", return_value=operation),
+            patch("rightmemory.cli._stored_correction_message", return_value=None),
+            patch("rightmemory.cli._git_rightmemory_diff", return_value="- before\n+ after") as diff,
+            patch("rightmemory.cli._require_completed_correction_operation"),
             patch("rightmemory.cli.RightMemoryRuntime", CorrectionRuntime),
-            patch("rightmemory.cli._record_memory_change_pressure") as pressure,
         ):
             outcome = _run_update_review_correction(Path("/memory"), request)
 
         self.assertEqual(outcome.status, "resolved")
         self.assertEqual(outcome.correction_commit, "fix-commit")
-        self.assertEqual(calls[0], ("init", config, "review-correction"))
-        self.assertIn("Human comment here.", calls[1][2])
-        self.assertIn('"- before\\n+ after"', calls[1][2])
-        self.assertIn("Do not rely on an editable copy", calls[1][2])
-        self.assertNotIn("UNTRUSTED EMBEDDED DIFF", calls[1][2])
-        pressure.assert_called_once_with(Path("/memory"))
-
-    def test_update_review_correction_adds_no_pressure_for_pursuit_only_change(self):
-        class CorrectionRuntime:
-            def __init__(self, config, *, update_mode):
-                self.last_write_result = IsolatedWriteResult(
-                    output="corrected",
-                    commits_landed=1,
-                    landed_commit="fix-commit",
-                    changed_paths=("PURSUITS.md",),
-                )
-
-            def run_session_turn(self, session_id, message, **_kwargs):
-                return "corrected"
-
-            def cleanup(self):
-                pass
-
-        request = UpdateReviewRequest(
-            review_id="review-1",
-            document_path=Path("review.md"),
-            base_commit="base",
-            update_commit="update",
-            write_surface="Pursuit",
-            document="review",
-            comment="Close the pursuit.",
-            comment_sha256="d" * 64,
-            original_diff="- active\n+ complete",
-        )
-        with (
-            patch("rightmemory.cli.load_config", return_value=object()),
-            patch("rightmemory.cli.RightMemoryRuntime", CorrectionRuntime),
-            patch("rightmemory.cli._record_memory_change_pressure") as pressure,
-        ):
-            outcome = _run_update_review_correction(Path("/memory"), request)
-
-        self.assertEqual(outcome.status, "resolved")
-        self.assertEqual(outcome.correction_commit, "fix-commit")
-        pressure.assert_not_called()
+        self.assertEqual(calls[0], ("init", config))
+        self.assertEqual(calls[1][1:3], ("correction-operation", "correction-operation"))
+        self.assertIn("Human comment here.", calls[1][3])
+        self.assertIn('"diff": "- before\\n+ after"', calls[1][3])
+        self.assertIn("trusted update summary", calls[1][3])
+        self.assertNotIn("UNTRUSTED EMBEDDED DIFF", calls[1][3])
+        diff.assert_called_once_with(Path("/memory"), "base", "update")
 
     def test_update_review_correction_maps_needs_input_without_commit(self):
         class CorrectionRuntime:
-            last_write_result = None
-
-            def __init__(self, config, *, update_mode):
+            def __init__(self, config):
                 self.config = config
+                self.last_write_result = IsolatedWriteResult(
+                    output='{"status":"needs_input","message":"Which preference should win?"}',
+                    commits_landed=0,
+                    landed_commit="update",
+                    operation_id="correction-operation",
+                )
 
-            def run_session_turn(self, session_id, message, **_kwargs):
-                return "Needs input: Which preference should win?"
+            def run_session_turn(self, session_id, message, *, operation_id):
+                return '{"status":"needs_input","message":"Which preference should win?"}'
 
             def cleanup(self):
                 pass
@@ -1624,16 +1649,38 @@ class JsonRequestTests(unittest.TestCase):
         request = UpdateReviewRequest(
             review_id="review-1",
             document_path=Path("review.md"),
+            origin_operation_id="original-operation",
             base_commit="base",
             update_commit="update",
             write_surface="Memory",
             document="review",
             comment="ambiguous",
             comment_sha256="b" * 64,
-            original_diff="- old\n+ new",
+            operation_id="correction-operation",
         )
+        operation = type(
+            "Operation",
+            (),
+            {
+                "operation_id": "original-operation",
+                "outcome": type(
+                    "Outcome",
+                    (),
+                    {
+                        "start_commit": "base",
+                        "landed_commit": "update",
+                        "changed_paths": ("MEMORY.md",),
+                        "output": "updated",
+                    },
+                )(),
+            },
+        )()
         with (
-            patch("rightmemory.cli.load_config", return_value=object()),
+            patch("rightmemory.cli.load_update_corrector_config", return_value=object()),
+            patch("rightmemory.cli._verified_update_operation", return_value=operation),
+            patch("rightmemory.cli._stored_correction_message", return_value=None),
+            patch("rightmemory.cli._git_rightmemory_diff", return_value="- old\n+ new"),
+            patch("rightmemory.cli._require_completed_correction_operation"),
             patch("rightmemory.cli.RightMemoryRuntime", CorrectionRuntime),
         ):
             outcome = _run_update_review_correction(Path("/memory"), request)
@@ -1642,18 +1689,21 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(outcome.message, "Which preference should win?")
         self.assertIsNone(outcome.correction_commit)
 
-    def test_update_review_correction_rejects_no_commit_reply_after_landing_commit(self):
-        class IncorrectRuntime:
-            def __init__(self, config, *, update_mode):
+    def test_update_review_correction_replays_its_first_journal_message(self):
+        calls = []
+
+        class CorrectionRuntime:
+            def __init__(self, config):
                 self.last_write_result = IsolatedWriteResult(
-                    output="Needs input: Which preference should win?",
-                    commits_landed=1,
-                    landed_commit="unexpected",
-                    changed_paths=("MEMORY.md",),
+                    output='{"status":"no_change","message":"Same revision."}',
+                    commits_landed=0,
+                    landed_commit="update",
+                    operation_id="correction-operation",
                 )
 
-            def run_session_turn(self, session_id, message, **_kwargs):
-                return "Needs input: Which preference should win?"
+            def run_session_turn(self, session_id, message, *, operation_id):
+                calls.append(message)
+                return '{"status":"no_change","message":"Same revision."}'
 
             def cleanup(self):
                 pass
@@ -1661,23 +1711,234 @@ class JsonRequestTests(unittest.TestCase):
         request = UpdateReviewRequest(
             review_id="review-1",
             document_path=Path("review.md"),
+            origin_operation_id="original-operation",
+            base_commit="base",
+            update_commit="update",
+            write_surface="Memory",
+            document="review",
+            comment="Use the earlier choice.",
+            comment_sha256="e" * 64,
+            operation_id="correction-operation",
+            previous_question="A different later question?",
+        )
+        operation = type(
+            "Operation",
+            (),
+            {
+                "operation_id": "original-operation",
+                "outcome": type(
+                    "Outcome",
+                    (),
+                    {
+                        "start_commit": "base",
+                        "landed_commit": "update",
+                        "changed_paths": ("MEMORY.md",),
+                        "output": "updated",
+                    },
+                )(),
+            },
+        )()
+        with (
+            patch("rightmemory.cli.load_update_corrector_config", return_value=object()),
+            patch("rightmemory.cli._verified_update_operation", return_value=operation),
+            patch(
+                "rightmemory.cli._stored_correction_message",
+                return_value="the first durable correction message",
+            ),
+            patch("rightmemory.cli._git_rightmemory_diff") as diff,
+            patch("rightmemory.cli._require_completed_correction_operation"),
+            patch("rightmemory.cli.RightMemoryRuntime", CorrectionRuntime),
+        ):
+            outcome = _run_update_review_correction(Path("/memory"), request)
+
+        self.assertEqual(outcome.status, "resolved")
+        self.assertEqual(calls, ["the first durable correction message"])
+        diff.assert_not_called()
+
+    def test_update_review_correction_waits_for_all_durable_effects(self):
+        class CorrectionRuntime:
+            def __init__(self, config):
+                self.last_write_result = IsolatedWriteResult(
+                    output='{"status":"no_change","message":"Already correct."}',
+                    commits_landed=0,
+                    landed_commit="update",
+                    operation_id="correction-operation",
+                )
+
+            def run_session_turn(self, session_id, message, *, operation_id):
+                return '{"status":"no_change","message":"Already correct."}'
+
+            def cleanup(self):
+                pass
+
+        request = UpdateReviewRequest(
+            review_id="review-1",
+            document_path=Path("review.md"),
+            origin_operation_id="original-operation",
+            base_commit="base",
+            update_commit="update",
+            write_surface="Memory",
+            document="review",
+            comment="Check the correction.",
+            comment_sha256="d" * 64,
+            operation_id="correction-operation",
+        )
+        operation = type(
+            "Operation",
+            (),
+            {
+                "operation_id": "original-operation",
+                "outcome": type(
+                    "Outcome",
+                    (),
+                    {
+                        "start_commit": "base",
+                        "landed_commit": "update",
+                        "changed_paths": ("MEMORY.md",),
+                        "output": "updated",
+                    },
+                )(),
+            },
+        )()
+        with (
+            patch("rightmemory.cli.load_update_corrector_config", return_value=object()),
+            patch("rightmemory.cli._verified_update_operation", return_value=operation),
+            patch("rightmemory.cli._stored_correction_message", return_value=None),
+            patch("rightmemory.cli._git_rightmemory_diff", return_value="- old\n+ new"),
+            patch(
+                "rightmemory.cli._require_completed_correction_operation",
+                side_effect=RuntimeError(
+                    "update correction has pending operation effects: file-view-publish"
+                ),
+            ),
+            patch("rightmemory.cli.RightMemoryRuntime", CorrectionRuntime),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "pending operation effects: file-view-publish"):
+                _run_update_review_correction(Path("/memory"), request)
+
+    def test_completed_correction_gate_reads_the_durable_receipt(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = SemanticOperationStore(root)
+            operation_id = "correction-operation"
+            store.begin(
+                operation_id,
+                {
+                    "kind": "semantic-turn",
+                    "role": "update-corrector",
+                    "session_id": operation_id,
+                    "message": "the first durable correction message",
+                },
+            )
+            store.prepare_outcome(
+                operation_id,
+                output='{"status":"no_change","message":"Already correct."}',
+                start_commit="update",
+                changed_paths=(),
+                effects=(OperationEffect("file-view-publish"),),
+            )
+            store.complete_no_change(operation_id, "update")
+
+            with self.assertRaisesRegex(RuntimeError, "pending operation effects"):
+                _require_completed_correction_operation(root, operation_id)
+
+            store.mark_effect(operation_id, "file-view-publish", "done")
+            _require_completed_correction_operation(root, operation_id)
+            self.assertEqual(
+                _stored_correction_message(root, operation_id),
+                "the first durable correction message",
+            )
+
+    def test_update_review_correction_rejects_applied_result_without_matching_commit(self):
+        class IncorrectRuntime:
+            def __init__(self, config):
+                self.last_write_result = IsolatedWriteResult(
+                    output='{"status":"applied","message":"done"}',
+                    commits_landed=1,
+                    landed_commit="unexpected",
+                    changed_paths=("MEMORY.md",),
+                    operation_id="different-operation",
+                )
+
+            def run_session_turn(self, session_id, message, *, operation_id):
+                return '{"status":"applied","message":"done"}'
+
+            def cleanup(self):
+                pass
+
+        request = UpdateReviewRequest(
+            review_id="review-1",
+            document_path=Path("review.md"),
+            origin_operation_id="original-operation",
             base_commit="base",
             update_commit="update",
             write_surface="Memory",
             document="review",
             comment="ambiguous",
             comment_sha256="c" * 64,
-            original_diff="- old\n+ new",
+            operation_id="correction-operation",
         )
+        operation = type(
+            "Operation",
+            (),
+            {
+                "operation_id": "original-operation",
+                "outcome": type(
+                    "Outcome",
+                    (),
+                    {
+                        "start_commit": "base",
+                        "landed_commit": "update",
+                        "changed_paths": ("MEMORY.md",),
+                        "output": "updated",
+                    },
+                )(),
+            },
+        )()
         with (
-            patch("rightmemory.cli.load_config", return_value=object()),
+            patch("rightmemory.cli.load_update_corrector_config", return_value=object()),
+            patch("rightmemory.cli._verified_update_operation", return_value=operation),
+            patch("rightmemory.cli._stored_correction_message", return_value=None),
+            patch("rightmemory.cli._git_rightmemory_diff", return_value="- old\n+ new"),
             patch("rightmemory.cli.RightMemoryRuntime", IncorrectRuntime),
-            patch("rightmemory.cli._record_memory_change_pressure") as pressure,
         ):
-            with self.assertRaisesRegex(RuntimeError, "no-commit outcome"):
+            with self.assertRaisesRegex(RuntimeError, "did not complete its validated semantic operation"):
                 _run_update_review_correction(Path("/memory"), request)
 
-        pressure.assert_not_called()
+    def test_verified_update_operation_rejects_editable_metadata_that_disagrees_with_receipt(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = SemanticOperationStore(root)
+            store.begin(
+                "original-operation",
+                {"kind": "semantic-turn", "role": "update", "session_id": "update-session"},
+            )
+            store.prepare_outcome(
+                "original-operation",
+                output="updated",
+                start_commit="base-commit",
+                changed_paths=("MEMORY.md",),
+            )
+            store.complete_commit("original-operation", "update-commit")
+            request = UpdateReviewRequest(
+                review_id="update-commit",
+                document_path=Path("review.md"),
+                origin_operation_id="original-operation",
+                base_commit="base-commit",
+                update_commit="update-commit",
+                write_surface="Memory",
+                document="editable review",
+                comment="correct it",
+                comment_sha256="d" * 64,
+                operation_id="correction-operation",
+            )
+
+            record = _verified_update_operation(root, request)
+            tampered = UpdateReviewRequest(**{**request.__dict__, "base_commit": "tampered"})
+            with self.assertRaisesRegex(ValueError, "base commit"):
+                _verified_update_operation(root, tampered)
+
+        self.assertEqual(record.operation_id, "original-operation")
 
     def test_update_review_watch_drains_ready_comments_before_sleeping(self):
         stdout = io.StringIO()
@@ -1697,7 +1958,7 @@ class JsonRequestTests(unittest.TestCase):
                 patch("sys.stdout", stdout),
                 patch("sys.stderr", stderr),
             ):
-                result = main(["update-review", "watch", "--interval", "7", "--stable-seconds", "0"])
+                result = main(["update-review", "watch", "--interval", "7"])
 
         self.assertEqual(result, 130)
         self.assertEqual(scan.call_count, 2)
@@ -1708,8 +1969,53 @@ class JsonRequestTests(unittest.TestCase):
     def test_update_review_watch_rejects_invalid_intervals(self):
         with self.assertRaises(ValueError):
             main(["update-review", "watch", "--interval", "0"])
-        with self.assertRaises(ValueError):
-            main(["update-review", "watch", "--stable-seconds", "-1"])
+
+    def test_update_review_watch_sleeps_after_a_failed_ready_revision(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        failed = UpdateReviewProcessResult(processed=1, failed=1)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli._run_update_review_scan", return_value=failed) as scan,
+                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
+                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["update-review", "watch", "--interval", "7"])
+
+        self.assertEqual(result, 130)
+        scan.assert_called_once_with(root)
+        sleep.assert_called_once_with(7)
+
+    def test_update_review_watch_keeps_retrying_beyond_global_failure_limit(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        failures = [
+            UpdateReviewProcessResult(processed=1, failed=1)
+            for _index in range(4)
+        ]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli._run_update_review_scan", side_effect=failures) as scan,
+                patch(
+                    "rightmemory.cli._sleep_with_refresh_check",
+                    side_effect=[True, True, True, KeyboardInterrupt],
+                ),
+                patch("sys.stdout", stdout),
+                patch("sys.stderr", stderr),
+            ):
+                result = main(["update-review", "watch", "--interval", "7"])
+
+        self.assertEqual(result, 130)
+        self.assertEqual(scan.call_count, 4)
+        self.assertEqual([call.args for call in scan.call_args_list], [(root,)] * 4)
 
     def test_review_scan_does_not_add_pressure_before_unified_update(self):
         stdout = io.StringIO()

@@ -20,9 +20,10 @@ from .semantic_operation import (
     SemanticOperationRecord,
     SemanticOperationStore,
 )
-from .graph import MEMORY_DETAIL_FILE_RE, PURSUIT_DETAIL_FILE_RE
+from .graph import MEMORY_DETAIL_FILE_RE, PURSUIT_DETAIL_FILE_RE, build_graph_manifest
 from .tools import (
     CORRECTIONS_PATH,
+    FIXED_CORRECTION_COLLECTION_IDS,
     FIXED_CORRECTION_COLLECTION_PATHS,
     INSIGHT_LOG_FILE_RE,
     PURSUIT_RULES_PATH,
@@ -30,6 +31,11 @@ from .tools import (
     SHARE_REGISTRY_PATH,
     SHARED_VIEW_REGISTRY_PATH,
     MemoryTools,
+)
+from .update_corrector import (
+    UpdateCorrectionResult,
+    parse_update_correction_result,
+    render_update_correction_result,
 )
 from .update_review import validate_corrections_markdown
 
@@ -104,14 +110,9 @@ class IsolatedWriteResult:
 
 
 class IsolatedWriteSupervisor:
-    def __init__(self, memory_root: Path, role: str, *, update_mode: str = "normal"):
+    def __init__(self, memory_root: Path, role: str):
         self.memory_root = Path(memory_root).resolve()
         self.role = role
-        self.update_mode = update_mode
-        if update_mode not in {"normal", "review-correction"}:
-            raise ValueError("update_mode must be normal or review-correction")
-        if update_mode != "normal" and role != "update":
-            raise ValueError("non-normal update modes require the update role")
 
     def recover_prepared(self) -> None:
         """Finish durable outcomes before a caller starts another model turn."""
@@ -163,7 +164,6 @@ class IsolatedWriteSupervisor:
             operation_store = SemanticOperationStore(self.memory_root)
             input_data = dict(operation_input or {})
             input_data["role"] = self.role
-            input_data["update_mode"] = self.update_mode
             operation = operation_store.begin(
                 operation_id,
                 input_data,
@@ -197,14 +197,15 @@ class IsolatedWriteSupervisor:
                 raise RuntimeError(f"isolated worktree has uncommitted changes:\n{status}")
 
             commits = self._temp_commits(worktree, start_head)
-            if self.role == "update" and self.update_mode == "review-correction":
-                outcome = _output_text(output).strip()
-                if outcome.startswith(("Needs input:", "No correction needed:")):
-                    commits = []
-                elif not commits:
+            if self.role == "update-corrector":
+                decision = _correction_result(output)
+                if decision.status == "applied" and len(commits) != 1:
                     raise RuntimeError(
-                        "review correction made no state commit; reply `Needs input: ...` or "
-                        "`No correction needed: ...` when a commit is intentionally unnecessary"
+                        "update-corrector `applied` result requires exactly one state commit"
+                    )
+                if decision.status != "applied" and commits:
+                    raise RuntimeError(
+                        f"update-corrector `{decision.status}` result must not create a commit"
                     )
             if commits:
                 if operation_id is not None:
@@ -372,17 +373,12 @@ class IsolatedWriteSupervisor:
                 # Sync owns candidate validation and exact fast-forward publication.
                 continue
             role = record.input_data.get("role")
-            update_mode = record.input_data.get("update_mode", "normal")
-            if not isinstance(role, str) or not isinstance(update_mode, str):
+            if not isinstance(role, str):
                 raise RuntimeError(
                     f"prepared operation has invalid routing data: {record.operation_id}"
                 )
             claimed = store.claim_prepared(record.operation_id)
-            supervisor = IsolatedWriteSupervisor(
-                self.memory_root,
-                role,
-                update_mode=update_mode,
-            )
+            supervisor = IsolatedWriteSupervisor(self.memory_root, role)
             supervisor._resume_prepared_operation(store, claimed)
 
     def _result_from_operation(self, operation: SemanticOperationRecord) -> IsolatedWriteResult:
@@ -452,8 +448,8 @@ class IsolatedWriteSupervisor:
         return [line.strip() for line in output.splitlines() if line.strip()]
 
     def _validate_commits(self, worktree: Path, commits: list[str]) -> None:
-        if self.role == "update" and len(commits) > 1:
-            raise RuntimeError("one update turn must land at most one commit")
+        if self.role in {"update", "update-corrector"} and len(commits) > 1:
+            raise RuntimeError(f"one {self.role} turn must land at most one commit")
         for commit in commits:
             changed_paths = self._commit_paths(worktree, commit)
             if not changed_paths:
@@ -464,7 +460,7 @@ class IsolatedWriteSupervisor:
                 label = "non-insight paths" if self.role == "insight" else "non-memory paths"
                 raise RuntimeError(f"isolated commit touches {label}: {paths}")
             self._validate_commit_tree(worktree, commit, set(changed_paths))
-        if self.role == "update" and self.update_mode == "review-correction" and commits:
+        if self.role == "update-corrector" and commits:
             changed_paths = set(self._commit_paths(worktree, commits[0]))
             if not any(self._is_rightmemory_path(path) for path in changed_paths):
                 raise RuntimeError(
@@ -478,14 +474,40 @@ class IsolatedWriteSupervisor:
         self._validate_commits(worktree, commits)
         if self.role == "insight":
             return
-        tool_role = "update-correction" if self.update_mode == "review-correction" else self.role
-        validation = MemoryTools(worktree, role=tool_role).validate_memory(
-            enforce_correction_capacity=(
-                self.role == "update" and self.update_mode == "review-correction"
-            )
+        if self.role == "update-corrector":
+            self._validate_fixed_correction_collections(worktree)
+        validation = MemoryTools(worktree, role=self.role).validate_memory(
+            # A pre-existing sync union must not block an unrelated state correction.
+            enforce_correction_capacity=False
         )
         if validation.startswith("validation failed:"):
             raise RuntimeError(validation)
+
+    def _validate_fixed_correction_collections(self, worktree: Path) -> None:
+        before = build_graph_manifest(self.memory_root)
+        candidate = build_graph_manifest(worktree)
+        for collection_id in sorted(FIXED_CORRECTION_COLLECTION_IDS):
+            original = before.backing.get(collection_id)
+            if original is None or original.kind != "M#":
+                continue
+            current = candidate.backing.get(collection_id)
+            original_block = before.block_for_id(collection_id)
+            current_block = candidate.block_for_id(collection_id)
+            if (
+                current is None
+                or current.kind != "M#"
+                or current.path.relative_to(candidate.root)
+                != original.path.relative_to(before.root)
+                or current.source_file.relative_to(candidate.root)
+                != original.source_file.relative_to(before.root)
+                or original_block is None
+                or current_block is None
+                or current_block.line != original_block.line
+            ):
+                raise RuntimeError(
+                    "update-corrector cannot alter fixed M# collection "
+                    f"`{collection_id}`"
+                )
 
     def _rebase_operation_commit(self, worktree: Path, commit: str, new_base: str) -> str:
         self._run_git(worktree, "reset", "--hard", new_base)
@@ -557,10 +579,13 @@ class IsolatedWriteSupervisor:
             return bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
         if self.role == "reviewer":
             return False
-        if self.role == "update":
-            return self._is_rightmemory_path(path) or (
-                self.update_mode == "review-correction" and path == CORRECTIONS_PATH
+        if self.role == "update-corrector":
+            return (
+                path not in FIXED_CORRECTION_COLLECTION_PATHS
+                and (self._is_rightmemory_path(path) or path == CORRECTIONS_PATH)
             )
+        if self.role == "update":
+            return self._is_rightmemory_path(path)
         if self.role == "sync-reconciler":
             return (
                 self._is_rightmemory_path(path)
@@ -763,10 +788,21 @@ class IsolatedWriteSupervisor:
 
 def _output_text(output: Any) -> str:
     value = getattr(output, "output", None)
-    text = str(value if value is not None else output)
+    value = value if value is not None else output
+    if isinstance(value, UpdateCorrectionResult):
+        return render_update_correction_result(value)
+    text = str(value)
     if "</think>" in text:
         text = text.rsplit("</think>", 1)[1]
     return text.lstrip()
+
+
+def _correction_result(output: Any) -> UpdateCorrectionResult:
+    value = getattr(output, "output", None)
+    value = value if value is not None else output
+    if isinstance(value, (UpdateCorrectionResult, Mapping)):
+        return parse_update_correction_result(value)
+    return parse_update_correction_result(_output_text(value))
 
 
 def _write_worktree_lease(path: Path) -> None:

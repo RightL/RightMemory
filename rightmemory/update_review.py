@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import re
-import time
+import stat
+import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -16,27 +18,35 @@ from .platform import lock_file, unlock_file
 from .session import _ensure_runtime_gitignore, _fsync_directory
 
 
-DEFAULT_STABLE_SECONDS = 60
 DEFAULT_BLANK_REVIEW_LIMIT = 50
 DEFAULT_BLANK_REVIEW_EXPIRY_DAYS = 30
-STATE_VERSION = 2
+REVIEW_FORMAT_VERSION = 3
 
 COMMENT_START = "<!-- rightmemory-update-review-comment:start -->"
 COMMENT_END = "<!-- rightmemory-update-review-comment:end -->"
-STATUS_START = "<!-- rightmemory-update-review-status:start -->"
-STATUS_END = "<!-- rightmemory-update-review-status:end -->"
+READY_START = "<!-- rightmemory-update-review-ready:start -->"
+READY_END = "<!-- rightmemory-update-review-ready:end -->"
+QUESTION_START = "<!-- rightmemory-update-review-question:start -->"
+QUESTION_END = "<!-- rightmemory-update-review-question:end -->"
+QUESTION_OPERATION_PREFIX = "<!-- rightmemory-update-review-question-operation:"
+QUESTION_OPERATION_SUFFIX = "-->"
 METADATA_PREFIX = "<!-- rightmemory-update-review:"
 METADATA_SUFFIX = "-->"
-PROCESSED_COMMENT_PREFIX = "<!-- rightmemory-update-review-processed-comment-sha256:"
-PROCESSED_COMMENT_SUFFIX = "-->"
+READY_LABEL = "Ready for correction"
+HUMAN_HEADING = "## Human review\n\n"
+QUESTION_HEADING = "## Corrector question\n\n"
 
 _REVIEW_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$")
-_OUTCOME_STATUSES = {"resolved", "needs_input"}
+_READY_RE = re.compile(
+    rf"^- \[([ xX])\] {re.escape(READY_LABEL)}[ \t]*$",
+    re.MULTILINE,
+)
 _CORRECTION_SECTIONS = ("Background", "Proposed edit", "Accepted edit")
+_OUTCOME_STATUSES = {"resolved", "needs_input"}
 
 
 class UpdateExecutionLock:
-    """Serialize whole update turns, including semantic review corrections."""
+    """Serialize Update and update-corrector turns over shared semantic state."""
 
     def __init__(self, memory_root: Path):
         self.runtime_root = Path(memory_root).resolve() / ".runtime"
@@ -63,41 +73,40 @@ class UpdateExecutionLock:
 @dataclass(frozen=True)
 class UpdateReviewRecord:
     review_id: str
+    origin_operation_id: str
     base_commit: str
     update_commit: str
     write_surface: str
     created_at: str
-    original_diff_sha256: str
-    processed_comment_sha256: str | None = None
-    inflight_comment_sha256: str | None = None
-    status: str = "open"
-    status_message: str | None = None
 
 
 @dataclass(frozen=True)
 class ParsedUpdateReview:
     review_id: str
+    origin_operation_id: str
     base_commit: str
     update_commit: str
     write_surface: str
     created_at: str
+    ready: bool
     comment: str
-    original_diff: str
-    original_diff_sha256: str
-    processed_comment_sha256: str | None = None
+    question: str
+    question_operation_id: str | None
 
 
 @dataclass(frozen=True)
 class UpdateReviewRequest:
     review_id: str
     document_path: Path
+    origin_operation_id: str
     base_commit: str
     update_commit: str
     write_surface: str
     document: str
     comment: str
     comment_sha256: str
-    original_diff: str = ""
+    operation_id: str
+    previous_question: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,7 +116,12 @@ class UpdateReviewOutcome:
     correction_commit: str | None = None
 
     @classmethod
-    def resolved(cls, *, correction_commit: str | None = None, message: str | None = None) -> UpdateReviewOutcome:
+    def resolved(
+        cls,
+        *,
+        correction_commit: str | None = None,
+        message: str | None = None,
+    ) -> UpdateReviewOutcome:
         return cls("resolved", message=message, correction_commit=correction_commit)
 
     @classmethod
@@ -125,28 +139,28 @@ class UpdateReviewProcessResult:
     needs_input: int = 0
     failed: int = 0
     blank: int = 0
-    unstable: int = 0
-    unchanged: int = 0
+    not_ready: int = 0
+    changed: int = 0
     malformed: int = 0
-    missing: int = 0
     pruned_blank: int = 0
     errors: tuple[str, ...] = ()
 
 
 class UpdateReviewStore:
-    """Own local, human-editable review documents for landed update turns."""
+    """Use one local Markdown document as both review UI and submission state."""
 
     def __init__(
         self,
         memory_root: Path,
         *,
-        stable_seconds: int = DEFAULT_STABLE_SECONDS,
         blank_review_limit: int = DEFAULT_BLANK_REVIEW_LIMIT,
         blank_review_expiry_days: int = DEFAULT_BLANK_REVIEW_EXPIRY_DAYS,
     ):
-        if isinstance(stable_seconds, bool) or not isinstance(stable_seconds, int) or stable_seconds < 0:
-            raise ValueError("stable_seconds must be a nonnegative integer")
-        if isinstance(blank_review_limit, bool) or not isinstance(blank_review_limit, int) or blank_review_limit < 1:
+        if (
+            isinstance(blank_review_limit, bool)
+            or not isinstance(blank_review_limit, int)
+            or blank_review_limit < 1
+        ):
             raise ValueError("blank_review_limit must be a positive integer")
         if (
             isinstance(blank_review_expiry_days, bool)
@@ -158,17 +172,14 @@ class UpdateReviewStore:
         self.runtime_root = self.memory_root / ".runtime"
         self.root = self.runtime_root / "update-review"
         self.reviews_root = self.root / "reviews"
-        self.pending_root = self.root / "pending"
-        self.state_path = self.root / "state.json"
-        self.lock_path = self.root / "state.lock"
         self.process_lock_path = self.root / "process.lock"
-        self.stable_seconds = stable_seconds
         self.blank_review_limit = blank_review_limit
         self.blank_review_expiry_days = blank_review_expiry_days
 
     def create_review(
         self,
         *,
+        origin_operation_id: str,
         base_commit: str,
         update_commit: str,
         write_surface: str,
@@ -178,506 +189,258 @@ class UpdateReviewStore:
         created_at: str | None = None,
     ) -> UpdateReviewRecord:
         clean_update_commit = _single_line(update_commit, "update_commit")
-        clean_review_id = _review_id(review_id or clean_update_commit)
-        clean_base_commit = _single_line(base_commit, "base_commit")
-        clean_surface = _single_line(write_surface, "write_surface")
-        clean_created_at = created_at or datetime.now(UTC).isoformat()
-        _parse_time(clean_created_at, "created_at")
-        requested = UpdateReviewRecord(
-            review_id=clean_review_id,
-            base_commit=clean_base_commit,
+        record = UpdateReviewRecord(
+            review_id=_review_id(review_id or clean_update_commit),
+            origin_operation_id=_single_line(origin_operation_id, "origin_operation_id"),
+            base_commit=_single_line(base_commit, "base_commit"),
             update_commit=clean_update_commit,
-            write_surface=clean_surface,
-            created_at=clean_created_at,
-            original_diff_sha256=_text_sha256(diff.rstrip()),
+            write_surface=_single_line(write_surface, "write_surface"),
+            created_at=created_at or datetime.now(UTC).isoformat(),
         )
-        path = self.review_path(clean_review_id)
+        _parse_time(record.created_at, "created_at")
+        path = self.review_path(record.review_id)
+        _ensure_runtime_gitignore(self.runtime_root)
+        try:
+            existing = parse_review_markdown(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            _assert_same_review(existing, record)
+            return _record_from_parsed(existing)
 
-        with self._locked():
-            records = self._load_records_locked()
-            existing = records.get(clean_review_id)
-            if path.exists():
-                parsed = parse_review_markdown(path.read_text(encoding="utf-8"))
-                _assert_same_review(parsed, requested)
-                if existing is None:
-                    existing = _record_from_parsed(parsed)
-                    records[clean_review_id] = existing
-                    self._save_records_locked(records)
-                self._prune_blank_locked(records, now=datetime.now(UTC))
-                self.pending_path(clean_review_id).unlink(missing_ok=True)
-                return existing
-
-            record = existing or requested
-            text = render_review_markdown(
-                record,
-                summary=summary,
-                diff=diff,
-            )
-            self.reviews_root.mkdir(parents=True, exist_ok=True)
-            _atomic_write_text(path, text)
-            records[clean_review_id] = record
-            self._save_records_locked(records)
-            self._prune_blank_locked(records, now=datetime.now(UTC))
-            self.pending_path(clean_review_id).unlink(missing_ok=True)
-            return record
-
-    def queue_review(
-        self,
-        *,
-        base_commit: str,
-        update_commit: str,
-        write_surface: str,
-        summary: str,
-        diff: str,
-        review_id: str | None = None,
-        created_at: str | None = None,
-    ) -> str:
-        """Persist a review-creation obligation before best-effort materialization."""
-        clean_update_commit = _single_line(update_commit, "update_commit")
-        clean_review_id = _review_id(review_id or clean_update_commit)
-        payload = {
-            "version": STATE_VERSION,
-            "review_id": clean_review_id,
-            "base_commit": _single_line(base_commit, "base_commit"),
-            "update_commit": clean_update_commit,
-            "write_surface": _single_line(write_surface, "write_surface"),
-            "summary": str(summary),
-            "diff": str(diff),
-            "created_at": created_at or datetime.now(UTC).isoformat(),
-        }
-        _parse_time(payload["created_at"], "created_at")
-        path = self.pending_path(clean_review_id)
-        with self._locked():
-            if path.exists():
-                existing = json.loads(path.read_text(encoding="utf-8"))
-                comparable_existing = dict(existing) if isinstance(existing, dict) else existing
-                comparable_payload = dict(payload)
-                if isinstance(comparable_existing, dict):
-                    comparable_existing.pop("created_at", None)
-                comparable_payload.pop("created_at", None)
-                if comparable_existing != comparable_payload:
-                    raise ValueError(f"pending update review has different content: {clean_review_id}")
-                return clean_review_id
-            self.pending_root.mkdir(parents=True, exist_ok=True)
-            _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-        return clean_review_id
-
-    def materialize_pending(self, *, limit: int | None = None) -> int:
-        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
-            raise ValueError("pending review limit must be a positive integer")
-        if not self.pending_root.exists():
-            return 0
-        created = 0
-        for path in sorted(self.pending_root.glob("*.json")):
-            if limit is not None and created >= limit:
-                break
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
-                raise ValueError(f"pending update review has unsupported format: {path}")
-            review_id = _review_id(_required_string(data, "review_id"))
-            if path != self.pending_path(review_id):
-                raise ValueError(f"pending update review path does not match review id: {path}")
-            self.create_review(
-                review_id=review_id,
-                base_commit=_required_string(data, "base_commit"),
-                update_commit=_required_string(data, "update_commit"),
-                write_surface=_required_string(data, "write_surface"),
-                summary=_required_string_allow_empty(data, "summary"),
-                diff=_required_string_allow_empty(data, "diff"),
-                created_at=_required_string(data, "created_at"),
-            )
-            path.unlink(missing_ok=True)
-            created += 1
-        return created
+        self.reviews_root.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(path, render_review_markdown(record, summary=summary, diff=diff))
+        return record
 
     def review_path(self, review_id: str) -> Path:
         return self.reviews_root / f"{_review_id(review_id)}.md"
 
-    def pending_path(self, review_id: str) -> Path:
-        return self.pending_root / f"{_review_id(review_id)}.json"
-
     def list_records(self) -> list[UpdateReviewRecord]:
-        with self._locked():
-            records = self._load_records_locked()
-            _missing, changed = self._discover_and_clean_locked(records)
-            if changed:
-                self._save_records_locked(records)
-            return sorted(records.values(), key=lambda item: (item.created_at, item.review_id))
-
-    def prune_blank_reviews(self, *, now: datetime | None = None) -> tuple[str, ...]:
-        if now is not None and now.tzinfo is None:
-            raise ValueError("blank review pruning time must include a timezone")
-        with self._locked():
-            records = self._load_records_locked()
-            self._discover_and_clean_locked(records)
-            current = (now or datetime.now(UTC)).astimezone(UTC)
-            return self._prune_blank_locked(records, now=current)
-
-    def process_ready(
-        self,
-        run_correction: Callable[[UpdateReviewRequest], UpdateReviewOutcome],
-        *,
-        now: float | None = None,
-        limit: int = 1,
-    ) -> UpdateReviewProcessResult:
-        with self._processing_locked():
-            return self._process_ready_locked(run_correction, now=now, limit=limit)
-
-    def _process_ready_locked(
-        self,
-        run_correction: Callable[[UpdateReviewRequest], UpdateReviewOutcome],
-        *,
-        now: float | None = None,
-        limit: int = 1,
-    ) -> UpdateReviewProcessResult:
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-            raise ValueError("limit must be a positive integer")
-        self.materialize_pending()
-        now = time.time() if now is None else now
-        counts: dict[str, int] = {
-            "processed": 0,
-            "resolved": 0,
-            "needs_input": 0,
-            "failed": 0,
-            "blank": 0,
-            "unstable": 0,
-            "unchanged": 0,
-            "malformed": 0,
-            "missing": 0,
-            "pruned_blank": 0,
-        }
-        errors: list[str] = []
-
-        while counts["processed"] < limit:
-            request = self._claim_ready(now, counts, errors)
-            if request is None:
-                break
-            counts["processed"] += 1
-            try:
-                outcome = run_correction(request)
-                _validate_outcome(outcome)
-            except Exception as exc:
-                message = f"{type(exc).__name__}: {exc}"
-                errors.append(f"{request.review_id}: {message}")
-                self._finish_failed(request, message)
-                counts["failed"] += 1
-                continue
-
-            if outcome.status == "resolved":
-                deleted = self._finish_resolved(request, outcome)
-                if deleted:
-                    counts["resolved"] += 1
-                else:
-                    counts["unchanged"] += 1
-                continue
-
-            self._finish_needs_input(request, outcome)
-            counts["needs_input"] += 1
-
-        pruned = self.prune_blank_reviews(now=datetime.fromtimestamp(now, UTC))
-        counts["pruned_blank"] += len(pruned)
-        return UpdateReviewProcessResult(**counts, errors=tuple(errors))
-
-    def _claim_ready(
-        self,
-        now: float,
-        counts: dict[str, int],
-        errors: list[str],
-    ) -> UpdateReviewRequest | None:
-        with self._locked():
-            records = self._load_records_locked()
-            missing, changed = self._discover_and_clean_locked(records)
-            counts["missing"] += missing
-            for record in sorted(records.values(), key=lambda item: (item.created_at, item.review_id)):
-                path = self.review_path(record.review_id)
-                try:
-                    document = path.read_text(encoding="utf-8")
-                    parsed = parse_review_markdown(document)
-                    _assert_same_review(parsed, record)
-                except FileNotFoundError:
-                    records.pop(record.review_id, None)
-                    counts["missing"] += 1
-                    changed = True
-                    continue
-                except (OSError, ValueError) as exc:
-                    counts["malformed"] += 1
-                    errors.append(f"{record.review_id}: {type(exc).__name__}: {exc}")
-                    continue
-
-                comment = normalize_review_comment(parsed.comment)
-                if record.inflight_comment_sha256 is not None:
-                    interrupted_hash = record.inflight_comment_sha256
-                    message = "Previous processing was interrupted. Edit the human review comment to retry."
-                    record = replace(
-                        record,
-                        processed_comment_sha256=interrupted_hash,
-                        inflight_comment_sha256=None,
-                        status="failed",
-                        status_message=message,
-                    )
-                    records[record.review_id] = record
-                    self._write_status_locked(
-                        path,
-                        "Processing interrupted",
-                        message,
-                        processed_comment_sha256=interrupted_hash,
-                    )
-                    counts["failed"] += 1
-                    errors.append(f"{record.review_id}: previous processing was interrupted")
-                    changed = True
-                if not comment:
-                    counts["blank"] += 1
-                    continue
-                comment_sha256 = review_comment_sha256(comment)
-                if comment_sha256 == record.processed_comment_sha256:
-                    counts["unchanged"] += 1
-                    continue
-                try:
-                    mtime = path.stat().st_mtime
-                except OSError as exc:
-                    counts["malformed"] += 1
-                    errors.append(f"{record.review_id}: {type(exc).__name__}: {exc}")
-                    continue
-                if now - mtime < self.stable_seconds:
-                    counts["unstable"] += 1
-                    continue
-
-                claimed = replace(
-                    record,
-                    inflight_comment_sha256=comment_sha256,
-                    status="processing",
-                    status_message=None,
-                )
-                records[record.review_id] = claimed
-                self._save_records_locked(records)
-                return UpdateReviewRequest(
-                    review_id=record.review_id,
-                    document_path=path,
-                    base_commit=record.base_commit,
-                    update_commit=record.update_commit,
-                    write_surface=record.write_surface,
-                    document=document,
-                    comment=comment,
-                    comment_sha256=comment_sha256,
-                    original_diff=parsed.original_diff,
-                )
-            if changed:
-                self._save_records_locked(records)
-            return None
-
-    def _finish_resolved(self, request: UpdateReviewRequest, outcome: UpdateReviewOutcome) -> bool:
-        with self._locked():
-            records = self._load_records_locked()
-            record = records.get(request.review_id)
-            if record is None:
-                return True
-            path = self.review_path(request.review_id)
-            current_comment = ""
-            if path.exists():
-                try:
-                    current_comment = normalize_review_comment(
-                        parse_review_markdown(path.read_text(encoding="utf-8")).comment
-                    )
-                except (OSError, ValueError):
-                    current_comment = request.comment
-            current_hash = review_comment_sha256(current_comment) if current_comment else None
-            if current_hash not in {None, request.comment_sha256}:
-                message = outcome.message or "The previous comment was applied. A newer comment is pending."
-                records[request.review_id] = replace(
-                    record,
-                    processed_comment_sha256=request.comment_sha256,
-                    inflight_comment_sha256=None,
-                    status="open",
-                    status_message=message,
-                )
-                if path.exists():
-                    self._write_status_locked(
-                        path,
-                        "Applied",
-                        message,
-                        processed_comment_sha256=request.comment_sha256,
-                    )
-                self._save_records_locked(records)
-                return False
-            path.unlink(missing_ok=True)
-            records.pop(request.review_id, None)
-            self._save_records_locked(records)
-            return True
-
-    def _finish_needs_input(self, request: UpdateReviewRequest, outcome: UpdateReviewOutcome) -> None:
-        message = (outcome.message or "More input is needed before this correction can be applied.").strip()
-        with self._locked():
-            records = self._load_records_locked()
-            record = records.get(request.review_id)
-            if record is None:
-                return
-            records[request.review_id] = replace(
-                record,
-                processed_comment_sha256=request.comment_sha256,
-                inflight_comment_sha256=None,
-                status="needs_input",
-                status_message=message,
-            )
-            path = self.review_path(request.review_id)
-            if path.exists():
-                self._write_status_locked(
-                    path,
-                    "Needs input",
-                    message,
-                    processed_comment_sha256=request.comment_sha256,
-                )
-            self._save_records_locked(records)
-
-    def _finish_failed(self, request: UpdateReviewRequest, message: str) -> None:
-        user_message = f"Processing failed: {message}. Edit the human review comment to retry."
-        with self._locked():
-            records = self._load_records_locked()
-            record = records.get(request.review_id)
-            if record is None:
-                return
-            records[request.review_id] = replace(
-                record,
-                processed_comment_sha256=request.comment_sha256,
-                inflight_comment_sha256=None,
-                status="failed",
-                status_message=user_message,
-            )
-            path = self.review_path(request.review_id)
-            if path.exists():
-                self._write_status_locked(
-                    path,
-                    "Processing failed",
-                    user_message,
-                    processed_comment_sha256=request.comment_sha256,
-                )
-            self._save_records_locked(records)
-
-    def _write_status_locked(
-        self,
-        path: Path,
-        label: str,
-        message: str,
-        *,
-        processed_comment_sha256: str,
-    ) -> None:
-        text = path.read_text(encoding="utf-8")
-        block = (
-            f"{STATUS_START}\n"
-            f"{PROCESSED_COMMENT_PREFIX}{_sha256(processed_comment_sha256)}{PROCESSED_COMMENT_SUFFIX}\n"
-            "## RightMemory status\n\n"
-            f"**{label}.** {message.strip()}\n"
-            f"{STATUS_END}"
-        )
-        start = text.find(STATUS_START)
-        end = text.find(STATUS_END)
-        if start >= 0 and end >= start:
-            end += len(STATUS_END)
-            updated = text[:start].rstrip() + "\n\n" + block + text[end:]
-        else:
-            updated = text.rstrip() + "\n\n" + block + "\n"
-        _atomic_write_text(path, updated)
-
-    def _discover_and_clean_locked(self, records: dict[str, UpdateReviewRecord]) -> tuple[int, bool]:
-        missing = 0
-        changed = False
-        for review_id in list(records):
-            if not self.review_path(review_id).exists():
-                records.pop(review_id, None)
-                missing += 1
-                changed = True
+        records: list[UpdateReviewRecord] = []
         if not self.reviews_root.exists():
-            return missing, changed
+            return records
         for path in sorted(self.reviews_root.glob("*.md")):
             try:
                 parsed = parse_review_markdown(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            if path != self.review_path(parsed.review_id):
-                continue
-            if parsed.review_id not in records:
-                records[parsed.review_id] = _record_from_parsed(parsed)
-                changed = True
-        return missing, changed
+            if path == self.review_path(parsed.review_id):
+                records.append(_record_from_parsed(parsed))
+        return sorted(records, key=lambda item: (item.created_at, item.review_id))
 
-    def _prune_blank_locked(
-        self,
-        records: dict[str, UpdateReviewRecord],
-        *,
-        now: datetime,
-    ) -> tuple[str, ...]:
-        self._discover_and_clean_locked(records)
-        blank: list[UpdateReviewRecord] = []
-        for record in records.values():
-            path = self.review_path(record.review_id)
-            try:
-                parsed = parse_review_markdown(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if (
-                not normalize_review_comment(parsed.comment)
-                and record.status == "open"
-                and record.processed_comment_sha256 is None
-                and record.inflight_comment_sha256 is None
-            ):
-                blank.append(record)
-        blank.sort(key=lambda item: (item.created_at, item.review_id))
+    def prune_blank_reviews(self, *, now: datetime | None = None) -> tuple[str, ...]:
+        with self._processing_locked():
+            return self._prune_blank_reviews_locked(now=now)
+
+    def _prune_blank_reviews_locked(self, *, now: datetime | None = None) -> tuple[str, ...]:
+        if now is not None and now.tzinfo is None:
+            raise ValueError("blank review pruning time must include a timezone")
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        blank: list[tuple[UpdateReviewRecord, str]] = []
+        if self.reviews_root.exists():
+            for path in sorted(self.reviews_root.glob("*.md")):
+                try:
+                    document = path.read_text(encoding="utf-8")
+                    parsed = parse_review_markdown(document)
+                except (OSError, ValueError):
+                    continue
+                if path != self.review_path(parsed.review_id):
+                    continue
+                if (
+                    not parsed.ready
+                    and not normalize_review_comment(parsed.comment)
+                    and not parsed.question.strip()
+                ):
+                    blank.append((_record_from_parsed(parsed), document))
+        blank.sort(key=lambda item: (item[0].created_at, item[0].review_id))
         expiry_seconds = self.blank_review_expiry_days * 24 * 60 * 60
         expired = [
-            record
-            for record in blank
-            if (now - _parse_time(record.created_at, "created_at")).total_seconds() >= expiry_seconds
+            item
+            for item in blank
+            if (current - _parse_time(item[0].created_at, "created_at")).total_seconds()
+            >= expiry_seconds
         ]
-        expired_ids = {record.review_id for record in expired}
-        retained = [record for record in blank if record.review_id not in expired_ids]
+        expired_ids = {record.review_id for record, _document in expired}
+        retained = [item for item in blank if item[0].review_id not in expired_ids]
         excess = max(0, len(retained) - self.blank_review_limit)
         selected = [*expired, *retained[:excess]]
-        pruned = []
-        for record in selected:
-            self.review_path(record.review_id).unlink(missing_ok=True)
-            records.pop(record.review_id, None)
-            pruned.append(record.review_id)
-        self._save_records_locked(records)
+        pruned: list[str] = []
+        for record, document in selected:
+            if _delete_document_if_unchanged(self.review_path(record.review_id), document):
+                pruned.append(record.review_id)
         return tuple(pruned)
 
-    def _load_records_locked(self) -> dict[str, UpdateReviewRecord]:
-        try:
-            data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {}
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"update review state is not valid JSON: {self.state_path}") from exc
-        if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
-            raise ValueError(f"update review state has unsupported format: {self.state_path}")
-        raw_records = data.get("reviews")
-        if not isinstance(raw_records, dict):
-            raise ValueError(f"update review state must contain an object field `reviews`: {self.state_path}")
-        records: dict[str, UpdateReviewRecord] = {}
-        for key, value in raw_records.items():
-            if not isinstance(key, str) or not isinstance(value, dict):
-                raise ValueError(f"update review state contains an invalid record: {self.state_path}")
-            record = _record_from_json(value)
-            if record.review_id != key:
-                raise ValueError(f"update review state key does not match review id: {key}")
-            records[key] = record
-        return records
+    def process_ready(
+        self,
+        run_correction: Callable[[UpdateReviewRequest], UpdateReviewOutcome],
+        *,
+        limit: int = 1,
+    ) -> UpdateReviewProcessResult:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        with self._processing_locked() as process_handle:
+            return self._process_ready_locked(
+                run_correction,
+                limit=limit,
+                process_handle=process_handle,
+            )
 
-    def _save_records_locked(self, records: dict[str, UpdateReviewRecord]) -> None:
-        data = {
-            "version": STATE_VERSION,
-            "reviews": {key: asdict(value) for key, value in sorted(records.items())},
+    def _process_ready_locked(
+        self,
+        run_correction: Callable[[UpdateReviewRequest], UpdateReviewOutcome],
+        *,
+        limit: int,
+        process_handle: Any,
+    ) -> UpdateReviewProcessResult:
+        counts = {
+            "processed": 0,
+            "resolved": 0,
+            "needs_input": 0,
+            "failed": 0,
+            "blank": 0,
+            "not_ready": 0,
+            "changed": 0,
+            "malformed": 0,
+            "pruned_blank": 0,
         }
-        _atomic_write_text(self.state_path, json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        errors: list[str] = []
+        if self.reviews_root.exists():
+            paths = sorted(self.reviews_root.glob("*.md"))
+            cursor = _read_process_cursor(process_handle)
+            if cursor is not None:
+                split = next(
+                    (index for index, path in enumerate(paths) if path.stem > cursor),
+                    len(paths),
+                )
+                paths = paths[split:] + paths[:split]
+            for path in paths:
+                if counts["processed"] >= limit:
+                    break
+                try:
+                    document = path.read_text(encoding="utf-8")
+                    parsed = parse_review_markdown(document)
+                    if path != self.review_path(parsed.review_id):
+                        raise ValueError("review filename does not match its review id")
+                except (OSError, ValueError) as exc:
+                    counts["malformed"] += 1
+                    errors.append(f"{path.name}: {type(exc).__name__}: {exc}")
+                    continue
 
-    @contextmanager
-    def _locked(self):
-        _ensure_runtime_gitignore(self.runtime_root)
-        self.root.mkdir(parents=True, exist_ok=True)
-        with self.lock_path.open("a+", encoding="utf-8") as handle:
-            lock_file(handle)
-            try:
-                yield
-            finally:
-                unlock_file(handle)
+                comment = normalize_review_comment(parsed.comment)
+                if not parsed.ready:
+                    if comment:
+                        counts["not_ready"] += 1
+                    else:
+                        counts["blank"] += 1
+                    continue
+                if not comment:
+                    counts["blank"] += 1
+                    continue
+
+                comment_sha256 = review_comment_sha256(comment)
+                operation_id = correction_operation_id(parsed.review_id, comment_sha256)
+                request = UpdateReviewRequest(
+                    review_id=parsed.review_id,
+                    document_path=path,
+                    origin_operation_id=parsed.origin_operation_id,
+                    base_commit=parsed.base_commit,
+                    update_commit=parsed.update_commit,
+                    write_surface=parsed.write_surface,
+                    document=document,
+                    comment=comment,
+                    comment_sha256=comment_sha256,
+                    operation_id=operation_id,
+                    previous_question=(
+                        parsed.question
+                        if parsed.question
+                        and parsed.question_operation_id != operation_id
+                        else None
+                    ),
+                )
+                counts["processed"] += 1
+                try:
+                    _write_process_cursor(process_handle, parsed.review_id)
+                except Exception as exc:
+                    counts["failed"] += 1
+                    errors.append(f"{parsed.review_id}: {type(exc).__name__}: {exc}")
+                    break
+                try:
+                    outcome = run_correction(request)
+                    _validate_outcome(outcome)
+                except Exception as exc:
+                    counts["failed"] += 1
+                    errors.append(f"{parsed.review_id}: {type(exc).__name__}: {exc}")
+                    continue
+
+                try:
+                    if outcome.status == "resolved":
+                        if self._delete_if_unchanged(request):
+                            counts["resolved"] += 1
+                        else:
+                            counts["changed"] += 1
+                        continue
+                    if self._write_question_if_unchanged(request, outcome.message or ""):
+                        counts["needs_input"] += 1
+                    else:
+                        counts["changed"] += 1
+                except Exception as exc:
+                    counts["failed"] += 1
+                    errors.append(f"{parsed.review_id}: {type(exc).__name__}: {exc}")
+
+        pruned = self._prune_blank_reviews_locked()
+        counts["pruned_blank"] = len(pruned)
+        return UpdateReviewProcessResult(
+            **counts,
+            errors=tuple(errors),
+        )
+
+    def _delete_if_unchanged(self, request: UpdateReviewRequest) -> bool:
+        return _delete_document_if_unchanged(request.document_path, request.document)
+
+    def _write_question_if_unchanged(
+        self,
+        request: UpdateReviewRequest,
+        message: str,
+    ) -> bool:
+        current = request.document
+        human_start, question_start = _review_section_bounds(current)
+        human_section = current[human_start:question_start]
+        ready_area = _marked_area(human_section, READY_START, READY_END, "Ready control")
+        ready_area, replacements = _READY_RE.subn(
+            f"- [ ] {READY_LABEL}",
+            ready_area,
+            count=1,
+        )
+        if replacements != 1:
+            raise ValueError("submitted review no longer has one Ready checkbox")
+        human_section = _replace_marked_area(
+            human_section,
+            READY_START,
+            READY_END,
+            ready_area,
+        )
+        updated = current[:human_start] + human_section + current[question_start:]
+        _human_start, question_start = _review_section_bounds(updated)
+        question_section = updated[question_start:]
+        question = _question_markdown(message, request.operation_id)
+        question_section = _replace_marked_area(
+            question_section,
+            QUESTION_START,
+            QUESTION_END,
+            question,
+        )
+        updated = updated[:question_start] + question_section
+        claim = _claim_document_if_unchanged(request.document_path, request.document)
+        if claim is None:
+            return False
+        try:
+            published = _write_text_if_absent(request.document_path, updated)
+        except Exception:
+            _restore_claim_if_vacant(claim, request.document_path)
+            raise
+        claim.unlink(missing_ok=True)
+        _fsync_directory(request.document_path.parent)
+        return published
 
     @contextmanager
     def _processing_locked(self):
@@ -686,30 +449,29 @@ class UpdateReviewStore:
         with self.process_lock_path.open("a+", encoding="utf-8") as handle:
             lock_file(handle)
             try:
-                yield
+                _recover_claimed_documents(self.reviews_root)
+                yield handle
             finally:
                 unlock_file(handle)
 
 
 def render_review_markdown(record: UpdateReviewRecord, *, summary: str, diff: str) -> str:
-    clean_diff = diff.rstrip()
-    if _text_sha256(clean_diff) != record.original_diff_sha256:
-        raise ValueError("update review diff does not match its recorded hash")
     metadata = json.dumps(
         {
-            "version": STATE_VERSION,
+            "version": REVIEW_FORMAT_VERSION,
             "review_id": record.review_id,
+            "origin_operation_id": record.origin_operation_id,
             "base_commit": record.base_commit,
             "update_commit": record.update_commit,
             "write_surface": record.write_surface,
             "created_at": record.created_at,
-            "original_diff_sha256": record.original_diff_sha256,
         },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
     clean_summary = summary.strip() or "No update summary was provided."
+    clean_diff = diff.rstrip()
     fence = _markdown_fence(clean_diff)
     return (
         "# RightMemory Update Review\n\n"
@@ -718,10 +480,14 @@ def render_review_markdown(record: UpdateReviewRecord, *, summary: str, diff: st
         "## What changed\n\n"
         f"{clean_summary}\n\n"
         "## Original diff\n\n"
+        "This copy is for reading only. Correction re-verifies the operation receipt and Git diff.\n\n"
         f"{fence}diff\n{clean_diff}\n{fence}\n\n"
-        "## Human review\n\n"
-        "Leave this area blank when no correction is needed. Otherwise, write one overall comment.\n\n"
-        f"{COMMENT_START}\n\n{COMMENT_END}\n"
+        f"{HUMAN_HEADING}"
+        "Write one overall correction comment between the markers, then check Ready.\n\n"
+        f"{READY_START}\n\n- [ ] {READY_LABEL}\n\n{READY_END}\n\n"
+        f"{COMMENT_START}\n\n{COMMENT_END}\n\n"
+        f"{QUESTION_HEADING}"
+        f"{QUESTION_START}\n\n{QUESTION_END}\n"
     )
 
 
@@ -737,65 +503,42 @@ def parse_review_markdown(text: str) -> ParsedUpdateReview:
         metadata = json.loads(raw_metadata)
     except json.JSONDecodeError as exc:
         raise ValueError("update review metadata is not valid JSON") from exc
-    if not isinstance(metadata, dict) or metadata.get("version") != STATE_VERSION:
+    if not isinstance(metadata, dict) or metadata.get("version") != REVIEW_FORMAT_VERSION:
         raise ValueError("update review metadata has unsupported format")
 
-    if text.count(COMMENT_START) != 1 or text.count(COMMENT_END) != 1:
-        raise ValueError("update review must contain exactly one human comment area")
-    comment_start = text.find(COMMENT_START) + len(COMMENT_START)
-    comment_end = text.find(COMMENT_END, comment_start)
-    if comment_end < comment_start:
-        raise ValueError("update review human comment area is malformed")
-
-    original_diff = _extract_original_diff(text)
-    original_diff_sha256 = _required_sha256(metadata, "original_diff_sha256")
-    if _text_sha256(original_diff) != original_diff_sha256:
-        raise ValueError("update review original diff was modified")
-
-    processed_comment_sha256 = _embedded_processed_comment_sha256(text)
-
+    human_start, question_start = _review_section_bounds(text)
+    human_section = text[human_start:question_start]
+    question_section = text[question_start:]
+    ready_area = _marked_area(human_section, READY_START, READY_END, "Ready control")
+    ready_matches = list(_READY_RE.finditer(ready_area))
+    if len(ready_matches) != 1:
+        raise ValueError("update review must contain exactly one Ready checkbox")
+    comment = _marked_area(human_section, COMMENT_START, COMMENT_END, "human comment")
+    raw_question = _marked_area(
+        question_section,
+        QUESTION_START,
+        QUESTION_END,
+        "corrector question",
+    )
+    question, question_operation_id = _parse_question_markdown(raw_question)
     return ParsedUpdateReview(
-        review_id=_review_id(_required_metadata_string(metadata, "review_id")),
-        base_commit=_single_line(_required_metadata_string(metadata, "base_commit"), "base_commit"),
-        update_commit=_single_line(_required_metadata_string(metadata, "update_commit"), "update_commit"),
-        write_surface=_single_line(_required_metadata_string(metadata, "write_surface"), "write_surface"),
-        created_at=_parsed_metadata_time(metadata),
-        comment=text[comment_start:comment_end],
-        original_diff=original_diff,
-        original_diff_sha256=original_diff_sha256,
-        processed_comment_sha256=processed_comment_sha256,
+        review_id=_review_id(_metadata_string(metadata, "review_id")),
+        origin_operation_id=_single_line(
+            _metadata_string(metadata, "origin_operation_id"),
+            "origin_operation_id",
+        ),
+        base_commit=_single_line(_metadata_string(metadata, "base_commit"), "base_commit"),
+        update_commit=_single_line(_metadata_string(metadata, "update_commit"), "update_commit"),
+        write_surface=_single_line(
+            _metadata_string(metadata, "write_surface"),
+            "write_surface",
+        ),
+        created_at=_metadata_time(metadata),
+        ready=ready_matches[0].group(1).lower() == "x",
+        comment=comment,
+        question=question,
+        question_operation_id=question_operation_id,
     )
-
-
-def _extract_original_diff(text: str) -> str:
-    heading = "## Original diff\n\n"
-    start = text.find(heading)
-    if start < 0:
-        raise ValueError("update review is missing its original diff")
-    fence_start = start + len(heading)
-    first_newline = text.find("\n", fence_start)
-    if first_newline < 0:
-        raise ValueError("update review original diff fence is malformed")
-    opening = text[fence_start:first_newline]
-    match = re.fullmatch(r"(`{3,}|~{3,})diff", opening)
-    if match is None:
-        raise ValueError("update review original diff fence is malformed")
-    marker = match.group(1)
-    closing = f"\n{marker}\n\n## Human review"
-    end = text.find(closing, first_newline + 1)
-    if end < 0:
-        raise ValueError("update review original diff fence is not closed")
-    return text[first_newline + 1 : end]
-
-
-def _embedded_processed_comment_sha256(text: str) -> str | None:
-    matches = re.findall(
-        re.escape(PROCESSED_COMMENT_PREFIX) + r"([0-9a-f]{64})" + re.escape(PROCESSED_COMMENT_SUFFIX),
-        text,
-    )
-    if len(matches) > 1:
-        raise ValueError("update review contains multiple processed-comment markers")
-    return matches[0] if matches else None
 
 
 def normalize_review_comment(comment: str) -> str:
@@ -807,6 +550,15 @@ def review_comment_sha256(comment: str) -> str:
     if not normalized:
         raise ValueError("cannot hash a blank review comment")
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def correction_operation_id(review_id: str, comment_sha256: str) -> str:
+    clean_review_id = _review_id(review_id)
+    clean_comment_hash = _sha256(comment_sha256)
+    revision = hashlib.sha256(
+        f"{clean_review_id}\n{clean_comment_hash}".encode("utf-8")
+    ).hexdigest()
+    return f"update-review-correction-{revision}"
 
 
 def validate_corrections_markdown(text: str) -> list[str]:
@@ -842,7 +594,9 @@ def validate_corrections_markdown(text: str) -> list[str]:
             entries.append(current)
             continue
         if current is None:
-            errors.append(f"line {line_number}: correction section `{title}` appears before any `##` entry")
+            errors.append(
+                f"line {line_number}: correction section `{title}` appears before any `##` entry"
+            )
             continue
         current[2].append((title, line_number))
 
@@ -852,9 +606,15 @@ def validate_corrections_markdown(text: str) -> list[str]:
     expected = list(_CORRECTION_SECTIONS)
     for entry_index, (title, line_number, sections) in enumerate(entries):
         names = [name for name, _section_line in sections]
-        unexpected = [(name, section_line) for name, section_line in sections if name not in _CORRECTION_SECTIONS]
+        unexpected = [
+            (name, section_line)
+            for name, section_line in sections
+            if name not in _CORRECTION_SECTIONS
+        ]
         for name, section_line in unexpected:
-            errors.append(f"line {section_line}: correction entry `{title}` has unexpected `### {name}` section")
+            errors.append(
+                f"line {section_line}: correction entry `{title}` has unexpected `### {name}` section"
+            )
         for name in expected:
             count = names.count(name)
             if count == 0:
@@ -879,7 +639,9 @@ def validate_corrections_markdown(text: str) -> list[str]:
             )
             body = "\n".join(lines[section_line:section_end]).strip()
             if not body:
-                errors.append(f"line {section_line}: correction entry `{title}` has empty `### {name}` content")
+                errors.append(
+                    f"line {section_line}: correction entry `{title}` has empty `### {name}` content"
+                )
     return errors
 
 
@@ -887,7 +649,10 @@ def _validate_outcome(outcome: UpdateReviewOutcome) -> None:
     if not isinstance(outcome, UpdateReviewOutcome):
         raise TypeError("update review callback must return UpdateReviewOutcome")
     if outcome.status not in _OUTCOME_STATUSES:
-        raise ValueError(f"update review outcome status must be one of: {', '.join(sorted(_OUTCOME_STATUSES))}")
+        raise ValueError(
+            "update review outcome status must be one of: "
+            + ", ".join(sorted(_OUTCOME_STATUSES))
+        )
     if outcome.status == "needs_input" and not (outcome.message or "").strip():
         raise ValueError("needs-input outcome requires a message")
 
@@ -895,41 +660,24 @@ def _validate_outcome(outcome: UpdateReviewOutcome) -> None:
 def _record_from_parsed(parsed: ParsedUpdateReview) -> UpdateReviewRecord:
     return UpdateReviewRecord(
         review_id=parsed.review_id,
+        origin_operation_id=parsed.origin_operation_id,
         base_commit=parsed.base_commit,
         update_commit=parsed.update_commit,
         write_surface=parsed.write_surface,
         created_at=parsed.created_at,
-        original_diff_sha256=parsed.original_diff_sha256,
-        processed_comment_sha256=parsed.processed_comment_sha256,
-    )
-
-
-def _record_from_json(data: dict[str, Any]) -> UpdateReviewRecord:
-    return UpdateReviewRecord(
-        review_id=_review_id(_required_string(data, "review_id")),
-        base_commit=_single_line(_required_string(data, "base_commit"), "base_commit"),
-        update_commit=_single_line(_required_string(data, "update_commit"), "update_commit"),
-        write_surface=_single_line(_required_string(data, "write_surface"), "write_surface"),
-        created_at=_parsed_time_value(data, "created_at"),
-        original_diff_sha256=_sha256(_required_string(data, "original_diff_sha256")),
-        processed_comment_sha256=_optional_string(data, "processed_comment_sha256"),
-        inflight_comment_sha256=_optional_string(data, "inflight_comment_sha256"),
-        status=_required_string(data, "status"),
-        status_message=_optional_string(data, "status_message"),
     )
 
 
 def _assert_same_review(parsed: ParsedUpdateReview, record: UpdateReviewRecord) -> None:
-    pairs = (
-        ("review_id", parsed.review_id, record.review_id),
-        ("base_commit", parsed.base_commit, record.base_commit),
-        ("update_commit", parsed.update_commit, record.update_commit),
-        ("write_surface", parsed.write_surface, record.write_surface),
-        ("original_diff_sha256", parsed.original_diff_sha256, record.original_diff_sha256),
-    )
-    for field, actual, expected in pairs:
-        if actual != expected:
-            raise ValueError(f"existing update review has different {field}: {actual}")
+    for field in (
+        "review_id",
+        "origin_operation_id",
+        "base_commit",
+        "update_commit",
+        "write_surface",
+    ):
+        if getattr(parsed, field) != getattr(record, field):
+            raise ValueError(f"existing update review has different {field}")
 
 
 def _review_id(value: str) -> str:
@@ -941,42 +689,21 @@ def _review_id(value: str) -> str:
 
 def _single_line(value: str, field: str) -> str:
     clean = str(value).strip()
-    if not clean or "\n" in clean or "\r" in clean or "\x00" in clean:
+    if not clean or any(character in clean for character in "\n\r\0"):
         raise ValueError(f"{field} must be a non-empty single line")
     return clean
 
 
-def _required_metadata_string(data: dict[str, Any], key: str) -> str:
+def _metadata_string(data: dict[str, Any], key: str) -> str:
     value = data.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"update review metadata must contain string field `{key}`")
     return value
 
 
-def _required_sha256(data: dict[str, Any], key: str) -> str:
-    return _sha256(_required_metadata_string(data, key))
-
-
-def _sha256(value: str) -> str:
-    clean = str(value).strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", clean):
-        raise ValueError("SHA-256 values must contain exactly 64 lowercase hexadecimal characters")
-    return clean
-
-
-def _text_sha256(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _parsed_metadata_time(data: dict[str, Any]) -> str:
-    return _parsed_time_value(data, "created_at", label="update review metadata")
-
-
-def _parsed_time_value(data: dict[str, Any], key: str, *, label: str = "update review state") -> str:
-    value = data.get(key)
-    if not isinstance(value, str):
-        raise ValueError(f"{label} must contain string field `{key}`")
-    _parse_time(value, key)
+def _metadata_time(data: dict[str, Any]) -> str:
+    value = _metadata_string(data, "created_at")
+    _parse_time(value, "created_at")
     return value
 
 
@@ -990,27 +717,82 @@ def _parse_time(value: str, field: str) -> datetime:
     return parsed
 
 
-def _required_string(data: dict[str, Any], key: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"update review state record must contain string field `{key}`")
-    return value
+def _sha256(value: str) -> str:
+    clean = str(value).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", clean):
+        raise ValueError("SHA-256 values must contain exactly 64 lowercase hexadecimal characters")
+    return clean
 
 
-def _required_string_allow_empty(data: dict[str, Any], key: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str):
-        raise ValueError(f"update review record must contain string field `{key}`")
-    return value
+def _marked_area(text: str, start: str, end: str, label: str) -> str:
+    if text.count(start) != 1 or text.count(end) != 1:
+        raise ValueError(f"update review must contain exactly one {label} area")
+    area_start = text.find(start) + len(start)
+    area_end = text.find(end, area_start)
+    if area_end < area_start:
+        raise ValueError(f"update review {label} area is malformed")
+    return text[area_start:area_end]
 
 
-def _optional_string(data: dict[str, Any], key: str) -> str | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValueError(f"update review state record field `{key}` must be a string or null")
-    return value
+def _review_section_bounds(text: str) -> tuple[int, int]:
+    ready_marker = text.rfind(READY_START)
+    comment_marker = text.rfind(COMMENT_START)
+    question_marker = text.rfind(QUESTION_START)
+    human_start = text.rfind(HUMAN_HEADING, 0, ready_marker)
+    question_start = text.rfind(
+        QUESTION_HEADING,
+        comment_marker + len(COMMENT_START),
+        question_marker,
+    )
+    if not (
+        0 <= human_start < ready_marker < comment_marker < question_start < question_marker
+    ):
+        raise ValueError("update review human and corrector sections are malformed")
+    return human_start, question_start
+
+
+def _replace_marked_area(text: str, start: str, end: str, value: str) -> str:
+    _marked_area(text, start, end, "corrector question")
+    area_start = text.find(start) + len(start)
+    area_end = text.find(end, area_start)
+    return text[:area_start] + f"\n\n{value.strip()}\n\n" + text[area_end:]
+
+
+def _question_markdown(message: str, operation_id: str) -> str:
+    clean = message.strip()
+    if not clean:
+        raise ValueError("corrector question must not be blank")
+    escaped = html.escape(clean, quote=False)
+    return (
+        f"{QUESTION_OPERATION_PREFIX}{_single_line(operation_id, 'operation_id')}"
+        f"{QUESTION_OPERATION_SUFFIX}\n"
+        "> **Corrector question:** "
+        + escaped.replace("\n", "\n> ")
+    )
+
+
+def _parse_question_markdown(value: str) -> tuple[str, str | None]:
+    clean = value.strip()
+    if not clean:
+        return "", None
+    operation_id: str | None = None
+    if clean.startswith(QUESTION_OPERATION_PREFIX):
+        marker_end = clean.find(QUESTION_OPERATION_SUFFIX, len(QUESTION_OPERATION_PREFIX))
+        if marker_end < 0:
+            raise ValueError("corrector question operation marker is not closed")
+        operation_id = _single_line(
+            clean[len(QUESTION_OPERATION_PREFIX) : marker_end],
+            "question_operation_id",
+        )
+        clean = clean[marker_end + len(QUESTION_OPERATION_SUFFIX) :].strip()
+    prefix = "> **Corrector question:** "
+    if clean.startswith(prefix):
+        clean = clean[len(prefix) :]
+        clean = "\n".join(
+            line[2:] if line.startswith("> ") else line
+            for line in clean.splitlines()
+        )
+    return html.unescape(clean).strip(), operation_id
 
 
 def _markdown_fence(text: str) -> str:
@@ -1018,6 +800,120 @@ def _markdown_fence(text: str) -> str:
     for match in re.finditer(r"`+", text):
         longest = max(longest, len(match.group(0)))
     return "`" * max(3, longest + 1)
+
+
+def _read_process_cursor(handle: Any) -> str | None:
+    handle.seek(0)
+    value = handle.read().strip()
+    if not value:
+        return None
+    try:
+        return _review_id(value)
+    except ValueError:
+        return None
+
+
+def _write_process_cursor(handle: Any, review_id: str) -> None:
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{_review_id(review_id)}\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def _recover_claimed_documents(reviews_root: Path) -> None:
+    if not reviews_root.exists():
+        return
+    pattern = re.compile(
+        r"^\.(?P<name>[A-Za-z0-9][A-Za-z0-9_.-]{0,159}\.md)\.\d+\.[0-9a-f]{32}\.cas$"
+    )
+    for claim in sorted(reviews_root.glob(".*.cas")):
+        match = pattern.fullmatch(claim.name)
+        if match is None:
+            continue
+        target = reviews_root / match.group("name")
+        _restore_claim_if_vacant(claim, target)
+
+
+def _delete_document_if_unchanged(path: Path, expected: str) -> bool:
+    claim = _claim_document_if_unchanged(path, expected)
+    if claim is None:
+        return False
+    try:
+        claim.unlink()
+    except Exception:
+        _restore_claim_if_vacant(claim, path)
+        raise
+    _fsync_directory(path.parent)
+    return not path.exists()
+
+
+def _claim_document_if_unchanged(path: Path, expected: str) -> Path | None:
+    if not _supports_atomic_hardlink_publication(path):
+        return None
+    claim = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.cas")
+    try:
+        os.replace(path, claim)
+    except FileNotFoundError:
+        return None
+    try:
+        mode = claim.stat(follow_symlinks=False).st_mode
+        actual = claim.read_text(encoding="utf-8") if stat.S_ISREG(mode) else None
+    except Exception:
+        _restore_claim_if_vacant(claim, path)
+        raise
+    if actual != expected:
+        _restore_claim_if_vacant(claim, path)
+        return None
+    return claim
+
+
+def _supports_atomic_hardlink_publication(path: Path) -> bool:
+    probe = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.link-probe")
+    try:
+        os.link(path, probe, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise RuntimeError(
+            "exact review finalization requires hard-link support in the review directory"
+        ) from exc
+    finally:
+        probe.unlink(missing_ok=True)
+    return True
+
+
+def _restore_claim_if_vacant(claim: Path, path: Path) -> None:
+    try:
+        os.link(claim, path, follow_symlinks=False)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        if not path.exists():
+            raise RuntimeError(f"could not restore claimed review document: {path}") from exc
+    claim.unlink(missing_ok=True)
+    _fsync_directory(path.parent)
+
+
+def _write_text_if_absent(path: Path, text: str) -> bool:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.publish")
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError:
+            return False
+        except OSError as exc:
+            raise RuntimeError(
+                "exact review publication requires hard-link support in the review directory"
+            ) from exc
+        _fsync_directory(path.parent)
+        return True
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _atomic_write_text(path: Path, text: str) -> None:

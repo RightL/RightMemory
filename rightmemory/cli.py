@@ -30,6 +30,7 @@ from .config import (
     load_pruner_config,
     load_review_config,
     load_sync_config,
+    load_update_corrector_config,
 )
 from .dreamer_trigger import DreamerTriggerStore
 from .doctor import format_doctor_report, run_agent_cli_doctor
@@ -47,7 +48,14 @@ from .profiles import (
 )
 from .platform import restart_current_process
 from .review import ReviewScanner, normalize_transcript
-from .runtime import AUTOMATIC_WRITE_ROLES, STATE_EFFECT, RightMemoryRuntime
+from .runtime import (
+    AUTOMATIC_WRITE_ROLES,
+    STATE_EFFECT,
+    RightMemoryRuntime,
+    _git_rightmemory_diff,
+    _rightmemory_write_surface,
+    recover_pending_update_review_effect,
+)
 from .semantic_operation import FINAL_PHASES, SemanticOperationStore
 from .session import MemoryWriteLock
 from .shared_view_builder import refresh_file_view, run_file_view_builder, run_question_view_builder
@@ -69,12 +77,12 @@ from .shares import approve_share, create_share, join_share, list_shares, publis
 from .status import collect_status, format_status_dashboard
 from .sync import SyncManager
 from .update_review import (
-    DEFAULT_STABLE_SECONDS,
     UpdateReviewOutcome,
     UpdateReviewProcessResult,
     UpdateReviewRequest,
     UpdateReviewStore,
 )
+from .update_corrector import parse_update_correction_result
 from .watch import (
     MANAGED_WATCH_TARGETS,
     WATCH_HANDOFF_PID_ENV,
@@ -1306,83 +1314,163 @@ def _update_review_main(argv: list[str], memory_root: Path) -> int:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     scan = subparsers.add_parser("scan", help="process one ready update-review comment")
-    scan.add_argument("--once", action="store_true", help="process at most one ready comment and exit")
-    scan.add_argument("--stable-seconds", type=int, default=DEFAULT_STABLE_SECONDS)
+    scan.add_argument(
+        "--once",
+        action="store_true",
+        help="attempt at most one ready comment and exit",
+    )
     watch = subparsers.add_parser("watch", help="periodically process ready update-review comments")
     watch.add_argument("--interval", type=int, default=DEFAULT_UPDATE_REVIEW_WATCH_INTERVAL_SECONDS)
-    watch.add_argument("--stable-seconds", type=int, default=DEFAULT_STABLE_SECONDS)
     args = parser.parse_args(argv)
 
     if args.command == "scan":
         if not args.once:
             raise ValueError("update-review scan currently requires --once")
         with WatchLock(memory_root, "update-review"):
-            result = _run_update_review_scan(memory_root, args.stable_seconds)
+            result = _run_update_review_scan(memory_root)
         print(_format_update_review_result(result))
         return 0
     if args.command == "watch":
-        return _update_review_watch(args.interval, args.stable_seconds, memory_root)
+        return _update_review_watch(args.interval, memory_root)
     raise ValueError(f"unknown update-review command: {args.command}")
 
 
-def _run_update_review_scan(memory_root: Path, stable_seconds: int = DEFAULT_STABLE_SECONDS):
-    store = UpdateReviewStore(memory_root, stable_seconds=stable_seconds)
-    return store.process_ready(
+def _run_update_review_scan(memory_root: Path):
+    recovery_error: str | None = None
+    try:
+        recover_pending_update_review_effect(memory_root)
+    except Exception as exc:
+        recovery_error = f"effect recovery: {type(exc).__name__}: {exc}"
+    store = UpdateReviewStore(memory_root)
+    result = store.process_ready(
         lambda request: _run_update_review_correction(memory_root, request),
         limit=1,
+    )
+    if recovery_error is None:
+        return result
+    return replace(
+        result,
+        failed=result.failed + 1,
+        errors=(recovery_error, *result.errors),
     )
 
 
 def _run_update_review_correction(memory_root: Path, request: UpdateReviewRequest) -> UpdateReviewOutcome:
-    message = "\n".join(
-        (
-            "<rightmemory_update_correction>",
-            f"review_id: {request.review_id}",
-            f"original_base_commit: {request.base_commit}",
-            f"original_update_commit: {request.update_commit}",
-            f"original_write_surface: {request.write_surface}",
-            "authority: Apply the human comment semantically to the current RightMemory state. Preserve unrelated later work.",
-            "The verified original diff supplied separately below is authoritative for what the original update changed. "
-            "Do not rely on an editable copy of the review document.",
-            "If clarification is required, make no commit and reply exactly `Needs input: <concise question>`.",
-            "If the current state already satisfies the comment, make no commit and reply exactly "
-            "`No correction needed: <concise reason>`.",
-            "The requested state correction and any admitted corrections.md feedback must share one commit.",
-            "</rightmemory_update_correction>",
-            "",
-            "Verified original diff JSON:",
-            json.dumps(request.original_diff, ensure_ascii=False),
-            "",
-            "Human review comment JSON:",
-            json.dumps(request.comment, ensure_ascii=False),
+    record = _verified_update_operation(memory_root, request)
+    outcome = record.outcome
+    if outcome is None:
+        raise RuntimeError("verified Update operation has no outcome")
+    message = _stored_correction_message(memory_root, request.operation_id)
+    if message is None:
+        verified_diff = _git_rightmemory_diff(
+            memory_root,
+            outcome.start_commit,
+            outcome.landed_commit or "",
         )
-    )
-    config = load_config("update", memory_root=memory_root)
-    runtime = RightMemoryRuntime(config, update_mode="review-correction")
-    session_id = f"update-review-{request.review_id[:48]}-{request.comment_sha256[:12]}"
+        payload = {
+            "original_update": {
+                "operation_id": record.operation_id,
+                "base_commit": outcome.start_commit,
+                "update_commit": outcome.landed_commit,
+                "write_surface": _rightmemory_write_surface(outcome.changed_paths),
+                "changed_paths": list(outcome.changed_paths),
+                "summary": outcome.output,
+                "diff": verified_diff,
+            },
+            "human_comment": request.comment,
+        }
+        if request.previous_question is not None:
+            payload["previous_corrector_question"] = request.previous_question
+        message = (
+            "Review the verified original Update and apply the submitted correction to the current "
+            "RightMemory state. Preserve unrelated later work.\n\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+        )
+    config = load_update_corrector_config(memory_root=memory_root)
+    runtime = RightMemoryRuntime(config)
     try:
-        output = runtime.run_session_turn(session_id, message, operation_id=session_id)
+        output = runtime.run_session_turn(
+            request.operation_id,
+            message,
+            operation_id=request.operation_id,
+        )
         write_result = runtime.last_write_result
     finally:
         runtime.cleanup()
-    clean_output = output.strip()
-    if clean_output.startswith(("Needs input:", "No correction needed:")) and (
-        write_result is not None and write_result.commits_landed
-    ):
-        raise RuntimeError("review correction reported a no-commit outcome after landing a state commit")
-    if clean_output.startswith("Needs input:"):
-        question = clean_output.removeprefix("Needs input:").strip() or "Please clarify the requested correction."
-        return UpdateReviewOutcome.needs_input(question)
-    if clean_output.startswith("No correction needed:"):
-        return UpdateReviewOutcome.resolved(message=clean_output)
-    if write_result is None or write_result.commits_landed != 1:
-        raise RuntimeError("review correction did not land exactly one validated state commit")
-    if getattr(write_result, "operation_id", None) is None and _changed_memory_paths(write_result.changed_paths):
-        _record_memory_change_pressure(memory_root)
+    decision = parse_update_correction_result(output)
+    if write_result is None or write_result.operation_id != request.operation_id:
+        raise RuntimeError("update correction did not complete its validated semantic operation")
+    _require_completed_correction_operation(memory_root, request.operation_id)
+    if decision.status == "needs_input":
+        if write_result.commits_landed:
+            raise RuntimeError("needs-input update correction unexpectedly landed a state commit")
+        return UpdateReviewOutcome.needs_input(decision.message)
+    if decision.status == "no_change":
+        if write_result.commits_landed:
+            raise RuntimeError("no-change update correction unexpectedly landed a state commit")
+        return UpdateReviewOutcome.resolved(message=decision.message)
+    if write_result.commits_landed != 1:
+        raise RuntimeError("applied update correction did not land its one validated state commit")
     return UpdateReviewOutcome.resolved(
         correction_commit=write_result.landed_commit,
-        message=clean_output or None,
+        message=decision.message,
     )
+
+
+def _stored_correction_message(memory_root: Path, operation_id: str) -> str | None:
+    record = SemanticOperationStore(memory_root).read(operation_id)
+    if record is None:
+        return None
+    if (
+        record.input_data.get("role") != "update-corrector"
+        or record.input_data.get("kind") != "semantic-turn"
+        or record.input_data.get("session_id") != operation_id
+    ):
+        raise RuntimeError("existing update correction operation has invalid routing")
+    message = record.input_data.get("message")
+    if not isinstance(message, str) or not message.strip():
+        raise RuntimeError("existing update correction operation has no replayable message")
+    return message
+
+
+def _require_completed_correction_operation(memory_root: Path, operation_id: str) -> None:
+    store = SemanticOperationStore(memory_root)
+    record = store.read(operation_id)
+    if record is None:
+        raise RuntimeError("update correction operation receipt is missing")
+    if (
+        record.phase not in FINAL_PHASES
+        or record.input_data.get("role") != "update-corrector"
+        or record.input_data.get("kind") != "semantic-turn"
+    ):
+        raise RuntimeError("update correction operation receipt has invalid terminal routing")
+    pending = tuple(effect.name for effect in store.list_pending_effects(operation_id))
+    if pending:
+        raise RuntimeError(
+            "update correction has pending operation effects: " + ", ".join(pending)
+        )
+
+
+def _verified_update_operation(memory_root: Path, request: UpdateReviewRequest):
+    if request.review_id != request.update_commit:
+        raise ValueError("update review id does not match its original Update commit")
+    record = SemanticOperationStore(memory_root).read(request.origin_operation_id)
+    if record is None:
+        raise ValueError("original Update operation receipt is missing")
+    if (
+        record.input_data.get("role") != "update"
+        or record.input_data.get("kind") != "semantic-turn"
+        or record.phase != "committed"
+    ):
+        raise ValueError("original operation is not a committed Update")
+    outcome = record.outcome
+    if outcome is None:
+        raise ValueError("original Update operation receipt has no outcome")
+    if outcome.start_commit != request.base_commit:
+        raise ValueError("review base commit does not match the original Update receipt")
+    if outcome.landed_commit != request.update_commit:
+        raise ValueError("review Update commit does not match the original Update receipt")
+    return record
 
 
 def _format_update_review_result(result: UpdateReviewProcessResult) -> str:
@@ -1392,46 +1480,34 @@ def _format_update_review_result(result: UpdateReviewProcessResult) -> str:
         f"needs_input: {result.needs_input}",
         f"failed: {result.failed}",
         f"blank: {result.blank}",
-        f"unstable: {result.unstable}",
-        f"unchanged: {result.unchanged}",
+        f"not_ready: {result.not_ready}",
+        f"changed: {result.changed}",
         f"malformed: {result.malformed}",
-        f"missing: {result.missing}",
         f"pruned_blank: {result.pruned_blank}",
     ]
     lines.extend(f"error: {error}" for error in result.errors)
     return "\n".join(lines)
 
 
-def _update_review_watch(interval: int, stable_seconds: int, memory_root: Path) -> int:
+def _update_review_watch(interval: int, memory_root: Path) -> int:
     if interval < 1:
         raise ValueError("--interval must be a positive integer")
-    if stable_seconds < 0:
-        raise ValueError("--stable-seconds must be a nonnegative integer")
     refresh = InstallStamp(memory_root)
-    consecutive_failures = 0
-    exit_code = 0
     try:
         with _watch_stop_signal("update-review", memory_root) as stop, WatchLock(memory_root, "update-review"):
             while not stop.requested:
                 _reexec_if_install_changed(refresh, stop)
                 timestamp = datetime.now(UTC).isoformat()
                 print(f"[{timestamp}] rightmemory update-review scan", flush=True)
-                result = _run_update_review_scan(memory_root, stable_seconds)
+                result = _run_update_review_scan(memory_root)
                 print(_format_update_review_result(result), flush=True)
                 _reexec_if_install_changed(refresh, stop)
-                if result.failed:
-                    consecutive_failures += 1
-                    if _watch_failure_limit_reached("update-review", consecutive_failures):
-                        exit_code = 1
-                        break
-                else:
-                    consecutive_failures = 0
-                if not stop.requested and result.processed:
+                if not stop.requested and result.processed and not result.failed:
                     continue
                 if not _sleep_with_refresh_check(interval, refresh, stop):
                     break
         print("rightmemory update-review watch stopped", file=sys.stderr)
-        return exit_code
+        return 0
     except KeyboardInterrupt:
         print("rightmemory update-review watch stopped", file=sys.stderr)
         return 130

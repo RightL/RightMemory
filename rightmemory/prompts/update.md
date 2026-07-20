@@ -45,17 +45,6 @@
 - Judge importance by likely recurrence, cost when repeated, applicability across future tasks, strength of the user's correction, and how fully existing guidance already covers the pattern. Fifteen is a ceiling, not a quota or an automatic eviction trigger.
 - Corrections to RightMemory edits belong to updater-only correction feedback, not these M# collections.
 
-## Reviewed Update Correction
-
-- A review-correction request supplies the complete review document, original update diff, current RightMemory state, and one human comment. Treat the comment as a semantic correction to the current state, not as a textual Git revert.
-- Preserve unrelated later changes. If the requested state is ambiguous, make no edit or commit and reply exactly `Needs input: <concise question>`.
-- If the current state already satisfies the comment and no edit is needed, make no commit and reply exactly `No correction needed: <concise reason>`.
-- A successful state correction stands on its own. It may produce zero, one, or several feedback candidates for root `corrections.md`; rejecting all feedback candidates must not block the requested state change.
-- Each feedback item uses `Background`, `Proposed edit`, and `Accepted edit`. Keep only the smallest self-contained evidence needed to understand the correction; use `[no memory change]` when the proposal was rejected entirely.
-- Curate at most 15 feedback items. Improve, merge, or replace evidence for a represented pattern. Admit a distinct pattern only when important enough; when the set is full, discard it unless it is more important than an existing item.
-- When feedback is admitted, commit its `corrections.md` change atomically with the successful state correction. Failed or ambiguous corrections add no feedback.
-- `corrections.md` is updater-only feedback, not Memory, Pursuit, or graph content. Do not expose it through ordinary retrieval or add generalized lessons to its entries.
-
 ## Shared View Connections
 
 - Shared-view relationships use schema-defined MF# and MQ# headings. Keep their bodies focused on local relationship meaning.

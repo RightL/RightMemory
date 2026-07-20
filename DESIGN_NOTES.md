@@ -61,15 +61,19 @@ Updating RightMemory is one judgment over two lifecycles. The updater treats rel
 
 This separation keeps orchestration simple: the skill reports task state, while the updater owns storage judgment and matching against existing Pursuits. Memory retains its strict durable filter and does not become a bug database, implementation log, experiment ledger, or duplicate of project-local artifacts. Pursuit shares the existing update queue, model role, and schedule because a second pipeline would make one task settle at two different times.
 
-### Two correction channels
+### Three correction surfaces
 
 Corrections to ordinary agent writing, reasoning, or behavior may become Writing or Design M# evidence when the rejected/accepted contrast is useful during a future second pass. A directly executable rule belongs in ordinary Agent Behavior or S# instead, because storing the same lesson as both instruction and correction evidence would increase prompt weight without increasing guidance.
 
-Corrections to RightMemory edits belong in root-level `corrections.md`, which only the updater consumes semantically. Keeping update-edit feedback outside Memory prevents ordinary retrieval and Memory maintenance from treating updater examples as user knowledge. The same event is not stored in both channels.
+Reusable feedback about Update's state judgment belongs in root-level `corrections.md`, which only Update and the internal update-corrector consume semantically. Keeping updater feedback outside Memory prevents ordinary retrieval and Memory maintenance from treating those examples as user knowledge.
+
+The local update-review Markdown document is neither kind of durable correction evidence. It is a disposable human interface that owns the current comment and explicit submission intent. Keeping that temporary request separate from both durable surfaces prevents UI state from becoming Memory and prevents one correction event from being stored redundantly.
 
 ### Offline review and correction feedback
 
-Each normal unified-updater commit produces one local Markdown review document with a natural account of the change and one free-form human comment area; correction and maintenance commits do not. A periodic checker handles each stable comment revision once. Semantic correction uses the review, original diff, and current state so it can preserve unrelated later work. The review area is a bounded disposable inbox: resolved files are removed, untouched blank files expire, and ambiguous requests remain until the comment changes.
+Each normal unified-updater commit produces one local Markdown review document with a natural account of the change, one free-form human comment area, and an explicit Ready checkbox; correction and maintenance commits do not. Ready is the submission boundary because a visible human control is more reliable than inferring intent from file age. The document and one process lock are sufficient, so no sidecar state, stability timer, or processed-comment ledger is needed. The lock file retains only the last attempted review id, giving bounded scans durable round-robin fairness without another state artifact.
+
+The internal update-corrector receives only the submitted comment plus context re-derived from the original semantic-operation receipt and Git. It never trusts the editable displayed diff. A review id and normalized-comment hash identify one correction operation, making retries replay the same semantic transaction. After the callback and its journaled effects complete, exact-document compare-and-swap deletes a resolved review or writes a clarification question; a newer human edit is left untouched. Failures leave Ready checked so the same revision retries after the watcher delay. The scanner also replays one stranded review-creation effect per pass directly from the durable Update receipt, so an interruption after commit does not require another model turn.
 
 A successful state correction is independent from feedback admission. The state change lands whenever it succeeds; its `corrections.md` candidates may be merged, admitted, or discarded, with any accepted feedback included in the same commit. This preserves the user's requested state without forcing a weak example into the bounded feedback set.
 
@@ -81,7 +85,7 @@ The M# collections and updater-only `corrections.md` are bounded priority sets r
 
 ### Automatic write isolation
 
-Automatic semantic turns run in temporary Git worktrees when they operate on the main state root. Each role keeps an explicit write boundary: unified update may maintain Memory and Pursuit together, correction may also update `corrections.md`, Memory-oriented maintenance roles preserve cross-tree references, and Insight commits only reflective logs. Runtime validates the role-owned result before landing it and promotes temporary session/provider state only after the isolated turn succeeds.
+Automatic semantic turns run in temporary Git worktrees when they operate on the main state root. Each role keeps an explicit write boundary: unified Update may maintain Memory and Pursuit together, update-corrector may additionally update `corrections.md` only alongside a real state correction, Memory-oriented maintenance roles preserve cross-tree references, and Insight commits only reflective logs. Runtime validates the role-owned result before landing it and promotes temporary session/provider state only after the isolated turn succeeds.
 
 This keeps the user-facing RightMemory repo focused on completed commits instead of partial agent editing state. Failed or interrupted work is discarded because its source input remains retryable. Dirty user-owned state blocks automatic semantic writes independently of remote sync so local edits remain visible instead of being blended into a model-created change.
 
@@ -103,7 +107,7 @@ Insight logs are a reflective artifact stream inside the RightMemory repo. They 
 
 ### Command-backed roles
 
-RightMemory exposes explicit command roles because operations still have different authority boundaries even though Memory and Pursuit share one graph. `retrieve` is read-only over current RightMemory. Transcript review extracts candidates from idle sessions and routes them through `update` rather than writing the graph itself. `history`, `dreamer`, `insight`, and `pruner` remain Memory-oriented, while `update` performs the unified durable-versus-live reconciliation across both document trees. Offline update correction is a mode of that semantic update authority rather than a second updater role. Command-selected roles keep prompts, tools, sessions, and write boundaries explicit without asking one model context to infer authority from dispatch tags.
+RightMemory exposes explicit command roles because operations still have different authority boundaries even though Memory and Pursuit share one graph. `retrieve` is read-only over current RightMemory. Transcript review extracts candidates from idle sessions and routes them through `update` rather than writing the graph itself. `history`, `dreamer`, `insight`, and `pruner` remain Memory-oriented, while `update` performs the unified durable-versus-live reconciliation across both document trees. Review correction is a separate internal role because its authority, evidence, commit contract, and terminal result differ from ordinary candidate reconciliation. It inherits Update's executor configuration for operational simplicity but has its own prompt and fresh one-shot conversation; it is not a public CLI or TOML role.
 
 ### Command-backed install modes
 
@@ -127,7 +131,7 @@ Standalone mode exposes narrow filesystem and Git tools instead of arbitrary Pyt
 
 ### Standalone commit boundary
 
-Standalone commit tools are role-aware. Unified update may commit Memory and Pursuit files together; semantic correction may additionally commit `corrections.md`; Memory-oriented maintenance roles retain their smaller surfaces; Insight commits `insight_logs/*.md`. Empty commits remain reserved for `prune:` checkpoints. Retrieval roles receive no write tools, and unrelated files remain outside model-driven stage and commit allowlists.
+Standalone commit tools are role-aware. Unified Update may commit Memory and Pursuit files together; update-corrector may additionally commit `corrections.md` with a state correction but cannot edit the fixed writing/design M# collections; Memory-oriented maintenance roles retain their smaller surfaces; Insight commits `insight_logs/*.md`. Empty commits remain reserved for `prune:` checkpoints. Retrieval roles receive no write tools, and unrelated files remain outside model-driven stage and commit allowlists.
 
 ### Global RightMemory sync
 

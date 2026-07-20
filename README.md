@@ -113,7 +113,7 @@ When it completes, blocks, changes direction, or reaches a useful handoff:
 
 Later:
   the unified updater reconciles candidates into Memory, Pursuit, both, or neither
-  a local update-review document lets the user comment on the updater's edit
+  a local update-review document lets the user comment and explicitly submit a correction
   rightmemory dreamer consolidates stale, duplicated, or overgrown memory
   rightmemory insight writes durable reflection artifacts when useful
 ```
@@ -368,7 +368,7 @@ RightMemory separates corrections to general agent work from corrections to Righ
 
 Reusable rejected/accepted evidence about ordinary agent work may be curated into two fixed Memory-only M# collections: `MEMORY_agent-corrections-writing.md` for expression and presentation, and `MEMORY_agent-corrections-design.md` for underlying reasoning, decisions, behavior, or action. Each is a priority-curated set of at most 15 compact items, not an append-only log or FIFO. Agents consult relevant correction evidence only after forming an initial draft or direction. When a concise executable instruction captures the lesson better, ordinary Agent Behavior or S# guidance replaces duplicate correction evidence.
 
-Comments on unified-updater edits use the separate update-review channel. A successful state correction may also curate root `corrections.md`; that file is synchronized updater-only feedback, not Memory and not graph content. The same correction is never stored in both channels.
+Comments on unified-updater edits use the separate local update-review channel. Its Markdown is temporary UI, not Memory or durable correction evidence. A successful state correction may also curate root `corrections.md`; that file is synchronized updater-only feedback, not Memory and not graph content. General writing/design correction M# collections remain a third, independent surface.
 
 ## Agent Roles
 
@@ -391,8 +391,8 @@ unified updater
   +--> PURSUIT*.md                  live intent and continuity
 
 update-review
-  +--> local Markdown review        one overall human comment
-  +--> update correction mode       state correction and optional corrections.md feedback
+  +--> local Markdown review        one overall human comment + explicit Ready control
+  +--> internal update-corrector    state correction and optional corrections.md feedback
 ```
 
 - `memory-retriever` retrieves relevant context and never submits updates.
@@ -412,6 +412,7 @@ RightMemory keeps role behavior in one canonical prompt set under `rightmemory/p
 ```text
 rightmemory/prompts/retrieve.md
 rightmemory/prompts/update.md
+rightmemory/prompts/update-corrector.md
 rightmemory/prompts/dreamer.md
 rightmemory/prompts/insight.md
 rightmemory/prompts/reviewer.md
@@ -422,7 +423,7 @@ rightmemory/prompts/sync-reconciler.md
 
 Both install modes use these files through the `rightmemory` runtime. Standalone mode loads them into the local Pydantic AI agent and tool loop. CLI-agent mode wraps the same role instructions into prompts sent to Codex CLI or Claude Code CLI. Other command-capable agents can call the same CLI or daemon surface without changing the schema. The installed `memory-retriever` and `rightmemory-orchestrator` skills remain thin command dispatchers, so role behavior belongs in the canonical prompt files rather than a parallel documentation-first layer.
 
-`reviewer.md` extracts candidate evidence from supported transcripts and submits it through unified update. Offline updater-edit correction uses the update prompt in correction mode.
+`reviewer.md` extracts candidate evidence from supported transcripts and submits it through unified Update. `update-corrector.md` is an internal prompt for explicitly submitted updater-edit corrections; it does not share Update's candidate-reconciliation prompt.
 
 ## Install Modes
 
@@ -539,7 +540,7 @@ The runtime is intentionally small:
 - CLI-agent mode delegates the same role turn to Codex CLI or Claude Code CLI. Retrieve may keep one active provider mapping under `<memory-root>/.runtime/agent_cli_sessions/`; other independent role commands are one-shot.
 - Standalone retrieve uses complete typed reads for local F# details and S# skills, line-numbered reads for local M# evidence, and typed progressive reads for validated MF# graphs and their F#/M#/S# resources, then finishes through a native structured selector. CLI-agent emits the same selector as strict JSON. The shared runtime uses the canonical index to resolve ids, permitted ranges, hierarchy, and source-authored Markdown.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different no-profile root, or use `--profile <name>` / `.rightmemory-profile` for project-specific roots.
-- Retrieve, unified update, update-review correction, transcript-review extraction, history, dreamer, insight, pruner, and sync repair have separate runtime boundaries selected by command line, queue, scanner, or watcher.
+- Retrieve, unified Update, internal update-corrector, transcript-review extraction, history, dreamer, insight, pruner, and sync repair have separate runtime boundaries selected by command line, queue, scanner, or watcher.
 - Role-specific executor settings are read from `<memory-root>/rightmemory.toml`.
 - Standalone calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`. In CLI-agent mode, only retrieve persists a provider mapping across commands. Explicit `chat` may reuse one process-local provider thread, while daemon requests and other independent role turns start fresh threads.
 - Every new CLI-agent provider thread receives an ownership record under `<memory-root>/.runtime/agent_cli_threads/`, including one-shot and failed isolated work, so transcript review can exclude internal conversations without relying on an active mapping.
@@ -703,7 +704,7 @@ intentionally stays focused on managed watch process state.
 
 #### Offline Update Review
 
-Every normal unified-updater commit creates one local Markdown document under `<memory-root>/.runtime/update-review/reviews/`. Its generated portion explains the update and may include the relevant diff; one free-form human comment area covers the whole update.
+Every normal unified-updater commit creates one local Markdown document under `<memory-root>/.runtime/update-review/reviews/`. Its generated portion explains the update and includes a readable diff. One free-form human comment area covers the whole update, and the visible `Ready for correction` checkbox is the only submission signal.
 
 The checker can also be run directly:
 
@@ -712,9 +713,11 @@ rightmemory update-review scan --once
 rightmemory update-review watch
 ```
 
-A stable non-empty comment requests semantic correction; a blank comment requests nothing. Each stable comment revision is processed at most once. Resolved files are removed, untouched blank files expire under bounded retention, and needs-input files remain until the user changes the comment.
+A non-empty comment is inert until the user checks Ready; no file-age or modification-time heuristic is involved. The Markdown document owns both human text and submission intent, with no review state JSON, pending queue, or processed-comment marker. The existing process lock retains only the last attempted review id so each bounded scan advances fairly past failures. Resolved files are removed, untouched blank files expire under bounded retention, and a needs-input result writes the question into the unchanged document and clears Ready.
 
-The correction pass receives the complete review document, original update diff, current RightMemory state, and human comment. It preserves unrelated later work and commits nothing when the requested result is ambiguous. A successful state correction may change Memory, Pursuit, or both and may curate root `corrections.md` in the same commit. Rejecting a feedback candidate never blocks the requested state correction, and a corrections-only commit is invalid. `corrections.md` holds at most 15 priority-curated entries.
+The deterministic scanner sends only the submitted comment to a separate internal `update-corrector` role, together with original-update context re-verified from the semantic-operation receipt and Git. The editable displayed diff is never authoritative. The corrector uses Update's configured executor in a fresh one-shot conversation, but has its own concise prompt and typed `applied`, `no_change`, or `needs_input` result. A review id plus normalized-comment hash gives each revision a deterministic operation id, so failure retries replay the same transaction.
+
+The corrector preserves unrelated later work and commits nothing for ambiguous or already-satisfied requests. An applied correction lands exactly one validated commit changing Memory, Pursuit, or both and may curate root `corrections.md` in that same commit; a corrections-only commit is invalid. Exact-document compare-and-swap removes a resolved review or writes a clarification only when the human has not edited it during processing. Finalization also waits for the correction's journaled effects to complete. Newer edits remain untouched, while execution failures leave Ready checked and retry after the watcher delay. Each scan can recreate one review document whose original post-commit effect was interrupted, directly from the durable receipt and Git without running a model.
 
 #### Transcript Review
 
@@ -814,7 +817,7 @@ check_interval_seconds = 3000
 
 A landed Memory-changing transaction adds one configured unit to Dreamer and Insight regardless of how many candidates the updater reconciled. Pursuit-only, no-op, and failed updates add no pressure. Transcript review only submits evidence to the unified queue and adds no pressure by itself. A successful automatic cycle consumes that role's configured threshold after it lands or completes as a valid no-op; failed cycles preserve accumulated points. `rightmemory dreamer watch --interval <seconds>` and `rightmemory insight watch --interval <seconds>` override the trigger-check cadence.
 
-Transcript-review and update-review scans share their per-role locks with the corresponding watchers under `.runtime/watch/`; dreamer, insight, and pruner watchers hold their own locks there as well. A competing scan or watcher exits instead of duplicating work. Unified updates and update-review corrections also share one updater execution lock. Isolated roles may do model work in temporary checkouts, and landing uses the shared write lock before changing the main repository.
+Transcript-review and update-review scans share their per-role locks with the corresponding watchers under `.runtime/watch/`; dreamer, insight, and pruner watchers hold their own locks there as well. A competing scan or watcher exits instead of duplicating work. Unified Update and update-corrector also share one updater execution lock. Isolated roles may do model work in temporary checkouts, and landing uses the shared write lock before changing the main repository.
 
 `rightmemory watch stop` writes a PID-bound cooperative stop request. A sleeping
 watcher exits within a few seconds; a watcher doing model work finishes the
@@ -829,7 +832,7 @@ when Windows assigns it a new PID. Run `rightmemory watch start` or
 
 ### Isolated Automatic Writes
 
-Automatic unified-update, dreamer, insight, and pruner turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. Normal unified updates may commit Memory and Pursuit together. Update-review correction mode may additionally change `corrections.md`, but only alongside a successful state correction. Memory-oriented maintenance roles remain restricted to Memory, while Insight commits `insight_logs/*.md`. Runtime validates complete role-owned results and lands successful commits; empty `prune:` checkpoints are allowed.
+Automatic unified-Update, update-corrector, dreamer, insight, and pruner turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. Normal Update may commit Memory and Pursuit together. Update-corrector may additionally change `corrections.md`, but only alongside a successful state correction, and cannot edit the fixed writing/design correction collections. Memory-oriented maintenance roles remain restricted to Memory, while Insight commits `insight_logs/*.md`. Runtime validates complete role-owned results and lands successful commits; empty `prune:` checkpoints are allowed.
 
 Temporary session and provider state lives under `.runtime/isolated-state/` during an isolated turn and is promoted after successful landing or a valid no-op. Standalone turns seed local message history there. CLI-agent turns start speculative provider work in a fresh one-shot session. Successful ownership state is promoted; if later validation or landing fails, the ownership record alone is preserved so the abandoned internal thread remains excluded from review and eligible for cleanup. Other temporary work is discarded, and the original candidate batch, update-review request, or maintenance trigger balance remains the retry source.
 
