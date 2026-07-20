@@ -80,16 +80,25 @@ class HubClient:
             bearer=True,
         )
 
-    def publish_package(self, view_id: str, package_root: Path) -> dict[str, Any]:
+    def publish_package(
+        self,
+        view_id: str,
+        package_root: Path,
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         with TemporaryDirectory() as tempdir:
             archive = Path(tempdir) / "package.zip"
             with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
                 for path in sorted(Path(package_root).rglob("*")):
                     if path.is_file() and not path.is_symlink():
                         zip_file.write(path, path.relative_to(package_root).as_posix())
+            path = f"/api/views/{urllib.parse.quote(view_id)}/versions"
+            if idempotency_key is not None:
+                path += "?idempotency_key=" + urllib.parse.quote(idempotency_key, safe="")
             return self._request(
                 "POST",
-                f"/api/views/{urllib.parse.quote(view_id)}/versions",
+                path,
                 data=archive.read_bytes(),
                 content_type="application/zip",
                 bearer=True,

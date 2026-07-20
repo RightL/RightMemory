@@ -22,6 +22,7 @@ from .platform import (
     process_identity,
     unlock_file,
 )
+from .semantic_operation import FINAL_PHASES, SemanticOperationStore
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
 
 UPDATE_DEBOUNCE_SECONDS = 60 * 60
@@ -59,6 +60,8 @@ class AsyncUpdateState:
     next_retry_at: str | None = None
     last_error: str | None = None
     next_flush_at: str | None = None
+    current_operation_id: str | None = None
+    last_operation_id: str | None = None
     current_batch: list[AsyncUpdateJob] = field(default_factory=list)
     pending: list[AsyncUpdateJob] = field(default_factory=list)
     next_id: int = 1
@@ -69,6 +72,14 @@ class AsyncUpdateSessionBatch:
     session_id: str
     ready_at: datetime
     jobs: list[AsyncUpdateJob]
+    operation_id: str | None = None
+
+
+@dataclass(frozen=True)
+class AsyncBatchReservation:
+    operation_id: str
+    created_at: str
+    participants: list[AsyncUpdateSessionBatch]
 
 
 @dataclass(frozen=True)
@@ -102,22 +113,34 @@ class AsyncUpdateStore:
         self.role = role
         self.root = memory_root / ".runtime" / "async" / role
         self.worker_root = self.root / "_worker"
+        self.reservations_root = self.root / "_batches"
 
     def read(self, session_id: str) -> AsyncUpdateState:
         with self._locked(session_id):
-            return self._read_checked_locked(session_id)
+            state = self._read_checked_locked(session_id)
+        if state.last_operation_id is not None:
+            self._clear_reservation_if_acknowledged(state.last_operation_id)
+        return state
 
     def cancel_pending(self, session_id: str, candidate_id: int) -> tuple[AsyncUpdateState, bool]:
         if not isinstance(candidate_id, int) or isinstance(candidate_id, bool) or candidate_id < 1:
             raise ValueError("candidate id must be a positive integer")
-        with self._locked(session_id):
-            state = self._read_checked_locked(session_id)
-            pending = [job for job in state.pending if job.id != candidate_id]
-            canceled = len(pending) != len(state.pending)
-            if canceled:
-                state = replace(state, pending=pending)
-                self._write(session_id, state)
-            return state, canceled
+        with self._reservations_locked():
+            reserved_ids = self._reserved_candidate_ids_locked(session_id)
+            with self._locked(session_id):
+                state = self._read_checked_locked(session_id)
+                pending = [
+                    job
+                    for job in state.pending
+                    if job.id != candidate_id or job.id in reserved_ids
+                ]
+                canceled = len(pending) != len(state.pending)
+                if canceled:
+                    state = replace(state, pending=pending)
+                    self._write(session_id, state)
+        if state.last_operation_id is not None:
+            self._clear_reservation_if_acknowledged(state.last_operation_id)
+        return state, canceled
 
     def retry_manual_recovery(self) -> AsyncUpdateRetryResult:
         now = _now_dt()
@@ -137,8 +160,8 @@ class AsyncUpdateStore:
                     continue
                 if state.status != STATUS_MANUAL_RECOVERY:
                     continue
-                retry_pending = [*state.current_batch, *state.pending]
-                if not retry_pending:
+                retry_count = len(state.current_batch) + len(state.pending)
+                if not retry_count:
                     skipped_sessions += 1
                     continue
                 next_state = replace(
@@ -151,12 +174,10 @@ class AsyncUpdateStore:
                     attempts=0,
                     next_retry_at=_format_time(now),
                     last_error=None,
-                    current_batch=[],
-                    pending=retry_pending,
                 )
                 self._write(session_id, next_state)
                 requeued_sessions += 1
-                requeued_candidates += len(retry_pending)
+                requeued_candidates += retry_count
                 requeued_session_ids.append(session_id)
                 if first_session_id is None:
                     first_session_id = session_id
@@ -249,7 +270,18 @@ class AsyncUpdateStore:
                     sleep_until(min(deadline, _now_dt() + timedelta(seconds=WORKER_IDLE_POLL_SECONDS)))
                     continue
 
-                batch_id = _batch_session_id(batch)
+                existing_operation_ids = {item.operation_id for item in batch if item.operation_id is not None}
+                if len(existing_operation_ids) > 1:
+                    raise RuntimeError("async recovery batch contains multiple operation ids")
+                computed_batch_id = _batch_session_id(batch)
+                batch_id = next(iter(existing_operation_ids), computed_batch_id)
+                if existing_operation_ids and batch_id != computed_batch_id:
+                    raise RuntimeError("async recovery batch no longer matches its operation id")
+                reservation = self._reserve_cross_session_batch(batch, batch_id)
+                if reservation is None:
+                    # A pending candidate may be canceled after selection but before reservation.
+                    continue
+                batch = reservation.participants
                 session_ids = [item.session_id for item in batch]
                 with self._worker_locked():
                     self._write_worker_locked(
@@ -259,8 +291,9 @@ class AsyncUpdateStore:
                         session_ids=session_ids,
                         error=None,
                     )
-                started = self._start_cross_session_batch(batch)
+                started = self._start_cross_session_batch(batch, batch_id)
                 if not started:
+                    self._clear_reservation_if_acknowledged(batch_id)
                     with self._worker_locked():
                         self._write_worker_locked(
                             status="running",
@@ -272,7 +305,6 @@ class AsyncUpdateStore:
                     continue
                 batch = started
 
-                batch_id = _batch_session_id(batch)
                 session_ids = [item.session_id for item in batch]
                 with self._worker_locked():
                     self._write_worker_locked(
@@ -283,9 +315,26 @@ class AsyncUpdateStore:
                         error=None,
                     )
 
+                terminal_output = self._terminal_operation_output(batch_id)
+                if terminal_output is not None:
+                    accepted_count = self._finish_cross_session_batch(batch, batch_id, terminal_output)
+                    if accepted_count:
+                        processed += accepted_count
+                        if on_batch_success is not None:
+                            on_batch_success(accepted_count)
+                    continue
+
                 try:
                     result = run_message(batch_id, _format_batch_message(batch))
                 except Exception as exc:
+                    terminal_output = self._terminal_operation_output(batch_id)
+                    if terminal_output is not None:
+                        accepted_count = self._finish_cross_session_batch(batch, batch_id, terminal_output)
+                        if accepted_count:
+                            processed += accepted_count
+                            if on_batch_success is not None:
+                                on_batch_success(accepted_count)
+                        continue
                     failed_states = self._fail_cross_session_batch(batch, str(exc))
                     manual_failure = manual_failure or any(
                         state.status == STATUS_MANUAL_RECOVERY for state in failed_states
@@ -298,11 +347,19 @@ class AsyncUpdateStore:
                             session_ids=[],
                             error=None,
                         )
-                    if any(state.status == "failed" and state.pending for state in failed_states):
+                    if any(
+                        state.status == "failed" and (state.current_batch or state.pending)
+                        for state in failed_states
+                    ):
                         continue
                     return AsyncUpdateWorkerResult(status="failed", processed=processed, failed=True)
 
-                accepted_count = self._finish_cross_session_batch(batch, result)
+                terminal_output = self._terminal_operation_output(batch_id)
+                accepted_count = self._finish_cross_session_batch(
+                    batch,
+                    batch_id,
+                    result if terminal_output is None else terminal_output,
+                )
                 if accepted_count:
                     processed += accepted_count
                     if on_batch_success is not None:
@@ -322,17 +379,45 @@ class AsyncUpdateStore:
         max_wait_seconds: int,
     ) -> tuple[list[AsyncUpdateSessionBatch] | None, datetime | None]:
         now = _now_dt()
+        reserved_batch, reserved_sessions, reservation_deadlines = self._next_reserved_batch(now)
+        if reserved_batch is not None:
+            return reserved_batch, None
+
         recovery: list[AsyncUpdateSessionBatch] = []
+        operation_recovery: dict[str, list[AsyncUpdateSessionBatch]] = {}
+        blocked_operation_ids: set[str] = set()
         eligible: list[AsyncUpdateSessionBatch] = []
-        future_deadlines: list[datetime] = []
+        future_deadlines = list(reservation_deadlines)
 
         for path in self._session_state_paths():
             session_id = path.stem
+            if session_id in reserved_sessions:
+                continue
             with self._locked(session_id):
                 state = self._read_checked_locked(session_id)
                 if state.role != self.role:
                     continue
-                if state.current_batch or not state.pending:
+                if state.current_batch:
+                    operation_id = state.current_operation_id
+                    if state.status == "failed":
+                        ready_at = _required_time(state.next_retry_at, "next_retry_at")
+                        item = AsyncUpdateSessionBatch(
+                            state.session_id,
+                            ready_at,
+                            list(state.current_batch),
+                            operation_id,
+                        )
+                        if operation_id is not None:
+                            operation_recovery.setdefault(operation_id, []).append(item)
+                        elif ready_at <= now:
+                            recovery.append(item)
+                        if ready_at > now:
+                            future_deadlines.append(ready_at)
+                    elif operation_id is not None:
+                        # Every participant must resume the same reserved operation together.
+                        blocked_operation_ids.add(operation_id)
+                    continue
+                if not state.pending:
                     continue
                 if state.status == "failed":
                     ready_at = _required_time(state.next_retry_at, "next_retry_at")
@@ -350,9 +435,19 @@ class AsyncUpdateStore:
                 else:
                     future_deadlines.append(ready_at)
 
+        ready_operation_groups = [
+            (max(item.ready_at for item in items), operation_id, items)
+            for operation_id, items in operation_recovery.items()
+            if operation_id not in blocked_operation_ids and all(item.ready_at <= now for item in items)
+        ]
+        if ready_operation_groups:
+            ready_operation_groups.sort(key=lambda entry: (entry[0], entry[1]))
+            return sorted(ready_operation_groups[0][2], key=lambda item: item.session_id), None
+
         recovery.sort(key=lambda item: (item.ready_at, item.session_id))
         if recovery:
-            return recovery, None
+            operation_id = recovery[0].operation_id
+            return [item for item in recovery if item.operation_id == operation_id], None
 
         eligible.sort(key=lambda item: (item.ready_at, item.session_id))
         if not eligible:
@@ -373,16 +468,315 @@ class AsyncUpdateStore:
         deadlines = [fallback_at, *future_deadlines]
         return None, min(deadlines)
 
-    def _start_cross_session_batch(self, batch: list[AsyncUpdateSessionBatch]) -> list[AsyncUpdateSessionBatch]:
+    def _next_reserved_batch(
+        self,
+        now: datetime,
+    ) -> tuple[list[AsyncUpdateSessionBatch] | None, set[str], list[datetime]]:
+        reservations = self._read_reservations()
+        reserved_sessions: set[str] = set()
+        future_deadlines: list[datetime] = []
+        ready: list[AsyncBatchReservation] = []
+
+        for reservation in reservations:
+            remaining = False
+            blocked = False
+            retry_deadlines: list[datetime] = []
+            for item in reservation.participants:
+                with self._locked(item.session_id):
+                    state = self._read_checked_locked(item.session_id)
+                if state.last_operation_id == reservation.operation_id and not state.current_batch:
+                    continue
+
+                remaining = True
+                self._validate_reserved_participant(state, item, reservation.operation_id)
+                if state.status == STATUS_MANUAL_RECOVERY:
+                    blocked = True
+                elif state.status == "failed":
+                    retry_at = _required_time(state.next_retry_at, "next_retry_at")
+                    if retry_at > now:
+                        retry_deadlines.append(retry_at)
+
+            if not remaining:
+                self._clear_reservation_if_acknowledged(reservation.operation_id)
+                continue
+
+            participant_ids = {item.session_id for item in reservation.participants}
+            overlap = reserved_sessions.intersection(participant_ids)
+            if overlap:
+                session_id = sorted(overlap)[0]
+                raise RuntimeError(f"async session belongs to multiple reserved batches: {session_id}")
+            reserved_sessions.update(participant_ids)
+            if not blocked and not retry_deadlines:
+                ready.append(reservation)
+            elif not blocked and retry_deadlines:
+                # A reserved operation resumes only when every participant is ready.
+                future_deadlines.append(max(retry_deadlines))
+
+        if ready:
+            ready.sort(key=lambda item: (_required_time(item.created_at, "created_at"), item.operation_id))
+            return ready[0].participants, reserved_sessions, future_deadlines
+        return None, reserved_sessions, future_deadlines
+
+    def _validate_reserved_participant(
+        self,
+        state: AsyncUpdateState,
+        item: AsyncUpdateSessionBatch,
+        operation_id: str,
+    ) -> None:
+        if state.session_id != item.session_id:
+            raise RuntimeError(f"async reserved batch has the wrong session: {item.session_id}")
+        if state.role != self.role:
+            raise RuntimeError(f"async reserved batch has the wrong role: {item.session_id}")
+        if state.last_operation_id == operation_id and not state.current_batch:
+            return
+        if state.current_batch == item.jobs:
+            if state.current_operation_id not in {None, operation_id}:
+                raise RuntimeError(f"async batch has a different operation id: {item.session_id}")
+            return
+        if not state.current_batch and state.pending[: len(item.jobs)] == item.jobs:
+            if state.current_operation_id is not None:
+                raise RuntimeError(f"async batch has a different operation id: {item.session_id}")
+            return
+        raise RuntimeError(f"async reserved batch no longer matches session state: {item.session_id}")
+
+    def _reserve_cross_session_batch(
+        self,
+        batch: list[AsyncUpdateSessionBatch],
+        operation_id: str,
+    ) -> AsyncBatchReservation | None:
+        if not batch:
+            raise ValueError("async reserved batch must contain at least one participant")
+        fresh_selection = all(item.operation_id is None for item in batch)
+        participants = [
+            replace(item, operation_id=operation_id)
+            for item in sorted(batch, key=lambda item: item.session_id)
+        ]
+        session_ids = [item.session_id for item in participants]
+        if len(session_ids) != len(set(session_ids)):
+            raise ValueError("async reserved batch must contain unique sessions")
+        if any(not item.jobs for item in participants):
+            raise ValueError("async reserved batch participants must contain at least one candidate")
+        if _batch_session_id(participants) != operation_id:
+            raise RuntimeError("async reserved batch does not match its operation id")
+
+        with self._reservations_locked():
+            path = self._reservation_path(operation_id)
+            if path.exists():
+                existing = self._read_reservation_path(path)
+                if existing.participants != participants:
+                    raise RuntimeError("async operation id already belongs to a different reserved batch")
+                return existing
+
+            participant_ids = set(session_ids)
+            for other_path in sorted(self.reservations_root.glob("*.json")):
+                other = self._read_reservation_path(other_path)
+                overlap = participant_ids.intersection(item.session_id for item in other.participants)
+                if overlap:
+                    session_id = sorted(overlap)[0]
+                    raise RuntimeError(f"async session already belongs to a reserved batch: {session_id}")
+
+            for item in participants:
+                with self._locked(item.session_id):
+                    state = self._read_raw(item.session_id)
+                if (
+                    fresh_selection
+                    and state.session_id == item.session_id
+                    and state.role == self.role
+                    and state.last_operation_id != operation_id
+                    and not state.current_batch
+                    and state.current_operation_id is None
+                    and state.pending[: len(item.jobs)] != item.jobs
+                ):
+                    return None
+                self._validate_reserved_participant(state, item, operation_id)
+
+            reservation = AsyncBatchReservation(
+                operation_id=operation_id,
+                created_at=_now(),
+                participants=participants,
+            )
+            self._write_reservation_locked(path, reservation)
+            return reservation
+
+    def _reserved_candidate_ids_locked(self, session_id: str) -> set[int]:
+        reserved_ids: set[int] = set()
+        for path in sorted(self.reservations_root.glob("*.json")):
+            reservation = self._read_reservation_path(path)
+            for item in reservation.participants:
+                if item.session_id == session_id:
+                    reserved_ids.update(job.id for job in item.jobs)
+        return reserved_ids
+
+    def _read_reservation(self, operation_id: str) -> AsyncBatchReservation | None:
+        if not self.reservations_root.exists():
+            return None
+        with self._reservations_locked():
+            path = self._reservation_path(operation_id)
+            return self._read_reservation_path(path) if path.exists() else None
+
+    def _read_reservations(self) -> list[AsyncBatchReservation]:
+        if not self.reservations_root.exists():
+            return []
+        with self._reservations_locked():
+            return [
+                self._read_reservation_path(path)
+                for path in sorted(self.reservations_root.glob("*.json"))
+            ]
+
+    def _read_reservation_path(self, path: Path) -> AsyncBatchReservation:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        version = data.get("version") if isinstance(data, dict) else None
+        if (
+            not isinstance(data, dict)
+            or isinstance(version, bool)
+            or not isinstance(version, int)
+            or version != 1
+        ):
+            raise ValueError("async batch reservation must be a version 1 JSON object")
+        operation_id = _required_state_str(data, "operation_id")
+        created_at = _required_state_str(data, "created_at")
+        _required_time(created_at, "created_at")
+        raw_participants = data.get("participants")
+        if not isinstance(raw_participants, list) or not raw_participants:
+            raise ValueError("async batch reservation must contain participants")
+
+        participants: list[AsyncUpdateSessionBatch] = []
+        for raw_item in raw_participants:
+            if not isinstance(raw_item, dict):
+                raise ValueError("async batch reservation participants must be JSON objects")
+            session_id = _required_state_str(raw_item, "session_id")
+            _safe_session_id(session_id)
+            ready_at_value = _required_state_str(raw_item, "ready_at")
+            ready_at = _required_time(ready_at_value, "ready_at")
+            jobs = _required_job_list(raw_item, "jobs")
+            if not jobs:
+                raise ValueError("async batch reservation participants must contain candidates")
+            job_ids = [job.id for job in jobs]
+            if any(first >= second for first, second in zip(job_ids, job_ids[1:])):
+                raise ValueError("async batch reservation candidate ids must be strictly increasing")
+            participants.append(AsyncUpdateSessionBatch(session_id, ready_at, jobs, operation_id))
+
+        participants.sort(key=lambda item: item.session_id)
+        session_ids = [item.session_id for item in participants]
+        if len(session_ids) != len(set(session_ids)):
+            raise ValueError("async batch reservation must contain unique sessions")
+        if _batch_session_id(participants) != operation_id:
+            raise ValueError("async batch reservation does not match its operation id")
+        if path.name != self._reservation_path(operation_id).name:
+            raise ValueError("async batch reservation filename does not match its operation id")
+        return AsyncBatchReservation(operation_id, created_at, participants)
+
+    def _write_reservation_locked(self, path: Path, reservation: AsyncBatchReservation) -> None:
+        content = json.dumps(
+            {
+                "version": 1,
+                "operation_id": reservation.operation_id,
+                "created_at": reservation.created_at,
+                "participants": [
+                    {
+                        "session_id": item.session_id,
+                        "ready_at": _format_time(item.ready_at),
+                        "jobs": [asdict(job) for job in item.jobs],
+                    }
+                    for item in reservation.participants
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+        tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        _fsync_directory(path.parent)
+
+    def _clear_reservation_if_acknowledged(self, operation_id: str) -> bool:
+        if not self.reservations_root.exists():
+            return False
+        with self._reservations_locked():
+            path = self._reservation_path(operation_id)
+            if not path.exists():
+                return False
+            reservation = self._read_reservation_path(path)
+            for item in reservation.participants:
+                with self._locked(item.session_id):
+                    state = self._read_raw(item.session_id)
+                if state.last_operation_id != operation_id:
+                    return False
+            path.unlink()
+            _fsync_directory(path.parent)
+            return True
+
+    def _reservation_path(self, operation_id: str) -> Path:
+        digest = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+        return self.reservations_root / f"{digest}.json"
+
+    @contextmanager
+    def _reservations_locked(self):
+        _ensure_runtime_gitignore(self.memory_root / ".runtime")
+        created = not self.reservations_root.exists()
+        self.reservations_root.mkdir(parents=True, exist_ok=True)
+        if created:
+            _fsync_directory(self.root)
+        lock_path = self.reservations_root / "state.lock"
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            lock_file(handle)
+            try:
+                yield
+            finally:
+                unlock_file(handle)
+
+    def _start_cross_session_batch(
+        self,
+        batch: list[AsyncUpdateSessionBatch],
+        operation_id: str,
+    ) -> list[AsyncUpdateSessionBatch]:
+        reservation = self._read_reservation(operation_id)
+        if reservation is None or reservation.participants != batch:
+            raise RuntimeError("async batch must be durably reserved before it starts")
+        if _batch_session_id(batch) != operation_id:
+            raise RuntimeError("async reserved batch no longer matches its operation id")
+
         started: list[AsyncUpdateSessionBatch] = []
         for item in sorted(batch, key=lambda entry: entry.session_id):
-            expected_ids = [job.id for job in item.jobs]
             with self._locked(item.session_id):
                 state = self._read_raw(item.session_id)
-                if [job.id for job in state.pending[: len(expected_ids)]] != expected_ids:
+                if state.last_operation_id == operation_id and not state.current_batch:
+                    started.append(replace(item, operation_id=operation_id))
                     continue
-                current_batch = state.pending[: len(expected_ids)]
-                pending = state.pending[len(expected_ids):]
+                if state.current_batch == item.jobs:
+                    if state.current_operation_id not in {None, operation_id}:
+                        raise RuntimeError(f"async batch has a different operation id: {item.session_id}")
+                    next_state = replace(
+                        state,
+                        status="running",
+                        phase="running",
+                        started_at=_now(),
+                        finished_at=None,
+                        result=None,
+                        error=None,
+                        pid=os.getpid(),
+                        current_operation_id=operation_id,
+                    )
+                    self._write(item.session_id, next_state)
+                    started.append(
+                        AsyncUpdateSessionBatch(
+                            item.session_id,
+                            item.ready_at,
+                            list(next_state.current_batch),
+                            operation_id,
+                        )
+                    )
+                    continue
+                if state.current_batch or state.pending[: len(item.jobs)] != item.jobs:
+                    raise RuntimeError(f"async reserved batch changed before start: {item.session_id}")
+                if state.current_operation_id is not None:
+                    raise RuntimeError(f"async batch has a different operation id: {item.session_id}")
+                current_batch = state.pending[: len(item.jobs)]
+                pending = state.pending[len(item.jobs):]
                 next_state = replace(
                     state,
                     status="running",
@@ -395,66 +789,88 @@ class AsyncUpdateStore:
                     result=None,
                     error=None,
                     pid=os.getpid(),
+                    current_operation_id=operation_id,
                 )
                 self._write(item.session_id, next_state)
-                started.append(AsyncUpdateSessionBatch(item.session_id, item.ready_at, current_batch))
+                started.append(
+                    AsyncUpdateSessionBatch(item.session_id, item.ready_at, current_batch, operation_id)
+                )
         return started
 
-    def _finish_cross_session_batch(self, batch: list[AsyncUpdateSessionBatch], result: str) -> int:
+    def _finish_cross_session_batch(
+        self,
+        batch: list[AsyncUpdateSessionBatch],
+        operation_id: str,
+        result: str,
+    ) -> int:
         accepted = 0
         for item in sorted(batch, key=lambda entry: entry.session_id):
-            expected_ids = [job.id for job in item.jobs]
             with self._locked(item.session_id):
                 state = self._read_raw(item.session_id)
-                if [job.id for job in state.current_batch] != expected_ids:
+                if state.last_operation_id == operation_id and not state.current_batch:
                     continue
+                if state.current_batch != item.jobs:
+                    raise RuntimeError(f"async reserved batch changed before finish: {item.session_id}")
+                if state.current_operation_id != operation_id:
+                    raise RuntimeError(f"async batch has a different operation id: {item.session_id}")
                 accepted += len(state.current_batch)
-                if state.pending:
-                    next_flush_at = state.next_flush_at or _format_time(
-                        _now_dt() + timedelta(seconds=UPDATE_DEBOUNCE_SECONDS)
-                    )
-                    next_state = replace(
-                        state,
-                        status="running",
-                        phase="waiting",
-                        started_at=_now(),
-                        finished_at=None,
-                        pid=os.getpid(),
-                        current_batch=[],
-                        next_flush_at=next_flush_at,
-                        result=result,
-                        error=None,
-                        attempts=0,
-                        next_retry_at=None,
-                        last_error=None,
-                    )
-                else:
-                    next_state = replace(
-                        state,
-                        status="succeeded",
-                        phase=None,
-                        finished_at=_now(),
-                        pid=os.getpid(),
-                        current_batch=[],
-                        pending=[],
-                        next_flush_at=None,
-                        result=result,
-                        error=None,
-                        attempts=0,
-                        next_retry_at=None,
-                        last_error=None,
-                    )
+                next_state = self._finished_state(state, operation_id, result)
                 self._write(item.session_id, next_state)
+        self._clear_reservation_if_acknowledged(operation_id)
         return accepted
+
+    def _finished_state(self, state: AsyncUpdateState, operation_id: str, result: str) -> AsyncUpdateState:
+        common = {
+            "pid": os.getpid(),
+            "current_batch": [],
+            "current_operation_id": None,
+            "last_operation_id": operation_id,
+            "result": result,
+            "error": None,
+            "attempts": 0,
+            "next_retry_at": None,
+            "last_error": None,
+        }
+        if state.pending:
+            next_flush_at = state.next_flush_at or _format_time(
+                _now_dt() + timedelta(seconds=UPDATE_DEBOUNCE_SECONDS)
+            )
+            return replace(
+                state,
+                status="running",
+                phase="waiting",
+                started_at=_now(),
+                finished_at=None,
+                next_flush_at=next_flush_at,
+                **common,
+            )
+        return replace(
+            state,
+            status="succeeded",
+            phase=None,
+            finished_at=_now(),
+            pending=[],
+            next_flush_at=None,
+            **common,
+        )
+
+    def _terminal_operation_output(self, operation_id: str) -> str | None:
+        record = SemanticOperationStore(self.memory_root).read(operation_id)
+        if record is None or record.phase not in FINAL_PHASES or record.outcome is None:
+            return None
+        return record.outcome.output
 
     def _fail_cross_session_batch(self, batch: list[AsyncUpdateSessionBatch], error: str) -> list[AsyncUpdateState]:
         failed_states: list[AsyncUpdateState] = []
         for item in sorted(batch, key=lambda entry: entry.session_id):
-            expected_ids = [job.id for job in item.jobs]
             with self._locked(item.session_id):
                 state = self._read_raw(item.session_id)
-                if [job.id for job in state.current_batch] != expected_ids:
+                if state.last_operation_id == item.operation_id and not state.current_batch:
                     continue
+                if state.current_batch != item.jobs:
+                    raise RuntimeError(f"async reserved batch changed before failure: {item.session_id}")
+                if state.current_operation_id != item.operation_id:
+                    raise RuntimeError(f"async batch has a different operation id: {item.session_id}")
                 failed_states.append(self._fail_locked(item.session_id, error))
         return failed_states
 
@@ -652,6 +1068,12 @@ class AsyncUpdateStore:
 
     def _read_checked_locked(self, session_id: str) -> AsyncUpdateState:
         state = self._read_raw(session_id)
+        if state.current_batch and state.current_operation_id is not None:
+            terminal_output = self._terminal_operation_output(state.current_operation_id)
+            if terminal_output is not None:
+                state = self._finished_state(state, state.current_operation_id, terminal_output)
+                self._write(session_id, state)
+                return state
         if _is_legacy_failed_pending_state(state):
             return self._manual_recovery_locked(session_id, state)
         if state.status != "running":
@@ -685,34 +1107,31 @@ class AsyncUpdateStore:
                 pid=worker_pid,
                 next_flush_at=next_flush_at,
                 pending=[job],
+                last_operation_id=state.last_operation_id,
                 next_id=next_id,
             )
         if state.status in {"failed", STATUS_MANUAL_RECOVERY}:
-            pending = [*state.current_batch, *state.pending, job]
             return replace(
                 state,
                 phase=None,
                 pid=worker_pid,
-                current_batch=[],
-                pending=pending,
+                pending=[*state.pending, job],
                 next_id=next_id,
             )
         if (
             state.status == "running"
             and state.phase == "running"
             and state.current_batch
-            and worker_pid is not None
-            and state.pid == worker_pid
         ):
             return replace(
                 state,
-                pid=worker_pid,
+                pid=worker_pid if worker_pid is not None else state.pid,
                 pending=[*state.pending, job],
                 next_id=next_id,
                 next_flush_at=next_flush_at,
                 error=None,
             )
-        pending = [*state.current_batch, *state.pending, job]
+        pending = [*state.pending, job]
         return AsyncUpdateState(
             status="running",
             session_id=state.session_id,
@@ -722,6 +1141,7 @@ class AsyncUpdateStore:
             pid=worker_pid,
             next_flush_at=next_flush_at,
             pending=pending,
+            last_operation_id=state.last_operation_id,
             next_id=next_id,
         )
 
@@ -731,7 +1151,6 @@ class AsyncUpdateStore:
 
     def _fail_locked(self, session_id: str, error: str) -> AsyncUpdateState:
         current = self._read_raw(session_id)
-        retry_pending = [*current.current_batch, *current.pending]
         attempts = current.attempts + 1
         manual = attempts >= UPDATE_MAX_AUTOMATIC_ATTEMPTS
         now = _now_dt()
@@ -745,15 +1164,12 @@ class AsyncUpdateStore:
             attempts=attempts,
             next_retry_at=None if manual else _format_time(now + timedelta(seconds=UPDATE_RETRY_COOLDOWN_SECONDS)),
             last_error=error,
-            next_flush_at=None,
-            current_batch=[],
-            pending=retry_pending,
+            next_flush_at=current.next_flush_at if current.current_batch and current.pending else None,
         )
         self._write(session_id, state)
         return state
 
     def _manual_recovery_locked(self, session_id: str, state: AsyncUpdateState) -> AsyncUpdateState:
-        retry_pending = [*state.current_batch, *state.pending]
         next_state = replace(
             state,
             status=STATUS_MANUAL_RECOVERY,
@@ -763,8 +1179,6 @@ class AsyncUpdateStore:
             attempts=max(state.attempts, UPDATE_MAX_AUTOMATIC_ATTEMPTS),
             next_retry_at=None,
             last_error=state.last_error or state.error,
-            current_batch=[],
-            pending=retry_pending,
         )
         self._write(session_id, next_state)
         return next_state
@@ -773,8 +1187,7 @@ class AsyncUpdateStore:
         for session_id in session_ids:
             with self._locked(session_id):
                 state = self._read_raw(session_id)
-                pending = [*state.current_batch, *state.pending]
-                if not pending:
+                if not state.current_batch and not state.pending:
                     continue
                 next_state = replace(
                     state,
@@ -786,8 +1199,6 @@ class AsyncUpdateStore:
                     attempts=max(state.attempts, UPDATE_MAX_AUTOMATIC_ATTEMPTS),
                     next_retry_at=None,
                     last_error=error,
-                    current_batch=[],
-                    pending=pending,
                 )
                 self._write(session_id, next_state)
 
@@ -864,6 +1275,8 @@ def _state_from_json(data: object) -> AsyncUpdateState:
         next_retry_at=_optional_str(data.get("next_retry_at")),
         last_error=_optional_str(data.get("last_error")),
         next_flush_at=_optional_str(data.get("next_flush_at")),
+        current_operation_id=_optional_str(data.get("current_operation_id")),
+        last_operation_id=_optional_str(data.get("last_operation_id")),
         current_batch=current_batch,
         pending=pending,
         next_id=next_id,
@@ -940,11 +1353,15 @@ def format_state(state: AsyncUpdateState) -> str:
     lines.append(f"current_batch: {len(state.current_batch)}")
     if state.current_batch:
         lines.append(f"current_batch_ids: {', '.join(str(job.id) for job in state.current_batch)}")
+    if state.current_operation_id:
+        lines.append(f"current_operation_id: {state.current_operation_id}")
     lines.append(f"pending: {len(state.pending)}")
     if state.pending:
         lines.append(f"pending_ids: {', '.join(str(job.id) for job in state.pending)}")
     if state.result:
         lines.append(f"result: {state.result}")
+    if state.last_operation_id:
+        lines.append(f"last_operation_id: {state.last_operation_id}")
     if state.error:
         lines.append(f"error: {state.error}")
     return "\n".join(lines)
@@ -991,11 +1408,28 @@ def _format_batch_message(batches: list[AsyncUpdateSessionBatch]) -> str:
 
 
 def _batch_session_id(batches: list[AsyncUpdateSessionBatch]) -> str:
-    parts = []
-    for batch in batches:
-        for job in batch.jobs:
-            parts.append(f"{batch.session_id}:{job.id}:{job.submitted_at}")
-    digest = hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()[:12]
+    participants = [
+        {
+            "session_id": batch.session_id,
+            "jobs": [
+                {
+                    "id": job.id,
+                    "message": job.message,
+                    "submitted_at": job.submitted_at,
+                }
+                for job in sorted(batch.jobs, key=lambda item: item.id)
+            ],
+        }
+        for batch in sorted(batches, key=lambda item: item.session_id)
+    ]
+    canonical = json.dumps(
+        participants,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return f"update-batch-{digest}"
 
 

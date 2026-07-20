@@ -1,12 +1,16 @@
+import json
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rightmemory.isolated_write import (
     IsolatedWriteSupervisor,
     MainMemoryDirtyError,
 )
+from rightmemory.semantic_operation import SemanticOperationStore
 
 
 class IsolatedWriteSupervisorTests(unittest.TestCase):
@@ -43,6 +47,282 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertEqual(self._git("status", "--short"), "")
         self.assertIn("two", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
         self._assert_isolated_cleanup()
+
+    def test_semantic_operation_lands_one_commit_with_receipt_trailer(self):
+        def callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `two` durable operation\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: durable operation", cwd=worktree)
+            return "updated"
+
+        result = IsolatedWriteSupervisor(self.root, "dreamer").run(
+            callback,
+            operation_id="dreamer-operation-1",
+            operation_input={"message": "dream"},
+        )
+
+        receipt = SemanticOperationStore(self.root).read("dreamer-operation-1")
+        message = self._git("log", "-1", "--format=%B")
+        self.assertEqual(result.commits_landed, 1)
+        self.assertEqual(result.operation_id, "dreamer-operation-1")
+        self.assertIn("RightMemory-Operation: dreamer-operation-1", message)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt.phase, "committed")
+        self.assertEqual(receipt.outcome.landed_commit, result.landed_commit)
+
+    def test_completed_no_change_operation_does_not_run_callback_again(self):
+        supervisor = IsolatedWriteSupervisor(self.root, "dreamer")
+        first = supervisor.run(
+            lambda _worktree: "nothing to change",
+            operation_id="dreamer-no-change-1",
+            operation_input={"message": "dream"},
+        )
+        second = supervisor.run(
+            lambda _worktree: self.fail("completed operation must not rerun"),
+            operation_id="dreamer-no-change-1",
+            operation_input={"message": "dream"},
+        )
+
+        self.assertEqual(first.commits_landed, 0)
+        self.assertEqual(second.output, "nothing to change")
+        self.assertEqual(second.commits_landed, 0)
+        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
+
+    def test_landed_operation_recovers_when_receipt_finalization_was_interrupted(self):
+        calls = []
+
+        def callback(worktree: Path) -> str:
+            calls.append("model")
+            self._append_memory(worktree, "- `two` recover landed operation\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: recover operation", cwd=worktree)
+            return "updated once"
+
+        original_complete = SemanticOperationStore.complete_commit
+        failed = False
+
+        def fail_once(store, operation_id, landed_commit):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError("simulated receipt interruption")
+            return original_complete(store, operation_id, landed_commit)
+
+        with patch.object(SemanticOperationStore, "complete_commit", fail_once):
+            with self.assertRaisesRegex(OSError, "receipt interruption"):
+                IsolatedWriteSupervisor(self.root, "dreamer").run(
+                    callback,
+                    operation_id="dreamer-recovery-1",
+                    operation_input={"message": "dream"},
+                )
+
+        recovered = IsolatedWriteSupervisor(self.root, "dreamer").run(
+            lambda _worktree: self.fail("recovery must not rerun the model"),
+            operation_id="dreamer-recovery-1",
+            operation_input={"message": "dream"},
+        )
+
+        self.assertEqual(calls, ["model"])
+        self.assertEqual(recovered.output, "updated once")
+        self.assertEqual((self.root / "MEMORY.md").read_text(encoding="utf-8").count("recover landed"), 1)
+        self.assertEqual(
+            self._git("log", "--format=%B").count("RightMemory-Operation: dreamer-recovery-1"),
+            1,
+        )
+
+    def test_prepared_candidate_remains_recoverable_after_cleanup_and_gc(self):
+        calls = []
+
+        def callback(worktree: Path) -> str:
+            calls.append("model")
+            self._append_memory(worktree, "- `two` pinned candidate\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: pinned candidate", cwd=worktree)
+            return "updated once"
+
+        with patch.object(
+            IsolatedWriteSupervisor,
+            "_land_operation_commit",
+            side_effect=OSError("simulated landing interruption"),
+        ):
+            with self.assertRaisesRegex(OSError, "landing interruption"):
+                IsolatedWriteSupervisor(self.root, "dreamer").run(
+                    callback,
+                    operation_id="dreamer-pinned-candidate-1",
+                    operation_input={"message": "dream"},
+                )
+
+        self.assertTrue(self._git("for-each-ref", "--format=%(refname)", "refs/rightmemory/operations"))
+        self._git("gc", "--prune=now")
+
+        recovered = IsolatedWriteSupervisor(self.root, "dreamer").run(
+            lambda _worktree: self.fail("recovery must not rerun the model"),
+            operation_id="dreamer-pinned-candidate-1",
+            operation_input={"message": "dream"},
+        )
+
+        self.assertEqual(calls, ["model"])
+        self.assertEqual(recovered.commits_landed, 1)
+        self.assertEqual(self._git("for-each-ref", "--format=%(refname)", "refs/rightmemory/operations"), "")
+
+    def test_new_operation_finishes_an_older_prepared_commit_before_running_model(self):
+        calls = []
+
+        def first_callback(worktree: Path) -> str:
+            calls.append("first")
+            self._append_memory(worktree, "- `two` first prepared operation\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: first prepared operation", cwd=worktree)
+            return "first result"
+
+        with patch.object(
+            IsolatedWriteSupervisor,
+            "_land_operation_commit",
+            side_effect=OSError("simulated landing interruption"),
+        ):
+            with self.assertRaisesRegex(OSError, "landing interruption"):
+                IsolatedWriteSupervisor(self.root, "dreamer").run(
+                    first_callback,
+                    operation_id="dreamer-prepared-first",
+                    operation_input={"message": "first"},
+                )
+
+        def second_callback(worktree: Path) -> str:
+            calls.append("second")
+            self.assertIn(
+                "first prepared operation",
+                (worktree / "MEMORY.md").read_text(encoding="utf-8"),
+            )
+            self._append_memory(worktree, "- `three` second operation\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: second operation", cwd=worktree)
+            return "second result"
+
+        second = IsolatedWriteSupervisor(self.root, "dreamer").run(
+            second_callback,
+            operation_id="dreamer-prepared-second",
+            operation_input={"message": "second"},
+        )
+
+        first = SemanticOperationStore(self.root).read("dreamer-prepared-first")
+        self.assertEqual(calls, ["first", "second"])
+        self.assertEqual(first.phase, "committed")
+        self.assertEqual(second.output, "second result")
+        self.assertIn("second operation", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
+
+    def test_prepared_no_change_recovery_keeps_its_original_snapshot(self):
+        original_complete = SemanticOperationStore.complete_no_change
+        failed = False
+
+        def fail_once(store, operation_id, completed_commit=None):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError("simulated no-change finalization interruption")
+            return original_complete(store, operation_id, completed_commit)
+
+        with patch.object(SemanticOperationStore, "complete_no_change", fail_once):
+            with self.assertRaisesRegex(OSError, "finalization interruption"):
+                IsolatedWriteSupervisor(self.root, "dreamer").run(
+                    lambda _worktree: "nothing changed",
+                    operation_id="dreamer-prepared-no-change",
+                    operation_input={"message": "dream"},
+                )
+
+        (self.root / "direct.txt").write_text("unrelated direct change\n", encoding="utf-8")
+        self._git("add", "-f", "direct.txt")
+        self._git("commit", "-m", "direct: unrelated change")
+
+        recovered = IsolatedWriteSupervisor(self.root, "dreamer").run(
+            lambda _worktree: self.fail("prepared no-change recovery must not rerun the model"),
+            operation_id="dreamer-prepared-no-change",
+            operation_input={"message": "dream"},
+        )
+
+        receipt = SemanticOperationStore(self.root).read("dreamer-prepared-no-change")
+        self.assertEqual(recovered.landed_commit, self.initial_head)
+        self.assertEqual(receipt.outcome.landed_commit, self.initial_head)
+        self.assertNotEqual(self._git("rev-parse", "HEAD"), self.initial_head)
+
+    def test_recovery_recognizes_a_rebased_operation_after_second_crash(self):
+        calls = []
+
+        def callback(worktree: Path) -> str:
+            calls.append("model")
+            self._append_memory(worktree, "- `two` recover rebased operation\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: recover rebased operation", cwd=worktree)
+            return "recovered output"
+
+        with patch.object(
+            IsolatedWriteSupervisor,
+            "_land_operation_commit",
+            side_effect=OSError("simulated first landing interruption"),
+        ):
+            with self.assertRaisesRegex(OSError, "first landing interruption"):
+                IsolatedWriteSupervisor(self.root, "dreamer").run(
+                    callback,
+                    operation_id="dreamer-rebased-recovery",
+                    operation_input={"message": "dream"},
+                )
+
+        (self.root / "direct.txt").write_text("unrelated direct change\n", encoding="utf-8")
+        self._git("add", "-f", "direct.txt")
+        self._git("commit", "-m", "direct: unrelated change")
+
+        original_complete = SemanticOperationStore.complete_commit
+        failed = False
+
+        def fail_once(store, operation_id, landed_commit):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError("simulated receipt interruption")
+            return original_complete(store, operation_id, landed_commit)
+
+        with patch.object(SemanticOperationStore, "complete_commit", fail_once):
+            with self.assertRaisesRegex(OSError, "receipt interruption"):
+                IsolatedWriteSupervisor(self.root, "dreamer").run(
+                    lambda _worktree: self.fail("prepared recovery must not rerun the model"),
+                    operation_id="dreamer-rebased-recovery",
+                    operation_input={"message": "dream"},
+                )
+
+        recovered = IsolatedWriteSupervisor(self.root, "dreamer").run(
+            lambda _worktree: self.fail("second recovery must not rerun the model"),
+            operation_id="dreamer-rebased-recovery",
+            operation_input={"message": "dream"},
+        )
+
+        receipt = SemanticOperationStore(self.root).read("dreamer-rebased-recovery")
+        self.assertEqual(calls, ["model"])
+        self.assertEqual(recovered.output, "recovered output")
+        self.assertEqual(receipt.phase, "committed")
+        self.assertEqual(
+            self._git("log", "--format=%B").count("RightMemory-Operation: dreamer-rebased-recovery"),
+            1,
+        )
+
+    def test_semantic_operation_squashes_multiple_model_commits(self):
+        def callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `two` first step\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: first step", cwd=worktree)
+            self._append_memory(worktree, "- `three` second step\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: second step", cwd=worktree)
+            return "updated"
+
+        result = IsolatedWriteSupervisor(self.root, "dreamer").run(
+            callback,
+            operation_id="dreamer-squash-1",
+            operation_input={"message": "dream"},
+        )
+
+        self.assertEqual(result.commits_landed, 1)
+        self.assertEqual(self._git("rev-list", "--count", f"{self.initial_head}..HEAD"), "1")
+        self.assertIn("first step", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
+        self.assertIn("second step", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
 
     def test_failed_callback_after_temp_commit_does_not_land(self):
         def callback(worktree: Path) -> None:
@@ -184,6 +464,50 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertEqual(self._git("log", "-1", "--format=%s"), "prune: checkpoint")
         self.assertEqual(self._git("status", "--short"), "")
         self._assert_isolated_cleanup()
+
+    def test_empty_prune_checkpoint_recovers_without_rerunning(self):
+        calls = []
+
+        def callback(worktree: Path) -> str:
+            calls.append("model")
+            self._git(
+                "commit",
+                "--allow-empty",
+                "-m",
+                "prune: checkpoint",
+                "-m",
+                "Boundary: HEAD\n\nRemoved:\n(none)",
+                cwd=worktree,
+            )
+            return "checkpoint"
+
+        original_complete = SemanticOperationStore.complete_commit
+        failed = False
+
+        def fail_once(store, operation_id, landed_commit):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError("simulated receipt interruption")
+            return original_complete(store, operation_id, landed_commit)
+
+        with patch.object(SemanticOperationStore, "complete_commit", fail_once):
+            with self.assertRaisesRegex(OSError, "receipt interruption"):
+                IsolatedWriteSupervisor(self.root, "pruner").run(
+                    callback,
+                    operation_id="pruner-empty-recovery-1",
+                    operation_input={"kind": "prune"},
+                )
+
+        recovered = IsolatedWriteSupervisor(self.root, "pruner").run(
+            lambda _worktree: self.fail("recovery must not rerun the model"),
+            operation_id="pruner-empty-recovery-1",
+            operation_input={"kind": "prune"},
+        )
+
+        self.assertEqual(calls, ["model"])
+        self.assertEqual(recovered.commits_landed, 1)
+        self.assertEqual(self._git("log", "-1", "--format=%s"), "prune: checkpoint")
 
     def test_empty_non_prune_commit_does_not_land(self):
         def callback(worktree: Path) -> None:
@@ -363,6 +687,109 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         text = (self.root / "MEMORY.md").read_text(encoding="utf-8")
         self.assertIn("main-change", text)
         self.assertNotIn("isolated memory", text)
+
+    def test_tracked_operation_rebases_before_preparing_when_unrelated_head_moves(self):
+        def callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `two` isolated memory\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: isolated update", cwd=worktree)
+            (self.root / "DIRECT.md").write_text("direct writer\n", encoding="utf-8")
+            self._git("add", "DIRECT.md")
+            self._git("commit", "-m", "direct: unrelated update")
+            return "updated"
+
+        result = IsolatedWriteSupervisor(self.root, "dreamer").run(
+            callback,
+            operation_id="dreamer-head-move-1",
+            operation_input={"message": "dream"},
+        )
+
+        receipt = SemanticOperationStore(self.root).read("dreamer-head-move-1")
+        self.assertEqual(result.commits_landed, 1)
+        self.assertTrue((self.root / "DIRECT.md").is_file())
+        self.assertIn("isolated memory", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
+        self.assertEqual(receipt.phase, "committed")
+        self.assertIn("RightMemory-Operation: dreamer-head-move-1", self._git("log", "-1", "--format=%B"))
+
+    def test_tracked_operation_reruns_when_nonconflicting_semantic_state_moves(self):
+        def stale_callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `two` stale isolated result\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: stale isolated result", cwd=worktree)
+            (self.root / "PURSUITS.md").write_text(
+                "# Pursuits\n\n## Direct {#direct}\n",
+                encoding="utf-8",
+            )
+            self._git("add", "PURSUITS.md")
+            self._git("commit", "-m", "pursuit: direct semantic update")
+            return "stale"
+
+        supervisor = IsolatedWriteSupervisor(self.root, "dreamer")
+        with self.assertRaisesRegex(RuntimeError, "main semantic state changed"):
+            supervisor.run(
+                stale_callback,
+                operation_id="dreamer-semantic-head-move",
+                operation_input={"message": "dream"},
+            )
+
+        receipt = SemanticOperationStore(self.root).read("dreamer-semantic-head-move")
+        self.assertEqual(receipt.phase, "running")
+
+        def fresh_callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `two` fresh isolated result\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: fresh isolated result", cwd=worktree)
+            return "fresh"
+
+        recovered = supervisor.run(
+            fresh_callback,
+            operation_id="dreamer-semantic-head-move",
+            operation_input={"message": "dream"},
+        )
+
+        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertEqual(recovered.output, "fresh")
+        self.assertNotIn("stale isolated result", memory)
+        self.assertIn("fresh isolated result", memory)
+
+    def test_tracked_operation_head_conflict_stays_rerunnable_not_prepared(self):
+        def conflicting_callback(worktree: Path) -> str:
+            memory = worktree / "MEMORY.md"
+            memory.write_text(memory.read_text(encoding="utf-8").replace("initial memory", "isolated memory"), encoding="utf-8")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: isolated replacement", cwd=worktree)
+            main_memory = self.root / "MEMORY.md"
+            main_memory.write_text(main_memory.read_text(encoding="utf-8").replace("initial memory", "direct memory"), encoding="utf-8")
+            self._git("add", "MEMORY.md")
+            self._git("commit", "-m", "memory: direct replacement")
+            return "conflicted"
+
+        supervisor = IsolatedWriteSupervisor(self.root, "dreamer")
+        with self.assertRaises(RuntimeError):
+            supervisor.run(
+                conflicting_callback,
+                operation_id="dreamer-head-conflict-1",
+                operation_input={"message": "dream"},
+            )
+
+        failed = SemanticOperationStore(self.root).read("dreamer-head-conflict-1")
+        self.assertEqual(failed.phase, "running")
+
+        def retry_callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `two` recovered after conflict\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: recovered operation", cwd=worktree)
+            return "recovered"
+
+        recovered = supervisor.run(
+            retry_callback,
+            operation_id="dreamer-head-conflict-1",
+            operation_input={"message": "dream"},
+        )
+
+        self.assertEqual(recovered.output, "recovered")
+        self.assertIn("direct memory", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
+        self.assertIn("recovered after conflict", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
 
     def test_validation_failure_does_not_land_temp_commit(self):
         def callback(worktree: Path) -> None:
@@ -636,6 +1063,119 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertEqual(self._git("branch", "--list", branch), "")
         self._assert_isolated_cleanup()
 
+    def test_cleanup_stale_preserves_live_same_role_run(self):
+        observed_lease = None
+
+        def callback(worktree: Path) -> str:
+            nonlocal observed_lease
+            branch = self._git("branch", "--show-current", cwd=worktree)
+            leases = list((self.root / ".runtime" / "worktree-leases").glob("dreamer-*.json"))
+            self.assertEqual(len(leases), 1)
+            observed_lease = leases[0]
+
+            IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+
+            self.assertTrue(worktree.exists())
+            self.assertIn(branch, self._git("branch", "--list", branch))
+            self.assertTrue(observed_lease.exists())
+            return "no memory change"
+
+        with patch("rightmemory.isolated_write.process_identity", return_value="proc:live"):
+            result = IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+
+        self.assertEqual(result.commits_landed, 0)
+        self.assertIsNotNone(observed_lease)
+        self.assertFalse(observed_lease.exists())
+        self._assert_isolated_cleanup()
+
+    def test_cleanup_stale_removes_reused_pid_lease(self):
+        identifier = "55555555555555555555555555555555"
+        branch, worktree = self._add_isolated_worktree("dreamer", identifier)
+        lease = self._write_lease("dreamer", identifier, pid=1234, identity="proc:old")
+
+        with (
+            patch("rightmemory.isolated_write.process_identity", return_value="proc:new"),
+            patch("rightmemory.isolated_write.process_exists", return_value=True),
+        ):
+            IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+
+        self.assertFalse(worktree.exists())
+        self.assertEqual(self._git("branch", "--list", branch), "")
+        self.assertFalse(lease.exists())
+
+    def test_cleanup_stale_preserves_owner_when_identity_is_temporarily_unavailable(self):
+        identifier = "66666666666666666666666666666666"
+        branch, worktree = self._add_isolated_worktree("dreamer", identifier)
+        lease = self._write_lease("dreamer", identifier, pid=1234, identity="proc:owner")
+
+        with (
+            patch("rightmemory.isolated_write.process_identity", return_value=None),
+            patch("rightmemory.isolated_write.process_exists", return_value=True),
+        ):
+            IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+
+        self.assertTrue(worktree.exists())
+        self.assertIn(branch, self._git("branch", "--list", branch))
+        self.assertTrue(lease.exists())
+
+        with (
+            patch("rightmemory.isolated_write.process_identity", return_value=None),
+            patch("rightmemory.isolated_write.process_exists", return_value=False),
+        ):
+            IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+        self._assert_isolated_cleanup()
+
+    def test_cleanup_stale_preserves_live_branch_before_worktree_registration(self):
+        identifier = "77777777777777777777777777777777"
+        branch = f"rightmemory-isolated-dreamer-{identifier}"
+        self._git("branch", branch)
+        lease = self._write_lease("dreamer", identifier, pid=1234, identity="proc:live")
+
+        with patch("rightmemory.isolated_write.process_identity", return_value="proc:live"):
+            IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+
+        self.assertIn(branch, self._git("branch", "--list", branch))
+        self.assertTrue(lease.exists())
+
+        with patch("rightmemory.isolated_write.process_identity", return_value="proc:gone"):
+            IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+        self._assert_isolated_cleanup()
+
+    def test_run_removes_lease_after_success(self):
+        observed = []
+
+        def callback(_worktree: Path) -> str:
+            leases = list((self.root / ".runtime" / "worktree-leases").glob("dreamer-*.json"))
+            self.assertEqual(len(leases), 1)
+            payload = json.loads(leases[0].read_text(encoding="utf-8"))
+            self.assertEqual(payload, {"pid": os.getpid(), "process_identity": "proc:owner"})
+            observed.extend(leases)
+            return "no memory change"
+
+        with patch("rightmemory.isolated_write.process_identity", return_value="proc:owner"):
+            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+
+        self.assertEqual(len(observed), 1)
+        self.assertFalse(observed[0].exists())
+        self._assert_isolated_cleanup()
+
+    def test_run_removes_lease_after_failure(self):
+        observed = []
+
+        def callback(_worktree: Path) -> str:
+            observed.extend((self.root / ".runtime" / "worktree-leases").glob("dreamer-*.json"))
+            raise RuntimeError("agent failed")
+
+        with (
+            patch("rightmemory.isolated_write.process_identity", return_value="proc:owner"),
+            self.assertRaisesRegex(RuntimeError, "agent failed"),
+        ):
+            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+
+        self.assertEqual(len(observed), 1)
+        self.assertFalse(observed[0].exists())
+        self._assert_isolated_cleanup()
+
     def test_cleanup_stale_preserves_other_role_temp_branch_and_worktree(self):
         dreamer_branch, dreamer_worktree = self._add_isolated_worktree("dreamer", "0123456789abcdef0123456789abcdef")
         update_branch, update_worktree = self._add_isolated_worktree("update", "11111111111111111111111111111111")
@@ -680,6 +1220,15 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self._git("worktree", "add", "-b", branch, str(worktree), self.initial_head)
         return branch, worktree
 
+    def _write_lease(self, role: str, identifier: str, *, pid: int, identity: str) -> Path:
+        path = self.root / ".runtime" / "worktree-leases" / f"{role}-{identifier}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"pid": pid, "process_identity": identity}) + "\n",
+            encoding="utf-8",
+        )
+        return path
+
     def _append_memory(self, root: Path, text: str) -> None:
         memory = root / "MEMORY.md"
         memory.write_text(memory.read_text(encoding="utf-8") + text, encoding="utf-8")
@@ -698,8 +1247,10 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
     def _assert_isolated_cleanup(self) -> None:
         worktrees = self._git("worktree", "list", "--porcelain")
         branches = self._git("branch", "--list", "rightmemory-isolated-*")
+        leases = list((self.root / ".runtime" / "worktree-leases").glob("*.json"))
         self.assertNotIn(".runtime/worktrees/", worktrees)
         self.assertEqual(branches, "")
+        self.assertEqual(leases, [])
 
     def _git(self, *args: str, cwd: Path | None = None) -> str:
         result = subprocess.run(

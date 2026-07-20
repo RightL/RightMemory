@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tomllib
+import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ from .shared_view_models import (
     load_shared_view_credential,
     validate_heading_id,
 )
+from .session import _ensure_durable_directory, _fsync_directory
 
 FILE_RECIPE_KEYS = {
     "version",
@@ -426,31 +428,170 @@ def pull_all_file_views(memory_root: Path) -> list[FileViewPullResult]:
     ]
 
 
-def publish_approved_file_views(memory_root: Path) -> list[FileViewPublishResult]:
+def publish_approved_file_views(
+    memory_root: Path,
+    *,
+    operation_id: str | None = None,
+    credential_root: Path | None = None,
+) -> list[FileViewPublishResult]:
     root = Path(memory_root).expanduser()
-    results: list[FileViewPublishResult] = []
-    for recipe in load_all_file_view_recipes(root):
-        if not recipe.approved:
-            continue
-        try:
-            validate_file_view_recipe_source(root, recipe.view_id, require_selection=True)
-        except (FileNotFoundError, ValueError) as exc:
-            results.append(FileViewPublishResult(recipe.view_id, "failed", str(exc)))
-            continue
-        if not recipe.publish_hub_url or not recipe.publish_credential_id:
-            results.append(FileViewPublishResult(recipe.view_id, "skipped", "approved recipe has no publish target"))
-            continue
-        try:
-            with TemporaryDirectory() as tempdir:
-                package = Path(tempdir) / recipe.view_id
+    credentials = root if credential_root is None else Path(credential_root).expanduser()
+    with TemporaryDirectory(prefix="rightmemory-publish-") as tempdir:
+        outbox = Path(tempdir) / "outbox"
+        prepare_file_view_publish_outbox(root, outbox)
+        return publish_file_view_outbox(
+            outbox,
+            credential_root=credentials,
+            operation_id=operation_id,
+        )
+
+
+def prepare_file_view_publish_outbox(memory_root: Path, outbox_root: Path) -> None:
+    """Freeze every approved file-view package before any network request."""
+    root = Path(memory_root).expanduser()
+    outbox = Path(outbox_root).expanduser()
+    if outbox.exists():
+        _load_publish_outbox(outbox)
+        return
+
+    _ensure_durable_directory(outbox.parent)
+    staging = outbox.with_name(f".{outbox.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    staging.mkdir()
+    entries: list[dict[str, str]] = []
+    try:
+        packages = staging / "packages"
+        packages.mkdir()
+        for recipe in load_all_file_view_recipes(root):
+            if not recipe.approved:
+                continue
+            try:
+                validate_file_view_recipe_source(root, recipe.view_id, require_selection=True)
+            except (FileNotFoundError, ValueError) as exc:
+                entries.append(
+                    {
+                        "view_id": recipe.view_id,
+                        "status": "failed",
+                        "message": str(exc),
+                    }
+                )
+                continue
+            if not recipe.publish_hub_url or not recipe.publish_credential_id:
+                entries.append(
+                    {
+                        "view_id": recipe.view_id,
+                        "status": "skipped",
+                        "message": "approved recipe has no publish target",
+                    }
+                )
+                continue
+            package = packages / recipe.view_id
+            try:
                 export_file_view_package(root, recipe.view_id, package)
-                credential = load_shared_view_credential(root, recipe.publish_credential_id)
-                client = HubClient(recipe.publish_hub_url, credential["token"])
-                client.publish_package(recipe.view_id, package)
-            results.append(FileViewPublishResult(recipe.view_id, "published", "file view published"))
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                shutil.rmtree(package, ignore_errors=True)
+                entries.append(
+                    {
+                        "view_id": recipe.view_id,
+                        "status": "failed",
+                        "message": str(exc),
+                    }
+                )
+                continue
+            entries.append(
+                {
+                    "view_id": recipe.view_id,
+                    "status": "ready",
+                    "message": "file view package prepared",
+                    "hub_url": recipe.publish_hub_url,
+                    "credential_id": recipe.publish_credential_id,
+                }
+            )
+        (staging / "manifest.json").write_text(
+            json.dumps({"version": 1, "entries": entries}, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        _fsync_publish_outbox(staging)
+        try:
+            os.replace(staging, outbox)
+        except OSError:
+            if not outbox.exists():
+                raise
+            _load_publish_outbox(outbox)
+        _fsync_directory(outbox.parent)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def publish_file_view_outbox(
+    outbox_root: Path,
+    *,
+    credential_root: Path,
+    operation_id: str | None = None,
+) -> list[FileViewPublishResult]:
+    outbox = Path(outbox_root).expanduser()
+    entries = _load_publish_outbox(outbox)
+    results: list[FileViewPublishResult] = []
+    for entry in entries:
+        view_id = entry["view_id"]
+        status = entry["status"]
+        if status != "ready":
+            results.append(FileViewPublishResult(view_id, status, entry["message"]))
+            continue
+        try:
+            credential = load_shared_view_credential(credential_root, entry["credential_id"])
+            client = HubClient(entry["hub_url"], credential["token"])
+            package = outbox / "packages" / view_id
+            if operation_id is None:
+                client.publish_package(view_id, package)
+            else:
+                client.publish_package(
+                    view_id,
+                    package,
+                    idempotency_key=f"{operation_id}:{view_id}",
+                )
+            results.append(FileViewPublishResult(view_id, "published", "file view published"))
         except (KeyError, ValueError, OSError, HubClientError) as exc:
-            results.append(FileViewPublishResult(recipe.view_id, "failed", str(exc)))
+            results.append(FileViewPublishResult(view_id, "failed", str(exc)))
     return results
+
+
+def _load_publish_outbox(outbox: Path) -> list[dict[str, str]]:
+    data = json.loads((outbox / "manifest.json").read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or set(data) != {"version", "entries"} or data["version"] != 1:
+        raise ValueError(f"invalid file-view publish outbox: {outbox}")
+    raw_entries = data["entries"]
+    if not isinstance(raw_entries, list):
+        raise ValueError(f"invalid file-view publish outbox entries: {outbox}")
+    entries: list[dict[str, str]] = []
+    for raw in raw_entries:
+        if not isinstance(raw, dict):
+            raise ValueError(f"invalid file-view publish outbox entry: {outbox}")
+        status = raw.get("status")
+        expected = {"view_id", "status", "message", "hub_url", "credential_id"} if status == "ready" else {
+            "view_id",
+            "status",
+            "message",
+        }
+        if set(raw) != expected or status not in {"ready", "skipped", "failed"}:
+            raise ValueError(f"invalid file-view publish outbox entry: {outbox}")
+        if not all(isinstance(value, str) and value for value in raw.values()):
+            raise ValueError(f"invalid file-view publish outbox value: {outbox}")
+        view_id = validate_heading_id(raw["view_id"])
+        if status == "ready" and not (outbox / "packages" / view_id).is_dir():
+            raise ValueError(f"file-view publish outbox package is missing: {view_id}")
+        entries.append(dict(raw))
+    return entries
+
+
+def _fsync_publish_outbox(root: Path) -> None:
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            with path.open("rb") as handle:
+                os.fsync(handle.fileno())
+    directories = [path for path in root.rglob("*") if path.is_dir()]
+    for path in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+        _fsync_directory(path)
+    _fsync_directory(root)
 
 
 def record_file_view_publish_results(

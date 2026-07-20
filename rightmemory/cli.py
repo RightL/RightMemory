@@ -47,7 +47,8 @@ from .profiles import (
 )
 from .platform import restart_current_process
 from .review import ReviewScanner, normalize_transcript
-from .runtime import RightMemoryRuntime
+from .runtime import AUTOMATIC_WRITE_ROLES, RightMemoryRuntime
+from .semantic_operation import FINAL_PHASES, SemanticOperationStore
 from .session import MemoryWriteLock
 from .shared_view_builder import refresh_file_view, run_file_view_builder, run_question_view_builder
 from .shared_view_files import approve_file_view, invite_file_view, pull_all_file_views, pull_file_view
@@ -86,6 +87,7 @@ from .watch import (
     start_managed_watch,
     stop_managed_watch,
 )
+from .watch_operation import WatchOperationStore
 from .web.process import (
     format_stop_result as format_web_stop_result,
     format_web_status,
@@ -1360,7 +1362,7 @@ def _run_update_review_correction(memory_root: Path, request: UpdateReviewReques
     runtime = RightMemoryRuntime(config, update_mode="review-correction")
     session_id = f"update-review-{request.review_id[:48]}-{request.comment_sha256[:12]}"
     try:
-        output = runtime.run_session_turn(session_id, message)
+        output = runtime.run_session_turn(session_id, message, operation_id=session_id)
         write_result = runtime.last_write_result
     finally:
         runtime.cleanup()
@@ -1376,7 +1378,7 @@ def _run_update_review_correction(memory_root: Path, request: UpdateReviewReques
         return UpdateReviewOutcome.resolved(message=clean_output)
     if write_result is None or write_result.commits_landed != 1:
         raise RuntimeError("review correction did not land exactly one validated state commit")
-    if _changed_memory_paths(write_result.changed_paths):
+    if getattr(write_result, "operation_id", None) is None and _changed_memory_paths(write_result.changed_paths):
         _record_memory_change_pressure(memory_root)
     return UpdateReviewOutcome.resolved(
         correction_commit=write_result.landed_commit,
@@ -1571,31 +1573,34 @@ def _run_dream_cycle(
     session_id: str,
     dreamer_config: Any | None = None,
     memory_root: Path | None = None,
+    operation_id: str | None = None,
 ) -> str:
     config = dreamer_config if dreamer_config is not None else load_config("dreamer", memory_root=memory_root)
     runtime = RightMemoryRuntime(config)
     try:
-        return runtime.run_cycle(session_id)
+        if operation_id is None:
+            return runtime.run_cycle(session_id)
+        return runtime.run_cycle(session_id, operation_id=operation_id)
     finally:
         runtime.cleanup()
 
 
-def _dreamer_watch_once(watch_config: Any, session_id: str, run_cycle: Callable[[str], str]) -> str:
+def _dreamer_watch_once(watch_config: Any, session_id: str, run_cycle: Callable[[str, str], str]) -> str:
     store = DreamerTriggerStore(watch_config.memory_root)
-    state = store.read()
-    if state.points < watch_config.trigger_points:
+    operation_id = store.claim_operation(watch_config.trigger_points)
+    if operation_id is None:
         return _DREAMER_WATCH_SKIPPED
 
     timestamp = datetime.now(UTC).isoformat()
     print(f"[{timestamp}] rightmemory dreamer cycle", flush=True)
     try:
-        output = run_cycle(session_id)
+        output = run_cycle(session_id, operation_id)
     except Exception as exc:
         print(f"rightmemory dreamer cycle failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         return _DREAMER_WATCH_FAILED
 
     print(output, flush=True)
-    store.consume_if_available(watch_config.trigger_points)
+    store.complete_operation(operation_id, watch_config.trigger_points)
     return _DREAMER_WATCH_SUCCEEDED
 
 
@@ -1617,11 +1622,19 @@ def _dreamer_watch(interval: int | None, session_id: str, memory_root: Path) -> 
             while not stop.requested:
                 _reexec_if_install_changed(refresh, stop)
 
-                def run_cycle(current_session_id: str) -> str:
+                def run_cycle(current_session_id: str, current_operation_id: str) -> str:
                     nonlocal next_config
                     if next_config is None:
-                        return _run_dream_cycle(current_session_id, memory_root=memory_root)
-                    output = _run_dream_cycle(current_session_id, next_config)
+                        return _run_dream_cycle(
+                            current_session_id,
+                            memory_root=memory_root,
+                            operation_id=current_operation_id,
+                        )
+                    output = _run_dream_cycle(
+                        current_session_id,
+                        next_config,
+                        operation_id=current_operation_id,
+                    )
                     next_config = None
                     return output
 
@@ -1652,34 +1665,44 @@ def _run_insight_cycle(
     session_id: str,
     insight_config: Any | None = None,
     memory_root: Path | None = None,
+    operation_id: str | None = None,
 ) -> str:
     config = insight_config if insight_config is not None else load_config("insight", memory_root=memory_root)
     runtime = RightMemoryRuntime(config)
     try:
-        return runtime.run_cycle(session_id)
+        if operation_id is None:
+            return runtime.run_cycle(session_id)
+        return runtime.run_cycle(session_id, operation_id=operation_id)
     finally:
         runtime.cleanup()
 
 
-def _insight_watch_once(watch_config: Any, session_id: str, run_cycle: Callable[[str], str]) -> str:
+def _insight_watch_once(watch_config: Any, session_id: str, run_cycle: Callable[[str, str], str]) -> str:
     store = InsightTriggerStore(watch_config.memory_root)
-    state = store.read()
-    if state.points < watch_config.trigger_points:
+    operation_id = store.claim_operation(watch_config.trigger_points)
+    if operation_id is None:
         return _INSIGHT_WATCH_SKIPPED
 
     before_logs = _insight_log_fingerprints(watch_config.memory_root)
     timestamp = datetime.now(UTC).isoformat()
     print(f"[{timestamp}] rightmemory insight cycle", flush=True)
     try:
-        output = run_cycle(session_id)
+        output = run_cycle(session_id, operation_id)
     except Exception as exc:
         print(f"rightmemory insight cycle failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         return _INSIGHT_WATCH_FAILED
 
     print(output, flush=True)
-    after_logs = _insight_log_fingerprints(watch_config.memory_root)
-    result = "artifact" if after_logs != before_logs else "noop"
-    store.consume_if_available(watch_config.trigger_points, result=result)
+    record = SemanticOperationStore(watch_config.memory_root).read(operation_id)
+    if record is not None and record.phase in FINAL_PHASES and record.outcome is not None:
+        result = (
+            "artifact"
+            if any(path.startswith("insight_logs/") for path in record.outcome.changed_paths)
+            else "noop"
+        )
+    else:
+        result = "artifact" if _insight_log_fingerprints(watch_config.memory_root) != before_logs else "noop"
+    store.complete_operation(operation_id, watch_config.trigger_points, result=result)
     return _INSIGHT_WATCH_SUCCEEDED
 
 
@@ -1712,11 +1735,19 @@ def _insight_watch(interval: int | None, session_id: str, memory_root: Path) -> 
             while not stop.requested:
                 _reexec_if_install_changed(refresh, stop)
 
-                def run_cycle(current_session_id: str) -> str:
+                def run_cycle(current_session_id: str, current_operation_id: str) -> str:
                     nonlocal next_config
                     if next_config is None:
-                        return _run_insight_cycle(current_session_id, memory_root=memory_root)
-                    output = _run_insight_cycle(current_session_id, next_config)
+                        return _run_insight_cycle(
+                            current_session_id,
+                            memory_root=memory_root,
+                            operation_id=current_operation_id,
+                        )
+                    output = _run_insight_cycle(
+                        current_session_id,
+                        next_config,
+                        operation_id=current_operation_id,
+                    )
                     next_config = None
                     return output
 
@@ -1748,13 +1779,14 @@ def _run_prune_cycle(
     pruner_config: Any | None = None,
     runtime_config: Any | None = None,
     memory_root: Path | None = None,
+    operation_id: str | None = None,
 ) -> str:
     config = pruner_config if pruner_config is not None else load_pruner_config(memory_root=memory_root)
     runtime = RightMemoryRuntime(
         runtime_config if runtime_config is not None else load_config("pruner", memory_root=memory_root)
     )
     try:
-        return runtime.run_prune_turn(session_id, config)
+        return runtime.run_prune_turn(session_id, config, operation_id=operation_id)
     finally:
         runtime.cleanup()
 
@@ -1765,6 +1797,7 @@ def _prune_watch(interval: int, session_id: str, memory_root: Path) -> int:
     pruner_config = load_pruner_config(memory_root=memory_root)
     runtime_config = load_config("pruner", memory_root=memory_root)
     refresh = InstallStamp(pruner_config.memory_root)
+    operations = WatchOperationStore(pruner_config.memory_root, "pruner")
     consecutive_failures = 0
     exit_code = 0
     try:
@@ -1778,12 +1811,15 @@ def _prune_watch(interval: int, session_id: str, memory_root: Path) -> int:
                 timestamp = datetime.now(UTC).isoformat()
                 print(f"[{timestamp}] rightmemory prune check", flush=True)
                 try:
+                    operation_id = operations.claim()
                     output = _run_prune_cycle(
                         session_id,
                         next_pruner_config,
                         next_runtime_config,
                         memory_root=memory_root,
+                        operation_id=operation_id,
                     )
+                    operations.complete(operation_id)
                     next_pruner_config = None
                     next_runtime_config = None
                 except Exception as exc:
@@ -1955,8 +1991,22 @@ def _handle_json_request(runtime: RightMemoryRuntime, request: dict[str, Any]) -
     message = request.get("message")
     if not isinstance(message, str):
         raise ValueError("JSON request must contain string field: message")
-    output = _run_accounted_update_turn(runtime, lambda: runtime.run_turn(message))
-    return {"type": "assistant", "message": output}
+    operation_id = request.get("operation_id")
+    role = getattr(getattr(runtime, "config", None), "role", None)
+    if role in AUTOMATIC_WRITE_ROLES and operation_id is None:
+        raise ValueError("automatic-writer JSON requests require string field: operation_id")
+    if operation_id is not None and (
+        not isinstance(operation_id, str) or not operation_id.strip()
+    ):
+        raise ValueError("JSON request operation_id must be a non-empty string")
+    if operation_id is None:
+        output = _run_accounted_update_turn(runtime, lambda: runtime.run_turn(message))
+        return {"type": "assistant", "message": output}
+    output = _run_accounted_update_turn(
+        runtime,
+        lambda: runtime.run_turn(message, operation_id=operation_id),
+    )
+    return {"type": "assistant", "message": output, "operation_id": operation_id}
 
 
 def _session_turn(
@@ -1985,6 +2035,7 @@ def _run_accounted_update_turn(runtime: RightMemoryRuntime, run_turn: Callable[[
         getattr(config, "role", None) == "update"
         and write_result is not None
         and write_result.commits_landed == 1
+        and getattr(write_result, "operation_id", None) is None
         and _changed_memory_paths(write_result.changed_paths)
     ):
         _record_memory_change_pressure(config.memory_root)
@@ -2030,46 +2081,25 @@ def _async_worker(memory_root, role: str) -> int:
     async_update_config = load_async_update_config(memory_root=memory_root)
     store = AsyncUpdateStore(memory_root, role)
 
-    batch_changed_memory = False
-
     def run_batch(batch_session_id: str, message: str) -> str:
-        nonlocal batch_changed_memory
-        batch_changed_memory = False
-        output, batch_changed_memory = _run_async_update_batch(memory_root, role, batch_session_id, message)
-        return output
-
-    def record_batch_pressure(_accepted_count: int) -> None:
-        nonlocal batch_changed_memory
-        try:
-            if batch_changed_memory:
-                _record_memory_change_pressure(memory_root)
-        finally:
-            batch_changed_memory = False
+        return _run_async_update_batch(memory_root, role, batch_session_id, message)
 
     result = store.run_pending_batches(
         run_batch,
         target_batch_candidates=async_update_config.target_batch_candidates,
         max_wait_seconds=async_update_config.max_wait_seconds,
-        on_batch_success=record_batch_pressure,
     )
     if result.status == "failed":
         return 1
     return 0
 
 
-def _run_async_update_batch(memory_root, role: str, batch_session_id: str, message: str) -> tuple[str, bool]:
+def _run_async_update_batch(memory_root, role: str, batch_session_id: str, message: str) -> str:
     # Reload per batch so queued retries use current model and executor settings.
     config = load_config(role, memory_root=memory_root)
     runtime = RightMemoryRuntime(config)
     try:
-        output = runtime.run_session_turn(batch_session_id, message)
-        write_result = runtime.last_write_result
-        changed_memory = (
-            write_result is not None
-            and write_result.commits_landed == 1
-            and _changed_memory_paths(write_result.changed_paths)
-        )
-        return output, changed_memory
+        return runtime.run_session_turn(batch_session_id, message, operation_id=batch_session_id)
     finally:
         runtime.cleanup()
 

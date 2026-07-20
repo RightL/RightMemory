@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from rightmemory.semantic_operation import OperationEffect, SemanticOperationStore
 from rightmemory.status import (
     DashboardStatus,
     GitStatus,
@@ -13,6 +14,7 @@ from rightmemory.status import (
     collect_git_status,
     collect_insight_section,
     collect_managed_watch_sections,
+    collect_semantic_operation_section,
     collect_status,
     format_status_dashboard,
     read_log_preview,
@@ -20,6 +22,32 @@ from rightmemory.status import (
 
 
 class StatusDashboardTests(unittest.TestCase):
+    def test_semantic_operation_status_shows_failed_effect_as_pending(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = SemanticOperationStore(root)
+            store.begin("update-op-1", {"role": "update", "session_id": "agent-1"})
+            store.prepare_outcome(
+                "update-op-1",
+                output="no change",
+                start_commit="base123",
+                changed_paths=(),
+                effects=(OperationEffect("file-view-publish"),),
+            )
+            store.complete_no_change("update-op-1")
+            store.mark_effect(
+                "update-op-1",
+                "file-view-publish",
+                "failed",
+                error="hub offline",
+            )
+
+            section, issues = collect_semantic_operation_section(root)
+
+        self.assertEqual(section.state, "1 effect pending")
+        self.assertIn("pending effects: 1", section.detail)
+        self.assertEqual(issues, ["semantic effect: update-op-1: file-view-publish: hub offline"])
+
     def test_collect_git_status_reports_clean_branch_and_head(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

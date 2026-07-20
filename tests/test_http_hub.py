@@ -2,9 +2,11 @@ import sqlite3
 import tempfile
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from io import BytesIO
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -144,6 +146,132 @@ class HubStoreTests(unittest.TestCase):
         self.assertEqual(len(accepted["parts"]), 2)
         question_part = [part for part in accepted["parts"] if part["type"] == "question"][0]
         self.assertEqual(question_part["question_token"], "question-token")
+
+    def test_failed_older_publish_retry_does_not_replace_a_newer_version(self):
+        store = HubStore(self.root)
+        store.initialize(admin_token="admin-secret")
+        older_package = self.root / "older-package"
+        newer_package = self.root / "newer-package"
+        _write_package(older_package, memory_text="# Older\n")
+        _write_package(newer_package, memory_text="# Newer\n")
+
+        with patch("rightmemory.hub.store.copy_package_version", side_effect=OSError("copy interrupted")):
+            with self.assertRaises(OSError):
+                store.store_package_version(
+                    older_package,
+                    view_id="alice-auth-api",
+                    version_id="operation-old",
+                    provider_id="alice",
+                )
+
+        newer = store.store_package_version(
+            newer_package,
+            view_id="alice-auth-api",
+            version_id="operation-new",
+            provider_id="alice",
+        )
+        older = store.store_package_version(
+            older_package,
+            view_id="alice-auth-api",
+            version_id="operation-old",
+            provider_id="alice",
+        )
+
+        self.assertTrue(older.path.is_dir())
+        self.assertEqual(store.get_view("alice-auth-api")["current_version_id"], newer.version_id)
+        with closing(sqlite3.connect(store.db_path)) as connection:
+            intents = connection.execute(
+                """
+                SELECT version_id, publish_sequence
+                FROM view_publish_intents
+                WHERE view_id = ?
+                ORDER BY publish_sequence
+                """,
+                ("alice-auth-api",),
+            ).fetchall()
+        self.assertEqual(intents, [("operation-old", 1), ("operation-new", 2)])
+
+    def test_database_failure_keeps_package_storage_for_retry(self):
+        store = HubStore(self.root)
+        store.initialize(admin_token="admin-secret")
+        package = self.root / "retry-package"
+        _write_package(package)
+        stored_path = self.root / "storage" / "views" / "alice-auth-api" / "versions" / "operation-1"
+
+        with patch.object(store, "_append_audit_event", side_effect=sqlite3.OperationalError("audit failed")):
+            with self.assertRaises(sqlite3.OperationalError):
+                store.store_package_version(
+                    package,
+                    view_id="alice-auth-api",
+                    version_id="operation-1",
+                    provider_id="alice",
+                )
+
+        self.assertTrue(stored_path.is_dir())
+        retried = store.store_package_version(
+            package,
+            view_id="alice-auth-api",
+            version_id="operation-1",
+            provider_id="alice",
+        )
+        self.assertEqual(retried.path, stored_path)
+        self.assertEqual(store.get_view("alice-auth-api")["current_version_id"], "operation-1")
+
+    def test_same_view_publishes_serialize_storage_and_database_work(self):
+        store = HubStore(self.root)
+        store.initialize(admin_token="admin-secret")
+        first_package = self.root / "first-package"
+        second_package = self.root / "second-package"
+        _write_package(first_package, memory_text="# First\n")
+        _write_package(second_package, memory_text="# Second\n")
+        first_copy_started = Event()
+        release_first_copy = Event()
+        second_publish_started = Event()
+        second_copy_started = Event()
+
+        def controlled_copy(package_root, storage_root, *, view_id, version_id, max_package_bytes):
+            if version_id == "operation-1":
+                first_copy_started.set()
+                if not release_first_copy.wait(2):
+                    raise TimeoutError("first package copy was not released")
+            else:
+                second_copy_started.set()
+            return copy_package_version(
+                package_root,
+                storage_root,
+                view_id=view_id,
+                version_id=version_id,
+                max_package_bytes=max_package_bytes,
+            )
+
+        def publish_second():
+            second_publish_started.set()
+            return store.store_package_version(
+                second_package,
+                view_id="alice-auth-api",
+                version_id="operation-2",
+                provider_id="alice",
+            )
+
+        with patch("rightmemory.hub.store.copy_package_version", side_effect=controlled_copy):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(
+                    store.store_package_version,
+                    first_package,
+                    view_id="alice-auth-api",
+                    version_id="operation-1",
+                    provider_id="alice",
+                )
+                self.assertTrue(first_copy_started.wait(2))
+                second = executor.submit(publish_second)
+                self.assertTrue(second_publish_started.wait(2))
+                second_was_blocked = not second_copy_started.wait(0.2)
+                release_first_copy.set()
+                first.result(timeout=2)
+                second.result(timeout=2)
+
+        self.assertTrue(second_was_blocked)
+        self.assertEqual(store.get_view("alice-auth-api")["current_version_id"], "operation-2")
 
     def test_admin_helpers_list_hub_state_without_secret_material(self):
         store = HubStore(self.root)
@@ -443,6 +571,56 @@ class HubApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
         self.assertTrue(response.json()["initialized"])
+
+    def test_publish_idempotency_key_reuses_one_version_and_rejects_changed_content(self):
+        package = self.root / "idempotent-package"
+        _write_package(package)
+        url = "/api/views/alice-auth-api/versions?idempotency_key=operation-1%3Aalice-auth-api"
+        headers = {**_auth(self.provider_token.raw_token), "content-type": "application/zip"}
+
+        first = self.client.post(
+            url,
+            content=_zip_package(package),
+            headers=headers,
+        )
+        repeated = self.client.post(
+            url,
+            content=_zip_package(package),
+            headers=headers,
+        )
+        newer_package = self.root / "newer-idempotent-package"
+        _write_package(newer_package, memory_text="# Newer\n")
+        newer = self.client.post(
+            "/api/views/alice-auth-api/versions?idempotency_key=operation-2%3Aalice-auth-api",
+            content=_zip_package(newer_package),
+            headers=headers,
+        )
+        late_repeat = self.client.post(
+            url,
+            content=_zip_package(package),
+            headers=headers,
+        )
+        changed_package = self.root / "changed-idempotent-package"
+        _write_package(changed_package, memory_text="# Changed\n")
+        changed = self.client.post(
+            url,
+            content=_zip_package(changed_package),
+            headers=headers,
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(repeated.status_code, 201)
+        self.assertEqual(newer.status_code, 201)
+        self.assertEqual(late_repeat.status_code, 201)
+        self.assertEqual(first.json()["version_id"], repeated.json()["version_id"])
+        with closing(sqlite3.connect(self.store.db_path)) as connection:
+            current_version_id = connection.execute(
+                "SELECT current_version_id FROM views WHERE id = ?",
+                ("alice-auth-api",),
+            ).fetchone()[0]
+        self.assertEqual(current_version_id, newer.json()["version_id"])
+        self.assertEqual(late_repeat.json()["current_version_id"], newer.json()["version_id"])
+        self.assertEqual(changed.status_code, 400)
 
     def test_admin_routes_require_admin_token(self):
         missing = self.client.get("/api/admin/overview")
