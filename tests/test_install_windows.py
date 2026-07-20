@@ -107,7 +107,7 @@ class WindowsInstallScriptTests(unittest.TestCase):
             self.assertTrue(orchestrator_exists)
             self.assertFalse(legacy_exists)
 
-    def test_windows_rerun_refreshes_managed_example_without_corrupting_utf8_memory(self):
+    def test_windows_rerun_preserves_managed_examples_and_utf8_memory(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
@@ -129,24 +129,29 @@ class WindowsInstallScriptTests(unittest.TestCase):
                 + pursuits.replace("Example Release Readiness", "Stale Release Readiness"),
                 encoding="utf-8",
             )
+            expected_memory = memory_path.read_bytes()
+            expected_pursuits = pursuits_path.read_bytes()
 
             result = self._install(memory_root, skills_target, env)
+            actual_memory = memory_path.read_bytes()
+            actual_pursuits = pursuits_path.read_bytes()
             refreshed = memory_path.read_text(encoding="utf-8")
             refreshed_pursuits = pursuits_path.read_text(encoding="utf-8")
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(actual_memory, expected_memory)
+        self.assertEqual(actual_pursuits, expected_pursuits)
         self.assertIn("用户偏好中文", refreshed)
-        self.assertIn("Example Application", refreshed)
-        self.assertNotIn("Stale Example Application", refreshed)
+        self.assertIn("Stale Example Application", refreshed)
         self.assertIn("## Continue {#continue}", refreshed_pursuits)
-        self.assertIn("Example Release Readiness", refreshed_pursuits)
-        self.assertNotIn("Stale Release Readiness", refreshed_pursuits)
+        self.assertIn("Stale Release Readiness", refreshed_pursuits)
 
-    def test_windows_installer_does_not_commit_missing_documents_into_existing_repo(self):
+    def test_windows_installer_refuses_incomplete_existing_repo_without_mutation(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
             skills_target = root / "skills"
+            runtime_home = root / "local" / "RightMemory"
             memory_root.mkdir()
             self._git(memory_root, "init")
             self._git(memory_root, "config", "user.email", "test@example.com")
@@ -154,19 +159,29 @@ class WindowsInstallScriptTests(unittest.TestCase):
             (memory_root / "MEMORY.md").write_text("# Existing Memory\n", encoding="utf-8")
             self._git(memory_root, "add", "MEMORY.md")
             self._git(memory_root, "commit", "-m", "memory: existing baseline")
-            before = self._git(memory_root, "rev-parse", "HEAD")
+            (memory_root / ".runtime").mkdir()
+            (memory_root / ".runtime" / "install.stamp").write_text("old stamp\n", encoding="utf-8")
+            skills_target.mkdir()
+            (skills_target / "keep.txt").write_text("skills stay\n", encoding="utf-8")
+            runtime_home.mkdir(parents=True)
+            (runtime_home / "keep.txt").write_text("runtime stays\n", encoding="utf-8")
+            before_head = self._git(memory_root, "rev-parse", "HEAD")
+            before_status = self._git(memory_root, "status", "--short")
+            before_memory = self._snapshot(memory_root)
+            before_skills = self._snapshot(skills_target)
+            before_runtime = self._snapshot(runtime_home)
 
             result = self._install(memory_root, skills_target, self._env_with_fake_uv(root))
-            after = self._git(memory_root, "rev-parse", "HEAD")
-            status = self._git(memory_root, "status", "--short").splitlines()
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(after, before)
-        self.assertEqual(status, ["?? PURSUITS.md", "?? PURSUIT_RULES.md"])
-        self.assertIn(
-            "new managed state files left uncommitted for review: PURSUITS.md, PURSUIT_RULES.md",
-            result.stdout,
-        )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("existing RightMemory root is incomplete", result.stderr)
+            self.assertIn("missing required files: PURSUITS.md, PURSUIT_RULES.md", result.stderr)
+            self.assertIn("installation made no changes", result.stderr)
+            self.assertEqual(self._git(memory_root, "rev-parse", "HEAD"), before_head)
+            self.assertEqual(self._git(memory_root, "status", "--short"), before_status)
+            self.assertEqual(self._snapshot(memory_root), before_memory)
+            self.assertEqual(self._snapshot(skills_target), before_skills)
+            self.assertEqual(self._snapshot(runtime_home), before_runtime)
 
     def test_windows_semantic_upgrade_failure_fails_install_without_success_stamp(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -311,6 +326,16 @@ class WindowsInstallScriptTests(unittest.TestCase):
             check=True,
         )
         return result.stdout.strip()
+
+    def _snapshot(self, root: Path) -> tuple[tuple[str, str, bytes], ...]:
+        entries: list[tuple[str, str, bytes]] = []
+        for path in sorted((root, *root.rglob("*")), key=lambda item: str(item.relative_to(root))):
+            relative = "." if path == root else path.relative_to(root).as_posix()
+            if path.is_dir():
+                entries.append((relative, "directory", b""))
+            else:
+                entries.append((relative, "file", path.read_bytes()))
+        return tuple(entries)
 
 
 if __name__ == "__main__":

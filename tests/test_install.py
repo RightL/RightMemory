@@ -211,6 +211,43 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("git user.name = RightMemory", result.stdout)
         self.assertIn("initial memory baseline commit", result.stdout)
 
+    def test_empty_git_repository_without_head_is_bootstrapped_as_new(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=memory_root, check=True)
+
+            result = self._install(memory_root, skills_target)
+
+            self.assertTrue((memory_root / "MEMORY.md").is_file())
+            self.assertTrue((memory_root / "PURSUITS.md").is_file())
+            self.assertTrue((memory_root / "PURSUIT_RULES.md").is_file())
+            self.assertIn("memory: initial baseline", self._git(memory_root, "log", "--oneline", "-1"))
+            self.assertEqual(self._git(memory_root, "status", "--short"), "")
+            self.assertIn("from MEMORY.example.md", result.stdout)
+
+    def test_complete_non_git_root_is_preserved_and_baseline_committed(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            expected = {
+                "MEMORY.md": b"# Existing Memory\n\xff\x00",
+                "PURSUITS.md": b"# Existing Pursuits\r\n",
+                "PURSUIT_RULES.md": b"# Existing Rules\n",
+            }
+            for name, content in expected.items():
+                (memory_root / name).write_bytes(content)
+
+            self._install(memory_root, skills_target)
+
+            self.assertEqual({name: (memory_root / name).read_bytes() for name in expected}, expected)
+            self.assertIn("memory: initial baseline", self._git(memory_root, "log", "--oneline", "-1"))
+            self.assertEqual(self._git(memory_root, "status", "--short"), "")
+
     def test_initial_install_baselines_existing_shared_view_registry(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -218,6 +255,8 @@ class InstallScriptTests(unittest.TestCase):
             skills_target = root / "skills"
             memory_root.mkdir()
             (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+            (memory_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+            (memory_root / "PURSUIT_RULES.md").write_text("# Rules\n", encoding="utf-8")
             (memory_root / "shared_views.toml").write_text(
                 '[connections.alice-auth-api]\ntype = "file"\nref = "rightmemory://mf/current"\n',
                 encoding="utf-8",
@@ -237,6 +276,8 @@ class InstallScriptTests(unittest.TestCase):
             skills_target = root / "skills"
             memory_root.mkdir()
             (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+            (memory_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+            (memory_root / "PURSUIT_RULES.md").write_text("# Rules\n", encoding="utf-8")
             (memory_root / "shares.toml").write_text(
                 '[shares.auth-api]\n'
                 'version = 1\n'
@@ -276,11 +317,13 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(git_email, "existing@example.com")
         self.assertIn("git author configured", result.stdout)
 
-    def test_install_adds_missing_current_documents_without_committing_existing_repo(self):
+    def test_install_refuses_incomplete_committed_root_without_mutation(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
             skills_target = root / "skills"
+            runtime_home = root / "data" / "rightmemory"
+            runtime_command = root / "home" / ".local" / "bin" / "rightmemory"
             memory_root.mkdir()
             subprocess.run(["git", "init", "-q"], cwd=memory_root, check=True)
             subprocess.run(["git", "config", "--local", "user.name", "Existing User"], cwd=memory_root, check=True)
@@ -290,21 +333,105 @@ class InstallScriptTests(unittest.TestCase):
             (memory_root / "MEMORY.md").write_text("# Existing Memory\n", encoding="utf-8")
             subprocess.run(["git", "add", "MEMORY.md"], cwd=memory_root, check=True)
             subprocess.run(["git", "commit", "-q", "-m", "memory: user baseline"], cwd=memory_root, check=True)
-            before = self._git(memory_root, "rev-parse", "HEAD")
+            runtime_dir = memory_root / ".runtime"
+            runtime_dir.mkdir()
+            (runtime_dir / "install.stamp").write_text("old stamp\n", encoding="utf-8")
+            skills_target.mkdir()
+            (skills_target / "keep.txt").write_text("skills stay\n", encoding="utf-8")
+            runtime_home.mkdir(parents=True)
+            (runtime_home / "keep.txt").write_text("runtime stays\n", encoding="utf-8")
+            runtime_command.parent.mkdir(parents=True)
+            runtime_command.write_text("old wrapper\n", encoding="utf-8")
+
+            before_head = self._git(memory_root, "rev-parse", "HEAD")
+            before_status = self._git(memory_root, "status", "--short")
+            before_name = self._git(memory_root, "config", "--local", "--get", "user.name")
+            before_email = self._git(memory_root, "config", "--local", "--get", "user.email")
+            before_memory = self._snapshot(memory_root)
+            before_skills = self._snapshot(skills_target)
+            before_runtime = self._snapshot(runtime_home)
+            before_wrapper = runtime_command.read_bytes()
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("existing RightMemory root is incomplete", result.stderr)
+            self.assertIn("missing required files: PURSUITS.md, PURSUIT_RULES.md", result.stderr)
+            self.assertIn("installation made no changes", result.stderr)
+            self.assertIn("migrate and review this root explicitly", result.stderr)
+            self.assertEqual(self._git(memory_root, "rev-parse", "HEAD"), before_head)
+            self.assertEqual(self._git(memory_root, "status", "--short"), before_status)
+            self.assertEqual(self._git(memory_root, "config", "--local", "--get", "user.name"), before_name)
+            self.assertEqual(self._git(memory_root, "config", "--local", "--get", "user.email"), before_email)
+            self.assertEqual(self._snapshot(memory_root), before_memory)
+            self.assertEqual(self._snapshot(skills_target), before_skills)
+            self.assertEqual(self._snapshot(runtime_home), before_runtime)
+            self.assertEqual(runtime_command.read_bytes(), before_wrapper)
+
+    def test_install_refuses_directory_and_symlink_required_paths_as_non_regular(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            cases = ("directory", "symlink")
+            for case in cases:
+                with self.subTest(case=case):
+                    memory_root = root / case / "memory"
+                    skills_target = root / case / "skills"
+                    memory_root.mkdir(parents=True)
+                    (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+                    (memory_root / "PURSUIT_RULES.md").write_text("# Rules\n", encoding="utf-8")
+                    pursuits = memory_root / "PURSUITS.md"
+                    if case == "directory":
+                        pursuits.mkdir()
+                    else:
+                        target = memory_root / "pursuits-target.md"
+                        target.write_text("# Pursuits\n", encoding="utf-8")
+                        pursuits.symlink_to(target.name)
+                    before = self._snapshot(memory_root)
+
+                    result = self._run_install(memory_root, skills_target, check=False)
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("non-regular required files: PURSUITS.md", result.stderr)
+                    self.assertIn("installation made no changes", result.stderr)
+                    self.assertEqual(self._snapshot(memory_root), before)
+                    self.assertFalse(skills_target.exists())
+                    self.assertFalse((memory_root / ".runtime" / "install.stamp").exists())
+
+    def test_complete_committed_root_preserves_all_semantic_state_bytes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            self._install(memory_root, skills_target)
+            semantic_files = {
+                "MEMORY.md": b"# Custom Memory\r\n",
+                "MEMORY_detail.md": b"detail\n",
+                "PURSUITS.md": b"# Custom Pursuits\n",
+                "PURSUIT_work.md": b"work\r\n",
+                "PURSUIT_RULES.md": b"# Custom Rules\n",
+                "corrections.md": b"# Corrections\n",
+                "shared_views.toml": b"[connections]\n",
+                "shares.toml": b"[shares]\n",
+                "shared_views/example/view.md": b"view\n",
+                "shared_views/example/recipe.toml": b"version = 1\n",
+                "insight_logs/one.md": b"insight\n",
+            }
+            for relative, content in semantic_files.items():
+                path = memory_root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            subprocess.run(["git", "add", "--", *semantic_files], cwd=memory_root, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "memory: custom semantic state"], cwd=memory_root, check=True)
+            expected_head = self._git(memory_root, "rev-parse", "HEAD")
 
             result = self._install(memory_root, skills_target)
 
-            after = self._git(memory_root, "rev-parse", "HEAD")
-            status = self._git(memory_root, "status", "--short").splitlines()
-            memory = (memory_root / "MEMORY.md").read_text(encoding="utf-8")
-
-        self.assertEqual(after, before)
-        self.assertEqual(memory, "# Existing Memory\n")
-        self.assertEqual(status, ["?? PURSUITS.md", "?? PURSUIT_RULES.md"])
-        self.assertIn(
-            "new managed state files left uncommitted for review: PURSUITS.md, PURSUIT_RULES.md",
-            result.stdout,
-        )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._git(memory_root, "rev-parse", "HEAD"), expected_head)
+            self.assertEqual(
+                {relative: (memory_root / relative).read_bytes() for relative in semantic_files},
+                semantic_files,
+            )
 
     def test_install_refreshes_memory_gitignore_to_current_allowlist(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -379,7 +506,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertNotIn("standalone runtime", orchestrator)
         self.assertEqual(installed_skill_directories, ["memory-retriever", "rightmemory-orchestrator"])
 
-    def test_rerun_refreshes_both_managed_examples_and_preserves_user_state(self):
+    def test_rerun_preserves_managed_examples_and_user_state_byte_for_byte(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
@@ -400,21 +527,25 @@ class InstallScriptTests(unittest.TestCase):
                 + pursuits.replace("Example Release Readiness", "Stale Release Readiness"),
                 encoding="utf-8",
             )
+            expected_memory = memory_path.read_bytes()
+            expected_pursuits = pursuits_path.read_bytes()
 
             self._install(memory_root, skills_target)
+            actual_memory = memory_path.read_bytes()
+            actual_pursuits = pursuits_path.read_bytes()
             refreshed_memory = memory_path.read_text(encoding="utf-8")
             refreshed_pursuits = pursuits_path.read_text(encoding="utf-8")
 
+        self.assertEqual(actual_memory, expected_memory)
+        self.assertEqual(actual_pursuits, expected_pursuits)
         self.assertIn("# Real Memory {#real-memory}", refreshed_memory)
         self.assertIn("- `real-node` keep me.", refreshed_memory)
-        self.assertIn("Example Application", refreshed_memory)
-        self.assertNotIn("Stale Example Application", refreshed_memory)
+        self.assertIn("Stale Example Application", refreshed_memory)
         self.assertEqual(refreshed_memory.count(EXAMPLE_START), 1)
         self.assertEqual(refreshed_memory.count(EXAMPLE_END), 1)
         self.assertIn("## Continue Release {#continue-release}", refreshed_pursuits)
         self.assertIn("Keep this live intent.", refreshed_pursuits)
-        self.assertIn("Example Release Readiness", refreshed_pursuits)
-        self.assertNotIn("Stale Release Readiness", refreshed_pursuits)
+        self.assertIn("Stale Release Readiness", refreshed_pursuits)
         self.assertEqual(refreshed_pursuits.count(PURSUIT_EXAMPLE_START), 1)
         self.assertEqual(refreshed_pursuits.count(PURSUIT_EXAMPLE_END), 1)
 
@@ -436,7 +567,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(pursuits, "# User Pursuits\n\nDo not replace.\n")
         self.assertEqual(rules, "# Custom Rules\n\nDo not replace.\n")
 
-    def test_rerun_migrates_known_old_starter_block(self):
+    def test_rerun_does_not_migrate_known_old_starter_block(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
@@ -450,13 +581,18 @@ class InstallScriptTests(unittest.TestCase):
                 "- `real-node` keep me. → []\n",
                 encoding="utf-8",
             )
+            (memory_root / "PURSUITS.md").write_text("# Existing Pursuits\n", encoding="utf-8")
+            (memory_root / "PURSUIT_RULES.md").write_text("# Existing Rules\n", encoding="utf-8")
+            expected = (memory_root / "MEMORY.md").read_bytes()
 
             self._install(memory_root, skills_target)
+            actual = (memory_root / "MEMORY.md").read_bytes()
             migrated = (memory_root / "MEMORY.md").read_text(encoding="utf-8")
 
-        self.assertIn(EXAMPLE_START, migrated)
-        self.assertIn("# Sample Project Graph", migrated)
-        self.assertNotIn("# Starter Knowledge Base", migrated)
+        self.assertEqual(actual, expected)
+        self.assertNotIn(EXAMPLE_START, migrated)
+        self.assertNotIn("# Sample Project Graph", migrated)
+        self.assertIn("# Starter Knowledge Base", migrated)
         self.assertIn("# Real Memory {#real-memory}", migrated)
         self.assertIn("- `real-node` keep me. → []", migrated)
 
@@ -583,6 +719,8 @@ class InstallScriptTests(unittest.TestCase):
                 "# Existing Memory {#existing-memory}\n\n- `existing-node` keep me. → []\n",
                 encoding="utf-8",
             )
+            (memory_root / "PURSUITS.md").write_text("# Existing Pursuits\n", encoding="utf-8")
+            (memory_root / "PURSUIT_RULES.md").write_text("# Existing Rules\n", encoding="utf-8")
 
             result = self._install(memory_root, skills_target)
             state_exists = (memory_root / ".runtime" / "semantic-upgrades.json").exists()
@@ -711,6 +849,15 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(user_orchestrator_text, customized_orchestrator)
 
     def _install(self, memory_root: Path, skills_target: Path) -> subprocess.CompletedProcess[str]:
+        return self._run_install(memory_root, skills_target, check=True)
+
+    def _run_install(
+        self,
+        memory_root: Path,
+        skills_target: Path,
+        *,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
         root = memory_root.parent
         return subprocess.run(
             ["bash", "install.sh", "--mode", "cli-agent", str(memory_root), str(skills_target)],
@@ -719,8 +866,22 @@ class InstallScriptTests(unittest.TestCase):
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            check=True,
+            check=check,
         )
+
+    def _snapshot(self, root: Path) -> tuple[tuple[str, str, bytes | str], ...] | None:
+        if not os.path.lexists(root):
+            return None
+        entries: list[tuple[str, str, bytes | str]] = []
+        for path in sorted((root, *root.rglob("*")), key=lambda item: str(item.relative_to(root))):
+            relative = "." if path == root else path.relative_to(root).as_posix()
+            if path.is_symlink():
+                entries.append((relative, "symlink", os.readlink(path)))
+            elif path.is_dir():
+                entries.append((relative, "directory", b""))
+            else:
+                entries.append((relative, "file", path.read_bytes()))
+        return tuple(entries)
 
     def _git(self, memory_root: Path, *args: str) -> str:
         result = subprocess.run(

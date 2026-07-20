@@ -6,18 +6,16 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from typing import Literal
 
 from .platform import prepare_command
 
 
 PYTHON_REQUIREMENT = ">=3.11"
-EXAMPLE_START_MARKER = "rightmemory:example:start"
-EXAMPLE_END_MARKER = "rightmemory:example:end"
-PURSUIT_EXAMPLE_START_MARKER = "rightmemory:pursuit-example:start"
-PURSUIT_EXAMPLE_END_MARKER = "rightmemory:pursuit-example:end"
 # Hash of the superseded managed template after its generated memory-root line is normalized.
 LEGACY_MEMORY_ORCHESTRATOR_SHA256 = "b2e0ed77f669b8d1da3f702755b85e7ac9cb8a664ccd02ffe9f7149cea095e00"
 LEGACY_MEMORY_ROOT_LINE = (
@@ -60,6 +58,14 @@ class InstallError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class InstallTarget:
+    kind: Literal["new", "existing"]
+    has_head: bool
+    missing_required: tuple[str, ...]
+    invalid_required: tuple[str, ...]
+
+
 class Installer:
     def __init__(self, repo_root: Path, mode: str, memory_root: Path, skills_targets: list[Path]):
         self.repo_root = repo_root
@@ -67,8 +73,6 @@ class Installer:
         self.memory_root = memory_root
         self.skills_targets = skills_targets
         self.is_windows = os.name == "nt"
-        self.memory_action = ""
-        self.new_managed_state_files: list[str] = []
 
         if self.is_windows:
             local_app_data = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
@@ -83,14 +87,18 @@ class Installer:
         self.runtime_python: Path | None = None
 
     def run(self) -> None:
+        target = self._inspect_target()
         self._print_layout()
+        self._require_complete_existing_target(target)
+
+        if target.kind == "new":
+            self._bootstrap_state()
+        else:
+            self._preserve_existing_state()
         (self.memory_root / "insight_logs").mkdir(parents=True, exist_ok=True)
-        self._install_or_refresh_memory()
-        self._install_or_refresh_pursuits()
-        self._install_pursuit_rules()
         self._ensure_memory_git()
         self._install_runtime()
-        self._run_semantic_upgrades()
+        self._run_semantic_upgrades(target)
         self._install_skills()
         self._warn_if_command_not_on_path()
         self._write_install_stamp()
@@ -106,129 +114,89 @@ class Installer:
         print("  CLI_COMMAND  = rightmemory")
         print()
 
-    def _install_or_refresh_memory(self) -> None:
-        memory_file = self.memory_root / "MEMORY.md"
-        block = self._example_block()
-        if not memory_file.is_file():
-            shutil.copyfile(self.repo_root / "MEMORY.example.md", memory_file)
-            print(f"  [new]     {memory_file}  (from MEMORY.example.md)")
-            self.memory_action = "new"
-            self.new_managed_state_files.append("MEMORY.md")
-            return
+    def _inspect_target(self) -> InstallTarget:
+        # Keep target classification side-effect free so refusal is an exact no-op.
+        has_head = self._target_has_head()
+        semantic_state_exists = self._semantic_state_exists()
+        kind: Literal["new", "existing"] = "existing" if has_head or semantic_state_exists else "new"
+        missing: list[str] = []
+        invalid: list[str] = []
+        if kind == "existing":
+            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+                path = self.memory_root / name
+                if not os.path.lexists(path):
+                    missing.append(name)
+                elif path.is_symlink() or not path.is_file():
+                    invalid.append(name)
+        return InstallTarget(kind, has_head, tuple(sorted(missing)), tuple(sorted(invalid)))
 
-        memory = _read_utf8(memory_file)
-        if EXAMPLE_START_MARKER in memory and EXAMPLE_END_MARKER in memory:
-            self._refresh_marked_example(memory_file, block)
-            print(f"  [refresh] {memory_file}  (managed example block)")
-            self.memory_action = "refresh"
-            return
-        if self._migrate_known_example(memory_file, block):
-            print(f"  [refresh] {memory_file}  (migrated known example block)")
-            self.memory_action = "migrate"
-            return
-        print(f"  [keep]    {memory_file} already exists; no managed example block found")
-        self.memory_action = "keep"
-
-    def _install_or_refresh_pursuits(self) -> None:
-        pursuits_file = self.memory_root / "PURSUITS.md"
-        source = self.repo_root / "PURSUITS.example.md"
-        block = self._managed_example_block(source, PURSUIT_EXAMPLE_END_MARKER)
-        if not pursuits_file.is_file():
-            shutil.copyfile(source, pursuits_file)
-            self.new_managed_state_files.append("PURSUITS.md")
-            print(f"  [new]     {pursuits_file}  (from PURSUITS.example.md)")
-            return
-
-        pursuits = _read_utf8(pursuits_file)
-        if PURSUIT_EXAMPLE_START_MARKER in pursuits and PURSUIT_EXAMPLE_END_MARKER in pursuits:
-            self._refresh_marked_example(
-                pursuits_file,
-                block,
-                start_marker=PURSUIT_EXAMPLE_START_MARKER,
-                end_marker=PURSUIT_EXAMPLE_END_MARKER,
-            )
-            print(f"  [refresh] {pursuits_file}  (managed example block)")
-            return
-        print(f"  [keep]    {pursuits_file} already exists; no managed example block found")
-
-    def _install_pursuit_rules(self) -> None:
-        rules_file = self.memory_root / "PURSUIT_RULES.md"
-        if rules_file.is_file():
-            print(f"  [keep]    {rules_file} already exists")
-            return
-        shutil.copyfile(self.repo_root / "PURSUIT_RULES.md", rules_file)
-        self.new_managed_state_files.append("PURSUIT_RULES.md")
-        print(f"  [new]     {rules_file}")
-
-    def _example_block(self) -> list[str]:
-        return self._managed_example_block(self.repo_root / "MEMORY.example.md", EXAMPLE_END_MARKER)
-
-    def _managed_example_block(self, source: Path, end_marker: str) -> list[str]:
-        block = []
-        for line in _read_utf8_lines(source):
-            block.append(line)
-            if end_marker in line:
-                return block
-        raise InstallError(f"{source.name} is missing the managed example end marker")
-
-    def _refresh_marked_example(
-        self,
-        memory_file: Path,
-        block: list[str],
-        *,
-        start_marker: str = EXAMPLE_START_MARKER,
-        end_marker: str = EXAMPLE_END_MARKER,
-    ) -> None:
-        output: list[str] = []
-        skipping = False
-        changed = False
-        for line in _read_utf8_lines(memory_file):
-            if not skipping and start_marker in line:
-                output.extend(block)
-                skipping = True
-                changed = True
-                continue
-            if skipping and end_marker in line:
-                skipping = False
-                continue
-            if not skipping:
-                output.append(line)
-        if not changed or skipping:
-            raise InstallError("could not refresh managed example block")
-        _write_utf8_lines(memory_file, output)
-
-    def _migrate_known_example(self, memory_file: Path, block: list[str]) -> bool:
-        lines = _read_utf8_lines(memory_file)
-        if not lines:
+    def _target_has_head(self) -> bool:
+        if not self.memory_root.is_dir() or not os.path.lexists(self.memory_root / ".git"):
             return False
-        if lines[0] == "# Starter Knowledge Base {#starter-knowledge-base}":
-            output = list(block)
-            separator = next((index for index, line in enumerate(lines[1:], start=1) if line == "---"), None)
-            if separator is None:
-                raise InstallError("could not migrate starter example block")
-            output.extend(lines[separator + 1 :])
-            _write_utf8_lines(memory_file, output)
+        result = _run(
+            ["git", "-C", str(self.memory_root), "rev-parse", "--verify", "--quiet", "HEAD"],
+            capture=True,
+        )
+        return result.returncode == 0
+
+    def _semantic_state_exists(self) -> bool:
+        if not self.memory_root.is_dir():
+            return False
+
+        for path in self.memory_root.iterdir():
+            name = path.name
+            if name in {
+                "MEMORY.md",
+                "PURSUITS.md",
+                "PURSUIT_RULES.md",
+                "corrections.md",
+                "shared_views.toml",
+                "shares.toml",
+            }:
+                return True
+            if (name.startswith("MEMORY_") or name.startswith("PURSUIT_")) and name.endswith(".md"):
+                return True
+
+        insight_logs = self.memory_root / "insight_logs"
+        if insight_logs.is_dir() and any(path.name.endswith(".md") for path in insight_logs.iterdir()):
             return True
 
-        output: list[str] = []
-        skipping = False
-        changed = False
-        for line in lines:
-            if not changed and re.match(r"^# Sample Project Graph .*{#sample-project-graph}", line):
-                output.extend(block)
-                skipping = True
-                changed = True
-                continue
-            if skipping and line.startswith("# Cross-Session Agent Behavior"):
-                skipping = False
-            if not skipping:
-                output.append(line)
-        if not changed:
-            return False
-        if skipping:
-            raise InstallError("could not migrate sample project graph block")
-        _write_utf8_lines(memory_file, output)
-        return True
+        shared_views = self.memory_root / "shared_views"
+        if shared_views.is_dir():
+            shared_view_files = {"view.md", "retriever.md", "recipe.toml", "question.toml"}
+            for view_dir in shared_views.iterdir():
+                if view_dir.is_dir() and any(os.path.lexists(view_dir / name) for name in shared_view_files):
+                    return True
+        return False
+
+    def _require_complete_existing_target(self, target: InstallTarget) -> None:
+        if target.kind != "existing" or (not target.missing_required and not target.invalid_required):
+            return
+        details: list[str] = []
+        if target.missing_required:
+            details.append(f"missing required files: {', '.join(target.missing_required)}")
+        if target.invalid_required:
+            details.append(f"non-regular required files: {', '.join(target.invalid_required)}")
+        raise InstallError(
+            f"existing RightMemory root is incomplete: {'; '.join(details)}\n"
+            "installation made no changes; migrate and review this root explicitly before reinstalling"
+        )
+
+    def _bootstrap_state(self) -> None:
+        self.memory_root.mkdir(parents=True, exist_ok=True)
+        memory_file = self.memory_root / "MEMORY.md"
+        pursuits_file = self.memory_root / "PURSUITS.md"
+        rules_file = self.memory_root / "PURSUIT_RULES.md"
+        shutil.copyfile(self.repo_root / "MEMORY.example.md", memory_file)
+        shutil.copyfile(self.repo_root / "PURSUITS.example.md", pursuits_file)
+        shutil.copyfile(self.repo_root / "PURSUIT_RULES.md", rules_file)
+        print(f"  [new]     {memory_file}  (from MEMORY.example.md)")
+        print(f"  [new]     {pursuits_file}  (from PURSUITS.example.md)")
+        print(f"  [new]     {rules_file}")
+
+    def _preserve_existing_state(self) -> None:
+        for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+            print(f"  [keep]    {self.memory_root / name} already exists")
 
     def _ensure_memory_git(self) -> None:
         git_marker = self.memory_root / ".git"
@@ -291,9 +259,6 @@ class Installer:
     def _ensure_initial_commit(self) -> None:
         if self._git_result("rev-parse", "--verify", "--quiet", "HEAD").returncode == 0:
             print("  [keep]    initial memory commit already exists")
-            if self.new_managed_state_files:
-                joined = ", ".join(self.new_managed_state_files)
-                print(f"  [notice]  new managed state files left uncommitted for review: {joined}")
             return
         files = self._initial_memory_files()
         if files:
@@ -362,9 +327,9 @@ class Installer:
             self.runtime_command.chmod(0o755)
         print(f"  [install] {self.runtime_command}")
 
-    def _run_semantic_upgrades(self) -> None:
+    def _run_semantic_upgrades(self, target: InstallTarget) -> None:
         assert self.runtime_python is not None
-        command = "baseline" if self.memory_action == "new" else "refresh"
+        command = "baseline" if target.kind == "new" else "refresh"
         result = _run(
             [
                 str(self.runtime_python),
@@ -380,6 +345,7 @@ class Installer:
 
     def _install_skills(self) -> None:
         for target in self.skills_targets:
+            target.mkdir(parents=True, exist_ok=True)
             schema = target / "rightmemory-schema.md"
             shutil.copyfile(self.repo_root / "skills" / "rightmemory-schema.md", schema)
             print(f"  [install] {schema}")
@@ -609,10 +575,8 @@ def _verify_required_commands() -> None:
             raise InstallError(f"missing or unusable required command: {name}")
 
 
-def _resolved_directory(path: str | Path) -> Path:
-    resolved = Path(path).expanduser().resolve(strict=False)
-    resolved.mkdir(parents=True, exist_ok=True)
-    return resolved.resolve()
+def _resolved_path(path: str | Path) -> Path:
+    return Path(path).expanduser().resolve(strict=False)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -638,13 +602,13 @@ def main(argv: list[str] | None = None) -> int:
         _verify_required_commands()
         home = Path.home()
         if args.paths:
-            memory_root = _resolved_directory(args.paths[0])
-            skills_targets = [_resolved_directory(args.paths[1])]
+            memory_root = _resolved_path(args.paths[0])
+            skills_targets = [_resolved_path(args.paths[1])]
         else:
-            memory_root = _resolved_directory(home / ".rightmemory")
+            memory_root = _resolved_path(home / ".rightmemory")
             skills_targets = [
-                _resolved_directory(home / ".codex" / "skills"),
-                _resolved_directory(home / ".claude" / "skills"),
+                _resolved_path(home / ".codex" / "skills"),
+                _resolved_path(home / ".claude" / "skills"),
             ]
         repo_root = Path(__file__).resolve().parents[1]
         Installer(repo_root, args.mode, memory_root, skills_targets).run()
