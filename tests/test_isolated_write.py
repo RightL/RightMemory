@@ -23,7 +23,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self._git("config", "user.name", "Test User")
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
-            "- `one` initial memory\n",
+            "- `one` initial memory → []\n",
             encoding="utf-8",
         )
         (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
@@ -33,7 +33,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_committed_temp_change_lands_as_ordinary_commit(self):
         def callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `two` isolated memory\n")
+            self._append_memory(worktree, "- `two` isolated memory → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: isolated update", cwd=worktree)
             return "updated"
@@ -50,7 +50,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_semantic_operation_lands_one_commit_with_receipt_trailer(self):
         def callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `two` durable operation\n")
+            self._append_memory(worktree, "- `two` durable operation → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: durable operation", cwd=worktree)
             return "updated"
@@ -93,7 +93,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
         def callback(worktree: Path) -> str:
             calls.append("model")
-            self._append_memory(worktree, "- `two` recover landed operation\n")
+            self._append_memory(worktree, "- `two` recover landed operation → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: recover operation", cwd=worktree)
             return "updated once"
@@ -135,7 +135,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
         def callback(worktree: Path) -> str:
             calls.append("model")
-            self._append_memory(worktree, "- `two` pinned candidate\n")
+            self._append_memory(worktree, "- `two` pinned candidate → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: pinned candidate", cwd=worktree)
             return "updated once"
@@ -170,7 +170,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
         def first_callback(worktree: Path) -> str:
             calls.append("first")
-            self._append_memory(worktree, "- `two` first prepared operation\n")
+            self._append_memory(worktree, "- `two` first prepared operation → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: first prepared operation", cwd=worktree)
             return "first result"
@@ -193,7 +193,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
                 "first prepared operation",
                 (worktree / "MEMORY.md").read_text(encoding="utf-8"),
             )
-            self._append_memory(worktree, "- `three` second operation\n")
+            self._append_memory(worktree, "- `three` second operation → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: second operation", cwd=worktree)
             return "second result"
@@ -249,7 +249,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
         def callback(worktree: Path) -> str:
             calls.append("model")
-            self._append_memory(worktree, "- `two` recover rebased operation\n")
+            self._append_memory(worktree, "- `two` recover rebased operation → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: recover rebased operation", cwd=worktree)
             return "recovered output"
@@ -305,10 +305,10 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_semantic_operation_squashes_multiple_model_commits(self):
         def callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `two` first step\n")
+            self._append_memory(worktree, "- `two` first step → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: first step", cwd=worktree)
-            self._append_memory(worktree, "- `three` second step\n")
+            self._append_memory(worktree, "- `three` second step → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: second step", cwd=worktree)
             return "updated"
@@ -326,7 +326,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_failed_callback_after_temp_commit_does_not_land(self):
         def callback(worktree: Path) -> None:
-            self._append_memory(worktree, "- `two` failed isolated memory\n")
+            self._append_memory(worktree, "- `two` failed isolated memory → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: failed isolated update", cwd=worktree)
             raise RuntimeError("agent failed")
@@ -372,7 +372,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
             original = (worktree / "MEMORY.md").read_text(encoding="utf-8")
             self._git("rm", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: delete root memory", cwd=worktree)
-            (worktree / "MEMORY.md").write_text(original + "- `two` restored memory\n", encoding="utf-8")
+            (worktree / "MEMORY.md").write_text(original + "- `two` restored memory → []\n", encoding="utf-8")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: restore root memory", cwd=worktree)
 
@@ -421,7 +421,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
             self._git("add", "MEMORY_secret.md", cwd=worktree)
             self._git("commit", "-m", "memory: add symlink detail", cwd=worktree)
             secret.unlink()
-            secret.write_text("# Secret\n\n- `secret` restored regular memory\n", encoding="utf-8")
+            secret.write_text("# Secret\n\n- `secret` restored regular memory → []\n", encoding="utf-8")
             self._git("add", "MEMORY_secret.md", cwd=worktree)
             self._git("commit", "-m", "memory: replace symlink detail", cwd=worktree)
 
@@ -522,7 +522,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_noop_rechecks_main_head_before_accepting(self):
         def callback(_worktree: Path) -> str:
-            self._append_memory(self.root, "- `main-change` outside main memory\n")
+            self._append_memory(self.root, "- `main-change` outside main memory → []\n")
             self._git("add", "MEMORY.md")
             self._git("commit", "-m", "memory: outside main update")
             return "noop"
@@ -538,7 +538,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_noop_rechecks_dirty_main_memory_before_accepting(self):
         def callback(_worktree: Path) -> str:
-            self._append_memory(self.root, "- `main-dirty` outside main memory\n")
+            self._append_memory(self.root, "- `main-dirty` outside main memory → []\n")
             return "noop"
 
         with self.assertRaises(MainMemoryDirtyError) as caught:
@@ -554,7 +554,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         called = False
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
-            "- `one` dirty memory\n",
+            "- `one` dirty memory → []\n",
             encoding="utf-8",
         )
 
@@ -586,7 +586,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_dirty_active_memory_blocks_insight_before_callback(self):
         called = False
-        self._append_memory(self.root, "- `two` uncommitted active memory\n")
+        self._append_memory(self.root, "- `two` uncommitted active memory → []\n")
 
         def callback(_worktree: Path) -> None:
             nonlocal called
@@ -629,7 +629,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertEqual(self._git("log", "-1", "--format=%s"), "insight: reflect on memory shape")
 
     def test_insight_commit_lands_when_active_memory_is_invalid(self):
-        self._append_memory(self.root, "- `one` duplicate active memory\n")
+        self._append_memory(self.root, "- `one` duplicate active memory → []\n")
         self._git("add", "MEMORY.md")
         self._git("commit", "-m", "memory: preexisting invalid active memory")
 
@@ -649,7 +649,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_insight_commit_rejects_memory_edit(self):
         def callback(worktree: Path) -> None:
-            self._append_memory(worktree, "- `two` invalid insight memory edit\n")
+            self._append_memory(worktree, "- `two` invalid insight memory edit → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "insight: invalid memory edit", cwd=worktree)
 
@@ -660,7 +660,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_uncommitted_temp_change_does_not_land(self):
         def callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `two` uncommitted isolated memory\n")
+            self._append_memory(worktree, "- `two` uncommitted isolated memory → []\n")
             return "dirty"
 
         with self.assertRaisesRegex(RuntimeError, "uncommitted changes"):
@@ -672,10 +672,10 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_main_head_change_before_landing_preserves_main_commit(self):
         def callback(worktree: Path) -> None:
-            self._append_memory(worktree, "- `two` isolated memory\n")
+            self._append_memory(worktree, "- `two` isolated memory → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: isolated update", cwd=worktree)
-            self._append_memory(self.root, "- `main-change` outside main memory\n")
+            self._append_memory(self.root, "- `main-change` outside main memory → []\n")
             self._git("add", "MEMORY.md")
             self._git("commit", "-m", "memory: outside main update")
 
@@ -690,7 +690,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_tracked_operation_rebases_before_preparing_when_unrelated_head_moves(self):
         def callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `two` isolated memory\n")
+            self._append_memory(worktree, "- `two` isolated memory → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: isolated update", cwd=worktree)
             (self.root / "DIRECT.md").write_text("direct writer\n", encoding="utf-8")
@@ -713,7 +713,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_tracked_operation_reruns_when_nonconflicting_semantic_state_moves(self):
         def stale_callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `two` stale isolated result\n")
+            self._append_memory(worktree, "- `two` stale isolated result → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: stale isolated result", cwd=worktree)
             (self.root / "PURSUITS.md").write_text(
@@ -736,7 +736,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertEqual(receipt.phase, "running")
 
         def fresh_callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `two` fresh isolated result\n")
+            self._append_memory(worktree, "- `two` fresh isolated result → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: fresh isolated result", cwd=worktree)
             return "fresh"
@@ -776,7 +776,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertEqual(failed.phase, "running")
 
         def retry_callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `two` recovered after conflict\n")
+            self._append_memory(worktree, "- `two` recovered after conflict → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: recovered operation", cwd=worktree)
             return "recovered"
@@ -793,7 +793,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_validation_failure_does_not_land_temp_commit(self):
         def callback(worktree: Path) -> None:
-            self._append_memory(worktree, "- `one` duplicate memory\n")
+            self._append_memory(worktree, "- `one` duplicate memory → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "memory: invalid isolated update", cwd=worktree)
 
@@ -806,7 +806,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_update_lands_memory_and_pursuit_as_one_transaction(self):
         def callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `durable` durable result\n")
+            self._append_memory(worktree, "- `durable` durable result → []\n")
             (worktree / "PURSUITS.md").write_text(
                 "# Pursuits\n\n## Continue {#continue} \u2192 [dep:durable]\n",
                 encoding="utf-8",
@@ -824,7 +824,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_update_rejects_multiple_commits(self):
         def callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `first` first state\n")
+            self._append_memory(worktree, "- `first` first state → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "rightmemory: first", cwd=worktree)
             (worktree / "PURSUITS.md").write_text(
@@ -855,7 +855,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_review_correction_lands_state_and_feedback_in_one_commit(self):
         def callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `corrected` accepted state\n")
+            self._append_memory(worktree, "- `corrected` accepted state → []\n")
             (worktree / "corrections.md").write_text(
                 "# RightMemory Update Corrections\n\n"
                 "## Keep accepted scope\n\n"
@@ -897,7 +897,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_review_correction_enforces_updater_correction_ceiling(self):
         def callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `corrected` accepted state\n")
+            self._append_memory(worktree, "- `corrected` accepted state → []\n")
             (worktree / "corrections.md").write_text(
                 self._corrections_markdown(16),
                 encoding="utf-8",
@@ -915,7 +915,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_review_correction_discards_speculative_commit_when_input_is_needed(self):
         def callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `speculative` must not land\n")
+            self._append_memory(worktree, "- `speculative` must not land → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "rightmemory: speculative correction", cwd=worktree)
             return "Needs input: Which scope should change?"
@@ -994,7 +994,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
 
     def test_reviewer_cannot_land_graph_edits(self):
         def callback(worktree: Path) -> None:
-            self._append_memory(worktree, "- `reviewed` invalid reviewer edit\n")
+            self._append_memory(worktree, "- `reviewed` invalid reviewer edit → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "reviewer: invalid graph write", cwd=worktree)
 
@@ -1026,7 +1026,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self._git("commit", "-m", "sync: preserve unresolved correction union")
 
         def callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `later` unrelated durable state\n")
+            self._append_memory(worktree, "- `later` unrelated durable state → []\n")
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "rightmemory: unrelated update", cwd=worktree)
             return "updated"

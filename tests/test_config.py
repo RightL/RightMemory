@@ -1431,7 +1431,7 @@ class RuntimeTests(unittest.TestCase):
         self._git(root, "init")
         self._git(root, "config", "user.email", "test@example.com")
         self._git(root, "config", "user.name", "Test User")
-        (root / "MEMORY.md").write_text("# Domain {#domain}\n\n- `one` initial\n", encoding="utf-8")
+        (root / "MEMORY.md").write_text("# Domain {#domain}\n\n- `one` initial → []\n", encoding="utf-8")
         (root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         self._git(root, "add", "MEMORY.md", "PURSUITS.md")
         self._git(root, "commit", "-m", "initial memory")
@@ -1440,7 +1440,7 @@ class RuntimeTests(unittest.TestCase):
         def nested(worktree, _state_root, _session_id, _message):
             calls.append("model")
             memory = worktree / "MEMORY.md"
-            memory.write_text(memory.read_text(encoding="utf-8") + "- `two` remembered\n", encoding="utf-8")
+            memory.write_text(memory.read_text(encoding="utf-8") + "- `two` remembered → []\n", encoding="utf-8")
             self._git(worktree, "add", "MEMORY.md")
             self._git(worktree, "commit", "-m", "memory: remember two")
             return "updated once"
@@ -2600,7 +2600,7 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertFalse((Path(self.tempdir.name) / ".runtime" / "recent_submitted").exists())
 
-    def test_update_turn_runs_sync_preflight_without_exposing_context(self):
+    def test_update_turn_runs_sync_pull_without_exposing_context(self):
         config = RuntimeConfig(
             role="update",
             model_id="openai/test",
@@ -2613,17 +2613,17 @@ class RuntimeTests(unittest.TestCase):
             patch.dict("sys.modules", self._fake_pydantic_modules()),
             patch("rightmemory.runtime.SyncManager") as manager_class,
         ):
-            manager_class.return_value.preflight.return_value = SyncResult("synced", "local memory is current")
+            manager_class.return_value.pull.return_value = SyncResult("synced", "local memory is current")
             manager_class.return_value.push.return_value = SyncResult("pushed", "local memory pushed")
             runtime = RightMemoryRuntime(config)
             runtime.run_session_turn("agent-session", "remember one")
 
         message = runtime.agent.calls[0]["message"]
         self.assertEqual(message, "remember one")
-        manager_class.return_value.preflight.assert_called_once()
-        manager_class.return_value.push.assert_called_once()
+        manager_class.return_value.pull.assert_called_once_with(repair=runtime._repair_sync_candidate)
+        manager_class.return_value.push.assert_called_once_with(repair=runtime._repair_sync_candidate)
 
-    def test_update_sync_preflight_runs_while_write_lock_is_held(self):
+    def test_sync_manager_operations_run_outside_the_model_write_lock(self):
         events = []
 
         class FakeLock:
@@ -2637,11 +2637,13 @@ class RuntimeTests(unittest.TestCase):
             def __exit__(self, exc_type, exc, traceback):
                 events.append("lock_exit")
 
-        def preflight():
-            events.append("preflight")
+        def pull(*, repair):
+            self.assertEqual(repair, runtime._repair_sync_candidate)
+            events.append("pull")
             return SyncResult("synced", "local memory is current")
 
-        def push():
+        def push(*, repair):
+            self.assertEqual(repair, runtime._repair_sync_candidate)
             events.append("push")
             return SyncResult("pushed", "local memory pushed")
 
@@ -2658,7 +2660,7 @@ class RuntimeTests(unittest.TestCase):
             patch("rightmemory.runtime.MemoryWriteLock", FakeLock),
             patch("rightmemory.runtime.SyncManager") as manager_class,
         ):
-            manager_class.return_value.preflight.side_effect = preflight
+            manager_class.return_value.pull.side_effect = pull
             manager_class.return_value.push.side_effect = push
             runtime = RightMemoryRuntime(config)
 
@@ -2676,9 +2678,9 @@ class RuntimeTests(unittest.TestCase):
             runtime.agent.run_sync = run_sync
             runtime.run_session_turn("agent-session", "remember one")
 
-        self.assertEqual(events, ["lock_enter", "preflight", "model", "push", "lock_exit"])
+        self.assertEqual(events, ["pull", "lock_enter", "model", "lock_exit", "push"])
 
-    def test_dirty_preflight_runs_sync_reconciler_before_update_agent(self):
+    def test_dirty_pull_runs_sync_reconciler_before_update_agent(self):
         repairs = []
         config = RuntimeConfig(
             role="update",
@@ -2693,7 +2695,7 @@ class RuntimeTests(unittest.TestCase):
             patch("rightmemory.runtime.SyncManager") as manager_class,
             patch.object(RightMemoryRuntime, "_run_sync_reconciler", lambda self, result: repairs.append(result.status)),
         ):
-            manager_class.return_value.preflight.side_effect = [
+            manager_class.return_value.pull.side_effect = [
                 SyncResult("dirty", "local memory has uncommitted changes", ["MEMORY.md"]),
                 SyncResult("synced", "local memory is current"),
             ]
@@ -2746,7 +2748,7 @@ class RuntimeTests(unittest.TestCase):
             ],
         )
 
-    def test_dirty_main_guard_retries_full_sync_preflight_after_repair(self):
+    def test_dirty_main_guard_retries_full_sync_pull_after_repair(self):
         repairs = []
         calls = []
         config = RuntimeConfig(
@@ -2769,7 +2771,7 @@ class RuntimeTests(unittest.TestCase):
             patch("rightmemory.runtime.SyncManager") as manager_class,
             patch.object(RightMemoryRuntime, "_run_sync_reconciler", lambda self, result: repairs.append(result.status)),
         ):
-            manager_class.return_value.preflight.side_effect = [
+            manager_class.return_value.pull.side_effect = [
                 SyncResult("synced", "local memory is current"),
                 SyncResult("synced", "local memory is current"),
             ]
@@ -2781,8 +2783,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(post_sync, None)
         self.assertEqual(calls, ["dirty", "model"])
         self.assertEqual(repairs, ["dirty"])
-        self.assertEqual(manager_class.return_value.preflight.call_count, 2)
-        manager_class.return_value.push.assert_called_once()
+        self.assertEqual(manager_class.return_value.pull.call_count, 2)
+        for call in manager_class.return_value.pull.call_args_list:
+            self.assertEqual(call.kwargs, {"repair": runtime._repair_sync_candidate})
+        manager_class.return_value.push.assert_called_once_with(repair=runtime._repair_sync_candidate)
 
     def test_dirty_main_guard_fails_after_one_uncleared_repair(self):
         repairs = []
@@ -2807,8 +2811,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(repairs, ["dirty"])
         self.assertIn("dirty-main repair did not clear memory files: MEMORY.md", str(caught.exception))
 
-    def test_dirty_push_runs_sync_reconciler_after_update_agent(self):
-        repairs = []
+    def test_push_delegates_candidate_repair_to_sync_manager(self):
         config = RuntimeConfig(
             role="update",
             model_id="openai/test",
@@ -2820,19 +2823,14 @@ class RuntimeTests(unittest.TestCase):
         with (
             patch.dict("sys.modules", self._fake_pydantic_modules()),
             patch("rightmemory.runtime.SyncManager") as manager_class,
-            patch.object(RightMemoryRuntime, "_run_sync_reconciler", lambda self, result: repairs.append(result.status)),
         ):
-            manager_class.return_value.preflight.return_value = SyncResult("synced", "local memory is current")
-            manager_class.return_value.push.return_value = SyncResult(
-                "dirty",
-                "local memory has uncommitted changes",
-                ["MEMORY.md"],
-            )
+            manager_class.return_value.pull.return_value = SyncResult("synced", "local memory is current")
+            manager_class.return_value.push.return_value = SyncResult("pushed", "local memory pushed")
             runtime = RightMemoryRuntime(config)
             runtime.run_session_turn("agent-session", "remember one")
 
         self.assertEqual(runtime.agent.calls[0]["message"], "remember one")
-        self.assertEqual(repairs, ["dirty"])
+        manager_class.return_value.push.assert_called_once_with(repair=runtime._repair_sync_candidate)
 
     def test_runtime_sync_reconciler_loads_selected_memory_root(self):
         memory_root = Path(self.tempdir.name) / "profile-root"
@@ -2878,7 +2876,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(nested_calls[0], ("init", memory_root))
         self.assertEqual(nested_calls[-1], ("cleanup",))
 
-    def test_prune_turn_checks_generation_after_sync_preflight(self):
+    def test_prune_turn_checks_generation_after_sync_pull(self):
         events = []
         memory_root = Path(self.tempdir.name)
         config = RuntimeConfig(
@@ -2903,19 +2901,18 @@ class RuntimeTests(unittest.TestCase):
             patch("rightmemory.runtime.SyncManager") as manager_class,
             patch("rightmemory.runtime.prune_due_status", side_effect=fake_prune_due_status),
         ):
-            manager_class.return_value.preflight.side_effect = lambda: events.append(("preflight", memory_root)) or SyncResult(
-                "synced",
-                "local memory is current",
-            )
+            manager_class.return_value.pull.side_effect = lambda *, repair: events.append(
+                ("pull", memory_root)
+            ) or SyncResult("synced", "local memory is current")
             manager_class.return_value.push.return_value = SyncResult("pushed", "local memory pushed")
             runtime = RightMemoryRuntime(config)
             result = runtime.run_prune_turn("prune-session", PrunerConfig(memory_root=memory_root))
 
         self.assertEqual(result, "prune not due after sync")
-        self.assertEqual(events, [("preflight", memory_root), ("status", memory_root)])
+        self.assertEqual(events, [("pull", memory_root), ("status", memory_root)])
         self.assertEqual(runtime.agent.calls, [])
 
-    def test_retrieve_turn_does_not_run_sync_preflight(self):
+    def test_retrieve_turn_does_not_run_sync_pull(self):
         config = RuntimeConfig(
             role="retrieve",
             model_id="openai/test",
@@ -2932,7 +2929,7 @@ class RuntimeTests(unittest.TestCase):
 
         manager_class.assert_not_called()
 
-    def test_historian_turn_does_not_run_sync_preflight(self):
+    def test_historian_turn_does_not_run_sync_pull(self):
         config = RuntimeConfig(
             role="historian",
             model_id="openai/test",
@@ -3552,7 +3549,8 @@ class PromptTests(unittest.TestCase):
         self.assertIn("MF#", prompt)
         self.assertIn("MQ#", prompt)
         self.assertIn("exactly one JSON object", prompt)
-        self.assertIn(".runtime/shared_views/imports/<mf-id>/dist/MEMORY.md", prompt)
+        self.assertIn("schema-valid `dist/MEMORY.md`", prompt)
+        self.assertIn("`dist/MEMORY_<id>.md`", prompt)
         self.assertIn("The `read_*` names", prompt)
         self.assertIn("provider CLI's read-only file tools", prompt)
         self.assertNotIn("rightmemory shared-view retrieve", prompt)
