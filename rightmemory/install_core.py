@@ -64,6 +64,7 @@ class InstallTarget:
     has_head: bool
     missing_required: tuple[str, ...]
     invalid_required: tuple[str, ...]
+    git_layout_error: str | None = None
 
 
 class Installer:
@@ -116,9 +117,11 @@ class Installer:
 
     def _inspect_target(self) -> InstallTarget:
         # Keep target classification side-effect free so refusal is an exact no-op.
-        has_head = self._target_has_head()
+        has_head, git_layout_error = self._inspect_target_git()
         semantic_state_exists = self._semantic_state_exists()
-        kind: Literal["new", "existing"] = "existing" if has_head or semantic_state_exists else "new"
+        kind: Literal["new", "existing"] = (
+            "existing" if has_head or semantic_state_exists or git_layout_error else "new"
+        )
         missing: list[str] = []
         invalid: list[str] = []
         if kind == "existing":
@@ -128,16 +131,48 @@ class Installer:
                     missing.append(name)
                 elif path.is_symlink() or not path.is_file():
                     invalid.append(name)
-        return InstallTarget(kind, has_head, tuple(sorted(missing)), tuple(sorted(invalid)))
+        return InstallTarget(
+            kind,
+            has_head,
+            tuple(sorted(missing)),
+            tuple(sorted(invalid)),
+            git_layout_error,
+        )
 
-    def _target_has_head(self) -> bool:
-        if not self.memory_root.is_dir() or not os.path.lexists(self.memory_root / ".git"):
-            return False
-        result = _run(
-            ["git", "-C", str(self.memory_root), "rev-parse", "--verify", "--quiet", "HEAD"],
+    def _inspect_target_git(self) -> tuple[bool, str | None]:
+        if not self.memory_root.is_dir():
+            return False, None
+        bare = _run(
+            ["git", "rev-parse", "--is-bare-repository"],
+            cwd=self.memory_root,
             capture=True,
         )
-        return result.returncode == 0
+        if bare.returncode == 0 and bare.stdout.strip() == "true":
+            head = _run(
+                ["git", "rev-parse", "--verify", "--quiet", "HEAD"],
+                cwd=self.memory_root,
+                capture=True,
+            )
+            return head.returncode == 0, "the memory root is a bare Git repository"
+
+        top_level = _run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=self.memory_root,
+            capture=True,
+        )
+        if top_level.returncode == 0 and top_level.stdout.strip():
+            resolved_top = Path(top_level.stdout.strip()).resolve()
+            if resolved_top != self.memory_root.resolve():
+                return False, "the memory root is inside another Git working tree"
+            head = _run(
+                ["git", "rev-parse", "--verify", "--quiet", "HEAD"],
+                cwd=self.memory_root,
+                capture=True,
+            )
+            return head.returncode == 0, None
+        if os.path.lexists(self.memory_root / ".git"):
+            return False, "the memory root has an unusable .git entry"
+        return False, None
 
     def _semantic_state_exists(self) -> bool:
         if not self.memory_root.is_dir():
@@ -163,13 +198,18 @@ class Installer:
 
         shared_views = self.memory_root / "shared_views"
         if shared_views.is_dir():
-            shared_view_files = {"view.md", "retriever.md", "recipe.toml", "question.toml"}
+            shared_view_files = {"view.md", "retriever.md", "recipe.toml", "question.toml", ".gitignore"}
             for view_dir in shared_views.iterdir():
                 if view_dir.is_dir() and any(os.path.lexists(view_dir / name) for name in shared_view_files):
                     return True
         return False
 
     def _require_complete_existing_target(self, target: InstallTarget) -> None:
+        if target.git_layout_error:
+            raise InstallError(
+                f"unsupported RightMemory target: {target.git_layout_error}\n"
+                "installation made no changes; choose a standalone non-bare Git working tree for the memory root"
+            )
         if target.kind != "existing" or (not target.missing_required and not target.invalid_required):
             return
         details: list[str] = []

@@ -397,6 +397,65 @@ class InstallScriptTests(unittest.TestCase):
                     self.assertFalse(skills_target.exists())
                     self.assertFalse((memory_root / ".runtime" / "install.stamp").exists())
 
+    def test_shared_view_gitignore_alone_marks_existing_root_incomplete(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            view_dir = memory_root / "shared_views" / "auth-api"
+            view_dir.mkdir(parents=True)
+            (view_dir / ".gitignore").write_text("dist/\n", encoding="utf-8")
+            before = self._snapshot(memory_root)
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("existing RightMemory root is incomplete", result.stderr)
+            self.assertIn("installation made no changes", result.stderr)
+            self.assertEqual(self._snapshot(memory_root), before)
+            self.assertFalse(skills_target.exists())
+
+    def test_install_refuses_bare_git_target_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory.git"
+            skills_target = root / "skills"
+            subprocess.run(["git", "init", "--bare", "-q", str(memory_root)], check=True)
+            before = self._snapshot(memory_root)
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("bare Git repository", result.stderr)
+            self.assertIn("installation made no changes", result.stderr)
+            self.assertEqual(self._snapshot(memory_root), before)
+            self.assertFalse(skills_target.exists())
+
+    def test_install_refuses_target_nested_in_another_git_worktree(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            outer = root / "outer"
+            memory_root = outer / "memory"
+            skills_target = root / "skills"
+            outer.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+            subprocess.run(["git", "config", "user.name", "Outer User"], cwd=outer, check=True)
+            subprocess.run(["git", "config", "user.email", "outer@example.com"], cwd=outer, check=True)
+            (outer / "README.md").write_text("outer\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=outer, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "outer baseline"], cwd=outer, check=True)
+            memory_root.mkdir()
+            self._env_with_fake_uv(outer)
+            before = self._snapshot(outer)
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("inside another Git working tree", result.stderr)
+            self.assertIn("installation made no changes", result.stderr)
+            self.assertEqual(self._snapshot(outer), before)
+            self.assertFalse(skills_target.exists())
+
     def test_complete_committed_root_preserves_all_semantic_state_bytes(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

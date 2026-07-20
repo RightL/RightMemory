@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory, mkdtemp
 
-from .graph import BlockKey, DocumentBlock, GraphManifest, build_graph_manifest
+from .graph import BlockKey, DocumentBlock, GraphManifest, build_graph_manifest, validate_item_id
 from .hub.client import HubClient, HubClientError
 from .shared_view_models import (
     PROVIDER_VIEWS_DIR,
@@ -127,10 +127,10 @@ def write_extractive_file_view_recipe(
         title=_required_text(title, "title"),
         intent=_required_text(intent, "intent"),
         render=FILE_VIEW_RENDER_EXTRACTIVE,
-        include_headings=tuple(validate_heading_id(item) for item in include_headings),
-        include_nodes=tuple(validate_heading_id(item) for item in include_nodes),
+        include_headings=tuple(validate_item_id(item) for item in include_headings),
+        include_nodes=tuple(validate_item_id(item) for item in include_nodes),
         include_files=tuple(_validate_graph_source_file(root, item) for item in include_files),
-        exclude_ids=tuple(validate_heading_id(item) for item in exclude_ids),
+        exclude_ids=tuple(validate_item_id(item) for item in exclude_ids),
         approved=bool(approved),
         publish_hub_url=_optional_text(publish_hub_url),
         publish_credential_id=validate_heading_id(publish_credential_id) if publish_credential_id else None,
@@ -213,14 +213,14 @@ def load_file_view_recipe(memory_root: Path, view_id: str) -> FileViewRecipe:
         title=str(data.get("title") or clean_view_id),
         intent=str(data.get("intent") or ""),
         render=render,
-        include_headings=tuple(validate_heading_id(str(item)) for item in data.get("include_headings", []) if isinstance(item, str)),
-        include_nodes=tuple(validate_heading_id(str(item)) for item in data.get("include_nodes", []) if isinstance(item, str)),
+        include_headings=tuple(validate_item_id(str(item)) for item in data.get("include_headings", []) if isinstance(item, str)),
+        include_nodes=tuple(validate_item_id(str(item)) for item in data.get("include_nodes", []) if isinstance(item, str)),
         include_files=tuple(
             _validate_graph_source_file(root, item)
             for item in data.get("include_files", [])
             if isinstance(item, str)
         ),
-        exclude_ids=tuple(validate_heading_id(str(item)) for item in data.get("exclude_ids", []) if isinstance(item, str)),
+        exclude_ids=tuple(validate_item_id(str(item)) for item in data.get("exclude_ids", []) if isinstance(item, str)),
         approved=bool(data.get("approved", False)),
         publish_hub_url=str(publish.get("hub_url")).strip() if publish.get("hub_url") else None,
         publish_credential_id=validate_heading_id(str(publish.get("credential_id"))) if publish.get("credential_id") else None,

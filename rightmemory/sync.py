@@ -76,6 +76,7 @@ class _Candidate:
     branch: str
     path: Path
     lease: WorktreeLease
+    removed: bool = False
 
 
 @dataclass(frozen=True)
@@ -132,8 +133,11 @@ class SyncManager:
         push_target = self._push_target(upstream)
         if push_target is None:
             return self._record_failure(SyncResult("unconfigured", "sync upstream is not pushable"))
+        upstream_commit = self._resolve_commit(upstream)
+        if upstream_commit is None:
+            return self._record_failure(SyncResult("error", "sync failed: upstream commit is unavailable"))
 
-        captured = self._capture_valid_tip()
+        captured = self._capture_valid_tip(upstream_commit)
         if isinstance(captured, SyncResult):
             return self._record_failure(captured)
         first_push = self._push(push_target, captured)
@@ -143,7 +147,10 @@ class SyncManager:
         pulled = self.pull(repair=repair)
         if pulled.status != "synced":
             return pulled
-        captured = self._capture_valid_tip()
+        upstream_commit = self._resolve_commit(upstream)
+        if upstream_commit is None:
+            return self._record_failure(SyncResult("error", "sync failed: upstream commit is unavailable"))
+        captured = self._capture_valid_tip(upstream_commit)
         if isinstance(captured, SyncResult):
             return self._record_failure(captured)
         retry = self._push(push_target, captured)
@@ -166,13 +173,16 @@ class SyncManager:
         if not self.config.enabled:
             return self.pull(repair=repair)
 
-        captured = self._capture_valid_tip()
-        if isinstance(captured, SyncResult):
-            return self._record_failure(captured)
         upstream = self._upstream()
         if upstream is None:
             return self._record_failure(SyncResult("unconfigured", "sync unconfigured"))
-        ahead_behind = self._ahead_behind(captured, upstream)
+        upstream_commit = self._resolve_commit(upstream)
+        if upstream_commit is None:
+            return self._record_failure(SyncResult("error", "sync failed: upstream commit is unavailable"))
+        captured = self._capture_valid_tip(upstream_commit)
+        if isinstance(captured, SyncResult):
+            return self._record_failure(captured)
+        ahead_behind = self._ahead_behind(captured, upstream_commit)
         if ahead_behind is not None and ahead_behind[0] > 0:
             return self.push(repair=repair)
 
@@ -385,12 +395,13 @@ class SyncManager:
             candidate_commit = outcome.metadata.get("candidate_commit")
             if not isinstance(candidate_commit, str) or not candidate_commit:
                 # Prepared no-change is completed without touching active history.
+                self._cleanup_recorded_candidate(claimed, require_removed=True)
                 store.complete_no_change(claimed.operation_id, outcome.start_commit)
                 return self._result_from_record(store.read(claimed.operation_id) or claimed)
             current_head = self._required_head(self.memory_root)
             if self._is_ancestor(candidate_commit, current_head):
+                self._cleanup_recorded_candidate(claimed, require_removed=True)
                 store.complete_commit(claimed.operation_id, candidate_commit)
-                self._cleanup_recorded_candidate(claimed)
                 return self._result_from_record(store.read(claimed.operation_id) or claimed)
             if current_head != outcome.start_commit:
                 raise RuntimeError("active HEAD changed incompatibly with a prepared sync candidate")
@@ -447,6 +458,7 @@ class SyncManager:
                 effects=effects,
                 metadata={"candidate_commit": None},
             )
+            self._remove_candidate(candidate, require_removed=True)
             store.complete_no_change(
                 record.operation_id,
                 _required_record_string(record, "active_start_commit"),
@@ -497,6 +509,7 @@ class SyncManager:
             raise RuntimeError("prepared sync operation has no candidate commit")
         current_head = self._required_head(self.memory_root)
         if self._is_ancestor(candidate_commit, current_head):
+            self._remove_candidate(candidate, require_removed=True)
             store.complete_commit(record.operation_id, candidate_commit)
             return self._result_from_record(store.read(record.operation_id) or record)
         if current_head != outcome.start_commit:
@@ -509,6 +522,7 @@ class SyncManager:
         if invalid is not None:
             raise RuntimeError(invalid.message)
         self._publish_candidate(candidate_commit, outcome.start_commit, candidate)
+        self._remove_candidate(candidate, require_removed=True)
         store.complete_commit(record.operation_id, candidate_commit)
         completed = store.read(record.operation_id)
         if completed is None:
@@ -635,14 +649,26 @@ class SyncManager:
             return SyncResult("conflict", "local memory root is incomplete", invalid_files)
         return self._invalid_graph_result(self.memory_root)
 
-    def _capture_valid_tip(self) -> str | SyncResult:
+    def _capture_valid_tip(self, upstream_commit: str) -> str | SyncResult:
         store = SemanticOperationStore(self.memory_root)
         try:
             with store.execution_locked(), MemoryWriteLock(self.memory_root):
                 blocked = self._active_preflight()
                 if blocked is not None:
                     return blocked
-                return self._required_head(self.memory_root)
+                captured = self._required_head(self.memory_root)
+                unexpected = [
+                    path
+                    for path in self._outgoing_paths(upstream_commit, captured)
+                    if not _is_sync_path(path)
+                ]
+                if unexpected:
+                    return SyncResult(
+                        "error",
+                        "sync refused local commits containing paths outside the synchronized state",
+                        sorted(unexpected),
+                    )
+                return captured
         except Exception as exc:
             return SyncResult("error", f"sync failed: {type(exc).__name__}: {exc}")
 
@@ -689,9 +715,7 @@ class SyncManager:
         upstream_commit: str,
         repair_input_sha256: str,
     ) -> _Candidate:
-        branch = _required_record_string(record, "candidate_branch")
-        path = self._recorded_worktree(record)
-        lease_id = hashlib.sha256(record.operation_id.encode("utf-8")).hexdigest()
+        branch, path, lease_id = self._recorded_candidate_identity(record)
         branch_commit = self._resolve_commit(branch)
         if branch_commit is None:
             if record.phase == "prepared":
@@ -723,12 +747,10 @@ class SyncManager:
         return self._open_recorded_candidate(record)
 
     def _open_recorded_candidate(self, record: SemanticOperationRecord) -> _Candidate:
-        branch = _required_record_string(record, "candidate_branch")
-        path = self._recorded_worktree(record)
+        branch, path, lease_id = self._recorded_candidate_identity(record)
         branch_commit = self._resolve_commit(branch)
         if branch_commit is None:
             raise RuntimeError("recorded sync candidate branch is missing")
-        lease_id = hashlib.sha256(record.operation_id.encode("utf-8")).hexdigest()
         lease = WorktreeLease(self.memory_root, "sync", lease_id)
         lease.acquire()
         candidate = _Candidate(branch, path, lease)
@@ -745,34 +767,55 @@ class SyncManager:
             lease.release()
             raise
 
-    def _cleanup_recorded_candidate(self, record: SemanticOperationRecord) -> None:
-        branch = record.input_data.get("candidate_branch")
-        relative = record.input_data.get("candidate_worktree")
-        if not isinstance(branch, str) or not isinstance(relative, str):
-            return
-        path = (self.memory_root / relative).resolve()
-        if self._resolve_commit(branch) is None and not path.exists():
-            return
-        lease_id = hashlib.sha256(record.operation_id.encode("utf-8")).hexdigest()
+    def _cleanup_recorded_candidate(
+        self,
+        record: SemanticOperationRecord,
+        *,
+        require_removed: bool = False,
+    ) -> None:
+        branch, path, lease_id = self._recorded_candidate_identity(record)
         lease = WorktreeLease(self.memory_root, "sync", lease_id)
         lease.acquire()
-        self._remove_candidate(_Candidate(branch, path, lease))
+        if self._resolve_commit(branch) is None and not path.exists():
+            lease.release()
+            return
+        self._remove_candidate(
+            _Candidate(branch, path, lease),
+            require_removed=require_removed,
+        )
 
-    def _remove_candidate(self, candidate: _Candidate) -> None:
+    def _remove_candidate(self, candidate: _Candidate, *, require_removed: bool = False) -> None:
+        if candidate.removed:
+            return
         try:
             self._git("worktree", "remove", "--force", str(candidate.path))
+            self._git("worktree", "prune")
             self._git("branch", "-D", candidate.branch)
+            if require_removed and (
+                candidate.path.exists() or self._resolve_commit(candidate.branch) is not None
+            ):
+                raise RuntimeError("could not remove settled sync candidate")
+            candidate.removed = not candidate.path.exists() and self._resolve_commit(candidate.branch) is None
         finally:
             candidate.lease.release()
 
-    def _recorded_worktree(self, record: SemanticOperationRecord) -> Path:
-        relative = _required_record_string(record, "candidate_worktree")
-        candidate = (self.memory_root / relative).resolve()
-        try:
-            candidate.relative_to(self._worktree_root().resolve())
-        except ValueError as exc:
-            raise RuntimeError("sync operation records an unsafe candidate worktree") from exc
-        return candidate
+    def _recorded_candidate_identity(
+        self,
+        record: SemanticOperationRecord,
+    ) -> tuple[str, Path, str]:
+        prefix = "sync-repair-"
+        if not record.operation_id.startswith(prefix):
+            raise RuntimeError("sync operation id does not identify a repair candidate")
+        digest = record.operation_id.removeprefix(prefix)
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise RuntimeError("sync operation id has an invalid repair digest")
+        branch = f"{SYNC_BRANCH_PREFIX}{digest}"
+        relative = f".runtime/worktrees/sync-{digest}"
+        if _required_record_string(record, "candidate_branch") != branch:
+            raise RuntimeError("sync operation candidate branch does not match its operation id")
+        if _required_record_string(record, "candidate_worktree") != relative:
+            raise RuntimeError("sync operation candidate worktree does not match its operation id")
+        return branch, (self.memory_root / relative).resolve(), digest
 
     def _worktree_root(self) -> Path:
         return self.memory_root / ".runtime" / "worktrees"
@@ -782,6 +825,37 @@ class SyncManager:
         if not merge_base:
             raise RuntimeError("sync histories are unrelated")
         return self._diff_paths(self.memory_root, merge_base, upstream_commit)
+
+    def _outgoing_paths(self, upstream_commit: str, captured_commit: str) -> list[str]:
+        result = self._run_git(
+            self.memory_root,
+            "rev-list",
+            "--reverse",
+            f"{upstream_commit}..{captured_commit}",
+        )
+        if result.returncode != 0:
+            raise RuntimeError("could not inspect outgoing sync history")
+        paths: set[str] = set()
+        for commit in result.stdout.splitlines():
+            commit = commit.strip()
+            if not commit:
+                continue
+            changed = self._run_git(
+                self.memory_root,
+                "diff-tree",
+                "--root",
+                "-m",
+                "--no-commit-id",
+                "--name-status",
+                "-r",
+                "-M",
+                "-z",
+                commit,
+            )
+            if changed.returncode != 0:
+                raise RuntimeError("could not inspect an outgoing sync commit")
+            paths.update(_name_status_paths(changed.stdout))
+        return sorted(paths)
 
     def _diff_paths(self, cwd: Path, start_commit: str, end_commit: str) -> list[str]:
         result = self._run_git(

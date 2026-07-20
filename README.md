@@ -156,6 +156,8 @@ Install creates semantic state only when bootstrapping a new root. A fresh root 
 
 If an existing root has a Git commit or any recognized semantic state but lacks a regular, non-symlink required root document, install refuses it before making any change. The memory root, runtime installation, installed skills, and install stamp remain untouched so the user can perform an explicit, reviewed migration first. Fresh installs still baseline current semantic-upgrade notes, while a successful reinstall may report pending notes for a later Dreamer cycle without applying them. Legacy `MEMORY_*.md` files remain protected even when they are not currently reachable from `MEMORY.md`.
 
+The memory root must be a standalone, non-bare Git working tree. An existing target nested inside another working tree, a bare repository, or an unusable `.git` entry is refused before installation writes anything.
+
 Reinstall replaces the superseded managed Memory-only orchestrator with the current two-skill surface; it does not keep an alias or a second behavior path. Removal is limited to content recognized as RightMemory-managed.
 
 ### Profiles

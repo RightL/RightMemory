@@ -294,6 +294,23 @@ class SyncManagerTests(unittest.TestCase):
         self.assertNotIn("committed local", remote_memory)
         self.assertNotIn("dirty local", remote_memory)
 
+    def test_push_refuses_committed_paths_outside_synchronized_state(self):
+        remote_head = self._git(self.other, "rev-parse", "origin/main")
+        (self.device / "rightmemory.toml").write_text(
+            '[retrieve.model]\nmodel_id = "private/provider"\n',
+            encoding="utf-8",
+        )
+        self._git(self.device, "add", "rightmemory.toml")
+        self._git(self.device, "commit", "-m", "local machine config")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).push()
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.files, ["rightmemory.toml"])
+        self.assertIn("outside the synchronized state", result.message)
+        self._git(self.other, "fetch", "origin")
+        self.assertEqual(self._git(self.other, "rev-parse", "origin/main"), remote_head)
+
     def test_push_reports_dirty_insight_log(self):
         insight = self.device / "insight_logs" / "2026-05-30-143012.md"
         insight.parent.mkdir()
@@ -597,6 +614,7 @@ class SyncManagerTests(unittest.TestCase):
 
         with patch.object(SemanticOperationStore, "complete_commit", fail_once):
             first = manager.pull(repair=repair)
+        self._assert_no_sync_candidates()
         published_head = self._git(self.device, "rev-parse", "HEAD")
         second = manager.pull(
             repair=lambda *_args: self.fail("published repair must not run the model again")
@@ -606,6 +624,7 @@ class SyncManagerTests(unittest.TestCase):
         self.assertEqual(second.status, "synced")
         self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), published_head)
         self.assertEqual(len(calls), 1)
+        self._assert_no_sync_candidates()
 
     def test_durable_no_change_conflict_does_not_rerun_model(self):
         self._create_remote_local_conflict()
@@ -625,6 +644,103 @@ class SyncManagerTests(unittest.TestCase):
         record = SemanticOperationStore(self.device).read(calls[0])
         self.assertIsNotNone(record)
         self.assertEqual(record.phase, "no_change")
+
+    def test_no_change_completion_crash_cleans_candidate_and_does_not_rerun_model(self):
+        self._create_remote_local_conflict()
+        manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True))
+        calls = []
+
+        def no_change(candidate, result, operation_id):
+            calls.append(operation_id)
+            return "no safe repair"
+
+        original_complete = SemanticOperationStore.complete_no_change
+        failed = False
+
+        def fail_once(store, *args, **kwargs):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise RuntimeError("crash after no-change preparation")
+            return original_complete(store, *args, **kwargs)
+
+        with patch.object(SemanticOperationStore, "complete_no_change", fail_once):
+            first = manager.pull(repair=no_change)
+        self._assert_no_sync_candidates()
+        second = manager.pull(
+            repair=lambda *_args: self.fail("prepared no-change must not rerun the model")
+        )
+
+        self.assertEqual(first.status, "error")
+        self.assertEqual(second.status, "conflict")
+        self.assertEqual(len(calls), 1)
+        self._assert_no_sync_candidates()
+
+    def test_recorded_candidate_identity_uses_operation_digest_for_lease(self):
+        manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True))
+        digest = "b" * 64
+        operation_id = f"sync-repair-{digest}"
+        branch = f"rightmemory-sync-{digest}"
+        relative = f".runtime/worktrees/sync-{digest}"
+        path = self.device / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._git(self.device, "worktree", "add", "-b", branch, str(path), "HEAD")
+        record = SemanticOperationStore(self.device).begin(
+            operation_id,
+            {
+                "kind": "sync-repair",
+                "role": "sync-reconciler",
+                "candidate_branch": branch,
+                "candidate_worktree": relative,
+            },
+        )
+
+        candidate = manager._open_recorded_candidate(record)
+
+        self.assertEqual(candidate.lease.identifier, digest)
+        candidate.lease.release()
+        manager._cleanup_recorded_candidate(record, require_removed=True)
+        self.assertFalse(path.exists())
+        self.assertEqual(self._git(self.device, "branch", "--list", branch), "")
+
+    def test_corrupt_recorded_routing_cannot_remove_another_worktree(self):
+        manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True))
+        other_branch = "rightmemory-sync-other-live-operation"
+        other_relative = ".runtime/worktrees/sync-other-live-operation"
+        other_path = self.device / other_relative
+        other_path.parent.mkdir(parents=True, exist_ok=True)
+        self._git(self.device, "worktree", "add", "-b", other_branch, str(other_path), "HEAD")
+        def cleanup_other_worktree():
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(other_path)],
+                cwd=self.device,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            subprocess.run(
+                ["git", "branch", "-D", other_branch],
+                cwd=self.device,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        self.addCleanup(cleanup_other_worktree)
+        record = SemanticOperationStore(self.device).begin(
+            f"sync-repair-{'c' * 64}",
+            {
+                "kind": "sync-repair",
+                "role": "sync-reconciler",
+                "candidate_branch": other_branch,
+                "candidate_worktree": other_relative,
+            },
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "does not match its operation id"):
+            manager._cleanup_recorded_candidate(record, require_removed=True)
+
+        self.assertTrue(other_path.is_dir())
+        self.assertIn(other_branch, self._git(self.device, "branch", "--list", other_branch))
 
     def test_active_head_race_blocks_publication_without_overwrite(self):
         self._create_remote_local_conflict()
@@ -670,6 +786,14 @@ class SyncManagerTests(unittest.TestCase):
         )
         self._git(candidate, "add", "MEMORY.md")
         self._git(candidate, "commit", "-m", "memory: resolve staged sync conflict")
+
+    def _assert_no_sync_candidates(self):
+        self.assertEqual(self._git(self.device, "branch", "--list", "rightmemory-sync-*"), "")
+        worktrees = self._git(self.device, "worktree", "list", "--porcelain")
+        self.assertNotIn("/.runtime/worktrees/sync-", worktrees)
+        lease_root = self.device / ".runtime" / "worktree-leases"
+        leases = sorted(path.name for path in lease_root.glob("sync-*.json")) if lease_root.is_dir() else []
+        self.assertEqual(leases, [])
 
     def _git(self, cwd: Path, *args: str) -> str:
         process = subprocess.run(

@@ -225,20 +225,23 @@ def promote_directory_candidate(candidate: Path, final: Path) -> None:
         raise ValueError(f"directory candidate is not a regular directory: {source}")
     backup = destination.with_name(f".{destination.name}.previous-{uuid.uuid4().hex}")
     moved_previous = False
+    promoted = False
     try:
         if _path_exists(destination):
             os.replace(destination, backup)
             moved_previous = True
         os.replace(source, destination)
+        promoted = True
         _fsync_directory(destination.parent)
     except BaseException:
-        if moved_previous and not _path_exists(destination) and _path_exists(backup):
+        if promoted and _path_exists(destination):
+            _remove_path(destination)
+        if moved_previous and _path_exists(backup) and not _path_exists(destination):
             os.replace(backup, destination)
             _fsync_directory(destination.parent)
         raise
-    finally:
-        if _path_exists(backup) and _path_exists(destination):
-            _remove_path(backup)
+    if _path_exists(backup):
+        _remove_path(backup)
 
 
 def _remove_path(path: Path) -> None:

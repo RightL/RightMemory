@@ -7,6 +7,7 @@ import unittest
 import warnings
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from rightmemory.git_share_transport import import_git_file_package
 from rightmemory.shared_view_files import (
@@ -19,6 +20,7 @@ from rightmemory.shared_view_files import (
 from rightmemory.shared_view_package import (
     FileViewPackageError,
     extract_package_archive,
+    promote_directory_candidate,
     validate_file_view_package,
 )
 
@@ -270,6 +272,27 @@ class SharedViewPackageV2Tests(unittest.TestCase):
             extract_package_archive(buffer.getvalue(), target)
 
         self.assertFalse(target.exists())
+
+    def test_promotion_fsync_failure_restores_previous_directory(self) -> None:
+        final = self.root / "imported"
+        candidate = self.root / ".imported-candidate"
+        final.mkdir()
+        candidate.mkdir()
+        (final / "value.txt").write_text("old\n", encoding="utf-8")
+        (candidate / "value.txt").write_text("new\n", encoding="utf-8")
+
+        with (
+            patch(
+                "rightmemory.shared_view_package._fsync_directory",
+                side_effect=[OSError("fsync failed"), None],
+            ),
+            self.assertRaisesRegex(OSError, "fsync failed"),
+        ):
+            promote_directory_candidate(candidate, final)
+
+        self.assertEqual((final / "value.txt").read_text(encoding="utf-8"), "old\n")
+        self.assertFalse(candidate.exists())
+        self.assertEqual(list(self.root.glob(".imported.previous-*")), [])
 
     @unittest.skipIf(not hasattr(os, "symlink"), "symlinks are unavailable")
     def test_git_import_does_not_launder_package_symlink(self) -> None:

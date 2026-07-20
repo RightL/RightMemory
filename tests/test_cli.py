@@ -10,6 +10,7 @@ from rightmemory.async_update import AsyncUpdateState, AsyncUpdateStore
 from rightmemory.cli import (
     _daemon_stdio_json,
     _dreamer_watch_once,
+    _finish_sync_repair,
     _handle_json_request,
     _insight_watch_once,
     _run_update_review_correction,
@@ -22,7 +23,7 @@ from rightmemory.doctor import DoctorCheck
 from rightmemory.hub.store import HubStore
 from rightmemory.insight_trigger import InsightTriggerStore
 from rightmemory.isolated_write import IsolatedWriteResult
-from rightmemory.semantic_operation import SemanticOperationStore
+from rightmemory.semantic_operation import OperationEffect, SemanticOperationStore
 from rightmemory.share_results import ShareOperationResult
 from rightmemory.shared_view_files import FileViewPullResult
 from rightmemory.shared_view_models import SharedViewConnection, SharedViewTarget, load_shared_view_credential, save_connections
@@ -75,6 +76,36 @@ class CliEntrypointTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertEqual(stderr.getvalue(), "error: hub request failed: HTTP 404\n")
         self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_sync_finisher_loads_runtime_for_pending_state_without_result_id(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            operation_id = f"sync-repair-{'e' * 64}"
+            store = SemanticOperationStore(root)
+            store.begin(operation_id, {"kind": "sync-repair", "role": "sync-reconciler"})
+            store.prepare_outcome(
+                operation_id,
+                output='{"files":[],"message":"published","status":"synced"}',
+                start_commit="base123",
+                changed_paths=("MEMORY.md",),
+                effects=(OperationEffect("session-state"),),
+                metadata={"candidate_commit": "tip456"},
+            )
+            store.complete_commit(operation_id, "tip456")
+            result = type(
+                "Result",
+                (),
+                {"status": "fresh", "message": "fresh", "files": [], "operation_id": None},
+            )()
+
+            with (
+                patch("rightmemory.cli.load_config", return_value=object()),
+                patch("rightmemory.cli.RightMemoryRuntime") as runtime_class,
+            ):
+                _finish_sync_repair(root, result)
+
+            runtime_class.return_value._finish_sync_repair.assert_called_once_with(result)
+            runtime_class.return_value.cleanup.assert_called_once_with()
 
 
 class ShareCliTests(unittest.TestCase):

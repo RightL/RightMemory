@@ -28,7 +28,12 @@ from rightmemory.provider_sessions import ProviderSessionStore
 from rightmemory.provider_threads import ProviderThreadStore
 from rightmemory.prune import PruneDueStatus
 from rightmemory.recent_submitted import RecentSubmittedMemoryEntry
-from rightmemory.runtime import RightMemoryRuntime, _IsolatedStateOverlay, build_model
+from rightmemory.runtime import (
+    SYNC_REPAIR_SESSION_ID,
+    RightMemoryRuntime,
+    _IsolatedStateOverlay,
+    build_model,
+)
 from rightmemory.session import MessageSessionStore
 from rightmemory.semantic_operation import OperationEffect, SemanticOperationStore
 from rightmemory.retrieve_selection import RetrieveSelection
@@ -1596,6 +1601,58 @@ class RuntimeTests(unittest.TestCase):
         main_history = MessageSessionStore(root, "update").paths("agent-session").history
         self.assertEqual(main_history.read_text(encoding="utf-8"), "recovered history")
         self.assertEqual(store.list_pending_effects("update-state-pending"), ())
+
+    def test_sync_finisher_retries_pending_state_on_a_fresh_result(self):
+        root = Path(self.tempdir.name)
+        operation_id = f"sync-repair-{'d' * 64}"
+        store = SemanticOperationStore(root)
+        store.begin(operation_id, {"kind": "sync-repair", "role": "sync-reconciler"})
+        store.prepare_outcome(
+            operation_id,
+            output='{"files":[],"message":"published","status":"synced"}',
+            start_commit="base123",
+            changed_paths=("MEMORY.md",),
+            effects=(
+                OperationEffect(
+                    "session-state",
+                    metadata={
+                        "role": "sync-reconciler",
+                        "session_id": SYNC_REPAIR_SESSION_ID,
+                    },
+                ),
+            ),
+            metadata={"candidate_commit": "tip456"},
+        )
+        store.complete_commit(operation_id, "tip456")
+        state = _IsolatedStateOverlay(
+            root,
+            "sync-reconciler",
+            SYNC_REPAIR_SESSION_ID,
+            operation_id=operation_id,
+        )
+        history = MessageSessionStore(
+            state.overlay_root,
+            "sync-reconciler",
+        ).paths(SYNC_REPAIR_SESSION_ID).history
+        history.parent.mkdir(parents=True, exist_ok=True)
+        history.write_text("recovered sync history", encoding="utf-8")
+
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+        fresh = SyncResult("fresh", "last successful pull is fresh")
+
+        with patch.object(_IsolatedStateOverlay, "promote_if_current", side_effect=OSError("disk full")):
+            runtime._finish_sync_repair(fresh)
+        self.assertTrue(store.list_pending_effects(operation_id))
+
+        runtime._finish_sync_repair(fresh)
+
+        main_history = MessageSessionStore(root, "sync-reconciler").paths(
+            SYNC_REPAIR_SESSION_ID
+        ).history
+        self.assertEqual(main_history.read_text(encoding="utf-8"), "recovered sync history")
+        self.assertEqual(store.list_pending_effects(operation_id), ())
 
     def test_invalid_pending_effect_record_does_not_starve_the_next_retry(self):
         root = Path(self.tempdir.name)

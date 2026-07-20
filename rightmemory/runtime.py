@@ -1163,14 +1163,61 @@ class RightMemoryRuntime:
         )
 
     def _finish_sync_repair(self, result: SyncResult) -> None:
-        operation_id = result.operation_id
-        if not isinstance(operation_id, str) or not operation_id:
-            return
         store = SemanticOperationStore(self.config.memory_root)
-        record = store.read(operation_id)
-        if record is None or record.phase not in FINAL_PHASES or record.outcome is None:
+        records: dict[str, SemanticOperationRecord] = {}
+        operation_id = result.operation_id
+        if isinstance(operation_id, str) and operation_id:
+            try:
+                record = store.read(operation_id)
+            except Exception as exc:
+                print(
+                    f"warning: could not inspect sync repair state for {operation_id}: {exc}",
+                    file=sys.stderr,
+                )
+            else:
+                if record is not None and record.input_data.get("kind") == "sync-repair":
+                    records[record.operation_id] = record
+        try:
+            for record in store.list_outstanding_records():
+                if (
+                    record.phase in FINAL_PHASES
+                    and record.outcome is not None
+                    and record.input_data.get("kind") == "sync-repair"
+                    and any(effect.name == STATE_EFFECT and effect.status != "done" for effect in record.effects)
+                ):
+                    records[record.operation_id] = record
+        except Exception as exc:
+            print(
+                f"warning: could not scan pending sync repair state: {exc}",
+                file=sys.stderr,
+            )
+
+        ordered = sorted(
+            records.values(),
+            key=lambda record: (
+                record.outcome.sequence if record.outcome is not None else 0,
+                record.operation_id,
+            ),
+        )
+        for record in ordered:
+            self._finish_sync_repair_record(store, record)
+
+    def _finish_sync_repair_record(
+        self,
+        store: SemanticOperationStore,
+        record: SemanticOperationRecord,
+    ) -> None:
+        operation_id = record.operation_id
+        if record.phase not in FINAL_PHASES or record.outcome is None:
             return
-        pending = {effect.name for effect in store.list_pending_effects(operation_id)}
+        try:
+            pending = {effect.name for effect in store.list_pending_effects(operation_id)}
+        except Exception as exc:
+            print(
+                f"warning: could not inspect pending sync repair state for {operation_id}: {exc}",
+                file=sys.stderr,
+            )
+            return
         if STATE_EFFECT not in pending:
             return
         state = _IsolatedStateOverlay(

@@ -47,7 +47,7 @@ from .profiles import (
 )
 from .platform import restart_current_process
 from .review import ReviewScanner, normalize_transcript
-from .runtime import AUTOMATIC_WRITE_ROLES, RightMemoryRuntime
+from .runtime import AUTOMATIC_WRITE_ROLES, STATE_EFFECT, RightMemoryRuntime
 from .semantic_operation import FINAL_PHASES, SemanticOperationStore
 from .session import MemoryWriteLock
 from .shared_view_builder import refresh_file_view, run_file_view_builder, run_question_view_builder
@@ -1928,13 +1928,34 @@ def _run_sync_reconciler(
 def _finish_sync_repair(memory_root: Path, result: Any) -> None:
     operation_id = getattr(result, "operation_id", None)
     if not isinstance(operation_id, str) or not operation_id:
-        return
-    reconciler_config = load_config("sync-reconciler", memory_root=memory_root)
-    runtime = RightMemoryRuntime(reconciler_config)
+        try:
+            has_pending = any(
+                record.phase in FINAL_PHASES
+                and record.outcome is not None
+                and record.input_data.get("kind") == "sync-repair"
+                and any(
+                    effect.name == STATE_EFFECT and effect.status != "done"
+                    for effect in record.effects
+                )
+                for record in SemanticOperationStore(memory_root).list_outstanding_records()
+            )
+        except Exception as exc:
+            print(f"warning: could not scan pending sync repair state: {exc}", file=sys.stderr)
+            return
+        if not has_pending:
+            return
     try:
-        runtime._finish_sync_repair(result)
-    finally:
-        runtime.cleanup()
+        reconciler_config = load_config("sync-reconciler", memory_root=memory_root)
+        runtime = RightMemoryRuntime(reconciler_config)
+        try:
+            runtime._finish_sync_repair(result)
+        finally:
+            runtime.cleanup()
+    except Exception as exc:
+        print(
+            f"warning: sync repair state remains pending: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _sleep_with_refresh_check(seconds: int, refresh: InstallStamp, stop: _WatchStopToken | None = None) -> bool:
