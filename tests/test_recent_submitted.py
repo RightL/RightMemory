@@ -109,8 +109,8 @@ class RecentSubmittedMemoryCollectionTests(unittest.TestCase):
 
         block = format_recent_submitted_block(entries)
 
-        self.assertIn("Recent submitted memory", block)
-        self.assertIn("not been consolidated into MEMORY.md yet", block)
+        self.assertIn("Recent submitted RightMemory candidates", block)
+        self.assertIn("not settled Memory or Pursuit", block)
         self.assertIn(
             "[update session: update-a | candidate: 1 | submitted_at: 2026-05-19T00:00:00+00:00]",
             block,
@@ -133,7 +133,7 @@ class RecentSubmittedMemoryCollectionTests(unittest.TestCase):
 
         message = append_recent_submitted_memory("retrieve this\n", [entry])
 
-        self.assertTrue(message.startswith("retrieve this\n\nRecent submitted memory"))
+        self.assertTrue(message.startswith("retrieve this\n\nRecent submitted RightMemory candidates"))
         self.assertIn("first", message)
 
     def test_delivery_store_returns_all_entries_then_session_delta(self):
@@ -252,7 +252,7 @@ class RecentSubmittedMemoryCollectionTests(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:
                 collect_recent_submitted_memory(root)
 
-        self.assertIn("async update state must contain integer field: next_id", str(caught.exception))
+        self.assertIn("async update state must contain positive integer field: next_id", str(caught.exception))
 
     def _write_state(self, root: Path, session_id: str, *, pending=None, current_batch=None):
         state_path = root / ".runtime" / "async" / "update" / f"{session_id}.json"

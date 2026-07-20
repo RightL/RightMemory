@@ -1,14 +1,21 @@
 # RightMemory Schema
 
-## Addressable Lines
+## Stored Model
 
-Each memory entry is either an addressable heading or a node.
+RightMemory is one addressable graph organized into two Markdown document trees. `MEMORY.md` stores durable context; `PURSUITS.md` stores live intent and continuity. Their headings and nodes share one globally unique id namespace, and typed edges may cross between the trees.
+
+The parsed graph begins at those two roots and recursively follows F# detail references. Filename globs do not define graph membership. M#, S#, MF#, and MQ# are Memory-only linked-resource forms: their headings are graph objects, but their linked content is not parsed as graph structure.
+
+## Addressable Items
+
+Each graph item is either an addressable heading or a node.
 
 Addressable headings use:
 
 ```md
 ### Human Title {#heading-id} → [edge1, edge2, ...]
 ### File-Backed Title {F#heading-id} → [edge1, edge2, ...]
+### Markdown Evidence {M#heading-id} → [edge1, edge2, ...]
 ### Skill Title {S#heading-id} → [edge1, edge2, ...]
 ### Mirrored File View {MF#heading-id} → [edge1, edge2, ...]
 ### Provider Question View {MQ#heading-id} → [edge1, edge2, ...]
@@ -24,20 +31,21 @@ Nodes use:
 - `<node-id>` <free-form description> → [edge1, edge2, ...]
 ```
 
-- `heading-id` and `node-id` share one namespace; do not reuse an id between a heading and a node.
-- `F#` marks a heading as backed by an ordinary detail file. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:F#heading-id`.
-- `S#` marks a heading as backed by a memory skill file. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:S#heading-id`.
+- `heading-id` and `node-id` share one namespace across Memory and Pursuit. Do not reuse an id anywhere in the parsed graph.
+- `F#` marks a heading whose child graph content lives in a sibling detail file. Memory F# maps to `MEMORY_<heading-id>.md`; Pursuit F# maps to `PURSUIT_<heading-id>.md`. The graph id remains `heading-id`.
+- `M#` marks a Memory heading backed by free-form Markdown evidence in `MEMORY_<heading-id>.md`. The backing file is addressable through its heading but is not parsed as graph content.
+- `S#` marks a Memory heading backed by reusable instruction in `MEMORY_SKILL_<heading-id>.md`. The backing file is addressable through its heading but is not parsed as graph content.
 - `MF#` marks a mirrored file shared-view connection. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:MF#heading-id`. The heading body records the local relationship and collaboration meaning; HTTP resolver details live outside memory prose.
 - `MQ#` marks a provider question shared-view connection. The graph id is still `heading-id`, so edges target `type:heading-id`, not `type:MQ#heading-id`. The heading body records when provider-side questions may help; prompts, HTTP resolver details, and credentials live outside memory prose.
-- `S#heading-id` maps to sibling skill file `MEMORY_SKILL_heading-id.md`.
 - Edges may connect heading to heading, heading to node, node to heading, or node to node.
 - Node lines with no edges write `→ []`; heading lines with no edges may omit `→ []`.
 - Useful but unsettled memory uses `Uncertain:` at the start of the node description, for example ``- `<node-id>` Uncertain: <tentative memory claim with its scope or doubt> → [...]``. Revise it into ordinary declarative memory when it becomes settled, or remove it when it is contradicted or no longer useful.
 
+Focus entries in `PURSUITS.md` are ordered references to Pursuit heading ids, not graph nodes. They use ``- `<pursuit-id>` ...`` under `## Focus`; the referenced id must name an addressable Pursuit heading. The ``- `do|ask|wait` ...`` bullets inside a Pursuit's `**Next:**` block are ordered control entries, not graph nodes.
+
 ## Memory Quality
 
-Good memory is scoped, durable knowledge that helps future agents act, decide,
-or understand.
+Good Memory is scoped, durable context that helps future agents act, decide, interpret, or retrieve. Live intent, current task state, and next actions belong in Pursuit and follow `PURSUIT_RULES.md`.
 
 ### Item Quality
 
@@ -54,6 +62,7 @@ Clearly not good memory:
 - Git log or commit-by-commit history.
 - Copied project documentation or source content.
 - Repeated examples that do not change the rule or conclusion.
+- Live task state preserved only because work is incomplete.
 
 ### Structure Quality
 
@@ -137,13 +146,13 @@ Consumers pull accepted `MF#` file views into `.runtime/shared_views/imports/<vi
 
 ## Memory Domains
 
-Memory domains are ordinary headings. Use `# User Context` for durable context about the user as a person with an ongoing life, work, and direction: relevant background, active pursuits, longer-term goals, important responsibilities or life/work circumstances, and why those things matter. It is a compact context profile grounded in evidence.
+Memory domains are ordinary headings. Use `# User Context` for durable context about the user as a person with ongoing life, work, and direction: relevant background, longer-term direction, important responsibilities or circumstances, and why those things matter. It is a compact context profile grounded in evidence. A commitment that still needs continuation belongs in Pursuit even when it also reflects a longer-term direction.
 
 Use `Cross-Session Agent Behavior` for future-facing guidance about how agents should work with this user across coding sessions. This includes both broadly applicable user-level guidance and project-scoped guidance that should persist across sessions for a specific repository or codebase, such as communication style, workflow expectations, tool or process preferences, and repeated agent mistakes that future agents can avoid. Express narrower scope through heading nesting or an explicit scope in the heading/local context. These entries should read like operating instructions, not transcript review notes.
 
 Use global `# Open Context Questions` for loose ends in memory. These are short questions for future agents, not declarative memory facts. Use them when a memory area feels incomplete, unclear, or hard to apply because something still needs to be pinned down. Question nodes use normal node syntax and link to related memory with `todo:`. When the answer becomes clear, write the answer into the appropriate declarative memory section, then remove or revise the question.
 
-When a fact could fit either domain, place it by what the memory is about. Facts that describe the user's background, pursuits, direction, motivations, responsibilities, or circumstances belong under user context. Guidance that tells an agent how to respond, decide, use tools, write, or collaborate belongs under agent behavior.
+When durable context could fit either domain, place it by what it is about. Facts that describe the user's background, direction, motivations, responsibilities, or circumstances belong under user context. Guidance that tells an agent how to respond, decide, use tools, write, or collaborate belongs under agent behavior. Live commitments and their current movement belong in Pursuit rather than either Memory domain.
 
 ## Edge Types
 
@@ -167,15 +176,17 @@ Written edges may be one-way or reciprocal [stored on both records so either sid
 
 ## Heading Rules
 
-- `#`, `##`, and `###` are normal tree layers and may contain memory content.
+- `#`, `##`, and `###` are normal tree layers and may contain Memory or Pursuit content.
 - `#`, `##`, and `###` may have `{#short-slug}` anchors and edges when the whole subtree is a graph target.
-- A file-backed `#`, `##`, or `###` heading uses `{F#short-slug}` and maps to sibling detail file `MEMORY_<short-slug>.md`.
+- A file-backed `#`, `##`, or `###` heading uses `{F#short-slug}`. It maps to `MEMORY_<short-slug>.md` in the Memory tree and `PURSUIT_<short-slug>.md` in the Pursuit tree.
+- A Markdown-evidence `#`, `##`, or `###` heading uses `{M#short-slug}` and maps to free-form `MEMORY_<short-slug>.md`. M# is valid only in Memory.
 - A skill-backed `#`, `##`, or `###` heading uses `{S#short-slug}` and maps to sibling skill file `MEMORY_SKILL_<short-slug>.md`.
 - A mirrored file shared-view `#`, `##`, or `###` heading uses `{MF#short-slug}` and points to an external file view through an out-of-band resolver entry.
 - A provider question shared-view `#`, `##`, or `###` heading uses `{MQ#short-slug}` and points to an external question view through an out-of-band resolver entry.
 - When a heading's child content moves into its detail file, keep only the heading line and any heading body paragraphs in the current file. Do not leave child node lines or child headings under that heading in the current file.
-- `####` is the deepest heading level allowed in a memory file and is a terminal reference heading under an existing `###` topic.
-- `#### Human Title {F#short-slug}` points to sibling detail file `MEMORY_<short-slug>.md`.
+- `####` is the deepest heading level allowed in a graph file and is a terminal reference heading under an existing `###` topic.
+- `#### Human Title {F#short-slug}` points to the containing tree's F# detail file.
+- `#### Human Title {M#short-slug}` points to free-form Memory evidence in `MEMORY_<short-slug>.md`.
 - `#### Human Title {S#short-slug}` points to sibling skill file `MEMORY_SKILL_<short-slug>.md`.
 - `#### Human Title {MF#short-slug}` points to a mirrored file shared-view connection.
 - `#### Human Title {MQ#short-slug}` points to a provider question shared-view connection.
@@ -186,7 +197,7 @@ Written edges may be one-way or reciprocal [stored on both records so either sid
 
 ## Placement Rules
 
-- Use detail files to keep large headings readable. As a guide, consider moving child content into a detail file when a `#`, `##`, or `###` heading has more than about 15 direct node lines, then mark the parent heading with `F#`.
+- Use F# detail files to keep large headings readable. As a guide, consider moving child graph content into a detail file when a `#`, `##`, or `###` heading has more than about 15 direct node lines, then mark the parent heading with `F#`.
 - Count only direct node lines shaped like ``- `<node-id>` ...``; do not count child headings or `####` pointers.
 - Tree nesting expresses reading context and containment; do not add child-to-containing-heading edges merely to say a node belongs under a heading.
 - Use heading edges when a relation applies to the whole subtree.
@@ -198,5 +209,8 @@ Written edges may be one-way or reciprocal [stored on both records so either sid
 
 ## File Set
 
-- The memory file set is `MEMORY.md` plus optional sibling `MEMORY_*.md` detail files.
-- `MEMORY.md` is the root memory file, but it remains normal memory and may contain real nodes.
+- The parsed Memory tree begins at `MEMORY.md` and follows Memory F# references into `MEMORY_<id>.md`.
+- The parsed Pursuit tree begins at `PURSUITS.md` and follows Pursuit F# references into `PURSUIT_<id>.md`.
+- M# files use the same `MEMORY_<id>.md` filename shape as Memory F# detail, but the referring heading determines that the file is free-form and excluded from graph parsing.
+- S# files use `MEMORY_SKILL_<id>.md` and are excluded from graph parsing.
+- Both root files remain useful documents rather than routing-only indexes.

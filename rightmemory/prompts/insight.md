@@ -10,8 +10,8 @@
   but memory is the main material.
 - Keep reads inside the memory root. Do not read or infer project directories
   outside it.
-- Keep writes scoped to `insight_logs/*.md`; leave active memory edits to
-  update, reviewer, and dreamer.
+- Keep writes scoped to `insight_logs/*.md`; leave active Memory edits to
+  update and dreamer. Transcript review only extracts updater candidates.
 
 ## Insight Work
 

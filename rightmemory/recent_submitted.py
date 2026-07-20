@@ -11,10 +11,10 @@ from .platform import lock_file, unlock_file
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
 
 
-RECENT_SUBMITTED_HEADER = "Recent submitted memory"
+RECENT_SUBMITTED_HEADER = "Recent submitted RightMemory candidates"
 RECENT_SUBMITTED_INTRO = (
-    "These are memory update submissions that have not been consolidated into MEMORY.md yet. "
-    "Use them as short-term working memory when relevant."
+    "These are pending updater submissions, not settled Memory or Pursuit. "
+    "Use relevant entries as short-term continuity while preserving their candidate status."
 )
 
 
@@ -54,6 +54,16 @@ class RecentSubmittedMemoryDeliveryStore:
             delivered = self._read_delivered_locked(retrieve_session_id)
             delivered.update(entry.key for entry in entries)
             self._write_delivered_locked(retrieve_session_id, delivered)
+
+    def reset(self, retrieve_session_id: str) -> bool:
+        with self._locked(retrieve_session_id):
+            state_path = self._state_path(retrieve_session_id)
+            try:
+                state_path.unlink()
+            except FileNotFoundError:
+                return False
+            _fsync_directory(state_path.parent)
+            return True
 
     def _state_path(self, retrieve_session_id: str) -> Path:
         safe_id = _safe_session_id(retrieve_session_id)

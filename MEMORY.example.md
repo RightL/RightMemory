@@ -6,7 +6,7 @@
 
 ## Example Application {#sample-app} → [rel:sample-infra]
 
-This example domain shows product memory with graph-addressable headings, compact fact nodes, detail-file pointers, and project-scoped preferences for this project.
+This example domain shows durable product context with graph-addressable headings, compact fact nodes, and project-scoped preferences. Live release intent belongs in Pursuit rather than this durable tree.
 
 ### Project Working Preferences {#sample-project-working-preferences}
 
@@ -24,9 +24,9 @@ This group tracks the example application's deployable services and shared code.
 - `lib-utils` shared-utils — small utility library reused by both frontend and backend. → [rel:proj-web, rel:proj-api]
 - `proj-deploy` deploy-bundle — production deployment package combining frontend and backend artifacts. → [agg:proj-web, agg:proj-api]
 
-### Release Runbook {F#sample-release-runbook} → [dep:sample-deployable-units]
+### Release Runbook {#sample-release-runbook} → [dep:sample-deployable-units]
 
-Release checklist, rollout steps, rollback notes, and environment-specific commands live in `MEMORY_sample-release-runbook.md`; the root keeps this short summary so agents can discover the topic without loading the long runbook.
+Release-facing changes should leave concise verification evidence covering the checklist, rollout, rollback, and environment-specific considerations.
 
 ### Interface Contracts {#sample-interface-contracts}
 
@@ -40,9 +40,7 @@ Release checklist, rollout steps, rollback notes, and environment-specific comma
 - `db-postgres` postgres-db — PostgreSQL database used by the API service. → [rel:proj-api]
 - `db-backup-job` backup-job — nightly logical backup for `db-postgres`, verified by restore drills before major releases. → [bak:db-postgres, rel:sample-backup-drill]
 
-#### Backup Drill Notes {F#sample-backup-drill}
-
-Detailed restore drill notes live in `MEMORY_sample-backup-drill.md`; this pointer is intentionally a `####` child under the database stack, with a body summary but no child nodes or headings in the root file.
+- `sample-backup-drill` Restore drills verify that the nightly backup is usable before major releases; keep the latest durable conclusion here and detailed run evidence with the project. → [ver:db-backup-job]
 
 ---
 

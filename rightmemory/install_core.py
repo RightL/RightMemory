@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 
 from .platform import prepare_command
@@ -15,10 +16,26 @@ from .platform import prepare_command
 PYTHON_REQUIREMENT = ">=3.11"
 EXAMPLE_START_MARKER = "rightmemory:example:start"
 EXAMPLE_END_MARKER = "rightmemory:example:end"
+PURSUIT_EXAMPLE_START_MARKER = "rightmemory:pursuit-example:start"
+PURSUIT_EXAMPLE_END_MARKER = "rightmemory:pursuit-example:end"
+# Hash of the superseded managed template after its generated memory-root line is normalized.
+LEGACY_MEMORY_ORCHESTRATOR_SHA256 = "b2e0ed77f669b8d1da3f702755b85e7ac9cb8a664ccd02ffe9f7149cea095e00"
+LEGACY_MEMORY_ROOT_LINE = (
+    "- The memory root is `{{MEMORY_ROOT}}`; the main agent must not read or edit files there by any means "
+    "unless the user explicitly permits direct access."
+)
+LEGACY_MEMORY_ROOT_LINE_PATTERN = re.compile(
+    r"(?m)^- The memory root is `[^`\r\n]+`; the main agent must not read or edit files there by any means "
+    r"unless the user explicitly permits direct access\.$"
+)
 MEMORY_GITIGNORE = """\
 *
 !MEMORY.md
 !MEMORY_*.md
+!PURSUITS.md
+!PURSUIT_*.md
+!PURSUIT_RULES.md
+!corrections.md
 !shared_views.toml
 !shares.toml
 !shared_views/
@@ -51,6 +68,7 @@ class Installer:
         self.skills_targets = skills_targets
         self.is_windows = os.name == "nt"
         self.memory_action = ""
+        self.new_managed_state_files: list[str] = []
 
         if self.is_windows:
             local_app_data = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
@@ -68,6 +86,8 @@ class Installer:
         self._print_layout()
         (self.memory_root / "insight_logs").mkdir(parents=True, exist_ok=True)
         self._install_or_refresh_memory()
+        self._install_or_refresh_pursuits()
+        self._install_pursuit_rules()
         self._ensure_memory_git()
         self._install_runtime()
         self._run_semantic_upgrades()
@@ -93,6 +113,7 @@ class Installer:
             shutil.copyfile(self.repo_root / "MEMORY.example.md", memory_file)
             print(f"  [new]     {memory_file}  (from MEMORY.example.md)")
             self.memory_action = "new"
+            self.new_managed_state_files.append("MEMORY.md")
             return
 
         memory = _read_utf8(memory_file)
@@ -108,25 +129,66 @@ class Installer:
         print(f"  [keep]    {memory_file} already exists; no managed example block found")
         self.memory_action = "keep"
 
-    def _example_block(self) -> list[str]:
-        block = []
-        for line in _read_utf8_lines(self.repo_root / "MEMORY.example.md"):
-            block.append(line)
-            if EXAMPLE_END_MARKER in line:
-                return block
-        raise InstallError("MEMORY.example.md is missing the managed example end marker")
+    def _install_or_refresh_pursuits(self) -> None:
+        pursuits_file = self.memory_root / "PURSUITS.md"
+        source = self.repo_root / "PURSUITS.example.md"
+        block = self._managed_example_block(source, PURSUIT_EXAMPLE_END_MARKER)
+        if not pursuits_file.is_file():
+            shutil.copyfile(source, pursuits_file)
+            self.new_managed_state_files.append("PURSUITS.md")
+            print(f"  [new]     {pursuits_file}  (from PURSUITS.example.md)")
+            return
 
-    def _refresh_marked_example(self, memory_file: Path, block: list[str]) -> None:
+        pursuits = _read_utf8(pursuits_file)
+        if PURSUIT_EXAMPLE_START_MARKER in pursuits and PURSUIT_EXAMPLE_END_MARKER in pursuits:
+            self._refresh_marked_example(
+                pursuits_file,
+                block,
+                start_marker=PURSUIT_EXAMPLE_START_MARKER,
+                end_marker=PURSUIT_EXAMPLE_END_MARKER,
+            )
+            print(f"  [refresh] {pursuits_file}  (managed example block)")
+            return
+        print(f"  [keep]    {pursuits_file} already exists; no managed example block found")
+
+    def _install_pursuit_rules(self) -> None:
+        rules_file = self.memory_root / "PURSUIT_RULES.md"
+        if rules_file.is_file():
+            print(f"  [keep]    {rules_file} already exists")
+            return
+        shutil.copyfile(self.repo_root / "PURSUIT_RULES.md", rules_file)
+        self.new_managed_state_files.append("PURSUIT_RULES.md")
+        print(f"  [new]     {rules_file}")
+
+    def _example_block(self) -> list[str]:
+        return self._managed_example_block(self.repo_root / "MEMORY.example.md", EXAMPLE_END_MARKER)
+
+    def _managed_example_block(self, source: Path, end_marker: str) -> list[str]:
+        block = []
+        for line in _read_utf8_lines(source):
+            block.append(line)
+            if end_marker in line:
+                return block
+        raise InstallError(f"{source.name} is missing the managed example end marker")
+
+    def _refresh_marked_example(
+        self,
+        memory_file: Path,
+        block: list[str],
+        *,
+        start_marker: str = EXAMPLE_START_MARKER,
+        end_marker: str = EXAMPLE_END_MARKER,
+    ) -> None:
         output: list[str] = []
         skipping = False
         changed = False
         for line in _read_utf8_lines(memory_file):
-            if not skipping and EXAMPLE_START_MARKER in line:
+            if not skipping and start_marker in line:
                 output.extend(block)
                 skipping = True
                 changed = True
                 continue
-            if skipping and EXAMPLE_END_MARKER in line:
+            if skipping and end_marker in line:
                 skipping = False
                 continue
             if not skipping:
@@ -204,6 +266,14 @@ class Installer:
 
         add("MEMORY.md")
         files.extend(path.name for path in sorted(self.memory_root.glob("MEMORY_*.md")) if path.is_file())
+        add("PURSUITS.md")
+        files.extend(
+            path.name
+            for path in sorted(self.memory_root.glob("PURSUIT_*.md"))
+            if path.is_file() and path.name != "PURSUIT_RULES.md"
+        )
+        add("PURSUIT_RULES.md")
+        add("corrections.md")
         add("shared_views.toml")
         add("shares.toml")
         shared_views = self.memory_root / "shared_views"
@@ -221,6 +291,9 @@ class Installer:
     def _ensure_initial_commit(self) -> None:
         if self._git_result("rev-parse", "--verify", "--quiet", "HEAD").returncode == 0:
             print("  [keep]    initial memory commit already exists")
+            if self.new_managed_state_files:
+                joined = ", ".join(self.new_managed_state_files)
+                print(f"  [notice]  new managed state files left uncommitted for review: {joined}")
             return
         files = self._initial_memory_files()
         if files:
@@ -311,10 +384,16 @@ class Installer:
             shutil.copyfile(self.repo_root / "skills" / "rightmemory-schema.md", schema)
             print(f"  [install] {schema}")
             self._install_skill(
-                self.repo_root / "skills" / "memory-orchestrator-cli" / "SKILL.md",
-                "memory-orchestrator",
+                self.repo_root / "skills" / "memory-retriever-cli" / "SKILL.md",
+                "memory-retriever",
                 target,
             )
+            self._install_skill(
+                self.repo_root / "skills" / "rightmemory-orchestrator-cli" / "SKILL.md",
+                "rightmemory-orchestrator",
+                target,
+            )
+            self._remove_old_skill("memory-orchestrator", target)
             self._remove_old_skill("memory-curator", target)
             self._remove_old_skill("memory-dreamer", target)
         print(f"  [skip]    generated role skills; {self.mode} mode uses rightmemory")
@@ -343,9 +422,19 @@ class Installer:
             print(f"  [skip]    {directory} has no SKILL.md; left untouched")
             return
         text = _read_utf8(skill_file)
-        recognized = re.search(rf"(?m)^name:\s*{re.escape(skill_name)}\s*$", text) and (
-            "subagent execution wrapper for RightMemory" in text
-        )
+        managed_layout = sorted(path.name for path in directory.iterdir()) == ["SKILL.md"]
+        if skill_name == "memory-orchestrator":
+            normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+            normalized = LEGACY_MEMORY_ROOT_LINE_PATTERN.sub(LEGACY_MEMORY_ROOT_LINE, normalized, count=1)
+            recognized = managed_layout and (
+                sha256(normalized.encode("utf-8")).hexdigest() == LEGACY_MEMORY_ORCHESTRATOR_SHA256
+            )
+        else:
+            recognized = managed_layout and bool(
+                re.search(rf"(?m)^name:\s*{re.escape(skill_name)}\s*$", text)
+            ) and (
+                "subagent execution wrapper for RightMemory" in text
+            )
         if not recognized:
             print(f"  [skip]    {directory} is not an old RightMemory role skill; left untouched")
             return
@@ -409,7 +498,10 @@ class Installer:
         separator = "\\" if self.is_windows else "/"
         print()
         print("Done. Next steps:")
-        print(f"  1. Open {self.memory_root}{separator}MEMORY.md and replace the example domain with your own.")
+        print(
+            f"  1. Open {self.memory_root}{separator}MEMORY.md and "
+            f"{self.memory_root}{separator}PURSUITS.md and replace the examples with your own state."
+        )
         if self.mode == "cli-agent":
             print(
                 "  2. Write [agent_cli], [retrieve.agent_cli], and a default writer [update.agent_cli] "
@@ -420,11 +512,20 @@ class Installer:
                 "  2. Write [retrieve.model] and a default writer [update.model] config to "
                 f"{self.memory_root}{separator}rightmemory.toml."
             )
-        print("  3. Trigger any memory-relevant message in your AI agent - the installed orchestrator calls rightmemory.")
-        print("  4. Optional background review, pruning, and insight: rightmemory watch start")
+        print(
+            "  3. Choose memory-retriever for read-only context or rightmemory-orchestrator "
+            "for conditional retrieval and unified updates."
+        )
+        print(
+            "  4. Optional background transcript review, update review, dreamer, pruning, insight, and sync: "
+            "rightmemory watch start"
+        )
         print()
         print("Re-run the installer any time you pull updates from the RightMemory repo;")
-        print("your existing MEMORY.md, MEMORY_*.md, and insight_logs/ are preserved.")
+        print(
+            "your existing MEMORY.md, MEMORY_*.md, PURSUITS.md, PURSUIT_*.md, "
+            "PURSUIT_RULES.md, corrections.md, and insight_logs/ are preserved."
+        )
 
     def _git(self, *args: str) -> None:
         result = self._git_result(*args)

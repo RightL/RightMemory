@@ -270,6 +270,16 @@ class StatusDashboardTests(unittest.TestCase):
                     (),
                     {"name": "review", "state": "running", "pid": 123, "log_path": log},
                 )(),
+                "update-review": type(
+                    "WatchStatus",
+                    (),
+                    {
+                        "name": "update-review",
+                        "state": "stopped",
+                        "pid": None,
+                        "log_path": root / ".runtime" / "watch" / "update-review.log",
+                    },
+                )(),
                 "dreamer": type(
                     "WatchStatus",
                     (),
@@ -310,6 +320,16 @@ class StatusDashboardTests(unittest.TestCase):
                         "log_path": root / ".runtime" / "watch" / "sync.log",
                     },
                 )(),
+                "agent-cli-cleanup": type(
+                    "WatchStatus",
+                    (),
+                    {
+                        "name": "agent-cli-cleanup",
+                        "state": "stopped",
+                        "pid": None,
+                        "log_path": root / ".runtime" / "watch" / "agent-cli-cleanup.log",
+                    },
+                )(),
             }
 
             watches, issues = collect_managed_watch_sections(
@@ -318,11 +338,14 @@ class StatusDashboardTests(unittest.TestCase):
                 sync_config_loader=lambda: type("SyncConfig", (), {"enabled": False})(),
             )
 
-        self.assertEqual([watch.name for watch in watches], ["review", "dreamer", "pruner", "insight", "sync"])
+        self.assertEqual(
+            [watch.name for watch in watches],
+            ["review", "update-review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"],
+        )
         self.assertEqual(watches[0].state, "running pid 123")
         self.assertEqual(watches[0].last, "reviewed 3 sessions")
-        self.assertEqual(watches[2].state, "stale pid 456")
-        self.assertEqual(watches[4].state, "disabled")
+        self.assertEqual(next(watch.state for watch in watches if watch.name == "pruner"), "stale pid 456")
+        self.assertEqual(next(watch.state for watch in watches if watch.name == "sync"), "disabled")
         self.assertIn("pruner: stale pid 456", issues)
 
     def test_collect_managed_watches_surfaces_failure_preview_as_issue(self):
@@ -333,7 +356,7 @@ class StatusDashboardTests(unittest.TestCase):
             log.write_text("rightmemory pruner check failed: RuntimeError: boom\n", encoding="utf-8")
 
             statuses = {}
-            for name in ("review", "dreamer", "pruner", "insight", "sync"):
+            for name in ("review", "update-review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"):
                 statuses[name] = type(
                     "WatchStatus",
                     (),
@@ -371,7 +394,7 @@ class StatusDashboardTests(unittest.TestCase):
                 encoding="utf-8",
             )
             statuses = {}
-            for name in ("review", "dreamer", "pruner", "insight", "sync"):
+            for name in ("review", "update-review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"):
                 statuses[name] = type(
                     "WatchStatus",
                     (),
@@ -401,7 +424,7 @@ class StatusDashboardTests(unittest.TestCase):
             log.parent.mkdir(parents=True)
             log.write_text("rightmemory dreamer watch stopping after current work\n", encoding="utf-8")
             statuses = {}
-            for name in ("review", "dreamer", "pruner", "insight", "sync"):
+            for name in ("review", "update-review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"):
                 statuses[name] = type(
                     "WatchStatus",
                     (),
@@ -435,12 +458,17 @@ class StatusDashboardTests(unittest.TestCase):
                 sync_config_loader=lambda: type("SyncConfig", (), {"enabled": False})(),
             )
 
-            self.assertEqual([watch.name for watch in watches], ["review", "dreamer", "pruner", "insight", "sync"])
+            self.assertEqual(
+                [watch.name for watch in watches],
+                ["review", "update-review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"],
+            )
             self.assertEqual(issues, [])
             self.assertFalse((watch_dir / "review.lock").exists())
+            self.assertFalse((watch_dir / "update-review.lock").exists())
             self.assertFalse((watch_dir / "dreamer.lock").exists())
             self.assertFalse((watch_dir / "pruner.lock").exists())
             self.assertFalse((watch_dir / "insight.lock").exists())
+            self.assertFalse((watch_dir / "agent-cli-cleanup.lock").exists())
 
     def test_collect_dreamer_section_reports_trigger_progress(self):
         state = type(

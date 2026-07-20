@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .graph import build_graph_manifest
 from .hub.client import HubClient, HubClientError
 from .shared_view_models import (
     PROVIDER_VIEWS_DIR,
@@ -314,10 +315,22 @@ def _provider_view_approved(view_dir: Path, view_type: str) -> bool:
 def _ensure_memory_heading(root: Path, *, view_type: str, heading_id: str, title: str, body: str) -> None:
     root.mkdir(parents=True, exist_ok=True)
     memory = root / "MEMORY.md"
-    text = memory.read_text(encoding="utf-8") if memory.exists() else "# Shared Views {#shared-views}\n"
     marker = "MF#" if view_type == "file" else "MQ#"
-    if f"{{{marker}{heading_id}}}" in text:
-        return
+    manifest = build_graph_manifest(root)
+    existing = manifest.items.get(heading_id)
+    if existing is not None:
+        if (
+            existing.family == "memory"
+            and existing.item_kind == "heading"
+            and existing.anchor_kind == marker
+        ):
+            return
+        location = f"{existing.file.relative_to(manifest.root).as_posix()}:{existing.line_number}"
+        raise ValueError(
+            f"shared view id `{heading_id}` already exists as a {existing.family} "
+            f"{existing.item_kind} at {location}"
+        )
+    text = memory.read_text(encoding="utf-8") if memory.exists() else "# Shared Views {#shared-views}\n"
     entry = f"\n\n### {title.strip()} {{{marker}{heading_id}}}\n\n{body.strip()}\n"
     memory.write_text(text.rstrip() + entry, encoding="utf-8")
 

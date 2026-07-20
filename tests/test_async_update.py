@@ -1190,6 +1190,113 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
         self.assertIn("unsupported legacy job fields", str(caught.exception))
 
+    def test_read_rejects_nonpositive_or_boolean_candidate_ids(self):
+        job = {"id": 1, "message": "first", "submitted_at": "2026-05-15T00:00:00+00:00"}
+        cases = (
+            ("boolean next id", True, [job]),
+            ("zero next id", 0, []),
+            ("negative next id", -1, []),
+            ("boolean job id", 2, [{**job, "id": True}]),
+            ("zero job id", 2, [{**job, "id": 0}]),
+            ("negative job id", 2, [{**job, "id": -1}]),
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            state_path = store._state_path("agent-1")
+            state_path.parent.mkdir(parents=True)
+            for name, next_id, pending in cases:
+                with self.subTest(name=name):
+                    state_path.write_text(
+                        json.dumps(
+                            {
+                                "status": "succeeded",
+                                "session_id": "agent-1",
+                                "role": "update",
+                                "current_batch": [],
+                                "pending": pending,
+                                "next_id": next_id,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaises(ValueError):
+                        store.read("agent-1")
+
+    def test_read_rejects_duplicate_or_out_of_order_candidate_ids(self):
+        def job(job_id: int) -> dict[str, object]:
+            return {
+                "id": job_id,
+                "message": f"candidate {job_id}",
+                "submitted_at": "2026-05-15T00:00:00+00:00",
+            }
+
+        cases = (
+            ("duplicate", [job(1)], [job(1)]),
+            ("out of order in pending", [], [job(2), job(1)]),
+            ("out of order across lists", [job(2)], [job(1)]),
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            state_path = store._state_path("agent-1")
+            state_path.parent.mkdir(parents=True)
+            for name, current_batch, pending in cases:
+                with self.subTest(name=name):
+                    state_path.write_text(
+                        json.dumps(
+                            {
+                                "status": "succeeded",
+                                "session_id": "agent-1",
+                                "role": "update",
+                                "current_batch": current_batch,
+                                "pending": pending,
+                                "next_id": 3,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(ValueError, "unique and strictly increasing"):
+                        store.read("agent-1")
+
+    def test_read_rejects_next_id_not_above_every_live_job(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            state_path = store._state_path("agent-1")
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "succeeded",
+                        "session_id": "agent-1",
+                        "role": "update",
+                        "current_batch": [],
+                        "pending": [
+                            {
+                                "id": 2,
+                                "message": "candidate",
+                                "submitted_at": "2026-05-15T00:00:00+00:00",
+                            }
+                        ],
+                        "next_id": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "greater than every live job id"):
+                store.read("agent-1")
+
+    def test_read_rejects_non_object_state(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            state_path = store._state_path("agent-1")
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text("[]", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "must be a JSON object"):
+                store.read("agent-1")
+
 
 def _job(job_id: int, message: str) -> AsyncUpdateJob:
     return AsyncUpdateJob(id=job_id, message=message, submitted_at="2026-05-15T00:00:00+00:00")

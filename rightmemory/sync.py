@@ -9,11 +9,16 @@ from pathlib import Path
 
 from .config import SyncConfig
 from .session import _ensure_runtime_gitignore, _fsync_directory
+from .tools import MemoryTools
 
 
 MEMORY_SYNC_PATHS = (
     "MEMORY.md",
     "MEMORY_*.md",
+    "PURSUITS.md",
+    "PURSUIT_*.md",
+    "PURSUIT_RULES.md",
+    "corrections.md",
     "shared_views.toml",
     "shares.toml",
     "shared_views/*/view.md",
@@ -69,6 +74,10 @@ class SyncManager:
         if dirty:
             return self._record_failure(SyncResult("dirty", "local memory has uncommitted changes", dirty))
 
+        invalid = self._invalid_graph_result()
+        if invalid is not None:
+            return self._record_failure(invalid)
+
         fetch = self._git("fetch")
         if fetch.returncode != 0:
             return self._record_failure(SyncResult("offline", "sync offline: git fetch failed"))
@@ -83,11 +92,17 @@ class SyncManager:
         if ahead == 0:
             merge = self._git("merge", "--ff-only", upstream)
             if merge.returncode == 0:
+                invalid = self._invalid_graph_result()
+                if invalid is not None:
+                    return self._record_failure(invalid)
                 return self._record_success("pull", SyncResult("synced", "local memory fast-forwarded"))
             return self._record_failure(SyncResult("error", "sync failed: fast-forward merge failed"))
 
         merge = self._git("merge", "--no-edit", upstream)
         if merge.returncode == 0:
+            invalid = self._invalid_graph_result()
+            if invalid is not None:
+                return self._record_failure(invalid)
             return self._record_success("pull", SyncResult("synced", "local and remote memory merged"))
 
         conflicted = self._conflicted_memory_files()
@@ -114,6 +129,10 @@ class SyncManager:
         if dirty:
             return self._record_failure(SyncResult("dirty", "local memory has uncommitted changes", dirty))
 
+        invalid = self._invalid_graph_result()
+        if invalid is not None:
+            return self._record_failure(invalid)
+
         push = self._push(push_target)
         if push.returncode == 0:
             return self._record_success("push", SyncResult("pushed", "local memory pushed"))
@@ -128,6 +147,10 @@ class SyncManager:
             if conflicted:
                 return self._record_failure(SyncResult("conflict", "memory sync conflict", conflicted))
             return self._record_failure(SyncResult("error", "sync failed: merge failed"))
+
+        invalid = self._invalid_graph_result()
+        if invalid is not None:
+            return self._record_failure(invalid)
 
         retry = self._push(push_target)
         if retry.returncode == 0:
@@ -227,6 +250,19 @@ class SyncManager:
         if result.returncode != 0:
             return []
         return sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+    def _invalid_graph_result(self) -> SyncResult | None:
+        validation = MemoryTools(self.memory_root, role="sync-reconciler").validate_memory(
+            enforce_correction_capacity=False
+        )
+        if not validation.startswith("validation failed:"):
+            return None
+        files = [
+            name
+            for name in ("MEMORY.md", "PURSUITS.md", "corrections.md")
+            if (self.memory_root / name).exists()
+        ]
+        return SyncResult("conflict", validation, files)
 
     def _last_successful_pull_at(self) -> datetime | None:
         value = self._read_state().get("last_successful_pull_at")

@@ -168,7 +168,7 @@ rightmemory --profile frontend retrieve --session codex-frontend \
   "Find auth API context for login token expiry"
 ```
 
-The pull result is intentionally not added to retrieve session history, which keeps cache hits stable.
+The pull result is intentionally not added to retrieve session history, which keeps cache hits stable. Retrieve exposes only the mirrored package's canonical `dist/MEMORY.md`; addressable items are selected by ids scoped to that MF# source, while unaddressable text uses line ranges. Package metadata is not retrieval content.
 
 ## Ask Live Questions With `MQ#`
 

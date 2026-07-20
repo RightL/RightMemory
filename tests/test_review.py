@@ -2,10 +2,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rightmemory.config import ReviewConfig, ReviewSourceConfig
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
-from rightmemory.review import ReviewScanResult, ReviewScanner, ReviewStateStore
+from rightmemory.review import REVIEW_NO_CANDIDATE, ReviewScanResult, ReviewScanner, ReviewStateStore
 from rightmemory.transcripts.codex import parse_session as parse_codex_session
 from rightmemory.transcripts.claude import parse_session as parse_claude_session
 
@@ -93,7 +94,7 @@ class ReviewScannerTests(unittest.TestCase):
                     idle_seconds=3600,
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
-                lambda session_id, message: calls.append((session_id, message)) or "ok",
+                lambda session_id, message: calls.append((session_id, message)) or REVIEW_NO_CANDIDATE,
             )
 
             result = scanner.scan_once(now=now)
@@ -111,19 +112,19 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertEqual(only_state.session_id, "s1")
         self.assertEqual(only_state.source, "codex")
 
-    def test_scan_success_callback_runs_after_state_save_with_session_count(self):
-        callback_calls = []
+    def test_scan_submits_candidate_before_saving_review_state(self):
+        submitted = []
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             source = root / "codex"
             source.mkdir()
             transcript = source / "session.jsonl"
-            self._write_codex(transcript, turns=[("u1", "a1")])
+            self._write_codex(transcript, turns=[("remember this", "understood")])
             self._set_mtime(transcript, 1_000)
 
-            def on_review_success(count: int) -> None:
-                saved = ReviewStateStore(root).load()
-                callback_calls.append((count, len(saved.sessions)))
+            def submit_candidate(session_id: str, candidate: str) -> None:
+                self.assertEqual(ReviewStateStore(root).load().sessions, {})
+                submitted.append((session_id, candidate))
 
             scanner = ReviewScanner(
                 ReviewConfig(
@@ -131,14 +132,312 @@ class ReviewScannerTests(unittest.TestCase):
                     idle_seconds=3600,
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
-                lambda session_id, message: "ok",
-                on_review_success=on_review_success,
+                lambda session_id, message: "# Transcript review candidates\n\n- source: codex:s1",
+                submit_candidate=submit_candidate,
             )
 
             result = scanner.scan_once(now=10_000)
+            state = ReviewStateStore(root).load()
 
         self.assertEqual(result.reviewed, 1)
-        self.assertEqual(callback_calls, [(1, 1)])
+        self.assertEqual(len(submitted), 1)
+        self.assertTrue(submitted[0][0].startswith("review-batch-"))
+        self.assertIn("codex:s1", submitted[0][1])
+        self.assertEqual(len(state.sessions), 1)
+
+    def test_scan_submission_failure_leaves_session_unreviewed(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            transcript = source / "session.jsonl"
+            self._write_codex(transcript, turns=[("remember this", "understood")])
+            self._set_mtime(transcript, 1_000)
+
+            def fail_submission(session_id: str, candidate: str) -> None:
+                raise RuntimeError("queue failed")
+
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                lambda session_id, message: "candidate",
+                submit_candidate=fail_submission,
+            )
+
+            result = scanner.scan_once(now=10_000)
+            state = ReviewStateStore(root).load()
+
+        self.assertEqual(result.reviewed, 0)
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(result.retried, 0)
+        self.assertEqual(state.sessions, {})
+
+    def test_scan_retries_worker_launch_without_duplicating_durable_candidate(self):
+        reviewer_calls = []
+        outputs = iter(("first candidate wording", "different retry wording"))
+
+        def review(session_id: str, message: str) -> str:
+            reviewer_calls.append(session_id)
+            return next(outputs)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            transcript = source / "session.jsonl"
+            self._write_codex(transcript, turns=[("remember this", "understood")])
+            self._set_mtime(transcript, 1_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                review,
+            )
+
+            with patch.object(
+                scanner.update_store,
+                "_start_worker_if_needed",
+                side_effect=[OSError("no worker"), None],
+            ) as start_worker:
+                first = scanner.scan_once(now=10_000)
+                second = scanner.scan_once(now=10_000)
+            queued = next((root / ".runtime" / "async" / "update").glob("*.json"))
+            queue_state = json.loads(queued.read_text(encoding="utf-8"))
+            review_state = ReviewStateStore(root).load()
+
+        self.assertEqual(first.failed, 1)
+        self.assertEqual(first.reviewed, 0)
+        self.assertEqual(second.reviewed, 1)
+        self.assertEqual(start_worker.call_count, 2)
+        self.assertEqual(len(reviewer_calls), 1)
+        self.assertEqual([item["message"] for item in queue_state["pending"]], ["first candidate wording"])
+        self.assertEqual(len(review_state.sessions), 1)
+
+    def test_scan_recovers_receipt_when_submission_failed_before_queue_write(self):
+        reviewer_calls = []
+
+        def review(session_id: str, message: str) -> str:
+            reviewer_calls.append(session_id)
+            return "candidate"
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            transcript = source / "session.jsonl"
+            self._write_codex(transcript, turns=[("remember this", "understood")])
+            self._set_mtime(transcript, 1_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                review,
+            )
+            original_submit = scanner.update_store.submit
+            submit_calls = 0
+
+            def flaky_submit(session_id: str, candidate: str):
+                nonlocal submit_calls
+                submit_calls += 1
+                if submit_calls == 1:
+                    raise OSError("queue write failed")
+                return original_submit(session_id, candidate)
+
+            with (
+                patch.object(scanner.update_store, "submit", side_effect=flaky_submit),
+                patch.object(scanner.update_store, "_start_worker_if_needed"),
+            ):
+                first = scanner.scan_once(now=10_000)
+                second = scanner.scan_once(now=10_000)
+            update_state = scanner.update_store.read(reviewer_calls[0])
+            review_state = ReviewStateStore(root).load()
+
+        self.assertEqual(first.failed, 1)
+        self.assertEqual(first.reviewed, 0)
+        self.assertEqual(second.reviewed, 1)
+        self.assertEqual(submit_calls, 2)
+        self.assertEqual(len(reviewer_calls), 1)
+        self.assertEqual([job.message for job in update_state.pending], ["candidate"])
+        self.assertEqual(len(review_state.sessions), 1)
+
+    def test_scan_recovers_delivery_after_state_save_failure_and_completed_update(self):
+        reviewer_calls = []
+
+        def review(session_id: str, message: str) -> str:
+            reviewer_calls.append(session_id)
+            return "candidate"
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            transcript = source / "session.jsonl"
+            self._write_codex(transcript, turns=[("remember this", "understood")])
+            self._set_mtime(transcript, 1_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                review,
+            )
+
+            with (
+                patch.object(scanner.update_store, "_start_worker_if_needed"),
+                patch.object(scanner.state_store, "save", side_effect=OSError("state write failed")),
+            ):
+                with self.assertRaisesRegex(OSError, "state write failed"):
+                    scanner.scan_once(now=10_000)
+
+            worker = scanner.update_store.run_pending_batches(
+                lambda session_id, message: "updated",
+                target_batch_candidates=1,
+                max_wait_seconds=0,
+            )
+            recovered = scanner.scan_once(now=10_000)
+            update_state = scanner.update_store.read(reviewer_calls[0])
+            review_state = ReviewStateStore(root).load()
+
+        self.assertEqual(worker.status, "succeeded")
+        self.assertEqual(worker.processed, 1)
+        self.assertEqual(recovered.reviewed, 1)
+        self.assertEqual(len(reviewer_calls), 1)
+        self.assertEqual(update_state.status, "succeeded")
+        self.assertEqual(update_state.next_id, 2)
+        self.assertEqual(len(review_state.sessions), 1)
+
+    def test_clearing_review_state_reruns_reviewer_for_changed_transcript(self):
+        reviewer_calls = []
+
+        def review(session_id: str, message: str) -> str:
+            reviewer_calls.append(session_id)
+            return f"candidate {len(reviewer_calls)}"
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            transcript = source / "session.jsonl"
+            self._write_codex(transcript, turns=[("remember this", "understood")])
+            self._set_mtime(transcript, 1_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                review,
+            )
+
+            with patch.object(scanner.update_store, "_start_worker_if_needed"):
+                first = scanner.scan_once(now=10_000)
+                delivery_root = root / ".runtime" / "review" / "deliveries"
+                self.assertEqual(list(delivery_root.glob("*.json")), [])
+                scanner.state_store.path.unlink()
+                self._write_codex(
+                    transcript,
+                    turns=[("remember this", "understood"), ("also remember this", "noted")],
+                )
+                self._set_mtime(transcript, 2_000)
+                second = scanner.scan_once(now=10_000)
+            review_state = ReviewStateStore(root).load()
+
+        self.assertEqual(first.reviewed, 1)
+        self.assertEqual(second.reviewed, 1)
+        self.assertEqual(len(reviewer_calls), 2)
+        self.assertNotEqual(reviewer_calls[0], reviewer_calls[1])
+        self.assertEqual(len(review_state.sessions), 1)
+
+    def test_clearing_review_state_reruns_reviewer_despite_old_async_history(self):
+        reviewer_calls = []
+
+        def review(session_id: str, message: str) -> str:
+            reviewer_calls.append(session_id)
+            return f"candidate {len(reviewer_calls)}"
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            transcript = source / "session.jsonl"
+            self._write_codex(transcript, turns=[("remember this", "understood")])
+            self._set_mtime(transcript, 1_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                review,
+            )
+
+            with patch.object(scanner.update_store, "_start_worker_if_needed"):
+                first = scanner.scan_once(now=10_000)
+                scanner.state_store.path.unlink()
+                second = scanner.scan_once(now=10_000)
+            update_state = scanner.update_store.read(reviewer_calls[0])
+
+        self.assertEqual(first.reviewed, 1)
+        self.assertEqual(second.reviewed, 1)
+        self.assertEqual(len(reviewer_calls), 2)
+        self.assertEqual(reviewer_calls[0], reviewer_calls[1])
+        self.assertEqual(update_state.next_id, 3)
+        self.assertEqual([job.message for job in update_state.pending], ["candidate 1", "candidate 2"])
+
+    def test_delivery_receipt_recovers_exact_batch_before_new_eligible_session(self):
+        reviewer_calls = []
+
+        def review(session_id: str, message: str) -> str:
+            reviewer_calls.append((session_id, message))
+            return "candidate"
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source = root / "codex"
+            source.mkdir()
+            first_transcript = source / "01-first.jsonl"
+            second_transcript = source / "02-second.jsonl"
+            self._write_codex(first_transcript, turns=[("first", "a1")], session_id="s1")
+            self._write_codex(second_transcript, turns=[("second", "a2")], session_id="s2")
+            self._set_mtime(first_transcript, 1_000)
+            self._set_mtime(second_transcript, 2_000)
+            scanner = ReviewScanner(
+                ReviewConfig(
+                    memory_root=root,
+                    idle_seconds=3600,
+                    batch_size=2,
+                    sources=[ReviewSourceConfig(kind="codex", path=source)],
+                ),
+                review,
+            )
+
+            with patch.object(scanner.update_store, "_start_worker_if_needed"):
+                with patch.object(scanner.state_store, "save", side_effect=OSError("state write failed")):
+                    with self.assertRaisesRegex(OSError, "state write failed"):
+                        scanner.scan_once(now=10_000)
+
+                earlier_transcript = source / "00-earlier.jsonl"
+                self._write_codex(earlier_transcript, turns=[("earlier", "a0")], session_id="s0")
+                self._set_mtime(earlier_transcript, 500)
+                recovered = scanner.scan_once(now=10_000)
+                recovered_state = ReviewStateStore(root).load()
+                remaining = scanner.scan_once(now=10_000)
+                final_state = ReviewStateStore(root).load()
+
+        self.assertEqual(recovered.reviewed, 2)
+        self.assertEqual(len(reviewer_calls), 2)
+        self.assertEqual(set(recovered_state.sessions), {"codex:s1", "codex:s2"})
+        self.assertEqual(remaining.reviewed, 1)
+        self.assertIn('"session_id": "s0"', reviewer_calls[1][1])
+        self.assertEqual(set(final_state.sessions), {"codex:s0", "codex:s1", "codex:s2"})
 
     def test_scan_full_batch_gate_waits_before_reviewing(self):
         calls = []
@@ -158,7 +457,7 @@ class ReviewScannerTests(unittest.TestCase):
                     idle_seconds=3600,
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
-                lambda session_id, message: calls.append(message) or "ok",
+                lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE,
             )
 
             result = scanner.scan_once(now=10_000, require_full_batch=True)
@@ -193,7 +492,7 @@ class ReviewScannerTests(unittest.TestCase):
                     idle_seconds=3600,
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
-                lambda session_id, message: calls.append(message) or "ok",
+                lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE,
             )
 
             first_result = scanner.scan_once(now=10_000)
@@ -231,7 +530,7 @@ class ReviewScannerTests(unittest.TestCase):
                     batch_size=1,
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
-                lambda session_id, message: calls.append(message) or "ok",
+                lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE,
             )
 
             result = scanner.scan_once(now=10_000)
@@ -245,7 +544,6 @@ class ReviewScannerTests(unittest.TestCase):
 
     def test_scan_reviews_longest_prefix_duplicate_and_marks_alias_reviewed(self):
         calls = []
-        callback_calls = []
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             source = root / "codex"
@@ -257,18 +555,13 @@ class ReviewScannerTests(unittest.TestCase):
             self._set_mtime(short, 1_000)
             self._set_mtime(long, 2_000)
 
-            def on_review_success(count: int) -> None:
-                saved = ReviewStateStore(root).load()
-                callback_calls.append((count, len(saved.sessions)))
-
             scanner = ReviewScanner(
                 ReviewConfig(
                     memory_root=root,
                     idle_seconds=3600,
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
-                lambda session_id, message: calls.append(message) or "ok",
-                on_review_success=on_review_success,
+                lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE,
             )
 
             result = scanner.scan_once(now=10_000)
@@ -282,7 +575,6 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertIn('"user": "u2"', calls[0])
         self.assertIn("codex:long", state.sessions)
         self.assertIn("codex:short", state.sessions)
-        self.assertEqual(callback_calls, [(1, 2)])
 
     def test_scan_exact_duplicate_keeps_newest_representative(self):
         calls = []
@@ -303,7 +595,7 @@ class ReviewScannerTests(unittest.TestCase):
                     idle_seconds=3600,
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
-                lambda session_id, message: calls.append(message) or "ok",
+                lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE,
             )
 
             result = scanner.scan_once(now=10_000)
@@ -336,7 +628,7 @@ class ReviewScannerTests(unittest.TestCase):
                     idle_seconds=3600,
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
-                lambda session_id, message: calls.append(message) or "ok",
+                lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE,
             )
 
             result = scanner.scan_once(now=10_000)
@@ -405,7 +697,7 @@ class ReviewScannerTests(unittest.TestCase):
                 idle_seconds=3600,
                 sources=[ReviewSourceConfig(kind="codex", path=source)],
             )
-            scanner = ReviewScanner(config, lambda session_id, message: calls.append(message) or "ok")
+            scanner = ReviewScanner(config, lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE)
             scanner.scan_once(now=10_000)
 
             self._write_codex(transcript, turns=[("u1", "a1"), ("u2", "a2")])
@@ -417,7 +709,6 @@ class ReviewScannerTests(unittest.TestCase):
 
     def test_scan_retries_once_then_stops_after_reviewer_failure(self):
         calls = []
-        callbacks = []
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             source = root / "codex"
@@ -433,7 +724,7 @@ class ReviewScannerTests(unittest.TestCase):
                 calls.append(message)
                 if '"user": "fail"' in message:
                     raise RuntimeError("review failed")
-                return "ok"
+                return REVIEW_NO_CANDIDATE
 
             scanner = ReviewScanner(
                 ReviewConfig(
@@ -442,7 +733,6 @@ class ReviewScannerTests(unittest.TestCase):
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
                 fail,
-                on_review_success=callbacks.append,
             )
 
             result = scanner.scan_once(now=10_000)
@@ -455,7 +745,6 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertIn('"user": "fail"', calls[0])
         self.assertIn('"user": "review"', calls[0])
         self.assertEqual(len(state.sessions), 0)
-        self.assertEqual(callbacks, [])
 
     def test_scan_skips_sessions_older_than_since_days(self):
         calls = []
@@ -474,7 +763,7 @@ class ReviewScannerTests(unittest.TestCase):
                     since_days=30,
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
-                lambda session_id, message: calls.append(message) or "ok",
+                lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE,
             )
 
             result = scanner.scan_once(now=now)
@@ -499,7 +788,7 @@ class ReviewScannerTests(unittest.TestCase):
                 idle_seconds=3600,
                 sources=[ReviewSourceConfig(kind="codex", path=source)],
             )
-            scanner = ReviewScanner(config, lambda session_id, message: calls.append(message) or "ok")
+            scanner = ReviewScanner(config, lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE)
             result = scanner.scan_once(now=10_000)
 
         self.assertEqual(result.reviewed, 1)
@@ -531,7 +820,7 @@ class ReviewScannerTests(unittest.TestCase):
                         ReviewSourceConfig(kind="claude", path=claude_root),
                     ],
                 ),
-                lambda session_id, message: calls.append(message) or "ok",
+                lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE,
             )
 
             result = scanner.scan_once(now=10_000)
@@ -571,7 +860,7 @@ class ReviewScannerTests(unittest.TestCase):
                         ReviewSourceConfig(kind="claude", path=claude_root),
                     ],
                 ),
-                lambda session_id, message: calls.append(message) or "ok",
+                lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE,
             )
 
             result = scanner.scan_once(now=10_000)
@@ -601,7 +890,7 @@ class ReviewScannerTests(unittest.TestCase):
                     batch_size=2,
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
-                lambda session_id, message: calls.append(message) or "ok",
+                lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE,
             )
 
             result = scanner.scan_once(now=10_000, require_full_batch=True)
@@ -645,7 +934,7 @@ class ReviewScannerTests(unittest.TestCase):
                     idle_seconds=3600,
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
-                lambda session_id, message: calls.append(message) or "ok",
+                lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE,
             )
 
             result = scanner.scan_once(now=10_000)
@@ -678,7 +967,7 @@ class ReviewScannerTests(unittest.TestCase):
                     idle_seconds=3600,
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
-                lambda session_id, message: calls.append(message) or "ok",
+                lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE,
             )
 
             result = scanner.scan_once(now=10_000)
@@ -704,7 +993,7 @@ class ReviewScannerTests(unittest.TestCase):
                     idle_seconds=3600,
                     sources=[ReviewSourceConfig(kind="codex", path=source)],
                 ),
-                lambda session_id, message: calls.append(message) or "ok",
+                lambda session_id, message: calls.append(message) or REVIEW_NO_CANDIDATE,
             )
 
             result = scanner.scan_once(now=10_000)

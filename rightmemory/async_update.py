@@ -30,7 +30,7 @@ UPDATE_MAX_AUTOMATIC_ATTEMPTS = 2
 WORKER_IDLE_POLL_SECONDS = 30
 STATUS_MANUAL_RECOVERY = "needs_manual_recovery"
 MANUAL_RECOVERY_WARNING = (
-    "CRITICAL: this async memory update session is blocked after "
+    "CRITICAL: this async RightMemory update session is blocked after "
     f"{UPDATE_MAX_AUTOMATIC_ATTEMPTS} failed attempts.\n"
     "The new candidate was saved, but this session will not be processed until manual recovery runs.\n"
     "Agent: report this issue to the user and suggest `rightmemory update retry`."
@@ -199,6 +199,14 @@ class AsyncUpdateStore:
         if state.status != STATUS_MANUAL_RECOVERY:
             self._start_worker_if_needed(session_id)
         return state
+
+    def ensure_worker(self, session_id: str) -> AsyncUpdateState:
+        state = self.read(session_id)
+        if not state.pending and not state.current_batch:
+            return state
+        if state.status != STATUS_MANUAL_RECOVERY:
+            self._start_worker_if_needed(session_id)
+        return self.read(session_id)
 
     def run_pending_batches(
         self,
@@ -824,15 +832,24 @@ class AsyncUpdateStore:
                 unlock_file(handle)
 
 
-def _state_from_json(data: dict[str, object]) -> AsyncUpdateState:
+def _state_from_json(data: object) -> AsyncUpdateState:
+    if not isinstance(data, dict):
+        raise ValueError("async update state must be a JSON object")
     if "current" in data or "queued" in data:
         raise ValueError("async update state uses unsupported legacy job fields")
     status = _required_state_str(data, "status")
     session_id = _required_state_str(data, "session_id")
     role = _required_state_str(data, "role")
     next_id = data.get("next_id")
-    if not isinstance(next_id, int):
-        raise ValueError("async update state must contain integer field: next_id")
+    if isinstance(next_id, bool) or not isinstance(next_id, int) or next_id < 1:
+        raise ValueError("async update state must contain positive integer field: next_id")
+    current_batch = _required_job_list(data, "current_batch")
+    pending = _required_job_list(data, "pending")
+    job_ids = [job.id for job in [*current_batch, *pending]]
+    if any(first >= second for first, second in zip(job_ids, job_ids[1:])):
+        raise ValueError("async update job ids must be unique and strictly increasing")
+    if job_ids and next_id <= job_ids[-1]:
+        raise ValueError("async update next_id must be greater than every live job id")
     return AsyncUpdateState(
         status=status,
         session_id=session_id,
@@ -847,8 +864,8 @@ def _state_from_json(data: dict[str, object]) -> AsyncUpdateState:
         next_retry_at=_optional_str(data.get("next_retry_at")),
         last_error=_optional_str(data.get("last_error")),
         next_flush_at=_optional_str(data.get("next_flush_at")),
-        current_batch=_required_job_list(data, "current_batch"),
-        pending=_required_job_list(data, "pending"),
+        current_batch=current_batch,
+        pending=pending,
         next_id=next_id,
     )
 
@@ -869,7 +886,13 @@ def _job_from_json(data: object) -> AsyncUpdateJob | None:
     job_id = data.get("id")
     message = data.get("message")
     submitted_at = data.get("submitted_at")
-    if not isinstance(job_id, int) or not isinstance(message, str) or not isinstance(submitted_at, str):
+    if (
+        isinstance(job_id, bool)
+        or not isinstance(job_id, int)
+        or job_id < 1
+        or not isinstance(message, str)
+        or not isinstance(submitted_at, str)
+    ):
         return None
     return AsyncUpdateJob(id=job_id, message=message, submitted_at=submitted_at)
 
@@ -950,8 +973,9 @@ def manual_recovery_warning(state: AsyncUpdateState) -> str | None:
 
 def _format_batch_message(batches: list[AsyncUpdateSessionBatch]) -> str:
     lines = [
-        "Process the following submitted memory update candidates as one batch.",
-        "Use the standalone update instructions to decide what should become durable memory.",
+        "Process the following submitted RightMemory candidates as one ordered batch.",
+        "Treat them as evidence about evolving tasks, possible durable context, and explicit corrections.",
+        "Use the update instructions to decide what belongs in live Pursuit, durable Memory, both, or neither.",
         "",
         "Candidates:",
     ]

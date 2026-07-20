@@ -18,6 +18,7 @@ from rightmemory.agent_cli import (
 )
 from rightmemory.config import ROLES, AgentCliConfig, RuntimeConfig, SyncConfig
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
+from rightmemory.provider_threads import ProviderThreadStore
 from rightmemory.semantic_upgrades import SemanticUpgradeContext, SemanticUpgradeNote
 
 
@@ -154,6 +155,18 @@ class AgentCliCommandTests(unittest.TestCase):
         self.assertIn("--sandbox", command)
         self.assertIn("read-only", command)
 
+    def test_build_codex_uses_read_only_for_reviewer(self):
+        command = build_codex_command(
+            Path("/memory/root"),
+            "reviewer",
+            AgentCliConfig(provider="codex"),
+            "prompt",
+            None,
+        )
+
+        self.assertIn("--sandbox", command)
+        self.assertIn("read-only", command)
+
     def test_build_codex_resume_command_uses_provider_session_id(self):
         config = AgentCliConfig(provider="codex", model="gpt-5")
         memory_root = Path("/memory/root")
@@ -228,6 +241,20 @@ class AgentCliCommandTests(unittest.TestCase):
                 "prompt",
             ],
         )
+
+    def test_build_claude_uses_plan_permission_for_reviewer(self):
+        session_id = "123e4567-e89b-12d3-a456-426614174000"
+
+        command = build_claude_command(
+            "reviewer",
+            AgentCliConfig(provider="claude"),
+            "prompt",
+            session_id,
+            False,
+        )
+
+        self.assertIn("--permission-mode", command)
+        self.assertIn("plan", command)
 
     def test_cli_agent_executor_includes_semantic_upgrades_for_dreamer_prompt(self):
         context = SemanticUpgradeContext(
@@ -394,7 +421,25 @@ class CliAgentExecutorTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_run_turn_saves_provider_session_record(self):
+    def test_opportunistic_cleanup_runs_only_for_top_level_state_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            overlay = root / "overlay"
+            with patch("rightmemory.agent_cli.AgentCliThreadCleanup") as cleanup:
+                cleanup.return_value.has_expired_codex_threads.return_value = True
+                cleanup.return_value.run.return_value.errors = ()
+                CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex"))
+                CliAgentExecutor(
+                    root,
+                    "retrieve",
+                    AgentCliConfig(provider="codex"),
+                    state_root=overlay,
+                )
+
+        cleanup.assert_called_once_with(root)
+        cleanup.return_value.run.assert_called_once_with()
+
+    def test_run_turn_is_one_shot_and_records_thread_ownership(self):
         def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
             return subprocess.CompletedProcess(
                 command,
@@ -414,12 +459,13 @@ class CliAgentExecutorTests(unittest.TestCase):
                 result = executor.run_turn("hello")
 
             record = ProviderSessionStore(root, "retrieve").load(NO_SESSION_RIGHTMEMORY_SESSION_ID)
+            ownership = ProviderThreadStore(root).load("codex", "thread-chat")
             is_internal = ProviderSessionStore.is_internal_provider_session(root, "codex", "thread-chat")
 
         self.assertEqual(result, "done 中文")
-        self.assertIsNotNone(record)
-        self.assertEqual(record.provider_session_id, "thread-chat")
-        self.assertEqual(record.rightmemory_session_id, NO_SESSION_RIGHTMEMORY_SESSION_ID)
+        self.assertIsNone(record)
+        self.assertEqual(ownership.policy, "one-shot")
+        self.assertEqual(ownership.rightmemory_session_id, NO_SESSION_RIGHTMEMORY_SESSION_ID)
         self.assertTrue(is_internal)
 
     def test_run_turn_records_provider_session_under_state_root(self):
@@ -482,17 +528,18 @@ class CliAgentExecutorTests(unittest.TestCase):
             self.assertEqual(result, "reply")
             self.assertFalse((root / ".runtime" / "agent_cli_sessions" / "retrieve").exists())
 
-    def test_run_turn_resumes_saved_provider_session_in_second_executor(self):
+    def test_run_turn_starts_fresh_thread_in_second_executor(self):
         calls = []
 
         def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
             calls.append(command)
-            text_out = "first" if len(calls) == 1 else "second"
+            number = len(calls)
+            text_out = "first" if number == 1 else "second"
             return subprocess.CompletedProcess(
                 command,
                 0,
                 stdout=(
-                    '{"type":"thread.started","thread_id":"thread-chat"}\n'
+                    f'{{"type":"thread.started","thread_id":"thread-chat-{number}"}}\n'
                     f'{{"type":"item.completed","item":{{"type":"agent_message","text":"{text_out}"}}}}\n'
                 ),
                 stderr="",
@@ -508,7 +555,7 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertEqual(first, "first")
         self.assertEqual(second, "second")
         self.assertNotIn("resume", calls[0])
-        self.assertEqual(calls[1][-3:], ["resume", "thread-chat", calls[1][-1]])
+        self.assertNotIn("resume", calls[1])
 
     def test_codex_session_turn_saves_and_resumes_provider_session(self):
         calls = []
@@ -544,10 +591,12 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertEqual(calls[1][-3:], ["resume", "thread-1", calls[1][-1]])
         self.assertIn("Caller message:\nhello", calls[0][-1])
         self.assertIn("You are RightMemory retrieve mode.", calls[0][-1])
+        self.assertIn("Caller message:\nagain", calls[1][-1])
+        self.assertNotIn("You are RightMemory retrieve mode.", calls[1][-1])
 
     def test_claude_first_turn_uses_stable_uuid_then_resumes(self):
         calls = []
-        expected_session_id = _stable_claude_session_id("update", "agent-1")
+        expected_session_id = _stable_claude_session_id("retrieve", "agent-1")
 
         def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
             calls.append(command)
@@ -559,7 +608,7 @@ class CliAgentExecutorTests(unittest.TestCase):
             )
 
         with tempfile.TemporaryDirectory() as tempdir:
-            executor = CliAgentExecutor(Path(tempdir), "update", AgentCliConfig(provider="claude"))
+            executor = CliAgentExecutor(Path(tempdir), "retrieve", AgentCliConfig(provider="claude"))
 
             with patch("rightmemory.agent_cli.subprocess.run", fake_run):
                 first = executor.run_session_turn("agent-1", "remember")
@@ -604,6 +653,160 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertIn("--session-id", calls[0])
         self.assertEqual(calls[0][calls[0].index("--session-id") + 1], fresh_session_id)
         self.assertNotEqual(fresh_session_id, stable_session_id)
+
+    def test_non_retrieve_session_turns_are_one_shot_for_claude(self):
+        calls = []
+        session_ids = [
+            "123e4567-e89b-12d3-a456-426614174001",
+            "123e4567-e89b-12d3-a456-426614174002",
+        ]
+
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+            calls.append(command)
+            session_id = command[command.index("--session-id") + 1]
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=f'{{"type":"result","session_id":"{session_id}","result":"done"}}',
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            executor = CliAgentExecutor(Path(tempdir), "update", AgentCliConfig(provider="claude"))
+            with (
+                patch("rightmemory.agent_cli.uuid4", side_effect=[UUID(value) for value in session_ids]),
+                patch("rightmemory.agent_cli.subprocess.run", fake_run),
+            ):
+                executor.run_session_turn("agent-1", "first")
+                executor.run_session_turn("agent-1", "second")
+
+            mapping = ProviderSessionStore(Path(tempdir), "update").load("agent-1")
+            records = ProviderThreadStore(Path(tempdir)).scan("claude").records
+
+        self.assertIsNone(mapping)
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(record.policy == "one-shot" for record in records))
+        self.assertTrue(all("--resume" not in command for command in calls))
+
+    def test_process_local_turn_resumes_only_within_executor(self):
+        calls = []
+
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+            calls.append(command)
+            if "resume" in command:
+                thread_id = command[command.index("resume") + 1]
+            else:
+                thread_id = f"thread-{len([call for call in calls if 'resume' not in call])}"
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    f'{{"type":"thread.started","thread_id":"{thread_id}"}}\n'
+                    '{"item":{"type":"agent_message","text":"done"}}\n'
+                ),
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
+                first = CliAgentExecutor(root, "reviewer", AgentCliConfig(provider="codex"))
+                first.run_process_turn("one")
+                first.run_process_turn("two")
+                CliAgentExecutor(root, "reviewer", AgentCliConfig(provider="codex")).run_process_turn("three")
+
+            records = ProviderThreadStore(root).scan("codex").records
+
+        self.assertNotIn("resume", calls[0])
+        self.assertEqual(calls[1][-3:-1], ["resume", "thread-1"])
+        self.assertNotIn("resume", calls[2])
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(record.policy == "process-local" for record in records))
+
+    def test_unregistered_legacy_retrieve_mapping_is_not_resumed(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            ProviderSessionStore(root, "retrieve").save(
+                ProviderSessionRecord(
+                    provider="codex",
+                    provider_session_id="legacy-thread",
+                    role="retrieve",
+                    rightmemory_session_id="agent-1",
+                    created_at="2026-07-17T00:00:00+00:00",
+                    updated_at="2026-07-17T00:00:00+00:00",
+                )
+            )
+            executor = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex"))
+            with patch(
+                "rightmemory.agent_cli._run_cli",
+                return_value=(
+                    '{"type":"thread.started","thread_id":"new-thread"}\n'
+                    '{"item":{"type":"agent_message","text":"done"}}\n'
+                ),
+            ) as run:
+                executor.run_session_turn("agent-1", "hello")
+
+            mapping = ProviderSessionStore(root, "retrieve").load("agent-1")
+
+        self.assertNotIn("resume", run.call_args.args[0])
+        self.assertEqual(mapping.provider_session_id, "new-thread")
+
+    def test_expired_retrieve_mapping_is_not_resumed_when_cleanup_itself_fails(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            ProviderThreadStore(root).record_created(
+                provider="codex",
+                provider_session_id="expired-thread",
+                role="retrieve",
+                rightmemory_session_id="agent-1",
+                policy="persistent",
+                created_at="2020-01-01T00:00:00+00:00",
+            )
+            ProviderSessionStore(root, "retrieve").save(
+                ProviderSessionRecord(
+                    provider="codex",
+                    provider_session_id="expired-thread",
+                    role="retrieve",
+                    rightmemory_session_id="agent-1",
+                    created_at="2020-01-01T00:00:00+00:00",
+                    updated_at="2020-01-01T00:00:00+00:00",
+                )
+            )
+            with patch("rightmemory.agent_cli.AgentCliThreadCleanup") as cleanup:
+                cleanup.return_value.has_expired_codex_threads.return_value = True
+                cleanup.return_value.run.side_effect = OSError("cleanup unavailable")
+                executor = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex"))
+            with patch(
+                "rightmemory.agent_cli._run_cli",
+                return_value=(
+                    '{"type":"thread.started","thread_id":"new-thread"}\n'
+                    '{"item":{"type":"agent_message","text":"done"}}\n'
+                ),
+            ) as run:
+                executor.run_session_turn("agent-1", "hello")
+
+        self.assertNotIn("resume", run.call_args.args[0])
+
+    def test_failed_codex_command_registers_partial_thread_started_event(self):
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+            return subprocess.CompletedProcess(
+                command,
+                7,
+                stdout='{"type":"thread.started","thread_id":"failed-thread"}\n',
+                stderr="failed later",
+            )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(root, "update", AgentCliConfig(provider="codex"))
+            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
+                with self.assertRaises(RuntimeError):
+                    executor.run_session_turn("agent-1", "hello")
+
+            ownership = ProviderThreadStore(root).load("codex", "failed-thread")
+
+        self.assertEqual(ownership.policy, "one-shot")
+        self.assertIsNone(ownership.last_successful_activity_at)
 
     def test_cli_failure_includes_stdout_and_stderr(self):
         def fake_run(command, cwd=None, capture_output=None, text=None, check=None):

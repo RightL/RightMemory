@@ -3,11 +3,16 @@ from __future__ import annotations
 import re
 import shlex
 import subprocess
-from dataclasses import dataclass
 from difflib import SequenceMatcher
 from hashlib import sha256
 from pathlib import Path
 
+from .graph import (
+    PURSUIT_ACTION_RE,
+    PURSUIT_DETAIL_FILE_RE,
+    build_graph_manifest,
+    resolve_backing_reference,
+)
 from .share_models import ShareFilePart, ShareQuestionPart, ShareRelationship, load_shares, save_shares, validate_share_id
 from .share_results import normalize_share_capability
 from .shared_view_files import (
@@ -18,6 +23,7 @@ from .shared_view_files import (
 )
 from .shared_view_models import validate_heading_id
 from .shared_view_questions import validate_question_view_source, write_question_view
+from .update_review import validate_corrections_markdown
 
 
 FULL_READ_LINE_LIMIT = 200
@@ -26,36 +32,17 @@ COMMAND_OUTPUT_CHAR_LIMIT = 30000
 MAX_LIST_FILES = 500
 MAX_SEARCH_MATCHES = 200
 MAX_OUTLINE_ITEMS = 500
-KNOWN_EDGE_TYPES = {
-    "dep",
-    "emb",
-    "bak",
-    "agg",
-    "ver",
-    "ext",
-    "up",
-    "rel",
-    "loc",
-    "run",
-    "cfg",
-    "out",
-    "in",
-    "doc",
-    "todo",
-}
 COMMIT_MESSAGE_LINE_LIMIT = 120
 MAX_CLOSE_MATCHES = 3
 MAX_EDIT_MATCH_LINES = 8
 MAX_MATCH_PREVIEW_CHARS = 180
 
-ANCHOR_RE = re.compile(r"^(#{1,4})\s+.*?\{(?:F#|S#|MF#|MQ#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
-ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{(F#|S#|MF#|MQ#|#)([A-Za-z0-9_.-]+)\}(?:\s*→\s*\[(.*?)\])?")
+ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{(F#|M#|S#|MF#|MQ#|#)([A-Za-z0-9_.-]+)\}(?:\s*(?:\u2192|->)\s*\[(.*?)\])?")
 UNSUPPORTED_ANCHOR_KIND_RE = re.compile(r"^(#{1,})\s+.*?\{([A-Za-z]+#)([A-Za-z0-9_.-]+)\}")
-TERMINAL_HEADING_KINDS = {"F#", "S#", "MF#", "MQ#"}
+TERMINAL_HEADING_KINDS = {"F#", "M#", "S#", "MF#", "MQ#"}
 ANY_HEADING_RE = re.compile(r"^(#+)\s+(.+?)\s*$")
 HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$")
-NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*→\s*\[(.*?)\])?\s*$")
-EDGE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*([A-Za-z0-9_.-]+)\s*$")
+NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s*(?:\u2192|->)\s*\[(.*?)\])?\s*$")
 MEMORY_DETAIL_FILE_RE = re.compile(r"^MEMORY_[A-Za-z0-9_.-]+\.md$")
 MEMORY_SKILL_FILE_RE = re.compile(r"^MEMORY_SKILL_[A-Za-z0-9_.-]+\.md$")
 INSIGHT_LOG_FILE_RE = re.compile(r"^insight_logs/[A-Za-z0-9_.-]+\.md$")
@@ -69,20 +56,24 @@ RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX = ".runtime/shared_views/imports/"
 GIT_REVISION_RE = re.compile(r"^[A-Za-z0-9_.^~/-]+$")
 PRUNE_SUBJECT_PREFIX = "prune:"
 ACTIVE_MEMORY_ROLES = {"dreamer", "pruner", "reviewer", "sync-reconciler", "update"}
+FULL_RIGHTMEMORY_WRITE_ROLES = {"update", "update-correction"}
+CORRECTION_WRITE_ROLES = {"update-correction"}
+CORRECTIONS_READ_ROLES = {"update", "update-correction", "sync-reconciler"}
 INSIGHT_ROLES = {"insight"}
 RETRIEVE_ROLES = {"retrieve"}
 SYNC_RECONCILER_ROLES = {"sync-reconciler"}
 SHARED_VIEW_BUILDER_ROLES = {"shared-view-builder"}
 INSIGHT_READ_PATHS = ("MEMORY.md", "MEMORY_*.md", "insight_logs/*.md")
-
-
-@dataclass(frozen=True)
-class MemoryId:
-    id: str
-    file: Path
-    line_number: int
-    edges: tuple[tuple[str, str], ...]
-    malformed_edges: tuple[str, ...] = ()
+RETRIEVE_READ_PATHS = ("MEMORY.md", "MEMORY_*.md", "PURSUITS.md", "PURSUIT_*.md")
+PURSUIT_RULES_PATH = "PURSUIT_RULES.md"
+CORRECTIONS_PATH = "corrections.md"
+FIXED_CORRECTION_COLLECTION_PATHS = {
+    "MEMORY_agent-corrections-design.md",
+    "MEMORY_agent-corrections-writing.md",
+}
+CORRECTIONS_CAPACITY_ERROR_RE = re.compile(
+    r"^corrections\.md contains \d+ entries; at most 15 are allowed$"
+)
 
 
 class MemoryTools:
@@ -91,9 +82,9 @@ class MemoryTools:
         self.role = role
         self._read_signatures: dict[Path, str] = {}
 
-    def list_files(self, pattern: str = "MEMORY*.md") -> list[str]:
+    def list_files(self, pattern: str = "*.md") -> list[str]:
         """List files under the RightMemory root that match a glob pattern."""
-        pattern = pattern.strip() or "MEMORY*.md"
+        pattern = pattern.strip() or "*.md"
         pattern = self._normalize_glob_pattern(pattern)
         paths = [
             path.relative_to(self.memory_root).as_posix()
@@ -105,7 +96,7 @@ class MemoryTools:
             raise ValueError(f"pattern matched more than {MAX_LIST_FILES} files; use a narrower pattern")
         return paths
 
-    def glob(self, pattern: str = "MEMORY*.md", path: str = ".") -> list[str]:
+    def glob(self, pattern: str = "*.md", path: str = ".") -> list[str]:
         """Find files under the RightMemory root by glob pattern."""
         pattern = pattern.strip() or "**/*"
         base = self._resolve_path(path)
@@ -140,44 +131,45 @@ class MemoryTools:
         return output
 
     def read_skill(self, skill_id: str) -> str:
-        """Read a MEMORY_SKILL body by S# id."""
+        """Read a complete MEMORY_SKILL body by S# id."""
         clean_id = self._validate_memory_reference_id(skill_id)
         relative = f"MEMORY_SKILL_{clean_id}.md"
         path = self.memory_root / relative
         if not self._is_safe_read_file(path):
             return self._missing_skill_message(clean_id)
-        return self._cap_command_output(self._read_text(path))
+        return self._read_text(path)
 
     def read_mf(self, mf_id: str) -> str:
-        """Read external file context for an MF# id."""
+        """Read a mirrored view's complete line-numbered canonical dist/MEMORY.md."""
         clean_id = self._validate_memory_reference_id(mf_id)
-        root = self.memory_root / RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX / clean_id
-        if not root.is_dir() or not self._is_under_root(root):
-            return self._missing_mf_message(clean_id)
-        files = sorted(path for path in root.rglob("*") if self._is_safe_read_file(path))
-        if not files:
-            return f"MF import is empty: {clean_id}\n\n{self._available_mf_imports_block()}"
-        parts = [f"MF import: {clean_id}", ""]
-        for path in files:
-            relative = path.relative_to(root).as_posix()
-            parts.append(f"===== {relative} =====")
-            parts.append(self._read_text(path).rstrip())
-            parts.append("")
-        return self._cap_command_output("\n".join(parts).rstrip())
-
-    def read_memory_file(self, slug: str) -> str:
-        """Read an ordinary MEMORY_<slug>.md detail file by slug."""
-        clean_slug = self._validate_memory_reference_id(slug)
-        if clean_slug.startswith(".") or clean_slug == ".." or clean_slug.startswith("SKILL_"):
-            raise ValueError("slug must name an ordinary MEMORY_<slug>.md detail file")
-        relative = f"MEMORY_{clean_slug}.md"
-        if not MEMORY_DETAIL_FILE_RE.fullmatch(relative) or MEMORY_SKILL_FILE_RE.fullmatch(relative):
-            raise ValueError("slug must name an ordinary MEMORY_<slug>.md detail file")
-        path = self.memory_root / relative
+        path = (
+            self.memory_root
+            / RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX
+            / clean_id
+            / "dist"
+            / "MEMORY.md"
+        )
         if not self._is_safe_read_file(path):
-            return self._missing_memory_file_message(clean_slug)
-        text = self._read_text(path).rstrip()
-        return self._cap_command_output(f"===== {relative} =====\n{text}")
+            return self._missing_mf_message(clean_id)
+        return self._read_numbered_source(path, f"MF#{clean_id}")
+
+    def read_detail(self, detail_id: str) -> str:
+        """Read the root-relative graph detail file for an F# heading id."""
+        clean_id = self._validate_memory_reference_id(detail_id)
+        reference = resolve_backing_reference(self.memory_root, clean_id, "F#")
+        if reference is None or not self._is_safe_read_file(reference.path):
+            return self._missing_typed_backing_message("F# detail", clean_id, "F#")
+        relative = reference.path.relative_to(self.memory_root).as_posix()
+        text = self._read_text(reference.path).rstrip()
+        return f"===== {relative} =====\n{text}"
+
+    def read_markdown(self, markdown_id: str) -> str:
+        """Read complete line-numbered free-form Markdown for an M# heading id."""
+        clean_id = self._validate_memory_reference_id(markdown_id)
+        reference = resolve_backing_reference(self.memory_root, clean_id, "M#")
+        if reference is None or not self._is_safe_read_file(reference.path):
+            return self._missing_typed_backing_message("M# Markdown", clean_id, "M#")
+        return self._read_numbered_source(reference.path, f"M#{clean_id}")
 
     def read_file(
         self,
@@ -226,7 +218,7 @@ class MemoryTools:
     def search_files(
         self,
         query: str,
-        pattern: str = "MEMORY*.md",
+        pattern: str = "*.md",
         context_lines: int = 2,
         max_matches: int = 50,
         case_sensitive: bool = False,
@@ -265,7 +257,7 @@ class MemoryTools:
         self,
         pattern: str,
         path: str | None = None,
-        glob: str = "MEMORY*.md",
+        glob: str = "*.md",
         context_lines: int = 0,
         max_matches: int = 50,
         case_sensitive: bool = True,
@@ -635,7 +627,7 @@ class MemoryTools:
     def git_status(self) -> str:
         """Return short git status for the RightMemory root."""
         if self._has_role_read_scope():
-            return self._run_git(["git", "status", "--short", "--", *INSIGHT_READ_PATHS])
+            return self._run_git(["git", "status", "--short", "--", *self._role_read_patterns()])
         return self._run_git(["git", "status", "--short"])
 
     def git_diff(self, paths: list[str] | None = None) -> str:
@@ -647,7 +639,7 @@ class MemoryTools:
                 resolved = self._allowed_read_path(path)
                 command.append(resolved.relative_to(self.memory_root).as_posix())
         elif self._has_role_read_scope():
-            command.extend(["--", *INSIGHT_READ_PATHS])
+            command.extend(["--", *self._role_read_patterns()])
         return self._run_git(command)
 
     def git_log(self, grep: str = r"^prune:", max_count: int = 20) -> str:
@@ -805,57 +797,24 @@ class MemoryTools:
                 self._unlink_worktree_file(path)
         return "discarded: " + ", ".join(relative_paths)
 
-    def validate_memory(self) -> str:
-        """Validate RightMemory ids, graph edges, and memory file structure."""
-        files = self._memory_files()
-        graph_files = [file_path for file_path in files if not self._is_memory_skill_file(file_path)]
-        ids: dict[str, MemoryId] = {}
-        errors: list[str] = []
-
-        for file_path in graph_files:
-            for item in self._parse_file(file_path):
-                if item.id in ids:
-                    previous = ids[item.id]
-                    errors.append(
-                        f"duplicate id `{item.id}` at {self._loc(item)}; first seen at {self._loc(previous)}"
-                    )
-                else:
-                    ids[item.id] = item
-
-        for item in ids.values():
-            seen_edges: set[tuple[str, str]] = set()
-            for malformed_edge in item.malformed_edges:
-                errors.append(f"malformed edge `{malformed_edge}` at {self._loc(item)}")
-            for edge_type, target in item.edges:
-                edge = (edge_type, target)
-                if edge in seen_edges:
-                    errors.append(f"duplicate edge `{edge_type}:{target}` at {self._loc(item)}")
-                    continue
-                seen_edges.add(edge)
-                if target == item.id:
-                    errors.append(f"self-edge `{edge_type}:{target}` at {self._loc(item)}")
-                    continue
-                if edge_type not in KNOWN_EDGE_TYPES:
-                    errors.append(f"unknown edge type `{edge_type}` at {self._loc(item)}")
-                    continue
-                target_item = ids.get(target)
-                if target_item is None:
-                    errors.append(f"dangling edge `{edge_type}:{target}` at {self._loc(item)}")
-
-        errors.extend(self._structure_errors(graph_files))
-        errors.extend(self._skill_backing_file_errors(graph_files))
+    def validate_memory(self, *, enforce_correction_capacity: bool = True) -> str:
+        """Validate the complete RightMemory graph and updater correction file."""
+        manifest = build_graph_manifest(self.memory_root)
+        errors = [*manifest.errors, *self._structure_errors(manifest.graph_files)]
+        corrections_path = self.memory_root / CORRECTIONS_PATH
+        if corrections_path.is_file():
+            correction_errors = validate_corrections_markdown(corrections_path.read_text(encoding="utf-8"))
+            if not enforce_correction_capacity:
+                correction_errors = [
+                    error for error in correction_errors if not CORRECTIONS_CAPACITY_ERROR_RE.fullmatch(error)
+                ]
+            errors.extend(correction_errors)
         if errors:
             return "validation failed:\n" + "\n".join(f"- {error}" for error in errors)
-        return f"validation passed: {len(ids)} ids across {len(files)} memory files"
+        return f"validation passed: {len(manifest.items)} ids across {len(manifest.files)} RightMemory files"
 
     def _memory_files(self) -> list[Path]:
-        files = [
-            path
-            for pattern in ("MEMORY.md", "MEMORY_*.md")
-            for path in self.memory_root.glob(pattern)
-            if path.is_file() and self._is_under_root(path)
-        ]
-        return sorted(set(files))
+        return build_graph_manifest(self.memory_root).files
 
     def _require_shared_view_builder_tool(self) -> None:
         if self.role not in SHARED_VIEW_BUILDER_ROLES:
@@ -870,17 +829,19 @@ class MemoryTools:
         exclude_ids: list[str],
     ) -> list[str]:
         errors: list[str] = []
-        memory_ids = self._memory_id_kinds()
+        manifest = build_graph_manifest(self.memory_root)
+        memory_ids = {item_id: item.item_kind for item_id, item in manifest.items.items()}
+        graph_files = {
+            path.relative_to(self.memory_root).as_posix()
+            for path in manifest.graph_files
+        }
         errors.extend(self._id_selection_errors("include_headings", include_headings, memory_ids, expected_kind="heading"))
         errors.extend(self._id_selection_errors("include_nodes", include_nodes, memory_ids, expected_kind="node"))
         errors.extend(self._id_selection_errors("exclude_ids", exclude_ids, memory_ids, expected_kind=None))
         for value in include_files:
             path = Path(value)
-            if path.is_absolute() or ".." in path.parts or not re.fullmatch(r"MEMORY(?:_[A-Za-z0-9_.-]+)?\.md", path.as_posix()):
-                errors.append(f"include_files entry must be a memory file: {value}")
-                continue
-            if not (self.memory_root / path).is_file():
-                errors.append(f"include_files entry does not exist: {value}")
+            if path.is_absolute() or ".." in path.parts or path.as_posix() not in graph_files:
+                errors.append(f"include_files entry must be a RightMemory graph file: {value}")
         return errors
 
     def _id_selection_errors(
@@ -906,19 +867,8 @@ class MemoryTools:
         return errors
 
     def _memory_id_kinds(self) -> dict[str, str]:
-        ids: dict[str, str] = {}
-        for file_path in self._memory_files():
-            if self._is_memory_skill_file(file_path):
-                continue
-            for line in file_path.read_text(encoding="utf-8").splitlines():
-                heading = ANCHOR_RE.match(line)
-                if heading:
-                    ids.setdefault(heading.group(2), "heading")
-                    continue
-                node = NODE_RE.match(line)
-                if node:
-                    ids.setdefault(node.group(1), "node")
-        return ids
+        manifest = build_graph_manifest(self.memory_root)
+        return {item_id: item.item_kind for item_id, item in manifest.items.items()}
 
     def _file_view_rendered_context(self, path: Path) -> str:
         if not path.is_file():
@@ -936,6 +886,12 @@ class MemoryTools:
         if mark_read:
             self._mark_read_text(resolved, text)
         return text.splitlines()
+
+    def _read_numbered_source(self, path: Path, label: str) -> str:
+        lines = self._read_lines(path, label)
+        if not lines:
+            return f"Source: {label}\n\n[empty source]"
+        return f"Source: {label}\n\n{self._format_lines(lines, 1, len(lines))}"
 
     def _read_text(self, path: Path) -> str:
         with path.open("r", encoding="utf-8", newline="") as handle:
@@ -1159,22 +1115,11 @@ class MemoryTools:
             return "Available skills:\n- none"
         return "Available skills:\n" + "\n".join(f"- {item}" for item in ids)
 
-    def _missing_memory_file_message(self, slug: str) -> str:
-        return f"Memory file not found: {slug}\n\n{self._available_memory_files_block()}"
-
-    def _available_memory_files_block(self) -> str:
-        slugs = []
-        for path in sorted(self.memory_root.glob("MEMORY_*.md")):
-            relative = path.relative_to(self.memory_root).as_posix()
-            if (
-                MEMORY_DETAIL_FILE_RE.fullmatch(relative)
-                and not MEMORY_SKILL_FILE_RE.fullmatch(relative)
-                and self._is_safe_read_file(path)
-            ):
-                slugs.append(path.stem.removeprefix("MEMORY_"))
-        if not slugs:
-            return "Available memory files:\n- none"
-        return "Available memory files:\n" + "\n".join(f"- {item}" for item in slugs)
+    def _missing_typed_backing_message(self, label: str, item_id: str, kind: str) -> str:
+        manifest = build_graph_manifest(self.memory_root)
+        ids = sorted(reference.id for reference in manifest.backing.values() if reference.kind == kind)
+        available = "\n".join(f"- {value}" for value in ids) if ids else "- none"
+        return f"{label} not found: {item_id}\n\nAvailable {label} ids:\n{available}"
 
     def _missing_mf_message(self, mf_id: str) -> str:
         return f"MF import not found: {mf_id}\n\n{self._available_mf_imports_block()}"
@@ -1293,60 +1238,27 @@ class MemoryTools:
         if value < 1:
             raise ValueError(f"{name} must be >= 1")
 
-    def _parse_file(self, file_path: Path) -> list[MemoryId]:
-        items: list[MemoryId] = []
-        for line_number, line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), start=1):
-            match = ANCHOR_RE.match(line) or NODE_RE.match(line)
-            if not match:
-                continue
-            item_id = match.group(2) if line.startswith("#") else match.group(1)
-            edge_text = match.group(3) if line.startswith("#") else match.group(2)
-            edges, malformed_edges = self._parse_edges(edge_text or "")
-            items.append(
-                MemoryId(
-                    id=item_id,
-                    file=file_path,
-                    line_number=line_number,
-                    edges=tuple(edges),
-                    malformed_edges=tuple(malformed_edges),
-                )
-            )
-        return items
-
-    def _skill_backing_file_errors(self, files: list[Path]) -> list[str]:
-        errors: list[str] = []
-        for file_path in files:
-            relative_path = file_path.relative_to(self.memory_root)
-            for line_number, line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), start=1):
-                anchor_match = ANCHOR_KIND_RE.match(line)
-                if anchor_match is None or anchor_match.group(2) != "S#":
-                    continue
-                skill_file = f"MEMORY_SKILL_{anchor_match.group(3)}.md"
-                if not (self.memory_root / skill_file).is_file():
-                    errors.append(f"missing skill file `{skill_file}` for S# heading at {relative_path}:{line_number}")
-        return errors
-
-    def _parse_edges(self, edge_text: str) -> tuple[list[tuple[str, str]], list[str]]:
-        edges: list[tuple[str, str]] = []
-        malformed_edges: list[str] = []
-        for raw_edge in edge_text.split(","):
-            raw_edge = raw_edge.strip()
-            if not raw_edge:
-                continue
-            match = EDGE_RE.match(raw_edge)
-            if match is None:
-                malformed_edges.append(raw_edge)
-                continue
-            edges.append((match.group(1), match.group(2)))
-        return edges, malformed_edges
-
     def _structure_errors(self, files: list[Path]) -> list[str]:
         errors: list[str] = []
         for path in files:
             heading_stack: list[tuple[int, int]] = []
             active_terminal: tuple[int, int] | None = None
+            fence_char: str | None = None
+            fence_length = 0
             relative_path = path.relative_to(self.memory_root)
             for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+                if fence is not None:
+                    marker = fence.group(1)
+                    if fence_char is None:
+                        fence_char = marker[0]
+                        fence_length = len(marker)
+                    elif marker[0] == fence_char and len(marker) >= fence_length:
+                        fence_char = None
+                        fence_length = 0
+                    continue
+                if fence_char is not None:
+                    continue
                 heading_match = ANY_HEADING_RE.match(line)
                 if heading_match is None:
                     if active_terminal is not None and NODE_RE.match(line):
@@ -1373,7 +1285,7 @@ class MemoryTools:
                     anchor_match = ANCHOR_KIND_RE.match(line)
                     if anchor_match is None or anchor_match.group(2) not in TERMINAL_HEADING_KINDS:
                         errors.append(
-                            f"`####` terminal reference must use `{{F#slug}}`, `{{S#slug}}`, `{{MF#slug}}`, or `{{MQ#slug}}` at {relative_path}:{line_number}"
+                            f"`####` terminal reference must use `{{F#slug}}`, `{{M#slug}}`, `{{S#slug}}`, `{{MF#slug}}`, or `{{MQ#slug}}` at {relative_path}:{line_number}"
                         )
                     if parent_depth != 3:
                         errors.append(f"`####` terminal reference must be under a `###` heading at {relative_path}:{line_number}")
@@ -1483,17 +1395,26 @@ class MemoryTools:
         if self.role in INSIGHT_ROLES:
             return "insight_logs/*.md"
         if self.role in SYNC_RECONCILER_ROLES:
-            return "MEMORY.md, MEMORY_*.md, shared_views.toml, shares.toml, shared_views/<id> source files, or insight_logs/*.md"
+            return "RightMemory state files, shared-view source files, or insight_logs/*.md"
         if self.role in SHARED_VIEW_BUILDER_ROLES:
             return "shared_views/<id> source files"
+        if self.role in FULL_RIGHTMEMORY_WRITE_ROLES:
+            suffix = ", or corrections.md" if self.role in CORRECTION_WRITE_ROLES else ""
+            return f"MEMORY.md, MEMORY_*.md, PURSUITS.md, or PURSUIT_*.md{suffix}"
         return "MEMORY.md or MEMORY_*.md"
 
     def _is_allowed_write_path(self, relative_path: str) -> bool:
+        if (
+            relative_path in FIXED_CORRECTION_COLLECTION_PATHS
+            and self.role not in FULL_RIGHTMEMORY_WRITE_ROLES | SYNC_RECONCILER_ROLES
+        ):
+            return False
         if self.role in INSIGHT_ROLES:
             return self._is_insight_log_path(relative_path)
         if self.role in SYNC_RECONCILER_ROLES:
             return (
-                self._is_active_memory_path(relative_path)
+                self._is_active_rightmemory_path(relative_path)
+                or relative_path in {PURSUIT_RULES_PATH, CORRECTIONS_PATH}
                 or relative_path == SHARED_VIEW_REGISTRY_PATH
                 or relative_path == SHARE_REGISTRY_PATH
                 or self._is_shared_view_definition_path(relative_path)
@@ -1501,6 +1422,10 @@ class MemoryTools:
             )
         if self.role in SHARED_VIEW_BUILDER_ROLES:
             return self._is_shared_view_definition_path(relative_path)
+        if self.role in FULL_RIGHTMEMORY_WRITE_ROLES:
+            return self._is_active_rightmemory_path(relative_path) or (
+                self.role in CORRECTION_WRITE_ROLES and relative_path == CORRECTIONS_PATH
+            )
         return self._is_active_memory_path(relative_path)
 
     def _allowed_write_path(self, path: str) -> str:
@@ -1532,10 +1457,14 @@ class MemoryTools:
         return self.role in INSIGHT_ROLES | RETRIEVE_ROLES
 
     def _read_policy_label(self) -> str:
+        if self.role == "retrieve":
+            return "MEMORY.md, MEMORY_*.md, PURSUITS.md, or PURSUIT_*.md"
         return "MEMORY.md, MEMORY_*.md, or insight_logs/*.md"
 
     def _is_allowed_read_file(self, path: Path) -> bool:
         relative_path = path.relative_to(self.memory_root).as_posix()
+        if relative_path == CORRECTIONS_PATH and self.role not in CORRECTIONS_READ_ROLES:
+            return False
         if self._is_runtime_shared_view_path(relative_path):
             if self._is_runtime_shared_view_import_path(relative_path):
                 return self.role == "retrieve"
@@ -1545,12 +1474,16 @@ class MemoryTools:
         return self._is_allowed_read_relative_file(relative_path)
 
     def _is_allowed_read_relative_file(self, relative_path: str) -> bool:
+        if relative_path == CORRECTIONS_PATH and self.role not in CORRECTIONS_READ_ROLES:
+            return False
         if self._is_runtime_shared_view_path(relative_path):
             if self._is_runtime_shared_view_import_path(relative_path):
                 return self.role == "retrieve"
             return False
         if not self._has_role_read_scope():
             return True
+        if self.role == "retrieve":
+            return self._is_active_rightmemory_path(relative_path)
         return self._is_active_memory_path(relative_path) or self._is_insight_log_path(relative_path)
 
     def _check_allowed_read_search_dir(self, path: Path, original_path: str) -> None:
@@ -1590,11 +1523,14 @@ class MemoryTools:
     def _existing_role_read_paths(self) -> list[str]:
         paths = [
             path.relative_to(self.memory_root).as_posix()
-            for pattern in INSIGHT_READ_PATHS
+            for pattern in self._role_read_patterns()
             for path in self.memory_root.glob(pattern)
             if path.is_file() and self._is_under_root(path) and self._is_allowed_read_file(path)
         ]
         return sorted(set(paths))
+
+    def _role_read_patterns(self) -> tuple[str, ...]:
+        return RETRIEVE_READ_PATHS if self.role == "retrieve" else INSIGHT_READ_PATHS
 
     def _existing_role_read_paths_under(self, directory: Path) -> list[str]:
         directory = directory.resolve(strict=False)
@@ -1613,6 +1549,12 @@ class MemoryTools:
 
     def _is_active_memory_path(self, relative_path: str) -> bool:
         return relative_path == "MEMORY.md" or bool(MEMORY_DETAIL_FILE_RE.fullmatch(relative_path))
+
+    def _is_active_pursuit_path(self, relative_path: str) -> bool:
+        return relative_path == "PURSUITS.md" or bool(PURSUIT_DETAIL_FILE_RE.fullmatch(relative_path))
+
+    def _is_active_rightmemory_path(self, relative_path: str) -> bool:
+        return self._is_active_memory_path(relative_path) or self._is_active_pursuit_path(relative_path)
 
     def _is_insight_log_path(self, relative_path: str) -> bool:
         return bool(INSIGHT_LOG_FILE_RE.fullmatch(relative_path))
@@ -1812,10 +1754,6 @@ class MemoryTools:
     def _worktree_file_exists(self, path: str) -> bool:
         resolved = self.memory_root / path
         return resolved.is_file() or resolved.is_symlink()
-
-    def _loc(self, item: MemoryId) -> str:
-        return f"{item.file.relative_to(self.memory_root)}:{item.line_number}"
-
 
 def _capability_from_selected_views(file_view_id: str | None, question_view_id: str | None) -> str:
     has_file = bool(str(file_view_id or "").strip())

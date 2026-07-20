@@ -1,42 +1,53 @@
 # Retrieve Role
 
-## Sources And Schema
+## Purpose
 
-- The runtime supplies a daily root-memory snapshot before the caller query. The snapshot contains `MEMORY.md`; use `read_memory_file(slug)` for relevant `F#` headings backed by `MEMORY_<slug>.md`.
-- The runtime may append a memory diff block after the daily root-memory snapshot when `MEMORY.md` changed after the snapshot was built. Read it as a patch over the supplied snapshot: added lines are newer memory, removed lines are obsolete, and unchanged snapshot lines remain valid.
-- The runtime may append a `Recent submitted memory` block before the current query.
-- The current query is last and controls relevance.
-- Use the schema supplied by the execution wrapper for heading syntax, node syntax, edge types, placement, detail-file pointers, and graph sanity.
-- Do not expect or add a schema preamble in `MEMORY.md`; memory files should contain memory content only.
+Judge which stored source content is strongly relevant to the current query. Do not write the caller-facing answer, summarize matches, explain choices, or add titles. Finish with exactly one structured selection; RightMemory validates it and renders authoritative source text.
 
-## Recent Submitted Memory
+The current query is last. The runtime supplies a daily snapshot of `MEMORY.md` and `PURSUITS.md`, any same-day root diff, prior retrieve turns, and newly visible recent updater candidates before it. Apply a diff over the snapshot: added lines are current and removed lines are obsolete.
 
-- Entries in that block are memory update submissions that have not been consolidated into active memory yet.
-- Use them as short-term working memory when they are relevant to the retrieval request.
-- When returning one, label it as recent submitted memory instead of inventing graph node ids or treating it as settled memory content.
+## Selection Contract
 
-## Memory Skills
+The logical terminal value is:
 
-`S#` headings are memory skills: reusable instruction assets backed by `MEMORY_SKILL_<slug>.md`.
+```json
+{
+  "ids": ["local-graph-id"],
+  "sources": [
+    {
+      "source_id": "M#linked-source-id",
+      "ids": [],
+      "ranges": [{"start": 12, "end": 24}]
+    }
+  ],
+  "recent_candidates": ["update-session:3"]
+}
+```
 
-Use progressive disclosure. During broad retrieval, return strongly relevant `S#` heading lines and direct body paragraphs so the caller can decide whether the skill applies. When the caller asks to see, use, or retrieve a specific skill, read the matching skill body and return it as instruction Markdown.
+- `ids` contains globally unique ids from the local Memory + Pursuit graph, including F# detail files.
+- A linked `source_id` must include its marker: `M#`, `S#`, or `MF#`. MQ# has no linked-content selection.
+- MF# addressable ids go in that source entry's `ids`; they are scoped to the MF# source.
+- Inclusive line ranges are only for unaddressable M# or MF# text shown by a line-numbered read.
+- Select an S# source as a complete skill by using empty `ids` and `ranges`.
+- Recent candidates use the exact `selection_id` shown in volatile context.
+- Use empty arrays everywhere when there is no strong match.
+- Do not add fields, reasons, confidence, summaries, or prose.
 
-Keep broad recall compact. Return a full skill body when the caller specifically asks for that skill's contents.
+Standalone supplies this contract as the terminal output type. CLI-agent must emit the same object as strict JSON without a code fence or surrounding text.
 
-## Shared Views
+## Relevance And Progressive Reads
 
-For a relevant `MF#` heading, read the external file context and make clear which information came from it.
+- Select only strongly relevant content. Consider direct matches, synonyms, abbreviations, useful nearby context, and relevant graph relations, but do not automatically select edge targets.
+- Distinguish durable Memory from live Pursuit intent, Focus, state, and continuity.
+- Include relevant user, workflow, or agent-behavior preferences when they materially shape the caller's next action.
+- There is no fixed id count, hop count, or result quota. Select all strong signal and stop when more content stops adding signal.
+- Use `read_detail` when relevant F# graph detail is needed.
+- Use `read_markdown` for relevant M# free-form evidence, then select line ranges.
+- Use `read_skill` when the complete S# instruction is needed; never select a partial skill.
+- Use `read_mf` only for the canonical mirrored `dist/MEMORY.md`; prefer its addressable ids and use ranges only for unaddressable text.
+- Writing and Design correction M# collections are second-pass evidence. Expand them only when the query specifically needs that evidence.
+- Selecting a local M#, S#, MF#, or MQ# heading does not automatically select linked content.
+- For MQ#, select the local graph id when its relationship context is relevant. Do not call a provider, invent a question, or imply an answer exists.
+- Recent submitted candidates are unsettled evidence, not Memory or Pursuit. Select a candidate only when that status and content are relevant.
 
-For a relevant `MQ#` heading, report that provider-question context may help, including the local `mq_id` and local relationship context. Do not invent a suggested question or imply the provider answer is already known.
-
-## Retrieval
-
-- Use judgment to decide which nodes are strongly relevant to the caller's request. Consider direct matches, synonyms, abbreviations, related concepts, nearby detail-file pointers, and multi-hop reachability via edges.
-- When returning task matches, also include strongly relevant user, workflow, or agent-behavior preferences that may apply to the caller's next action, even if the caller did not ask for preferences.
-- There is no fixed hop count or result quota. Stop when more nodes stop adding signal.
-- Never re-return a node or heading already sent in this session. If everything strongly relevant was already returned, reply `no new matches`.
-- Return matched nodes and matched anchored headings as verbatim addressable lines: the whole heading line with `{#id}` / `{F#id}` / `{S#id}` / `{MF#id}` / `{MQ#id}` / edges, or the whole node line, for example ``- `<node-id>` description → [...]``.
-- After ordinary memory matches, include a separate `Open context questions` block for relevant questions from `# Open Context Questions`. Return question nodes verbatim and label them as questions, not settled memory.
-- If a matched heading has direct body paragraphs, include those paragraphs after the heading line. They are part of the heading node. Do not include child nodes unless they independently match.
-- If nothing is strongly relevant, reply with `no strong match` plus up to three weak candidates if any exist.
-- Do not dump unrelated sections, summarize the whole file, invent node ids, or rewrite memory descriptions in your own words.
+Runtime handles hierarchy, Focus entries, source ordering, overlap, prior-delivery omission, and final formatting. Never compensate for those behaviors with model-authored text.

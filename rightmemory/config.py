@@ -34,6 +34,7 @@ MODEL_FALLBACK_ROLES = (
     "shared-view-builder",
 )
 DEFAULT_MAX_TOOL_RETRIES = 10
+DEFAULT_RETRIEVE_MAX_OUTPUT_CHARS = 100_000
 DEFAULT_REVIEW_IDLE_SECONDS = 6 * 60 * 60
 DEFAULT_REVIEW_SINCE_DAYS = 3
 DEFAULT_REVIEW_BATCH_SIZE = 3
@@ -44,11 +45,9 @@ DEFAULT_PRUNER_GENERATION_COMMITS = 70
 DEFAULT_PRUNER_REVIVAL_GRACE_CHECKPOINTS = 2
 DEFAULT_DREAMER_TRIGGER_POINTS = 50.0
 DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS = 1.0
-DEFAULT_DREAMER_REVIEW_SESSION_POINTS = 1.5
 DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS = 3000
 DEFAULT_INSIGHT_TRIGGER_POINTS = 150.0
 DEFAULT_INSIGHT_UPDATE_CANDIDATE_POINTS = 1.0
-DEFAULT_INSIGHT_REVIEW_SESSION_POINTS = 1.5
 DEFAULT_INSIGHT_CHECK_INTERVAL_SECONDS = 3000
 
 
@@ -100,7 +99,6 @@ class DreamerWatchConfig:
     memory_root: Path = MEMORY_ROOT
     trigger_points: float = DEFAULT_DREAMER_TRIGGER_POINTS
     update_candidate_points: float = DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS
-    review_session_points: float = DEFAULT_DREAMER_REVIEW_SESSION_POINTS
     check_interval_seconds: int = DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS
 
 
@@ -109,7 +107,6 @@ class InsightWatchConfig:
     memory_root: Path = MEMORY_ROOT
     trigger_points: float = DEFAULT_INSIGHT_TRIGGER_POINTS
     update_candidate_points: float = DEFAULT_INSIGHT_UPDATE_CANDIDATE_POINTS
-    review_session_points: float = DEFAULT_INSIGHT_REVIEW_SESSION_POINTS
     check_interval_seconds: int = DEFAULT_INSIGHT_CHECK_INTERVAL_SECONDS
 
 
@@ -138,6 +135,7 @@ class RuntimeConfig:
     memory_root: Path = MEMORY_ROOT
     state_root: Path = _STATE_ROOT_UNSET
     max_tool_retries: int = DEFAULT_MAX_TOOL_RETRIES
+    retrieve_max_output_chars: int = DEFAULT_RETRIEVE_MAX_OUTPUT_CHARS
     debug_trace: bool = False
     sync: SyncConfig = field(default_factory=SyncConfig)
     fresh_provider_session: bool = False
@@ -204,6 +202,7 @@ def load_config(role: str, memory_root: Path | None = None) -> RuntimeConfig:
         memory_root=root,
         state_root=root,
         max_tool_retries=DEFAULT_MAX_TOOL_RETRIES,
+        retrieve_max_output_chars=_retrieve_max_output_chars(role, role_section),
         debug_trace=_debug_trace(data.get("debug", {})),
         sync=_sync_config(data.get("sync", {}), memory_root=root),
     )
@@ -317,6 +316,9 @@ def load_dreamer_watch_config(memory_root: Path | None = None) -> DreamerWatchCo
         {"trigger_points", "update_candidate_points", "review_session_points", "check_interval_seconds"},
         "[dreamer.watch]",
     )
+    if "review_session_points" in watch:
+        # Keep older user config loadable, but transcript extraction no longer creates pressure directly.
+        _positive_number(watch, "review_session_points", 1.0, "[dreamer.watch]")
 
     return DreamerWatchConfig(
         memory_root=root,
@@ -330,12 +332,6 @@ def load_dreamer_watch_config(memory_root: Path | None = None) -> DreamerWatchCo
             watch,
             "update_candidate_points",
             DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS,
-            "[dreamer.watch]",
-        ),
-        review_session_points=_positive_number(
-            watch,
-            "review_session_points",
-            DEFAULT_DREAMER_REVIEW_SESSION_POINTS,
             "[dreamer.watch]",
         ),
         check_interval_seconds=_positive_integer(
@@ -372,6 +368,9 @@ def load_insight_watch_config(memory_root: Path | None = None) -> InsightWatchCo
         {"trigger_points", "update_candidate_points", "review_session_points", "check_interval_seconds"},
         "[insight.watch]",
     )
+    if "review_session_points" in watch:
+        # Keep older user config loadable, but transcript extraction no longer creates pressure directly.
+        _positive_number(watch, "review_session_points", 1.0, "[insight.watch]")
 
     return InsightWatchConfig(
         memory_root=root,
@@ -385,12 +384,6 @@ def load_insight_watch_config(memory_root: Path | None = None) -> InsightWatchCo
             watch,
             "update_candidate_points",
             DEFAULT_INSIGHT_UPDATE_CANDIDATE_POINTS,
-            "[insight.watch]",
-        ),
-        review_session_points=_positive_number(
-            watch,
-            "review_session_points",
-            DEFAULT_INSIGHT_REVIEW_SESSION_POINTS,
             "[insight.watch]",
         ),
         check_interval_seconds=_positive_integer(
@@ -484,6 +477,8 @@ def _allowed_role_keys(role: str) -> set[str]:
         allowed.update({"generation_commits", "revival_grace_checkpoints"})
     if role == "update":
         allowed.add("async")
+    if role == "retrieve":
+        allowed.add("max_output_chars")
     return allowed
 
 
@@ -575,6 +570,7 @@ def _agent_cli_runtime_config(
         memory_root=memory_root,
         state_root=memory_root,
         max_tool_retries=DEFAULT_MAX_TOOL_RETRIES,
+        retrieve_max_output_chars=_retrieve_max_output_chars(role, role_section),
         debug_trace=_debug_trace(data.get("debug", {})),
         sync=_sync_config(data.get("sync", {}), memory_root=memory_root),
     )
@@ -586,6 +582,17 @@ def _optional_agent_cli_model(role: str, value: object) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"[{role}.agent_cli].model must be a non-empty string when set")
     return value.strip()
+
+
+def _retrieve_max_output_chars(role: str, role_section: dict[str, object]) -> int:
+    if role != "retrieve":
+        return DEFAULT_RETRIEVE_MAX_OUTPUT_CHARS
+    return _positive_integer(
+        role_section,
+        "max_output_chars",
+        DEFAULT_RETRIEVE_MAX_OUTPUT_CHARS,
+        "[retrieve]",
+    )
 
 
 def _debug_trace(value: object) -> bool:

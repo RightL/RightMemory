@@ -185,6 +185,10 @@ def initialize_memory_root(memory_root: Path, *, source_root: Path) -> None:
     (root / "insight_logs").mkdir(exist_ok=True)
     if not (root / "MEMORY.md").exists():
         (root / "MEMORY.md").write_text(_memory_example_text(), encoding="utf-8")
+    if not (root / "PURSUITS.md").exists():
+        (root / "PURSUITS.md").write_text(_pursuits_example_text(), encoding="utf-8")
+    if not (root / "PURSUIT_RULES.md").exists():
+        (root / "PURSUIT_RULES.md").write_text(_pursuit_rules_text(), encoding="utf-8")
     _ensure_memory_gitignore(root)
     _ensure_runtime_gitignore(root / ".runtime")
     _ensure_git_repo(root)
@@ -213,6 +217,20 @@ def _memory_example_text() -> str:
     return resources.files("rightmemory").joinpath("MEMORY.example.md").read_text(encoding="utf-8")
 
 
+def _pursuits_example_text() -> str:
+    source_tree_seed = Path(__file__).resolve().parents[1] / "PURSUITS.example.md"
+    if source_tree_seed.exists():
+        return source_tree_seed.read_text(encoding="utf-8")
+    return resources.files("rightmemory").joinpath("PURSUITS.example.md").read_text(encoding="utf-8")
+
+
+def _pursuit_rules_text() -> str:
+    source_tree_rules = Path(__file__).resolve().parents[1] / "PURSUIT_RULES.md"
+    if source_tree_rules.exists():
+        return source_tree_rules.read_text(encoding="utf-8")
+    return resources.files("rightmemory").joinpath("PURSUIT_RULES.md").read_text(encoding="utf-8")
+
+
 def _ensure_git_repo(root: Path) -> None:
     if (root / ".git").is_dir():
         return
@@ -233,8 +251,13 @@ def _ensure_git_author(root: Path) -> None:
 def _ensure_initial_memory_commit(root: Path) -> None:
     if _git(root, "rev-parse", "--verify", "HEAD", check=False).returncode == 0:
         return
-    memory_files = ["MEMORY.md"]
+    memory_files = ["MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"]
     memory_files.extend(sorted(path.name for path in root.glob("MEMORY_*.md")))
+    memory_files.extend(
+        sorted(path.name for path in root.glob("PURSUIT_*.md") if path.name != "PURSUIT_RULES.md")
+    )
+    if (root / "corrections.md").is_file():
+        memory_files.append("corrections.md")
     insight_files = [path.relative_to(root).as_posix() for path in sorted((root / "insight_logs").glob("*.md"))]
     staged = [*memory_files, *insight_files]
     _git(root, "add", "--", *staged)

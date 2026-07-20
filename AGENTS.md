@@ -17,8 +17,8 @@
 
 - Core runtime code lives in `rightmemory/`; tests live in `tests/`.
 - Canonical role prompts live in `rightmemory/prompts/`. Edit role behavior there first; installed skills are not the source of truth for role prompts.
-- `skills/rightmemory-schema.md` defines the memory-file schema.
-- `MEMORY.example.md` is the installer seed and the source of its managed example block.
+- `skills/rightmemory-schema.md` defines the shared Memory and Pursuit graph and file schema; `PURSUIT_RULES.md` defines Pursuit lifecycle judgment.
+- `MEMORY.example.md` and `PURSUITS.example.md` are installer seeds and sources of their managed example blocks.
 - `install.sh` and `install.ps1` are platform bootstraps for the shared stdlib-only `rightmemory.install_core` transaction.
 - Use `README.md` for behavior, usage, command, configuration, and file-layout documentation. Use `DESIGN_NOTES.md` for durable design rationale.
 
@@ -34,7 +34,7 @@
 
 - Run the full test suite with `python -m unittest discover -s tests`.
 - Run syntax checks with `python -m compileall -q rightmemory tests`.
-- Add or update focused tests when changing prompt behavior, configuration shape, transcript review state, or Git/memory safety.
+- Add or update focused tests when changing prompt behavior, configuration shape, transcript/update-review state, CLI-agent thread lifecycle, or Git/memory safety.
 - Prompt tests should verify assembly boundaries and durable invariants rather than pinning exact prose.
 - When changing installer behavior, verify the affected modes with `./install.sh [--mode cli-agent|standalone] <memory-root> <skills-target>` on macOS/Linux/WSL or `.\install.ps1 [--mode cli-agent|standalone] <memory-root> <skills-target>` on Windows PowerShell. Use disposable test roots.
 - When changing semantic upgrade machinery or notes, run `python -m unittest discover -s tests -p 'test_semantic_upgrades.py'`.
