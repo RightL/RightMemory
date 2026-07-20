@@ -489,6 +489,7 @@ rightmemory insight watch
 rightmemory prune
 rightmemory prune watch
 rightmemory history --session <agent-session-id> "find pruned memory about the old setup"
+rightmemory agent-cli cleanup --once
 rightmemory shared-view list
 rightmemory shared-view build-file <view-id> "intent" --title "View Title" --hub-url <url> --credential-id <id>
 rightmemory shared-view build-question <view-id> "intent" --title "View Title"
@@ -526,12 +527,13 @@ The daemon reads JSON lines from stdin and writes JSON lines to stdout:
 The runtime is intentionally small:
 
 - Standalone mode uses `pydantic_ai.Agent` as a chat-like agent loop.
-- CLI-agent mode delegates the same role turn to Codex CLI or Claude Code CLI and records the provider session under `<memory-root>/.runtime/agent_cli_sessions/`.
+- CLI-agent mode delegates the same role turn to Codex CLI or Claude Code CLI. Retrieve may keep one active provider mapping under `<memory-root>/.runtime/agent_cli_sessions/`; other independent role commands are one-shot.
 - In standalone mode, retrieve uses Claude-shaped read-only tools (`read`, `grep`, `glob`) plus a restricted `read_command` for familiar forms such as `cat`, `sed -n`, `rg`, and read-only `git`; historian adds bounded Git history reads; write-capable roles also get exact `edit_file` replacements, file lifecycle tools, and narrow role-scoped git tools.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different no-profile root, or use `--profile <name>` / `.rightmemory-profile` for project-specific roots.
 - Retrieve, unified update, update-review correction, transcript-review extraction, history, dreamer, insight, pruner, and sync repair have separate runtime boundaries selected by command line, queue, scanner, or watcher.
 - Role-specific executor settings are read from `<memory-root>/rightmemory.toml`.
-- Standalone one-shot calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`; CLI-agent calls persist provider session mappings under `<memory-root>/.runtime/agent_cli_sessions/<role>/`.
+- Standalone calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`. In CLI-agent mode, only retrieve persists a provider mapping across commands. Explicit `chat` may reuse one process-local provider thread, while daemon requests and other independent role turns start fresh threads.
+- Every new CLI-agent provider thread receives an ownership record under `<memory-root>/.runtime/agent_cli_threads/`, including one-shot and failed isolated work, so transcript review can exclude internal conversations without relying on an active mapping.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - Use `rightmemory status` for a read-only operational dashboard across the configured memory root. It summarizes Git state, managed watches, Dreamer and Insight trigger progress, async update queues, bounded last-message previews, and file paths for full logs or state. Use `rightmemory watch status` when you need the lower-level managed-watch process view.
 - The installer creates a root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, `PURSUIT_RULES.md`, optional root `corrections.md`, sharing metadata and provider view sources, and `insight_logs/*.md`; generated shared-view output and update-review documents stay outside the committed surface.
@@ -591,6 +593,18 @@ model = "sonnet"
 ```
 
 Use `rightmemory doctor agent-cli` after configuring CLI-agent mode. It checks that role config resolves to CLI-agent execution, required provider commands are available, and read/write role probes can complete.
+
+`rightmemory retrieve --session <id>` resumes the same registered provider conversation while it remains active. Its first turn receives the canonical role instructions and current Memory/Pursuit root snapshot; resumed turns receive only new root changes, newly submitted candidates, and the current query. Local prior questions and answers are not replayed into an already resumed provider thread.
+
+Every other independent CLI-agent role turn starts a fresh provider conversation. An explicit `chat` process may keep one in-memory conversation until that process exits, but it does not create a mapping for another process to resume. This policy is the same for Codex and Claude.
+
+Registered Codex threads expire after 24 hours without a successful turn. Cleanup first detaches an expired retrieve mapping and resets its local delivery state, then deletes the exact owned thread through Codex App Server. It runs opportunistically before top-level CLI-agent work and hourly through the managed `agent-cli-cleanup` watcher. Run a bounded diagnostic pass directly with:
+
+```bash
+rightmemory agent-cli cleanup --once
+```
+
+Cleanup failures do not fail the role command; pending records are retried. RightMemory never edits Codex history files or SQLite state directly, never imports old unregistered threads, and never deletes Claude sessions automatically.
 
 ### Standalone Config
 
@@ -655,7 +669,7 @@ Trace files include run, history-save, and tool events. They may include prompts
 
 ### Background Watchers
 
-RightMemory can keep transcript review, updater-edit review, pruning, Dreamer, Insight, and sync loops under the same background manager. The normal controls are:
+RightMemory can keep transcript review, updater-edit review, pruning, Dreamer, Insight, CLI-agent thread cleanup, and sync loops under the same background manager. The normal controls are:
 
 ```bash
 rightmemory watch start
@@ -666,7 +680,7 @@ rightmemory --profile my-project watch start
 rightmemory --profile my-project status
 ```
 
-By default these commands manage `review`, `update-review`, `dreamer`, `insight`, and `pruner`, plus `sync` when `[sync].enabled` is true. Pass a target when you want one loop, such as `rightmemory watch start update-review`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.
+By default these commands manage `review`, `update-review`, `dreamer`, `insight`, `pruner`, and `agent-cli-cleanup`, plus `sync` when `[sync].enabled` is true. Pass a target when you want one loop, such as `rightmemory watch start agent-cli-cleanup`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.
 
 For a single read-only view of watcher state, Dreamer and Insight trigger
 progress, async update queues, recent previews, and paths to the underlying logs
@@ -803,7 +817,7 @@ when Windows assigns it a new PID. Run `rightmemory watch start` or
 
 Automatic unified-update, dreamer, insight, and pruner turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. Normal unified updates may commit Memory and Pursuit together. Update-review correction mode may additionally change `corrections.md`, but only alongside a successful state correction. Memory-oriented maintenance roles remain restricted to Memory, while Insight commits `insight_logs/*.md`. Runtime validates complete role-owned results and lands successful commits; empty `prune:` checkpoints are allowed.
 
-Temporary session and provider state lives under `.runtime/isolated-state/` during an isolated turn and is promoted after successful landing or a valid no-op. Standalone turns seed local message history there. CLI-agent turns start speculative provider work in a fresh provider session, then promote the successful record. If a role fails, is interrupted, leaves dirty temporary files, or cannot land cleanly, temporary work is discarded and the original candidate batch, update-review request, or maintenance trigger balance remains the retry source.
+Temporary session and provider state lives under `.runtime/isolated-state/` during an isolated turn and is promoted after successful landing or a valid no-op. Standalone turns seed local message history there. CLI-agent turns start speculative provider work in a fresh one-shot session. Successful ownership state is promoted; if later validation or landing fails, the ownership record alone is preserved so the abandoned internal thread remains excluded from review and eligible for cleanup. Other temporary work is discarded, and the original candidate batch, update-review request, or maintenance trigger balance remains the retry source.
 
 Dirty synchronized RightMemory files block automatic semantic writes before a temporary role starts, but runtime gives `sync-reconciler` one bounded repair chance. If repair commits a clean state, the original automatic write restarts from its source input. Otherwise it fails instead of stacking model work on unclear local changes.
 

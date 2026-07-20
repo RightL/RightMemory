@@ -50,8 +50,32 @@ class ProviderSessionStore:
         os.replace(tmp_path, path)
         _fsync_directory(path.parent)
 
+    def delete_if_matches(
+        self,
+        rightmemory_session_id: str,
+        provider_session_id: str,
+        *,
+        provider: str | None = None,
+    ) -> bool:
+        path = self.path(rightmemory_session_id)
+        try:
+            record = _record_from_json(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return False
+        if record.provider_session_id != provider_session_id or (
+            provider is not None and record.provider != provider
+        ):
+            return False
+        path.unlink()
+        _fsync_directory(path.parent)
+        return True
+
     @staticmethod
     def is_internal_provider_session(memory_root: Path, provider: str, provider_session_id: str) -> bool:
+        from .provider_threads import ProviderThreadStore
+
+        if ProviderThreadStore(memory_root).is_owned(provider, provider_session_id):
+            return True
         records_root = memory_root / ".runtime" / "agent_cli_sessions"
         if not records_root.exists():
             return False

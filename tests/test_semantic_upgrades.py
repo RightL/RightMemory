@@ -260,7 +260,7 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
             ):
                 self.semantic_upgrades = semantic_upgrades
 
-            def run_session_turn(self, session_id: str, message: str) -> str:
+            def run_one_shot_turn(self, session_id: str, message: str) -> str:
                 calls.append((session_id, message, self.semantic_upgrades.ids))
                 return "dreamed"
 
@@ -328,7 +328,7 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
             ):
                 self.semantic_upgrades = semantic_upgrades
 
-            def run_session_turn(self, session_id: str, message: str) -> str:
+            def run_one_shot_turn(self, session_id: str, message: str) -> str:
                 return "dreamed"
 
             def cleanup(self):
@@ -377,7 +377,7 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
             ):
                 self.semantic_upgrades = semantic_upgrades
 
-            def run_session_turn(self, session_id: str, message: str) -> str:
+            def run_one_shot_turn(self, session_id: str, message: str) -> str:
                 raise RuntimeError("dreamer failed")
 
             def cleanup(self):

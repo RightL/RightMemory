@@ -1827,6 +1827,30 @@ class JsonRequestTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 main(["review", "watch", "--interval", "0"])
 
+    def test_agent_cli_cleanup_once_reports_bounded_counts(self):
+        stdout = io.StringIO()
+
+        class FakeResult:
+            def format(self):
+                return "deleted: 2\npending: 1\nskipped: 3\nmalformed: 0"
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli.AgentCliThreadCleanup") as cleanup,
+                patch("sys.stdout", stdout),
+            ):
+                cleanup.return_value.run.return_value = FakeResult()
+                result = main(["agent-cli", "cleanup", "--once"])
+
+        self.assertEqual(result, 0)
+        cleanup.assert_called_once_with(root)
+        self.assertEqual(
+            stdout.getvalue().strip(),
+            "deleted: 2\npending: 1\nskipped: 3\nmalformed: 0",
+        )
+
     def test_watch_start_starts_both_reviews_dreamer_pruner_and_insight_managed_processes(self):
         stdout = io.StringIO()
 
@@ -1846,63 +1870,7 @@ class JsonRequestTests(unittest.TestCase):
                 return type("SyncConfig", (), {"memory_root": memory_root, "enabled": False})()
 
             with (
-                patch("rightmemory.cli.load_config", fake_load_config),
-                patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
-                patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
-                patch(
-                    "rightmemory.watch.subprocess.Popen",
-                    side_effect=[
-                        FakeProcess(101),
-                        FakeProcess(102),
-                        FakeProcess(103),
-                        FakeProcess(104),
-                        FakeProcess(105),
-                    ],
-                ) as popen,
-                patch("sys.stdout", stdout),
-            ):
-                result = main(["watch", "start"])
-
-            review_pid = (memory_root / ".runtime" / "watch" / "review.pid").read_text(encoding="utf-8")
-            update_review_pid = (memory_root / ".runtime" / "watch" / "update-review.pid").read_text(
-                encoding="utf-8"
-            )
-            dreamer_pid = (memory_root / ".runtime" / "watch" / "dreamer.pid").read_text(encoding="utf-8")
-            pruner_pid = (memory_root / ".runtime" / "watch" / "pruner.pid").read_text(encoding="utf-8")
-            insight_pid = (memory_root / ".runtime" / "watch" / "insight.pid").read_text(encoding="utf-8")
-
-        self.assertEqual(result, 0)
-        self.assertEqual(roles, ["reviewer", "update", "dreamer", "pruner", "insight"])
-        self.assertEqual(popen.call_count, 5)
-        self.assertEqual(review_pid, "101\n")
-        self.assertEqual(update_review_pid, "102\n")
-        self.assertEqual(dreamer_pid, "103\n")
-        self.assertEqual(pruner_pid, "104\n")
-        self.assertEqual(insight_pid, "105\n")
-        self.assertIn("review: running pid 101", stdout.getvalue())
-        self.assertIn("update-review: running pid 102", stdout.getvalue())
-        self.assertIn("dreamer: running pid 103", stdout.getvalue())
-        self.assertIn("pruner: running pid 104", stdout.getvalue())
-        self.assertIn("insight: running pid 105", stdout.getvalue())
-        self.assertIn("sync: disabled", stdout.getvalue())
-
-    def test_watch_start_starts_sync_when_enabled(self):
-        stdout = io.StringIO()
-
-        class FakeProcess:
-            def __init__(self, pid):
-                self.pid = pid
-
-        with tempfile.TemporaryDirectory() as tempdir:
-            memory_root = Path(tempdir)
-
-            def fake_load_config(role, **kwargs):
-                return type("Config", (), {"memory_root": memory_root})()
-
-            def fake_load_sync_config(**kwargs):
-                return type("SyncConfig", (), {"memory_root": memory_root, "enabled": True})()
-
-            with (
+                patch("rightmemory.cli.default_memory_root", return_value=memory_root),
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
                 patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
@@ -1921,10 +1889,75 @@ class JsonRequestTests(unittest.TestCase):
             ):
                 result = main(["watch", "start"])
 
+            review_pid = (memory_root / ".runtime" / "watch" / "review.pid").read_text(encoding="utf-8")
+            update_review_pid = (memory_root / ".runtime" / "watch" / "update-review.pid").read_text(
+                encoding="utf-8"
+            )
+            dreamer_pid = (memory_root / ".runtime" / "watch" / "dreamer.pid").read_text(encoding="utf-8")
+            pruner_pid = (memory_root / ".runtime" / "watch" / "pruner.pid").read_text(encoding="utf-8")
+            insight_pid = (memory_root / ".runtime" / "watch" / "insight.pid").read_text(encoding="utf-8")
+            cleanup_pid = (memory_root / ".runtime" / "watch" / "agent-cli-cleanup.pid").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(roles, ["reviewer", "update", "dreamer", "pruner", "insight"])
+        self.assertEqual(popen.call_count, 6)
+        self.assertEqual(review_pid, "101\n")
+        self.assertEqual(update_review_pid, "102\n")
+        self.assertEqual(dreamer_pid, "103\n")
+        self.assertEqual(pruner_pid, "104\n")
+        self.assertEqual(insight_pid, "105\n")
+        self.assertEqual(cleanup_pid, "106\n")
+        self.assertIn("review: running pid 101", stdout.getvalue())
+        self.assertIn("update-review: running pid 102", stdout.getvalue())
+        self.assertIn("dreamer: running pid 103", stdout.getvalue())
+        self.assertIn("pruner: running pid 104", stdout.getvalue())
+        self.assertIn("insight: running pid 105", stdout.getvalue())
+        self.assertIn("sync: disabled", stdout.getvalue())
+        self.assertIn("agent-cli-cleanup: running pid 106", stdout.getvalue())
+
+    def test_watch_start_starts_sync_when_enabled(self):
+        stdout = io.StringIO()
+
+        class FakeProcess:
+            def __init__(self, pid):
+                self.pid = pid
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+
+            def fake_load_config(role, **kwargs):
+                return type("Config", (), {"memory_root": memory_root})()
+
+            def fake_load_sync_config(**kwargs):
+                return type("SyncConfig", (), {"memory_root": memory_root, "enabled": True})()
+
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=memory_root),
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
+                patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
+                patch(
+                    "rightmemory.watch.subprocess.Popen",
+                    side_effect=[
+                        FakeProcess(101),
+                        FakeProcess(102),
+                        FakeProcess(103),
+                        FakeProcess(104),
+                        FakeProcess(105),
+                        FakeProcess(106),
+                        FakeProcess(107),
+                    ],
+                ) as popen,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["watch", "start"])
+
             sync_pid = (memory_root / ".runtime" / "watch" / "sync.pid").read_text(encoding="utf-8")
 
         self.assertEqual(result, 0)
-        self.assertEqual(popen.call_count, 6)
+        self.assertEqual(popen.call_count, 7)
         self.assertEqual(sync_pid, "106\n")
         self.assertIn("sync: running pid 106", stdout.getvalue())
 
@@ -1945,6 +1978,7 @@ class JsonRequestTests(unittest.TestCase):
                 return type("SyncConfig", (), {"memory_root": memory_root, "enabled": False})()
 
             with (
+                patch("rightmemory.cli.default_memory_root", return_value=memory_root),
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
                 patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
@@ -1956,6 +1990,7 @@ class JsonRequestTests(unittest.TestCase):
                         FakeProcess(103),
                         FakeProcess(104),
                         FakeProcess(105),
+                        FakeProcess(106),
                     ],
                 ) as popen,
                 patch("sys.stdout", stdout),
@@ -1963,7 +1998,7 @@ class JsonRequestTests(unittest.TestCase):
                 result = main(["watch", "start"])
 
         self.assertEqual(result, 0)
-        self.assertEqual(popen.call_count, 5)
+        self.assertEqual(popen.call_count, 6)
         self.assertIn("sync: disabled", stdout.getvalue())
 
     def test_watch_start_passes_selected_profile_root_to_subprocess_env(self):
@@ -2032,6 +2067,7 @@ class JsonRequestTests(unittest.TestCase):
                 return type("SyncConfig", (), {"memory_root": memory_root, "enabled": True})()
 
             with (
+                patch("rightmemory.cli.default_memory_root", return_value=memory_root),
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
                 patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale", return_value=None),
@@ -2043,6 +2079,7 @@ class JsonRequestTests(unittest.TestCase):
                         FakeProcess(203),
                         FakeProcess(204),
                         FakeProcess(205),
+                        FakeProcess(206),
                     ],
                 ) as popen,
                 patch("sys.stdout", stdout),
@@ -2057,7 +2094,7 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertEqual(roles, ["reviewer", "update", "dreamer", "pruner", "insight"])
-        self.assertEqual(popen.call_count, 5)
+        self.assertEqual(popen.call_count, 6)
         self.assertEqual(dreamer_pid, "202\n")
         self.assertEqual(pruner_pid, "203\n")
         self.assertEqual(insight_pid, "204\n")
@@ -2099,6 +2136,7 @@ class JsonRequestTests(unittest.TestCase):
                 return type("SyncConfig", (), {"memory_root": memory_root, "enabled": True})()
 
             with (
+                patch("rightmemory.cli.default_memory_root", return_value=memory_root),
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.cli.load_sync_config", fake_load_sync_config),
                 patch("rightmemory.watch.IsolatedWriteSupervisor", FakeSupervisor),
@@ -2121,12 +2159,17 @@ class JsonRequestTests(unittest.TestCase):
                 ("cleanup", "insight"),
                 ("start", "insight"),
                 ("start", "sync"),
+                ("start", "cleanup"),
             ],
         )
 
     def test_sync_is_a_managed_watch_target(self):
         self.assertIn("sync", MANAGED_WATCH_TARGETS)
         self.assertEqual(WATCH_COMMANDS["sync"], ("sync", "watch"))
+
+    def test_agent_cli_cleanup_is_a_managed_watch_target(self):
+        self.assertIn("agent-cli-cleanup", MANAGED_WATCH_TARGETS)
+        self.assertEqual(WATCH_COMMANDS["agent-cli-cleanup"], ("agent-cli", "cleanup", "--watch"))
 
     def test_transcript_and_update_review_are_managed_watch_targets(self):
         self.assertIn("review", MANAGED_WATCH_TARGETS)

@@ -20,6 +20,7 @@ from .isolated_write import IsolatedWriteResult, IsolatedWriteSupervisor, MainMe
 from .prompt import build_instructions
 from .prune import build_pruner_message, prune_due_status
 from .provider_sessions import ProviderSessionStore
+from .provider_threads import ProviderThreadStore
 from .recent_submitted import (
     RecentSubmittedMemoryDeliveryStore,
     RecentSubmittedMemoryEntry,
@@ -123,6 +124,23 @@ class RightMemoryRuntime:
             self._create_update_review(base_commit, output)
             return output
 
+    def run_chat_turn(self, message: str, session_id: str | None = None) -> str:
+        if self.config.runtime_mode != "cli-agent":
+            if session_id is None:
+                return self.run_turn(message)
+            return self.run_session_turn(session_id, message)
+        if self.config.role == "retrieve" and session_id is not None:
+            return self.run_session_turn(session_id, message)
+        if self._should_isolate_write_turn():
+            return self.run_turn(message)
+        with self._update_execution_lock():
+            self._last_write_result = None
+            self._last_reviewed_update_commit = None
+            base_commit = self._review_base_commit()
+            output = self._run_cli_process_turn_unlocked(message)
+            self._create_update_review(base_commit, output)
+            return output
+
     def _run_turn_unlocked(self, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
@@ -158,6 +176,22 @@ class RightMemoryRuntime:
         self._publish_file_views_after_write()
         self._mark_semantic_upgrades_absorbed()
         return output
+
+    def _run_cli_process_turn_unlocked(self, message: str) -> str:
+        if not message.strip():
+            raise ValueError("message must not be empty")
+        result, post_sync = self._run_locked_turn(
+            lambda: self._run_session_cli_agent(
+                NO_SESSION_RIGHTMEMORY_SESSION_ID,
+                message,
+                process_local=True,
+            )
+        )
+        if post_sync is not None:
+            self._run_sync_reconciler(post_sync)
+        self._publish_file_views_after_write()
+        self._mark_semantic_upgrades_absorbed()
+        return str(result)
 
     def run_session_turn(self, session_id: str, message: str, *, on_started: Callable[[], None] | None = None) -> str:
         with self._update_execution_lock():
@@ -288,19 +322,42 @@ class RightMemoryRuntime:
                 self._trace("history_saved", path=str(session.paths.history))
             return result
 
-    def _run_session_cli_agent(self, session_id: str, message: str, *, on_started: Callable[[], None] | None = None) -> str:
+    def _run_session_cli_agent(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        on_started: Callable[[], None] | None = None,
+        process_local: bool = False,
+    ) -> str:
         with self.sessions.locked(session_id):
             self._pull_file_views_for_retrieve()
-            prepared = self._prepare_retrieve_turn(session_id, message)
+            if process_local:
+                continuation = self.agent.has_process_session()
+            elif self.config.role == "retrieve":
+                continuation = (
+                    session_id != NO_SESSION_RIGHTMEMORY_SESSION_ID
+                    and self.agent.has_saved_session(session_id)
+                )
+            else:
+                continuation = False
+            prepared = self._prepare_retrieve_turn(
+                session_id,
+                message,
+                cli_agent_phase="resume" if continuation else "new",
+            )
             if on_started is not None:
                 on_started()
             self._trace("model_started")
-            if self.config.role == "retrieve":
-                result = self.agent.run_stateless_turn(prepared.message)
-                self._trace("model_finished", output=str(result))
-                self._record_successful_retrieve_turn(session_id, prepared, str(result))
-                return result
-            result = self.agent.run_session_turn(session_id, prepared.message)
+            if process_local:
+                result = self.agent.run_process_turn(prepared.message)
+            elif self.config.role == "retrieve":
+                if session_id == NO_SESSION_RIGHTMEMORY_SESSION_ID:
+                    result = self.agent.run_one_shot_turn(session_id, prepared.message)
+                else:
+                    result = self.agent.run_session_turn(session_id, prepared.message)
+            else:
+                result = self.agent.run_one_shot_turn(session_id, prepared.message)
             self._trace("model_finished", output=str(result))
             self._record_successful_retrieve_turn(session_id, prepared, str(result))
             return result
@@ -546,9 +603,16 @@ class RightMemoryRuntime:
         self,
         session_id: str,
         message: str,
+        *,
+        cli_agent_phase: str | None = None,
     ) -> PreparedRetrieveTurn:
         if self.config.role != "retrieve":
             return PreparedRetrieveTurn(message, message, [], None)
+        if cli_agent_phase not in {None, "new", "resume"}:
+            raise ValueError("cli_agent_phase must be new, resume, or None")
+        if cli_agent_phase == "new":
+            self.retrieve_context.reset(session_id)
+            self.recent_submitted_delivery.reset(session_id)
         snapshot = load_daily_snapshot(self.config.memory_root)
         state = self.retrieve_context.load(session_id)
         current_commit = current_memory_head(self.config.memory_root)
@@ -561,8 +625,8 @@ class RightMemoryRuntime:
             entries = self.recent_submitted_delivery.new_entries(session_id, entries)
         recent_block = format_recent_submitted_context_block(entries)
         request = build_retrieve_request_text(
-            snapshot_text=snapshot.text,
-            turns=state.turns,
+            snapshot_text="" if cli_agent_phase == "resume" else snapshot.text,
+            turns=[] if cli_agent_phase is not None else state.turns,
             diff_block=diff_block,
             recent_block=recent_block,
             query=message,
@@ -883,12 +947,14 @@ class _IsolatedStateOverlay:
 
     def promote(self) -> None:
         _ensure_runtime_gitignore(self.state_root / ".runtime")
-        for relative_path in self._promoted_paths():
+        for relative_path in [*self._promoted_paths(), *self._provider_thread_paths()]:
             _copy_state_file(self.overlay_root / relative_path, self.state_root / relative_path)
 
     def archive_failed_provider_session(self) -> None:
         if self.seed_provider_session:
             return
+        for relative_path in self._provider_thread_paths():
+            _copy_state_file(self.overlay_root / relative_path, self.state_root / relative_path)
         source = ProviderSessionStore(self.overlay_root, self.role).path(self.session_id)
         if not source.exists():
             return
@@ -922,6 +988,12 @@ class _IsolatedStateOverlay:
             MessageSessionStore(self.state_root, self.role).paths(self.session_id).history.relative_to(self.state_root),
             ProviderSessionStore(self.state_root, self.role).path(self.session_id).relative_to(self.state_root),
         ]
+
+    def _provider_thread_paths(self) -> list[Path]:
+        root = ProviderThreadStore(self.overlay_root).root
+        if not root.exists():
+            return []
+        return [path.relative_to(self.overlay_root) for path in sorted(root.glob("*/*.json"))]
 
 
 def _copy_state_file(source: Path, destination: Path) -> None:

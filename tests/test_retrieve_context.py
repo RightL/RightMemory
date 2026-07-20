@@ -151,6 +151,20 @@ class RetrieveContextRequestTests(unittest.TestCase):
         self.assertNotIn("Recent submitted RightMemory candidates", text)
         self.assertTrue(text.rstrip().endswith("# Query\n\nfind root"))
 
+    def test_resumed_request_can_omit_snapshot_and_local_history(self):
+        text = build_retrieve_request_text(
+            snapshot_text="",
+            turns=[],
+            diff_block="# RightMemory root changes since previous retrieve turn\n\n```diff\n+new\n```",
+            recent_block="",
+            query="find new",
+        )
+
+        self.assertTrue(text.startswith("# RightMemory root changes since previous retrieve turn\n"))
+        self.assertNotIn("Daily RightMemory root snapshot", text)
+        self.assertNotIn("Prior retrieve conversation", text)
+        self.assertTrue(text.rstrip().endswith("# Query\n\nfind new"))
+
     def test_recent_submitted_context_block_omits_empty_entries(self):
         self.assertEqual(format_recent_submitted_context_block([]), "")
         block = format_recent_submitted_context_block(
@@ -180,3 +194,14 @@ class RetrieveContextRequestTests(unittest.TestCase):
 
         self.assertEqual(state.delivered_memory_commit, "abc123")
         self.assertEqual([(turn.query, turn.answer) for turn in state.turns], [("find alpha", "alpha answer")])
+
+    def test_retrieve_context_store_reset_removes_complete_session_state(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = RetrieveContextStore(Path(tempdir))
+            store.record_success("retrieve-a", query="find alpha", answer="answer", memory_commit="abc123")
+
+            self.assertTrue(store.reset("retrieve-a"))
+            state = store.load("retrieve-a")
+
+        self.assertEqual(state.turns, [])
+        self.assertIsNone(state.delivered_memory_commit)

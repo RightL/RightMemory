@@ -58,7 +58,7 @@ def run_agent_cli_doctor(memory_root: Path | None = None) -> list[DoctorCheck]:
 
         doctor_configs = {role: _doctor_config(config, memory_root) for role, config in configs.items()}
         _check_first_provider_calls(checks, doctor_configs, run_nonce)
-        _check_resume_history(checks, doctor_configs, providers, run_nonce)
+        _check_resume_history(checks, doctor_configs["retrieve"], run_nonce)
         _check_retrieve_reads_memory(checks, doctor_configs["retrieve"], retrieve_token, run_nonce)
         write_config = _write_config(doctor_configs)
         _check_write_edits_memory(checks, write_config, memory_root, run_nonce)
@@ -120,27 +120,25 @@ def _check_first_provider_calls(
 
 def _check_resume_history(
     checks: list[DoctorCheck],
-    configs: dict[str, RuntimeConfig],
-    providers: list[str],
+    config: RuntimeConfig,
     run_nonce: str,
 ) -> None:
     failures = []
-    for provider in providers:
-        config = _config_for_provider(configs, provider)
-        session_id = f"doctor-{run_nonce}-resume-{provider}"
-        token = f"RM_HISTORY_{provider.upper()}_{uuid4().hex}"
-        try:
-            _runtime_turn(
-                config,
-                session_id,
-                f"Remember this doctor token for the next check: `{token}`. Reply exactly `READY {token}`.",
-            )
-            output = _runtime_turn(config, session_id, "What doctor token did I ask you to remember? Reply with it.")
-            if token not in output:
-                failures.append(f"{provider}: prior token not found")
-        except Exception as exc:
-            failures.append(f"{provider}: {_exception_detail(exc)}")
-    _append_check(checks, "resume history", failures, f"succeeded for {', '.join(providers)}")
+    provider = config.agent_cli.provider if config.agent_cli is not None else "unknown"
+    session_id = f"doctor-{run_nonce}-resume-{provider}"
+    token = f"RM_HISTORY_{provider.upper()}_{uuid4().hex}"
+    try:
+        _runtime_turn(
+            config,
+            session_id,
+            f"Remember this doctor token for the next check: `{token}`. Reply exactly `READY {token}`.",
+        )
+        output = _runtime_turn(config, session_id, "What doctor token did I ask you to remember? Reply with it.")
+        if token not in output:
+            failures.append(f"{provider}: prior token not found")
+    except Exception as exc:
+        failures.append(f"{provider}: {_exception_detail(exc)}")
+    _append_check(checks, "resume history", failures, f"retrieve succeeded for {provider}")
 
 
 def _check_retrieve_reads_memory(checks: list[DoctorCheck], config: RuntimeConfig, token: str, run_nonce: str) -> None:
@@ -259,17 +257,6 @@ def _runtime_turn(config: RuntimeConfig, session_id: str, message: str) -> str:
         return runtime.run_session_turn(session_id, message)
     finally:
         runtime.cleanup()
-
-
-def _config_for_provider(configs: dict[str, RuntimeConfig], provider: str) -> RuntimeConfig:
-    retrieve = configs["retrieve"]
-    if retrieve.agent_cli is not None and retrieve.agent_cli.provider == provider:
-        return retrieve
-    for role in sorted(configs):
-        config = configs[role]
-        if config.agent_cli is not None and config.agent_cli.provider == provider:
-            return config
-    raise RuntimeError(f"no config for provider: {provider}")
 
 
 def _write_config(configs: dict[str, RuntimeConfig]) -> RuntimeConfig:

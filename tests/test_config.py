@@ -25,7 +25,9 @@ from rightmemory.config import (
 from rightmemory.isolated_write import IsolatedWriteResult, MainMemoryDirtyError
 from rightmemory.prompt import build_cli_agent_instructions, build_instructions
 from rightmemory.provider_sessions import ProviderSessionStore
+from rightmemory.provider_threads import ProviderThreadStore
 from rightmemory.prune import PruneDueStatus
+from rightmemory.recent_submitted import RecentSubmittedMemoryEntry
 from rightmemory.runtime import RightMemoryRuntime, build_model
 from rightmemory.semantic_upgrades import SemanticUpgradeContext, SemanticUpgradeNote
 from rightmemory.shared_view_files import FileViewPublishResult
@@ -993,7 +995,8 @@ class RuntimeTests(unittest.TestCase):
         )
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.run_stateless_turn.return_value = "cli reply"
+            executor_class.return_value.has_saved_session.return_value = False
+            executor_class.return_value.run_session_turn.return_value = "cli reply"
             runtime = RightMemoryRuntime(config)
             result = runtime.run_session_turn("agent-session", "remember one")
 
@@ -1660,6 +1663,14 @@ class RuntimeTests(unittest.TestCase):
                 history='["new message"]',
                 provider=new_provider,
             )
+            ProviderThreadStore(state_root).record_created(
+                provider="codex",
+                provider_session_id="new-thread",
+                role="reviewer",
+                rightmemory_session_id=session_id,
+                policy="one-shot",
+                created_at="2026-07-17T00:00:00+00:00",
+            )
             return "nested output"
 
         config = RuntimeConfig(
@@ -1680,6 +1691,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result, "nested output")
         provider = json.loads(self._provider_session_path(main_root, "reviewer", "agent-session").read_text(encoding="utf-8"))
         self.assertEqual(provider["provider_session_id"], "new-thread")
+        self.assertEqual(ProviderThreadStore(main_root).load("codex", "new-thread").policy, "one-shot")
 
     def test_failed_cli_agent_isolated_run_keeps_prior_provider_session(self):
         main_root = Path(self.tempdir.name)
@@ -1705,6 +1717,14 @@ class RuntimeTests(unittest.TestCase):
                 history='["new message"]',
                 provider=new_provider,
             )
+            ProviderThreadStore(state_root).record_created(
+                provider="codex",
+                provider_session_id="new-thread",
+                role="reviewer",
+                rightmemory_session_id=session_id,
+                policy="one-shot",
+                created_at="2026-07-17T00:00:00+00:00",
+            )
             return "nested output"
 
         config = RuntimeConfig(
@@ -1726,6 +1746,7 @@ class RuntimeTests(unittest.TestCase):
         provider = json.loads(self._provider_session_path(main_root, "reviewer", "agent-session").read_text(encoding="utf-8"))
         self.assertEqual(provider["provider_session_id"], "old-thread")
         self.assertTrue(ProviderSessionStore.is_internal_provider_session(main_root, "codex", "new-thread"))
+        self.assertEqual(ProviderThreadStore(main_root).load("codex", "new-thread").policy, "one-shot")
 
     def test_cli_agent_run_turn_uses_reserved_session_lock(self):
         config = RuntimeConfig(
@@ -1748,12 +1769,13 @@ class RuntimeTests(unittest.TestCase):
             events.append(("locked", session_id))
             return FakeLockedSession()
 
-        def run_stateless_turn(message):
+        def run_one_shot_turn(session_id, message):
+            self.assertEqual(session_id, NO_SESSION_RIGHTMEMORY_SESSION_ID)
             events.append(("agent", message))
             return "cli reply"
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.run_stateless_turn.side_effect = run_stateless_turn
+            executor_class.return_value.run_one_shot_turn.side_effect = run_one_shot_turn
             runtime = RightMemoryRuntime(config)
             runtime.sessions.locked = locked
             result = runtime.run_turn("remember one")
@@ -2060,13 +2082,14 @@ class RuntimeTests(unittest.TestCase):
         )
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.run_stateless_turn.return_value = "cli reply"
+            executor_class.return_value.has_saved_session.return_value = False
+            executor_class.return_value.run_session_turn.return_value = "cli reply"
             runtime = RightMemoryRuntime(config)
             result = runtime.run_session_turn("agent-session", "find one")
 
         self.assertEqual(result, "cli reply")
-        executor_class.return_value.run_stateless_turn.assert_called_once()
-        (message,) = executor_class.return_value.run_stateless_turn.call_args.args
+        executor_class.return_value.run_session_turn.assert_called_once()
+        _, message = executor_class.return_value.run_session_turn.call_args.args
         self.assertTrue(message.startswith("Daily RightMemory root snapshot\n"))
         self.assertLess(message.index("# Recent submitted RightMemory candidates"), message.index("# Query"))
         self.assertTrue(message.rstrip().endswith("# Query\n\nfind one"))
@@ -2074,6 +2097,104 @@ class RuntimeTests(unittest.TestCase):
         state_path = Path(self.tempdir.name) / ".runtime" / "recent_submitted" / "retrieve" / "agent-session.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(state["delivered"], ["update-a:1:2026-05-19T00:00:00+00:00"])
+
+    def test_cli_agent_resumed_retrieve_sends_only_continuation_data(self):
+        root = Path(self.tempdir.name)
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=root,
+        )
+        entry = RecentSubmittedMemoryEntry(
+            update_session_id="update-a",
+            candidate_id=1,
+            submitted_at="2026-07-17T00:00:00+00:00",
+            message="new candidate",
+        )
+
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            executor_class.return_value.has_saved_session.return_value = True
+            executor_class.return_value.run_session_turn.return_value = "cli reply"
+            runtime = RightMemoryRuntime(config)
+            runtime.retrieve_context.record_success(
+                "agent-session",
+                query="old question",
+                answer="old answer",
+                memory_commit="old-commit",
+            )
+            with (
+                patch("rightmemory.runtime.current_memory_head", return_value="new-commit"),
+                patch("rightmemory.runtime.memory_diff_since", return_value="diff --git a/MEMORY.md b/MEMORY.md\n+new"),
+                patch("rightmemory.runtime.collect_recent_submitted_memory", return_value=[entry]),
+            ):
+                result = runtime.run_session_turn("agent-session", "current question")
+
+        self.assertEqual(result, "cli reply")
+        _, message = executor_class.return_value.run_session_turn.call_args.args
+        self.assertTrue(message.startswith("# RightMemory root changes since previous retrieve turn\n"))
+        self.assertIn("# Recent submitted RightMemory candidates", message)
+        self.assertIn("new candidate", message)
+        self.assertTrue(message.rstrip().endswith("# Query\n\ncurrent question"))
+        self.assertNotIn("Daily RightMemory root snapshot", message)
+        self.assertNotIn("Prior retrieve conversation", message)
+        self.assertNotIn("old question", message)
+
+    def test_cli_agent_new_retrieve_discards_legacy_local_context(self):
+        root = Path(self.tempdir.name)
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=root,
+        )
+        old_entry = RecentSubmittedMemoryEntry("update-old", 1, "2026-07-16T00:00:00+00:00", "old candidate")
+
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            executor_class.return_value.has_saved_session.return_value = False
+            executor_class.return_value.run_session_turn.return_value = "fresh reply"
+            runtime = RightMemoryRuntime(config)
+            runtime.retrieve_context.record_success(
+                "agent-session",
+                query="legacy question",
+                answer="legacy answer",
+                memory_commit="old-commit",
+            )
+            runtime.recent_submitted_delivery.record_delivered("agent-session", [old_entry])
+            result = runtime.run_session_turn("agent-session", "fresh question")
+
+        self.assertEqual(result, "fresh reply")
+        _, message = executor_class.return_value.run_session_turn.call_args.args
+        self.assertTrue(message.startswith("Daily RightMemory root snapshot\n"))
+        self.assertNotIn("Prior retrieve conversation", message)
+        self.assertNotIn("legacy question", message)
+        state = runtime.retrieve_context.load("agent-session")
+        self.assertEqual([(turn.query, turn.answer) for turn in state.turns], [("fresh question", "fresh reply")])
+        self.assertEqual(runtime.recent_submitted_delivery.new_entries("agent-session", [old_entry]), [old_entry])
+
+    def test_cli_agent_chat_uses_process_local_retrieve_continuity(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=Path(self.tempdir.name),
+        )
+
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            executor = executor_class.return_value
+            executor.has_process_session.side_effect = [False, True]
+            executor.run_process_turn.side_effect = ["first reply", "second reply"]
+            runtime = RightMemoryRuntime(config)
+            first = runtime.run_chat_turn("first question")
+            second = runtime.run_chat_turn("second question")
+
+        self.assertEqual((first, second), ("first reply", "second reply"))
+        first_message = executor.run_process_turn.call_args_list[0].args[0]
+        second_message = executor.run_process_turn.call_args_list[1].args[0]
+        self.assertIn("Daily RightMemory root snapshot", first_message)
+        self.assertNotIn("Daily RightMemory root snapshot", second_message)
+        self.assertNotIn("Prior retrieve conversation", second_message)
+        self.assertTrue(second_message.rstrip().endswith("# Query\n\nsecond question"))
 
     def test_write_role_creates_memory_lock_and_gitignore(self):
         config = RuntimeConfig(
@@ -2749,7 +2870,8 @@ class RuntimeTests(unittest.TestCase):
         )
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.run_stateless_turn.return_value = "cli reply"
+            executor_class.return_value.has_saved_session.return_value = False
+            executor_class.return_value.run_session_turn.return_value = "cli reply"
             runtime = RightMemoryRuntime(config)
             result = runtime.run_session_turn("agent-session", "remember one")
 

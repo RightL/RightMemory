@@ -28,6 +28,10 @@ class WatchControlTests(unittest.TestCase):
         self.assertEqual(WATCH_COMMANDS["review"], ("review", "watch"))
         self.assertEqual(WATCH_COMMANDS["update-review"], ("update-review", "watch"))
 
+    def test_agent_cli_cleanup_has_its_own_managed_target(self):
+        self.assertIn("agent-cli-cleanup", MANAGED_WATCH_TARGETS)
+        self.assertEqual(WATCH_COMMANDS["agent-cli-cleanup"], ("agent-cli", "cleanup", "--watch"))
+
     def test_starting_update_review_does_not_clean_update_worktrees(self):
         class FakeProcess:
             pid = 456

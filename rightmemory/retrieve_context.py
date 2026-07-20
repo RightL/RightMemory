@@ -82,6 +82,15 @@ class RetrieveContextStore:
         )
         self._write(next_state)
 
+    def reset(self, session_id: str) -> bool:
+        path = self._state_path(session_id)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        _fsync_directory(path.parent)
+        return True
+
     def _state_path(self, session_id: str) -> Path:
         return self.root / f"{_safe_session_id(session_id)}.json"
 
@@ -181,7 +190,9 @@ def build_retrieve_request_text(
     recent_block: str,
     query: str,
 ) -> str:
-    parts = [snapshot_text.rstrip()]
+    parts: list[str] = []
+    if snapshot_text.strip():
+        parts.append(snapshot_text.rstrip())
     history = _format_turn_history(turns)
     if history:
         parts.append(history)

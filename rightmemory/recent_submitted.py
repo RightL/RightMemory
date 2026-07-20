@@ -55,6 +55,16 @@ class RecentSubmittedMemoryDeliveryStore:
             delivered.update(entry.key for entry in entries)
             self._write_delivered_locked(retrieve_session_id, delivered)
 
+    def reset(self, retrieve_session_id: str) -> bool:
+        with self._locked(retrieve_session_id):
+            state_path = self._state_path(retrieve_session_id)
+            try:
+                state_path.unlink()
+            except FileNotFoundError:
+                return False
+            _fsync_directory(state_path.parent)
+            return True
+
     def _state_path(self, retrieve_session_id: str) -> Path:
         safe_id = _safe_session_id(retrieve_session_id)
         return self.root / f"{safe_id}.json"

@@ -99,6 +99,12 @@ RightMemory exposes explicit command roles because operations still have differe
 
 Both install modes expose the same two independently selected skills: read-only `memory-retriever` and full `rightmemory-orchestrator`. The difference between install modes remains the executor behind their commands. Standalone mode runs RightMemory's local Pydantic AI agent and bounded tools; CLI-agent mode delegates the same canonical role behavior while preserving RightMemory's prompts, session records, root, and command surface.
 
+### CLI-agent conversation lifecycle
+
+Retrieve keeps a provider conversation across independent commands because follow-up questions benefit from conversational continuity and provider prefix caching. Other roles are semantic transactions rather than chats, so resuming them would mix unrelated evidence and maintenance cycles; they use fresh provider conversations instead. Explicit interactive chat may retain context only for that process, which gives the operator continuity without turning a temporary chat into a later command's hidden input.
+
+Provider conversations created by RightMemory are tracked separately from active retrieve mappings. Exact ownership is necessary both to exclude internal work from transcript review and to delete only conversations RightMemory can prove it created. Registered Codex conversations expire after 24 hours of inactivity through Codex's supported deletion interface. Pre-registry history is intentionally left alone because incomplete cleanup is safer than guessing ownership from prompts, paths, or timestamps.
+
 ### Executor config
 
 Standalone mode uses role-local model tables because retrieval, unified update, history, Dreamer, Insight, transcript review, pruning, and sync repair may need different providers or model sizes. Pursuit is part of unified update and therefore does not introduce another updater model table. CLI-agent mode keeps the corresponding global provider plus role-local overrides so one RightMemory root can use different executors where the authority genuinely differs.
