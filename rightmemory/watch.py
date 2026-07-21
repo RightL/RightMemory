@@ -17,6 +17,7 @@ from .platform import (
     process_command,
     process_exists,
     process_identity,
+    python_module_child_env,
     unlock_file,
 )
 from .session import _ensure_runtime_gitignore, _fsync_directory
@@ -199,7 +200,8 @@ def start_managed_watch(memory_root: Path, name: str, python_executable: str | N
     watch_dir.mkdir(parents=True, exist_ok=True)
     log_path = watch_log_path(memory_root, name)
     command = [python_executable or sys.executable, "-m", "rightmemory.cli", *WATCH_COMMANDS[name]]
-    env = {**os.environ, MEMORY_ROOT_ENV: str(memory_root), MANAGED_WATCH_ENV: name}
+    env = python_module_child_env()
+    env.update({MEMORY_ROOT_ENV: str(memory_root), MANAGED_WATCH_ENV: name})
     with log_path.open("ab") as log:
         process = subprocess.Popen(
             command,

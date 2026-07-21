@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import MEMORY_ROOT_ENV
-from ..platform import detached_process_kwargs, process_command, process_exists, process_identity
+from ..platform import (
+    detached_process_kwargs,
+    process_command,
+    process_exists,
+    process_identity,
+    python_module_child_env,
+)
 from ..session import _ensure_runtime_gitignore, _fsync_directory
 from .auth import WEB_RUNTIME_DIR, ensure_web_auth_files
 
@@ -182,28 +188,9 @@ def format_stop_result(result: StopWebResult) -> str:
 
 
 def _web_child_env(memory_root: Path) -> dict[str, str]:
-    env = {**os.environ, MEMORY_ROOT_ENV: str(memory_root)}
-    source_parent = _source_checkout_parent()
-    if source_parent is not None:
-        env["PYTHONPATH"] = _prepend_pythonpath(str(source_parent), env.get("PYTHONPATH"))
+    env = python_module_child_env()
+    env[MEMORY_ROOT_ENV] = str(memory_root)
     return env
-
-
-def _source_checkout_parent() -> Path | None:
-    package_root = Path(__file__).resolve().parents[1]
-    project_root = package_root.parent
-    if (project_root / "pyproject.toml").is_file() and (project_root / "rightmemory" / "__init__.py").is_file():
-        return project_root
-    return None
-
-
-def _prepend_pythonpath(path: str, existing: str | None) -> str:
-    if not existing:
-        return path
-    parts = existing.split(os.pathsep)
-    if path in parts:
-        return existing
-    return os.pathsep.join([path, existing])
 
 
 def _read_settings(memory_root: Path) -> dict[str, object]:

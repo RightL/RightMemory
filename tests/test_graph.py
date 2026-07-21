@@ -28,7 +28,7 @@ class CanonicalGraphManifestTests(unittest.TestCase):
             "## Details {F#details}\n\n"
             "Detail summary.\n"
         )
-        (self.root / "MEMORY.md").write_text(memory_text, encoding="utf-8")
+        (self.root / "MEMORY.md").write_text(memory_text, encoding="utf-8", newline="")
         (self.root / "MEMORY_details.md").write_text(
             "### Detail Topic {#detail-topic}\n\n"
             "Detail body.\n\n"
