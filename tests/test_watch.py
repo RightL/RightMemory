@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from rightmemory.config import MEMORY_ROOT_ENV
 from rightmemory.watch import (
     MANAGED_WATCH_TARGETS,
     MANAGED_WATCH_ENV,
@@ -38,16 +39,22 @@ class WatchControlTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
+            source_root = Path(__file__).resolve().parents[1]
             with (
+                patch.dict(os.environ, {"PYTHONPATH": "/existing/path"}, clear=False),
                 patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale") as cleanup,
                 patch("rightmemory.watch.subprocess.Popen", return_value=FakeProcess()) as popen,
             ):
                 status = start_managed_watch(root, "update-review", "python")
+            env = popen.call_args.kwargs["env"]
 
         self.assertEqual(status.state, "running")
         self.assertEqual(status.pid, 456)
         cleanup.assert_not_called()
         self.assertEqual(popen.call_args.args[0], ["python", "-m", "rightmemory.cli", "update-review", "watch"])
+        self.assertEqual(env[MEMORY_ROOT_ENV], str(root))
+        self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(source_root))
+        self.assertIn("/existing/path", env["PYTHONPATH"].split(os.pathsep))
 
     def test_managed_watch_registers_and_cleans_its_own_pid(self):
         with tempfile.TemporaryDirectory() as tempdir:

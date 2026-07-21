@@ -39,22 +39,25 @@ class MemoryToolsTests(unittest.TestCase):
         package = self.root / ".runtime" / "shared_views" / "imports" / view_id
         dist = package / "dist"
         dist.mkdir(parents=True)
-        (package / "view.md").write_text(f"# {view_id}\n", encoding="utf-8")
+        (package / "view.md").write_text(f"# {view_id}\n", encoding="utf-8", newline="")
         (package / "recipe.toml").write_text(
             f'version = 1\nview_id = "{view_id}"\nkind = "file"\n',
             encoding="utf-8",
+            newline="",
         )
         (package / "rightmemory-shared-view.toml").write_text(
             f'version = 2\nview_id = "{view_id}"\nkind = "file"\n',
             encoding="utf-8",
+            newline="",
         )
         (dist / "manifest.toml").write_text(
             f'version = 2\nview_id = "{view_id}"\ndocument_kind = "rightmemory-memory"\n',
             encoding="utf-8",
+            newline="",
         )
-        (dist / "MEMORY.md").write_text(memory_document, encoding="utf-8")
+        (dist / "MEMORY.md").write_text(memory_document, encoding="utf-8", newline="")
         for name, content in (resources or {}).items():
-            (dist / name).write_text(content, encoding="utf-8")
+            (dist / name).write_text(content, encoding="utf-8", newline="")
         return package
 
     def test_rejects_paths_outside_memory_root(self):

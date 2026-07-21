@@ -54,6 +54,7 @@ from .session import (
     _ensure_durable_directory,
     _ensure_runtime_gitignore,
     _fsync_directory,
+    _fsync_file,
 )
 from .semantic_operation import FINAL_PHASES, OperationEffect, SemanticOperationRecord, SemanticOperationStore
 from .shared_view_files import (
@@ -1794,8 +1795,7 @@ def _copy_state_file(source: Path, destination: Path) -> None:
     tmp_path = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
     try:
         shutil.copy2(source, tmp_path)
-        with tmp_path.open("rb") as handle:
-            os.fsync(handle.fileno())
+        _fsync_file(tmp_path)
         os.replace(tmp_path, destination)
     except OSError:
         tmp_path.unlink(missing_ok=True)

@@ -20,7 +20,7 @@ from .shared_view_models import (
     load_shared_view_credential,
     validate_heading_id,
 )
-from .session import _ensure_durable_directory, _fsync_directory
+from .session import _ensure_durable_directory, _fsync_directory, _fsync_file
 from .shared_view_package import (
     DOCUMENT_KIND,
     PACKAGE_VERSION,
@@ -490,7 +490,7 @@ def prepare_file_view_publish_outbox(memory_root: Path, outbox_root: Path) -> No
         return
 
     _ensure_durable_directory(outbox.parent)
-    staging = outbox.with_name(f".{outbox.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    staging = outbox.parent / f".outbox-{os.getpid()}-{uuid.uuid4().hex}.tmp"
     staging.mkdir()
     entries: list[dict[str, str]] = []
     try:
@@ -621,8 +621,7 @@ def _load_publish_outbox(outbox: Path) -> list[dict[str, str]]:
 def _fsync_publish_outbox(root: Path) -> None:
     for path in sorted(root.rglob("*")):
         if path.is_file():
-            with path.open("rb") as handle:
-                os.fsync(handle.fileno())
+            _fsync_file(path)
     directories = [path for path in root.rglob("*") if path.is_dir()]
     for path in sorted(directories, key=lambda item: len(item.parts), reverse=True):
         _fsync_directory(path)

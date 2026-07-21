@@ -104,6 +104,19 @@ def detached_process_kwargs() -> dict[str, object]:
     return kwargs
 
 
+def python_module_child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    source_root = _source_checkout_root()
+    if source_root is None:
+        return env
+    source = str(source_root)
+    existing = env.get("PYTHONPATH")
+    entries = existing.split(os.pathsep) if existing else []
+    if source not in entries:
+        env["PYTHONPATH"] = os.pathsep.join([source, *entries])
+    return env
+
+
 def restart_current_process(command: list[str]) -> None:
     if not command:
         raise ValueError("command must not be empty")
@@ -301,6 +314,13 @@ def _lock_windows_file_nonblocking(handle: IO[Any]) -> None:
 def _is_windows_lock_contention(exc: OSError) -> bool:
     contention_errnos = {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
     return exc.errno in contention_errnos or getattr(exc, "winerror", None) == 33
+
+
+def _source_checkout_root() -> Path | None:
+    project_root = Path(__file__).resolve().parents[1]
+    if (project_root / "pyproject.toml").is_file() and (project_root / "rightmemory" / "__init__.py").is_file():
+        return project_root
+    return None
 
 
 def _resolve_windows_executable(name: str) -> Path:
