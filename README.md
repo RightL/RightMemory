@@ -656,6 +656,8 @@ api_key = "<token>"
 
 `model_id` is required for each explicit `[<role>.model]` table. `anthropic/...` model ids use `AnthropicModel`; other model ids use `OpenAIChatModel` with `OpenAIProvider`, so OpenAI-compatible local gateways can use `api_base` and `api_key`. `[<role>.model.kwargs]` is forwarded as Pydantic AI model settings and unsupported keys fail fast.
 
+Normalized `deepseek-*` model ids keep that configurable OpenAI-compatible transport while using Pydantic AI's DeepSeek profile, so thinking-mode tool loops avoid forced tool selection and preserve `reasoning_content` between requests.
+
 Standalone configs use role-local model tables such as `[retrieve.model]`, `[update.model]`, `[historian.model]`, `[dreamer.model]`, `[insight.model]`, `[reviewer.model]`, and `[pruner.model]` for the roles you run. In the common setup, configure `[retrieve.model]` for search and `[update.model]` as the default writer model. Update-review correction uses the existing update executor; `[reviewer.model]` is for transcript candidate extraction. Other non-retrieve roles reuse the writer model unless you give them their own table.
 
 Configure `[sync-reconciler.model]` or `[sync-reconciler.agent_cli]` only if sync repair should use a different model from the default writer.

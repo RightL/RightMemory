@@ -1026,6 +1026,36 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(model.model_name, "/models/example-chat-model")
         self.assertEqual(model.provider.kwargs, {"base_url": "http://127.0.0.1:8000/v1", "api_key": "token"})
 
+    def test_builds_deepseek_model_with_deepseek_profile_and_openai_transport(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            model_id="deepseek-v4-flash",
+            api_base="https://example.test/v1",
+            api_key="token",
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            model = build_model(config)
+
+        self.assertEqual(model.model_name, "deepseek-v4-flash")
+        self.assertEqual(model.provider.kwargs, {"base_url": "https://example.test/v1", "api_key": "token"})
+        self.assertEqual(model.profile, {"provider": "deepseek", "model_name": "deepseek-v4-flash"})
+
+    def test_deepseek_v4_profile_preserves_thinking_tool_loops(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            model_id="deepseek-v4-flash",
+            api_base="https://example.test/v1",
+            api_key="token",
+        )
+
+        model = build_model(config)
+
+        self.assertTrue(model.profile["supports_thinking"])
+        self.assertFalse(model.profile["openai_supports_tool_choice_required"])
+        self.assertEqual(model.profile["openai_chat_thinking_field"], "reasoning_content")
+        self.assertEqual(model.profile["openai_chat_send_back_thinking_parts"], "field")
+
     def test_builds_anthropic_model(self):
         config = RuntimeConfig(
             role="dreamer",
@@ -3632,10 +3662,16 @@ class RuntimeTests(unittest.TestCase):
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
 
+        class FakeDeepSeekProvider:
+            @staticmethod
+            def model_profile(model_name):
+                return {"provider": "deepseek", "model_name": model_name}
+
         class FakeModel:
-            def __init__(self, model_name, provider=None):
+            def __init__(self, model_name, provider=None, profile=None):
                 self.model_name = model_name
                 self.provider = provider
+                self.profile = profile
 
         class FakeModelMessagesTypeAdapter:
             @staticmethod
@@ -3656,6 +3692,7 @@ class RuntimeTests(unittest.TestCase):
             "pydantic_ai.models": types.SimpleNamespace(),
             "pydantic_ai.models.openai": types.SimpleNamespace(OpenAIChatModel=FakeModel),
             "pydantic_ai.providers": types.SimpleNamespace(),
+            "pydantic_ai.providers.deepseek": types.SimpleNamespace(DeepSeekProvider=FakeDeepSeekProvider),
             "pydantic_ai.providers.openai": types.SimpleNamespace(OpenAIProvider=FakeProvider),
             "pydantic_ai.models.anthropic": types.SimpleNamespace(AnthropicModel=FakeModel),
             "pydantic_ai.providers.anthropic": types.SimpleNamespace(AnthropicProvider=FakeProvider),
