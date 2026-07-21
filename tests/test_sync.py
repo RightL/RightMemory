@@ -43,7 +43,7 @@ class SyncManagerTests(unittest.TestCase):
         self.assertIn("disabled", result.message)
 
     def test_sync_paths_include_shared_view_registry_and_provider_definitions(self):
-        from rightmemory.sync import MEMORY_SYNC_PATHS
+        from rightmemory.sync import MEMORY_SYNC_PATHS, _is_sync_path
 
         self.assertIn("shared_views.toml", MEMORY_SYNC_PATHS)
         self.assertIn("shares.toml", MEMORY_SYNC_PATHS)
@@ -55,6 +55,16 @@ class SyncManagerTests(unittest.TestCase):
         self.assertIn("PURSUIT_*.md", MEMORY_SYNC_PATHS)
         self.assertIn("PURSUIT_RULES.md", MEMORY_SYNC_PATHS)
         self.assertIn("corrections.md", MEMORY_SYNC_PATHS)
+        self.assertIn("update_queue/candidates/*.json", MEMORY_SYNC_PATHS)
+        self.assertIn("update_queue/recovery/*.json", MEMORY_SYNC_PATHS)
+        self.assertIn("update_queue/lease.json", MEMORY_SYNC_PATHS)
+        self.assertTrue(_is_sync_path(f"update_queue/candidates/{'a' * 32}.json"))
+        self.assertTrue(_is_sync_path(f"update_queue/recovery/update-batch-{'b' * 64}.json"))
+        self.assertTrue(_is_sync_path("update_queue/lease.json"))
+        self.assertFalse(_is_sync_path("update_queue/candidates/not-a-uuid.json"))
+        self.assertFalse(_is_sync_path(f"update_queue/candidates/{'A' * 32}.json"))
+        self.assertFalse(_is_sync_path(f"update_queue/recovery/{'b' * 64}.json"))
+        self.assertFalse(_is_sync_path("update_queue/extra.json"))
 
     def test_preflight_rejects_memory_root_nested_in_outer_git_repo(self):
         outer_remote = self.root / "outer.git"
@@ -395,6 +405,28 @@ class SyncManagerTests(unittest.TestCase):
 
         self.assertEqual(result.status, "fresh")
 
+    def test_background_pull_fetches_remote_change_even_when_state_is_fresh(self):
+        (self.other / "PURSUITS.md").write_text(
+            "# Pursuits\n\n## Remote work {#remote-work}\n",
+            encoding="utf-8",
+        )
+        self._git(self.other, "add", "PURSUITS.md")
+        self._git(self.other, "commit", "-m", "pursuit: remote change")
+        self._git(self.other, "push")
+        state_path = self.device / ".runtime" / "sync" / "state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text(
+            json.dumps({"last_successful_pull_at": datetime.now(UTC).isoformat()}),
+            encoding="utf-8",
+        )
+
+        result = SyncManager(
+            SyncConfig(memory_root=self.device, enabled=True, stale_pull_after_hours=24)
+        ).background_pull()
+
+        self.assertEqual(result.status, "synced")
+        self.assertIn("remote-work", (self.device / "PURSUITS.md").read_text(encoding="utf-8"))
+
     def test_background_pull_pushes_ahead_commits_even_when_pull_state_fresh(self):
         (self.device / "MEMORY.md").write_text(
             "# Domain\n\n- `one` first → []\n- `two` local committed → []\n",
@@ -524,6 +556,100 @@ class SyncManagerTests(unittest.TestCase):
         self.assertEqual(result.files, ["rightmemory.toml"])
         self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), start_head)
         self.assertFalse((self.device / "rightmemory.toml").exists())
+
+    def test_remote_queue_path_with_invalid_identity_is_rejected(self):
+        start_head = self._git(self.device, "rev-parse", "HEAD")
+        path = self.other / "update_queue" / "candidates" / "not-a-uuid.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{}\n", encoding="utf-8")
+        self._git(self.other, "add", "-f", str(path.relative_to(self.other)))
+        self._git(self.other, "commit", "-m", "queue: add invalid candidate path")
+        self._git(self.other, "push")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.files, ["update_queue/candidates/not-a-uuid.json"])
+        self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), start_head)
+
+    def test_malformed_remote_queue_fails_closed_without_model_repair(self):
+        start_head = self._git(self.device, "rev-parse", "HEAD")
+        relative = f"update_queue/candidates/{'a' * 32}.json"
+        path = self.other / relative
+        path.parent.mkdir(parents=True)
+        path.write_text("{not json\n", encoding="utf-8")
+        self._git(self.other, "add", "-f", relative)
+        self._git(self.other, "commit", "-m", "queue: add malformed candidate")
+        self._git(self.other, "push")
+        repair_calls = []
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull(
+            repair=lambda *args: repair_calls.append(args) or "repaired"
+        )
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.files, [relative])
+        self.assertIn("invalid JSON", result.message)
+        self.assertEqual(repair_calls, [])
+        self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), start_head)
+        self.assertFalse((self.device / relative).exists())
+
+    def test_queue_conflict_fails_closed_without_model_repair(self):
+        relative = "update_queue/lease.json"
+        for root, owner in ((self.device, "local"), (self.other, "remote")):
+            path = root / relative
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({"owner": owner}) + "\n", encoding="utf-8")
+            self._git(root, "add", "-f", relative)
+            self._git(root, "commit", "-m", f"queue: {owner} lease")
+        start_head = self._git(self.device, "rev-parse", "HEAD")
+        local_bytes = (self.device / relative).read_bytes()
+        self._git(self.other, "push")
+        repair_calls = []
+
+        with patch("rightmemory.sync.validate_update_queue", return_value=[]):
+            result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull(
+                repair=lambda *args: repair_calls.append(args) or "repaired"
+            )
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.files, [relative])
+        self.assertIn("coordination conflict", result.message)
+        self.assertEqual(repair_calls, [])
+        self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), start_head)
+        self.assertEqual((self.device / relative).read_bytes(), local_bytes)
+
+    def test_malformed_queue_with_memory_conflict_never_reaches_model_repair(self):
+        relative = f"update_queue/candidates/{'a' * 32}.json"
+        (self.other / "MEMORY.md").write_text(
+            "# Domain\n\n- `one` remote durable fact → []\n",
+            encoding="utf-8",
+        )
+        path = self.other / relative
+        path.parent.mkdir(parents=True)
+        path.write_text("{not json\n", encoding="utf-8")
+        self._git(self.other, "add", "MEMORY.md")
+        self._git(self.other, "add", "-f", relative)
+        self._git(self.other, "commit", "-m", "remote memory and malformed queue")
+        self._git(self.other, "push")
+        (self.device / "MEMORY.md").write_text(
+            "# Domain\n\n- `one` local durable fact → []\n",
+            encoding="utf-8",
+        )
+        self._git(self.device, "add", "MEMORY.md")
+        self._git(self.device, "commit", "-m", "local memory edit")
+        start_head = self._git(self.device, "rev-parse", "HEAD")
+        repair_calls = []
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull(
+            repair=lambda *args: repair_calls.append(args) or "repaired"
+        )
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.files, [relative])
+        self.assertIn("invalid JSON", result.message)
+        self.assertEqual(repair_calls, [])
+        self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), start_head)
 
     def test_repair_exception_leaves_active_checkout_unchanged(self):
         self._create_remote_local_conflict()

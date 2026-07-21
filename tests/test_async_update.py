@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,7 @@ from rightmemory.async_update import (
 )
 from rightmemory.platform import lock_file_nonblocking, unlock_file
 from rightmemory.semantic_operation import OperationEffect, SemanticOperationStore
+from rightmemory.update_queue import UpdateCandidate, UpdateQueueStore
 
 
 class AsyncUpdateStateTests(unittest.TestCase):
@@ -76,6 +78,404 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
         popen.assert_called_once()
         self.assertEqual(state.status, "running")
+
+    def test_submit_creates_and_persists_candidate_uid(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            with patch.object(store, "_start_worker_if_needed"):
+                submitted = store.submit("agent-1", "first")
+            loaded = store.read("agent-1")
+            persisted = json.loads(store._state_path("agent-1").read_text(encoding="utf-8"))
+
+        candidate_uid = submitted.pending[0].candidate_uid
+        self.assertRegex(candidate_uid, r"^[0-9a-f]{32}$")
+        self.assertEqual(loaded.pending[0].candidate_uid, candidate_uid)
+        self.assertEqual(persisted["pending"][0]["candidate_uid"], candidate_uid)
+
+    def test_submit_with_caller_candidate_uid_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            candidate_uid = "a" * 32
+            with patch.object(store, "_start_worker_if_needed"):
+                first = store.submit("agent-1", "first", candidate_uid=candidate_uid)
+                second = store.submit("agent-1", "first", candidate_uid=candidate_uid)
+
+        self.assertEqual(first.pending, second.pending)
+        self.assertEqual([job.id for job in second.pending], [1])
+        self.assertEqual(second.pending[0].candidate_uid, candidate_uid)
+        self.assertEqual(second.next_id, 2)
+
+    def test_candidate_uid_remains_idempotent_after_processing_finishes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            candidate_uid = "a" * 32
+            with patch.object(store, "_start_worker_if_needed"):
+                store.submit("agent-1", "first", candidate_uid=candidate_uid)
+            store.run_pending_batches(
+                lambda _session_id, _message: "updated",
+                target_batch_candidates=1,
+                max_wait_seconds=0,
+            )
+
+            with patch.object(store, "_start_worker_if_needed"):
+                repeated = store.submit(
+                    "agent-1",
+                    "first",
+                    candidate_uid=candidate_uid,
+                )
+
+        self.assertEqual(repeated.pending, [])
+        self.assertEqual(repeated.current_batch, [])
+        self.assertEqual(repeated.next_id, 2)
+        self.assertEqual(repeated.accepted_candidate_uids, [candidate_uid])
+
+    def test_submit_rejects_candidate_uid_reuse_for_different_evidence(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            candidate_uid = "b" * 32
+            with patch.object(store, "_start_worker_if_needed"):
+                store.submit("agent-1", "first", candidate_uid=candidate_uid)
+                with self.assertRaisesRegex(ValueError, "different update evidence"):
+                    store.submit("agent-1", "second", candidate_uid=candidate_uid)
+
+            state = store.read("agent-1")
+
+        self.assertEqual([job.message for job in state.pending], ["first"])
+
+    def test_submit_rejects_noncanonical_candidate_uid(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            with self.assertRaisesRegex(ValueError, "32 lowercase hexadecimal"):
+                store.submit("agent-1", "first", candidate_uid="NOT-A-UUID")
+
+            self.assertFalse(store._state_path("agent-1").exists())
+
+    def test_outbox_only_submit_crash_is_reconciled_and_publishable(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = AsyncUpdateStore(root, "update")
+            candidate = UpdateCandidate(
+                uid="a" * 32,
+                session_id="agent-1",
+                display_id=1,
+                message="survived submit crash",
+                submitted_at="2026-05-15T00:00:00+00:00",
+            )
+            UpdateQueueStore(root).write_outbox(candidate)
+
+            publishable = store.publishable_candidate_uids()
+            state = store.read("agent-1")
+
+        self.assertEqual(publishable, frozenset({candidate.uid}))
+        self.assertEqual(
+            state.pending,
+            [
+                AsyncUpdateJob(
+                    id=1,
+                    candidate_uid=candidate.uid,
+                    message=candidate.message,
+                    submitted_at=candidate.submitted_at,
+                )
+            ],
+        )
+        self.assertEqual(state.next_id, 2)
+
+    def test_attempted_pending_is_publishable_even_after_scheduler_failure(self):
+        for status in ("failed", "needs_manual_recovery"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tempdir:
+                root = Path(tempdir)
+                store = AsyncUpdateStore(root, "update")
+                job = _job(1, "must finish publication")
+                store._write(
+                    "agent-1",
+                    AsyncUpdateState(
+                        status=status,
+                        session_id="agent-1",
+                        role="update",
+                        attempts=2,
+                        pending=[job],
+                        next_id=2,
+                    ),
+                )
+                queue = UpdateQueueStore(root)
+                queue.write_outbox(_candidate_from_job("agent-1", job))
+                queue.begin_publication(job.candidate_uid, attempted_at=job.submitted_at)
+
+                self.assertEqual(
+                    store.publishable_candidate_uids(),
+                    frozenset({job.candidate_uid}),
+                )
+
+    def test_acknowledge_synchronized_normalizes_an_empty_local_lane(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = AsyncUpdateStore(root, "update")
+            job = _job(1, "published")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    pid=4242,
+                    next_flush_at="2099-01-01T00:00:00+00:00",
+                    pending=[job],
+                    next_id=2,
+                ),
+            )
+
+            removed = store.acknowledge_synchronized(frozenset({job.candidate_uid}))
+            with patch.object(store, "_worker_snapshot", side_effect=AssertionError("not needed")):
+                state = store.read("agent-1")
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(state.status, "succeeded")
+        self.assertIsNone(state.phase)
+        self.assertIsNone(state.pid)
+        self.assertIsNone(state.next_flush_at)
+        self.assertEqual(state.pending, [])
+        self.assertEqual(state.next_id, 2)
+
+    def test_reserved_and_current_candidates_are_not_publishable(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = AsyncUpdateStore(root, "update")
+            current = _job(1, "current")
+            reserved = _job(2, "reserved")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="running",
+                    current_batch=[current],
+                    next_id=2,
+                ),
+            )
+            store._write(
+                "agent-2",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-2",
+                    role="update",
+                    phase="waiting",
+                    pending=[reserved],
+                    next_id=3,
+                ),
+            )
+            queue = UpdateQueueStore(root)
+            queue.write_outbox(_candidate_from_job("agent-1", current))
+            queue.write_outbox(_candidate_from_job("agent-2", reserved))
+            batch = [
+                AsyncUpdateSessionBatch(
+                    "agent-2",
+                    _dt("2000-01-01T00:00:00+00:00"),
+                    [reserved],
+                )
+            ]
+            store._reserve_cross_session_batch(batch, _batch_session_id(batch))
+
+            publishable = store.publishable_candidate_uids()
+
+        self.assertEqual(publishable, frozenset())
+
+    def test_begin_publication_serializes_with_cancel(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = AsyncUpdateStore(root, "update")
+            with patch.object(store, "_start_worker_if_needed"):
+                state = store.submit("agent-1", "race candidate")
+            job = state.pending[0]
+            candidate = _candidate_from_job("agent-1", job)
+            publication_started = threading.Event()
+            allow_publication = threading.Event()
+            cancel_finished = threading.Event()
+            results: dict[str, object] = {}
+            errors: list[BaseException] = []
+            original = UpdateQueueStore.begin_publication
+
+            def delayed_begin(queue, uid, *, attempted_at, attempt_id=None):
+                publication_started.set()
+                if not allow_publication.wait(2):
+                    raise TimeoutError("publication test gate timed out")
+                return original(
+                    queue,
+                    uid,
+                    attempted_at=attempted_at,
+                    attempt_id=attempt_id,
+                )
+
+            def publish():
+                try:
+                    results["marker"] = store.begin_publication(
+                        candidate,
+                        attempted_at=job.submitted_at,
+                    )
+                except BaseException as exc:  # Capture thread failures for the assertion thread.
+                    errors.append(exc)
+
+            def cancel():
+                try:
+                    results["cancel"] = store.cancel_pending("agent-1", job.id)
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    cancel_finished.set()
+
+            with patch.object(UpdateQueueStore, "begin_publication", new=delayed_begin):
+                publishing = threading.Thread(target=publish)
+                canceling = threading.Thread(target=cancel)
+                publishing.start()
+                self.assertTrue(publication_started.wait(2))
+                canceling.start()
+                self.assertFalse(cancel_finished.wait(0.05))
+                allow_publication.set()
+                publishing.join(2)
+                canceling.join(2)
+
+            self.assertFalse(publishing.is_alive())
+            self.assertFalse(canceling.is_alive())
+            self.assertEqual(errors, [])
+            canceled_state, canceled = results["cancel"]
+
+        self.assertIsNotNone(results["marker"])
+        self.assertFalse(canceled)
+        self.assertEqual(canceled_state.pending, [job])
+
+    def test_cancel_result_retains_git_authority_after_marker_cleanup(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = AsyncUpdateStore(root, "update")
+            with patch.object(store, "_start_worker_if_needed"):
+                submitted = store.submit("agent-1", "publication race")
+            job = submitted.pending[0]
+            queue_store = UpdateQueueStore(root)
+            queue_store.begin_publication(
+                job.candidate_uid,
+                attempted_at=job.submitted_at,
+            )
+
+            result = store.cancel_pending_candidate("agent-1", job.id)
+            queue_store.clear_publication_marker(job.candidate_uid)
+
+        self.assertEqual(result.outcome, "publication_started")
+        self.assertEqual(result.candidate, job)
+        self.assertEqual(result.state.pending, [job])
+
+    def test_stale_publication_snapshot_cannot_resurrect_canceled_candidate(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = AsyncUpdateStore(root, "update")
+            with patch.object(store, "_start_worker_if_needed"):
+                submitted = store.submit("agent-1", "cancel before publication")
+            job = submitted.pending[0]
+            stale_candidate = _candidate_from_job("agent-1", job)
+
+            _state, canceled = store.cancel_pending("agent-1", job.id)
+            marker = store.begin_publication(
+                stale_candidate,
+                attempted_at=job.submitted_at,
+            )
+
+        self.assertTrue(canceled)
+        self.assertIsNone(marker)
+
+    def test_reserved_candidate_cannot_cross_publication_boundary(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = AsyncUpdateStore(root, "update")
+            with patch.object(store, "_start_worker_if_needed"):
+                submitted = store.submit("agent-1", "reserve before publication")
+            job = submitted.pending[0]
+            batch = [
+                AsyncUpdateSessionBatch(
+                    "agent-1",
+                    _dt("2000-01-01T00:00:00+00:00"),
+                    [job],
+                )
+            ]
+            store._reserve_cross_session_batch(batch, _batch_session_id(batch))
+
+            marker = store.begin_publication(
+                _candidate_from_job("agent-1", job),
+                attempted_at=job.submitted_at,
+            )
+
+        self.assertIsNone(marker)
+
+    def test_before_batches_runs_again_after_worker_wait(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = AsyncUpdateStore(root, "update")
+            job = _job(1, "publish before local selection")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2099-01-01T00:00:00+00:00",
+                    pending=[job],
+                    next_id=2,
+                ),
+            )
+            candidate = _candidate_from_job("agent-1", job)
+            UpdateQueueStore(root).write_outbox(candidate)
+            before_calls = 0
+            run_message = Mock(side_effect=AssertionError("attempted candidate must not run locally"))
+
+            def before_batches():
+                nonlocal before_calls
+                before_calls += 1
+                if before_calls == 2:
+                    self.assertIsNotNone(
+                        store.begin_publication(candidate, attempted_at=job.submitted_at)
+                    )
+                return True
+
+            def finish_wait(_deadline):
+                state = store._read_raw("agent-1")
+                store._write(
+                    "agent-1",
+                    replace(state, next_flush_at="2000-01-01T00:00:00+00:00"),
+                )
+
+            result = store.run_pending_batches(
+                run_message,
+                target_batch_candidates=15,
+                max_wait_seconds=0,
+                sleep_until=finish_wait,
+                before_batches=before_batches,
+            )
+
+        self.assertEqual(result.status, "idle")
+        self.assertEqual(before_calls, 2)
+        run_message.assert_not_called()
+
+    def test_cancel_write_failure_restores_candidate_for_publication(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = AsyncUpdateStore(root, "update")
+            with patch.object(store, "_start_worker_if_needed"):
+                submitted = store.submit("agent-1", "keep after interrupted cancel")
+            job = submitted.pending[0]
+
+            with patch.object(store, "_write", side_effect=OSError("interrupted cancel")):
+                with self.assertRaisesRegex(OSError, "interrupted cancel"):
+                    store.cancel_pending("agent-1", job.id)
+
+            self.assertIsNone(UpdateQueueStore(root).read_outbox(job.candidate_uid))
+            recovered = store.read("agent-1")
+            restored = UpdateQueueStore(root).read_outbox(job.candidate_uid)
+            batch, _deadline = store._next_batch(1, 0)
+
+        self.assertEqual(recovered.pending, [job])
+        self.assertEqual(restored, _candidate_from_job("agent-1", job))
+        self.assertIsNotNone(batch)
+        self.assertEqual(batch[0].jobs, [job])
 
     def test_session_state_paths_exclude_worker_state(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1492,7 +1892,10 @@ class AsyncUpdateStateTests(unittest.TestCase):
                     attempts=2,
                     error="boom",
                     last_error="boom",
-                    pending=[_job(1, "second"), _job(2, "third")],
+                    pending=[
+                        replace(_job(1, "second"), candidate_uid="a" * 32),
+                        _job(2, "third"),
+                    ],
                     next_id=3,
                 ),
             )
@@ -1562,6 +1965,9 @@ class AsyncUpdateStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
             for session_id, message in (("agent-1", "first"), ("agent-2", "second")):
+                job = _job(1, message)
+                if session_id == "agent-2":
+                    job = replace(job, candidate_uid="a" * 32)
                 store._write(
                     session_id,
                     AsyncUpdateState(
@@ -1571,7 +1977,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
                         attempts=2,
                         error="boom",
                         last_error="boom",
-                        pending=[_job(1, message)],
+                        pending=[job],
                         next_id=2,
                     ),
                 )
@@ -1665,7 +2071,12 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertIn("unsupported legacy job fields", str(caught.exception))
 
     def test_read_rejects_nonpositive_or_boolean_candidate_ids(self):
-        job = {"id": 1, "message": "first", "submitted_at": "2026-05-15T00:00:00+00:00"}
+        job = {
+            "id": 1,
+            "candidate_uid": f"{1:032x}",
+            "message": "first",
+            "submitted_at": "2026-05-15T00:00:00+00:00",
+        }
         cases = (
             ("boolean next id", True, [job]),
             ("zero next id", 0, []),
@@ -1701,6 +2112,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
         def job(job_id: int) -> dict[str, object]:
             return {
                 "id": job_id,
+                "candidate_uid": f"{job_id:032x}",
                 "message": f"candidate {job_id}",
                 "submitted_at": "2026-05-15T00:00:00+00:00",
             }
@@ -1748,6 +2160,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
                         "pending": [
                             {
                                 "id": 2,
+                                "candidate_uid": f"{2:032x}",
                                 "message": "candidate",
                                 "submitted_at": "2026-05-15T00:00:00+00:00",
                             }
@@ -1759,6 +2172,42 @@ class AsyncUpdateStateTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "greater than every live job id"):
+                store.read("agent-1")
+
+    def test_read_rejects_duplicate_candidate_uids(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            state_path = store._state_path("agent-1")
+            state_path.parent.mkdir(parents=True)
+            duplicate_uid = "c" * 32
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "session_id": "agent-1",
+                        "role": "update",
+                        "current_batch": [],
+                        "pending": [
+                            {
+                                "id": 1,
+                                "candidate_uid": duplicate_uid,
+                                "message": "first",
+                                "submitted_at": "2026-05-15T00:00:00+00:00",
+                            },
+                            {
+                                "id": 2,
+                                "candidate_uid": duplicate_uid,
+                                "message": "second",
+                                "submitted_at": "2026-05-15T00:01:00+00:00",
+                            },
+                        ],
+                        "next_id": 3,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "candidate uids must be unique"):
                 store.read("agent-1")
 
     def test_read_rejects_non_object_state(self):
@@ -1773,7 +2222,22 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
 
 def _job(job_id: int, message: str) -> AsyncUpdateJob:
-    return AsyncUpdateJob(id=job_id, message=message, submitted_at="2026-05-15T00:00:00+00:00")
+    return AsyncUpdateJob(
+        id=job_id,
+        candidate_uid=f"{job_id:032x}",
+        message=message,
+        submitted_at="2026-05-15T00:00:00+00:00",
+    )
+
+
+def _candidate_from_job(session_id: str, job: AsyncUpdateJob) -> UpdateCandidate:
+    return UpdateCandidate(
+        uid=job.candidate_uid,
+        session_id=session_id,
+        display_id=job.id,
+        message=job.message,
+        submitted_at=job.submitted_at,
+    )
 
 
 def _record_terminal_operation(root: Path, operation_id: str, *, phase: str, output: str) -> None:

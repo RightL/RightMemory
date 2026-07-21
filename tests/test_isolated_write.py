@@ -71,6 +71,145 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertEqual(receipt.phase, "committed")
         self.assertEqual(receipt.outcome.landed_commit, result.landed_commit)
 
+    def test_external_finalizer_prepares_without_landing_or_generic_recovery(self):
+        calls = []
+
+        def callback(worktree: Path) -> str:
+            calls.append("model")
+            self._append_memory(worktree, "- `two` externally fenced → []\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: externally fenced", cwd=worktree)
+            return "prepared"
+
+        supervisor = IsolatedWriteSupervisor(self.root, "update")
+        prepared = supervisor.run(
+            callback,
+            operation_id="update-external-1",
+            operation_input={"message": "remember"},
+            external_finalizer="update-queue",
+        )
+        supervisor.recover_prepared()
+        resumed = supervisor.run(
+            lambda _worktree: self.fail("prepared external work must not rerun"),
+            operation_id="update-external-1",
+            operation_input={"message": "remember"},
+            external_finalizer="update-queue",
+        )
+
+        self.assertTrue(prepared.prepared)
+        self.assertEqual(prepared.commits_landed, 0)
+        self.assertEqual(resumed.candidate_commit, prepared.candidate_commit)
+        self.assertEqual(calls, ["model"])
+        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
+
+    def test_external_finalizer_completes_only_after_published_commit_is_active(self):
+        def callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `two` externally published → []\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: externally published", cwd=worktree)
+            return "published"
+
+        supervisor = IsolatedWriteSupervisor(self.root, "update")
+        prepared = supervisor.run(
+            callback,
+            operation_id="update-external-2",
+            operation_input={"message": "remember"},
+            external_finalizer="update-queue",
+        )
+        self._git("merge", "--ff-only", prepared.candidate_commit)
+
+        completed = supervisor.complete_external(
+            "update-external-2",
+            external_finalizer="update-queue",
+            landed_commit=prepared.candidate_commit,
+        )
+
+        self.assertEqual(completed.commits_landed, 1)
+        self.assertFalse(completed.prepared)
+        self.assertIn("externally published", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
+
+    def test_external_finalizer_can_restart_a_stale_prepared_result(self):
+        supervisor = IsolatedWriteSupervisor(self.root, "update")
+
+        def first(worktree: Path) -> str:
+            self._append_memory(worktree, "- `two` stale result → []\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: stale result", cwd=worktree)
+            return "stale"
+
+        supervisor.run(
+            first,
+            operation_id="update-external-3",
+            operation_input={"message": "remember"},
+            external_finalizer="update-queue",
+        )
+        supervisor.restart_external(
+            "update-external-3",
+            external_finalizer="update-queue",
+            reason="semantic base changed",
+        )
+
+        second = supervisor.run(
+            lambda _worktree: "fresh no-change",
+            operation_id="update-external-3",
+            operation_input={"message": "remember"},
+            external_finalizer="update-queue",
+        )
+
+        self.assertTrue(second.prepared)
+        self.assertIsNone(second.candidate_commit)
+        self.assertEqual(second.output, "fresh no-change")
+
+    def test_external_lease_token_can_change_without_changing_operation_identity(self):
+        supervisor = IsolatedWriteSupervisor(self.root, "update")
+        supervisor.run(
+            lambda _worktree: "first lease",
+            operation_id="update-external-token",
+            operation_input={"message": "remember"},
+            external_finalizer="update-queue:" + "1" * 32,
+        )
+        supervisor.restart_external(
+            "update-external-token",
+            external_finalizer="update-queue:" + "1" * 32,
+            reason="lease changed",
+        )
+
+        prepared = supervisor.run(
+            lambda _worktree: "second lease",
+            operation_id="update-external-token",
+            operation_input={"message": "remember"},
+            external_finalizer="update-queue:" + "2" * 32,
+        )
+
+        self.assertEqual(prepared.output, "second lease")
+        self.assertEqual(
+            SemanticOperationStore(self.root)
+            .read("update-external-token")
+            .outcome.metadata["external_finalizer"],
+            "update-queue:" + "2" * 32,
+        )
+
+    def test_external_result_can_be_superseded_by_another_lease_owner(self):
+        supervisor = IsolatedWriteSupervisor(self.root, "update")
+        finalizer = "update-queue:" + "1" * 32
+        prepared = supervisor.run(
+            lambda _worktree: "stale local result",
+            operation_id="update-external-superseded",
+            operation_input={"message": "remember"},
+            external_finalizer=finalizer,
+        )
+
+        supervisor.supersede_external(
+            "update-external-superseded",
+            external_finalizer=finalizer,
+            landed_commit=prepared.start_commit,
+        )
+
+        record = SemanticOperationStore(self.root).read("update-external-superseded")
+        self.assertEqual(record.phase, "no_change")
+        self.assertEqual(record.effects, ())
+        self.assertTrue(record.outcome.metadata["superseded"])
+
     def test_completed_no_change_operation_does_not_run_callback_again(self):
         supervisor = IsolatedWriteSupervisor(self.root, "dreamer")
         first = supervisor.run(

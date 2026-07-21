@@ -9,6 +9,7 @@ from pathlib import Path
 from .async_update import AsyncUpdateJob, AsyncUpdateState, AsyncUpdateStore
 from .platform import lock_file, unlock_file
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
+from .update_queue import UpdateQueueStore
 
 
 RECENT_SUBMITTED_HEADER = "Recent submitted RightMemory candidates"
@@ -24,9 +25,12 @@ class RecentSubmittedMemoryEntry:
     candidate_id: int
     submitted_at: str
     message: str
+    candidate_uid: str | None = None
 
     @property
     def key(self) -> str:
+        if self.candidate_uid is not None:
+            return self.candidate_uid
         return f"{self.update_session_id}:{self.candidate_id}:{self.submitted_at}"
 
 
@@ -118,21 +122,39 @@ class RecentSubmittedMemoryDeliveryStore:
 
 def collect_recent_submitted_memory(memory_root: Path) -> list[RecentSubmittedMemoryEntry]:
     store = AsyncUpdateStore(memory_root, "update")
-    if not store.root.exists():
-        return []
-
     entries: list[RecentSubmittedMemoryEntry] = []
-    for state_path in store._session_state_paths():
-        session_hint = state_path.stem
-        with store._locked(session_hint):
-            state = store._read_checked_locked(session_hint)
-        if state.role != "update":
-            raise ValueError(f"async update state role mismatch: expected update, got {state.role}")
-        entries.extend(_entries_from_jobs(state, state.current_batch))
-        entries.extend(_entries_from_jobs(state, state.pending))
+    if store.root.exists():
+        for state_path in store._session_state_paths():
+            session_hint = state_path.stem
+            with store._locked(session_hint):
+                state = store._read_checked_locked(session_hint)
+            if state.role != "update":
+                raise ValueError(f"async update state role mismatch: expected update, got {state.role}")
+            entries.extend(_entries_from_jobs(state, state.current_batch))
+            entries.extend(_entries_from_jobs(state, state.pending))
+
+    queue_store = UpdateQueueStore(memory_root)
+    candidates = [*queue_store.outbox_candidates(), *queue_store.snapshot().candidates]
+    for candidate in candidates:
+        entries.append(
+            RecentSubmittedMemoryEntry(
+                update_session_id=candidate.session_id,
+                candidate_id=candidate.display_id,
+                submitted_at=candidate.submitted_at,
+                message=candidate.message,
+                candidate_uid=candidate.uid,
+            )
+        )
+    # A publishing device may temporarily see the same immutable candidate in both lanes.
+    entries = list({entry.key: entry for entry in entries}.values())
     return sorted(
         entries,
-        key=lambda entry: (entry.submitted_at, entry.update_session_id, entry.candidate_id),
+        key=lambda entry: (
+            entry.submitted_at,
+            entry.update_session_id,
+            entry.candidate_uid or "",
+            entry.candidate_id,
+        ),
     )
 
 
@@ -165,6 +187,7 @@ def _entries_from_jobs(state: AsyncUpdateState, jobs: list[AsyncUpdateJob]) -> l
             candidate_id=job.id,
             submitted_at=job.submitted_at,
             message=job.message,
+            candidate_uid=job.candidate_uid,
         )
         for job in jobs
     ]

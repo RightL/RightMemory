@@ -6,7 +6,13 @@ from unittest.mock import patch
 
 from rightmemory.config import ReviewConfig, ReviewSourceConfig
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
-from rightmemory.review import REVIEW_NO_CANDIDATE, ReviewScanResult, ReviewScanner, ReviewStateStore
+from rightmemory.review import (
+    REVIEW_NO_CANDIDATE,
+    ReviewDeliveryReceipt,
+    ReviewScanResult,
+    ReviewScanner,
+    ReviewStateStore,
+)
 from rightmemory.transcripts.codex import parse_session as parse_codex_session
 from rightmemory.transcripts.claude import parse_session as parse_claude_session
 
@@ -76,6 +82,83 @@ class TranscriptParserTests(unittest.TestCase):
 
 
 class ReviewScannerTests(unittest.TestCase):
+    def test_delivery_recovery_uses_uid_when_concurrent_submit_takes_display_id(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            scanner = ReviewScanner(
+                ReviewConfig(memory_root=root, sources=[]),
+                lambda _session_id, _message: REVIEW_NO_CANDIDATE,
+            )
+            receipt = ReviewDeliveryReceipt(
+                batch_id="review-batch",
+                candidate="review candidate",
+                candidate_id=1,
+                candidate_uid="a" * 32,
+                reviewed_at="2026-07-21T00:00:00+00:00",
+                sessions=(),
+                reviewed_count=1,
+                skipped_duplicate_count=0,
+            )
+            with patch.object(scanner.update_store, "_start_worker_if_needed"):
+                scanner.update_store.submit(
+                    receipt.batch_id,
+                    "concurrent candidate",
+                    candidate_uid="b" * 32,
+                )
+                scanner.update_store.submit(
+                    receipt.batch_id,
+                    receipt.candidate,
+                    candidate_uid=receipt.candidate_uid,
+                )
+                scanner._resume_delivery(receipt)
+            state = scanner.update_store.read(receipt.batch_id)
+
+        self.assertEqual([job.id for job in state.pending], [1, 2])
+        self.assertEqual(
+            [job.candidate_uid for job in state.pending],
+            ["b" * 32, receipt.candidate_uid],
+        )
+
+    def test_delivery_recovery_submits_after_concurrent_display_id_was_processed(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            scanner = ReviewScanner(
+                ReviewConfig(memory_root=root, sources=[]),
+                lambda _session_id, _message: REVIEW_NO_CANDIDATE,
+            )
+            receipt = ReviewDeliveryReceipt(
+                batch_id="review-batch",
+                candidate="review candidate",
+                candidate_id=1,
+                candidate_uid="a" * 32,
+                reviewed_at="2026-07-21T00:00:00+00:00",
+                sessions=(),
+                reviewed_count=1,
+                skipped_duplicate_count=0,
+            )
+            with patch.object(scanner.update_store, "_start_worker_if_needed"):
+                scanner.update_store.submit(
+                    receipt.batch_id,
+                    "concurrent candidate",
+                    candidate_uid="b" * 32,
+                )
+            scanner.update_store.run_pending_batches(
+                lambda _session_id, _message: "updated",
+                target_batch_candidates=1,
+                max_wait_seconds=0,
+            )
+
+            with patch.object(scanner.update_store, "_start_worker_if_needed"):
+                scanner._resume_delivery(receipt)
+            state = scanner.update_store.read(receipt.batch_id)
+
+        self.assertEqual([job.id for job in state.pending], [2])
+        self.assertEqual(state.pending[0].candidate_uid, receipt.candidate_uid)
+        self.assertEqual(
+            state.accepted_candidate_uids,
+            ["b" * 32, receipt.candidate_uid],
+        )
+
     def test_scan_reviews_idle_session_and_updates_state(self):
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:
@@ -205,6 +288,8 @@ class ReviewScannerTests(unittest.TestCase):
                 side_effect=[OSError("no worker"), None],
             ) as start_worker:
                 first = scanner.scan_once(now=10_000)
+                delivery_path = next((root / ".runtime" / "review" / "deliveries").glob("*.json"))
+                delivery = json.loads(delivery_path.read_text(encoding="utf-8"))
                 second = scanner.scan_once(now=10_000)
             queued = next((root / ".runtime" / "async" / "update").glob("*.json"))
             queue_state = json.loads(queued.read_text(encoding="utf-8"))
@@ -216,6 +301,9 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertEqual(start_worker.call_count, 2)
         self.assertEqual(len(reviewer_calls), 1)
         self.assertEqual([item["message"] for item in queue_state["pending"]], ["first candidate wording"])
+        self.assertEqual(delivery["version"], 2)
+        self.assertRegex(delivery["candidate_uid"], r"^[0-9a-f]{32}$")
+        self.assertEqual(queue_state["pending"][0]["candidate_uid"], delivery["candidate_uid"])
         self.assertEqual(len(review_state.sessions), 1)
 
     def test_scan_recovers_receipt_when_submission_failed_before_queue_write(self):
@@ -242,13 +330,15 @@ class ReviewScannerTests(unittest.TestCase):
             )
             original_submit = scanner.update_store.submit
             submit_calls = 0
+            submitted_uids = []
 
-            def flaky_submit(session_id: str, candidate: str):
+            def flaky_submit(session_id: str, candidate: str, *, candidate_uid: str | None = None):
                 nonlocal submit_calls
                 submit_calls += 1
+                submitted_uids.append(candidate_uid)
                 if submit_calls == 1:
                     raise OSError("queue write failed")
-                return original_submit(session_id, candidate)
+                return original_submit(session_id, candidate, candidate_uid=candidate_uid)
 
             with (
                 patch.object(scanner.update_store, "submit", side_effect=flaky_submit),
@@ -263,8 +353,11 @@ class ReviewScannerTests(unittest.TestCase):
         self.assertEqual(first.reviewed, 0)
         self.assertEqual(second.reviewed, 1)
         self.assertEqual(submit_calls, 2)
+        self.assertEqual(len(set(submitted_uids)), 1)
+        self.assertRegex(submitted_uids[0] or "", r"^[0-9a-f]{32}$")
         self.assertEqual(len(reviewer_calls), 1)
         self.assertEqual([job.message for job in update_state.pending], ["candidate"])
+        self.assertEqual(update_state.pending[0].candidate_uid, submitted_uids[0])
         self.assertEqual(len(review_state.sessions), 1)
 
     def test_scan_recovers_delivery_after_state_save_failure_and_completed_update(self):

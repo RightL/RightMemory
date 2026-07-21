@@ -16,6 +16,7 @@ from .isolated_write import WorktreeLease
 from .semantic_operation import FINAL_PHASES, OperationEffect, SemanticOperationRecord, SemanticOperationStore
 from .session import MemoryWriteLock, _ensure_runtime_gitignore, _fsync_directory
 from .tools import MemoryTools
+from .update_queue import validate_update_queue
 
 
 MEMORY_SYNC_PATHS = (
@@ -33,11 +34,16 @@ MEMORY_SYNC_PATHS = (
     "shared_views/*/question.toml",
     "shared_views/*/.gitignore",
     "insight_logs/*.md",
+    "update_queue/candidates/*.json",
+    "update_queue/recovery/*.json",
+    "update_queue/lease.json",
 )
 REQUIRED_ROOT_DOCUMENTS = ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md")
 GIT_TIMEOUT_SECONDS = 30
 SYNC_BRANCH_PREFIX = "rightmemory-sync-"
 SYNC_REPAIR_POLICY_VERSION = "staged-sync-repair-v1"
+UPDATE_QUEUE_CANDIDATE_PATH_RE = re.compile(r"update_queue/candidates/[0-9a-f]{32}\.json")
+UPDATE_QUEUE_RECOVERY_PATH_RE = re.compile(r"update_queue/recovery/update-batch-[0-9a-f]{64}\.json")
 
 
 @dataclass(frozen=True)
@@ -176,6 +182,9 @@ class SyncManager:
         upstream = self._upstream()
         if upstream is None:
             return self._record_failure(SyncResult("unconfigured", "sync unconfigured"))
+        fetch = self._git("fetch")
+        if fetch.returncode != 0:
+            return self._record_failure(SyncResult("offline", "sync offline: git fetch failed"))
         upstream_commit = self._resolve_commit(upstream)
         if upstream_commit is None:
             return self._record_failure(SyncResult("error", "sync failed: upstream commit is unavailable"))
@@ -183,8 +192,13 @@ class SyncManager:
         if isinstance(captured, SyncResult):
             return self._record_failure(captured)
         ahead_behind = self._ahead_behind(captured, upstream_commit)
-        if ahead_behind is not None and ahead_behind[0] > 0:
+        if ahead_behind is None:
+            return self._record_failure(SyncResult("error", "sync failed: could not compare upstream"))
+        ahead, behind = ahead_behind
+        if ahead > 0:
             return self.push(repair=repair)
+        if behind > 0:
+            return self.pull(repair=repair)
 
         last_pull = self._last_successful_pull_at()
         stale_after = timedelta(hours=self.config.stale_pull_after_hours)
@@ -555,12 +569,34 @@ class SyncManager:
         merge = self._run_git(candidate.path, "merge", "--no-edit", upstream_commit)
         if merge.returncode != 0:
             conflicts = self._conflicted_files(candidate.path)
+            queue_conflicts = [path for path in conflicts if _is_update_queue_path(path)]
+            if queue_conflicts:
+                return _CandidateInspection(
+                    None,
+                    SyncResult(
+                        "error",
+                        "incoming update queue has a coordination conflict",
+                        sorted(queue_conflicts),
+                    ),
+                    start_commit,
+                    upstream_commit,
+                    True,
+                )
             invalid_conflicts = [path for path in conflicts if not _is_sync_path(path)]
             if not conflicts or invalid_conflicts:
                 files = invalid_conflicts or conflicts
                 return _CandidateInspection(
                     None,
                     SyncResult("error", "sync candidate merge failed outside repairable state", files),
+                    start_commit,
+                    upstream_commit,
+                    True,
+                )
+            invalid_queue = _invalid_update_queue_result(candidate.path)
+            if invalid_queue is not None:
+                return _CandidateInspection(
+                    None,
+                    invalid_queue,
                     start_commit,
                     upstream_commit,
                     True,
@@ -633,6 +669,9 @@ class SyncManager:
         invalid_files = self._non_regular_paths(candidate_root, changed_paths)
         if invalid_files:
             return SyncResult("error", "sync candidate contains a missing or non-regular required path", invalid_files)
+        invalid_queue = _invalid_update_queue_result(candidate_root)
+        if invalid_queue is not None:
+            return invalid_queue
         return self._invalid_graph_result(candidate_root)
 
     def _active_preflight(self) -> SyncResult | None:
@@ -647,6 +686,9 @@ class SyncManager:
         invalid_files = self._non_regular_paths(self.memory_root, ())
         if invalid_files:
             return SyncResult("conflict", "local memory root is incomplete", invalid_files)
+        invalid_queue = _invalid_update_queue_result(self.memory_root)
+        if invalid_queue is not None:
+            return invalid_queue
         return self._invalid_graph_result(self.memory_root)
 
     def _capture_valid_tip(self, upstream_commit: str) -> str | SyncResult:
@@ -1077,11 +1119,40 @@ class SyncManager:
 
 
 def _is_sync_path(path: str) -> bool:
+    if path.startswith("update_queue/"):
+        return _is_update_queue_path(path)
     for pattern in MEMORY_SYNC_PATHS:
         expression = re.escape(pattern).replace(r"\*", "[^/]*")
         if re.fullmatch(expression, path):
             return True
     return False
+
+
+def _is_update_queue_path(path: str) -> bool:
+    return (
+        path == "update_queue/lease.json"
+        or UPDATE_QUEUE_CANDIDATE_PATH_RE.fullmatch(path) is not None
+        or UPDATE_QUEUE_RECOVERY_PATH_RE.fullmatch(path) is not None
+    )
+
+
+def _invalid_update_queue_result(root: Path) -> SyncResult | None:
+    diagnostics = validate_update_queue(root)
+    if not diagnostics:
+        return None
+    files = sorted(
+        {
+            diagnostic.partition(":")[0]
+            for diagnostic in diagnostics
+            if diagnostic.partition(":")[0] == "update_queue"
+            or diagnostic.partition(":")[0].startswith("update_queue/")
+        }
+    )
+    return SyncResult(
+        "error",
+        "invalid synchronized update queue:\n" + "\n".join(f"- {item}" for item in diagnostics),
+        files,
+    )
 
 
 def _required_record_string(record: SemanticOperationRecord, key: str) -> str:

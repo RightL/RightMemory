@@ -107,6 +107,8 @@ class IsolatedWriteResult:
     landed_commit: str = ""
     changed_paths: tuple[str, ...] = ()
     operation_id: str | None = None
+    candidate_commit: str | None = None
+    prepared: bool = False
 
 
 class IsolatedWriteSupervisor:
@@ -121,6 +123,101 @@ class IsolatedWriteSupervisor:
         with store.execution_locked():
             self._drain_prepared_operations(store)
 
+    def complete_external(
+        self,
+        operation_id: str,
+        *,
+        external_finalizer: str,
+        landed_commit: str,
+    ) -> IsolatedWriteResult:
+        """Complete a prepared operation only after its external publication lands."""
+        self._ensure_repo_root()
+        store = SemanticOperationStore(self.memory_root)
+        with store.execution_locked():
+            operation = store.read(operation_id)
+            if operation is None:
+                raise FileNotFoundError(f"semantic operation does not exist: {operation_id}")
+            self._require_external_finalizer(operation, external_finalizer)
+            if operation.phase in FINAL_PHASES:
+                return self._result_from_operation(operation)
+            operation = store.claim_prepared(operation_id)
+            current_head = self._git_stdout(self.memory_root, "rev-parse", "HEAD")
+            if not self._is_ancestor(landed_commit, current_head):
+                raise RuntimeError("externally finalized commit is not present in the active checkout")
+            outcome = operation.outcome
+            if outcome is None:
+                raise RuntimeError(f"prepared operation has no outcome: {operation_id}")
+            if outcome.metadata.get("candidate_commit") is None:
+                completed = store.complete_no_change(operation_id, landed_commit)
+            else:
+                completed = store.complete_commit(operation_id, landed_commit)
+            self._delete_operation_ref(operation_id)
+            return self._result_from_operation(completed)
+
+    def restart_external(
+        self,
+        operation_id: str,
+        *,
+        external_finalizer: str,
+        reason: str,
+    ) -> None:
+        """Discard a stale prepared result while retaining its durable identity."""
+        self._ensure_repo_root()
+        store = SemanticOperationStore(self.memory_root)
+        with store.execution_locked():
+            operation = store.claim_prepared(operation_id)
+            self._require_external_finalizer(operation, external_finalizer)
+            store.restart_prepared(
+                operation_id,
+                expected_metadata={"external_finalizer": external_finalizer},
+                reason=reason,
+            )
+            self._delete_operation_ref(operation_id)
+
+    def supersede_external(
+        self,
+        operation_id: str,
+        *,
+        external_finalizer: str,
+        landed_commit: str,
+    ) -> None:
+        """Settle a stale prepared result after another fenced owner publishes."""
+        self._ensure_repo_root()
+        store = SemanticOperationStore(self.memory_root)
+        with store.execution_locked():
+            operation = store.claim_prepared(operation_id)
+            self._require_external_finalizer(operation, external_finalizer)
+            current_head = self._git_stdout(self.memory_root, "rev-parse", "HEAD")
+            if not self._is_ancestor(landed_commit, current_head):
+                raise RuntimeError("superseding commit is not present in the active checkout")
+            store.supersede_prepared(
+                operation_id,
+                expected_metadata={"external_finalizer": external_finalizer},
+                landed_commit=landed_commit,
+            )
+            self._delete_operation_ref(operation_id)
+
+    def supersede_running(
+        self,
+        operation_id: str,
+        *,
+        landed_commit: str,
+        reason: str,
+    ) -> None:
+        """Settle abandoned execution after Git proves its batch is terminal."""
+        self._ensure_repo_root()
+        store = SemanticOperationStore(self.memory_root)
+        with store.execution_locked():
+            current_head = self._git_stdout(self.memory_root, "rev-parse", "HEAD")
+            if not self._is_ancestor(landed_commit, current_head):
+                raise RuntimeError("superseding commit is not present in the active checkout")
+            store.supersede_running(
+                operation_id,
+                landed_commit=landed_commit,
+                reason=reason,
+            )
+            self._delete_operation_ref(operation_id)
+
     def run(
         self,
         run_in_worktree: Callable[[Path], Any],
@@ -129,13 +226,20 @@ class IsolatedWriteSupervisor:
         operation_input: Mapping[str, Any] | None = None,
         effects_for_outcome: Callable[[tuple[str, ...], int], Iterable[OperationEffect]] | None = None,
         prepare_effects: Callable[[str, Path], None] | None = None,
+        external_finalizer: str | None = None,
     ) -> IsolatedWriteResult:
+        if external_finalizer is not None:
+            if not isinstance(external_finalizer, str) or not external_finalizer.strip():
+                raise ValueError("external_finalizer must be a non-empty string")
+            if operation_id is None:
+                raise ValueError("external_finalizer requires operation_id")
         if operation_id is None:
             return self._run_claimed(
                 run_in_worktree,
                 operation_input=operation_input,
                 effects_for_outcome=effects_for_outcome,
                 prepare_effects=prepare_effects,
+                external_finalizer=external_finalizer,
             )
         self._ensure_repo_root()
         store = SemanticOperationStore(self.memory_root)
@@ -147,6 +251,7 @@ class IsolatedWriteSupervisor:
                 operation_input=operation_input,
                 effects_for_outcome=effects_for_outcome,
                 prepare_effects=prepare_effects,
+                external_finalizer=external_finalizer,
             )
 
     def _run_claimed(
@@ -157,6 +262,7 @@ class IsolatedWriteSupervisor:
         operation_input: Mapping[str, Any] | None = None,
         effects_for_outcome: Callable[[tuple[str, ...], int], Iterable[OperationEffect]] | None = None,
         prepare_effects: Callable[[str, Path], None] | None = None,
+        external_finalizer: str | None = None,
     ) -> IsolatedWriteResult:
         self._ensure_repo_root()
         operation_store: SemanticOperationStore | None = None
@@ -172,6 +278,13 @@ class IsolatedWriteSupervisor:
                 self._delete_operation_ref(operation_id)
                 return self._result_from_operation(operation)
             if operation.phase == "prepared":
+                recorded_finalizer = operation.outcome.metadata.get("external_finalizer")
+                if recorded_finalizer is not None:
+                    if recorded_finalizer != external_finalizer:
+                        raise RuntimeError(
+                            f"prepared operation requires external finalizer: {recorded_finalizer}"
+                        )
+                    return self._result_from_operation(operation)
                 return self._resume_prepared_operation(operation_store, operation)
             self._delete_operation_ref(operation_id)
 
@@ -250,7 +363,24 @@ class IsolatedWriteSupervisor:
                         start_commit=start_head,
                         changed_paths=changed_paths,
                         effects=effects,
-                        metadata={"candidate_commit": commits[0] if commits else None},
+                        metadata={
+                            "candidate_commit": commits[0] if commits else None,
+                            **(
+                                {"external_finalizer": external_finalizer}
+                                if external_finalizer is not None
+                                else {}
+                            ),
+                        },
+                    )
+                if external_finalizer is not None:
+                    return IsolatedWriteResult(
+                        output=output,
+                        commits_landed=0,
+                        start_commit=start_head,
+                        changed_paths=changed_paths,
+                        operation_id=operation_id,
+                        candidate_commit=commits[0] if commits else None,
+                        prepared=True,
                     )
                 if commits:
                     if operation_store is None:
@@ -271,6 +401,7 @@ class IsolatedWriteSupervisor:
                 landed_commit=landed_commit,
                 changed_paths=changed_paths,
                 operation_id=operation_id,
+                candidate_commit=commits[0] if commits else None,
             )
         except Exception as exc:
             if operation_store is not None and operation_id is not None:
@@ -359,6 +490,7 @@ class IsolatedWriteSupervisor:
             landed_commit=landed_commit,
             changed_paths=outcome.changed_paths,
             operation_id=operation.operation_id,
+            candidate_commit=candidate if isinstance(candidate, str) else None,
         )
 
     def _drain_prepared_operations(self, store: SemanticOperationStore) -> None:
@@ -371,6 +503,9 @@ class IsolatedWriteSupervisor:
         for record in prepared:
             if record.input_data.get("kind") == "sync-repair":
                 # Sync owns candidate validation and exact fast-forward publication.
+                continue
+            if record.outcome.metadata.get("external_finalizer") is not None:
+                # The external owner must prove publication before this can land.
                 continue
             role = record.input_data.get("role")
             if not isinstance(role, str):
@@ -385,6 +520,7 @@ class IsolatedWriteSupervisor:
         outcome = operation.outcome
         if outcome is None:
             raise RuntimeError(f"completed operation has no outcome: {operation.operation_id}")
+        candidate = outcome.metadata.get("candidate_commit")
         return IsolatedWriteResult(
             output=outcome.output,
             commits_landed=1 if operation.phase == "committed" else 0,
@@ -392,7 +528,21 @@ class IsolatedWriteSupervisor:
             landed_commit=outcome.landed_commit or outcome.start_commit,
             changed_paths=outcome.changed_paths,
             operation_id=operation.operation_id,
+            candidate_commit=candidate if isinstance(candidate, str) else None,
+            prepared=operation.phase == "prepared",
         )
+
+    def _require_external_finalizer(
+        self,
+        operation: SemanticOperationRecord,
+        expected: str,
+    ) -> None:
+        outcome = operation.outcome
+        actual = None if outcome is None else outcome.metadata.get("external_finalizer")
+        if actual != expected:
+            raise RuntimeError(
+                f"operation {operation.operation_id} is not owned by external finalizer {expected}"
+            )
 
     def cleanup_stale(self) -> None:
         role_slug = _safe_role_slug(self.role)

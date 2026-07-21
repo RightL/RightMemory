@@ -1,9 +1,20 @@
+import hashlib
+import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
-import os
+from datetime import UTC, datetime
 from pathlib import Path
+
+from rightmemory.update_queue import (
+    UpdateCandidate,
+    UpdateQueueLease,
+    UpdateQueueRecovery,
+    UpdateQueueStore,
+    update_candidate_batch_id,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -299,6 +310,455 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(status, "")
         self.assertIn("shares.toml", committed_files)
 
+    def test_initial_install_baselines_existing_update_queue_files(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+            (memory_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+            (memory_root / "PURSUIT_RULES.md").write_text("# Rules\n", encoding="utf-8")
+            candidate_uid = "a" * 32
+            timestamp = datetime.now(UTC).isoformat()
+            queue = UpdateQueueStore(memory_root)
+            candidate_record = UpdateCandidate(
+                candidate_uid,
+                "session",
+                1,
+                "remember this",
+                timestamp,
+            )
+            batch_id = update_candidate_batch_id((candidate_record,))
+            candidate = queue.write_candidate(candidate_record)
+            recovery = queue.write_recovery(
+                UpdateQueueRecovery(batch_id, (candidate_uid,), 1, "retry", timestamp)
+            )
+            lease = queue.write_lease(
+                UpdateQueueLease("c" * 32, "d" * 32, "e" * 40, batch_id, (candidate_uid,), timestamp)
+            )
+
+            self._install(memory_root, skills_target)
+            committed_files = self._git(memory_root, "ls-tree", "--name-only", "-r", "HEAD").splitlines()
+
+        self.assertIn(candidate.relative_to(memory_root).as_posix(), committed_files)
+        self.assertIn(recovery.relative_to(memory_root).as_posix(), committed_files)
+        self.assertIn(lease.relative_to(memory_root).as_posix(), committed_files)
+
+    def test_install_refuses_malformed_existing_update_queue_without_changes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+            (memory_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+            (memory_root / "PURSUIT_RULES.md").write_text("# Rules\n", encoding="utf-8")
+            candidate = memory_root / "update_queue" / "candidates" / f"{'a' * 32}.json"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_text("{not json\n", encoding="utf-8")
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RightMemory update queue is invalid", result.stderr)
+        self.assertIn(candidate.relative_to(memory_root).as_posix(), result.stderr)
+        self.assertFalse((memory_root / ".git").exists())
+
+    def test_queue_only_root_is_refused_without_bootstrap(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            lease = memory_root / "update_queue" / "lease.json"
+            lease.parent.mkdir(parents=True)
+            lease.write_text("{}\n", encoding="utf-8")
+
+            result = self._run_install(memory_root, skills_target, check=False)
+            memory_created = (memory_root / "MEMORY.md").exists()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RightMemory update queue is invalid", result.stderr)
+        self.assertFalse(memory_created)
+
+    def test_install_validates_malformed_queue_before_new_target_bootstrap(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            queue_path = memory_root / "update_queue"
+            queue_path.write_text("not a queue directory\n", encoding="utf-8")
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RightMemory update queue is invalid", result.stderr)
+        self.assertIn("update_queue: must be a directory", result.stderr)
+        self.assertFalse((memory_root / "MEMORY.md").exists())
+        self.assertFalse((memory_root / ".git").exists())
+
+    def test_install_refuses_live_legacy_async_updates_before_changes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+            state_path = memory_root / ".runtime" / "async" / "update" / "legacy-session.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "session_id": "legacy-session",
+                        "role": "update",
+                        "phase": "waiting",
+                        "current_batch": [],
+                        "pending": [
+                            {
+                                "id": 1,
+                                "message": "legacy pending evidence",
+                                "submitted_at": "2026-07-20T00:00:00+00:00",
+                            }
+                        ],
+                        "next_id": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("live async updates are incompatible", result.stderr)
+        self.assertIn(state_path.relative_to(memory_root).as_posix(), result.stderr)
+        self.assertIn("finish, retry, or undo every live update", result.stderr)
+        self.assertIn("`pending: 0`", result.stderr)
+        self.assertIn("`current_batch: 0`", result.stderr)
+        self.assertFalse((memory_root / ".git").exists())
+        self.assertFalse(skills_target.exists())
+
+    def test_install_allows_drained_legacy_async_state(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+            state_path = memory_root / ".runtime" / "async" / "update" / "drained-session.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "succeeded",
+                        "session_id": "drained-session",
+                        "role": "update",
+                        "current_batch": [],
+                        "pending": [],
+                        "next_id": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_install_refuses_non_directory_async_root_before_changes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+            async_root = memory_root / ".runtime" / "async" / "update"
+            async_root.parent.mkdir(parents=True)
+            async_root.write_text("not a directory\n", encoding="utf-8")
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("live async updates are incompatible", result.stderr)
+        self.assertIn(async_root.relative_to(memory_root).as_posix(), result.stderr)
+        self.assertFalse((memory_root / ".git").exists())
+        self.assertFalse(skills_target.exists())
+
+    def test_install_refuses_unsafe_runtime_state_parent_containers(self):
+        cases = (
+            ("async-file", Path(".runtime/async"), "file", "live async updates"),
+            ("async-symlink", Path(".runtime/async"), "symlink", "live async updates"),
+            ("review-file", Path(".runtime/review"), "file", "pending transcript-review"),
+            ("review-symlink", Path(".runtime/review"), "symlink", "pending transcript-review"),
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            for name, relative, kind, diagnostic in cases:
+                with self.subTest(name=name):
+                    memory_root = root / name / "memory"
+                    skills_target = root / name / "skills"
+                    memory_root.mkdir(parents=True)
+                    for required in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+                        (memory_root / required).write_text(f"# {required}\n", encoding="utf-8")
+                    container = memory_root / relative
+                    container.parent.mkdir(parents=True)
+                    if kind == "file":
+                        container.write_text("not a directory\n", encoding="utf-8")
+                    else:
+                        external = root / name / "external"
+                        external.mkdir()
+                        container.symlink_to(external, target_is_directory=True)
+
+                    result = self._run_install(memory_root, skills_target, check=False)
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(diagnostic, result.stderr)
+                    self.assertIn(relative.as_posix(), result.stderr)
+                    self.assertFalse(skills_target.exists())
+
+    def test_install_refuses_drained_unsupported_async_state_before_changes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+            state_path = memory_root / ".runtime" / "async" / "update" / "drained-session.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "succeeded",
+                        "session_id": "drained-session",
+                        "role": "update",
+                        "current": None,
+                        "queued": [],
+                        "next_id": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("live async updates are incompatible", result.stderr)
+        self.assertIn(state_path.relative_to(memory_root).as_posix(), result.stderr)
+        self.assertIn("archive any listed drained legacy state", result.stderr)
+        self.assertFalse((memory_root / ".git").exists())
+        self.assertFalse(skills_target.exists())
+
+    def test_install_refuses_legacy_async_batch_reservation_before_changes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+            reservation = (
+                memory_root
+                / ".runtime"
+                / "async"
+                / "update"
+                / "_batches"
+                / ("a" * 64 + ".json")
+            )
+            reservation.parent.mkdir(parents=True)
+            reservation.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "operation_id": "update-batch-" + "a" * 64,
+                        "created_at": "2026-07-20T00:00:00+00:00",
+                        "participants": [
+                            {
+                                "session_id": "legacy-session",
+                                "ready_at": "2026-07-20T00:00:00+00:00",
+                                "jobs": [
+                                    {
+                                        "id": 1,
+                                        "message": "legacy reserved evidence",
+                                        "submitted_at": "2026-07-20T00:00:00+00:00",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("live async updates are incompatible", result.stderr)
+        self.assertIn(reservation.relative_to(memory_root).as_posix(), result.stderr)
+        self.assertFalse((memory_root / ".git").exists())
+        self.assertFalse(skills_target.exists())
+
+    def test_install_refuses_legacy_pending_review_delivery_before_changes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+            delivery = memory_root / ".runtime" / "review" / "deliveries" / "legacy.json"
+            delivery.parent.mkdir(parents=True)
+            delivery.write_text(
+                json.dumps({"version": 1, "batch_id": "legacy"}),
+                encoding="utf-8",
+            )
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pending transcript-review deliveries are incompatible", result.stderr)
+        self.assertIn(delivery.relative_to(memory_root).as_posix(), result.stderr)
+        self.assertFalse((memory_root / ".git").exists())
+        self.assertFalse(skills_target.exists())
+
+    def test_install_refuses_malformed_v2_review_delivery_before_changes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+            batch_id = "review-batch"
+            filename = hashlib.sha256(batch_id.encode("utf-8")).hexdigest() + ".json"
+            delivery = memory_root / ".runtime" / "review" / "deliveries" / filename
+            delivery.parent.mkdir(parents=True)
+            delivery.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "batch_id": batch_id,
+                        "candidate_uid": "a" * 32,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pending transcript-review deliveries are incompatible", result.stderr)
+        self.assertIn(delivery.relative_to(memory_root).as_posix(), result.stderr)
+        self.assertFalse((memory_root / ".git").exists())
+        self.assertFalse(skills_target.exists())
+
+    def test_install_accepts_valid_v2_review_delivery(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+            batch_id = "review-batch"
+            reviewed_at = "2026-07-20T00:00:00+00:00"
+            filename = hashlib.sha256(batch_id.encode("utf-8")).hexdigest() + ".json"
+            delivery = memory_root / ".runtime" / "review" / "deliveries" / filename
+            delivery.parent.mkdir(parents=True)
+            delivery.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "batch_id": batch_id,
+                        "candidate": "durable review evidence",
+                        "candidate_id": 1,
+                        "candidate_uid": "a" * 32,
+                        "reviewed_at": reviewed_at,
+                        "sessions": [
+                            {
+                                "session_id": "session-1",
+                                "source": "codex",
+                                "last_reviewed_at": reviewed_at,
+                            }
+                        ],
+                        "reviewed_count": 1,
+                        "skipped_duplicate_count": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_install_refuses_valid_review_delivery_under_wrong_filename(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+            reviewed_at = "2026-07-20T00:00:00+00:00"
+            delivery = memory_root / ".runtime" / "review" / "deliveries" / "wrong.json"
+            delivery.parent.mkdir(parents=True)
+            delivery.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "batch_id": "review-batch",
+                        "candidate": "durable review evidence",
+                        "candidate_id": 1,
+                        "candidate_uid": "a" * 32,
+                        "reviewed_at": reviewed_at,
+                        "sessions": [
+                            {
+                                "session_id": "session-1",
+                                "source": "codex",
+                                "last_reviewed_at": reviewed_at,
+                            }
+                        ],
+                        "reviewed_count": 1,
+                        "skipped_duplicate_count": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pending transcript-review deliveries are incompatible", result.stderr)
+        self.assertIn(delivery.relative_to(memory_root).as_posix(), result.stderr)
+        self.assertFalse(skills_target.exists())
+
+    def test_install_refuses_symlink_review_delivery_root_before_changes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+            external = root / "external-deliveries"
+            external.mkdir()
+            deliveries_root = memory_root / ".runtime" / "review" / "deliveries"
+            deliveries_root.parent.mkdir(parents=True)
+            deliveries_root.symlink_to(external, target_is_directory=True)
+
+            result = self._run_install(memory_root, skills_target, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pending transcript-review deliveries are incompatible", result.stderr)
+        self.assertIn(deliveries_root.relative_to(memory_root).as_posix(), result.stderr)
+        self.assertFalse((memory_root / ".git").exists())
+        self.assertFalse(skills_target.exists())
+
     def test_install_preserves_existing_memory_repo_author(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -526,7 +986,13 @@ class InstallScriptTests(unittest.TestCase):
             "!shared_views/*/question.toml\n"
             "!shared_views/*/.gitignore\n"
             "!insight_logs/\n"
-            "!insight_logs/*.md\n",
+            "!insight_logs/*.md\n"
+            "!update_queue/\n"
+            "!update_queue/candidates/\n"
+            "!update_queue/candidates/*.json\n"
+            "!update_queue/recovery/\n"
+            "!update_queue/recovery/*.json\n"
+            "!update_queue/lease.json\n",
         )
 
     def test_cli_agent_installs_exactly_two_independent_command_backed_skills(self):

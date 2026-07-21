@@ -260,6 +260,149 @@ class RightMemoryRuntime:
                 self._create_update_review(output)
             return output
 
+    def prepare_session_turn_external(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        operation_id: str,
+        external_finalizer: str,
+    ) -> IsolatedWriteResult:
+        """Prepare an isolated semantic turn without landing it in the active root."""
+        if not self._should_isolate_write_turn():
+            raise RuntimeError("external finalization requires an isolated automatic-write role")
+        with self._update_execution_lock():
+            self._last_write_result = None
+            self._last_reviewed_update_commit = None
+            self._run_session_turn_isolated(
+                session_id,
+                message,
+                operation_id=operation_id,
+                external_finalizer=external_finalizer,
+            )
+            if self._last_write_result is None or not self._last_write_result.prepared:
+                raise RuntimeError("external semantic turn did not produce a prepared result")
+            return self._last_write_result
+
+    def complete_session_turn_external(
+        self,
+        session_id: str,
+        *,
+        operation_id: str,
+        external_finalizer: str,
+        landed_commit: str,
+    ) -> str:
+        """Confirm external publication, then apply local state and review effects."""
+        with self._update_execution_lock():
+            supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
+            result = supervisor.complete_external(
+                operation_id,
+                external_finalizer=external_finalizer,
+                landed_commit=landed_commit,
+            )
+            self._last_write_result = result
+            state = _IsolatedStateOverlay(
+                self.config.state_root,
+                self.config.role,
+                session_id,
+                operation_id=operation_id,
+                seed_provider_session=self.config.runtime_mode != "cli-agent",
+            )
+            with self.sessions.locked(session_id):
+                self._run_operation_effects(operation_id, state, effect_names={STATE_EFFECT})
+            self._run_operation_effects(operation_id, state, exclude_effects={STATE_EFFECT})
+            self._retry_pending_operation_effects(exclude=operation_id)
+            return str(result.output)
+
+    def restart_session_turn_external(
+        self,
+        session_id: str,
+        *,
+        operation_id: str,
+        external_finalizer: str,
+        reason: str,
+    ) -> None:
+        """Reset a prepared turn after its semantic base loses the Git fence."""
+        with self._update_execution_lock():
+            supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
+            supervisor.restart_external(
+                operation_id,
+                external_finalizer=external_finalizer,
+                reason=reason,
+            )
+            store = SemanticOperationStore(self.config.memory_root)
+            store.clear_effect_state(operation_id, PUBLISH_EFFECT)
+            state = _IsolatedStateOverlay(
+                self.config.state_root,
+                self.config.role,
+                session_id,
+                operation_id=operation_id,
+                seed_provider_session=self.config.runtime_mode != "cli-agent",
+            )
+            try:
+                state.archive_failed_provider_session()
+            finally:
+                state.cleanup()
+
+    def supersede_session_turn_external(
+        self,
+        session_id: str,
+        *,
+        operation_id: str,
+        external_finalizer: str,
+        landed_commit: str,
+    ) -> None:
+        """Discard local prepared effects after another lease owner publishes."""
+        with self._update_execution_lock():
+            supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
+            supervisor.supersede_external(
+                operation_id,
+                external_finalizer=external_finalizer,
+                landed_commit=landed_commit,
+            )
+            store = SemanticOperationStore(self.config.memory_root)
+            store.clear_effect_state(operation_id, PUBLISH_EFFECT)
+            state = _IsolatedStateOverlay(
+                self.config.state_root,
+                self.config.role,
+                session_id,
+                operation_id=operation_id,
+                seed_provider_session=self.config.runtime_mode != "cli-agent",
+            )
+            try:
+                state.archive_failed_provider_session()
+            finally:
+                state.cleanup()
+
+    def supersede_running_session_turn(
+        self,
+        session_id: str,
+        *,
+        operation_id: str,
+        landed_commit: str,
+    ) -> None:
+        """Discard abandoned local execution after its Git batch became terminal."""
+        with self._update_execution_lock():
+            supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
+            supervisor.supersede_running(
+                operation_id,
+                landed_commit=landed_commit,
+                reason="superseded by a terminal synchronized queue transaction",
+            )
+            store = SemanticOperationStore(self.config.memory_root)
+            store.clear_effect_state(operation_id, PUBLISH_EFFECT)
+            state = _IsolatedStateOverlay(
+                self.config.state_root,
+                self.config.role,
+                session_id,
+                operation_id=operation_id,
+                seed_provider_session=self.config.runtime_mode != "cli-agent",
+            )
+            try:
+                state.archive_failed_provider_session()
+            finally:
+                state.cleanup()
+
     def _run_session_turn_unlocked(
         self,
         session_id: str,
@@ -590,6 +733,7 @@ class RightMemoryRuntime:
         *,
         on_started: Callable[[], None] | None = None,
         operation_id: str | None = None,
+        external_finalizer: str | None = None,
     ):
         def run_in_operation(worktree: Path, state_root: Path):
             if on_started is None:
@@ -607,6 +751,7 @@ class RightMemoryRuntime:
             operation_id,
             {"kind": "semantic-turn", "message": message},
             run_in_operation,
+            external_finalizer=external_finalizer,
         )
 
     def _run_prune_turn_isolated(
@@ -634,6 +779,8 @@ class RightMemoryRuntime:
         operation_id: str | None,
         operation_input: dict[str, object],
         run_in_operation: Callable[[Path, Path], Any],
+        *,
+        external_finalizer: str | None = None,
     ):
         clean_operation_id = operation_id or f"{self.config.role}-{uuid.uuid4().hex}"
         operation_input = {
@@ -684,6 +831,7 @@ class RightMemoryRuntime:
                         pressure_points=pressure_points,
                     ),
                     prepare_effects=self._prepare_operation_effects,
+                    external_finalizer=external_finalizer,
                 )
                 self._last_write_result = result
                 if store.read(clean_operation_id) is None:

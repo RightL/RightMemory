@@ -1,19 +1,26 @@
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
-from rightmemory.async_update import AsyncUpdateState, AsyncUpdateStore
+from rightmemory.async_update import WORKER_IDLE_POLL_SECONDS, AsyncUpdateState, AsyncUpdateStore
 from rightmemory.cli import (
+    _async_worker,
+    _candidate_reference,
     _daemon_stdio_json,
     _dreamer_watch_once,
     _finish_sync_repair,
     _handle_json_request,
     _insight_watch_once,
     _require_completed_correction_operation,
+    _recover_synchronized_update_operations,
+    _run_synchronized_update_batch,
     _run_update_review_scan,
     _run_update_review_correction,
     _stored_correction_message,
@@ -21,7 +28,7 @@ from rightmemory.cli import (
     cli_main,
     main,
 )
-from rightmemory.config import DreamerWatchConfig, InsightWatchConfig
+from rightmemory.config import DreamerWatchConfig, InsightWatchConfig, SyncConfig
 from rightmemory.dreamer_trigger import DreamerTriggerStore
 from rightmemory.doctor import DoctorCheck
 from rightmemory.hub.store import HubStore
@@ -33,6 +40,7 @@ from rightmemory.shared_view_files import FileViewPullResult
 from rightmemory.shared_view_models import SharedViewConnection, SharedViewTarget, load_shared_view_credential, save_connections
 from rightmemory.watch import MANAGED_WATCH_TARGETS, WATCH_COMMANDS, _process_command, _write_pid, watch_stop_path
 from rightmemory.update_review import UpdateReviewProcessResult, UpdateReviewRequest
+from rightmemory.update_queue import UpdateQueueStore
 
 
 class FakeRuntime:
@@ -71,6 +79,198 @@ def _fake_async_worker_process(pid: int = 123):
 
 
 class CliEntrypointTests(unittest.TestCase):
+    def test_candidate_reference_preserves_all_digit_uid_prefix(self):
+        self.assertEqual(_candidate_reference("12345678"), "12345678")
+        self.assertEqual(_candidate_reference("1234567"), 1234567)
+
+    def test_offline_synchronized_queue_yields_to_never_published_local_work(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            store = AsyncUpdateStore(memory_root, "update")
+            with patch.object(store, "_start_worker_if_needed"):
+                attempted_state = store.submit("agent-a", "attempted")
+                local_state = store.submit("agent-b", "local only")
+            attempted = attempted_state.pending[0]
+            UpdateQueueStore(memory_root).begin_publication(
+                attempted.candidate_uid,
+                attempted_at=attempted.submitted_at,
+            )
+            coordinator = Mock()
+            coordinator.store = UpdateQueueStore(memory_root)
+            coordinator.publish_outbox.side_effect = (
+                SimpleNamespace(
+                    settled_uids=(),
+                    unresolved_uids=(attempted.candidate_uid,),
+                    online=False,
+                ),
+                SimpleNamespace(
+                    settled_uids=(attempted.candidate_uid,),
+                    unresolved_uids=(),
+                    online=True,
+                ),
+            )
+            coordinator.claim_next.side_effect = (
+                SimpleNamespace(claim=None, next_attempt_at=None, online=False),
+                SimpleNamespace(claim=None, next_attempt_at=None, online=True),
+            )
+            run_batch = Mock(return_value="processed locally")
+
+            with (
+                patch(
+                    "rightmemory.cli.load_async_update_config",
+                    return_value=SimpleNamespace(
+                        target_batch_candidates=1,
+                        max_wait_seconds=0,
+                    ),
+                ),
+                patch(
+                    "rightmemory.cli.load_sync_config",
+                    return_value=SyncConfig(memory_root=memory_root, enabled=True),
+                ),
+                patch(
+                    "rightmemory.cli.GitUpdateQueueCoordinator",
+                    return_value=coordinator,
+                ),
+                patch("rightmemory.cli._recover_synchronized_update_operations"),
+                patch("rightmemory.cli._run_async_update_batch", run_batch),
+            ):
+                result = _async_worker(memory_root, "update")
+
+            attempted_after = store.read("agent-a")
+            local_after = store.read("agent-b")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(attempted_after.pending, [])
+        self.assertEqual(local_after.pending, [])
+        run_batch.assert_called_once()
+        self.assertIn("local only", run_batch.call_args.args[3])
+
+    def test_remote_lease_wait_yields_to_ready_local_work(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            store = AsyncUpdateStore(memory_root, "update")
+            with patch.object(store, "_start_worker_if_needed"):
+                store.submit("agent-local", "process before remote lease expires")
+            coordinator = Mock()
+            coordinator.store = UpdateQueueStore(memory_root)
+            coordinator.publish_outbox.return_value = SimpleNamespace(
+                settled_uids=(),
+                unresolved_uids=(),
+                online=True,
+            )
+            coordinator.claim_next.side_effect = (
+                SimpleNamespace(
+                    claim=None,
+                    next_attempt_at=datetime.now(UTC) + timedelta(hours=6),
+                    online=True,
+                ),
+                SimpleNamespace(claim=None, next_attempt_at=None, online=True),
+            )
+            run_batch = Mock(return_value="processed locally")
+
+            with (
+                patch(
+                    "rightmemory.cli.load_async_update_config",
+                    return_value=SimpleNamespace(
+                        target_batch_candidates=1,
+                        max_wait_seconds=0,
+                    ),
+                ),
+                patch(
+                    "rightmemory.cli.load_sync_config",
+                    return_value=SyncConfig(memory_root=memory_root, enabled=True),
+                ),
+                patch(
+                    "rightmemory.cli.GitUpdateQueueCoordinator",
+                    return_value=coordinator,
+                ),
+                patch("rightmemory.cli._recover_synchronized_update_operations"),
+                patch("rightmemory.cli._run_async_update_batch", run_batch),
+                patch(
+                    "rightmemory.cli.time.sleep",
+                    side_effect=AssertionError("ready local work must not wait for a remote lease"),
+                ),
+            ):
+                result = _async_worker(memory_root, "update")
+
+            final_state = store.read("agent-local")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(final_state.pending, [])
+        run_batch.assert_called_once()
+
+    def test_remote_wait_polls_for_local_work_submitted_during_sleep(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            coordinator = Mock()
+            coordinator.store = UpdateQueueStore(memory_root)
+            coordinator.publish_outbox.return_value = SimpleNamespace(
+                settled_uids=(),
+                unresolved_uids=(),
+                online=True,
+            )
+            coordinator.claim_next.side_effect = (
+                SimpleNamespace(
+                    claim=None,
+                    next_attempt_at=datetime.now(UTC) + timedelta(hours=6),
+                    online=True,
+                ),
+                SimpleNamespace(claim=None, next_attempt_at=None, online=True),
+            )
+            run_batch = Mock(return_value="processed locally")
+            sleep_calls = []
+
+            def submit_during_sleep(seconds):
+                sleep_calls.append(seconds)
+                store = AsyncUpdateStore(memory_root, "update")
+                with patch.object(store, "_start_worker_if_needed"):
+                    store.submit("agent-local", "arrived during remote wait")
+
+            with (
+                patch(
+                    "rightmemory.cli.load_async_update_config",
+                    return_value=SimpleNamespace(
+                        target_batch_candidates=1,
+                        max_wait_seconds=0,
+                    ),
+                ),
+                patch(
+                    "rightmemory.cli.load_sync_config",
+                    return_value=SyncConfig(memory_root=memory_root, enabled=True),
+                ),
+                patch(
+                    "rightmemory.cli.GitUpdateQueueCoordinator",
+                    return_value=coordinator,
+                ),
+                patch("rightmemory.cli._recover_synchronized_update_operations"),
+                patch("rightmemory.cli._run_async_update_batch", run_batch),
+                patch("rightmemory.cli.time.sleep", side_effect=submit_during_sleep),
+            ):
+                result = _async_worker(memory_root, "update")
+
+            final_state = AsyncUpdateStore(memory_root, "update").read("agent-local")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(final_state.pending, [])
+        self.assertEqual(len(sleep_calls), 1)
+        self.assertLessEqual(sleep_calls[0], WORKER_IDLE_POLL_SECONDS)
+        run_batch.assert_called_once()
+
+    def test_synchronized_batch_releases_lease_when_local_runtime_cannot_load(self):
+        coordinator = Mock()
+        claim = SimpleNamespace(lease=SimpleNamespace(token="a" * 32))
+
+        with patch("rightmemory.cli.load_config", side_effect=ValueError("missing model")):
+            completed = _run_synchronized_update_batch(
+                Path("/memory"),
+                "update",
+                coordinator,
+                claim,
+            )
+
+        self.assertFalse(completed)
+        coordinator.release.assert_called_once_with(claim)
+
     def test_cli_main_reports_expected_errors_without_traceback(self):
         stderr = io.StringIO()
 
@@ -80,6 +280,158 @@ class CliEntrypointTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertEqual(stderr.getvalue(), "error: hub request failed: HTTP 404\n")
         self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_synchronized_recovery_replays_effects_from_final_operation(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=root,
+                check=True,
+            )
+            (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+            subprocess.run(["git", "add", "MEMORY.md"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=root, check=True)
+            start = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip()
+            batch_id = "update-batch-" + "a" * 64
+            token = "1" * 32
+            subprocess.run(
+                [
+                    "git",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    f"finalize\n\nRightMemory-Queue-Token: {token}\nRightMemory-Queue-Batch: {batch_id}",
+                ],
+                cwd=root,
+                check=True,
+            )
+            landed = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip()
+            store = SemanticOperationStore(root)
+            store.begin(
+                batch_id,
+                {"kind": "semantic-turn", "role": "update", "session_id": batch_id},
+                effects=(OperationEffect("session-state"),),
+            )
+            store.prepare_outcome(
+                batch_id,
+                output="done",
+                start_commit=start,
+                changed_paths=(),
+                metadata={"candidate_commit": None, "external_finalizer": f"update-queue:{token}"},
+            )
+            store.complete_no_change(batch_id, landed)
+            calls = []
+
+            class RecoveryRuntime:
+                def __init__(self, _config):
+                    pass
+
+                def complete_session_turn_external(self, session_id, **kwargs):
+                    calls.append((session_id, kwargs))
+                    store.mark_effect(batch_id, "session-state", "done")
+
+                def cleanup(self):
+                    pass
+
+            with (
+                patch("rightmemory.cli.load_config", return_value=object()),
+                patch("rightmemory.cli.RightMemoryRuntime", RecoveryRuntime),
+            ):
+                recovered = _recover_synchronized_update_operations(
+                    root,
+                    SyncConfig(memory_root=root, enabled=True),
+                )
+
+        self.assertEqual(recovered, 1)
+        self.assertEqual(calls[0][0], batch_id)
+        self.assertEqual(calls[0][1]["landed_commit"], landed)
+
+    def test_synchronized_recovery_settles_abandoned_running_operation(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=root,
+                check=True,
+            )
+            (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+            subprocess.run(["git", "add", "MEMORY.md"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=root, check=True)
+            batch_id = "update-batch-" + "b" * 64
+            store = SemanticOperationStore(root)
+            store.begin(
+                batch_id,
+                {"kind": "semantic-turn", "role": "update", "session_id": batch_id},
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    f"finalize\n\nRightMemory-Queue-Batch: {batch_id}",
+                ],
+                cwd=root,
+                check=True,
+            )
+            landed = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip()
+            calls = []
+
+            class RecoveryRuntime:
+                def __init__(self, _config):
+                    pass
+
+                def supersede_running_session_turn(self, session_id, **kwargs):
+                    calls.append((session_id, kwargs))
+                    store.supersede_running(
+                        batch_id,
+                        landed_commit=kwargs["landed_commit"],
+                        reason="settled by Git",
+                    )
+
+                def cleanup(self):
+                    pass
+
+            with (
+                patch("rightmemory.cli.load_config", return_value=object()),
+                patch("rightmemory.cli.RightMemoryRuntime", RecoveryRuntime),
+            ):
+                recovered = _recover_synchronized_update_operations(
+                    root,
+                    SyncConfig(memory_root=root, enabled=True),
+                )
+
+            final = store.read(batch_id)
+
+        self.assertEqual(recovered, 1)
+        self.assertEqual(calls[0][0], batch_id)
+        self.assertEqual(final.phase, "no_change")
+        self.assertEqual(final.outcome.landed_commit, landed)
 
     def test_sync_finisher_loads_runtime_for_pending_state_without_result_id(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -3588,6 +3940,63 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("canceled pending candidate: 1", output)
         self.assertIn("pending: 0", output)
 
+    def test_main_cancels_attempted_candidate_through_git_fence(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            store = AsyncUpdateStore(memory_root, "update")
+            with patch.object(store, "_start_worker_if_needed"):
+                state = store.submit("agent-1", "attempted")
+            candidate = state.pending[0]
+            queue_store = UpdateQueueStore(memory_root)
+            queue_store.begin_publication(
+                candidate.candidate_uid,
+                attempted_at=candidate.submitted_at,
+            )
+            coordinator = Mock()
+            coordinator.cancel_attempted.return_value = "canceled"
+
+            def clear_local(candidate_uids):
+                for uid in candidate_uids:
+                    queue_store.remove_outbox(uid)
+                    queue_store.clear_publication_marker(uid)
+
+            coordinator.clear_local_candidates.side_effect = clear_local
+
+            def fake_load_config(role, **kwargs):
+                return SimpleNamespace(memory_root=memory_root)
+
+            with (
+                patch("rightmemory.cli.load_config", fake_load_config),
+                patch(
+                    "rightmemory.cli.load_sync_config",
+                    return_value=SyncConfig(memory_root=memory_root, enabled=True),
+                ),
+                patch(
+                    "rightmemory.cli.GitUpdateQueueCoordinator",
+                    return_value=coordinator,
+                ),
+                patch.object(
+                    UpdateQueueStore,
+                    "publication_state",
+                    side_effect=(
+                        "attempted",
+                        AssertionError("undo must not infer authority from a later marker read"),
+                    ),
+                ),
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["update", "undo", "--session", "agent-1", "1"])
+
+            final_state = store.read("agent-1")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(final_state.pending, [])
+        self.assertIsNone(queue_store.read_outbox(candidate.candidate_uid))
+        self.assertEqual(queue_store.publication_state(candidate.candidate_uid), "missing")
+        coordinator.cancel_attempted.assert_called_once()
+        self.assertIn("canceled pending candidate: 1", stdout.getvalue())
+
     def test_main_reports_non_pending_update_undo(self):
         stdout = io.StringIO()
 
@@ -3600,6 +4009,10 @@ class JsonRequestTests(unittest.TestCase):
             with (
                 patch("rightmemory.cli.load_config", fake_load_config),
                 patch("rightmemory.cli.RightMemoryRuntime", side_effect=AssertionError("runtime should not load")),
+                patch(
+                    "rightmemory.cli.load_sync_config",
+                    side_effect=AssertionError("integer ids must stay local"),
+                ),
                 patch("sys.stdout", stdout),
             ):
                 result = main(["update", "undo", "--session", "agent-1", "1"])
@@ -3685,6 +4098,7 @@ class JsonRequestTests(unittest.TestCase):
                         "pending": [
                             {
                                 "id": 1,
+                                "candidate_uid": f"{1:032x}",
                                 "message": "manual item",
                                 "submitted_at": "2026-05-15T00:00:00+00:00",
                             }
@@ -3805,6 +4219,7 @@ class JsonRequestTests(unittest.TestCase):
                             "pending": [
                                 {
                                     "id": 1,
+                                    "candidate_uid": f"{1:032x}",
                                     "message": session_id,
                                     "submitted_at": "2026-05-29T08:00:00+00:00",
                                 }

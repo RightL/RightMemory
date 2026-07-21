@@ -139,6 +139,21 @@ Global sync remains local-first: every device keeps a complete RightMemory root,
 
 Runtime code owns deterministic sync mechanics where they belong in the workflow. It fetches and captures exact commits, then merges incoming history in a leased candidate worktree while the active root remains unchanged. Only a complete candidate whose paths and canonical graph validate may be published, and publication is one guarded fast-forward from the captured active commit. A concurrent active change or failed merge, repair, or validation refuses publication instead of requiring rollback.
 
+The synchronized update queue is a protocol surface rather than model-owned
+content. Only canonical candidate, recovery, and singleton-lease JSON paths are
+admitted, and their complete machine schema validates before incoming state can
+publish. Malformed queue data and queue conflicts fail closed; they never enter
+`sync-reconciler`. Because older runtimes reject these paths by design, enabling
+the queue requires a coordinated runtime reinstall across every device sharing
+the repository. Version one deliberately does not migrate live legacy async jobs
+during install: each device must drain them with its current runtime, and installer
+admission refuses malformed or unsupported session and reservation state before
+changing the root or installed runtime, including drained legacy formats that
+must be archived explicitly. Admission also refuses older pending transcript-review
+deliveries that have not reserved a stable candidate UID. The six-hour lease is
+an availability window measured by device clocks, so its approximate takeover
+delay assumes reasonable clock synchronization; fencing correctness does not.
+
 Graph-aware repair stays in `sync-reconciler` because conflicts across Memory, Pursuit, and their relationships require schema judgment rather than Git mechanics alone, but that role edits and commits only the candidate. Durable prepared-operation records make a completed repair recoverable after a crash without another model turn. For `corrections.md`, repair preserves non-identical entries without ranking them; semantic merging and replacement remain updater-owned. Push transport remains a retryable follow-up after local publication, and `sync-reconciler` stays separate from Dreamer because repair is a narrow integrity responsibility while Dreamer owns broader Memory consolidation.
 
 ### Standalone tool retry behavior

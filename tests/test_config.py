@@ -2588,7 +2588,7 @@ class RuntimeTests(unittest.TestCase):
         state_path = Path(self.tempdir.name) / ".runtime" / "recent_submitted" / "retrieve" / "agent-session.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(state["session_id"], "agent-session")
-        self.assertEqual(state["delivered"], ["update-a:1:2026-05-19T00:00:00+00:00"])
+        self.assertEqual(state["delivered"], [f"{1:032x}"])
 
     def test_retrieve_turn_does_not_record_recent_submitted_delivery_after_failure(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
@@ -2786,7 +2786,13 @@ class RuntimeTests(unittest.TestCase):
             "!shared_views/*/question.toml\n"
             "!shared_views/*/.gitignore\n"
             "!insight_logs/\n"
-            "!insight_logs/*.md\n",
+            "!insight_logs/*.md\n"
+            "!update_queue/\n"
+            "!update_queue/candidates/\n"
+            "!update_queue/candidates/*.json\n"
+            "!update_queue/recovery/\n"
+            "!update_queue/recovery/*.json\n"
+            "!update_queue/lease.json\n",
         )
 
     def test_retrieve_role_does_not_record_recent_submitted_state_without_entries(self):
@@ -3709,6 +3715,12 @@ class RuntimeTests(unittest.TestCase):
         return FailingAgent
 
     def _write_async_update_state(self, session_id, *, pending=None, current_batch=None):
+        def with_candidate_uids(jobs):
+            return [
+                {**job, "candidate_uid": job.get("candidate_uid", f"{job['id']:032x}")}
+                for job in (jobs or [])
+            ]
+
         state_path = Path(self.tempdir.name) / ".runtime" / "async" / "update" / f"{session_id}.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(
@@ -3724,8 +3736,8 @@ class RuntimeTests(unittest.TestCase):
                     "result": None,
                     "error": None,
                     "next_flush_at": "2026-05-19T01:00:00+00:00",
-                    "current_batch": current_batch or [],
-                    "pending": pending or [],
+                    "current_batch": with_candidate_uids(current_batch),
+                    "pending": with_candidate_uids(pending),
                     "next_id": 10,
                 }
             ),

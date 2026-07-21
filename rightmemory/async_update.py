@@ -3,15 +3,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TextIO
+from typing import Literal, TextIO
 
 from .platform import (
     detached_process_kwargs,
@@ -24,12 +26,14 @@ from .platform import (
 )
 from .semantic_operation import FINAL_PHASES, SemanticOperationStore
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
+from .update_queue import PublicationMarker, UpdateCandidate, UpdateQueueStore
 
 UPDATE_DEBOUNCE_SECONDS = 60 * 60
 UPDATE_RETRY_COOLDOWN_SECONDS = 60 * 60
 UPDATE_MAX_AUTOMATIC_ATTEMPTS = 2
 WORKER_IDLE_POLL_SECONDS = 30
 STATUS_MANUAL_RECOVERY = "needs_manual_recovery"
+CANDIDATE_UID_RE = re.compile(r"[0-9a-f]{32}")
 MANUAL_RECOVERY_WARNING = (
     "CRITICAL: this async RightMemory update session is blocked after "
     f"{UPDATE_MAX_AUTOMATIC_ATTEMPTS} failed attempts.\n"
@@ -41,6 +45,7 @@ MANUAL_RECOVERY_WARNING = (
 @dataclass(frozen=True)
 class AsyncUpdateJob:
     id: int
+    candidate_uid: str
     message: str
     submitted_at: str
 
@@ -62,6 +67,7 @@ class AsyncUpdateState:
     next_flush_at: str | None = None
     current_operation_id: str | None = None
     last_operation_id: str | None = None
+    accepted_candidate_uids: list[str] = field(default_factory=list)
     current_batch: list[AsyncUpdateJob] = field(default_factory=list)
     pending: list[AsyncUpdateJob] = field(default_factory=list)
     next_id: int = 1
@@ -100,6 +106,13 @@ class AsyncUpdateRetryResult:
 
 
 @dataclass(frozen=True)
+class AsyncUpdateCancelResult:
+    state: AsyncUpdateState
+    candidate: AsyncUpdateJob | None
+    outcome: Literal["canceled", "publication_started", "not_pending"]
+
+
+@dataclass(frozen=True)
 class _WorkerSnapshot:
     pid: int | None = None
     batch_id: str | None = None
@@ -116,19 +129,44 @@ class AsyncUpdateStore:
         self.reservations_root = self.root / "_batches"
 
     def read(self, session_id: str) -> AsyncUpdateState:
-        with self._locked(session_id):
-            state = self._read_checked_locked(session_id)
+        with self._reservations_locked():
+            with self._locked(session_id):
+                state = self._read_checked_locked(session_id)
+                state = self._reconcile_session_outbox_locked(state)
         if state.last_operation_id is not None:
             self._clear_reservation_if_acknowledged(state.last_operation_id)
         return state
 
     def cancel_pending(self, session_id: str, candidate_id: int) -> tuple[AsyncUpdateState, bool]:
+        result = self.cancel_pending_candidate(session_id, candidate_id)
+        return result.state, result.outcome == "canceled"
+
+    def cancel_pending_candidate(
+        self,
+        session_id: str,
+        candidate_id: int,
+    ) -> AsyncUpdateCancelResult:
+        """Cancel locally or report the exact candidate that crossed into Git authority."""
         if not isinstance(candidate_id, int) or isinstance(candidate_id, bool) or candidate_id < 1:
             raise ValueError("candidate id must be a positive integer")
         with self._reservations_locked():
             reserved_ids = self._reserved_candidate_ids_locked(session_id)
             with self._locked(session_id):
                 state = self._read_checked_locked(session_id)
+                selected = next(
+                    (job for job in state.pending if job.id == candidate_id),
+                    None,
+                )
+                queue_store = UpdateQueueStore(self.memory_root)
+                if (
+                    selected is not None
+                    and queue_store.publication_state(selected.candidate_uid) == "attempted"
+                ):
+                    return AsyncUpdateCancelResult(
+                        state=state,
+                        candidate=selected,
+                        outcome="publication_started",
+                    )
                 pending = [
                     job
                     for job in state.pending
@@ -136,11 +174,19 @@ class AsyncUpdateStore:
                 ]
                 canceled = len(pending) != len(state.pending)
                 if canceled:
+                    if selected is not None:
+                        # Removing the outbox first makes an interrupted cancel retryable:
+                        # the still-pending state recreates it on the next reconciled read.
+                        queue_store.remove_outbox(selected.candidate_uid)
                     state = replace(state, pending=pending)
                     self._write(session_id, state)
         if state.last_operation_id is not None:
             self._clear_reservation_if_acknowledged(state.last_operation_id)
-        return state, canceled
+        return AsyncUpdateCancelResult(
+            state=state,
+            candidate=selected,
+            outcome="canceled" if canceled else "not_pending",
+        )
 
     def retry_manual_recovery(self) -> AsyncUpdateRetryResult:
         now = _now_dt()
@@ -208,18 +254,194 @@ class AsyncUpdateStore:
             worker_error=worker_error,
         )
 
-    def submit(self, session_id: str, message: str) -> AsyncUpdateState:
+    def submit(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        candidate_uid: str | None = None,
+    ) -> AsyncUpdateState:
+        candidate_uid = (
+            new_candidate_uid()
+            if candidate_uid is None
+            else normalize_candidate_uid(candidate_uid)
+        )
         now = _now_dt()
-        with self._locked(session_id):
-            current = self._read_checked_locked(session_id)
-            job = AsyncUpdateJob(id=current.next_id, message=message, submitted_at=_format_time(now))
-            worker_pid = self._active_worker_pid()
-            state = self._enqueue_locked(current, job, now=now, worker_pid=worker_pid)
-            self._write(session_id, state)
+        with self._reservations_locked():
+            with self._locked(session_id):
+                current = self._read_checked_locked(session_id)
+                current = self._reconcile_session_outbox_locked(current)
+                matching = [
+                    job
+                    for job in [*current.current_batch, *current.pending]
+                    if job.candidate_uid == candidate_uid
+                ]
+                if candidate_uid in current.accepted_candidate_uids:
+                    if any(job.message != message for job in matching):
+                        raise ValueError("candidate uid already belongs to different update evidence")
+                    state = current
+                else:
+                    job = AsyncUpdateJob(
+                        id=current.next_id,
+                        candidate_uid=candidate_uid,
+                        message=message,
+                        submitted_at=_format_time(now),
+                    )
+                    UpdateQueueStore(self.memory_root).write_outbox(
+                        self._candidate_from_job(session_id, job)
+                    )
+                    worker_pid = self._active_worker_pid()
+                    current = replace(
+                        current,
+                        accepted_candidate_uids=[
+                            *current.accepted_candidate_uids,
+                            candidate_uid,
+                        ],
+                    )
+                    state = self._enqueue_locked(current, job, now=now, worker_pid=worker_pid)
+                    self._write(session_id, state)
 
         if state.status != STATUS_MANUAL_RECOVERY:
             self._start_worker_if_needed(session_id)
         return state
+
+    def acknowledge_synchronized(
+        self,
+        candidate_uids: set[str] | frozenset[str],
+        *,
+        result: str = "candidate handed to synchronized Git queue",
+    ) -> int:
+        """Remove published candidates from the local scheduling lane."""
+        normalized = {normalize_candidate_uid(uid) for uid in candidate_uids}
+        if not normalized:
+            return 0
+        removed = 0
+        for path in self._session_state_paths():
+            session_id = path.stem
+            with self._locked(session_id):
+                state = self._read_checked_locked(session_id)
+                if any(job.candidate_uid in normalized for job in state.current_batch):
+                    raise RuntimeError("cannot publish an update candidate after local processing starts")
+                pending = [job for job in state.pending if job.candidate_uid not in normalized]
+                removed += len(state.pending) - len(pending)
+                if len(pending) != len(state.pending):
+                    if pending:
+                        state = replace(state, pending=pending)
+                    else:
+                        state = replace(
+                            state,
+                            status="succeeded",
+                            phase=None,
+                            finished_at=_now(),
+                            pid=None,
+                            result=result,
+                            error=None,
+                            attempts=0,
+                            next_retry_at=None,
+                            last_error=None,
+                            next_flush_at=None,
+                            current_operation_id=None,
+                            pending=[],
+                        )
+                    self._write(session_id, state)
+        return removed
+
+    def publishable_candidate_uids(self) -> frozenset[str]:
+        """Return candidates whose Git publication may safely start or resume."""
+        candidate_uids: set[str] = set()
+        queue_store = UpdateQueueStore(self.memory_root)
+        with self._reservations_locked():
+            outbox_by_session: dict[str, list[UpdateCandidate]] = {}
+            for candidate in queue_store.outbox_candidates():
+                outbox_by_session.setdefault(candidate.session_id, []).append(candidate)
+
+            session_ids = {path.stem for path in self._session_state_paths()}
+            session_ids.update(outbox_by_session)
+            for session_id in sorted(session_ids):
+                reserved_uids = self._reserved_candidate_uids_locked(session_id)
+                with self._locked(session_id):
+                    state = self._read_raw(session_id)
+                    state = self._reconcile_session_outbox_locked(
+                        state,
+                        candidates=outbox_by_session.get(session_id, ()),
+                    )
+                    current_uids = {job.candidate_uid for job in state.current_batch}
+                    for job in state.pending:
+                        if job.candidate_uid in reserved_uids:
+                            continue
+                        publication_state = queue_store.publication_state(job.candidate_uid)
+                        if publication_state == "attempted" or (
+                            publication_state == "never_attempted"
+                            and state.status == "running"
+                            and state.phase == "waiting"
+                        ):
+                            candidate_uids.add(job.candidate_uid)
+
+                # A crash after local acknowledgement can leave only an attempted
+                # outbox record. It still needs one final Git settlement pass.
+                for candidate in outbox_by_session.get(session_id, ()):
+                    if (
+                        candidate.uid not in current_uids
+                        and candidate.uid not in reserved_uids
+                        and queue_store.publication_state(candidate.uid) == "attempted"
+                    ):
+                        candidate_uids.add(candidate.uid)
+        return frozenset(candidate_uids)
+
+    def begin_publication(
+        self,
+        candidate: UpdateCandidate,
+        *,
+        attempted_at: str,
+    ) -> PublicationMarker | None:
+        """Cross the Git-authority boundary while excluding undo and local reservation."""
+        queue_store = UpdateQueueStore(self.memory_root)
+        with self._reservations_locked():
+            reserved_uids = self._reserved_candidate_uids_locked(candidate.session_id)
+            with self._locked(candidate.session_id):
+                stored = queue_store.read_outbox(candidate.uid)
+                if stored is None:
+                    return None
+                if stored != candidate:
+                    raise RuntimeError("publication candidate conflicts with local outbox")
+                state = self._read_raw(candidate.session_id)
+                state = self._reconcile_session_outbox_locked(
+                    state,
+                    candidates=(candidate,),
+                )
+                current_uids = {job.candidate_uid for job in state.current_batch}
+                if candidate.uid in current_uids or candidate.uid in reserved_uids:
+                    return None
+                pending = next(
+                    (job for job in state.pending if job.candidate_uid == candidate.uid),
+                    None,
+                )
+                marker = queue_store.read_publication_marker(candidate.uid)
+                if pending is None and marker is None:
+                    return None
+                if pending is not None:
+                    self._require_candidate_matches_job(candidate, state.session_id, pending)
+                return queue_store.begin_publication(
+                    candidate.uid,
+                    attempted_at=attempted_at,
+                )
+
+    def wake_worker(self) -> None:
+        """Wake the shared worker even when this device has no local session state."""
+        self._start_worker_if_needed(None)
+
+    def local_work_schedule(
+        self,
+        *,
+        target_batch_candidates: int,
+        max_wait_seconds: int,
+    ) -> tuple[bool, datetime | None]:
+        """Peek at local-only readiness without reserving or starting a batch."""
+        batch, deadline = self._next_batch(
+            target_batch_candidates,
+            max_wait_seconds,
+        )
+        return batch is not None, deadline
 
     def ensure_worker(self, session_id: str) -> AsyncUpdateState:
         state = self.read(session_id)
@@ -237,6 +459,7 @@ class AsyncUpdateStore:
         max_wait_seconds: int,
         sleep_until: Callable[[datetime], None] | None = None,
         on_batch_success: Callable[[int], None] | None = None,
+        before_batches: Callable[[], bool] | None = None,
     ) -> AsyncUpdateWorkerResult:
         leader_handle = self._try_acquire_worker_leader()
         if leader_handle is None:
@@ -256,6 +479,8 @@ class AsyncUpdateStore:
         worker_state_cleared = False
         try:
             while True:
+                if before_batches is not None and not before_batches():
+                    return AsyncUpdateWorkerResult(status="failed", failed=True)
                 wake_counter = self._read_wake_counter()
                 batch, deadline = self._next_batch(target_batch_candidates, max_wait_seconds)
                 if batch is None:
@@ -388,6 +613,7 @@ class AsyncUpdateStore:
         blocked_operation_ids: set[str] = set()
         eligible: list[AsyncUpdateSessionBatch] = []
         future_deadlines = list(reservation_deadlines)
+        queue_store = UpdateQueueStore(self.memory_root)
 
         for path in self._session_state_paths():
             session_id = path.stem
@@ -418,6 +644,12 @@ class AsyncUpdateStore:
                         blocked_operation_ids.add(operation_id)
                     continue
                 if not state.pending:
+                    continue
+                if any(
+                    queue_store.publication_state(job.candidate_uid) == "attempted"
+                    for job in state.pending
+                ):
+                    # Once publication starts, only the Git lease may process this session.
                     continue
                 if state.status == "failed":
                     ready_at = _required_time(state.next_retry_at, "next_retry_at")
@@ -578,6 +810,12 @@ class AsyncUpdateStore:
             for item in participants:
                 with self._locked(item.session_id):
                     state = self._read_raw(item.session_id)
+                    if fresh_selection and any(
+                        UpdateQueueStore(self.memory_root).publication_state(job.candidate_uid)
+                        == "attempted"
+                        for job in item.jobs
+                    ):
+                        return None
                 if (
                     fresh_selection
                     and state.session_id == item.session_id
@@ -606,6 +844,15 @@ class AsyncUpdateStore:
                 if item.session_id == session_id:
                     reserved_ids.update(job.id for job in item.jobs)
         return reserved_ids
+
+    def _reserved_candidate_uids_locked(self, session_id: str) -> set[str]:
+        reserved_uids: set[str] = set()
+        for path in sorted(self.reservations_root.glob("*.json")):
+            reservation = self._read_reservation_path(path)
+            for item in reservation.participants:
+                if item.session_id == session_id:
+                    reserved_uids.update(job.candidate_uid for job in item.jobs)
+        return reserved_uids
 
     def _read_reservation(self, operation_id: str) -> AsyncBatchReservation | None:
         if not self.reservations_root.exists():
@@ -814,6 +1061,10 @@ class AsyncUpdateStore:
                 if state.current_operation_id != operation_id:
                     raise RuntimeError(f"async batch has a different operation id: {item.session_id}")
                 accepted += len(state.current_batch)
+                queue_store = UpdateQueueStore(self.memory_root)
+                for job in state.current_batch:
+                    queue_store.remove_outbox(job.candidate_uid)
+                    queue_store.clear_publication_marker(job.candidate_uid)
                 next_state = self._finished_state(state, operation_id, result)
                 self._write(item.session_id, next_state)
         self._clear_reservation_if_acknowledged(operation_id)
@@ -1026,7 +1277,7 @@ class AsyncUpdateStore:
             session_ids=session_ids,
         )
 
-    def _start_worker_if_needed(self, session_id: str) -> None:
+    def _start_worker_if_needed(self, session_id: str | None) -> None:
         with self._worker_locked():
             self._increment_wake_counter_locked()
             state = self._read_worker_locked()
@@ -1051,7 +1302,8 @@ class AsyncUpdateStore:
                     **detached_process_kwargs(),
                 )
             except Exception as exc:
-                self._fail(session_id, str(exc))
+                if session_id is not None:
+                    self._fail(session_id, str(exc))
                 raise
             self._write_worker_locked(
                 status="running",
@@ -1108,6 +1360,7 @@ class AsyncUpdateStore:
                 next_flush_at=next_flush_at,
                 pending=[job],
                 last_operation_id=state.last_operation_id,
+                accepted_candidate_uids=state.accepted_candidate_uids,
                 next_id=next_id,
             )
         if state.status in {"failed", STATUS_MANUAL_RECOVERY}:
@@ -1142,8 +1395,108 @@ class AsyncUpdateStore:
             next_flush_at=next_flush_at,
             pending=pending,
             last_operation_id=state.last_operation_id,
+            accepted_candidate_uids=state.accepted_candidate_uids,
             next_id=next_id,
         )
+
+    def _reconcile_session_outbox_locked(
+        self,
+        state: AsyncUpdateState,
+        *,
+        candidates: Iterable[UpdateCandidate] | None = None,
+    ) -> AsyncUpdateState:
+        if self.role != "update":
+            return state
+        if state.role != self.role:
+            raise ValueError(
+                f"async update state role mismatch: expected {self.role}, got {state.role}"
+            )
+
+        queue_store = UpdateQueueStore(self.memory_root)
+        for job in state.pending:
+            candidate = self._candidate_from_job(state.session_id, job)
+            stored = queue_store.read_outbox(job.candidate_uid)
+            if stored is None:
+                # Cancellation removes the outbox first. If its state write is
+                # interrupted, restore the still-pending source of truth.
+                queue_store.write_outbox(candidate)
+            elif stored != candidate:
+                raise RuntimeError("local outbox candidate conflicts with pending update state")
+        if candidates is None:
+            candidates = (
+                candidate
+                for candidate in queue_store.outbox_candidates()
+                if candidate.session_id == state.session_id
+            )
+        session_candidates = sorted(
+            candidates,
+            key=lambda item: (item.display_id, item.submitted_at, item.uid),
+        )
+        live_jobs = [*state.current_batch, *state.pending]
+        live_by_uid = {job.candidate_uid: job for job in live_jobs}
+
+        changed = False
+        for candidate in session_candidates:
+            if candidate.session_id != state.session_id:
+                raise ValueError("local outbox candidate belongs to a different update session")
+            existing = live_by_uid.get(candidate.uid)
+            if existing is not None:
+                self._require_candidate_matches_job(candidate, state.session_id, existing)
+                continue
+            if candidate.uid in state.accepted_candidate_uids:
+                continue
+            if queue_store.publication_state(candidate.uid) == "attempted":
+                # State acknowledgement may precede outbox cleanup. Git remains
+                # authoritative, so an attempted orphan must not re-enter local work.
+                continue
+            if candidate.display_id != state.next_id:
+                raise RuntimeError(
+                    "local outbox candidate cannot be reconciled without changing its display id"
+                )
+            job = AsyncUpdateJob(
+                id=candidate.display_id,
+                candidate_uid=candidate.uid,
+                message=candidate.message,
+                submitted_at=candidate.submitted_at,
+            )
+            state = replace(
+                state,
+                accepted_candidate_uids=[
+                    *state.accepted_candidate_uids,
+                    candidate.uid,
+                ],
+            )
+            state = self._enqueue_locked(
+                state,
+                job,
+                now=_required_time(candidate.submitted_at, "candidate submitted_at"),
+                worker_pid=state.pid,
+            )
+            live_by_uid[job.candidate_uid] = job
+            changed = True
+
+        if changed:
+            self._write(state.session_id, state)
+        return state
+
+    @staticmethod
+    def _candidate_from_job(session_id: str, job: AsyncUpdateJob) -> UpdateCandidate:
+        return UpdateCandidate(
+            uid=job.candidate_uid,
+            session_id=session_id,
+            display_id=job.id,
+            message=job.message,
+            submitted_at=job.submitted_at,
+        )
+
+    @staticmethod
+    def _require_candidate_matches_job(
+        candidate: UpdateCandidate,
+        session_id: str,
+        job: AsyncUpdateJob,
+    ) -> None:
+        if candidate != AsyncUpdateStore._candidate_from_job(session_id, job):
+            raise RuntimeError("local outbox candidate conflicts with async update state")
 
     def _fail(self, session_id: str, error: str) -> AsyncUpdateState:
         with self._locked(session_id):
@@ -1257,8 +1610,25 @@ def _state_from_json(data: object) -> AsyncUpdateState:
     current_batch = _required_job_list(data, "current_batch")
     pending = _required_job_list(data, "pending")
     job_ids = [job.id for job in [*current_batch, *pending]]
+    candidate_uids = [job.candidate_uid for job in [*current_batch, *pending]]
     if any(first >= second for first, second in zip(job_ids, job_ids[1:])):
         raise ValueError("async update job ids must be unique and strictly increasing")
+    if len(candidate_uids) != len(set(candidate_uids)):
+        raise ValueError("async update candidate uids must be unique")
+    raw_accepted = data.get("accepted_candidate_uids", [])
+    if (
+        not isinstance(raw_accepted, list)
+        or any(
+            not isinstance(uid, str) or CANDIDATE_UID_RE.fullmatch(uid) is None
+            for uid in raw_accepted
+        )
+        or len(raw_accepted) != len(set(raw_accepted))
+    ):
+        raise ValueError("async update state must contain unique accepted candidate uids")
+    accepted_candidate_uids = [*raw_accepted]
+    accepted_candidate_uids.extend(
+        uid for uid in candidate_uids if uid not in accepted_candidate_uids
+    )
     if job_ids and next_id <= job_ids[-1]:
         raise ValueError("async update next_id must be greater than every live job id")
     return AsyncUpdateState(
@@ -1277,6 +1647,7 @@ def _state_from_json(data: object) -> AsyncUpdateState:
         next_flush_at=_optional_str(data.get("next_flush_at")),
         current_operation_id=_optional_str(data.get("current_operation_id")),
         last_operation_id=_optional_str(data.get("last_operation_id")),
+        accepted_candidate_uids=accepted_candidate_uids,
         current_batch=current_batch,
         pending=pending,
         next_id=next_id,
@@ -1297,17 +1668,35 @@ def _job_from_json(data: object) -> AsyncUpdateJob | None:
     if not isinstance(data, dict):
         return None
     job_id = data.get("id")
+    candidate_uid = data.get("candidate_uid")
     message = data.get("message")
     submitted_at = data.get("submitted_at")
     if (
         isinstance(job_id, bool)
         or not isinstance(job_id, int)
         or job_id < 1
+        or not isinstance(candidate_uid, str)
+        or CANDIDATE_UID_RE.fullmatch(candidate_uid) is None
         or not isinstance(message, str)
         or not isinstance(submitted_at, str)
     ):
         return None
-    return AsyncUpdateJob(id=job_id, message=message, submitted_at=submitted_at)
+    return AsyncUpdateJob(
+        id=job_id,
+        candidate_uid=candidate_uid,
+        message=message,
+        submitted_at=submitted_at,
+    )
+
+
+def new_candidate_uid() -> str:
+    return uuid.uuid4().hex
+
+
+def normalize_candidate_uid(value: object) -> str:
+    if not isinstance(value, str) or CANDIDATE_UID_RE.fullmatch(value) is None:
+        raise ValueError("candidate uid must be 32 lowercase hexadecimal characters")
+    return value
 
 
 def _required_state_str(data: dict[str, object], key: str) -> str:
@@ -1414,6 +1803,7 @@ def _batch_session_id(batches: list[AsyncUpdateSessionBatch]) -> str:
             "jobs": [
                 {
                     "id": job.id,
+                    "candidate_uid": job.candidate_uid,
                     "message": job.message,
                     "submitted_at": job.submitted_at,
                 }

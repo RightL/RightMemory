@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -12,7 +13,10 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 
+from .async_update import AsyncUpdateStore, _state_from_json
 from .platform import prepare_command
+from .review import ReviewDeliveryStore
+from .update_queue import validate_update_queue
 
 
 PYTHON_REQUIREMENT = ">=3.11"
@@ -45,6 +49,12 @@ MEMORY_GITIGNORE = """\
 !shared_views/*/.gitignore
 !insight_logs/
 !insight_logs/*.md
+!update_queue/
+!update_queue/candidates/
+!update_queue/candidates/*.json
+!update_queue/recovery/
+!update_queue/recovery/*.json
+!update_queue/lease.json
 """
 ROLE_PROMPTS = {
     "{{ROLE_PROMPT_RETRIEVE}}": "retrieve.md",
@@ -88,6 +98,9 @@ class Installer:
         self.runtime_python: Path | None = None
 
     def run(self) -> None:
+        self._require_valid_update_queue()
+        self._require_no_live_legacy_async_updates()
+        self._require_no_legacy_review_deliveries()
         target = self._inspect_target()
         self._print_layout()
         self._require_complete_existing_target(target)
@@ -104,6 +117,111 @@ class Installer:
         self._warn_if_command_not_on_path()
         self._write_install_stamp()
         self._print_next_steps()
+
+    def _require_valid_update_queue(self) -> None:
+        diagnostics = validate_update_queue(self.memory_root)
+        if diagnostics:
+            raise InstallError(
+                "RightMemory update queue is invalid:\n- "
+                + "\n- ".join(diagnostics)
+                + "\ninstallation made no changes; repair or remove the invalid queue state before reinstalling"
+            )
+
+    def _require_no_live_legacy_async_updates(self) -> None:
+        runtime_root = self.memory_root / ".runtime"
+        async_parent = runtime_root / "async"
+        async_root = self.memory_root / ".runtime" / "async" / "update"
+        incompatible: list[str] = []
+        for container in (runtime_root, async_parent, async_root):
+            if not container.exists() and not container.is_symlink():
+                return
+            if container.is_symlink() or not container.is_dir():
+                incompatible.append(container.relative_to(self.memory_root).as_posix())
+                break
+        if incompatible:
+            raise InstallError(
+                "live async updates are incompatible with this coordinated upgrade:\n- "
+                + "\n- ".join(incompatible)
+                + "\ninstallation made no changes; use the currently installed RightMemory to finish, "
+                "retry, or undo every live update until `update pull` shows both `pending: 0` and "
+                "`current_batch: 0`; archive any listed drained legacy state, then rerun the installer"
+            )
+
+        for path in sorted(async_root.glob("*.json")):
+            relative = path.relative_to(self.memory_root).as_posix()
+            if path.is_symlink() or not path.is_file():
+                incompatible.append(relative)
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                state = _state_from_json(data)
+                if state.session_id != path.stem or state.role != "update":
+                    raise ValueError("async update state identity does not match its path")
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+                incompatible.append(relative)
+
+        reservation_store = AsyncUpdateStore(self.memory_root, "update")
+        reservations_root = async_root / "_batches"
+        if reservations_root.exists() or reservations_root.is_symlink():
+            if reservations_root.is_symlink() or not reservations_root.is_dir():
+                incompatible.append(
+                    reservations_root.relative_to(self.memory_root).as_posix()
+                )
+            else:
+                for path in sorted(reservations_root.glob("*.json")):
+                    relative = path.relative_to(self.memory_root).as_posix()
+                    if path.is_symlink() or not path.is_file():
+                        incompatible.append(relative)
+                        continue
+                    try:
+                        reservation_store._read_reservation_path(path)
+                    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+                        incompatible.append(relative)
+        if incompatible:
+            raise InstallError(
+                "live async updates are incompatible with this coordinated upgrade:\n- "
+                + "\n- ".join(incompatible)
+                + "\ninstallation made no changes; use the currently installed RightMemory to finish, "
+                "retry, or undo every live update until `update pull` shows both `pending: 0` and "
+                "`current_batch: 0`; archive any listed drained legacy state, then rerun the installer"
+            )
+
+    def _require_no_legacy_review_deliveries(self) -> None:
+        runtime_root = self.memory_root / ".runtime"
+        review_parent = runtime_root / "review"
+        deliveries_root = self.memory_root / ".runtime" / "review" / "deliveries"
+        incompatible: list[str] = []
+        for container in (runtime_root, review_parent, deliveries_root):
+            if not container.exists() and not container.is_symlink():
+                return
+            if container.is_symlink() or not container.is_dir():
+                incompatible.append(container.relative_to(self.memory_root).as_posix())
+                break
+        if incompatible:
+            raise InstallError(
+                "pending transcript-review deliveries are incompatible with this coordinated upgrade:\n- "
+                + "\n- ".join(incompatible)
+                + "\ninstallation made no changes; use the currently installed RightMemory review watcher "
+                "to finish these deliveries, then rerun the installer"
+            )
+
+        delivery_store = ReviewDeliveryStore(self.memory_root)
+        for path in sorted(deliveries_root.glob("*.json")):
+            relative = path.relative_to(self.memory_root).as_posix()
+            if path.is_symlink() or not path.is_file():
+                incompatible.append(relative)
+                continue
+            try:
+                delivery_store._load(path)
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+                incompatible.append(relative)
+        if incompatible:
+            raise InstallError(
+                "pending transcript-review deliveries are incompatible with this coordinated upgrade:\n- "
+                + "\n- ".join(incompatible)
+                + "\ninstallation made no changes; use the currently installed RightMemory review watcher "
+                "to finish these deliveries, then rerun the installer"
+            )
 
     def _print_layout(self) -> None:
         print("Installing RightMemory")
@@ -196,6 +314,10 @@ class Installer:
         if insight_logs.is_dir() and any(path.name.endswith(".md") for path in insight_logs.iterdir()):
             return True
 
+        update_queue = self.memory_root / "update_queue"
+        if update_queue.is_dir() and any(update_queue.iterdir()):
+            return True
+
         shared_views = self.memory_root / "shared_views"
         if shared_views.is_dir():
             shared_view_files = {"view.md", "retriever.md", "recipe.toml", "question.toml", ".gitignore"}
@@ -210,17 +332,18 @@ class Installer:
                 f"unsupported RightMemory target: {target.git_layout_error}\n"
                 "installation made no changes; choose a standalone non-bare Git working tree for the memory root"
             )
-        if target.kind != "existing" or (not target.missing_required and not target.invalid_required):
+        if target.kind != "existing":
             return
-        details: list[str] = []
-        if target.missing_required:
-            details.append(f"missing required files: {', '.join(target.missing_required)}")
-        if target.invalid_required:
-            details.append(f"non-regular required files: {', '.join(target.invalid_required)}")
-        raise InstallError(
-            f"existing RightMemory root is incomplete: {'; '.join(details)}\n"
-            "installation made no changes; migrate and review this root explicitly before reinstalling"
-        )
+        if target.missing_required or target.invalid_required:
+            details: list[str] = []
+            if target.missing_required:
+                details.append(f"missing required files: {', '.join(target.missing_required)}")
+            if target.invalid_required:
+                details.append(f"non-regular required files: {', '.join(target.invalid_required)}")
+            raise InstallError(
+                f"existing RightMemory root is incomplete: {'; '.join(details)}\n"
+                "installation made no changes; migrate and review this root explicitly before reinstalling"
+            )
 
     def _bootstrap_state(self) -> None:
         self.memory_root.mkdir(parents=True, exist_ok=True)
@@ -294,6 +417,22 @@ class Installer:
             files.extend(
                 f"insight_logs/{path.name}" for path in sorted(insight_logs.glob("*.md")) if path.is_file()
             )
+        update_queue = self.memory_root / "update_queue"
+        candidates = update_queue / "candidates"
+        if candidates.is_dir():
+            files.extend(
+                f"update_queue/candidates/{path.name}"
+                for path in sorted(candidates.glob("*.json"))
+                if path.is_file() and re.fullmatch(r"[0-9a-f]{32}\.json", path.name)
+            )
+        recovery = update_queue / "recovery"
+        if recovery.is_dir():
+            files.extend(
+                f"update_queue/recovery/{path.name}"
+                for path in sorted(recovery.glob("*.json"))
+                if path.is_file() and re.fullmatch(r"update-batch-[0-9a-f]{64}\.json", path.name)
+            )
+        add("update_queue/lease.json")
         return files
 
     def _ensure_initial_commit(self) -> None:
@@ -530,7 +669,7 @@ class Installer:
         print("Re-run the installer any time you pull updates from the RightMemory repo;")
         print(
             "your existing MEMORY.md, MEMORY_*.md, PURSUITS.md, PURSUIT_*.md, "
-            "PURSUIT_RULES.md, corrections.md, and insight_logs/ are preserved."
+            "PURSUIT_RULES.md, corrections.md, insight_logs/, and pending update queue are preserved."
         )
 
     def _git(self, *args: str) -> None:

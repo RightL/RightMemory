@@ -635,11 +635,13 @@ class StatusDashboardTests(unittest.TestCase):
                         "pending": [
                             {
                                 "id": 1,
+                                "candidate_uid": f"{1:032x}",
                                 "message": "first",
                                 "submitted_at": "2026-05-29T08:00:00+00:00",
                             },
                             {
                                 "id": 2,
+                                "candidate_uid": f"{2:032x}",
                                 "message": "second",
                                 "submitted_at": "2026-05-29T08:05:00+00:00",
                             },
@@ -665,6 +667,7 @@ class StatusDashboardTests(unittest.TestCase):
                         "current_batch": [
                             {
                                 "id": 1,
+                                "candidate_uid": f"{1:032x}",
                                 "message": "running",
                                 "submitted_at": "2026-05-29T08:30:00+00:00",
                             }
@@ -716,6 +719,7 @@ class StatusDashboardTests(unittest.TestCase):
                         "pending": [
                             {
                                 "id": 1,
+                                "candidate_uid": f"{1:032x}",
                                 "message": "retrying",
                                 "submitted_at": "2026-05-29T08:00:00+00:00",
                             }
@@ -737,11 +741,13 @@ class StatusDashboardTests(unittest.TestCase):
                         "pending": [
                             {
                                 "id": 1,
+                                "candidate_uid": f"{1:032x}",
                                 "message": "manual",
                                 "submitted_at": "2026-05-29T08:00:00+00:00",
                             },
                             {
                                 "id": 2,
+                                "candidate_uid": f"{2:032x}",
                                 "message": "manual two",
                                 "submitted_at": "2026-05-29T08:01:00+00:00",
                             },
@@ -783,6 +789,7 @@ class StatusDashboardTests(unittest.TestCase):
                         "pending": [
                             {
                                 "id": 1,
+                                "candidate_uid": f"{1:032x}",
                                 "message": "legacy",
                                 "submitted_at": "2026-05-29T08:00:00+00:00",
                             }
@@ -822,6 +829,7 @@ class StatusDashboardTests(unittest.TestCase):
                         "current_batch": [
                             {
                                 "id": 1,
+                                "candidate_uid": f"{1:032x}",
                                 "message": "manual current",
                                 "submitted_at": "2026-05-29T08:00:00+00:00",
                             }

@@ -11,7 +11,7 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable
@@ -19,7 +19,13 @@ from typing import Any, Callable
 import uvicorn
 
 from .agent_cli_cleanup import AgentCliThreadCleanup
-from .async_update import AsyncUpdateStore, format_retry_result, format_state, manual_recovery_warning
+from .async_update import (
+    WORKER_IDLE_POLL_SECONDS,
+    AsyncUpdateStore,
+    format_retry_result,
+    format_state,
+    manual_recovery_warning,
+)
 from .config import (
     ROLES,
     default_memory_root,
@@ -83,6 +89,15 @@ from .update_review import (
     UpdateReviewStore,
 )
 from .update_corrector import parse_update_correction_result
+from .update_queue_git import (
+    QUEUE_FINALIZER,
+    ClaimedUpdateBatch,
+    GitUpdateQueueCoordinator,
+    UpdateQueueLeaseLost,
+    UpdateQueueSemanticBaseChanged,
+    UpdateQueueUnavailable,
+)
+from .update_queue import UpdateCandidate, UpdateQueueStore
 from .watch import (
     MANAGED_WATCH_TARGETS,
     WATCH_HANDOFF_PID_ENV,
@@ -125,6 +140,7 @@ _INSIGHT_WATCH_SKIPPED = "skipped"
 _INSIGHT_WATCH_SUCCEEDED = "succeeded"
 _INSIGHT_WATCH_FAILED = "failed"
 PRUNER_WATCH_SESSION_ID = "pruner-watch"
+QUEUE_FINALIZER_SEPARATOR = ":"
 
 
 def _watch_failure_limit_reached(label: str, failures: int) -> bool:
@@ -911,7 +927,14 @@ def cli_main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
-    except (ValueError, ProfileError, HubClientError, FileNotFoundError) as exc:
+    except (
+        ValueError,
+        ProfileError,
+        HubClientError,
+        FileNotFoundError,
+        UpdateQueueLeaseLost,
+        UpdateQueueUnavailable,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -1191,7 +1214,11 @@ def _pull_parser(role: str) -> argparse.ArgumentParser:
 def _undo_parser(role: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=f"rightmemory {role} undo")
     parser.add_argument("--session", required=True, help="cancel a pending candidate for this update session id")
-    parser.add_argument("candidate_id", type=_candidate_id, help="pending candidate id to cancel")
+    parser.add_argument(
+        "candidate_id",
+        type=_candidate_reference,
+        help="pending integer candidate id or synchronized uid prefix to cancel",
+    )
     return parser
 
 
@@ -1211,6 +1238,19 @@ def _candidate_id(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("candidate id must be a positive integer")
     return parsed
+
+
+def _candidate_reference(value: str) -> int | str:
+    if len(value) >= 8 and len(value) <= 32 and all(
+        character in "0123456789abcdef" for character in value
+    ):
+        return value
+    try:
+        return _candidate_id(value)
+    except argparse.ArgumentTypeError:
+        raise argparse.ArgumentTypeError(
+            "candidate must be a positive integer id or an 8-32 character lowercase uid prefix"
+        )
 
 
 def _review_main(argv: list[str], memory_root: Path) -> int:
@@ -1954,6 +1994,18 @@ def _sync_watch(interval: int, memory_root: Path) -> int:
                         )
                     )
                     _finish_sync_repair(sync_config.memory_root, result)
+                    if result.status in {"synced", "fresh", "pushed"}:
+                        _recover_synchronized_update_operations(
+                            sync_config.memory_root,
+                            sync_config,
+                        )
+                        queue_store = UpdateQueueStore(sync_config.memory_root)
+                        snapshot = queue_store.snapshot()
+                        if snapshot.candidates or queue_store.outbox_candidates():
+                            AsyncUpdateStore(
+                                sync_config.memory_root,
+                                "update",
+                            ).wake_worker()
                 except Exception as exc:
                     print(
                         f"rightmemory sync check failed: {type(exc).__name__}: {exc}",
@@ -2170,13 +2222,77 @@ def _submit(memory_root, role: str, session_id: str, message_parts: list[str]) -
 def _pull(memory_root, role: str, session_id: str) -> int:
     state = AsyncUpdateStore(memory_root, role).read(session_id)
     print(format_state(state))
+    synchronized = [
+        candidate
+        for candidate in UpdateQueueStore(memory_root).snapshot().candidates
+        if candidate.session_id == session_id
+    ]
+    if synchronized:
+        print(f"synchronized_pending: {len(synchronized)}")
+        for candidate in synchronized:
+            print(
+                f"synchronized_candidate: {candidate.uid[:8]} "
+                f"(origin id {candidate.display_id})"
+            )
     return 0
 
 
-def _undo(memory_root, role: str, session_id: str, candidate_id: int) -> int:
-    state, canceled = AsyncUpdateStore(memory_root, role).cancel_pending(session_id, candidate_id)
+def _undo(memory_root, role: str, session_id: str, candidate_id: int | str) -> int:
+    store = AsyncUpdateStore(memory_root, role)
+    synchronized = None
+    if isinstance(candidate_id, int):
+        cancellation = store.cancel_pending_candidate(session_id, candidate_id)
+        state = cancellation.state
+        selected = cancellation.candidate
+        canceled = cancellation.outcome == "canceled"
+        # The locked result carries the authority transition across a concurrent
+        # publisher acknowledgement; do not infer it from a later marker read.
+        publication_started = cancellation.outcome == "publication_started"
+    else:
+        state = store.read(session_id)
+        selected = None
+        canceled = False
+        publication_started = False
+    if not canceled and (isinstance(candidate_id, str) or publication_started):
+        sync_config = load_sync_config(memory_root=memory_root)
+        if publication_started and not sync_config.enabled:
+            raise UpdateQueueUnavailable(
+                "cannot cancel an attempted synchronized candidate while Git sync is disabled"
+            )
+        if sync_config.enabled:
+            coordinator = GitUpdateQueueCoordinator(sync_config)
+            if publication_started and selected is not None:
+                candidate = UpdateCandidate(
+                    uid=selected.candidate_uid,
+                    session_id=session_id,
+                    display_id=selected.id,
+                    message=selected.message,
+                    submitted_at=selected.submitted_at,
+                )
+                outcome = coordinator.cancel_attempted(candidate)
+                store.acknowledge_synchronized(
+                    frozenset({candidate.uid}),
+                    result=(
+                        "candidate canceled through synchronized Git queue"
+                        if outcome == "canceled"
+                        else "candidate already settled through synchronized Git queue"
+                    ),
+                )
+                coordinator.clear_local_candidates((candidate.uid,))
+                state = store.read(session_id)
+                if outcome == "canceled":
+                    synchronized = candidate
+                    canceled = True
+            else:
+                synchronized = coordinator.cancel(session_id, candidate_id)
+                canceled = synchronized is not None
+                if synchronized is not None:
+                    store.acknowledge_synchronized(frozenset({synchronized.uid}))
+                    coordinator.clear_local_candidates((synchronized.uid,))
+                    state = store.read(session_id)
     if canceled:
-        print(f"canceled pending candidate: {candidate_id}")
+        suffix = f" ({synchronized.uid[:8]})" if synchronized is not None else ""
+        print(f"canceled pending candidate: {candidate_id}{suffix}")
     else:
         print(f"candidate is not pending: {candidate_id}")
     print(format_state(state))
@@ -2184,14 +2300,98 @@ def _undo(memory_root, role: str, session_id: str, candidate_id: int) -> int:
 
 
 def _retry(memory_root, role: str) -> int:
-    result = AsyncUpdateStore(memory_root, role).retry_manual_recovery()
+    store = AsyncUpdateStore(memory_root, role)
+    result = store.retry_manual_recovery()
+    synchronized = 0
+    sync_config = load_sync_config(memory_root=memory_root)
+    if sync_config.enabled:
+        synchronized = GitUpdateQueueCoordinator(sync_config).retry_manual()
+        if synchronized:
+            store.wake_worker()
     print(format_retry_result(result))
+    if synchronized:
+        print(f"requeued synchronized batches: {synchronized}")
     return 1 if result.worker_error else 0
 
 
 def _async_worker(memory_root, role: str) -> int:
     async_update_config = load_async_update_config(memory_root=memory_root)
     store = AsyncUpdateStore(memory_root, role)
+
+    sync_config = load_sync_config(memory_root=memory_root)
+    coordinator = GitUpdateQueueCoordinator(sync_config) if sync_config.enabled else None
+
+    def yield_to_local_or_wait(next_attempt_at: datetime | None = None) -> bool:
+        sync_deadline = datetime.now(UTC) + timedelta(
+            seconds=DEFAULT_SYNC_WATCH_INTERVAL_SECONDS
+        )
+        if next_attempt_at is not None:
+            sync_deadline = min(sync_deadline, next_attempt_at)
+        while True:
+            local_ready, local_deadline = store.local_work_schedule(
+                target_batch_candidates=async_update_config.target_batch_candidates,
+                max_wait_seconds=async_update_config.max_wait_seconds,
+            )
+            if local_ready:
+                return True
+            wake_deadline = sync_deadline
+            if local_deadline is not None:
+                wake_deadline = min(wake_deadline, local_deadline)
+            remaining = (wake_deadline - datetime.now(UTC)).total_seconds()
+            if remaining <= 0:
+                return False
+            time.sleep(min(remaining, WORKER_IDLE_POLL_SECONDS))
+
+    def run_synchronized() -> bool:
+        if coordinator is None:
+            return True
+        while True:
+            try:
+                _recover_synchronized_update_operations(memory_root, sync_config)
+                publication = coordinator.publish_outbox(store.publishable_candidate_uids())
+                settled = frozenset(publication.settled_uids)
+                if settled:
+                    store.acknowledge_synchronized(settled)
+                    coordinator.clear_local_candidates(publication.settled_uids)
+                claim_result = coordinator.claim_next(
+                    target_batch_candidates=async_update_config.target_batch_candidates,
+                    max_wait_seconds=async_update_config.max_wait_seconds,
+                )
+                if claim_result.claim is not None:
+                    completed = _run_synchronized_update_batch(
+                        memory_root,
+                        role,
+                        coordinator,
+                        claim_result.claim,
+                    )
+                    if not completed:
+                        if yield_to_local_or_wait():
+                            return True
+                    elif store.local_work_schedule(
+                        target_batch_candidates=async_update_config.target_batch_candidates,
+                        max_wait_seconds=async_update_config.max_wait_seconds,
+                    )[0]:
+                        return True
+                    continue
+            except (UpdateQueueLeaseLost, UpdateQueueUnavailable):
+                # Published work stays online-only; retain the leader and retry.
+                if yield_to_local_or_wait():
+                    return True
+                continue
+            attempted_unresolved = any(
+                coordinator.store.publication_state(uid) == "attempted"
+                for uid in publication.unresolved_uids
+            )
+            if not claim_result.online:
+                if not attempted_unresolved and not _synchronized_update_work_remains(memory_root):
+                    return True
+                if yield_to_local_or_wait():
+                    return True
+                continue
+            if not attempted_unresolved and claim_result.next_attempt_at is None:
+                return True
+            if yield_to_local_or_wait(claim_result.next_attempt_at):
+                return True
 
     def run_batch(batch_session_id: str, message: str) -> str:
         return _run_async_update_batch(memory_root, role, batch_session_id, message)
@@ -2200,10 +2400,227 @@ def _async_worker(memory_root, role: str) -> int:
         run_batch,
         target_batch_candidates=async_update_config.target_batch_candidates,
         max_wait_seconds=async_update_config.max_wait_seconds,
+        before_batches=run_synchronized,
     )
     if result.status == "failed":
         return 1
     return 0
+
+
+def _run_synchronized_update_batch(
+    memory_root: Path,
+    role: str,
+    coordinator: GitUpdateQueueCoordinator,
+    claim: ClaimedUpdateBatch,
+) -> bool:
+    external_finalizer = _queue_external_finalizer(claim.lease.token)
+    runtime: RightMemoryRuntime | None = None
+    try:
+        try:
+            config = load_config(role, memory_root=memory_root)
+            runtime = RightMemoryRuntime(config)
+        except Exception:
+            # Local configuration must not strand a global lease that another
+            # online device may be able to process.
+            coordinator.release(claim)
+            return False
+        try:
+            record = SemanticOperationStore(memory_root).read(claim.batch_id)
+            recorded_finalizer = (
+                None
+                if record is None or record.phase != "prepared" or record.outcome is None
+                else record.outcome.metadata.get("external_finalizer")
+            )
+            if (
+                _queue_finalizer_token(recorded_finalizer) is not None
+                and recorded_finalizer != external_finalizer
+            ):
+                runtime.restart_session_turn_external(
+                    claim.session_id,
+                    operation_id=claim.batch_id,
+                    external_finalizer=str(recorded_finalizer),
+                    reason="Git lease token changed before finalization",
+                )
+            prepared = runtime.prepare_session_turn_external(
+                claim.session_id,
+                claim.message,
+                operation_id=claim.batch_id,
+                external_finalizer=external_finalizer,
+            )
+        except Exception:
+            coordinator.fail(claim, reason_code="processing_failed")
+            return False
+        try:
+            landed_commit = coordinator.finalize(
+                claim,
+                prepared.candidate_commit,
+                prepared_start_commit=prepared.start_commit,
+            )
+        except UpdateQueueSemanticBaseChanged:
+            runtime.restart_session_turn_external(
+                claim.session_id,
+                operation_id=claim.batch_id,
+                external_finalizer=external_finalizer,
+                reason="semantic base changed before Git finalization",
+            )
+            coordinator.release(claim)
+            return False
+        except Exception:
+            # Keep the lease and prepared receipt; the same device can resume safely.
+            return False
+        try:
+            runtime.complete_session_turn_external(
+                claim.session_id,
+                operation_id=claim.batch_id,
+                external_finalizer=external_finalizer,
+                landed_commit=landed_commit,
+            )
+        except Exception:
+            # Git is already authoritative; effect recovery will finish locally later.
+            return False
+        return True
+    finally:
+        if runtime is not None:
+            runtime.cleanup()
+
+
+def _recover_synchronized_update_operations(memory_root: Path, sync_config: Any) -> int:
+    """Finish local receipts after Git proves a queue transaction already published."""
+    store = SemanticOperationStore(memory_root)
+    coordinator = GitUpdateQueueCoordinator(sync_config)
+    recovered = 0
+    for record in store.list_outstanding_records():
+        outcome = record.outcome
+        external_finalizer = (
+            None if outcome is None else outcome.metadata.get("external_finalizer")
+        )
+        token = _queue_finalizer_token(external_finalizer)
+        running_queue_operation = (
+            record.phase == "running"
+            and record.input_data.get("role") == "update"
+            and record.input_data.get("kind") == "semantic-turn"
+        )
+        prepared_or_final = (
+            record.phase in {"prepared", *FINAL_PHASES}
+            and outcome is not None
+            and token is not None
+        )
+        if not running_queue_operation and not prepared_or_final:
+            continue
+        finalized_commit = coordinator.finalized_batch_commit("HEAD", record.operation_id)
+        superseded_commit = coordinator.superseded_batch_commit(
+            "HEAD",
+            record.operation_id,
+        )
+        if finalized_commit is None and superseded_commit is None:
+            try:
+                finalized_commit = coordinator.fetch_and_integrate_finalized_batch(
+                    record.operation_id,
+                )
+            except UpdateQueueUnavailable:
+                continue
+        if finalized_commit is None and superseded_commit is None:
+            try:
+                superseded_commit = coordinator.fetch_and_integrate_superseded_batch(
+                    record.operation_id,
+                )
+            except UpdateQueueUnavailable:
+                continue
+        landed_commit = (
+            None
+            if token is None
+            else coordinator.finalized_batch_commit(
+                "HEAD",
+                record.operation_id,
+                token=token,
+            )
+        )
+        superseding_commit = (
+            finalized_commit or superseded_commit
+            if landed_commit is None
+            else None
+        )
+        session_id = record.input_data.get("session_id")
+        if not isinstance(session_id, str):
+            continue
+        try:
+            runtime = RightMemoryRuntime(load_config("update", memory_root=memory_root))
+            try:
+                if running_queue_operation and (finalized_commit or superseded_commit):
+                    runtime.supersede_running_session_turn(
+                        session_id,
+                        operation_id=record.operation_id,
+                        landed_commit=finalized_commit or superseded_commit,
+                    )
+                elif landed_commit is not None:
+                    runtime.complete_session_turn_external(
+                        session_id,
+                        operation_id=record.operation_id,
+                        external_finalizer=str(external_finalizer),
+                        landed_commit=landed_commit,
+                    )
+                elif superseding_commit is not None:
+                    runtime.supersede_session_turn_external(
+                        session_id,
+                        operation_id=record.operation_id,
+                        external_finalizer=str(external_finalizer),
+                        landed_commit=superseding_commit,
+                    )
+                else:
+                    continue
+            finally:
+                runtime.cleanup()
+        except Exception as exc:
+            print(
+                "warning: synchronized update effects remain pending for "
+                f"{record.operation_id}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+        recovered += 1
+    return recovered
+
+
+def _queue_external_finalizer(token: str) -> str:
+    if len(token) != 32 or any(character not in "0123456789abcdef" for character in token):
+        raise ValueError("queue lease token must be 32 lowercase hexadecimal characters")
+    return f"{QUEUE_FINALIZER}{QUEUE_FINALIZER_SEPARATOR}{token}"
+
+
+def _queue_finalizer_token(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    prefix = f"{QUEUE_FINALIZER}{QUEUE_FINALIZER_SEPARATOR}"
+    if not value.startswith(prefix):
+        return None
+    token = value[len(prefix) :]
+    if len(token) != 32 or any(character not in "0123456789abcdef" for character in token):
+        return None
+    return token
+
+
+def _synchronized_update_work_remains(memory_root: Path) -> bool:
+    snapshot = UpdateQueueStore(memory_root).snapshot()
+    if snapshot.candidates or snapshot.lease or snapshot.recoveries:
+        return True
+    for record in SemanticOperationStore(memory_root).list_outstanding_records():
+        if (
+            record.phase == "running"
+            and record.input_data.get("role") == "update"
+            and record.input_data.get("kind") == "semantic-turn"
+        ):
+            return True
+        if (
+            record.phase == "prepared"
+            and record.outcome is not None
+            and _queue_finalizer_token(
+                record.outcome.metadata.get("external_finalizer")
+            )
+            is not None
+        ):
+            return True
+    return False
 
 
 def _run_async_update_batch(memory_root, role: str, batch_session_id: str, message: str) -> str:

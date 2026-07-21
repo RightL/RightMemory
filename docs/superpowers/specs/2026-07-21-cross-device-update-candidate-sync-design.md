@@ -68,8 +68,8 @@ New candidates are first written to an ignored local outbox:
 
 ```text
 .runtime/async/update/
-  outbox/<candidate-id>.json
-  publication/<candidate-id>.json
+  outbox/<candidate-uid>.json
+  publication/<candidate-uid>.json
 ```
 
 The outbox is authoritative while the candidate is guaranteed not to have been
@@ -88,28 +88,27 @@ layout:
 
 ```text
 update_queue/
-  candidates/<candidate-id>.json
-  recovery/<session-key>.json
+  candidates/<candidate-uid>.json
+  recovery/update-batch-<sha256>.json
   lease.json
 ```
 
 Candidate files are immutable. Each contains:
 
 - `schema_version`;
-- a globally unique `candidate_id` generated before it enters the outbox;
+- a globally unique `uid` generated before it enters the outbox;
 - `session_id` for provenance and whole-session batching;
+- `display_id` for the familiar per-session numeric command surface;
 - `submitted_at` in UTC;
-- `message` containing the submitted evidence;
-- `origin_device_id` for diagnostics;
-- optional legacy identity metadata used only for migration and compatibility.
+- `message` containing the submitted evidence.
 
 The canonical candidate id is a lowercase UUID hex string. User-facing commands
 may accept an unambiguous prefix while storing and comparing the full id.
 
-Recovery files are keyed by a filesystem-safe hash of `session_id`. They contain
-only synchronized control state needed to preserve retry behavior across
-devices: attempt count, cooldown eligibility, manual-recovery status, and a
-bounded error summary. Detailed logs remain local.
+Recovery files are keyed by the deterministic `update-batch-<sha256>` operation
+id. They contain `schema_version`, `batch_id`, the sorted candidate UID set,
+attempt count, a machine-readable reason code, optional retry time, and the
+manual-recovery flag. Detailed errors and logs remain local.
 
 `lease.json` exists only while a synchronized batch is claimed. It records:
 
@@ -118,13 +117,14 @@ bounded error summary. Detailed logs remain local.
 - the owning device id;
 - the exact candidate ids in the batch;
 - the deterministic batch operation id;
-- acquisition and expiry timestamps.
+- the exact Git base commit;
+- the expiry timestamp.
 
 New submissions never join an existing lease. They remain pending for a later
 batch.
 
 Within each session, candidates are ordered by `submitted_at` and then
-`candidate_id`; sessions are ordered by `session_id`. The batch operation id is
+candidate UID; sessions are ordered by `session_id`. The batch operation id is
 the canonical hash of that ordered session-and-candidate structure.
 
 ## Authority Invariants
@@ -170,9 +170,9 @@ when a device attempts a claim, but the lease determines which attempt wins.
 
 ### Git queue coordinator
 
-The coordinator performs claim, renewal, takeover, undo, recovery, and
-finalization as exact-upstream compare-and-swap transactions in temporary
-worktrees. It never lands a failed claim commit in the active checkout.
+The coordinator performs claim, takeover, undo, recovery, and finalization as
+exact-upstream compare-and-swap transactions in temporary worktrees. It never
+lands a failed claim commit in the active checkout.
 
 ### Async update worker
 
@@ -187,12 +187,14 @@ must pass the fencing token into finalization.
 
 1. `update submit` creates a stable candidate id and atomically writes the local
    outbox file.
-2. The command reports the id and current visibility.
+2. The command reports the familiar per-session numeric queue state; the global
+   UID remains the internal cross-device identity.
 3. When the upstream is reachable, the publisher writes a durable publication
    marker, creates a candidate-addition commit in a temporary worktree, and
    pushes it.
-4. After fetching and confirming the candidate on the upstream, Runtime advances
-   the active root safely and removes the local outbox copy and marker.
+4. After upstream history proves the candidate published or already settled,
+   Runtime removes its local scheduling copy and marker. Queue claim or ordinary
+   sync then advances the active checkout to the upstream queue state.
 5. If the upstream is unavailable before a push attempt begins, the candidate
    remains local-only and eligible for offline processing.
 
@@ -205,8 +207,8 @@ checks the candidate path and its reachable history:
   synchronized;
 - absent at the tip but present in reachable upstream history: another device
   already processed or canceled it, so the local copy is discarded;
-- absent from both tip and reachable history: publication did not land, so the
-  marker may be cleared and the candidate becomes local-only again.
+- absent from both tip and reachable history: publication is retried while
+  online; the marker remains, so offline local processing stays forbidden.
 
 Managed sync never rewrites upstream history, making this check authoritative.
 
@@ -252,8 +254,8 @@ ordinary Memory sync reconciliation concern.
    active checkout to that exact commit.
 
 If the remote accepts the push but the client loses the response, the operation
-id and upstream tree allow startup recovery to recognize success without another
-model call.
+id, exact lease token, and upstream history allow startup recovery to recognize
+success without another model call.
 
 ### Failure and retry
 
@@ -264,23 +266,25 @@ recovery work bypasses the normal fill threshold as it does today. Repeated
 failure enters synchronized manual-recovery state, so another device cannot
 reset attempts merely by seeing the queue for the first time.
 
-A local-only failure retains equivalent retry state locally. If that work is
-later published, its relevant recovery state is published with it.
+A local-only failure retains its retry state locally. It stays in the local lane
+until local retry policy makes it eligible again.
 
 If the upstream becomes unavailable while recording a synchronized failure, the
-device retains a local prepared failure transaction and does not start another
-attempt. Recovery first checks whether its lease is still current: it publishes
-the prepared failure when it still owns the lease, or discards it after a
-verified takeover.
+candidate files and lease remain authoritative upstream. The worker does not
+fall back to local processing; it retries online, or another device takes over
+after verified lease expiry.
 
-### Lease renewal and takeover
+### Lease expiry and takeover
 
-The initial lease lasts one hour and the winner attempts renewal every fifteen
-minutes while model or finalization work remains active. Expiry time controls
-availability, not correctness: any takeover replaces the fencing token through
-another compare-and-swap push. An old worker must fetch and verify its token
-before finalization, so clock skew or a delayed process can at worst duplicate
-model computation, never committed effects.
+The fixed lease lasts six hours, which covers typical model and tool work;
+CLI-agent execution has no enforced upper bound and may outlive it. Version one
+has no heartbeat or renewal path. Expiry time controls availability, not
+correctness: any takeover replaces the fencing token through another
+compare-and-swap push. An old worker must fetch and verify its token before
+finalization, so clock skew or a delayed process can at worst duplicate model
+computation, never committed effects. With reasonably synchronized device clocks,
+a crashed owner delays takeover by about six hours; clock skew can shorten or
+extend that availability delay without weakening fencing correctness.
 
 ### Undo
 
@@ -292,24 +296,21 @@ refetches and excludes it.
 
 ## Retrieval, Status, and Commands
 
-Recent-submitted retrieval reads the union of local outbox and synchronized
-candidate files, deduplicated by global candidate id. Delivery tracking remains
-local, so a newly used device may surface an existing synchronized candidate
-once even if another device already displayed it.
+Recent-submitted retrieval reads the durable local outbox, live local
+async-session jobs, and synchronized candidate files, deduplicated by global
+candidate UID. Delivery tracking remains local, so a newly used device may
+surface an existing synchronized candidate once even if another device already
+displayed it.
 
-`update pull --session` and `rightmemory status` derive live state from both
-lanes and distinguish:
+`update pull --session` shows the detailed local session state and lists its
+synchronized candidates with an eight-character UID prefix. `rightmemory status`
+shows aggregate local pending, retrying, manual-recovery, and current counts plus
+aggregate synchronized pending, leased, retrying, and manual-recovery counts.
 
-- `local-only`;
-- `publication-unknown`;
-- synchronized pending;
-- claimed/current batch;
-- retry cooldown;
-- manual recovery.
-
-`update undo` continues to require `--session` as a safety scope and accepts the
-printed global id or an unambiguous prefix. A migrated candidate may also accept
-its legacy numeric id while it remains live.
+`update undo` continues to require `--session` as a safety scope. A numeric
+reference names only this device's local lane. A synchronized candidate must use
+the unambiguous 8-to-32-character lowercase UID prefix shown by `update pull`;
+an all-digit reference of at least eight characters is therefore a UID prefix.
 
 `update retry` applies local recovery immediately. Synchronized manual recovery
 requires an online fenced transaction before any device can claim the work.
@@ -334,19 +335,24 @@ Candidate text remains in Git history after consumption or undo. The first
 version intentionally adds no compaction, history rewriting, encryption, or
 alternate transport.
 
-## Compatibility and Migration
+## Compatibility and Upgrade Admission
 
-Existing per-session async state is migrated under the current worker and memory
-write locks. A live old worker delays migration until it exits. Pending and
-recoverable jobs become local outbox candidates because old versions could not
-have synchronized them.
+The tracked queue is a coordinated sync-protocol upgrade. Every device sharing
+the upstream must update the RightMemory runtime and rerun the installer before
+the first `update_queue/` candidate is published. An older runtime deliberately
+rejects those paths as unknown synchronized state; the first version does not
+add a dual-format transport or compatibility alias.
 
-Migration creates deterministic UUID values from the complete legacy identity
-and payload so a crash can repeat migration without duplicating candidates. It
-preserves session provenance, submission order, retry attempts, cooldown,
-manual-recovery state, and legacy numeric ids. A durable local migration marker
-prevents the old state from being read as a second queue. Legacy files may remain
-as ignored recovery evidence; they are not committed.
+Version one intentionally has no migration framework for live legacy async jobs,
+because inventing cross-device identities during install would enlarge the
+coordination boundary. Before reinstalling, each device must use its currently
+installed RightMemory runtime to finish, retry, or undo every live update. The
+installer scans local async session and reservation state before any mutation
+and refuses data the new runtime cannot parse, including live jobs without the
+new `candidate_uid`. Current-format drained state may remain, but unsupported
+drained legacy files must be reviewed and archived explicitly. It also refuses
+an older pending transcript-review delivery, because that receipt has not yet
+reserved a stable candidate UID; the existing review watcher must drain it first.
 
 Sync-disabled roots use the same local outbox but retain local process locking
 and offline processing. They do not create synchronized queue files until sync
@@ -355,7 +361,7 @@ is enabled, avoiding remote-coordination requirements for local-only users.
 ## Validation and Safety
 
 - Candidate ids, filenames, and embedded ids must match.
-- Candidate and recovery session ids must pass existing safe-session validation.
+- Candidate session ids must be non-empty canonical strings.
 - Candidate payloads are treated as evidence text, never as instructions to the
   coordination layer.
 - Unknown schema versions, malformed JSON, invalid lease membership, duplicate
@@ -368,29 +374,12 @@ is enabled, avoiding remote-coordination requirements for local-only users.
 
 ## Testing
 
-Focused unit tests will cover candidate and recovery schemas, safe paths, global
-id prefix resolution, local/synchronized state derivation, whole-session batch
-selection, retry transitions, migration idempotence, and recent-submitted
-deduplication.
-
-Git integration tests will use two independent clones of one bare remote and
-cover:
-
-- concurrent unique submissions merge without conflict;
-- a local-only candidate processes offline without entering the remote queue;
-- local-only and synchronized candidates are never mixed in one updater call;
-- publication and local processing cannot acquire the same outbox candidate;
-- ambiguous publication recovery detects live, already-consumed, and never-landed
-  candidates;
-- two simultaneous claims produce one winner and one worker invocation;
-- claim versus undo produces one authoritative outcome;
-- new candidates arriving during a lease remain pending;
-- failed batches retain candidates and synchronize recovery policy;
-- expired-lease takeover fences the former owner;
-- final push acknowledgement loss recovers without rerunning the updater;
-- semantic success and semantic no-op both consume the exact claimed batch;
-- malformed incoming queue state is rejected before active publication;
-- sync-disabled local behavior remains functional.
+Focused tests cover strict queue schemas, local outbox recovery, publication and
+undo exclusion, recent-submitted deduplication, retry transitions, upgrade
+admission, and exact token ownership of prepared results. Two-clone Git tests
+cover one-winner claims, ambiguous publication/cancel/retry outcomes, claim
+installation failure, exact candidate consumption, semantic-base rejection,
+token-qualified finalization recovery, and malformed queue rejection.
 
 Existing async update, sync, isolated-write, status, retrieval, install, and CLI
 tests must continue to pass. README and `DESIGN_NOTES.md` will document the

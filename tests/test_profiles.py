@@ -166,7 +166,13 @@ class ProfileTests(unittest.TestCase):
             "!shared_views/*/question.toml\n"
             "!shared_views/*/.gitignore\n"
             "!insight_logs/\n"
-            "!insight_logs/*.md\n",
+            "!insight_logs/*.md\n"
+            "!update_queue/\n"
+            "!update_queue/candidates/\n"
+            "!update_queue/candidates/*.json\n"
+            "!update_queue/recovery/\n"
+            "!update_queue/recovery/*.json\n"
+            "!update_queue/lease.json\n",
         )
         self.assertIn("memory: initial baseline", git_head)
         self.assertEqual(profiles["alpha"].root, profile.root)

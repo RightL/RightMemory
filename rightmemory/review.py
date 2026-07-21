@@ -9,7 +9,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
-from .async_update import AsyncUpdateState, AsyncUpdateStore
+from .async_update import (
+    AsyncUpdateState,
+    AsyncUpdateStore,
+    new_candidate_uid,
+    normalize_candidate_uid,
+)
 from .config import ReviewConfig, ReviewSourceConfig
 from .provider_sessions import ProviderSessionStore
 from .session import _ensure_runtime_gitignore, _fsync_directory
@@ -19,6 +24,7 @@ from .transcripts.model import NormalizedSession, TranscriptFile
 SECONDS_PER_DAY = 24 * 60 * 60
 REVIEW_MAX_RETRIES = 1
 REVIEW_NO_CANDIDATE = "Nothing to save."
+REVIEW_DELIVERY_FORMAT_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -79,6 +85,7 @@ class ReviewDeliveryReceipt:
     batch_id: str
     candidate: str
     candidate_id: int
+    candidate_uid: str
     reviewed_at: str
     sessions: tuple[ReviewSessionState, ...]
     reviewed_count: int
@@ -149,10 +156,11 @@ class ReviewDeliveryStore:
         tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         content = json.dumps(
             {
-                "version": 1,
+                "version": REVIEW_DELIVERY_FORMAT_VERSION,
                 "batch_id": receipt.batch_id,
                 "candidate": receipt.candidate,
                 "candidate_id": receipt.candidate_id,
+                "candidate_uid": receipt.candidate_uid,
                 "reviewed_at": receipt.reviewed_at,
                 "sessions": [asdict(session) for session in receipt.sessions],
                 "reviewed_count": receipt.reviewed_count,
@@ -364,13 +372,14 @@ class ReviewScanner:
                 batch_id=session_id,
                 candidate=candidate,
                 candidate_id=state.next_id,
+                candidate_uid=new_candidate_uid(),
                 reviewed_at=reviewed_at,
                 sessions=reviewed_sessions,
                 reviewed_count=len(payload),
                 skipped_duplicate_count=skipped_duplicate_count,
             )
             self.delivery_store.save(receipt)
-            self.update_store.submit(session_id, candidate)
+            self.update_store.submit(session_id, candidate, candidate_uid=receipt.candidate_uid)
         except Exception:
             counts["failed"] += 1
             return False, None
@@ -400,8 +409,12 @@ class ReviewScanner:
         state = self.update_store.read(receipt.batch_id)
         if state.next_id < receipt.candidate_id:
             raise RuntimeError("async updater state precedes transcript-review delivery receipt")
-        if state.next_id == receipt.candidate_id:
-            state = self.update_store.submit(receipt.batch_id, receipt.candidate)
+        if receipt.candidate_uid not in state.accepted_candidate_uids:
+            state = self.update_store.submit(
+                receipt.batch_id,
+                receipt.candidate,
+                candidate_uid=receipt.candidate_uid,
+            )
             _validate_delivery_state(state, receipt)
             return
 
@@ -428,19 +441,27 @@ def normalize_review_candidate(output: str) -> str | None:
 def _validate_delivery_state(state: AsyncUpdateState, receipt: ReviewDeliveryReceipt) -> None:
     if state.next_id <= receipt.candidate_id:
         raise RuntimeError("async updater did not accept transcript-review delivery receipt")
-    matching_jobs = [
-        job for job in [*state.current_batch, *state.pending] if job.id == receipt.candidate_id
-    ]
-    if matching_jobs and any(job.message != receipt.candidate for job in matching_jobs):
-        raise RuntimeError("async updater candidate conflicts with transcript-review delivery receipt")
+    if receipt.candidate_uid not in state.accepted_candidate_uids:
+        raise RuntimeError("async updater did not accept transcript-review candidate identity")
+    live_jobs = [*state.current_batch, *state.pending]
+    matching_uids = [job for job in live_jobs if job.candidate_uid == receipt.candidate_uid]
+    if len(matching_uids) > 1:
+        raise RuntimeError("async updater contains duplicate transcript-review candidate identity")
+    if matching_uids:
+        if matching_uids[0].message != receipt.candidate:
+            raise RuntimeError(
+                "async updater candidate conflicts with transcript-review delivery receipt"
+            )
+        return
 
 
 def _parse_delivery_receipt(data: object) -> ReviewDeliveryReceipt:
-    if not isinstance(data, dict) or data.get("version") != 1:
+    if not isinstance(data, dict) or data.get("version") != REVIEW_DELIVERY_FORMAT_VERSION:
         raise ValueError("unsupported transcript-review delivery receipt")
     batch_id = data.get("batch_id")
     candidate = data.get("candidate")
     candidate_id = data.get("candidate_id")
+    candidate_uid = data.get("candidate_uid")
     reviewed_at = data.get("reviewed_at")
     reviewed_count = data.get("reviewed_count")
     skipped_duplicate_count = data.get("skipped_duplicate_count")
@@ -450,6 +471,10 @@ def _parse_delivery_receipt(data: object) -> ReviewDeliveryReceipt:
         raise ValueError("transcript-review delivery receipt requires a candidate")
     if not isinstance(candidate_id, int) or isinstance(candidate_id, bool) or candidate_id < 1:
         raise ValueError("transcript-review delivery receipt candidate id must be positive")
+    try:
+        candidate_uid = normalize_candidate_uid(candidate_uid)
+    except ValueError as exc:
+        raise ValueError("transcript-review delivery receipt requires a valid candidate uid") from exc
     if not isinstance(reviewed_at, str) or not reviewed_at:
         raise ValueError("transcript-review delivery receipt requires a review timestamp")
     if not isinstance(reviewed_count, int) or isinstance(reviewed_count, bool) or reviewed_count < 1:
@@ -493,6 +518,7 @@ def _parse_delivery_receipt(data: object) -> ReviewDeliveryReceipt:
         batch_id=batch_id,
         candidate=candidate,
         candidate_id=candidate_id,
+        candidate_uid=candidate_uid,
         reviewed_at=reviewed_at,
         sessions=tuple(sessions),
         reviewed_count=reviewed_count,

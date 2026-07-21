@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 
 from rightmemory.recent_submitted import (
@@ -10,9 +11,46 @@ from rightmemory.recent_submitted import (
     collect_recent_submitted_memory,
     format_recent_submitted_block,
 )
+from rightmemory.update_queue import UpdateCandidate, UpdateQueueStore
 
 
 class RecentSubmittedMemoryCollectionTests(unittest.TestCase):
+    def test_collects_outbox_only_candidate_after_submit_crash(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            candidate = UpdateCandidate(
+                uid="b" * 32,
+                session_id="crashed-submit",
+                display_id=1,
+                message="durable local evidence",
+                submitted_at=datetime(2026, 5, 19, tzinfo=UTC).isoformat(),
+            )
+            UpdateQueueStore(root).write_outbox(candidate)
+
+            entries = collect_recent_submitted_memory(root)
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].key, candidate.uid)
+        self.assertEqual(entries[0].message, candidate.message)
+
+    def test_collects_candidate_pulled_from_synchronized_queue(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            candidate = UpdateCandidate(
+                uid="a" * 32,
+                session_id="remote-session",
+                display_id=7,
+                message="remote pending evidence",
+                submitted_at=datetime(2026, 5, 19, tzinfo=UTC).isoformat(),
+            )
+            UpdateQueueStore(root).write_candidate(candidate)
+
+            entries = collect_recent_submitted_memory(root)
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].key, candidate.uid)
+        self.assertEqual(entries[0].message, "remote pending evidence")
+
     def test_collects_pending_and_current_batch_from_all_update_sessions(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -51,9 +89,9 @@ class RecentSubmittedMemoryCollectionTests(unittest.TestCase):
         self.assertEqual(
             [entry.key for entry in entries],
             [
-                "update-b:3:2026-05-19T00:00:00+00:00",
-                "update-b:4:2026-05-19T00:01:00+00:00",
-                "update-a:2:2026-05-19T00:02:00+00:00",
+                f"{3:032x}",
+                f"{4:032x}",
+                f"{2:032x}",
             ],
         )
         self.assertEqual(entries[0].update_session_id, "update-b")
@@ -255,6 +293,12 @@ class RecentSubmittedMemoryCollectionTests(unittest.TestCase):
         self.assertIn("async update state must contain positive integer field: next_id", str(caught.exception))
 
     def _write_state(self, root: Path, session_id: str, *, pending=None, current_batch=None):
+        def with_candidate_uids(jobs):
+            return [
+                {**job, "candidate_uid": job.get("candidate_uid", f"{job['id']:032x}")}
+                for job in (jobs or [])
+            ]
+
         state_path = root / ".runtime" / "async" / "update" / f"{session_id}.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(
@@ -270,8 +314,8 @@ class RecentSubmittedMemoryCollectionTests(unittest.TestCase):
                     "result": None,
                     "error": None,
                     "next_flush_at": "2026-05-19T01:00:00+00:00",
-                    "current_batch": current_batch or [],
-                    "pending": pending or [],
+                    "current_batch": with_candidate_uids(current_batch),
+                    "pending": with_candidate_uids(pending),
                     "next_id": 10,
                 }
             ),

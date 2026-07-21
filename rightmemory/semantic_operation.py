@@ -367,6 +367,124 @@ class SemanticOperationStore:
             self._write_locked(updated)
             return updated
 
+    def restart_prepared(
+        self,
+        operation_id: str,
+        *,
+        expected_metadata: Mapping[str, Any],
+        reason: str,
+    ) -> SemanticOperationRecord:
+        """Return a fenced prepared operation to running so it can be recomputed."""
+        clean_id = _operation_id(operation_id)
+        clean_metadata = _json_object(expected_metadata, "expected outcome metadata")
+        clean_reason = _required_string(reason, "operation restart reason")
+        with self._locked(clean_id):
+            record = self._required_record_locked(clean_id)
+            self._require_current_owner(record)
+            if record.phase != "prepared" or record.outcome is None:
+                raise OperationConflictError(
+                    f"operation {clean_id} cannot restart from phase {record.phase}"
+                )
+            for key, value in clean_metadata.items():
+                if record.outcome.metadata.get(key) != value:
+                    raise OperationConflictError(
+                        f"operation {clean_id} has different outcome metadata: {key}"
+                    )
+            restarted = replace(
+                record,
+                phase="running",
+                outcome=None,
+                effects=(),
+                failure=clean_reason,
+                updated_at=_now(),
+            )
+            self._write_locked(restarted)
+            return restarted
+
+    def supersede_prepared(
+        self,
+        operation_id: str,
+        *,
+        expected_metadata: Mapping[str, Any],
+        landed_commit: str,
+    ) -> SemanticOperationRecord:
+        """Settle a prepared result that lost an external publication fence."""
+        clean_id = _operation_id(operation_id)
+        clean_metadata = _json_object(expected_metadata, "expected outcome metadata")
+        clean_commit = _required_string(landed_commit, "landed_commit")
+        with self._locked(clean_id):
+            record = self._required_record_locked(clean_id)
+            self._require_current_owner(record)
+            if record.phase != "prepared" or record.outcome is None:
+                raise OperationConflictError(
+                    f"operation {clean_id} cannot be superseded from phase {record.phase}"
+                )
+            for key, value in clean_metadata.items():
+                if record.outcome.metadata.get(key) != value:
+                    raise OperationConflictError(
+                        f"operation {clean_id} has different outcome metadata: {key}"
+                    )
+            outcome = OperationOutcome(
+                phase="no_change",
+                output="superseded by another external publication owner",
+                start_commit=record.outcome.start_commit,
+                sequence=record.outcome.sequence,
+                landed_commit=clean_commit,
+                metadata={
+                    **clean_metadata,
+                    "superseded": True,
+                },
+            )
+            settled = replace(
+                record,
+                phase="no_change",
+                outcome=outcome,
+                effects=(),
+                failure=None,
+                updated_at=_now(),
+            )
+            self._write_locked(settled)
+            return settled
+
+    def supersede_running(
+        self,
+        operation_id: str,
+        *,
+        landed_commit: str,
+        reason: str,
+    ) -> SemanticOperationRecord:
+        """Settle an abandoned running operation after external terminal proof."""
+        clean_id = _operation_id(operation_id)
+        clean_commit = _required_string(landed_commit, "landed_commit")
+        clean_reason = _required_string(reason, "operation supersede reason")
+        with self._locked(clean_id):
+            record = self._required_record_locked(clean_id)
+            if record.phase in FINAL_PHASES:
+                self._sync_outstanding_locked(record)
+                return record
+            if record.phase != "running":
+                raise OperationConflictError(
+                    f"operation {clean_id} cannot supersede running work from phase {record.phase}"
+                )
+            outcome = OperationOutcome(
+                phase="no_change",
+                output=clean_reason,
+                start_commit=clean_commit,
+                sequence=self._next_sequence(),
+                landed_commit=clean_commit,
+                metadata={"superseded": True},
+            )
+            settled = replace(
+                record,
+                phase="no_change",
+                outcome=outcome,
+                effects=(),
+                failure=None,
+                updated_at=_now(),
+            )
+            self._write_locked(settled)
+            return settled
+
     def mark_effect(
         self,
         operation_id: str,

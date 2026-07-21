@@ -156,6 +156,12 @@ Install creates semantic state only when bootstrapping a new root. A fresh root 
 
 If an existing root has a Git commit or any recognized semantic state but lacks a regular, non-symlink required root document, install refuses it before making any change. The memory root, runtime installation, installed skills, and install stamp remain untouched so the user can perform an explicit, reviewed migration first. Fresh installs still baseline current semantic-upgrade notes, while a successful reinstall may report pending notes for a later Dreamer cycle without applying them. Legacy `MEMORY_*.md` files remain protected even when they are not currently reachable from `MEMORY.md`.
 
+Installer admission also validates any existing tracked update queue and checks
+for live async jobs from the pre-queue runtime. It changes nothing when either is
+incompatible. Finish, retry, or undo those live jobs with the currently installed
+RightMemory before rerunning the installer; version one does not invent migrated
+candidate identities during package installation.
+
 The memory root must be a standalone, non-bare Git working tree. An existing target nested inside another working tree, a bare repository, or an unusable `.git` entry is refused before installation writes anything.
 
 Reinstall replaces the superseded managed Memory-only orchestrator with the current two-skill surface; it does not keep an alias or a second behavior path. Removal is limited to content recognized as RightMemory-managed.
@@ -518,6 +524,11 @@ rightmemory dreamer chat
 rightmemory insight chat
 ```
 
+`update undo` uses a numeric ID only for this device's local queue. For a
+synchronized candidate, use the eight-character UID prefix shown by
+`update pull`; this keeps cross-device ID collisions unambiguous. An all-digit
+reference of eight or more characters is therefore interpreted as a UID prefix.
+
 For machine callers:
 
 ```bash
@@ -546,7 +557,7 @@ The runtime is intentionally small:
 - Every new CLI-agent provider thread receives an ownership record under `<memory-root>/.runtime/agent_cli_threads/`, including one-shot and failed isolated work, so transcript review can exclude internal conversations without relying on an active mapping.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - Use `rightmemory status` for a read-only operational dashboard across the configured memory root. It summarizes Git state, managed watches, Dreamer and Insight trigger progress, async update queues, bounded last-message previews, and file paths for full logs or state. Use `rightmemory watch status` when you need the lower-level managed-watch process view.
-- The installer creates a root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, `PURSUIT_RULES.md`, optional root `corrections.md`, sharing metadata and provider view sources, and `insight_logs/*.md`; generated shared-view output and update-review documents stay outside the committed surface.
+- The installer creates a root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, `PURSUIT_RULES.md`, optional root `corrections.md`, sharing metadata and provider view sources, `insight_logs/*.md`, and the narrowly defined `update_queue/` JSON paths; generated shared-view output and update-review documents stay outside the committed surface.
 - Async `update submit` calls for the same `--session` accumulate as pending candidates and reset that session's configured quiet period. Start and terminal candidates that reach the same batch are reconciled together, so already-finished work does not leave transient Pursuit state. A global worker batches whole session queues, but the updater groups candidates by the work they describe rather than treating a session as one task. `pull` and `undo` remain per-session. Retrieve can see pending evidence as `Recent submitted RightMemory` before consolidation.
 - Automatic unified-update, dreamer, insight, and pruner turns use isolated Git worktrees when they operate on the main state root. Runtime validates complete role-owned results before landing them. Transcript review remains read-only and queues any resulting candidate.
 - Standalone daemon context is preserved with Pydantic AI message history.
@@ -570,6 +581,32 @@ measured from the oldest eligible queue's quiet-period deadline.
 `rightmemory status` includes aggregate async update worker and queue state
 without requiring a session id. For one session's detailed pending, running,
 result, or error state, continue to use `rightmemory update pull --session <id>`.
+
+When Git sync is enabled, published candidates and their coordination state use
+the tracked `update_queue/` paths. Candidate text therefore remains in the
+private repository's history after processing or undo. Before upgrading, drain
+live updates on every device with its currently installed runtime. Then update
+and reinstall RightMemory everywhere before submitting another candidate; older
+runtimes reject the new paths rather than silently admitting state they cannot
+validate. Reinstall refuses a live legacy job without `candidate_uid` or any
+older pending transcript-review delivery, or any malformed queue, before
+changing the installation.
+
+Unsupported or unreadable historical async state also blocks reinstall, even
+when drained. After confirming it contains no live work, archive the listed
+runtime file and rerun the installer.
+
+Processing synchronized candidates requires an online Git claim. Version one
+uses a fixed six-hour lease with no heartbeat; this is long enough for typical
+work, while an unusually long CLI-agent command may outlive it. Finalization
+refetches and verifies the fencing token, so expiry can duplicate computation but
+cannot commit a stale result. With reasonably synchronized device clocks, a
+crashed owner delays takeover by about six hours; clock skew can change that
+availability delay without weakening fencing correctness.
+
+A candidate may still process offline while it is provably local-only. Once its
+first publication attempt begins, it stays online-only until Git proves the
+synchronized outcome.
 
 ### CLI-Agent Config
 
@@ -854,7 +891,12 @@ stale_pull_after_hours = 24
 
 When sync is enabled, runtime code handles remote Git synchronization around automatic semantic work. It checks upstream state before model work and pushes after successful synchronized-state commits land. Incoming commits never merge directly into the active checkout: RightMemory merges the exact fetched commit in a leased candidate worktree, invokes `sync-reconciler` there only for synchronized conflicts or semantic validation failures, validates the complete candidate, and then fast-forwards the active root to that exact commit. The isolated-write dirty-main check is separate from remote sync: local synchronized files can block automatic semantic writes even when `[sync].enabled` is false. Retrieval and historical retrieval stay local by default for speed.
 
-Managed watch includes a `sync` target. `rightmemory watch start` starts it when sync is enabled, and `rightmemory watch start sync` runs that target by itself. The sync watcher pulls when no successful pull is recorded or when the last successful pull is older than `stale_pull_after_hours`; clean pulls and fresh checks stay deterministic and do not call a model.
+Update-queue files are coordination data, not semantic repair input. Sync admits
+only the canonical candidate, recovery, and singleton-lease paths, validates the
+complete queue before publication, and fails closed on malformed data or queue
+merge conflicts. `sync-reconciler` never edits or resolves queue state.
+
+Managed watch includes a `sync` target. `rightmemory watch start` starts it when sync is enabled, and `rightmemory watch start sync` runs that target by itself. Every normal watcher cycle fetches the upstream so newly published candidates become locally visible; it pulls immediately when the fetched tip changed. When the tip is unchanged, `stale_pull_after_hours` controls how often a no-change pull checkpoint is recorded. Clean pulls and fresh checks stay deterministic and do not call a model.
 
 Pre-existing dirty or already-invalid active state blocks incoming sync before a candidate can land. If candidate merge, repair, validation, or final publication checks fail, the active branch and semantic files remain unchanged; conflict markers exist only in the candidate. A prepared repair is durably recoverable without another model turn. For `corrections.md`, candidate repair preserves non-identical entries without ranking them; semantic merging, replacement, or rejection remains updater-owned. A network push failure after local publication leaves the valid local commit in place and can retry without repeating repair.
 
@@ -916,6 +958,7 @@ After install:
 ├── PURSUIT_RULES.md
 ├── corrections.md              # created only when updater feedback is admitted
 ├── insight_logs/
+├── update_queue/               # appears when synchronized queue state exists
 └── .runtime/update-review/     # local review inbox, not committed
 
 ~/.codex/skills/

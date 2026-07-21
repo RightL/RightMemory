@@ -75,6 +75,24 @@ class SemanticOperationStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(OperationConflictError, "different input"):
             self.store.begin("operation-1", {"candidate": "two"})
 
+    def test_running_operation_can_settle_after_external_terminal_proof(self):
+        self.store.begin(
+            "operation-1",
+            {"kind": "semantic-turn", "role": "update", "session_id": "operation-1"},
+        )
+
+        settled = self.store.supersede_running(
+            "operation-1",
+            landed_commit="tip456",
+            reason="superseded externally",
+        )
+
+        self.assertEqual(settled.phase, "no_change")
+        self.assertEqual(settled.outcome.landed_commit, "tip456")
+        self.assertTrue(settled.outcome.metadata["superseded"])
+        self.assertTrue(settled.complete)
+        self.assertEqual(self.store.list_outstanding_records(), ())
+
     def test_record_path_digest_collision_fails_closed(self):
         with patch("rightmemory.semantic_operation._operation_digest", return_value="a" * 64):
             self.store.begin("operation-1", {"candidate": "one"})

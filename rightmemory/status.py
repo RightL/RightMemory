@@ -16,6 +16,7 @@ from .config import load_dreamer_watch_config, load_insight_watch_config, load_s
 from .platform import lock_file_nonblocking, process_identity, unlock_file
 from .semantic_operation import FINAL_PHASES, SemanticOperationStore
 from .watch import MANAGED_WATCH_TARGETS, ManagedWatchStatus, _is_managed_watch_process, watch_log_path, watch_pid_path
+from .update_queue import UpdateQueueStore
 
 
 MAX_PREVIEW_CHARS = 300
@@ -276,6 +277,19 @@ def collect_async_update_section(
             ),
             [issue],
         )
+    try:
+        queue_snapshot = UpdateQueueStore(Path(memory_root)).snapshot()
+    except Exception as exc:
+        issue = f"update: synchronized queue error: {type(exc).__name__}: {exc}"
+        return (
+            SectionStatus(
+                name="update",
+                state=f"queue error: {type(exc).__name__}: {exc}",
+                detail=f"state: {_display_path(Path(memory_root), async_root)}",
+                issue=issue,
+            ),
+            [issue],
+        )
 
     pending_candidates = 0
     pending_sessions = 0
@@ -345,6 +359,35 @@ def collect_async_update_section(
         ),
         f"state: {_display_path(Path(memory_root), async_root)}",
     ]
+    if queue_snapshot.candidates or queue_snapshot.lease or queue_snapshot.recoveries:
+        leased = set(
+            () if queue_snapshot.lease is None else queue_snapshot.lease.candidate_uids
+        )
+        recovering = {
+            uid for recovery in queue_snapshot.recoveries for uid in recovery.candidate_uids
+        }
+        fresh = {
+            candidate.uid
+            for candidate in queue_snapshot.candidates
+            if candidate.uid not in leased and candidate.uid not in recovering
+        }
+        manual = sum(
+            len(recovery.candidate_uids)
+            for recovery in queue_snapshot.recoveries
+            if recovery.manual_recovery
+        )
+        retrying = sum(
+            len(recovery.candidate_uids)
+            for recovery in queue_snapshot.recoveries
+            if not recovery.manual_recovery and recovery.batch_id
+            != (queue_snapshot.lease.batch_id if queue_snapshot.lease else None)
+        )
+        detail_lines.insert(
+            -1,
+            "synchronized: "
+            f"{len(fresh)} pending, {len(leased)} leased, "
+            f"{retrying} retrying, {manual} manual recovery",
+        )
     if flush_times:
         detail_lines.insert(1, f"next flush: {min(flush_times)}")
     if worker_state.detail:
