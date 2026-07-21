@@ -1960,6 +1960,7 @@ def build_model(config: RuntimeConfig):
 def _build_openai_compatible_model(config: RuntimeConfig):
     try:
         from pydantic_ai.models.openai import OpenAIChatModel
+        from pydantic_ai.providers.deepseek import DeepSeekProvider
         from pydantic_ai.providers.openai import OpenAIProvider
     except ImportError as exc:
         raise RuntimeError("install standalone dependencies with: pip install -e .") from exc
@@ -1971,7 +1972,12 @@ def _build_openai_compatible_model(config: RuntimeConfig):
         provider_kwargs["api_key"] = config.api_key
     provider = OpenAIProvider(**provider_kwargs)
     model_name = _openai_model_name(config.model_id)
-    return OpenAIChatModel(model_name, provider=provider)
+    profile = (
+        DeepSeekProvider.model_profile(model_name)
+        if model_name.startswith("deepseek-")
+        else None
+    )
+    return OpenAIChatModel(model_name, provider=provider, profile=profile)
 
 
 def _build_anthropic_model(config: RuntimeConfig):
