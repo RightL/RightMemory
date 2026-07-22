@@ -3116,22 +3116,101 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(events, [("pull", memory_root), ("status", memory_root)])
         self.assertEqual(runtime.agent.calls, [])
 
-    def test_retrieve_turn_does_not_run_sync_pull(self):
+    def test_retrieve_turn_refreshes_before_model_and_defers_incomplete_sync(self):
+        events = []
+        memory_root = Path(self.tempdir.name)
         config = RuntimeConfig(
             role="retrieve",
             model_id="openai/test",
-            memory_root=Path(self.tempdir.name),
-            sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
+            memory_root=memory_root,
+            sync=load_sync_config_for_test(memory_root, enabled=True),
         )
 
         with (
             patch.dict("sys.modules", self._fake_pydantic_modules()),
             patch("rightmemory.runtime.SyncManager") as manager_class,
+            patch(
+                "rightmemory.runtime.schedule_deferred_sync",
+                side_effect=lambda root: events.append(("deferred", root)),
+            ) as schedule,
         ):
+            manager_class.return_value.refresh_for_retrieve.side_effect = lambda: events.append(
+                ("refresh", memory_root)
+            ) or SyncResult("offline", "fetch timed out")
+            runtime = RightMemoryRuntime(config)
+            runtime.run_session_turn(
+                "agent-session",
+                "find one",
+                on_started=lambda: events.append(("model", memory_root)),
+            )
+
+        manager_class.assert_called_once_with(config.sync)
+        manager_class.return_value.refresh_for_retrieve.assert_called_once_with()
+        manager_class.return_value.pull.assert_not_called()
+        manager_class.return_value.push.assert_not_called()
+        schedule.assert_called_once_with(memory_root)
+        self.assertEqual(
+            events,
+            [
+                ("refresh", memory_root),
+                ("model", memory_root),
+                ("deferred", memory_root),
+            ],
+        )
+
+    def test_nested_retrieve_entrypoints_schedule_deferred_sync_once(self):
+        memory_root = Path(self.tempdir.name)
+        config = RuntimeConfig(
+            role="retrieve",
+            model_id="openai/test",
+            memory_root=memory_root,
+            sync=load_sync_config_for_test(memory_root, enabled=True),
+        )
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.SyncManager") as manager_class,
+            patch("rightmemory.runtime.schedule_deferred_sync") as schedule,
+        ):
+            manager_class.return_value.refresh_for_retrieve.side_effect = [
+                SyncResult("conflict", "repair is required"),
+                SyncResult("fresh", "retrieve sync refresh is not due"),
+            ]
+            runtime = RightMemoryRuntime(config)
+            runtime.run_chat_turn("find one", session_id="agent-session")
+            runtime.run_chat_turn("find two", session_id="agent-session")
+
+        schedule.assert_called_once_with(memory_root)
+
+    def test_retrieve_sync_wakes_update_worker_after_incoming_queue_lands(self):
+        memory_root = Path(self.tempdir.name)
+        config = RuntimeConfig(
+            role="retrieve",
+            model_id="openai/test",
+            memory_root=memory_root,
+            sync=load_sync_config_for_test(memory_root, enabled=True),
+        )
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.SyncManager") as manager_class,
+            patch("rightmemory.runtime.UpdateQueueStore") as queue_class,
+            patch("rightmemory.runtime.AsyncUpdateStore") as update_class,
+            patch("rightmemory.runtime.schedule_deferred_sync"),
+        ):
+            manager_class.return_value.refresh_for_retrieve.return_value = SyncResult(
+                "ahead",
+                "incoming memory landed with local commits pending push",
+            )
+            queue_class.return_value.snapshot.return_value = types.SimpleNamespace(
+                candidates=[object()]
+            )
+            queue_class.return_value.outbox_candidates.return_value = []
             runtime = RightMemoryRuntime(config)
             runtime.run_session_turn("agent-session", "find one")
 
-        manager_class.assert_not_called()
+        update_class.assert_called_once_with(memory_root, "update")
+        update_class.return_value.wake_worker.assert_called_once_with()
 
     def test_historian_turn_does_not_run_sync_pull(self):
         config = RuntimeConfig(
@@ -3244,8 +3323,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("dirty state", instructions)
 
         retrieve_instructions = build_instructions(Path("/memory"), "retrieve")
-        self.assertIn("local memory", retrieve_instructions)
-        self.assertIn("does not perform sync preflight by default", retrieve_instructions)
+        self.assertIn("Before model start", retrieve_instructions)
+        self.assertIn("clean bounded global-sync refresh", retrieve_instructions)
+        self.assertIn("does not add either pull result to session history", retrieve_instructions)
+        self.assertNotIn("call `sync_push`", retrieve_instructions)
 
     def test_update_prompt_owns_unified_lifecycle_and_bounded_correction_surfaces(self):
         instructions = build_instructions(Path("/memory"), "update")

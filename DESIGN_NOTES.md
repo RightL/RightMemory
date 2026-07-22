@@ -139,6 +139,8 @@ Global sync remains local-first: every device keeps a complete RightMemory root,
 
 Runtime code owns deterministic sync mechanics where they belong in the workflow. It fetches and captures exact commits, then merges incoming history in a leased candidate worktree while the active root remains unchanged. Only a complete candidate whose paths and canonical graph validate may be published, and publication is one guarded fast-forward from the captured active commit. A concurrent active change or failed merge, repair, or validation refuses publication instead of requiring rollback.
 
+Retrieve participates without becoming a writer. A five-minute attempt gate and two-second fetch bound let active retrieval admit clean remote state before reading memory without paying normal sync latency on every request. Foreground retrieve sync is pull-only and cannot invoke model repair. An incomplete check falls back to the last valid local state and, only after retrieval completes, launches a detached one-shot full sync cycle. Watcher, foreground, and deferred cycles share a nonblocking lease, while state timestamps use a separate short lock. This makes the persistent watcher an accelerator rather than the only recovery path and keeps synchronized update processing out of retrieve latency.
+
 The synchronized update queue is a protocol surface rather than model-owned
 content. Only canonical candidate, recovery, and singleton-lease JSON paths are
 admitted, and their complete machine schema validates before incoming state can

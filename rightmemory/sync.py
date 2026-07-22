@@ -5,14 +5,24 @@ import json
 import os
 import re
 import subprocess
+import sys
 import uuid
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Iterator
 
-from .config import SyncConfig
+from .config import MEMORY_ROOT_ENV, SyncConfig
 from .isolated_write import WorktreeLease
+from .platform import (
+    detached_process_kwargs,
+    lock_file,
+    lock_file_nonblocking,
+    python_module_child_env,
+    unlock_file,
+)
 from .semantic_operation import FINAL_PHASES, OperationEffect, SemanticOperationRecord, SemanticOperationStore
 from .session import MemoryWriteLock, _ensure_runtime_gitignore, _fsync_directory
 from .tools import MemoryTools
@@ -40,6 +50,9 @@ MEMORY_SYNC_PATHS = (
 )
 REQUIRED_ROOT_DOCUMENTS = ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md")
 GIT_TIMEOUT_SECONDS = 30
+RETRIEVE_SYNC_REFRESH_SECONDS = 5 * 60
+RETRIEVE_SYNC_FETCH_TIMEOUT_SECONDS = 2
+RETRIEVE_SYNC_DEFERRED_STATUSES = frozenset({"offline", "error", "dirty", "conflict", "ahead"})
 SYNC_BRANCH_PREFIX = "rightmemory-sync-"
 SYNC_REPAIR_POLICY_VERSION = "staged-sync-repair-v1"
 UPDATE_QUEUE_CANDIDATE_PATH_RE = re.compile(r"update_queue/candidates/[0-9a-f]{32}\.json")
@@ -75,6 +88,33 @@ class SyncRepairOutcome:
 
 
 SyncRepair = Callable[[Path, SyncResult, str], str | SyncRepairOutcome]
+ActiveSyncRepair = Callable[[SyncResult], None]
+
+
+def retrieve_sync_needs_deferred(result: SyncResult) -> bool:
+    return result.status in RETRIEVE_SYNC_DEFERRED_STATUSES
+
+
+def schedule_deferred_sync(memory_root: Path) -> None:
+    """Start one detached sync cycle; the cycle lock makes duplicate workers harmless."""
+    root = Path(memory_root).resolve()
+    runtime_root = root / ".runtime"
+    sync_root = runtime_root / "sync"
+    _ensure_runtime_gitignore(runtime_root)
+    sync_root.mkdir(parents=True, exist_ok=True)
+    env = python_module_child_env()
+    env[MEMORY_ROOT_ENV] = str(root)
+    command = [sys.executable, "-m", "rightmemory.cli", "sync", "_deferred"]
+    with (sync_root / "deferred.log").open("a", encoding="utf-8") as log_handle:
+        subprocess.Popen(
+            command,
+            cwd=root,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            **detached_process_kwargs(),
+        )
 
 
 @dataclass
@@ -99,6 +139,8 @@ class SyncManager:
         self.config = config
         self.memory_root = Path(config.memory_root).resolve()
         self.state_path = self.memory_root / ".runtime" / "sync" / "state.json"
+        self.state_lock_path = self.state_path.with_name("state.lock")
+        self.cycle_lock_path = self.state_path.with_name("cycle.lock")
 
     def pull(self, repair: SyncRepair | None = None) -> SyncResult:
         if not self.config.enabled:
@@ -114,6 +156,9 @@ class SyncManager:
         if upstream_commit is None:
             return self._record_failure(SyncResult("error", "sync failed: upstream commit is unavailable"))
 
+        return self._admit_fetched(upstream_commit, repair)
+
+    def _admit_fetched(self, upstream_commit: str, repair: SyncRepair | None) -> SyncResult:
         store = SemanticOperationStore(self.memory_root)
         try:
             # This matches automatic-write lock order: operation execution, then active memory.
@@ -124,6 +169,62 @@ class SyncManager:
         if result.status == "synced":
             return self._record_success("pull", result)
         return self._record_failure(result)
+
+    def refresh_for_retrieve(self, *, now: datetime | None = None) -> SyncResult:
+        """Perform a bounded, pull-only refresh when the retrieve freshness gate is due."""
+        if not self.config.enabled:
+            return SyncResult("disabled", "sync disabled")
+
+        checked_at = _utc_now(now)
+        if not self._retrieve_refresh_due(checked_at):
+            return SyncResult("fresh", "retrieve sync refresh is not due")
+
+        with self._cycle_locked_nonblocking() as acquired:
+            if not acquired:
+                return SyncResult("busy", "another sync cycle is already running")
+            checked_at = _utc_now(now)
+            if not self._retrieve_refresh_due(checked_at):
+                return SyncResult("fresh", "retrieve sync refresh is not due")
+
+            upstream = self._upstream()
+            if upstream is None:
+                return self._record_failure(SyncResult("unconfigured", "sync unconfigured"))
+            self._record_remote_check_attempt(checked_at)
+            fetch = self._git("fetch", timeout_seconds=RETRIEVE_SYNC_FETCH_TIMEOUT_SECONDS)
+            if fetch.returncode != 0:
+                return self._record_failure(SyncResult("offline", "sync offline: git fetch failed"))
+            self._record_remote_check_success(checked_at)
+            upstream_commit = self._resolve_commit(upstream)
+            if upstream_commit is None:
+                return self._record_failure(
+                    SyncResult("error", "sync failed: upstream commit is unavailable")
+                )
+            admitted = self._admit_fetched(upstream_commit, repair=None)
+            if admitted.status != "synced":
+                return admitted
+            active_commit = self._resolve_commit("HEAD")
+            if active_commit is None:
+                return self._record_failure(
+                    SyncResult("error", "sync failed: local commit is unavailable")
+                )
+            ahead_behind = self._ahead_behind(active_commit, upstream_commit)
+            if ahead_behind is None:
+                return self._record_failure(
+                    SyncResult("error", "sync failed: could not compare refreshed memory")
+                )
+            ahead, behind = ahead_behind
+            if behind > 0:
+                return self._record_failure(
+                    SyncResult("error", "sync failed: refreshed memory is still behind upstream")
+                )
+            if ahead > 0:
+                return SyncResult(
+                    "ahead",
+                    "local memory has commits pending deferred sync",
+                    admitted.files,
+                    admitted.operation_id,
+                )
+            return admitted
 
     def preflight(self, repair: SyncRepair | None = None) -> SyncResult:
         """Compatibility alias for callers migrating to truthful pull naming."""
@@ -175,10 +276,24 @@ class SyncManager:
             SyncResult(status, message, operation_id=pulled.operation_id)
         )
 
-    def background_sync(self, repair: SyncRepair | None = None) -> SyncResult:
+    def background_sync(
+        self,
+        repair: SyncRepair | None = None,
+        active_repair: ActiveSyncRepair | None = None,
+    ) -> SyncResult:
         if not self.config.enabled:
             return self.pull(repair=repair)
 
+        with self._cycle_locked_nonblocking() as acquired:
+            if not acquired:
+                return SyncResult("busy", "another sync cycle is already running")
+            return self._background_sync_locked(repair, active_repair)
+
+    def _background_sync_locked(
+        self,
+        repair: SyncRepair | None = None,
+        active_repair: ActiveSyncRepair | None = None,
+    ) -> SyncResult:
         upstream = self._upstream()
         if upstream is None:
             return self._record_failure(SyncResult("unconfigured", "sync unconfigured"))
@@ -189,6 +304,13 @@ class SyncManager:
         if upstream_commit is None:
             return self._record_failure(SyncResult("error", "sync failed: upstream commit is unavailable"))
         captured = self._capture_valid_tip(upstream_commit)
+        if (
+            isinstance(captured, SyncResult)
+            and captured.status in {"dirty", "conflict"}
+            and active_repair is not None
+        ):
+            active_repair(captured)
+            captured = self._capture_valid_tip(upstream_commit)
         if isinstance(captured, SyncResult):
             return self._record_failure(captured)
         ahead_behind = self._ahead_behind(captured, upstream_commit)
@@ -198,13 +320,13 @@ class SyncManager:
         if ahead > 0:
             return self.push(repair=repair)
         if behind > 0:
-            return self.pull(repair=repair)
+            return self._admit_fetched(upstream_commit, repair)
 
         last_pull = self._last_successful_pull_at()
         stale_after = timedelta(hours=self.config.stale_pull_after_hours)
         if last_pull is not None and datetime.now(UTC) - last_pull < stale_after:
             return SyncResult("fresh", "last successful pull is fresh")
-        return self.pull(repair=repair)
+        return self._admit_fetched(upstream_commit, repair)
 
     def background_pull(self, repair: SyncRepair | None = None) -> SyncResult:
         """Compatibility alias for callers migrating to background_sync."""
@@ -1027,7 +1149,10 @@ class SyncManager:
         return SyncResult(result.status, result.message, result.files, record.operation_id)
 
     def _last_successful_pull_at(self) -> datetime | None:
-        value = self._read_state().get("last_successful_pull_at")
+        return self._state_datetime("last_successful_pull_at")
+
+    def _state_datetime(self, key: str) -> datetime | None:
+        value = self._read_state().get(key)
         if not isinstance(value, str):
             return None
         try:
@@ -1038,36 +1163,107 @@ class SyncManager:
             parsed = parsed.replace(tzinfo=UTC)
         return parsed.astimezone(UTC)
 
+    def _retrieve_refresh_due(self, now: datetime) -> bool:
+        last_attempt = self._state_datetime("last_remote_check_attempt_at")
+        return (
+            last_attempt is None
+            or now - last_attempt >= timedelta(seconds=RETRIEVE_SYNC_REFRESH_SECONDS)
+        )
+
+    def _record_remote_check_attempt(self, checked_at: datetime) -> None:
+        self._mutate_state(
+            lambda state: state.__setitem__(
+                "last_remote_check_attempt_at",
+                checked_at.isoformat(),
+            )
+        )
+
+    def _record_remote_check_success(self, checked_at: datetime) -> None:
+        self._mutate_state(
+            lambda state: state.__setitem__(
+                "last_successful_remote_check_at",
+                checked_at.isoformat(),
+            )
+        )
+
     def _record_success(self, operation: str, result: SyncResult) -> SyncResult:
         now = datetime.now(UTC).isoformat()
-        state = self._read_state()
-        state[f"last_successful_{operation}_at"] = now
-        state["last_status"] = result.status
-        state["last_message"] = result.message
-        state["last_files"] = result.files
-        state.pop("last_failure_at", None)
-        state.pop("last_failure_status", None)
-        state.pop("last_failure_message", None)
-        state.pop("last_failure_files", None)
-        self._write_state(state)
+
+        def mutate(state: dict[str, object]) -> None:
+            state[f"last_successful_{operation}_at"] = now
+            state["last_status"] = result.status
+            state["last_message"] = result.message
+            state["last_files"] = result.files
+            state.pop("last_failure_at", None)
+            state.pop("last_failure_status", None)
+            state.pop("last_failure_message", None)
+            state.pop("last_failure_files", None)
+
+        self._mutate_state(mutate)
         return result
 
     def _record_failure(self, result: SyncResult) -> SyncResult:
-        state = self._read_state()
-        state["last_status"] = result.status
-        state["last_message"] = result.message
-        state["last_files"] = result.files
-        state["last_failure_at"] = datetime.now(UTC).isoformat()
-        state["last_failure_status"] = result.status
-        state["last_failure_message"] = result.message
-        state["last_failure_files"] = result.files
-        self._write_state(state)
+        def mutate(state: dict[str, object]) -> None:
+            state["last_status"] = result.status
+            state["last_message"] = result.message
+            state["last_files"] = result.files
+            state["last_failure_at"] = datetime.now(UTC).isoformat()
+            state["last_failure_status"] = result.status
+            state["last_failure_message"] = result.message
+            state["last_failure_files"] = result.files
+
+        self._mutate_state(mutate)
         return result
 
+    def _mutate_state(self, mutate: Callable[[dict[str, object]], None]) -> None:
+        with self._state_locked():
+            state = self._read_state_unlocked()
+            mutate(state)
+            self._write_state(state)
+
+    @contextmanager
+    def _state_locked(self) -> Iterator[None]:
+        self._prepare_sync_runtime()
+        handle = self.state_lock_path.open("a+", encoding="utf-8")
+        lock_file(handle)
+        try:
+            yield
+        finally:
+            try:
+                unlock_file(handle)
+            finally:
+                handle.close()
+
+    @contextmanager
+    def _cycle_locked_nonblocking(self) -> Iterator[bool]:
+        self._prepare_sync_runtime()
+        handle = self.cycle_lock_path.open("a+", encoding="utf-8")
+        try:
+            lock_file_nonblocking(handle)
+        except BlockingIOError:
+            handle.close()
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            try:
+                unlock_file(handle)
+            finally:
+                handle.close()
+
+    def _prepare_sync_runtime(self) -> None:
+        _ensure_runtime_gitignore(self.memory_root / ".runtime")
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+
     def _read_state(self) -> dict[str, object]:
+        with self._state_locked():
+            return self._read_state_unlocked()
+
+    def _read_state_unlocked(self) -> dict[str, object]:
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError):
             return {}
         return data if isinstance(data, dict) else {}
 
@@ -1083,14 +1279,23 @@ class SyncManager:
         os.replace(tmp_path, self.state_path)
         _fsync_directory(self.state_path.parent)
 
-    def _git(self, *args: str) -> subprocess.CompletedProcess[str]:
-        return self._run_git(self.memory_root, *args)
+    def _git(
+        self,
+        *args: str,
+        timeout_seconds: int = GIT_TIMEOUT_SECONDS,
+    ) -> subprocess.CompletedProcess[str]:
+        return self._run_git(self.memory_root, *args, timeout_seconds=timeout_seconds)
 
     def _git_stdout(self, cwd: Path, *args: str) -> str:
         result = self._run_git(cwd, *args)
         return result.stdout.strip() if result.returncode == 0 else ""
 
-    def _run_git(self, cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    def _run_git(
+        self,
+        cwd: Path,
+        *args: str,
+        timeout_seconds: int = GIT_TIMEOUT_SECONDS,
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["GIT_ASKPASS"] = "true"
@@ -1105,14 +1310,14 @@ class SyncManager:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
-                timeout=GIT_TIMEOUT_SECONDS,
+                timeout=timeout_seconds,
             )
         except FileNotFoundError as exc:
             return subprocess.CompletedProcess(["git", *args], 1, "", str(exc))
         except subprocess.TimeoutExpired as exc:
             stdout = _timeout_output(exc.stdout)
             stderr = _timeout_output(exc.stderr)
-            message = f"git command timed out after {GIT_TIMEOUT_SECONDS} seconds"
+            message = f"git command timed out after {timeout_seconds} seconds"
             if stderr:
                 message = f"{stderr}\n{message}"
             return subprocess.CompletedProcess(["git", *args], 124, stdout, message)
@@ -1126,6 +1331,13 @@ def _is_sync_path(path: str) -> bool:
         if re.fullmatch(expression, path):
             return True
     return False
+
+
+def _utc_now(value: datetime | None = None) -> datetime:
+    current = datetime.now(UTC) if value is None else value
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    return current.astimezone(UTC)
 
 
 def _is_update_queue_path(path: str) -> bool:

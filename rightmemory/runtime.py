@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_cli import CliAgentExecutor, NO_SESSION_RIGHTMEMORY_SESSION_ID
+from .async_update import AsyncUpdateStore
 from .automatic_effects import (
     forget_memory_change_pressure_operation,
     memory_change_pressure_points,
@@ -64,9 +65,16 @@ from .shared_view_files import (
     pull_all_file_views,
     record_file_view_publish_results,
 )
-from .sync import SyncManager, SyncRepairOutcome, SyncResult
+from .sync import (
+    SyncManager,
+    SyncRepairOutcome,
+    SyncResult,
+    retrieve_sync_needs_deferred,
+    schedule_deferred_sync,
+)
 from .tools import MemoryTools
 from .update_corrector import UpdateCorrectionResult, render_update_correction_result
+from .update_queue import UpdateQueueStore
 from .update_review import UpdateExecutionLock, UpdateReviewStore
 
 
@@ -110,6 +118,17 @@ class PreparedRetrieveTurn:
     memory_commit: str | None
 
 
+def _complete_retrieve_sync(method: Callable[..., Any]):
+    @wraps(method)
+    def wrapped(self: RightMemoryRuntime, *args: Any, **kwargs: Any):
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._finish_retrieve_sync()
+
+    return wrapped
+
+
 class RightMemoryRuntime:
     def __init__(self, config: RuntimeConfig):
         if config.runtime_mode not in {"standalone", "cli-agent"}:
@@ -122,12 +141,14 @@ class RightMemoryRuntime:
         self._message_history: list[Any] = []
         self._active_trace: DebugTrace | None = None
         self._sync_manager: SyncManager | None = None
+        self._retrieve_sync_result: SyncResult | None = None
         self._last_write_result: IsolatedWriteResult | None = None
         self._last_reviewed_update_commit: str | None = None
         self.semantic_upgrades = self._semantic_upgrade_context()
         self._semantic_upgrade_ids = self.semantic_upgrades.ids if self.semantic_upgrades is not None else []
         self.agent = self._build_cli_agent() if config.runtime_mode == "cli-agent" else self._build_agent()
 
+    @_complete_retrieve_sync
     def run_turn(self, message: str, *, operation_id: str | None = None) -> str:
         if self.config.role in AUTOMATIC_WRITE_ROLES:
             with self._update_execution_lock():
@@ -151,6 +172,7 @@ class RightMemoryRuntime:
             self._create_update_review(output)
             return output
 
+    @_complete_retrieve_sync
     def run_chat_turn(
         self,
         message: str,
@@ -237,6 +259,7 @@ class RightMemoryRuntime:
         self._mark_semantic_upgrades_absorbed()
         return str(result)
 
+    @_complete_retrieve_sync
     def run_session_turn(
         self,
         session_id: str,
@@ -1477,8 +1500,45 @@ class RightMemoryRuntime:
     def _pull_file_views_for_retrieve(self) -> None:
         if self.config.role != "retrieve":
             return
+        try:
+            self._retrieve_sync_result = self._sync().refresh_for_retrieve()
+        except Exception as exc:
+            self._retrieve_sync_result = SyncResult(
+                "error",
+                f"retrieve sync refresh failed: {type(exc).__name__}: {exc}",
+            )
+            print(f"warning: {self._retrieve_sync_result.message}", file=sys.stderr)
         with MemoryWriteLock(self.config.memory_root):
             pull_all_file_views(self.config.memory_root)
+
+    def _finish_retrieve_sync(self) -> None:
+        if self.config.role != "retrieve":
+            return
+        result = self._retrieve_sync_result
+        self._retrieve_sync_result = None
+        if result is None:
+            return
+
+        if result.status in {"synced", "ahead"}:
+            try:
+                queue_store = UpdateQueueStore(self.config.memory_root)
+                snapshot = queue_store.snapshot()
+                if snapshot.candidates or queue_store.outbox_candidates():
+                    AsyncUpdateStore(self.config.memory_root, "update").wake_worker()
+            except Exception as exc:
+                print(
+                    f"warning: could not wake update worker after retrieve sync: {exc}",
+                    file=sys.stderr,
+                )
+
+        if retrieve_sync_needs_deferred(result):
+            try:
+                schedule_deferred_sync(self.config.memory_root)
+            except Exception as exc:
+                print(
+                    f"warning: could not schedule deferred sync after retrieve: {exc}",
+                    file=sys.stderr,
+                )
 
     def _publish_file_views_after_write(
         self,

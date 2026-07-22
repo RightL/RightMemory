@@ -20,6 +20,7 @@ from rightmemory.cli import (
     _insight_watch_once,
     _require_completed_correction_operation,
     _recover_synchronized_update_operations,
+    _run_active_sync_reconciler,
     _run_synchronized_update_batch,
     _run_update_review_scan,
     _run_update_review_correction,
@@ -28,7 +29,7 @@ from rightmemory.cli import (
     cli_main,
     main,
 )
-from rightmemory.config import DreamerWatchConfig, InsightWatchConfig, SyncConfig
+from rightmemory.config import DreamerWatchConfig, InsightWatchConfig, RuntimeConfig, SyncConfig
 from rightmemory.dreamer_trigger import DreamerTriggerStore
 from rightmemory.doctor import DoctorCheck
 from rightmemory.hub.store import HubStore
@@ -3011,6 +3012,69 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 0)
         self.assertIn("rightmemory sync watch", stdout.getvalue())
 
+    def test_deferred_sync_runs_exactly_one_shared_cycle(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            sync_config = SimpleNamespace(
+                memory_root=Path(tempdir),
+                enabled=True,
+                stale_pull_after_hours=24,
+            )
+            result_obj = SimpleNamespace(status="synced", message="local memory is current")
+            with (
+                patch("rightmemory.cli.load_sync_config", return_value=sync_config),
+                patch("rightmemory.cli._run_sync_cycle", return_value=result_obj) as cycle,
+                patch("sys.stdout", stdout),
+            ):
+                result = main(["sync", "_deferred"])
+
+        self.assertEqual(result, 0)
+        cycle.assert_called_once_with(sync_config)
+        self.assertIn("local memory is current", stdout.getvalue())
+
+    def test_deferred_sync_skips_disabled_config(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            sync_config = SimpleNamespace(
+                memory_root=Path(tempdir),
+                enabled=False,
+                stale_pull_after_hours=24,
+            )
+            with (
+                patch("rightmemory.cli.load_sync_config", return_value=sync_config),
+                patch("rightmemory.cli._run_sync_cycle") as cycle,
+            ):
+                result = main(["sync", "_deferred"])
+
+        self.assertEqual(result, 0)
+        cycle.assert_not_called()
+
+    def test_active_sync_reconciler_repairs_locally_before_outer_cycle_pushes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            sync_config = SyncConfig(memory_root=memory_root, enabled=True)
+            reconciler_config = RuntimeConfig(
+                role="sync-reconciler",
+                model_id="openai/test",
+                memory_root=memory_root,
+                sync=sync_config,
+            )
+            manager = Mock(memory_root=memory_root)
+            manager.repair_message.return_value = "repair dirty memory"
+            diagnostic = SimpleNamespace(status="dirty", message="dirty", files=["MEMORY.md"])
+            with (
+                patch("rightmemory.cli.load_config", return_value=reconciler_config),
+                patch("rightmemory.cli.RightMemoryRuntime") as runtime_class,
+            ):
+                _run_active_sync_reconciler(manager, diagnostic, memory_root)
+
+        local_config = runtime_class.call_args.args[0]
+        self.assertFalse(local_config.sync.enabled)
+        runtime_class.return_value.run_session_turn.assert_called_once_with(
+            "runtime-sync-repair",
+            "repair dirty memory",
+        )
+        runtime_class.return_value.cleanup.assert_called_once_with()
+
     def test_sync_watch_rejects_non_positive_interval(self):
         with patch("rightmemory.cli.load_sync_config", side_effect=AssertionError("sync config should not load")):
             with self.assertRaises(ValueError):
@@ -3048,8 +3112,9 @@ class JsonRequestTests(unittest.TestCase):
             sync_config = type("SyncConfig", (), {"memory_root": Path(tempdir), "enabled": True, "stale_pull_after_hours": 24})()
             result_obj = type("Result", (), {"status": "synced", "message": "local memory is current", "files": []})()
 
-            def background_sync(*, repair):
+            def background_sync(*, repair, active_repair):
                 self.assertTrue(callable(repair))
+                self.assertTrue(callable(active_repair))
                 events.append("background_sync")
                 return result_obj
 
@@ -3157,7 +3222,7 @@ class JsonRequestTests(unittest.TestCase):
                 {"status": "synced", "message": "candidate published", "files": ["MEMORY.md"], "operation_id": "sync-op"},
             )()
 
-            def background_sync(*, repair):
+            def background_sync(*, repair, active_repair):
                 repair(candidate, diagnostic, "sync-op")
                 return result_obj
 
@@ -3194,7 +3259,7 @@ class JsonRequestTests(unittest.TestCase):
             memory_root = Path(tempdir)
             sync_config = type("SyncConfig", (), {"memory_root": memory_root, "enabled": True, "stale_pull_after_hours": 24})()
 
-            def background_sync(*, repair):
+            def background_sync(*, repair, active_repair):
                 return repair(memory_root / "candidate", object(), "sync-op")
 
             with (
@@ -3225,7 +3290,7 @@ class JsonRequestTests(unittest.TestCase):
             reconciler_config = type("Config", (), {"memory_root": other_root})()
             result_obj = type("Result", (), {"status": "conflict", "message": "conflict", "files": ["MEMORY.md"]})()
 
-            def background_sync(*, repair):
+            def background_sync(*, repair, active_repair):
                 return repair(memory_root / "candidate", result_obj, "sync-op")
 
             with (
