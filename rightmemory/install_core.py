@@ -49,6 +49,8 @@ MEMORY_GITIGNORE = """\
 !shared_views/*/.gitignore
 !insight_logs/
 !insight_logs/*.md
+!update_reviews/
+!update_reviews/*.md
 !update_queue/
 !update_queue/candidates/
 !update_queue/candidates/*.json
@@ -416,6 +418,13 @@ class Installer:
         if insight_logs.is_dir():
             files.extend(
                 f"insight_logs/{path.name}" for path in sorted(insight_logs.glob("*.md")) if path.is_file()
+            )
+        update_reviews = self.memory_root / "update_reviews"
+        if update_reviews.is_dir():
+            files.extend(
+                f"update_reviews/{path.name}"
+                for path in sorted(update_reviews.glob("review-*.md"))
+                if path.is_file() and re.fullmatch(r"review-[0-9a-f]{64}\.md", path.name)
             )
         update_queue = self.memory_root / "update_queue"
         candidates = update_queue / "candidates"

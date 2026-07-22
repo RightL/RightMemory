@@ -167,6 +167,8 @@ class ProfileTests(unittest.TestCase):
             "!shared_views/*/.gitignore\n"
             "!insight_logs/\n"
             "!insight_logs/*.md\n"
+            "!update_reviews/\n"
+            "!update_reviews/*.md\n"
             "!update_queue/\n"
             "!update_queue/candidates/\n"
             "!update_queue/candidates/*.json\n"

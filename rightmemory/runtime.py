@@ -104,7 +104,6 @@ MODEL_REQUEST_LIMIT = 100
 THINK_START_TAG = "<think>"
 THINK_END_TAG = "</think>"
 STATE_EFFECT = "session-state"
-REVIEW_EFFECT = "update-review"
 PRESSURE_EFFECT = "memory-pressure"
 PUBLISH_EFFECT = "file-view-publish"
 SEMANTIC_UPGRADE_EFFECT = "semantic-upgrades"
@@ -143,7 +142,6 @@ class RightMemoryRuntime:
         self._sync_manager: SyncManager | None = None
         self._retrieve_sync_result: SyncResult | None = None
         self._last_write_result: IsolatedWriteResult | None = None
-        self._last_reviewed_update_commit: str | None = None
         self.semantic_upgrades = self._semantic_upgrade_context()
         self._semantic_upgrade_ids = self.semantic_upgrades.ids if self.semantic_upgrades is not None else []
         self.agent = self._build_cli_agent() if config.runtime_mode == "cli-agent" else self._build_agent()
@@ -153,7 +151,6 @@ class RightMemoryRuntime:
         if self.config.role in AUTOMATIC_WRITE_ROLES:
             with self._update_execution_lock():
                 self._last_write_result = None
-                self._last_reviewed_update_commit = None
                 turn_kwargs: dict[str, object] = {"allow_internal_session": True}
                 if operation_id is not None:
                     turn_kwargs["operation_id"] = operation_id
@@ -162,15 +159,10 @@ class RightMemoryRuntime:
                     message,
                     **turn_kwargs,
                 )
-                if not self._should_isolate_write_turn():
-                    self._create_update_review(output)
                 return output
         with self._update_execution_lock():
             self._last_write_result = None
-            self._last_reviewed_update_commit = None
-            output = self._run_turn_unlocked(message)
-            self._create_update_review(output)
-            return output
+            return self._run_turn_unlocked(message)
 
     @_complete_retrieve_sync
     def run_chat_turn(
@@ -190,10 +182,7 @@ class RightMemoryRuntime:
             return self.run_turn(message, operation_id=operation_id)
         with self._update_execution_lock():
             self._last_write_result = None
-            self._last_reviewed_update_commit = None
-            output = self._run_cli_process_turn_unlocked(message)
-            self._create_update_review(output)
-            return output
+            return self._run_cli_process_turn_unlocked(message)
 
     def _run_turn_unlocked(self, message: str) -> str:
         if not message.strip():
@@ -271,17 +260,13 @@ class RightMemoryRuntime:
     ) -> str:
         with self._update_execution_lock():
             self._last_write_result = None
-            self._last_reviewed_update_commit = None
             turn_kwargs: dict[str, object] = {
                 "on_started": on_started,
                 "include_returned": include_returned,
             }
             if operation_id is not None:
                 turn_kwargs["operation_id"] = operation_id
-            output = self._run_session_turn_unlocked(session_id, message, **turn_kwargs)
-            if not self._should_isolate_write_turn():
-                self._create_update_review(output)
-            return output
+            return self._run_session_turn_unlocked(session_id, message, **turn_kwargs)
 
     def prepare_session_turn_external(
         self,
@@ -296,7 +281,6 @@ class RightMemoryRuntime:
             raise RuntimeError("external finalization requires an isolated automatic-write role")
         with self._update_execution_lock():
             self._last_write_result = None
-            self._last_reviewed_update_commit = None
             self._run_session_turn_isolated(
                 session_id,
                 message,
@@ -315,7 +299,7 @@ class RightMemoryRuntime:
         external_finalizer: str,
         landed_commit: str,
     ) -> str:
-        """Confirm external publication, then apply local state and review effects."""
+        """Confirm external publication, then apply local operation effects."""
         with self._update_execution_lock():
             supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
             result = supervisor.complete_external(
@@ -854,12 +838,25 @@ class RightMemoryRuntime:
                         pressure_points=pressure_points,
                     ),
                     prepare_effects=self._prepare_operation_effects,
+                    prepare_managed_artifacts=(
+                        lambda worktree, base_commit, candidate_commit, changed_paths, output: (
+                            self._prepare_update_review_artifact(
+                                clean_operation_id,
+                                worktree,
+                                base_commit,
+                                candidate_commit,
+                                changed_paths,
+                                str(output),
+                            )
+                        )
+                    )
+                    if self.config.role == "update"
+                    else None,
                     external_finalizer=external_finalizer,
                 )
                 self._last_write_result = result
                 if store.read(clean_operation_id) is None:
                     # Keep test/custom supervisors compatible with the runtime seam.
-                    self._create_update_review(str(result.output))
                     state.promote()
                     cleanup = getattr(state, "cleanup", None)
                     if callable(cleanup):
@@ -899,8 +896,6 @@ class RightMemoryRuntime:
     ) -> tuple[OperationEffect, ...]:
         effects = [OperationEffect(STATE_EFFECT, metadata={"session_id": session_id})]
         effects.append(OperationEffect(PUBLISH_EFFECT))
-        if self.config.role == "update" and commits_landed:
-            effects.append(OperationEffect(REVIEW_EFFECT))
         if (
             self.config.role in {"update", "update-corrector"}
             and commits_landed
@@ -1055,13 +1050,6 @@ class RightMemoryRuntime:
             raise RuntimeError(f"completed operation has no outcome: {record.operation_id}")
         if effect.name == STATE_EFFECT:
             state.promote_if_current(record.operation_id, outcome.sequence)
-            return
-        if effect.name == REVIEW_EFFECT:
-            self._create_update_review_for_result(
-                _write_result_from_operation(record),
-                outcome.output,
-                raise_errors=True,
-            )
             return
         if effect.name == PRESSURE_EFFECT:
             dreamer_points = effect.metadata.get("dreamer_points")
@@ -1718,73 +1706,28 @@ class RightMemoryRuntime:
             return UpdateExecutionLock(self.config.memory_root)
         return nullcontext()
 
-    def _create_update_review(
-        self,
-        summary: str,
-        *,
-        raise_errors: bool = False,
-    ) -> None:
-        if self.config.role != "update":
-            return
-        landed = self._last_write_result
-        if landed is None:
-            return
-        self._create_update_review_for_result(landed, summary, raise_errors=raise_errors)
-
-    def _create_update_review_for_result(
-        self,
-        landed: IsolatedWriteResult,
-        summary: str,
-        *,
-        raise_errors: bool = False,
-    ) -> None:
-        if landed.commits_landed == 0:
-            return
-        if landed.operation_id is None:
-            return
-        self._write_update_review(
-            landed.operation_id,
-            landed.start_commit,
-            landed.landed_commit,
-            _rightmemory_write_surface(landed.changed_paths),
-            summary,
-            raise_errors=raise_errors,
-        )
-
-    def _write_update_review(
+    def _prepare_update_review_artifact(
         self,
         origin_operation_id: str,
+        worktree: Path,
         base_commit: str,
-        update_commit: str | None,
-        write_surface: str,
+        candidate_commit: str,
+        changed_paths: tuple[str, ...],
         summary: str,
-        *,
-        raise_errors: bool,
-    ) -> None:
-        if update_commit is None or update_commit == base_commit:
-            return
-        if update_commit == self._last_reviewed_update_commit:
-            return
-        try:
-            _create_update_review_document(
-                self.config.memory_root,
-                origin_operation_id=origin_operation_id,
-                base_commit=base_commit,
-                update_commit=update_commit,
-                write_surface=write_surface,
-                summary=summary,
-            )
-            self._last_reviewed_update_commit = update_commit
-        except Exception as exc:
-            self._trace("update_review_failed", error_type=type(exc).__name__, error=str(exc))
-            if raise_errors:
-                raise
-            print(
-                f"Warning: update commit {update_commit} landed, but its local review document could not be created: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-                flush=True,
-            )
+    ) -> tuple[str, ...]:
+        write_surface = _rightmemory_write_surface(changed_paths)
+        if write_surface == "RightMemory":
+            return ()
+        diff = _git_rightmemory_diff(worktree, base_commit, candidate_commit)
+        record = UpdateReviewStore(worktree).create_review(
+            origin_operation_id=origin_operation_id,
+            base_commit=base_commit,
+            write_surface=write_surface,
+            summary=summary,
+            diff=diff,
+        )
+        path = UpdateReviewStore(worktree).review_path(record.review_id)
+        return (path.relative_to(worktree).as_posix(),)
 
     @property
     def last_write_result(self) -> IsolatedWriteResult | None:
@@ -2068,93 +2011,6 @@ def _rightmemory_write_surface(paths: tuple[str, ...]) -> str:
 
 def _changed_memory_paths(paths: tuple[str, ...]) -> bool:
     return any(path == "MEMORY.md" or (path.startswith("MEMORY_") and path.endswith(".md")) for path in paths)
-
-
-def recover_pending_update_review_effect(memory_root: Path) -> str | None:
-    """Materialize one stranded Update review effect without constructing an agent."""
-    store = SemanticOperationStore(memory_root)
-    candidates = [
-        record
-        for record in store.list_outstanding_records()
-        if record.phase == "committed"
-        and record.input_data.get("role") == "update"
-        and record.input_data.get("kind") == "semantic-turn"
-        and any(effect.name == REVIEW_EFFECT and effect.status != "done" for effect in record.effects)
-    ]
-    record = store.choose_effect_retry("effect:update-review", candidates)
-    if record is None:
-        return None
-
-    with store.effects_locked(record.operation_id):
-        current = store.read(record.operation_id)
-        if current is None:
-            raise FileNotFoundError(f"semantic operation does not exist: {record.operation_id}")
-        pending = any(
-            effect.name == REVIEW_EFFECT and effect.status != "done" for effect in current.effects
-        )
-        if not pending:
-            return None
-        try:
-            if current.phase != "committed" or current.outcome is None:
-                raise RuntimeError("update-review effect requires a committed Update outcome")
-            outcome = current.outcome
-            if outcome.landed_commit is None:
-                raise RuntimeError("committed Update outcome has no landed commit")
-            _create_update_review_document(
-                Path(memory_root).resolve(),
-                origin_operation_id=current.operation_id,
-                base_commit=outcome.start_commit,
-                update_commit=outcome.landed_commit,
-                write_surface=_rightmemory_write_surface(outcome.changed_paths),
-                summary=outcome.output,
-            )
-            store.mark_effect(current.operation_id, REVIEW_EFFECT, "done")
-        except Exception as exc:
-            try:
-                store.mark_effect(
-                    current.operation_id,
-                    REVIEW_EFFECT,
-                    "failed",
-                    error=f"{type(exc).__name__}: {exc}",
-                )
-            except Exception:
-                pass
-            raise
-    return record.operation_id
-
-
-def _create_update_review_document(
-    memory_root: Path,
-    *,
-    origin_operation_id: str,
-    base_commit: str,
-    update_commit: str,
-    write_surface: str,
-    summary: str,
-) -> None:
-    diff = _git_rightmemory_diff(memory_root, base_commit, update_commit)
-    UpdateReviewStore(memory_root).create_review(
-        origin_operation_id=origin_operation_id,
-        base_commit=base_commit,
-        update_commit=update_commit,
-        write_surface=write_surface,
-        summary=summary,
-        diff=diff,
-    )
-
-
-def _write_result_from_operation(record: SemanticOperationRecord) -> IsolatedWriteResult:
-    outcome = record.outcome
-    if outcome is None:
-        raise RuntimeError(f"completed operation has no outcome: {record.operation_id}")
-    return IsolatedWriteResult(
-        output=outcome.output,
-        commits_landed=1 if record.phase == "committed" else 0,
-        start_commit=outcome.start_commit,
-        landed_commit=outcome.landed_commit or outcome.start_commit,
-        changed_paths=outcome.changed_paths,
-        operation_id=record.operation_id,
-    )
 
 
 def build_model(config: RuntimeConfig):

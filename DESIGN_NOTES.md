@@ -67,13 +67,13 @@ Corrections to ordinary agent writing, reasoning, or behavior may become Writing
 
 Reusable feedback about Update's state judgment belongs in root-level `corrections.md`, which only Update and the internal update-corrector consume semantically. Keeping updater feedback outside Memory prevents ordinary retrieval and Memory maintenance from treating those examples as user knowledge.
 
-The local update-review Markdown document is neither kind of durable correction evidence. It is a disposable human interface that owns the current comment and explicit submission intent. Keeping that temporary request separate from both durable surfaces prevents UI state from becoming Memory and prevents one correction event from being stored redundantly.
+The tracked update-review Markdown document is neither kind of durable correction evidence. It is a disposable synchronized human interface that owns the current comment and explicit submission intent. Keeping that temporary request separate from both durable surfaces prevents UI state from becoming Memory and prevents one correction event from being stored redundantly.
 
-### Offline review and correction feedback
+### Synchronized review and correction feedback
 
-Each normal unified-updater commit produces one local Markdown review document with a natural account of the change, one free-form human comment area, and an explicit Ready checkbox; correction and maintenance commits do not. Ready is the submission boundary because a visible human control is more reliable than inferring intent from file age. The document and one process lock are sufficient, so no sidecar state, stability timer, or processed-comment ledger is needed. The lock file retains only the last attempted review id, giving bounded scans durable round-robin fairness without another state artifact.
+Each normal unified-updater commit includes one tracked `update_reviews/review-<sha256(operation-id)>.md` document in the same commit as the state change; correction and maintenance commits do not. The document gives a natural account of the change, one free-form human comment area, and an explicit Ready checkbox. Git sync therefore transports the review naturally, while an uncommitted draft remains local until Ready supplies an unambiguous submission boundary.
 
-The internal update-corrector receives only the submitted comment plus context re-derived from the original semantic-operation receipt and Git. It never trusts the editable displayed diff. A review id and normalized-comment hash identify one correction operation, making retries replay the same semantic transaction. After the callback and its journaled effects complete, exact-document compare-and-swap deletes a resolved review or writes a clarification question; a newer human edit is left untouched. Failures leave Ready checked so the same revision retries after the watcher delay. The scanner also replays one stranded review-creation effect per pass directly from the durable Update receipt, so an interruption after commit does not require another model turn.
+With sync enabled, the scanner binds a Ready comment to the exact tracked review commit and blob, publishes that evidence as typed work in the existing synchronized update queue, then restores the tracked document so local UI edits do not block sync. The queue selects review work alone and reuses its global lease, fencing, and recovery rather than introducing another distributed queue. The internal update-corrector receives only the submitted comment plus context re-derived from the review's creation commit and operation trailer in Git; it never trusts the editable displayed diff. Finalization rechecks the commit and blob, atomically consumes the candidate, applies any prepared correction, and either deletes the resolved review or writes a clarification and clears Ready. Duplicate evidence converges, while stale evidence is terminally consumed without touching newer review state. With sync disabled, the same correction and settlement commit through local Git.
 
 A successful state correction is independent from feedback admission. The state change lands whenever it succeeds; its `corrections.md` candidates may be merged, admitted, or discarded, with any accepted feedback included in the same commit. This preserves the user's requested state without forcing a weak example into the bounded feedback set.
 
@@ -131,11 +131,11 @@ Standalone mode exposes narrow filesystem and Git tools instead of arbitrary Pyt
 
 ### Standalone commit boundary
 
-Standalone commit tools are role-aware. Unified Update may commit Memory and Pursuit files together; update-corrector may additionally commit `corrections.md` with a state correction but cannot edit the fixed writing/design M# collections; Memory-oriented maintenance roles retain their smaller surfaces; Insight commits `insight_logs/*.md`. Empty commits remain reserved for `prune:` checkpoints. Retrieval roles receive no write tools, and unrelated files remain outside model-driven stage and commit allowlists.
+Standalone commit tools are role-aware. Unified Update may commit Memory and Pursuit files together, and runtime adds the generated update-review document to that same commit; update-corrector may additionally commit `corrections.md` with a state correction but cannot edit the fixed writing/design M# collections. Memory-oriented maintenance roles retain their smaller surfaces; Insight commits `insight_logs/*.md`. Empty commits remain reserved for `prune:` checkpoints. Retrieval roles receive no write tools, and unrelated files remain outside model-driven stage and commit allowlists.
 
 ### Global RightMemory sync
 
-Global sync remains local-first: every device keeps a complete RightMemory root, and Git provides distributed transport between those roots. Memory, Pursuit, and `corrections.md` are synchronized state; offline review documents remain local runtime artifacts. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
+Global sync remains local-first: every device keeps a complete RightMemory root, and Git provides distributed transport between those roots. Memory, Pursuit, `corrections.md`, and tracked update-review documents are synchronized state. Review drafts stay local until Ready turns the exact comment into typed work in the synchronized update queue. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
 
 Runtime code owns deterministic sync mechanics where they belong in the workflow. It fetches and captures exact commits, then merges incoming history in a leased candidate worktree while the active root remains unchanged. Only a complete candidate whose paths and canonical graph validate may be published, and publication is one guarded fast-forward from the captured active commit. A concurrent active change or failed merge, repair, or validation refuses publication instead of requiring rollback.
 
@@ -145,16 +145,12 @@ The synchronized update queue is a protocol surface rather than model-owned
 content. Only canonical candidate, recovery, and singleton-lease JSON paths are
 admitted, and their complete machine schema validates before incoming state can
 publish. Malformed queue data and queue conflicts fail closed; they never enter
-`sync-reconciler`. Because older runtimes reject these paths by design, enabling
-the queue requires a coordinated runtime reinstall across every device sharing
-the repository. Version one deliberately does not migrate live legacy async jobs
-during install: each device must drain them with its current runtime, and installer
-admission refuses malformed or unsupported session and reservation state before
-changing the root or installed runtime, including drained legacy formats that
-must be archived explicitly. Admission also refuses older pending transcript-review
-deliveries that have not reserved a stable candidate UID. The six-hour lease is
-an availability window measured by device clocks, so its approximate takeover
-delay assumes reasonable clock synchronization; fencing correctness does not.
+`sync-reconciler`. Ready update reviews reuse this surface as typed candidates
+and are selected alone, so the existing lease and fenced Git finalization can
+atomically apply a correction and delete or re-ask the tracked review. The
+six-hour lease is an availability window measured by device clocks, so its
+approximate takeover delay assumes reasonable clock synchronization; fencing
+correctness does not.
 
 Graph-aware repair stays in `sync-reconciler` because conflicts across Memory, Pursuit, and their relationships require schema judgment rather than Git mechanics alone, but that role edits and commits only the candidate. Durable prepared-operation records make a completed repair recoverable after a crash without another model turn. For `corrections.md`, repair preserves non-identical entries without ranking them; semantic merging and replacement remain updater-owned. Push transport remains a retryable follow-up after local publication, and `sync-reconciler` stays separate from Dreamer because repair is a narrow integrity responsibility while Dreamer owns broader Memory consolidation.
 

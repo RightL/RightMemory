@@ -353,6 +353,8 @@ class AsyncUpdateStore:
         with self._reservations_locked():
             outbox_by_session: dict[str, list[UpdateCandidate]] = {}
             for candidate in queue_store.outbox_candidates():
+                if candidate.kind != "update":
+                    continue
                 outbox_by_session.setdefault(candidate.session_id, []).append(candidate)
 
             session_ids = {path.stem for path in self._session_state_paths()}
@@ -1426,7 +1428,7 @@ class AsyncUpdateStore:
             candidates = (
                 candidate
                 for candidate in queue_store.outbox_candidates()
-                if candidate.session_id == state.session_id
+                if candidate.kind == "update" and candidate.session_id == state.session_id
             )
         session_candidates = sorted(
             candidates,

@@ -83,13 +83,13 @@ Each collection is a bounded curated set rather than an append-only log or FIFO 
 
 Importance reflects likely recurrence, cost if repeated, applicability across future tasks, strength of the user's correction, and whether existing guidance already covers it. Each collection may contain at most 15 compact items, but 15 is a ceiling rather than a target or automatic eviction trigger. General agents consult the relevant collection after forming an initial draft, design, or implementation direction.
 
-### Offline update review
+### Update review
 
-Every normal unified-updater commit produces one local Markdown review document; correction and maintenance commits do not. Its generated portion explains the update naturally and may include the relevant diff, but it has one free-form human comment area for the whole update and one visible `Ready for correction` checkbox. There are no per-group comment fields or required web UI.
+Every normal unified-updater commit produces one tracked `update_reviews/review-<sha256(operation-id)>.md` document in the same commit as its state change; correction and maintenance commits do not. Its generated portion explains the update naturally and may include the relevant diff, but it has one free-form human comment area for the whole update and one visible `Ready for correction` checkbox. Git sync transports the document without requiring a separate review service.
 
-Review files remain under runtime state and are checked periodically. A non-empty comment is inert until Ready is checked; no file-age or modification-time heuristic infers submission. The Markdown owns the human text and submission intent, while the single process lock carries only the bounded fairness cursor needed to attempt one Ready revision per scan. A review id plus normalized-comment hash identifies the correction operation, so retries replay one semantic transaction instead of running duplicate corrections.
+A non-empty comment remains a local working-tree draft until Ready is checked; no file-age or modification-time heuristic infers submission. With sync enabled, the scanner binds the normalized comment to the exact tracked review commit and blob, publishes that evidence as typed review work in the existing synchronized update queue, and restores the tracked document. The queue's singleton lease selects one review request alone and fences processing across devices. With sync disabled, the same request is processed and settled in local Git.
 
-The separate internal update-corrector receives the submitted comment plus original-update context re-derived from the durable operation receipt and Git; it does not trust the editable displayed diff. It preserves unrelated later work and commits nothing when the requested result is ambiguous or already satisfied. A clarification question is written back only if the exact submitted document is unchanged, and Ready is cleared so the human can revise and explicitly resubmit. Resolved documents are removed with the same exact-document comparison, failures leave Ready checked for retry, and untouched blank documents expire under bounded retention.
+The internal update-corrector receives the submitted comment plus original-update context re-derived from the review's creation commit and operation trailer in Git; it does not trust the editable displayed diff. It preserves unrelated later work and commits nothing when the requested result is ambiguous or already satisfied. Fenced queue finalization rechecks the review commit and blob, atomically applies any prepared correction, consumes the candidate, and either deletes the resolved review or writes a clarification and clears Ready. Exact duplicates converge, while stale candidates are terminally consumed without changing a newer review.
 
 ### Updater correction feedback
 
@@ -121,7 +121,7 @@ Existing updater-edit corrections stored in the old Memory-backed form may be im
 
 ## Runtime ownership
 
-Unified updates run in isolated worktrees, validate the complete graph, and land only completed role-owned commits. Review documents remain local runtime artifacts; Memory, Pursuit, and `corrections.md` are ordinary synchronized RightMemory state.
+Unified updates run in isolated worktrees, validate the complete graph, and land only completed role-owned commits. Runtime adds one tracked update-review document to each normal Update commit, and Git synchronizes it alongside Memory, Pursuit, and `corrections.md`; uncommitted review drafts remain local until Ready.
 
 Memory-oriented Dreamer, Insight, Historian, and Pruner remain narrower than the unified updater and do not independently maintain Pursuit or the curated correction collections. Transcript review extracts candidates from idle sessions and submits them through unified update rather than editing the graph independently. The unified updater owns lifecycle transitions between live Pursuit and durable Memory as well as admission to correction feedback.
 

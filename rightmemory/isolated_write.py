@@ -37,7 +37,8 @@ from .update_corrector import (
     parse_update_correction_result,
     render_update_correction_result,
 )
-from .update_review import validate_corrections_markdown
+from .update_coordination import UPDATE_REVIEW_PATH_RE
+from .update_review import OPERATION_TRAILER, validate_corrections_markdown, validate_update_reviews
 
 
 GIT_TIMEOUT_SECONDS = 30
@@ -52,7 +53,6 @@ PROTECTED_RIGHTMEMORY_PATHS = (
 INSIGHT_WRITE_PATHS = ("insight_logs/*.md",)
 ROLE_SAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 TEMP_BRANCH_PREFIX = "rightmemory-isolated-"
-OPERATION_TRAILER = "RightMemory-Operation"
 WORKTREE_LEASE_DIR = "worktree-leases"
 
 
@@ -226,6 +226,10 @@ class IsolatedWriteSupervisor:
         operation_input: Mapping[str, Any] | None = None,
         effects_for_outcome: Callable[[tuple[str, ...], int], Iterable[OperationEffect]] | None = None,
         prepare_effects: Callable[[str, Path], None] | None = None,
+        prepare_managed_artifacts: Callable[
+            [Path, str, str, tuple[str, ...], Any], Iterable[str]
+        ]
+        | None = None,
         external_finalizer: str | None = None,
     ) -> IsolatedWriteResult:
         if external_finalizer is not None:
@@ -239,6 +243,7 @@ class IsolatedWriteSupervisor:
                 operation_input=operation_input,
                 effects_for_outcome=effects_for_outcome,
                 prepare_effects=prepare_effects,
+                prepare_managed_artifacts=prepare_managed_artifacts,
                 external_finalizer=external_finalizer,
             )
         self._ensure_repo_root()
@@ -251,6 +256,7 @@ class IsolatedWriteSupervisor:
                 operation_input=operation_input,
                 effects_for_outcome=effects_for_outcome,
                 prepare_effects=prepare_effects,
+                prepare_managed_artifacts=prepare_managed_artifacts,
                 external_finalizer=external_finalizer,
             )
 
@@ -262,6 +268,10 @@ class IsolatedWriteSupervisor:
         operation_input: Mapping[str, Any] | None = None,
         effects_for_outcome: Callable[[tuple[str, ...], int], Iterable[OperationEffect]] | None = None,
         prepare_effects: Callable[[str, Path], None] | None = None,
+        prepare_managed_artifacts: Callable[
+            [Path, str, str, tuple[str, ...], Any], Iterable[str]
+        ]
+        | None = None,
         external_finalizer: str | None = None,
     ) -> IsolatedWriteResult:
         self._ensure_repo_root()
@@ -348,6 +358,22 @@ class IsolatedWriteSupervisor:
                     start_head = current_head
                     changed_paths = tuple(
                         sorted({path for commit in commits for path in self._commit_paths(worktree, commit)})
+                    )
+                managed_paths: tuple[str, ...] = ()
+                if commits and prepare_managed_artifacts is not None:
+                    managed_paths = self._prepare_managed_artifacts(
+                        worktree,
+                        start_head,
+                        commits[0],
+                        changed_paths,
+                        output,
+                        prepare_managed_artifacts,
+                    )
+                    commits = [self._git_stdout(worktree, "rev-parse", "HEAD")]
+                    self._validate_candidate(
+                        worktree,
+                        commits,
+                        managed_paths=frozenset(managed_paths),
                     )
                 if operation_store is not None and operation_id is not None:
                     if commits:
@@ -597,14 +623,24 @@ class IsolatedWriteSupervisor:
         output = self._git_stdout(worktree, "rev-list", "--reverse", f"{start_head}..HEAD")
         return [line.strip() for line in output.splitlines() if line.strip()]
 
-    def _validate_commits(self, worktree: Path, commits: list[str]) -> None:
+    def _validate_commits(
+        self,
+        worktree: Path,
+        commits: list[str],
+        *,
+        managed_paths: frozenset[str] = frozenset(),
+    ) -> None:
         if self.role in {"update", "update-corrector"} and len(commits) > 1:
             raise RuntimeError(f"one {self.role} turn must land at most one commit")
         for commit in commits:
             changed_paths = self._commit_paths(worktree, commit)
             if not changed_paths:
                 self._validate_empty_commit(worktree, commit)
-            invalid_paths = {path for path in changed_paths if not self._is_role_write_path(path)}
+            invalid_paths = {
+                path
+                for path in changed_paths
+                if path not in managed_paths and not self._is_role_write_path(path)
+            }
             if invalid_paths:
                 paths = ", ".join(sorted(invalid_paths))
                 label = "non-insight paths" if self.role == "insight" else "non-memory paths"
@@ -620,8 +656,25 @@ class IsolatedWriteSupervisor:
             if CORRECTIONS_PATH in changed_paths:
                 self._validate_corrections_file(worktree, commits[0])
 
-    def _validate_candidate(self, worktree: Path, commits: list[str]) -> None:
-        self._validate_commits(worktree, commits)
+    def _validate_candidate(
+        self,
+        worktree: Path,
+        commits: list[str],
+        *,
+        managed_paths: frozenset[str] = frozenset(),
+    ) -> None:
+        self._validate_commits(worktree, commits, managed_paths=managed_paths)
+        if managed_paths:
+            if self.role != "update" or any(
+                UPDATE_REVIEW_PATH_RE.fullmatch(path) is None for path in managed_paths
+            ):
+                raise RuntimeError("runtime-managed Update artifacts use an invalid path")
+            diagnostics = validate_update_reviews(worktree)
+            if diagnostics:
+                raise RuntimeError(
+                    "invalid runtime-managed update review:\n"
+                    + "\n".join(f"- {item}" for item in diagnostics)
+                )
         if self.role == "insight":
             return
         if self.role == "update-corrector":
@@ -632,6 +685,41 @@ class IsolatedWriteSupervisor:
         )
         if validation.startswith("validation failed:"):
             raise RuntimeError(validation)
+
+    def _prepare_managed_artifacts(
+        self,
+        worktree: Path,
+        start_commit: str,
+        candidate_commit: str,
+        changed_paths: tuple[str, ...],
+        output: Any,
+        prepare: Callable[[Path, str, str, tuple[str, ...], Any], Iterable[str]],
+    ) -> tuple[str, ...]:
+        paths = tuple(dict.fromkeys(prepare(
+            worktree,
+            start_commit,
+            candidate_commit,
+            changed_paths,
+            output,
+        )))
+        if not paths:
+            return ()
+        if self.role != "update" or any(
+            not isinstance(path, str) or UPDATE_REVIEW_PATH_RE.fullmatch(path) is None
+            for path in paths
+        ):
+            raise RuntimeError("runtime-managed Update artifacts use an invalid path")
+        dirty = set(
+            _porcelain_paths(
+                self._git_stdout(worktree, "status", "--porcelain", "--untracked-files=all")
+            )
+        )
+        if dirty != set(paths):
+            detail = ", ".join(sorted(dirty ^ set(paths))) or "unknown paths"
+            raise RuntimeError(f"runtime-managed Update artifacts changed unexpected paths: {detail}")
+        self._run_git(worktree, "add", "-f", "-A", "--", *paths)
+        self._run_git(worktree, "commit", "--amend", "--no-edit")
+        return paths
 
     def _validate_fixed_correction_collections(self, worktree: Path) -> None:
         before = build_graph_manifest(self.memory_root)

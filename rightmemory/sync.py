@@ -27,6 +27,12 @@ from .semantic_operation import FINAL_PHASES, OperationEffect, SemanticOperation
 from .session import MemoryWriteLock, _ensure_runtime_gitignore, _fsync_directory
 from .tools import MemoryTools
 from .update_queue import validate_update_queue
+from .update_review import validate_update_reviews
+from .update_coordination import (
+    UPDATE_QUEUE_CANDIDATE_PATH_RE,
+    UPDATE_QUEUE_RECOVERY_PATH_RE,
+    UPDATE_REVIEW_PATH_RE,
+)
 
 
 MEMORY_SYNC_PATHS = (
@@ -44,6 +50,7 @@ MEMORY_SYNC_PATHS = (
     "shared_views/*/question.toml",
     "shared_views/*/.gitignore",
     "insight_logs/*.md",
+    "update_reviews/*.md",
     "update_queue/candidates/*.json",
     "update_queue/recovery/*.json",
     "update_queue/lease.json",
@@ -55,8 +62,6 @@ RETRIEVE_SYNC_FETCH_TIMEOUT_SECONDS = 2
 RETRIEVE_SYNC_DEFERRED_STATUSES = frozenset({"offline", "error", "dirty", "conflict", "ahead"})
 SYNC_BRANCH_PREFIX = "rightmemory-sync-"
 SYNC_REPAIR_POLICY_VERSION = "staged-sync-repair-v1"
-UPDATE_QUEUE_CANDIDATE_PATH_RE = re.compile(r"update_queue/candidates/[0-9a-f]{32}\.json")
-UPDATE_QUEUE_RECOVERY_PATH_RE = re.compile(r"update_queue/recovery/update-batch-[0-9a-f]{64}\.json")
 
 
 @dataclass(frozen=True)
@@ -691,14 +696,18 @@ class SyncManager:
         merge = self._run_git(candidate.path, "merge", "--no-edit", upstream_commit)
         if merge.returncode != 0:
             conflicts = self._conflicted_files(candidate.path)
-            queue_conflicts = [path for path in conflicts if _is_update_queue_path(path)]
-            if queue_conflicts:
+            coordination_conflicts = [
+                path
+                for path in conflicts
+                if _is_update_queue_path(path) or _is_update_review_path(path)
+            ]
+            if coordination_conflicts:
                 return _CandidateInspection(
                     None,
                     SyncResult(
                         "error",
-                        "incoming update queue has a coordination conflict",
-                        sorted(queue_conflicts),
+                        "incoming update coordination state has a coordination conflict",
+                        sorted(coordination_conflicts),
                     ),
                     start_commit,
                     upstream_commit,
@@ -794,6 +803,9 @@ class SyncManager:
         invalid_queue = _invalid_update_queue_result(candidate_root)
         if invalid_queue is not None:
             return invalid_queue
+        invalid_reviews = _invalid_update_reviews_result(candidate_root)
+        if invalid_reviews is not None:
+            return invalid_reviews
         return self._invalid_graph_result(candidate_root)
 
     def _active_preflight(self) -> SyncResult | None:
@@ -1105,7 +1117,9 @@ class SyncManager:
         return self._git("push", remote, f"{commit}:{branch}")
 
     def _dirty_memory_files(self) -> list[str]:
-        result = self._git("status", "--porcelain", "--", *MEMORY_SYNC_PATHS)
+        # Review drafts are working-tree UI, so they must not block unrelated sync.
+        paths = tuple(path for path in MEMORY_SYNC_PATHS if not path.startswith("update_reviews/"))
+        result = self._git("status", "--porcelain", "--", *paths)
         if result.returncode != 0:
             return []
         return _porcelain_paths(result.stdout)
@@ -1326,6 +1340,8 @@ class SyncManager:
 def _is_sync_path(path: str) -> bool:
     if path.startswith("update_queue/"):
         return _is_update_queue_path(path)
+    if path.startswith("update_reviews/"):
+        return _is_update_review_path(path)
     for pattern in MEMORY_SYNC_PATHS:
         expression = re.escape(pattern).replace(r"\*", "[^/]*")
         if re.fullmatch(expression, path):
@@ -1348,6 +1364,10 @@ def _is_update_queue_path(path: str) -> bool:
     )
 
 
+def _is_update_review_path(path: str) -> bool:
+    return UPDATE_REVIEW_PATH_RE.fullmatch(path) is not None
+
+
 def _invalid_update_queue_result(root: Path) -> SyncResult | None:
     diagnostics = validate_update_queue(root)
     if not diagnostics:
@@ -1363,6 +1383,19 @@ def _invalid_update_queue_result(root: Path) -> SyncResult | None:
     return SyncResult(
         "error",
         "invalid synchronized update queue:\n" + "\n".join(f"- {item}" for item in diagnostics),
+        files,
+    )
+
+
+def _invalid_update_reviews_result(root: Path) -> SyncResult | None:
+    diagnostics = validate_update_reviews(root)
+    if not diagnostics:
+        return None
+    files = sorted({item.partition(":")[0] for item in diagnostics})
+    return SyncResult(
+        "error",
+        "invalid synchronized update reviews:\n"
+        + "\n".join(f"- {item}" for item in diagnostics),
         files,
     )
 

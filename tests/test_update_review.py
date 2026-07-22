@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -23,6 +24,7 @@ from rightmemory.update_review import (
     parse_review_markdown,
     review_comment_sha256,
     validate_corrections_markdown,
+    verify_update_review,
 )
 
 
@@ -55,7 +57,6 @@ class UpdateReviewStoreTests(unittest.TestCase):
             review_id=review_id,
             origin_operation_id=f"update-operation-{review_id}",
             base_commit=f"base-{review_id}",
-            update_commit=review_id,
             write_surface="Memory + Pursuit",
             summary="Kept the stable location and removed snapshot detail.",
             diff="- old\n+ new\n``` nested fence",
@@ -98,10 +99,10 @@ class UpdateReviewStoreTests(unittest.TestCase):
         self.assertIn(f"- [ ] {READY_LABEL}", text)
         self.assertIn("````diff", text)
         self.assertEqual(parsed.origin_operation_id, "update-operation-abc123")
-        self.assertEqual(parsed.update_commit, "abc123")
+        self.assertEqual(parsed.summary, "Kept the stable location and removed snapshot detail.")
         self.assertFalse(parsed.ready)
         self.assertEqual(parsed.comment.strip(), "")
-        self.assertTrue((self.root / ".runtime" / ".gitignore").is_file())
+        self.assertEqual(store.root, self.root / "update_reviews")
 
     def test_create_review_is_idempotent_without_overwriting_human_text(self):
         store = self._store()
@@ -112,9 +113,8 @@ class UpdateReviewStoreTests(unittest.TestCase):
             review_id=first.review_id,
             origin_operation_id=first.origin_operation_id,
             base_commit=first.base_commit,
-            update_commit=first.update_commit,
             write_surface=first.write_surface,
-            summary="A different retry summary",
+            summary=first.summary,
             diff="a different display diff",
         )
 
@@ -147,7 +147,6 @@ class UpdateReviewStoreTests(unittest.TestCase):
             review_id="abc123",
             origin_operation_id="update-operation-abc123",
             base_commit="base-abc123",
-            update_commit="abc123",
             write_surface="Memory",
             summary="Added a checkbox example.",
             diff=f"+ - [ ] {READY_LABEL}",
@@ -230,8 +229,9 @@ class UpdateReviewStoreTests(unittest.TestCase):
         parsed = parse_review_markdown(store.review_path("abc123").read_text(encoding="utf-8"))
         self.assertEqual(first.needs_input, 1)
         self.assertEqual(second.processed, 0)
-        self.assertEqual(second.not_ready, 1)
+        self.assertEqual(second.blank, 1)
         self.assertFalse(parsed.ready)
+        self.assertEqual(parsed.comment.strip(), "")
         self.assertIn("Which path should remain?", parsed.question)
         self.assertEqual(len(calls), 1)
 
@@ -614,6 +614,99 @@ class UpdateReviewStoreTests(unittest.TestCase):
         with lock:
             self.assertEqual(lock.lock_path, expected)
             self.assertTrue(expected.is_file())
+
+
+class UpdateReviewGitVerificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        (self.root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+        (self.root / "PURSUIT_RULES.md").write_text("# Rules\n", encoding="utf-8")
+        self._git("add", ".")
+        self._git("commit", "-m", "initial memory")
+        self.base = self._git("rev-parse", "HEAD")
+
+    def test_verification_rejects_semantic_change_between_base_and_creation_parent(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Memory\n\n- unrelated semantic change\n",
+            encoding="utf-8",
+        )
+        self._git("add", "MEMORY.md")
+        self._git("commit", "-m", "unrelated update")
+        review_id = self._commit_review("target update")
+
+        with self.assertRaisesRegex(ValueError, "base-to-parent interval"):
+            verify_update_review(self.root, review_id)
+
+    def test_verification_allows_coordination_change_between_base_and_creation_parent(self):
+        lease = self.root / "update_queue" / "lease.json"
+        lease.parent.mkdir()
+        lease.write_text("{}\n", encoding="utf-8")
+        self._git("add", str(lease.relative_to(self.root)))
+        self._git("commit", "-m", "coordination-only change")
+        review_id = self._commit_review("target update")
+
+        verified = verify_update_review(self.root, review_id)
+
+        self.assertEqual(verified.review_id, review_id)
+        self.assertEqual(verified.changed_paths, ("MEMORY.md",))
+
+    def test_verification_rejects_committed_human_submission_state(self):
+        review_id = self._commit_review("target update")
+        store = UpdateReviewStore(self.root)
+        path = store.review_path(review_id)
+        text = path.read_text(encoding="utf-8")
+        text = text.replace(
+            f"- [ ] {READY_LABEL}",
+            f"- [x] {READY_LABEL}",
+            1,
+        ).replace(COMMENT_START, COMMENT_START + "\n\nUse the stable value.", 1)
+        path.write_text(text, encoding="utf-8")
+        self._git("add", str(path.relative_to(self.root)))
+        self._git("commit", "-m", "commit review draft")
+
+        with self.assertRaisesRegex(ValueError, "local-only human submission state"):
+            verify_update_review(self.root, review_id)
+
+    def _commit_review(self, label: str) -> str:
+        operation_id = f"operation-{label.replace(' ', '-')}"
+        (self.root / "MEMORY.md").write_text(
+            (self.root / "MEMORY.md").read_text(encoding="utf-8")
+            + f"\n- {label}\n",
+            encoding="utf-8",
+        )
+        store = UpdateReviewStore(self.root)
+        record = store.create_review(
+            origin_operation_id=operation_id,
+            base_commit=self.base,
+            write_surface="Memory",
+            summary=label,
+            diff=self._git("diff", "--", "MEMORY.md"),
+        )
+        self._git("add", "MEMORY.md", str(store.review_path(record.review_id).relative_to(self.root)))
+        self._git(
+            "commit",
+            "-m",
+            f"{label}\n\nRightMemory-Operation: {operation_id}",
+        )
+        return record.review_id
+
+    def _git(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=self.root,
+            text=True,
+            encoding="utf-8",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        return result.stdout.strip()
 
 
 class CorrectionsMarkdownValidationTests(unittest.TestCase):

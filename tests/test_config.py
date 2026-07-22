@@ -34,7 +34,6 @@ from rightmemory.runtime import (
     RightMemoryRuntime,
     _IsolatedStateOverlay,
     build_model,
-    recover_pending_update_review_effect,
 )
 from rightmemory.session import MessageSessionStore
 from rightmemory.semantic_operation import OperationEffect, SemanticOperationStore
@@ -1042,6 +1041,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(model.profile, {"provider": "deepseek", "model_name": "deepseek-v4-flash"})
 
     def test_deepseek_v4_profile_preserves_thinking_tool_loops(self):
+        try:
+            __import__("pydantic_ai")
+        except ImportError:
+            self.skipTest("pydantic-ai is not installed")
         config = RuntimeConfig(
             role="retrieve",
             model_id="deepseek-v4-flash",
@@ -1748,106 +1751,6 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(store.list_pending_effects("update-effect-poison"))
         self.assertEqual(store.list_pending_effects("update-effect-ready"), ())
 
-    def test_old_review_effect_uses_its_record_without_mutating_current_result(self):
-        root = Path(self.tempdir.name)
-        store = SemanticOperationStore(root)
-        store.begin(
-            "update-review-old",
-            {"role": "update", "session_id": "review-session"},
-        )
-        store.prepare_outcome(
-            "update-review-old",
-            output="old summary",
-            start_commit="base123",
-            changed_paths=("MEMORY.md",),
-            effects=(OperationEffect("update-review"),),
-        )
-        store.complete_commit("update-review-old", "tip456")
-        config = RuntimeConfig(role="update-corrector", model_id="openai/test", memory_root=root)
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-        current = IsolatedWriteResult("current", 1, "current-base", "current-tip", ("MEMORY.md",))
-        runtime._last_write_result = current
-
-        with patch.object(runtime, "_create_update_review_for_result") as create_review:
-            runtime._run_operation_effects("update-review-old", type("State", (), {})())
-
-        create_review.assert_called_once()
-        self.assertIs(runtime.last_write_result, current)
-        self.assertEqual(store.list_pending_effects("update-review-old"), ())
-
-    def test_stranded_update_review_effect_is_recovered_without_a_runtime_agent(self):
-        root = Path(self.tempdir.name)
-        self._git(root, "init")
-        self._git(root, "config", "user.email", "test@example.com")
-        self._git(root, "config", "user.name", "Test User")
-        (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-        (root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-        self._git(root, "add", "MEMORY.md", "PURSUITS.md")
-        self._git(root, "commit", "-m", "initial memory")
-        base_commit = self._git(root, "rev-parse", "HEAD")
-        (root / "MEMORY.md").write_text("# Memory\n\nRemembered.\n", encoding="utf-8")
-        self._git(root, "add", "MEMORY.md")
-        self._git(root, "commit", "-m", "Update memory")
-        update_commit = self._git(root, "rev-parse", "HEAD")
-
-        store = SemanticOperationStore(root)
-        store.begin(
-            "update-review-stranded",
-            {"kind": "semantic-turn", "role": "update", "session_id": "update-session"},
-        )
-        store.prepare_outcome(
-            "update-review-stranded",
-            output="Remembered one fact.",
-            start_commit=base_commit,
-            changed_paths=("MEMORY.md",),
-            effects=(OperationEffect("update-review"),),
-        )
-        store.complete_commit("update-review-stranded", update_commit)
-
-        recovered = recover_pending_update_review_effect(root)
-
-        review = root / ".runtime" / "update-review" / "reviews" / f"{update_commit}.md"
-        self.assertEqual(recovered, "update-review-stranded")
-        self.assertTrue(review.is_file())
-        self.assertIn("Remembered one fact.", review.read_text(encoding="utf-8"))
-        self.assertEqual(store.list_pending_effects("update-review-stranded"), ())
-
-    def test_stranded_review_recovery_rotates_past_a_failed_operation(self):
-        root = Path(self.tempdir.name)
-        store = SemanticOperationStore(root)
-        for operation_id, landed_commit in (
-            ("update-review-poison", "tip-poison"),
-            ("update-review-ready", "tip-ready"),
-        ):
-            store.begin(
-                operation_id,
-                {"kind": "semantic-turn", "role": "update", "session_id": operation_id},
-            )
-            store.prepare_outcome(
-                operation_id,
-                output="updated",
-                start_commit="base",
-                changed_paths=("MEMORY.md",),
-                effects=(OperationEffect("update-review"),),
-            )
-            store.complete_commit(operation_id, landed_commit)
-
-        with patch(
-            "rightmemory.runtime._create_update_review_document",
-            side_effect=[OSError("bad receipt"), None],
-        ):
-            with self.assertRaisesRegex(OSError, "bad receipt"):
-                recover_pending_update_review_effect(root)
-            recovered = recover_pending_update_review_effect(root)
-
-        self.assertEqual(recovered, "update-review-ready")
-        self.assertEqual(
-            store.list_pending_effects("update-review-poison")[0].status,
-            "failed",
-        )
-        self.assertEqual(store.list_pending_effects("update-review-ready"), ())
-
     def test_failed_follow_up_effect_does_not_change_terminal_outcome(self):
         root = Path(self.tempdir.name)
         store = SemanticOperationStore(root)
@@ -1927,7 +1830,7 @@ class RuntimeTests(unittest.TestCase):
             credential_root=root,
         )
 
-    def test_isolated_update_creates_review_before_state_promotion(self):
+    def test_isolated_update_prepares_review_before_state_promotion(self):
         main_root = Path(self.tempdir.name)
         worktree = main_root / ".runtime" / "worktrees" / "update-123"
         events = []
@@ -1936,8 +1839,15 @@ class RuntimeTests(unittest.TestCase):
             def __init__(self, memory_root, role):
                 pass
 
-            def run(self, callback, **_kwargs):
+            def run(self, callback, **kwargs):
                 output = callback(worktree)
+                kwargs["prepare_managed_artifacts"](
+                    worktree,
+                    "base123",
+                    "tip456",
+                    ("MEMORY.md",),
+                    output,
+                )
                 events.append("landed")
                 return IsolatedWriteResult(
                     output=output,
@@ -1971,55 +1881,55 @@ class RuntimeTests(unittest.TestCase):
             patch.object(RightMemoryRuntime, "_run_session_turn_in_worktree", return_value="updated"),
         ):
             runtime = RightMemoryRuntime(config)
-            with patch.object(runtime, "_create_update_review", side_effect=lambda *_args: events.append("review")):
+            with patch.object(
+                runtime,
+                "_prepare_update_review_artifact",
+                side_effect=lambda *_args: events.append("review") or ("update_reviews/review.md",),
+            ):
                 result = runtime._run_session_turn_isolated("agent-session", "remember one")
 
         self.assertEqual(result, "updated")
-        self.assertEqual(events, ["landed", "review", "promote"])
+        self.assertEqual(events, ["review", "landed", "promote"])
 
-    def test_normal_update_review_uses_actual_isolated_landing_metadata(self):
+    def test_update_review_artifact_uses_candidate_metadata(self):
         root = Path(self.tempdir.name)
         config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
-        runtime._last_write_result = IsolatedWriteResult(
-            output="updated",
-            commits_landed=1,
-            start_commit="base123",
-            landed_commit="tip456",
-            changed_paths=("MEMORY.md",),
-            operation_id="update-op-123",
-        )
-
-        with (
-            patch("rightmemory.runtime._git_rightmemory_diff", return_value="diff text") as diff,
-            patch("rightmemory.runtime.UpdateReviewStore.create_review") as create,
-        ):
-            runtime._create_update_review("updated summary")
+        with patch("rightmemory.runtime._git_rightmemory_diff", return_value="diff text") as diff:
+            paths = runtime._prepare_update_review_artifact(
+                "update-op-123",
+                root,
+                "base123",
+                "tip456",
+                ("MEMORY.md",),
+                "updated summary",
+            )
 
         diff.assert_called_once_with(root, "base123", "tip456")
-        self.assertEqual(create.call_args.kwargs["base_commit"], "base123")
-        self.assertEqual(create.call_args.kwargs["update_commit"], "tip456")
-        self.assertEqual(create.call_args.kwargs["write_surface"], "Memory")
-        self.assertEqual(create.call_args.kwargs["origin_operation_id"], "update-op-123")
+        self.assertEqual(len(paths), 1)
+        review = (root / paths[0]).read_text(encoding="utf-8")
+        self.assertIn('"base_commit":"base123"', review)
+        self.assertIn('"write_surface":"Memory"', review)
+        self.assertIn("updated summary", review)
 
-    def test_update_corrector_never_creates_another_review(self):
+    def test_update_review_artifact_skips_non_state_maintenance_commit(self):
         root = Path(self.tempdir.name)
-        config = RuntimeConfig(role="update-corrector", model_id="openai/test", memory_root=root)
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
-        runtime._last_write_result = IsolatedWriteResult(
-            output="corrected",
-            commits_landed=1,
-            start_commit="base123",
-            landed_commit="tip456",
-            changed_paths=("MEMORY.md", "corrections.md"),
+
+        paths = runtime._prepare_update_review_artifact(
+            "update-op-123",
+            root,
+            "base123",
+            "tip456",
+            ("corrections.md",),
+            "maintained correction evidence",
         )
 
-        with patch("rightmemory.runtime.UpdateReviewStore.create_review") as create:
-            runtime._create_update_review("corrected")
-
-        create.assert_not_called()
+        self.assertEqual(paths, ())
+        self.assertFalse((root / "update_reviews").exists())
 
     def test_isolated_run_holds_main_session_lock_around_supervisor_execution(self):
         main_root = Path(self.tempdir.name)
@@ -2369,10 +2279,11 @@ class RuntimeTests(unittest.TestCase):
                 with patch.dict("sys.modules", self._fake_pydantic_modules()):
                     runtime = RightMemoryRuntime(config)
 
-                with (
-                    patch.object(runtime, "_run_session_turn_unlocked", return_value="updated") as run,
-                    patch.object(runtime, "_create_update_review") as create_review,
-                ):
+                with patch.object(
+                    runtime,
+                    "_run_session_turn_unlocked",
+                    return_value="updated",
+                ) as run:
                     result = runtime.run_turn("remember one")
 
                 self.assertEqual(result, "updated")
@@ -2381,7 +2292,6 @@ class RuntimeTests(unittest.TestCase):
                     "remember one",
                     allow_internal_session=True,
                 )
-                create_review.assert_not_called()
 
     def test_run_turn_preserves_message_history(self):
         config = RuntimeConfig(
@@ -2787,6 +2697,8 @@ class RuntimeTests(unittest.TestCase):
             "!shared_views/*/.gitignore\n"
             "!insight_logs/\n"
             "!insight_logs/*.md\n"
+            "!update_reviews/\n"
+            "!update_reviews/*.md\n"
             "!update_queue/\n"
             "!update_queue/candidates/\n"
             "!update_queue/candidates/*.json\n"

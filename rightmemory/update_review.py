@@ -6,6 +6,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -16,11 +17,14 @@ from typing import Any
 
 from .platform import lock_file, unlock_file
 from .session import _ensure_runtime_gitignore, _fsync_directory
+from .update_coordination import is_update_coordination_path
 
 
 DEFAULT_BLANK_REVIEW_LIMIT = 50
 DEFAULT_BLANK_REVIEW_EXPIRY_DAYS = 30
-REVIEW_FORMAT_VERSION = 3
+REVIEW_FORMAT_VERSION = 4
+UPDATE_REVIEWS_DIRECTORY = "update_reviews"
+OPERATION_TRAILER = "RightMemory-Operation"
 
 COMMENT_START = "<!-- rightmemory-update-review-comment:start -->"
 COMMENT_END = "<!-- rightmemory-update-review-comment:end -->"
@@ -42,7 +46,11 @@ _READY_RE = re.compile(
     re.MULTILINE,
 )
 _CORRECTION_SECTIONS = ("Background", "Proposed edit", "Accepted edit")
-_OUTCOME_STATUSES = {"resolved", "needs_input"}
+_OUTCOME_STATUSES = {"resolved", "needs_input", "submitted"}
+
+
+class UpdateReviewSourceChanged(RuntimeError):
+    """Raised when a queued correction no longer targets the tracked review revision."""
 
 
 class UpdateExecutionLock:
@@ -75,9 +83,9 @@ class UpdateReviewRecord:
     review_id: str
     origin_operation_id: str
     base_commit: str
-    update_commit: str
     write_surface: str
     created_at: str
+    summary: str
 
 
 @dataclass(frozen=True)
@@ -85,9 +93,9 @@ class ParsedUpdateReview:
     review_id: str
     origin_operation_id: str
     base_commit: str
-    update_commit: str
     write_surface: str
     created_at: str
+    summary: str
     ready: bool
     comment: str
     question: str
@@ -100,13 +108,28 @@ class UpdateReviewRequest:
     document_path: Path
     origin_operation_id: str
     base_commit: str
-    update_commit: str
     write_surface: str
     document: str
     comment: str
     comment_sha256: str
     operation_id: str
     previous_question: str | None = None
+
+
+@dataclass(frozen=True)
+class VerifiedUpdateReview:
+    review_id: str
+    origin_operation_id: str
+    base_commit: str
+    creation_commit: str
+    write_surface: str
+    summary: str
+    document_commit: str
+    document_blob_oid: str
+    question: str
+    question_operation_id: str | None
+    diff: str
+    changed_paths: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -131,12 +154,17 @@ class UpdateReviewOutcome:
             raise ValueError("needs-input outcome requires a message")
         return cls("needs_input", message=clean_message)
 
+    @classmethod
+    def submitted(cls, message: str | None = None) -> UpdateReviewOutcome:
+        return cls("submitted", message=message)
+
 
 @dataclass(frozen=True)
 class UpdateReviewProcessResult:
     processed: int = 0
     resolved: int = 0
     needs_input: int = 0
+    submitted: int = 0
     failed: int = 0
     blank: int = 0
     not_ready: int = 0
@@ -147,7 +175,7 @@ class UpdateReviewProcessResult:
 
 
 class UpdateReviewStore:
-    """Use one local Markdown document as both review UI and submission state."""
+    """Use tracked Markdown as the review UI and submission state."""
 
     def __init__(
         self,
@@ -170,9 +198,9 @@ class UpdateReviewStore:
             raise ValueError("blank_review_expiry_days must be a positive integer")
         self.memory_root = Path(memory_root).resolve()
         self.runtime_root = self.memory_root / ".runtime"
-        self.root = self.runtime_root / "update-review"
-        self.reviews_root = self.root / "reviews"
-        self.process_lock_path = self.root / "process.lock"
+        self.root = self.memory_root / UPDATE_REVIEWS_DIRECTORY
+        self.reviews_root = self.root
+        self.process_lock_path = self.runtime_root / "update-review" / "process.lock"
         self.blank_review_limit = blank_review_limit
         self.blank_review_expiry_days = blank_review_expiry_days
 
@@ -181,25 +209,23 @@ class UpdateReviewStore:
         *,
         origin_operation_id: str,
         base_commit: str,
-        update_commit: str,
         write_surface: str,
         summary: str,
         diff: str,
         review_id: str | None = None,
         created_at: str | None = None,
     ) -> UpdateReviewRecord:
-        clean_update_commit = _single_line(update_commit, "update_commit")
+        clean_operation_id = _single_line(origin_operation_id, "origin_operation_id")
         record = UpdateReviewRecord(
-            review_id=_review_id(review_id or clean_update_commit),
-            origin_operation_id=_single_line(origin_operation_id, "origin_operation_id"),
+            review_id=_review_id(review_id or review_id_for_operation(clean_operation_id)),
+            origin_operation_id=clean_operation_id,
             base_commit=_single_line(base_commit, "base_commit"),
-            update_commit=clean_update_commit,
             write_surface=_single_line(write_surface, "write_surface"),
             created_at=created_at or datetime.now(UTC).isoformat(),
+            summary=summary.strip() or "No update summary was provided.",
         )
         _parse_time(record.created_at, "created_at")
         path = self.review_path(record.review_id)
-        _ensure_runtime_gitignore(self.runtime_root)
         try:
             existing = parse_review_markdown(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -209,7 +235,7 @@ class UpdateReviewStore:
             return _record_from_parsed(existing)
 
         self.reviews_root.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(path, render_review_markdown(record, summary=summary, diff=diff))
+        _atomic_write_text(path, render_review_markdown(record, diff=diff))
         return record
 
     def review_path(self, review_id: str) -> Path:
@@ -227,6 +253,50 @@ class UpdateReviewStore:
             if path == self.review_path(parsed.review_id):
                 records.append(_record_from_parsed(parsed))
         return sorted(records, key=lambda item: (item.created_at, item.review_id))
+
+    def settle_tracked(
+        self,
+        review_id: str,
+        outcome: UpdateReviewOutcome,
+        *,
+        operation_id: str,
+        expected_commit: str,
+        expected_blob_oid: str,
+    ) -> Path:
+        """Apply one fenced correction outcome inside a Git transaction worktree."""
+        _validate_outcome(outcome)
+        if outcome.status == "submitted":
+            raise ValueError("a submitted review cannot settle tracked state")
+        path = self.review_path(review_id)
+        expected_revision = _git_oid(expected_commit)
+        expected_blob = _git_oid(expected_blob_oid)
+        try:
+            document = path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise UpdateReviewSourceChanged(
+                "queued update review no longer exists"
+            ) from exc
+        if (
+            _git_path_commit(self.memory_root, path) != expected_revision
+            or _git_blob_oid(self.memory_root, path) != expected_blob
+        ):
+            raise UpdateReviewSourceChanged(
+                "queued update review no longer matches its submitted revision"
+            )
+        parsed = parse_review_markdown(document)
+        if parsed.review_id != review_id:
+            raise ValueError("tracked review identity does not match its path")
+        if outcome.status == "resolved":
+            path.unlink()
+            _fsync_directory(path.parent)
+            return path
+        updated = _review_with_question(
+            document,
+            outcome.message or "",
+            operation_id,
+        )
+        _atomic_write_text(path, updated)
+        return path
 
     def prune_blank_reviews(self, *, now: datetime | None = None) -> tuple[str, ...]:
         with self._processing_locked():
@@ -296,6 +366,7 @@ class UpdateReviewStore:
             "processed": 0,
             "resolved": 0,
             "needs_input": 0,
+            "submitted": 0,
             "failed": 0,
             "blank": 0,
             "not_ready": 0,
@@ -344,7 +415,6 @@ class UpdateReviewStore:
                     document_path=path,
                     origin_operation_id=parsed.origin_operation_id,
                     base_commit=parsed.base_commit,
-                    update_commit=parsed.update_commit,
                     write_surface=parsed.write_surface,
                     document=document,
                     comment=comment,
@@ -373,6 +443,12 @@ class UpdateReviewStore:
                     continue
 
                 try:
+                    if outcome.status == "submitted":
+                        if self._restore_tracked_if_unchanged(request):
+                            counts["submitted"] += 1
+                        else:
+                            counts["changed"] += 1
+                        continue
                     if outcome.status == "resolved":
                         if self._delete_if_unchanged(request):
                             counts["resolved"] += 1
@@ -387,8 +463,6 @@ class UpdateReviewStore:
                     counts["failed"] += 1
                     errors.append(f"{parsed.review_id}: {type(exc).__name__}: {exc}")
 
-        pruned = self._prune_blank_reviews_locked()
-        counts["pruned_blank"] = len(pruned)
         return UpdateReviewProcessResult(
             **counts,
             errors=tuple(errors),
@@ -397,39 +471,30 @@ class UpdateReviewStore:
     def _delete_if_unchanged(self, request: UpdateReviewRequest) -> bool:
         return _delete_document_if_unchanged(request.document_path, request.document)
 
+    def _restore_tracked_if_unchanged(self, request: UpdateReviewRequest) -> bool:
+        tracked = _git_show_file(
+            self.memory_root,
+            "HEAD",
+            request.document_path.relative_to(self.memory_root).as_posix(),
+        )
+        if tracked is None:
+            raise RuntimeError("submitted update review has no tracked source document")
+        return _replace_document_if_unchanged(
+            request.document_path,
+            request.document,
+            tracked,
+        )
+
     def _write_question_if_unchanged(
         self,
         request: UpdateReviewRequest,
         message: str,
     ) -> bool:
-        current = request.document
-        human_start, question_start = _review_section_bounds(current)
-        human_section = current[human_start:question_start]
-        ready_area = _marked_area(human_section, READY_START, READY_END, "Ready control")
-        ready_area, replacements = _READY_RE.subn(
-            f"- [ ] {READY_LABEL}",
-            ready_area,
-            count=1,
+        updated = _review_with_question(
+            request.document,
+            message,
+            request.operation_id,
         )
-        if replacements != 1:
-            raise ValueError("submitted review no longer has one Ready checkbox")
-        human_section = _replace_marked_area(
-            human_section,
-            READY_START,
-            READY_END,
-            ready_area,
-        )
-        updated = current[:human_start] + human_section + current[question_start:]
-        _human_start, question_start = _review_section_bounds(updated)
-        question_section = updated[question_start:]
-        question = _question_markdown(message, request.operation_id)
-        question_section = _replace_marked_area(
-            question_section,
-            QUESTION_START,
-            QUESTION_END,
-            question,
-        )
-        updated = updated[:question_start] + question_section
         claim = _claim_document_if_unchanged(request.document_path, request.document)
         if claim is None:
             return False
@@ -446,6 +511,7 @@ class UpdateReviewStore:
     def _processing_locked(self):
         _ensure_runtime_gitignore(self.runtime_root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self.process_lock_path.parent.mkdir(parents=True, exist_ok=True)
         with self.process_lock_path.open("a+", encoding="utf-8") as handle:
             lock_file(handle)
             try:
@@ -455,32 +521,67 @@ class UpdateReviewStore:
                 unlock_file(handle)
 
 
-def render_review_markdown(record: UpdateReviewRecord, *, summary: str, diff: str) -> str:
+def _review_with_question(current: str, message: str, operation_id: str) -> str:
+    # A tracked clarification contains no submitted draft, so the next edit is fresh.
+    human_start, question_start = _review_section_bounds(current)
+    human_section = current[human_start:question_start]
+    ready_area = _marked_area(human_section, READY_START, READY_END, "Ready control")
+    ready_area, replacements = _READY_RE.subn(
+        f"- [ ] {READY_LABEL}",
+        ready_area,
+        count=1,
+    )
+    if replacements != 1:
+        raise ValueError("submitted review no longer has one Ready checkbox")
+    human_section = _replace_marked_area(
+        human_section,
+        READY_START,
+        READY_END,
+        ready_area,
+    )
+    human_section = _replace_marked_area(
+        human_section,
+        COMMENT_START,
+        COMMENT_END,
+        "",
+    )
+    updated = current[:human_start] + human_section + current[question_start:]
+    _human_start, question_start = _review_section_bounds(updated)
+    question_section = updated[question_start:]
+    question = _question_markdown(message, operation_id)
+    question_section = _replace_marked_area(
+        question_section,
+        QUESTION_START,
+        QUESTION_END,
+        question,
+    )
+    return updated[:question_start] + question_section
+
+def render_review_markdown(record: UpdateReviewRecord, *, diff: str) -> str:
     metadata = json.dumps(
         {
             "version": REVIEW_FORMAT_VERSION,
             "review_id": record.review_id,
             "origin_operation_id": record.origin_operation_id,
             "base_commit": record.base_commit,
-            "update_commit": record.update_commit,
             "write_surface": record.write_surface,
             "created_at": record.created_at,
+            "summary": record.summary,
         },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
-    clean_summary = summary.strip() or "No update summary was provided."
     clean_diff = diff.rstrip()
     fence = _markdown_fence(clean_diff)
     return (
         "# RightMemory Update Review\n\n"
         f"{METADATA_PREFIX}{metadata}{METADATA_SUFFIX}\n\n"
-        f"Update commit: `{record.update_commit}`\n\n"
+        f"Update operation: `{record.origin_operation_id}`\n\n"
         "## What changed\n\n"
-        f"{clean_summary}\n\n"
+        f"{record.summary}\n\n"
         "## Original diff\n\n"
-        "This copy is for reading only. Correction re-verifies the operation receipt and Git diff.\n\n"
+        "This copy is for reading only. Correction re-verifies the creating Git operation and diff.\n\n"
         f"{fence}diff\n{clean_diff}\n{fence}\n\n"
         f"{HUMAN_HEADING}"
         "Write one overall correction comment between the markers, then check Ready.\n\n"
@@ -528,12 +629,12 @@ def parse_review_markdown(text: str) -> ParsedUpdateReview:
             "origin_operation_id",
         ),
         base_commit=_single_line(_metadata_string(metadata, "base_commit"), "base_commit"),
-        update_commit=_single_line(_metadata_string(metadata, "update_commit"), "update_commit"),
         write_surface=_single_line(
             _metadata_string(metadata, "write_surface"),
             "write_surface",
         ),
         created_at=_metadata_time(metadata),
+        summary=_metadata_string(metadata, "summary").strip(),
         ready=ready_matches[0].group(1).lower() == "x",
         comment=comment,
         question=question,
@@ -552,6 +653,34 @@ def review_comment_sha256(comment: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def tracked_review_blob_oid(root: Path, review_id: str) -> str | None:
+    """Return the exact tracked review revision used to fence queue evidence."""
+    memory_root = Path(root).resolve()
+    clean_review_id = _review_id(review_id)
+    relative = f"{UPDATE_REVIEWS_DIRECTORY}/{clean_review_id}.md"
+    tracked = _git_show_file(memory_root, "HEAD", relative)
+    if tracked is None:
+        return None
+    return _git_oid(_git_stdout(memory_root, "rev-parse", f"HEAD:{relative}"))
+
+
+def tracked_review_commit(root: Path, review_id: str) -> str | None:
+    """Return the commit that introduced the currently tracked review revision."""
+    memory_root = Path(root).resolve()
+    clean_review_id = _review_id(review_id)
+    relative = f"{UPDATE_REVIEWS_DIRECTORY}/{clean_review_id}.md"
+    if _git_show_file(memory_root, "HEAD", relative) is None:
+        return None
+    return _git_oid(
+        _git_stdout(memory_root, "log", "-1", "--format=%H", "HEAD", "--", relative)
+    )
+
+
+def review_id_for_operation(operation_id: str) -> str:
+    clean = _single_line(operation_id, "operation_id")
+    return f"review-{hashlib.sha256(clean.encode('utf-8')).hexdigest()}"
+
+
 def correction_operation_id(review_id: str, comment_sha256: str) -> str:
     clean_review_id = _review_id(review_id)
     clean_comment_hash = _sha256(comment_sha256)
@@ -559,6 +688,126 @@ def correction_operation_id(review_id: str, comment_sha256: str) -> str:
         f"{clean_review_id}\n{clean_comment_hash}".encode("utf-8")
     ).hexdigest()
     return f"update-review-correction-{revision}"
+
+
+def validate_update_reviews(root: Path) -> list[str]:
+    """Validate the complete tracked review directory without trusting edited display text."""
+    memory_root = Path(root).resolve()
+    reviews_root = memory_root / UPDATE_REVIEWS_DIRECTORY
+    if not reviews_root.exists() and not reviews_root.is_symlink():
+        return []
+    if reviews_root.is_symlink() or not reviews_root.is_dir():
+        return [f"{UPDATE_REVIEWS_DIRECTORY}: must be a directory"]
+    errors: list[str] = []
+    for path in sorted(reviews_root.iterdir(), key=lambda item: item.name):
+        relative = path.relative_to(memory_root).as_posix()
+        if path.is_symlink() or not path.is_file():
+            errors.append(f"{relative}: must be a regular file")
+            continue
+        if path.suffix != ".md":
+            errors.append(f"{relative}: unexpected tracked review path")
+            continue
+        try:
+            parsed = parse_review_markdown(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            errors.append(f"{relative}: {exc}")
+            continue
+        if path.name != f"{parsed.review_id}.md":
+            errors.append(f"{relative}: filename does not match review id")
+        elif parsed.review_id != review_id_for_operation(parsed.origin_operation_id):
+            errors.append(f"{relative}: review id does not match origin operation")
+    return errors
+
+
+def verify_update_review(root: Path, review_id: str) -> VerifiedUpdateReview:
+    """Recover authoritative Update context from synchronized Git history."""
+    memory_root = Path(root).resolve()
+    clean_review_id = _review_id(review_id)
+    relative = f"{UPDATE_REVIEWS_DIRECTORY}/{clean_review_id}.md"
+    tracked = _git_show_file(memory_root, "HEAD", relative)
+    if tracked is None:
+        raise FileNotFoundError(f"tracked update review does not exist: {relative}")
+    current = parse_review_markdown(tracked)
+    if current.review_id != clean_review_id:
+        raise ValueError("tracked update review identity does not match its path")
+    if current.ready or normalize_review_comment(current.comment):
+        raise ValueError(
+            "tracked update review contains local-only human submission state"
+        )
+
+    log = _git_stdout(memory_root, "log", "--format=%H", "--diff-filter=A", "--", relative)
+    creation_commits = tuple(line.strip() for line in log.splitlines() if line.strip())
+    if len(creation_commits) != 1:
+        raise ValueError("tracked update review must have exactly one creating commit")
+    creation_commit = creation_commits[0]
+    original_text = _git_show_file(memory_root, creation_commit, relative)
+    if original_text is None:
+        raise ValueError("creating commit does not contain its update review")
+    original = parse_review_markdown(original_text)
+    if original.review_id != clean_review_id:
+        raise ValueError("creating commit review identity does not match its path")
+    if original.review_id != review_id_for_operation(original.origin_operation_id):
+        raise ValueError("update review identity does not match its origin operation")
+    for field in (
+        "review_id",
+        "origin_operation_id",
+        "base_commit",
+        "write_surface",
+        "created_at",
+        "summary",
+    ):
+        if getattr(current, field) != getattr(original, field):
+            raise ValueError(f"tracked update review changed immutable {field}")
+
+    parents = _git_stdout(memory_root, "rev-list", "--parents", "-n", "1", creation_commit).split()
+    if len(parents) != 2:
+        raise ValueError("update review creating commit must have exactly one parent")
+    if not _git_is_ancestor(memory_root, original.base_commit, creation_commit):
+        raise ValueError("update review base is not an ancestor of its creating commit")
+    parent_commit = parents[1]
+    intervening = tuple(
+        path
+        for path in _git_changed_paths(memory_root, original.base_commit, parent_commit)
+        if not is_update_coordination_path(path)
+    )
+    if intervening:
+        raise ValueError(
+            "update review base-to-parent interval contains unrelated changes: "
+            + ", ".join(intervening)
+        )
+    message = _git_stdout(memory_root, "show", "-s", "--format=%B", creation_commit)
+    trailer = f"{OPERATION_TRAILER}: {original.origin_operation_id}"
+    if trailer not in (line.strip() for line in message.splitlines()):
+        raise ValueError("update review creating commit has no matching operation trailer")
+
+    changed_paths = _git_rightmemory_paths(
+        memory_root,
+        original.base_commit,
+        creation_commit,
+    )
+    if not changed_paths:
+        raise ValueError("update review creating commit has no Memory or Pursuit change")
+    write_surface = _write_surface(changed_paths)
+    if original.write_surface != write_surface:
+        raise ValueError("update review write surface does not match its Git diff")
+    return VerifiedUpdateReview(
+        review_id=clean_review_id,
+        origin_operation_id=original.origin_operation_id,
+        base_commit=original.base_commit,
+        creation_commit=creation_commit,
+        write_surface=write_surface,
+        summary=original.summary,
+        document_commit=_git_oid(
+            _git_stdout(memory_root, "log", "-1", "--format=%H", "HEAD", "--", relative)
+        ),
+        document_blob_oid=_git_oid(
+            _git_stdout(memory_root, "rev-parse", f"HEAD:{relative}")
+        ),
+        question=current.question,
+        question_operation_id=current.question_operation_id,
+        diff=_git_rightmemory_diff(memory_root, original.base_commit, creation_commit),
+        changed_paths=changed_paths,
+    )
 
 
 def validate_corrections_markdown(text: str) -> list[str]:
@@ -662,9 +911,9 @@ def _record_from_parsed(parsed: ParsedUpdateReview) -> UpdateReviewRecord:
         review_id=parsed.review_id,
         origin_operation_id=parsed.origin_operation_id,
         base_commit=parsed.base_commit,
-        update_commit=parsed.update_commit,
         write_surface=parsed.write_surface,
         created_at=parsed.created_at,
+        summary=parsed.summary,
     )
 
 
@@ -673,8 +922,8 @@ def _assert_same_review(parsed: ParsedUpdateReview, record: UpdateReviewRecord) 
         "review_id",
         "origin_operation_id",
         "base_commit",
-        "update_commit",
         "write_surface",
+        "summary",
     ):
         if getattr(parsed, field) != getattr(record, field):
             raise ValueError(f"existing update review has different {field}")
@@ -724,6 +973,27 @@ def _sha256(value: str) -> str:
     return clean
 
 
+def _git_oid(value: str) -> str:
+    clean = str(value).strip().lower()
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", clean):
+        raise ValueError("Git object IDs must contain 40 or 64 hexadecimal characters")
+    return clean
+
+
+def _git_blob_oid(root: Path, path: Path) -> str:
+    memory_root = Path(root).resolve()
+    relative = Path(path).resolve().relative_to(memory_root).as_posix()
+    return _git_oid(_git_stdout(memory_root, "hash-object", "--", relative))
+
+
+def _git_path_commit(root: Path, path: Path) -> str:
+    memory_root = Path(root).resolve()
+    relative = Path(path).resolve().relative_to(memory_root).as_posix()
+    return _git_oid(
+        _git_stdout(memory_root, "log", "-1", "--format=%H", "HEAD", "--", relative)
+    )
+
+
 def _marked_area(text: str, start: str, end: str, label: str) -> str:
     if text.count(start) != 1 or text.count(end) != 1:
         raise ValueError(f"update review must contain exactly one {label} area")
@@ -752,7 +1022,7 @@ def _review_section_bounds(text: str) -> tuple[int, int]:
 
 
 def _replace_marked_area(text: str, start: str, end: str, value: str) -> str:
-    _marked_area(text, start, end, "corrector question")
+    _marked_area(text, start, end, "marked section")
     area_start = text.find(start) + len(start)
     area_end = text.find(end, area_start)
     return text[:area_start] + f"\n\n{value.strip()}\n\n" + text[area_end:]
@@ -846,6 +1116,126 @@ def _delete_document_if_unchanged(path: Path, expected: str) -> bool:
         raise
     _fsync_directory(path.parent)
     return not path.exists()
+
+
+def _replace_document_if_unchanged(path: Path, expected: str, replacement: str) -> bool:
+    claim = _claim_document_if_unchanged(path, expected)
+    if claim is None:
+        return False
+    try:
+        published = _write_text_if_absent(path, replacement)
+    except Exception:
+        _restore_claim_if_vacant(claim, path)
+        raise
+    if not published:
+        _restore_claim_if_vacant(claim, path)
+        return False
+    claim.unlink(missing_ok=True)
+    _fsync_directory(path.parent)
+    return True
+
+
+def _git_show_file(root: Path, revision: str, path: str) -> str | None:
+    result = subprocess.run(
+        ["git", "show", f"{revision}:{path}"],
+        cwd=root,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode == 0:
+        return result.stdout
+    if result.returncode in {1, 128}:
+        return None
+    raise RuntimeError(f"git show failed: {result.stderr.strip()}")
+
+
+def _git_stdout(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=root,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout.rstrip()
+
+
+def _git_is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=root,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode in {0, 1}:
+        return result.returncode == 0
+    raise RuntimeError(f"git merge-base failed: {result.stderr.strip()}")
+
+
+def _git_changed_paths(root: Path, base: str, commit: str) -> tuple[str, ...]:
+    if base == commit:
+        return ()
+    output = _git_stdout(root, "diff", "--name-only", "-z", base, commit)
+    return tuple(sorted(path for path in output.split("\0") if path))
+
+
+def _git_rightmemory_paths(root: Path, base: str, commit: str) -> tuple[str, ...]:
+    output = _git_stdout(
+        root,
+        "diff",
+        "--name-only",
+        "-z",
+        base,
+        commit,
+        "--",
+        "MEMORY.md",
+        ":(glob)MEMORY_*.md",
+        "PURSUITS.md",
+        ":(glob)PURSUIT_*.md",
+    )
+    return tuple(sorted(path for path in output.split("\0") if path))
+
+
+def _git_rightmemory_diff(root: Path, base: str, commit: str) -> str:
+    return _git_stdout(
+        root,
+        "diff",
+        base,
+        commit,
+        "--",
+        "MEMORY.md",
+        ":(glob)MEMORY_*.md",
+        "PURSUITS.md",
+        ":(glob)PURSUIT_*.md",
+    )
+
+
+def _write_surface(paths: tuple[str, ...]) -> str:
+    changed_memory = any(path == "MEMORY.md" or path.startswith("MEMORY_") for path in paths)
+    changed_pursuit = any(path == "PURSUITS.md" or path.startswith("PURSUIT_") for path in paths)
+    if changed_memory and changed_pursuit:
+        return "Memory + Pursuit"
+    if changed_memory:
+        return "Memory"
+    if changed_pursuit:
+        return "Pursuit"
+    return "RightMemory"
 
 
 def _claim_document_if_unchanged(path: Path, expected: str) -> Path | None:

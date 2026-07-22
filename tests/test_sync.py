@@ -64,16 +64,19 @@ class SyncManagerTests(unittest.TestCase):
         self.assertIn("PURSUIT_*.md", MEMORY_SYNC_PATHS)
         self.assertIn("PURSUIT_RULES.md", MEMORY_SYNC_PATHS)
         self.assertIn("corrections.md", MEMORY_SYNC_PATHS)
+        self.assertIn("update_reviews/*.md", MEMORY_SYNC_PATHS)
         self.assertIn("update_queue/candidates/*.json", MEMORY_SYNC_PATHS)
         self.assertIn("update_queue/recovery/*.json", MEMORY_SYNC_PATHS)
         self.assertIn("update_queue/lease.json", MEMORY_SYNC_PATHS)
         self.assertTrue(_is_sync_path(f"update_queue/candidates/{'a' * 32}.json"))
         self.assertTrue(_is_sync_path(f"update_queue/recovery/update-batch-{'b' * 64}.json"))
         self.assertTrue(_is_sync_path("update_queue/lease.json"))
+        self.assertTrue(_is_sync_path(f"update_reviews/review-{'c' * 64}.md"))
         self.assertFalse(_is_sync_path("update_queue/candidates/not-a-uuid.json"))
         self.assertFalse(_is_sync_path(f"update_queue/candidates/{'A' * 32}.json"))
         self.assertFalse(_is_sync_path(f"update_queue/recovery/{'b' * 64}.json"))
         self.assertFalse(_is_sync_path("update_queue/extra.json"))
+        self.assertFalse(_is_sync_path("update_reviews/not-a-review.md"))
 
     def test_preflight_rejects_memory_root_nested_in_outer_git_repo(self):
         outer_remote = self.root / "outer.git"
@@ -160,6 +163,20 @@ class SyncManagerTests(unittest.TestCase):
                     path.unlink()
                 else:
                     path.write_text(original, encoding="utf-8")
+
+    def test_uncommitted_review_draft_does_not_block_unrelated_sync(self):
+        review = self.device / "update_reviews" / f"review-{'a' * 64}.md"
+        review.parent.mkdir()
+        review.write_text("tracked review\n", encoding="utf-8")
+        self._git(self.device, "add", str(review.relative_to(self.device)))
+        self._git(self.device, "commit", "-m", "review: tracked")
+        self._git(self.device, "push", "origin", "HEAD:main")
+        review.write_text("local draft\n", encoding="utf-8")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+        self.assertNotEqual(result.status, "dirty")
+        self.assertEqual(review.read_text(encoding="utf-8"), "local draft\n")
 
     def test_clean_git_merge_with_duplicate_cross_tree_id_reports_semantic_conflict(self):
         (self.other / "PURSUITS.md").write_text(

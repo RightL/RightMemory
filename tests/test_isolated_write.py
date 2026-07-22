@@ -12,6 +12,7 @@ from rightmemory.isolated_write import (
 )
 from rightmemory.semantic_operation import SemanticOperationStore
 from rightmemory.update_corrector import UpdateCorrectionResult
+from rightmemory.update_review import UpdateReviewStore, verify_update_review
 
 
 class IsolatedWriteSupervisorTests(unittest.TestCase):
@@ -70,6 +71,57 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
         self.assertIsNotNone(receipt)
         self.assertEqual(receipt.phase, "committed")
         self.assertEqual(receipt.outcome.landed_commit, result.landed_commit)
+
+    def test_update_lands_its_runtime_managed_review_in_the_same_commit(self):
+        operation_id = "update-operation-with-review"
+
+        def callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `two` reviewed update → []\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: reviewed update", cwd=worktree)
+            return "Added one durable memory."
+
+        def prepare(worktree, base, candidate, paths, output):
+            store = UpdateReviewStore(worktree)
+            record = store.create_review(
+                origin_operation_id=operation_id,
+                base_commit=base,
+                write_surface="Memory",
+                summary=output,
+                diff=self._git("diff", base, candidate, "--", "MEMORY.md", cwd=worktree),
+            )
+            return (store.review_path(record.review_id).relative_to(worktree).as_posix(),)
+
+        result = IsolatedWriteSupervisor(self.root, "update").run(
+            callback,
+            operation_id=operation_id,
+            operation_input={"message": "remember"},
+            prepare_managed_artifacts=prepare,
+        )
+
+        verified = verify_update_review(self.root, next((self.root / "update_reviews").glob("*.md")).stem)
+        changed = self._git("show", "--format=", "--name-only", "HEAD").splitlines()
+        self.assertEqual(result.commits_landed, 1)
+        self.assertEqual(result.changed_paths, ("MEMORY.md",))
+        self.assertIn("MEMORY.md", changed)
+        self.assertIn(f"update_reviews/{verified.review_id}.md", changed)
+        self.assertEqual(verified.origin_operation_id, operation_id)
+
+    def test_update_model_cannot_author_a_review_file(self):
+        def callback(worktree: Path) -> str:
+            review = worktree / "update_reviews" / f"review-{'a' * 64}.md"
+            review.parent.mkdir()
+            review.write_text("model-authored review\n", encoding="utf-8")
+            self._git("add", "-f", str(review.relative_to(worktree)), cwd=worktree)
+            self._git("commit", "-m", "memory: invalid review", cwd=worktree)
+            return "updated"
+
+        with self.assertRaisesRegex(RuntimeError, "non-memory paths"):
+            IsolatedWriteSupervisor(self.root, "update").run(
+                callback,
+                operation_id="update-model-review",
+                operation_input={"message": "remember"},
+            )
 
     def test_external_finalizer_prepares_without_landing_or_generic_recovery(self):
         calls = []

@@ -113,7 +113,7 @@ When it completes, blocks, changes direction, or reaches a useful handoff:
 
 Later:
   the unified updater reconciles candidates into Memory, Pursuit, both, or neither
-  a local update-review document lets the user comment and explicitly submit a correction
+  a synchronized update-review document lets the user comment and explicitly submit a correction
   rightmemory dreamer consolidates stale, duplicated, or overgrown memory
   rightmemory insight writes durable reflection artifacts when useful
 ```
@@ -128,7 +128,7 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 - Independent command-backed `memory-retriever` and `rightmemory-orchestrator` skills, selected by the user.
 - Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex/Claude CLI role execution.
 - Model-selected, runtime-rendered retrieval output without model-authored summaries or commentary.
-- One updater for Memory and Pursuit, automatic transcript-review candidate extraction, and local Markdown review documents for updater edits.
+- One updater for Memory and Pursuit, automatic transcript-review candidate extraction, and tracked Markdown review documents for updater edits.
 
 ## Install Options And Updates
 
@@ -374,7 +374,7 @@ RightMemory separates corrections to general agent work from corrections to Righ
 
 Reusable rejected/accepted evidence about ordinary agent work may be curated into two fixed Memory-only M# collections: `MEMORY_agent-corrections-writing.md` for expression and presentation, and `MEMORY_agent-corrections-design.md` for underlying reasoning, decisions, behavior, or action. Each is a priority-curated set of at most 15 compact items, not an append-only log or FIFO. Agents consult relevant correction evidence only after forming an initial draft or direction. When a concise executable instruction captures the lesson better, ordinary Agent Behavior or S# guidance replaces duplicate correction evidence.
 
-Comments on unified-updater edits use the separate local update-review channel. Its Markdown is temporary UI, not Memory or durable correction evidence. A successful state correction may also curate root `corrections.md`; that file is synchronized updater-only feedback, not Memory and not graph content. General writing/design correction M# collections remain a third, independent surface.
+Comments on unified-updater edits use the separate update-review channel. Its tracked Markdown is synchronized UI, not Memory or durable correction evidence; draft edits stay local until the user explicitly marks them Ready. A successful state correction may also curate root `corrections.md`; that file is synchronized updater-only feedback, not Memory and not graph content. General writing/design correction M# collections remain a third, independent surface.
 
 ## Agent Roles
 
@@ -397,7 +397,8 @@ unified updater
   +--> PURSUIT*.md                  live intent and continuity
 
 update-review
-  +--> local Markdown review        one overall human comment + explicit Ready control
+  +--> tracked Markdown review      one overall human comment + explicit Ready control
+  +--> synchronized update queue    typed Ready submission + global lease
   +--> internal update-corrector    state correction and optional corrections.md feedback
 ```
 
@@ -557,7 +558,7 @@ The runtime is intentionally small:
 - Every new CLI-agent provider thread receives an ownership record under `<memory-root>/.runtime/agent_cli_threads/`, including one-shot and failed isolated work, so transcript review can exclude internal conversations without relying on an active mapping.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - Use `rightmemory status` for a read-only operational dashboard across the configured memory root. It summarizes Git state, managed watches, Dreamer and Insight trigger progress, async update queues, bounded last-message previews, and file paths for full logs or state. Use `rightmemory watch status` when you need the lower-level managed-watch process view.
-- The installer creates a root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, `PURSUIT_RULES.md`, optional root `corrections.md`, sharing metadata and provider view sources, `insight_logs/*.md`, and the narrowly defined `update_queue/` JSON paths; generated shared-view output and update-review documents stay outside the committed surface.
+- The installer creates a root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, `PURSUIT_RULES.md`, optional root `corrections.md`, sharing metadata and provider view sources, `insight_logs/*.md`, tracked `update_reviews/*.md`, and the narrowly defined `update_queue/` JSON paths; generated shared-view output stays outside the committed surface.
 - Async `update submit` calls for the same `--session` accumulate as pending candidates and reset that session's configured quiet period. Start and terminal candidates that reach the same batch are reconciled together, so already-finished work does not leave transient Pursuit state. A global worker batches whole session queues, but the updater groups candidates by the work they describe rather than treating a session as one task. `pull` and `undo` remain per-session. Retrieve can see pending evidence as `Recent submitted RightMemory` before consolidation.
 - Automatic unified-update, dreamer, insight, and pruner turns use isolated Git worktrees when they operate on the main state root. Runtime validates complete role-owned results before landing them. Transcript review remains read-only and queues any resulting candidate.
 - Standalone daemon context is preserved with Pydantic AI message history.
@@ -741,9 +742,9 @@ progress, async update queues, recent previews, and paths to the underlying logs
 or state files, use `rightmemory status`. `rightmemory watch status`
 intentionally stays focused on managed watch process state.
 
-#### Offline Update Review
+#### Update Review
 
-Every normal unified-updater commit creates one local Markdown document under `<memory-root>/.runtime/update-review/reviews/`. Its generated portion explains the update and includes a readable diff. One free-form human comment area covers the whole update, and the visible `Ready for correction` checkbox is the only submission signal.
+Every normal unified-updater commit includes one tracked Markdown document at `<memory-root>/update_reviews/review-<sha256(operation-id)>.md` in the same commit as the state change. Correction and maintenance commits do not create reviews. The generated portion explains the update and includes a readable diff; one free-form human comment area covers the whole update, and the visible `Ready for correction` checkbox is the only submission signal. Ordinary Git sync transports the document to every device.
 
 The checker can also be run directly:
 
@@ -752,11 +753,11 @@ rightmemory update-review scan --once
 rightmemory update-review watch
 ```
 
-A non-empty comment is inert until the user checks Ready; no file-age or modification-time heuristic is involved. The Markdown document owns both human text and submission intent, with no review state JSON, pending queue, or processed-comment marker. The existing process lock retains only the last attempted review id so each bounded scan advances fairly past failures. Resolved files are removed, untouched blank files expire under bounded retention, and a needs-input result writes the question into the unchanged document and clears Ready.
+A non-empty comment remains a local working-tree draft until the user checks Ready; no file-age or modification-time heuristic is involved. With sync enabled, the scanner binds the normalized comment to the exact tracked review commit and Git blob, publishes that evidence as typed work in the existing synchronized update queue, then restores the tracked review document so the draft cannot block ordinary sync. The queue candidate, rather than an uncommitted edit, carries the submitted comment between devices.
 
-The deterministic scanner sends only the submitted comment to a separate internal `update-corrector` role, together with original-update context re-verified from the semantic-operation receipt and Git. The editable displayed diff is never authoritative. The corrector uses Update's configured executor in a fresh one-shot conversation, but has its own concise prompt and typed `applied`, `no_change`, or `needs_input` result. A review id plus normalized-comment hash gives each revision a deterministic operation id, so failure retries replay the same transaction.
+Typed review work is selected alone and processed under the update queue's global lease. The scanner sends only the submitted comment to the internal `update-corrector`, together with original-update context re-verified from the review's creation commit and operation trailer in Git. The editable displayed diff is never authoritative. The corrector uses Update's configured executor in a fresh one-shot conversation, but has its own concise prompt and typed `applied`, `no_change`, or `needs_input` result. Deterministic review and candidate identities make failure recovery resume the same transaction.
 
-The corrector preserves unrelated later work and commits nothing for ambiguous or already-satisfied requests. An applied correction lands exactly one validated commit changing Memory, Pursuit, or both and may curate root `corrections.md` in that same commit; a corrections-only commit is invalid. Exact-document compare-and-swap removes a resolved review or writes a clarification only when the human has not edited it during processing. Finalization also waits for the correction's journaled effects to complete. Newer edits remain untouched, while execution failures leave Ready checked and retry after the watcher delay. Each scan can recreate one review document whose original post-commit effect was interrupted, directly from the durable receipt and Git without running a model.
+The corrector preserves unrelated later work and commits nothing for ambiguous or already-satisfied requests. Queue finalization rechecks the submitted review commit and blob, atomically applies a validated correction when present, and either deletes the resolved review or writes a clarification and clears Ready. Exact duplicate submissions converge; stale work is terminally consumed without touching a newer review. The same fenced Git transaction consumes the claimed candidate, so another device cannot settle the request twice. With sync disabled, correction and review settlement use the same semantics but commit directly to local Git.
 
 #### Transcript Review
 
@@ -871,7 +872,7 @@ when Windows assigns it a new PID. Run `rightmemory watch start` or
 
 ### Isolated Automatic Writes
 
-Automatic unified-Update, update-corrector, dreamer, insight, and pruner turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. Normal Update may commit Memory and Pursuit together. Update-corrector may additionally change `corrections.md`, but only alongside a successful state correction, and cannot edit the fixed writing/design correction collections. Memory-oriented maintenance roles remain restricted to Memory, while Insight commits `insight_logs/*.md`. Runtime validates complete role-owned results and lands successful commits; empty `prune:` checkpoints are allowed.
+Automatic unified-Update, update-corrector, dreamer, insight, and pruner turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. Normal Update may commit Memory and Pursuit together; runtime adds its tracked update-review document to that same commit. Update-corrector may additionally change `corrections.md`, but only alongside a successful state correction, and cannot edit the fixed writing/design correction collections. Memory-oriented maintenance roles remain restricted to Memory, while Insight commits `insight_logs/*.md`. Runtime validates complete role-owned results and lands successful commits; empty `prune:` checkpoints are allowed.
 
 Temporary session and provider state lives under `.runtime/isolated-state/` during an isolated turn and is promoted after successful landing or a valid no-op. Standalone turns seed local message history there. CLI-agent turns start speculative provider work in a fresh one-shot session. Successful ownership state is promoted; if later validation or landing fails, the ownership record alone is preserved so the abandoned internal thread remains excluded from review and eligible for cleanup. Other temporary work is discarded, and the original candidate batch, update-review request, or maintenance trigger balance remains the retry source.
 
@@ -893,10 +894,7 @@ When sync is enabled, runtime code handles remote Git synchronization around aut
 
 Retrieve adds a small active-use safety net. At most once every five minutes it performs a pull-only upstream check before reading memory, with the fetch bounded to two seconds. A clean incoming commit is validated and admitted for the current request; the foreground path never pushes and never invokes `sync-reconciler`. Offline, timed-out, dirty, conflicting, or invalid incoming state does not block retrieval: the request uses the last valid local state, then starts one detached full sync cycle after the response finishes. That cycle owns reconciliation and push when needed, and a shared nonblocking cycle lock prevents duplicate watcher, retrieve, and deferred work. If a clean refresh brings synchronized update candidates, the update worker is woken only after retrieval completes. Historical retrieval remains local.
 
-Update-queue files are coordination data, not semantic repair input. Sync admits
-only the canonical candidate, recovery, and singleton-lease paths, validates the
-complete queue before publication, and fails closed on malformed data or queue
-merge conflicts. `sync-reconciler` never edits or resolves queue state.
+Update-review and update-queue files are protocol state, not semantic repair input. Sync transports only canonical `update_reviews/*.md` documents and candidate, recovery, and singleton-lease queue paths, validates their complete schemas before publication, and fails closed on malformed data or protocol-path merge conflicts. `sync-reconciler` never edits or resolves this state. Ready review comments travel as typed queue candidates, and the queue's global lease fences correction and review settlement across devices.
 
 Managed watch includes a `sync` target. `rightmemory watch start` starts it when sync is enabled, and `rightmemory watch start sync` runs that target by itself. The watcher is an optional low-latency accelerator; retrieve's bounded check also restores progress during active use when no watcher is running. Every normal watcher cycle fetches the upstream so newly published candidates become locally visible; it pulls immediately when the fetched tip changed. When the tip is unchanged, `stale_pull_after_hours` controls how often a no-change pull checkpoint is recorded. Clean pulls and fresh checks stay deterministic and do not call a model.
 
@@ -960,8 +958,9 @@ After install:
 ├── PURSUIT_RULES.md
 ├── corrections.md              # created only when updater feedback is admitted
 ├── insight_logs/
+├── update_reviews/             # tracked review documents, synchronized by Git
 ├── update_queue/               # appears when synchronized queue state exists
-└── .runtime/update-review/     # local review inbox, not committed
+└── .runtime/                   # machine-local runtime state
 
 ~/.codex/skills/
 ├── rightmemory-schema.md

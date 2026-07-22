@@ -15,7 +15,7 @@ from .platform import process_exists
 from .session import _ensure_durable_directory, _ensure_runtime_gitignore, _fsync_directory
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 QUEUE_DIRECTORY = "update_queue"
 CANDIDATES_DIRECTORY = "candidates"
 RECOVERY_DIRECTORY = "recovery"
@@ -26,6 +26,7 @@ LOCAL_PUBLICATION_DIRECTORY = Path(".runtime") / "async" / "update" / "publicati
 _UID_RE = re.compile(r"^[0-9a-f]{32}$")
 _OID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _BATCH_ID_RE = re.compile(r"^update-batch-[0-9a-f]{64}$")
+_REVIEW_ID_RE = re.compile(r"^review-[0-9a-f]{64}$")
 _REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _OUTBOX_RECORD_RE = re.compile(r"^(?P<uid>[0-9a-f]{32})\.json$")
 _OUTBOX_TEMP_RE = re.compile(
@@ -45,6 +46,11 @@ class UpdateCandidate:
     display_id: int
     message: str
     submitted_at: str
+    kind: Literal["update", "review"] = "update"
+    review_id: str | None = None
+    review_commit: str | None = None
+    review_blob_oid: str | None = None
+    previous_question: str | None = None
 
     def __post_init__(self) -> None:
         _require_uid(self.uid, "candidate uid")
@@ -52,6 +58,34 @@ class UpdateCandidate:
         _require_positive_int(self.display_id, "candidate display_id")
         _require_nonempty_string(self.message, "candidate message")
         _require_utc_time(self.submitted_at, "candidate submitted_at")
+        if not isinstance(self.kind, str) or self.kind not in {"update", "review"}:
+            raise UpdateQueueFormatError("candidate kind must be update or review")
+        if self.kind == "update":
+            if (
+                self.review_id is not None
+                or self.review_commit is not None
+                or self.review_blob_oid is not None
+                or self.previous_question is not None
+            ):
+                raise UpdateQueueFormatError(
+                    "update candidate review fields must be null"
+                )
+            return
+        _require_review_id(self.review_id)
+        _require_oid(self.review_commit, "review candidate review_commit")
+        _require_oid(
+            self.review_blob_oid,
+            "review candidate review_blob_oid",
+        )
+        if self.session_id != self.review_id:
+            raise UpdateQueueFormatError(
+                "review candidate session_id must match review_id"
+            )
+        if self.previous_question is not None:
+            _require_nonempty_string(
+                self.previous_question,
+                "review candidate previous_question",
+            )
 
 
 @dataclass(frozen=True)
@@ -328,6 +362,36 @@ def candidate_sha256(candidate: UpdateCandidate) -> str:
     return hashlib.sha256(_json_bytes(_candidate_json(candidate))).hexdigest()
 
 
+def candidate_evidence_matches(
+    left: UpdateCandidate,
+    right: UpdateCandidate,
+) -> bool:
+    """Compare evidence, ignoring only review submission wall-clock drift."""
+    if left.kind != "review" or right.kind != "review":
+        return left == right
+    return (
+        left.uid,
+        left.session_id,
+        left.display_id,
+        left.kind,
+        left.message,
+        left.review_id,
+        left.review_commit,
+        left.review_blob_oid,
+        left.previous_question,
+    ) == (
+        right.uid,
+        right.session_id,
+        right.display_id,
+        right.kind,
+        right.message,
+        right.review_id,
+        right.review_commit,
+        right.review_blob_oid,
+        right.previous_question,
+    )
+
+
 def parse_update_candidate_json(text: str) -> UpdateCandidate:
     """Parse strict synchronized-candidate JSON, including duplicate-key checks."""
     return _parse_candidate(_loads_json(text))
@@ -353,7 +417,12 @@ def update_candidate_batch_id(candidates: Iterable[UpdateCandidate]) -> str:
                 {
                     "id": item.display_id,
                     "candidate_uid": item.uid,
+                    "kind": item.kind,
                     "message": item.message,
+                    "review_id": item.review_id,
+                    "review_commit": item.review_commit,
+                    "review_blob_oid": item.review_blob_oid,
+                    "previous_question": item.previous_question,
                     "submitted_at": item.submitted_at,
                 }
                 for item in sorted(
@@ -399,6 +468,20 @@ def _inspect_update_queue(root: Path) -> tuple[UpdateQueueSnapshot, list[str]]:
         "candidate",
         errors,
     )
+    review_owners: dict[str, str] = {}
+    for candidate in candidates:
+        if candidate.kind != "review" or candidate.review_id is None:
+            continue
+        previous = review_owners.setdefault(candidate.review_id, candidate.uid)
+        if previous != candidate.uid:
+            path = queue_root / CANDIDATES_DIRECTORY / f"{candidate.uid}.json"
+            errors.append(
+                _diagnostic(
+                    root,
+                    path,
+                    f"review {candidate.review_id} already has pending candidate {previous}",
+                )
+            )
     recoveries = _inspect_record_directory(
         root,
         queue_root / RECOVERY_DIRECTORY,
@@ -554,7 +637,12 @@ def _candidate_json(candidate: UpdateCandidate) -> dict[str, object]:
         "uid": valid.uid,
         "session_id": valid.session_id,
         "display_id": valid.display_id,
+        "kind": valid.kind,
         "message": valid.message,
+        "previous_question": valid.previous_question,
+        "review_blob_oid": valid.review_blob_oid,
+        "review_commit": valid.review_commit,
+        "review_id": valid.review_id,
         "submitted_at": valid.submitted_at,
     }
 
@@ -600,15 +688,51 @@ def _publication_json(marker: PublicationMarker) -> dict[str, object]:
 def _parse_candidate(data: object) -> UpdateCandidate:
     value = _exact_object(
         data,
-        {"schema_version", "uid", "session_id", "display_id", "message", "submitted_at"},
+        {
+            "schema_version",
+            "uid",
+            "session_id",
+            "display_id",
+            "kind",
+            "message",
+            "review_id",
+            "review_commit",
+            "review_blob_oid",
+            "previous_question",
+            "submitted_at",
+        },
         "candidate",
     )
     _require_schema(value, "candidate")
+    review_id = value["review_id"]
+    if review_id is not None and not isinstance(review_id, str):
+        raise UpdateQueueFormatError("candidate review_id must be a string or null")
+    review_commit = value["review_commit"]
+    if review_commit is not None and not isinstance(review_commit, str):
+        raise UpdateQueueFormatError("candidate review_commit must be a string or null")
+    previous_question = value["previous_question"]
+    if previous_question is not None and not isinstance(previous_question, str):
+        raise UpdateQueueFormatError(
+            "candidate previous_question must be a string or null"
+        )
+    review_blob_oid = value["review_blob_oid"]
+    if review_blob_oid is not None and not isinstance(
+        review_blob_oid,
+        str,
+    ):
+        raise UpdateQueueFormatError(
+            "candidate review_blob_oid must be a string or null"
+        )
     return UpdateCandidate(
         uid=_required_string_field(value, "uid", "candidate"),
         session_id=_required_string_field(value, "session_id", "candidate"),
         display_id=_required_int_field(value, "display_id", "candidate"),
+        kind=_required_string_field(value, "kind", "candidate"),
         message=_required_string_field(value, "message", "candidate"),
+        review_id=review_id,
+        review_commit=review_commit,
+        review_blob_oid=review_blob_oid,
+        previous_question=previous_question,
         submitted_at=_required_string_field(value, "submitted_at", "candidate"),
     )
 
@@ -860,6 +984,14 @@ def _require_batch_id(value: str) -> str:
     if not isinstance(value, str) or not _BATCH_ID_RE.fullmatch(value):
         raise UpdateQueueFormatError(
             "batch_id must use update-batch- followed by lowercase SHA-256 hex"
+        )
+    return value
+
+
+def _require_review_id(value: str | None) -> str:
+    if not isinstance(value, str) or not _REVIEW_ID_RE.fullmatch(value):
+        raise UpdateQueueFormatError(
+            "review candidate review_id must use review- followed by lowercase SHA-256 hex"
         )
     return value
 
