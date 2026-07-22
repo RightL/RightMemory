@@ -351,12 +351,15 @@ class LocalUpdateOutboxTests(unittest.TestCase):
             store = UpdateQueueStore(Path(tempdir))
             candidate = _candidate(UID_A)
             store.write_outbox(candidate)
-            temporary = store.outbox_root / f".{UID_A}.json.999999999.{UID_B}.tmp"
+            temporary = store.outbox_root / f".999999999.{UID_B}.tmp"
             temporary.write_text("partial", encoding="utf-8")
+            legacy_temporary = store.outbox_root / f".{UID_A}.json.999999999.{UID_B}.tmp"
+            legacy_temporary.write_text("partial", encoding="utf-8")
 
             with patch("rightmemory.update_queue.process_exists", return_value=False):
                 self.assertEqual(store.outbox_candidates(), (candidate,))
             self.assertFalse(temporary.exists())
+            self.assertFalse(legacy_temporary.exists())
 
             junk = store.outbox_root / "notes.txt"
             junk.write_text("not runtime state", encoding="utf-8")
@@ -367,8 +370,21 @@ class LocalUpdateOutboxTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             store = UpdateQueueStore(Path(tempdir))
             candidate_path = store.write_outbox(_candidate(UID_A))
-            temporary = store.outbox_root / f".{UID_A}.json.999999999.{UID_B}.tmp"
-            temporary.symlink_to(candidate_path)
+            temporary = store.outbox_root / f".999999999.{UID_B}.tmp"
+            try:
+                temporary.symlink_to(candidate_path)
+            except OSError as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+
+            with self.assertRaisesRegex(UpdateQueueFormatError, "temporary artifact must be a regular file"):
+                store.outbox_candidates()
+
+    def test_outbox_listing_rejects_temp_shaped_directory(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = UpdateQueueStore(Path(tempdir))
+            store.write_outbox(_candidate(UID_A))
+            temporary = store.outbox_root / f".999999999.{UID_B}.tmp"
+            temporary.mkdir()
 
             with self.assertRaisesRegex(UpdateQueueFormatError, "temporary artifact must be a regular file"):
                 store.outbox_candidates()

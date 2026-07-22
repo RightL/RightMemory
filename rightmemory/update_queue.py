@@ -29,7 +29,7 @@ _BATCH_ID_RE = re.compile(r"^update-batch-[0-9a-f]{64}$")
 _REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _OUTBOX_RECORD_RE = re.compile(r"^(?P<uid>[0-9a-f]{32})\.json$")
 _OUTBOX_TEMP_RE = re.compile(
-    r"^\.(?P<uid>[0-9a-f]{32})\.json\.(?P<pid>[1-9][0-9]*)\.[0-9a-f]{32}\.tmp$"
+    r"^\.(?:[0-9a-f]{32}\.json\.)?(?P<pid>[1-9][0-9]*)\.[0-9a-f]{32}\.tmp$"
 )
 _Record = TypeVar("_Record")
 
@@ -744,7 +744,7 @@ def _write_immutable(
 
 def _write_json(path: Path, data: dict[str, object]) -> None:
     _ensure_durable_directory(path.parent)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    temporary = path.with_name(f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
         with temporary.open("xb") as handle:
             handle.write(_json_bytes(data))

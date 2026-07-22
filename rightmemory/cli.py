@@ -57,6 +57,7 @@ from .review import ReviewScanner, normalize_transcript
 from .runtime import (
     AUTOMATIC_WRITE_ROLES,
     STATE_EFFECT,
+    SYNC_REPAIR_SESSION_ID,
     RightMemoryRuntime,
     _git_rightmemory_diff,
     _rightmemory_write_surface,
@@ -1582,6 +1583,8 @@ def _history_main(argv: list[str], memory_root: Path) -> int:
 
 
 def _sync_main(argv: list[str], memory_root: Path) -> int:
+    if argv == ["_deferred"]:
+        return _sync_deferred(memory_root)
     parser = argparse.ArgumentParser(prog="rightmemory sync")
     subparsers = parser.add_subparsers(dest="command", required=True)
     watch = subparsers.add_parser("watch", help="keep local memory sync state alive")
@@ -1981,31 +1984,9 @@ def _sync_watch(interval: int, memory_root: Path) -> int:
                 _reexec_if_install_changed(refresh, stop)
                 timestamp = datetime.now(UTC).isoformat()
                 print(f"[{timestamp}] rightmemory sync check", flush=True)
-                manager = SyncManager(sync_config)
                 cycle_failed = False
                 try:
-                    result = manager.background_sync(
-                        repair=lambda candidate, diagnostic, operation_id: _run_sync_reconciler(
-                            manager,
-                            candidate,
-                            diagnostic,
-                            operation_id,
-                            sync_config.memory_root,
-                        )
-                    )
-                    _finish_sync_repair(sync_config.memory_root, result)
-                    if result.status in {"synced", "fresh", "pushed"}:
-                        _recover_synchronized_update_operations(
-                            sync_config.memory_root,
-                            sync_config,
-                        )
-                        queue_store = UpdateQueueStore(sync_config.memory_root)
-                        snapshot = queue_store.snapshot()
-                        if snapshot.candidates or queue_store.outbox_candidates():
-                            AsyncUpdateStore(
-                                sync_config.memory_root,
-                                "update",
-                            ).wake_worker()
+                    result = _run_sync_cycle(sync_config)
                 except Exception as exc:
                     print(
                         f"rightmemory sync check failed: {type(exc).__name__}: {exc}",
@@ -2030,6 +2011,81 @@ def _sync_watch(interval: int, memory_root: Path) -> int:
     except KeyboardInterrupt:
         print("rightmemory sync watch stopped", file=sys.stderr)
         return 130
+
+
+def _sync_deferred(memory_root: Path) -> int:
+    sync_config = load_sync_config(memory_root=memory_root)
+    if not sync_config.enabled:
+        return 0
+    try:
+        result = _run_sync_cycle(sync_config)
+    except Exception as exc:
+        print(
+            f"rightmemory deferred sync failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+    print(result.message, flush=True)
+    return 0 if result.status in {"synced", "fresh", "pushed", "busy"} else 1
+
+
+def _run_sync_cycle(sync_config: Any):
+    manager = SyncManager(sync_config)
+    result = manager.background_sync(
+        repair=lambda candidate, diagnostic, operation_id: _run_sync_reconciler(
+            manager,
+            candidate,
+            diagnostic,
+            operation_id,
+            sync_config.memory_root,
+        ),
+        active_repair=lambda diagnostic: _run_active_sync_reconciler(
+            manager,
+            diagnostic,
+            sync_config.memory_root,
+        ),
+    )
+    _finish_sync_repair(sync_config.memory_root, result)
+    if result.status in {"synced", "fresh", "pushed"}:
+        _recover_synchronized_update_operations(
+            sync_config.memory_root,
+            sync_config,
+        )
+        queue_store = UpdateQueueStore(sync_config.memory_root)
+        snapshot = queue_store.snapshot()
+        if snapshot.candidates or queue_store.outbox_candidates():
+            AsyncUpdateStore(
+                sync_config.memory_root,
+                "update",
+            ).wake_worker()
+    return result
+
+
+def _run_active_sync_reconciler(
+    manager: SyncManager,
+    result: Any,
+    memory_root: Path,
+) -> None:
+    reconciler_config = load_config("sync-reconciler", memory_root=memory_root)
+    reconciler_root = Path(reconciler_config.memory_root)
+    if reconciler_root != manager.memory_root:
+        raise ValueError(
+            "sync-reconciler memory root mismatch: "
+            f"sync cycle uses {manager.memory_root}, sync-reconciler uses {reconciler_root}"
+        )
+    local_config = replace(
+        reconciler_config,
+        sync=replace(reconciler_config.sync, enabled=False),
+    )
+    runtime = RightMemoryRuntime(local_config)
+    try:
+        runtime.run_session_turn(
+            SYNC_REPAIR_SESSION_ID,
+            manager.repair_message(result),
+        )
+    finally:
+        runtime.cleanup()
 
 
 def _run_sync_reconciler(

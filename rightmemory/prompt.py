@@ -235,9 +235,9 @@ def _sync_guidance(role: str) -> str:
         return "- Historical retrieval uses local memory and does not perform sync preflight by default."
     if role == "retrieve":
         return (
-            "- Retrieve does not perform sync preflight by default. It silently pulls accepted `MF#` file views "
-            "before model start and does not add pull results to session history. Do not mention pull results "
-            "unless imported file content is relevant."
+            "- Before model start, Retrieve may silently admit a clean bounded global-sync refresh and pulls "
+            "accepted `MF#` file views. It does not add either pull result to session history. Do not mention "
+            "pull results unless imported content is relevant."
         )
     if role == "reviewer":
         return (
