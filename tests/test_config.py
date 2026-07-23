@@ -2664,7 +2664,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("Prior retrieve conversation", second_message)
         self.assertTrue(second_message.rstrip().endswith("# Query\n\nsecond question"))
 
-    def test_write_role_creates_memory_lock_and_gitignore(self):
+    def test_write_role_creates_memory_lock_without_synthesizing_root_gitignore(self):
         config = RuntimeConfig(
             role="update",
             model_id="openai/test",
@@ -2677,35 +2677,7 @@ class RuntimeTests(unittest.TestCase):
             runtime.run_session_turn("agent-session", "remember one")
 
         self.assertTrue((Path(self.tempdir.name) / ".runtime" / "memory.lock").exists())
-        self.assertEqual(
-            (Path(self.tempdir.name) / ".gitignore").read_text(encoding="utf-8"),
-            "*\n"
-            "!MEMORY.md\n"
-            "!MEMORY_*.md\n"
-            "!PURSUITS.md\n"
-            "!PURSUIT_*.md\n"
-            "!PURSUIT_RULES.md\n"
-            "!corrections.md\n"
-            "!shared_views.toml\n"
-            "!shares.toml\n"
-            "!shared_views/\n"
-            "!shared_views/*/\n"
-            "!shared_views/*/view.md\n"
-            "!shared_views/*/retriever.md\n"
-            "!shared_views/*/recipe.toml\n"
-            "!shared_views/*/question.toml\n"
-            "!shared_views/*/.gitignore\n"
-            "!insight_logs/\n"
-            "!insight_logs/*.md\n"
-            "!update_reviews/\n"
-            "!update_reviews/*.md\n"
-            "!update_queue/\n"
-            "!update_queue/candidates/\n"
-            "!update_queue/candidates/*.json\n"
-            "!update_queue/recovery/\n"
-            "!update_queue/recovery/*.json\n"
-            "!update_queue/lease.json\n",
-        )
+        self.assertFalse((Path(self.tempdir.name) / ".gitignore").exists())
 
     def test_retrieve_role_does_not_record_recent_submitted_state_without_entries(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))

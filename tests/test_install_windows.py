@@ -34,6 +34,8 @@ class WindowsInstallScriptTests(unittest.TestCase):
             memory = (memory_root / "MEMORY.md").read_text(encoding="utf-8")
             pursuits = (memory_root / "PURSUITS.md").read_text(encoding="utf-8")
             pursuit_rules = (memory_root / "PURSUIT_RULES.md").read_text(encoding="utf-8")
+            gitignore = (memory_root / ".gitignore").read_text(encoding="utf-8")
+            tracked_gitignore = self._git(memory_root, "ls-files", "--", ".gitignore")
             install_stamp = (memory_root / ".runtime" / "install.stamp").read_text(encoding="utf-8")
             git_status = self._git(memory_root, "status", "--short")
             schema_exists = (skills_target / "rightmemory-schema.md").exists()
@@ -50,6 +52,8 @@ class WindowsInstallScriptTests(unittest.TestCase):
         self.assertIn("rightmemory:example:start", memory)
         self.assertIn("rightmemory:pursuit-example:start", pursuits)
         self.assertIn("# Pursuit Rules", pursuit_rules)
+        self.assertTrue(gitignore.startswith("*\n!.gitignore\n"))
+        self.assertEqual(tracked_gitignore, ".gitignore")
         self.assertIn("mode=cli-agent", install_stamp)
         self.assertEqual(git_status, "")
         self.assertTrue(schema_exists)
@@ -61,6 +65,38 @@ class WindowsInstallScriptTests(unittest.TestCase):
         self.assertIn(str(memory_root), wrapper_text)
         self.assertIn(' -m rightmemory.cli %*', wrapper_text)
         self.assertFalse(leaked_requirement_file)
+
+    def test_windows_installer_bootstraps_both_modes_with_tracked_gitignore(self):
+        for mode in ("cli-agent", "standalone"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tempdir:
+                root = Path(tempdir)
+                memory_root = root / "memory"
+                skills_target = root / "skills"
+                env = self._env_with_fake_uv(root)
+
+                result = self._run_installer(
+                    ["--mode", mode, str(memory_root), str(skills_target)],
+                    root,
+                    env,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self._git(memory_root, "status", "--short"), "")
+                self.assertEqual(
+                    self._git(memory_root, "ls-files", "--", ".gitignore"),
+                    ".gitignore",
+                )
+                self.assertTrue(
+                    (memory_root / ".gitignore")
+                    .read_text(encoding="utf-8")
+                    .startswith("*\n!.gitignore\n")
+                )
+                self.assertIn(
+                    f"mode={mode}",
+                    (memory_root / ".runtime" / "install.stamp").read_text(
+                        encoding="utf-8"
+                    ),
+                )
 
     def test_windows_installer_reports_missing_uv_before_writes(self):
         with tempfile.TemporaryDirectory() as tempdir:

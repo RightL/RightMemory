@@ -169,7 +169,7 @@ class GitUpdateQueueReviewTests(GitUpdateQueueTestBase):
         coordinator.clear_local_candidates(publication.settled_uids)
         self.assertIsNone(UpdateQueueStore(self.first).read_outbox(candidate.uid))
 
-    def test_review_publication_waits_for_its_source_revision_upstream(self):
+    def test_review_publication_synchronizes_its_source_revision_first(self):
         review_id = self._create_tracked_review()
         review_path = UpdateReviewStore(self.first).review_path(review_id)
         review_path.write_text(
@@ -185,16 +185,21 @@ class GitUpdateQueueReviewTests(GitUpdateQueueTestBase):
         )
         coordinator = self._coordinator(self.first, "1" * 32)
 
-        waiting = coordinator.publish_outbox({candidate.uid})
-
-        self.assertEqual(waiting.unresolved_uids, (candidate.uid,))
-        self.assertEqual(waiting.settled_uids, ())
-        self.assertEqual(UpdateQueueStore(self.first).publication_state(candidate.uid), "never_attempted")
-
-        self._git(self.first, "push", "origin", "HEAD:main")
         published = coordinator.publish_outbox({candidate.uid})
 
         self.assertEqual(published.published_uids, (candidate.uid,))
+        self.assertEqual(published.unresolved_uids, ())
+        self._git(self.second, "fetch", "origin")
+        self.assertEqual(
+            self._git(
+                self.second,
+                "merge-base",
+                "--is-ancestor",
+                candidate.review_commit,
+                "origin/main",
+            ),
+            "",
+        )
 
     def test_changed_review_document_settles_stale_outbox_without_publication(self):
         review_id = self._create_tracked_review()

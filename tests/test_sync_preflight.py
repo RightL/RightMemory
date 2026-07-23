@@ -15,6 +15,7 @@ class SyncPreflightTests(SyncTestBase):
     def test_sync_paths_include_shared_view_registry_and_provider_definitions(self):
         from rightmemory.sync import MEMORY_SYNC_PATHS, _is_sync_path
 
+        self.assertIn(".gitignore", MEMORY_SYNC_PATHS)
         self.assertIn("shared_views.toml", MEMORY_SYNC_PATHS)
         self.assertIn("shares.toml", MEMORY_SYNC_PATHS)
         self.assertIn("shared_views/*/view.md", MEMORY_SYNC_PATHS)
@@ -38,6 +39,18 @@ class SyncPreflightTests(SyncTestBase):
         self.assertFalse(_is_sync_path(f"update_queue/recovery/{'b' * 64}.json"))
         self.assertFalse(_is_sync_path("update_queue/extra.json"))
         self.assertFalse(_is_sync_path("update_reviews/not-a-review.md"))
+
+    def test_preflight_accepts_incoming_root_gitignore_change(self):
+        gitignore = "*\n!MEMORY.md\n!PURSUITS.md\n!PURSUIT_RULES.md\n"
+        (self.other / ".gitignore").write_text(gitignore, encoding="utf-8")
+        self._git(self.other, "add", "-f", ".gitignore")
+        self._git(self.other, "commit", "-m", "sync: update managed gitignore")
+        self._git(self.other, "push")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+        self.assertEqual(result.status, "synced")
+        self.assertEqual((self.device / ".gitignore").read_text(encoding="utf-8"), gitignore)
 
     def test_preflight_rejects_memory_root_nested_in_outer_git_repo(self):
         outer_remote = self.root / "outer.git"

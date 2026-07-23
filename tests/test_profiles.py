@@ -150,6 +150,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(
             gitignore,
             "*\n"
+            "!.gitignore\n"
             "!MEMORY.md\n"
             "!MEMORY_*.md\n"
             "!PURSUITS.md\n"

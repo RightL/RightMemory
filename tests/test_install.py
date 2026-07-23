@@ -952,7 +952,36 @@ class InstallScriptTests(unittest.TestCase):
                 semantic_files,
             )
 
-    def test_install_refreshes_memory_gitignore_to_current_allowlist(self):
+    def test_reinstall_preserves_complete_root_gitignore_bytes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            self._install(memory_root, skills_target)
+            custom_gitignore = (
+                b"*\r\n"
+                b"!MEMORY.md\r\n"
+                b"!PURSUITS.md\r\n"
+                b"!PURSUIT_RULES.md\r\n"
+                b"!local-control-plane-entry\r\n"
+            )
+            (memory_root / ".gitignore").write_bytes(custom_gitignore)
+            subprocess.run(["git", "add", ".gitignore"], cwd=memory_root, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "memory: explicit gitignore update"],
+                cwd=memory_root,
+                check=True,
+            )
+            expected_head = self._git(memory_root, "rev-parse", "HEAD")
+
+            result = self._install(memory_root, skills_target)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._git(memory_root, "rev-parse", "HEAD"), expected_head)
+            self.assertEqual((memory_root / ".gitignore").read_bytes(), custom_gitignore)
+            self.assertEqual(self._git(memory_root, "status", "--short"), "")
+
+    def test_new_root_installs_current_memory_gitignore_allowlist(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
@@ -970,6 +999,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(
             gitignore,
             "*\n"
+            "!.gitignore\n"
             "!MEMORY.md\n"
             "!MEMORY_*.md\n"
             "!PURSUITS.md\n"
