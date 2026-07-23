@@ -1325,8 +1325,6 @@ class SharedQuestionViewTests(unittest.TestCase):
         self.assertIn("provider is busy", result)
 
     def test_answer_question_view_times_out_when_provider_does_not_start(self):
-        release = threading.Event()
-        self.addCleanup(release.set)
         write_question_view(
             self.root,
             view_id="auth-api-ask",
@@ -1338,19 +1336,20 @@ class SharedQuestionViewTests(unittest.TestCase):
             answer_timeout_seconds=1,
         )
 
-        def blocked_start(root, provider_role, view_id, prompt, started):
-            release.wait(5)
-            return "too late"
-
-        with patch("rightmemory.shared_view_questions._run_provider_question", side_effect=blocked_start):
+        with (
+            patch("rightmemory.shared_view_questions.Event") as event_type,
+            patch("rightmemory.shared_view_questions.ThreadPoolExecutor") as executor_type,
+        ):
+            event_type.return_value.wait.return_value = False
+            executor_type.return_value.submit.return_value.done.return_value = False
             result = answer_question_view(self.root, "auth-api-ask", "How do tokens refresh?")
 
         self.assertIn("Status: unavailable", result)
         self.assertIn("provider did not start within 1 seconds", result)
+        event_type.return_value.wait.assert_called_once_with(timeout=1)
+        executor_type.return_value.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
 
     def test_answer_question_view_times_out_after_provider_starts(self):
-        release = threading.Event()
-        self.addCleanup(release.set)
         write_question_view(
             self.root,
             view_id="auth-api-ask",
@@ -1362,16 +1361,19 @@ class SharedQuestionViewTests(unittest.TestCase):
             answer_timeout_seconds=1,
         )
 
-        def slow_answer(root, provider_role, view_id, prompt, started):
-            started.set()
-            release.wait(5)
-            return "too late"
-
-        with patch("rightmemory.shared_view_questions._run_provider_question", side_effect=slow_answer):
+        with (
+            patch("rightmemory.shared_view_questions.Event") as event_type,
+            patch("rightmemory.shared_view_questions.ThreadPoolExecutor") as executor_type,
+        ):
+            event_type.return_value.wait.return_value = True
+            executor_type.return_value.submit.return_value.result.side_effect = TimeoutError
             result = answer_question_view(self.root, "auth-api-ask", "How do tokens refresh?")
 
         self.assertIn("Status: unavailable", result)
         self.assertIn("provider answer timed out after 1 seconds", result)
+        event_type.return_value.wait.assert_called_once_with(timeout=1)
+        executor_type.return_value.submit.return_value.result.assert_called_once_with(timeout=1)
+        executor_type.return_value.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
 
     def test_connection_status_reports_file_imports_and_question_targets(self):
         save_connections(

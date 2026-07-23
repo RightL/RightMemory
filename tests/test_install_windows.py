@@ -45,6 +45,8 @@ class WindowsInstallScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("MODE         = cli-agent", result.stdout)
         self.assertIn("rightmemory package into", result.stdout)
+        self.assertIn("rightmemory is available in this PowerShell session", result.stdout)
+        self.assertIn("SetEnvironmentVariable", result.stdout)
         self.assertIn("rightmemory:example:start", memory)
         self.assertIn("rightmemory:pursuit-example:start", pursuits)
         self.assertIn("# Pursuit Rules", pursuit_rules)
@@ -75,128 +77,22 @@ class WindowsInstallScriptTests(unittest.TestCase):
         self.assertFalse(memory_root.exists())
         self.assertFalse(skills_target.exists())
 
-    def test_windows_default_install_uses_standalone_and_both_skill_targets(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            env = self._env_with_fake_uv(root)
-
-            result = self._run_installer([], root, env)
-
-            home = root / "home"
-            memory_exists = (home / ".rightmemory" / "MEMORY.md").is_file()
-            pursuit_exists = (home / ".rightmemory" / "PURSUITS.md").is_file()
-            rules_exist = (home / ".rightmemory" / "PURSUIT_RULES.md").is_file()
-            installed = [
-                (
-                    (target / "memory-retriever" / "SKILL.md").is_file(),
-                    (target / "rightmemory-orchestrator" / "SKILL.md").is_file(),
-                    (target / "memory-orchestrator").exists(),
-                )
-                for target in (home / ".codex" / "skills", home / ".claude" / "skills")
-            ]
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("MODE         = standalone", result.stdout)
-        self.assertIn("rightmemory is available in this PowerShell session", result.stdout)
-        self.assertIn("SetEnvironmentVariable", result.stdout)
-        self.assertTrue(memory_exists)
-        self.assertTrue(pursuit_exists)
-        self.assertTrue(rules_exist)
-        for retriever_exists, orchestrator_exists, legacy_exists in installed:
-            self.assertTrue(retriever_exists)
-            self.assertTrue(orchestrator_exists)
-            self.assertFalse(legacy_exists)
-
-    def test_windows_rerun_preserves_managed_examples_and_utf8_memory(self):
+    def test_windows_installer_propagates_install_core_failure(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
             skills_target = root / "skills"
+            bootstrap_python = root / "failing-python.cmd"
+            bootstrap_python.write_text("@exit /b 7\r\n", encoding="ascii")
             env = self._env_with_fake_uv(root)
-            first = self._install(memory_root, skills_target, env)
-            self.assertEqual(first.returncode, 0, first.stderr)
-            memory_path = memory_root / "MEMORY.md"
-            original = memory_path.read_text(encoding="utf-8")
-            memory_path.write_text(
-                "# Real Memory {#real-memory}\n\n- `user-language` 用户偏好中文。 -> []\n\n"
-                + original.replace("Example Application", "Stale Example Application"),
-                encoding="utf-8",
-            )
-            pursuits_path = memory_root / "PURSUITS.md"
-            pursuits = pursuits_path.read_text(encoding="utf-8")
-            pursuits_path.write_text(
-                "# User Pursuits\n\n## Continue {#continue}\n\nKeep this.\n\n"
-                + pursuits.replace("Example Release Readiness", "Stale Release Readiness"),
-                encoding="utf-8",
-            )
-            expected_memory = memory_path.read_bytes()
-            expected_pursuits = pursuits_path.read_bytes()
+            env["RIGHTMEMORY_TEST_PYTHON"] = str(bootstrap_python)
 
             result = self._install(memory_root, skills_target, env)
-            actual_memory = memory_path.read_bytes()
-            actual_pursuits = pursuits_path.read_bytes()
-            refreshed = memory_path.read_text(encoding="utf-8")
-            refreshed_pursuits = pursuits_path.read_text(encoding="utf-8")
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(actual_memory, expected_memory)
-        self.assertEqual(actual_pursuits, expected_pursuits)
-        self.assertIn("用户偏好中文", refreshed)
-        self.assertIn("Stale Example Application", refreshed)
-        self.assertIn("## Continue {#continue}", refreshed_pursuits)
-        self.assertIn("Stale Release Readiness", refreshed_pursuits)
-
-    def test_windows_installer_refuses_incomplete_existing_repo_without_mutation(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            runtime_home = root / "local" / "RightMemory"
-            memory_root.mkdir()
-            self._git(memory_root, "init")
-            self._git(memory_root, "config", "user.email", "test@example.com")
-            self._git(memory_root, "config", "user.name", "Test User")
-            (memory_root / "MEMORY.md").write_text("# Existing Memory\n", encoding="utf-8")
-            self._git(memory_root, "add", "MEMORY.md")
-            self._git(memory_root, "commit", "-m", "memory: existing baseline")
-            (memory_root / ".runtime").mkdir()
-            (memory_root / ".runtime" / "install.stamp").write_text("old stamp\n", encoding="utf-8")
-            skills_target.mkdir()
-            (skills_target / "keep.txt").write_text("skills stay\n", encoding="utf-8")
-            runtime_home.mkdir(parents=True)
-            (runtime_home / "keep.txt").write_text("runtime stays\n", encoding="utf-8")
-            before_head = self._git(memory_root, "rev-parse", "HEAD")
-            before_status = self._git(memory_root, "status", "--short")
-            before_memory = self._snapshot(memory_root)
-            before_skills = self._snapshot(skills_target)
-            before_runtime = self._snapshot(runtime_home)
-
-            result = self._install(memory_root, skills_target, self._env_with_fake_uv(root))
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("existing RightMemory root is incomplete", result.stderr)
-            self.assertIn("missing required files: PURSUITS.md, PURSUIT_RULES.md", result.stderr)
-            self.assertIn("installation made no changes", result.stderr)
-            self.assertEqual(self._git(memory_root, "rev-parse", "HEAD"), before_head)
-            self.assertEqual(self._git(memory_root, "status", "--short"), before_status)
-            self.assertEqual(self._snapshot(memory_root), before_memory)
-            self.assertEqual(self._snapshot(skills_target), before_skills)
-            self.assertEqual(self._snapshot(runtime_home), before_runtime)
-
-    def test_windows_semantic_upgrade_failure_fails_install_without_success_stamp(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            env = self._env_with_fake_uv(root)
-            env["RIGHTMEMORY_TEST_SEMANTIC_EXIT"] = "7"
-
-            result = self._install(memory_root, skills_target, env)
-            stamp_exists = (memory_root / ".runtime" / "install.stamp").exists()
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("semantic upgrade baseline failed with status 7", result.stderr)
-        self.assertFalse(stamp_exists)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertNotIn("rightmemory is available in this PowerShell session", result.stdout)
+        self.assertFalse(memory_root.exists())
+        self.assertFalse(skills_target.exists())
 
     def _install(self, memory_root: Path, skills_target: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         return self._run_installer(
@@ -286,7 +182,6 @@ class WindowsInstallScriptTests(unittest.TestCase):
             "  Write-Output '  [keep]    no semantic upgrade notes pending'\n"
             "}\n"
             "Set-Content -Encoding UTF8 -Path $state -Value 'absorbed'\n"
-            "if ($env:RIGHTMEMORY_TEST_SEMANTIC_EXIT) { exit [int]$env:RIGHTMEMORY_TEST_SEMANTIC_EXIT }\n"
             "exit 0\n"
             "'@\n"
             "  exit 0\n"
@@ -326,17 +221,6 @@ class WindowsInstallScriptTests(unittest.TestCase):
             check=True,
         )
         return result.stdout.strip()
-
-    def _snapshot(self, root: Path) -> tuple[tuple[str, str, bytes], ...]:
-        entries: list[tuple[str, str, bytes]] = []
-        for path in sorted((root, *root.rglob("*")), key=lambda item: str(item.relative_to(root))):
-            relative = "." if path == root else path.relative_to(root).as_posix()
-            if path.is_dir():
-                entries.append((relative, "directory", b""))
-            else:
-                entries.append((relative, "file", path.read_bytes()))
-        return tuple(entries)
-
 
 if __name__ == "__main__":
     unittest.main()

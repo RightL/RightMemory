@@ -1,9 +1,26 @@
 import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rightmemory.install_core import _posix_data_home
+from rightmemory import install_core
+from rightmemory.install_core import InstallError, InstallTarget, Installer, _posix_data_home
+
+
+REPO_ROOT = Path(install_core.__file__).resolve().parents[1]
+
+
+def _snapshot(root: Path) -> tuple[tuple[str, str, bytes], ...]:
+    entries: list[tuple[str, str, bytes]] = []
+    for path in sorted((root, *root.rglob("*")), key=lambda item: str(item.relative_to(root))):
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        if path.is_dir():
+            entries.append((relative, "directory", b""))
+        else:
+            entries.append((relative, "file", path.read_bytes()))
+    return tuple(entries)
 
 
 class InstallCoreTests(unittest.TestCase):
@@ -25,6 +42,160 @@ class InstallCoreTests(unittest.TestCase):
             data_home = _posix_data_home()
 
         self.assertEqual(data_home, configured)
+
+    def test_default_install_selects_standalone_mode_and_both_skill_targets(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            home = Path(tempdir) / "home"
+            with (
+                patch.object(install_core, "_verify_required_commands"),
+                patch.object(install_core.Path, "home", return_value=home),
+                patch.object(install_core, "Installer") as installer_type,
+            ):
+                result = install_core.main([])
+
+        self.assertEqual(result, 0)
+        installer_type.assert_called_once_with(
+            REPO_ROOT,
+            "standalone",
+            home / ".rightmemory",
+            [home / ".codex" / "skills", home / ".claude" / "skills"],
+        )
+        installer_type.return_value.run.assert_called_once_with()
+
+    def test_install_skills_populates_every_selected_target(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            targets = [root / "codex-skills", root / "claude-skills"]
+            installer = Installer(REPO_ROOT, "standalone", root / "memory", targets)
+
+            with patch("builtins.print"):
+                installer._install_skills()
+
+            for target in targets:
+                self.assertTrue((target / "rightmemory-schema.md").is_file())
+                self.assertTrue((target / "memory-retriever" / "SKILL.md").is_file())
+                self.assertTrue((target / "rightmemory-orchestrator" / "SKILL.md").is_file())
+
+    def test_existing_install_preserves_semantic_state_byte_for_byte(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            memory_root.mkdir()
+            files = {
+                "MEMORY.md": (
+                    "# Real Memory {#real-memory}\n\n"
+                    "- `user-language` \u7528\u6237\u504f\u597d\u4e2d\u6587\u3002 -> []\n\n"
+                    "# Stale Example Application\n"
+                ),
+                "PURSUITS.md": (
+                    "# User Pursuits\n\n## Continue {#continue}\n\nKeep this.\n\n"
+                    "# Stale Release Readiness\n"
+                ),
+                "PURSUIT_RULES.md": "# Custom Rules\n\nKeep these rules.\n",
+            }
+            for name, text in files.items():
+                (memory_root / name).write_text(text, encoding="utf-8")
+            expected = {name: (memory_root / name).read_bytes() for name in files}
+            installer = Installer(REPO_ROOT, "cli-agent", memory_root, [root / "skills"])
+
+            with (
+                patch.object(installer, "_inspect_target_git", return_value=(False, None)),
+                patch.object(installer, "_print_layout"),
+                patch.object(installer, "_bootstrap_state") as bootstrap_state,
+                patch.object(installer, "_ensure_memory_git"),
+                patch.object(installer, "_install_runtime"),
+                patch.object(installer, "_run_semantic_upgrades") as semantic_upgrades,
+                patch.object(installer, "_install_skills"),
+                patch.object(installer, "_warn_if_command_not_on_path"),
+                patch.object(installer, "_write_install_stamp"),
+                patch.object(installer, "_print_next_steps"),
+                patch("builtins.print"),
+            ):
+                installer.run()
+
+            bootstrap_state.assert_not_called()
+            target = semantic_upgrades.call_args.args[0]
+            self.assertEqual(target.kind, "existing")
+            self.assertEqual(
+                {name: (memory_root / name).read_bytes() for name in files},
+                expected,
+            )
+
+    def test_incomplete_existing_root_is_rejected_before_any_install_writes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            runtime_home = (
+                root / "local" / "RightMemory"
+                if os.name == "nt"
+                else root / "data" / "rightmemory"
+            )
+            memory_root.mkdir()
+            (memory_root / "MEMORY.md").write_text("# Existing Memory\n", encoding="utf-8")
+            (memory_root / ".runtime").mkdir()
+            (memory_root / ".runtime" / "install.stamp").write_text("old stamp\n", encoding="utf-8")
+            skills_target.mkdir()
+            (skills_target / "keep.txt").write_text("skills stay\n", encoding="utf-8")
+            runtime_home.mkdir(parents=True)
+            (runtime_home / "keep.txt").write_text("runtime stays\n", encoding="utf-8")
+            before_memory = _snapshot(memory_root)
+            before_skills = _snapshot(skills_target)
+            before_runtime = _snapshot(runtime_home)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "LOCALAPPDATA": str(root / "local"),
+                    "XDG_DATA_HOME": str(root / "data"),
+                },
+                clear=False,
+            ):
+                installer = Installer(REPO_ROOT, "cli-agent", memory_root, [skills_target])
+            with (
+                patch.object(installer, "_inspect_target_git", return_value=(True, None)),
+                patch.object(installer, "_print_layout"),
+            ):
+                with self.assertRaisesRegex(
+                    InstallError,
+                    "existing RightMemory root is incomplete: "
+                    "missing required files: PURSUITS.md, PURSUIT_RULES.md",
+                ) as raised:
+                    installer.run()
+
+            self.assertIn("installation made no changes", str(raised.exception))
+            self.assertEqual(_snapshot(memory_root), before_memory)
+            self.assertEqual(_snapshot(skills_target), before_skills)
+            self.assertEqual(_snapshot(runtime_home), before_runtime)
+
+    def test_semantic_upgrade_failure_prevents_success_stamp_and_remaining_install(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            installer = Installer(REPO_ROOT, "cli-agent", memory_root, [root / "skills"])
+            installer.runtime_python = Path("fake-python")
+            target = InstallTarget("new", False, (), ())
+            failure = subprocess.CompletedProcess(["fake-python"], 7)
+
+            with (
+                patch.object(installer, "_inspect_target", return_value=target),
+                patch.object(installer, "_print_layout"),
+                patch.object(installer, "_bootstrap_state"),
+                patch.object(installer, "_ensure_memory_git"),
+                patch.object(installer, "_install_runtime"),
+                patch.object(installer, "_install_skills") as install_skills,
+                patch.object(installer, "_write_install_stamp") as write_install_stamp,
+                patch.object(install_core, "_run", return_value=failure),
+            ):
+                with self.assertRaisesRegex(
+                    InstallError,
+                    "semantic upgrade baseline failed with status 7",
+                ):
+                    installer.run()
+
+            install_skills.assert_not_called()
+            write_install_stamp.assert_not_called()
+            self.assertFalse((memory_root / ".runtime" / "install.stamp").exists())
 
 
 if __name__ == "__main__":
