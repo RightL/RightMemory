@@ -1,0 +1,1 @@
+"""RightMemory test suite."""
