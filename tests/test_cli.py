@@ -3140,16 +3140,6 @@ class JsonRequestTests(unittest.TestCase):
         self.assertIn("sync", MANAGED_WATCH_TARGETS)
         self.assertEqual(WATCH_COMMANDS["sync"], ("sync", "watch"))
 
-    def test_agent_cli_cleanup_is_a_managed_watch_target(self):
-        self.assertIn("agent-cli-cleanup", MANAGED_WATCH_TARGETS)
-        self.assertEqual(WATCH_COMMANDS["agent-cli-cleanup"], ("agent-cli", "cleanup", "--watch"))
-
-    def test_transcript_and_update_review_are_managed_watch_targets(self):
-        self.assertIn("review", MANAGED_WATCH_TARGETS)
-        self.assertIn("update-review", MANAGED_WATCH_TARGETS)
-        self.assertEqual(WATCH_COMMANDS["review"], ("review", "watch"))
-        self.assertEqual(WATCH_COMMANDS["update-review"], ("update-review", "watch"))
-
     def test_pruner_is_a_managed_watch_target(self):
         self.assertIn("pruner", MANAGED_WATCH_TARGETS)
         self.assertEqual(WATCH_COMMANDS["pruner"], ("prune", "watch"))

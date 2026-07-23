@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import tempfile
 import time
@@ -35,32 +36,45 @@ from rightmemory.update_review import (
 
 
 class GitUpdateQueueCoordinatorTests(unittest.TestCase):
-    def setUp(self):
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tempdir.cleanup)
-        self.root = Path(self.tempdir.name)
-        self.remote = self.root / "remote.git"
-        self.first = self.root / "first"
-        self.second = self.root / "second"
-        self._git(self.root, "init", "--bare", str(self.remote))
-        self._git(self.root, "clone", str(self.remote), str(self.first))
-        self._git(self.root, "clone", str(self.remote), str(self.second))
-        for repo in (self.first, self.second):
-            self._git(repo, "config", "user.email", "test@example.com")
-            self._git(repo, "config", "user.name", "Test User")
-        (self.first / "MEMORY.md").write_text(
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._seed_tempdir = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._seed_tempdir.cleanup)
+        cls._seed_root = Path(cls._seed_tempdir.name) / "topology"
+        cls._seed_root.mkdir()
+        remote = cls._seed_root / "remote.git"
+        first = cls._seed_root / "first"
+        second = cls._seed_root / "second"
+        cls._run_git(cls._seed_root, "init", "--bare", str(remote))
+        cls._run_git(cls._seed_root, "clone", str(remote), str(first))
+        cls._run_git(cls._seed_root, "clone", str(remote), str(second))
+        for repo in (first, second):
+            cls._run_git(repo, "config", "user.email", "test@example.com")
+            cls._run_git(repo, "config", "user.name", "Test User")
+            cls._run_git(repo, "remote", "set-url", "origin", "../remote.git")
+        (first / "MEMORY.md").write_text(
             "# Domain\n\n- `one` first → []\n",
             encoding="utf-8",
         )
-        (self.first / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-        (self.first / "PURSUIT_RULES.md").write_text("# Pursuit Rules\n", encoding="utf-8")
-        self._git(self.first, "add", "MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md")
-        self._git(self.first, "commit", "-m", "initial memory")
-        self._git(self.first, "push", "-u", "origin", "HEAD:main")
-        self._git(self.first, "branch", "--set-upstream-to", "origin/main")
-        self._git(self.second, "fetch", "origin")
-        self._git(self.second, "checkout", "-B", "main", "origin/main")
-        self._git(self.second, "branch", "--set-upstream-to", "origin/main")
+        (first / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+        (first / "PURSUIT_RULES.md").write_text("# Pursuit Rules\n", encoding="utf-8")
+        cls._run_git(first, "add", "MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md")
+        cls._run_git(first, "commit", "-m", "initial memory")
+        cls._run_git(first, "push", "-u", "origin", "HEAD:main")
+        cls._run_git(first, "branch", "--set-upstream-to", "origin/main")
+        cls._run_git(second, "fetch", "origin")
+        cls._run_git(second, "checkout", "-B", "main", "origin/main")
+        cls._run_git(second, "branch", "--set-upstream-to", "origin/main")
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name) / "topology"
+        shutil.copytree(self._seed_root, self.root)
+        self.remote = self.root / "remote.git"
+        self.first = self.root / "first"
+        self.second = self.root / "second"
 
     def test_publishes_outbox_candidate_and_preserves_it_until_acknowledged(self):
         candidate = self._outbox_candidate(self.first, "a" * 32)
@@ -1073,6 +1087,10 @@ class GitUpdateQueueCoordinatorTests(unittest.TestCase):
         self._git(root, "reset", "--hard", "origin/main")
 
     def _git(self, cwd: Path, *args: str) -> str:
+        return self._run_git(cwd, *args)
+
+    @staticmethod
+    def _run_git(cwd: Path, *args: str) -> str:
         result = subprocess.run(
             ["git", *args],
             cwd=cwd,
@@ -1083,7 +1101,7 @@ class GitUpdateQueueCoordinatorTests(unittest.TestCase):
             stderr=subprocess.PIPE,
         )
         if result.returncode != 0:
-            self.fail(result.stderr.strip() or result.stdout.strip())
+            raise AssertionError(result.stderr.strip() or result.stdout.strip())
         return result.stdout.strip()
 
 

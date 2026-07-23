@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,29 +22,22 @@ from rightmemory.sync import (
 
 
 class SyncManagerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._seed_tempdir = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._seed_tempdir.cleanup)
+        cls._seed_root = Path(cls._seed_tempdir.name)
+        cls._build_seed(cls._seed_root)
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
+        shutil.copytree(self._seed_root, self.root, dirs_exist_ok=True)
         self.remote = self.root / "remote.git"
         self.device = self.root / "device"
         self.other = self.root / "other"
-        self._git(self.root, "init", "--bare", str(self.remote))
-        self._git(self.root, "clone", str(self.remote), str(self.device))
-        self._git(self.root, "clone", str(self.remote), str(self.other))
-        for repo in (self.device, self.other):
-            self._git(repo, "config", "user.email", "test@example.com")
-            self._git(repo, "config", "user.name", "Test User")
-        (self.device / "MEMORY.md").write_text("# Domain\n\n- `one` first → []\n", encoding="utf-8")
-        (self.device / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-        (self.device / "PURSUIT_RULES.md").write_text("# Pursuit Rules\n", encoding="utf-8")
-        self._git(self.device, "add", "MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md")
-        self._git(self.device, "commit", "-m", "initial memory")
-        self._git(self.device, "push", "-u", "origin", "HEAD:main")
-        self._git(self.device, "branch", "--set-upstream-to", "origin/main")
-        self._git(self.other, "fetch", "origin")
-        self._git(self.other, "checkout", "-B", "main", "origin/main")
-        self._git(self.other, "branch", "--set-upstream-to", "origin/main")
 
     def test_preflight_disabled(self):
         result = SyncManager(SyncConfig(memory_root=self.device, enabled=False)).preflight()
@@ -1083,7 +1077,31 @@ class SyncManagerTests(unittest.TestCase):
         leases = sorted(path.name for path in lease_root.glob("sync-*.json")) if lease_root.is_dir() else []
         self.assertEqual(leases, [])
 
-    def _git(self, cwd: Path, *args: str) -> str:
+    @classmethod
+    def _build_seed(cls, root: Path) -> None:
+        remote = root / "remote.git"
+        device = root / "device"
+        other = root / "other"
+        cls._git(root, "init", "--bare", str(remote))
+        cls._git(root, "clone", str(remote), str(device))
+        cls._git(root, "clone", str(remote), str(other))
+        for repo in (device, other):
+            cls._git(repo, "config", "user.email", "test@example.com")
+            cls._git(repo, "config", "user.name", "Test User")
+            cls._git(repo, "remote", "set-url", "origin", "../remote.git")
+        (device / "MEMORY.md").write_text("# Domain\n\n- `one` first → []\n", encoding="utf-8")
+        (device / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+        (device / "PURSUIT_RULES.md").write_text("# Pursuit Rules\n", encoding="utf-8")
+        cls._git(device, "add", "MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md")
+        cls._git(device, "commit", "-m", "initial memory")
+        cls._git(device, "push", "-u", "origin", "HEAD:main")
+        cls._git(device, "branch", "--set-upstream-to", "origin/main")
+        cls._git(other, "fetch", "origin")
+        cls._git(other, "checkout", "-B", "main", "origin/main")
+        cls._git(other, "branch", "--set-upstream-to", "origin/main")
+
+    @staticmethod
+    def _git(cwd: Path, *args: str) -> str:
         process = subprocess.run(
             ["git", *args],
             cwd=cwd,

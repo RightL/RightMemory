@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -16,22 +17,47 @@ from rightmemory.update_review import UpdateReviewStore, verify_update_review
 
 
 class IsolatedWriteSupervisorTests(unittest.TestCase):
-    def setUp(self):
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tempdir.cleanup)
-        self.root = Path(self.tempdir.name)
-        self._git("init")
-        self._git("config", "user.email", "test@example.com")
-        self._git("config", "user.name", "Test User")
-        (self.root / "MEMORY.md").write_text(
+    @classmethod
+    def setUpClass(cls):
+        cls._seed_tempdir = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._seed_tempdir.cleanup)
+        cls._seed_root = Path(cls._seed_tempdir.name) / "repository"
+        cls._seed_root.mkdir()
+
+        def seed_git(*args: str) -> str:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=cls._seed_root,
+                text=True,
+                encoding="utf-8",
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"git {' '.join(args)} failed:\n{result.stderr}")
+            return result.stdout.strip()
+
+        seed_git("init")
+        seed_git("config", "user.email", "test@example.com")
+        seed_git("config", "user.name", "Test User")
+        (cls._seed_root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
             "- `one` initial memory → []\n",
             encoding="utf-8",
         )
-        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-        self._git("add", "MEMORY.md", "PURSUITS.md")
-        self._git("commit", "-m", "initial memory")
-        self.initial_head = self._git("rev-parse", "HEAD")
+        (cls._seed_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+        seed_git("add", "MEMORY.md", "PURSUITS.md")
+        seed_git("commit", "-m", "initial memory")
+        cls._seed_head = seed_git("rev-parse", "HEAD")
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+        shutil.copytree(self._seed_root, self.root, dirs_exist_ok=True)
+        self.initial_head = self._seed_head
 
     def test_committed_temp_change_lands_as_ordinary_commit(self):
         def callback(worktree: Path) -> str:
@@ -1603,6 +1629,7 @@ class IsolatedWriteSupervisorTests(unittest.TestCase):
             ["git", *args],
             cwd=cwd or self.root,
             text=True,
+            encoding="utf-8",
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
