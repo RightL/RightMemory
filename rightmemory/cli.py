@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+from base64 import urlsafe_b64encode
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -1466,7 +1467,7 @@ def _run_update_review_correction(memory_root: Path, request: UpdateReviewReques
     runtime = RightMemoryRuntime(config)
     try:
         output = runtime.run_session_turn(
-            request.operation_id,
+            _operation_session_id(request.operation_id),
             message,
             operation_id=request.operation_id,
         )
@@ -1531,7 +1532,7 @@ def _stored_correction_message(memory_root: Path, operation_id: str) -> str | No
     if (
         record.input_data.get("role") != "update-corrector"
         or record.input_data.get("kind") != "semantic-turn"
-        or record.input_data.get("session_id") != operation_id
+        or record.input_data.get("session_id") != _operation_session_id(operation_id)
     ):
         raise RuntimeError("existing update correction operation has invalid routing")
     message = record.input_data.get("message")
@@ -2963,9 +2964,20 @@ def _run_async_update_batch(memory_root, role: str, batch_session_id: str, messa
     config = load_config(role, memory_root=memory_root)
     runtime = RightMemoryRuntime(config)
     try:
-        return runtime.run_session_turn(batch_session_id, message, operation_id=batch_session_id)
+        return runtime.run_session_turn(
+            _operation_session_id(batch_session_id),
+            message,
+            operation_id=batch_session_id,
+        )
     finally:
         runtime.cleanup()
+
+
+def _operation_session_id(operation_id: str) -> str:
+    """Return a bounded, filename-safe session identity for one durable operation."""
+    digest = sha256(operation_id.encode("utf-8")).digest()
+    encoded = urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return f"op-{encoded}"
 
 
 def _combined_trigger_incrementer(*incrementers: Callable[[int], None]) -> Callable[[int], None]:

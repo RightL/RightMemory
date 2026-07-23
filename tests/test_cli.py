@@ -18,9 +18,11 @@ from rightmemory.cli import (
     _finish_sync_repair,
     _handle_json_request,
     _insight_watch_once,
+    _operation_session_id,
     _require_completed_correction_operation,
     _recover_synchronized_update_operations,
     _run_active_sync_reconciler,
+    _run_async_update_batch,
     _run_synchronized_review_correction,
     _run_synchronized_update_batch,
     _run_update_review_scan,
@@ -2261,7 +2263,10 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(outcome.status, "resolved")
         self.assertEqual(outcome.correction_commit, "fix-commit")
         self.assertEqual(calls[0], ("init", config))
-        self.assertEqual(calls[1][1:3], ("correction-operation", "correction-operation"))
+        self.assertEqual(
+            calls[1][1:3],
+            (_operation_session_id("correction-operation"), "correction-operation"),
+        )
         self.assertIn("Human comment here.", calls[1][3])
         self.assertIn('"diff": "- before\\n+ after"', calls[1][3])
         self.assertIn("trusted update summary", calls[1][3])
@@ -2409,7 +2414,7 @@ class JsonRequestTests(unittest.TestCase):
                 {
                     "kind": "semantic-turn",
                     "role": "update-corrector",
-                    "session_id": operation_id,
+                    "session_id": _operation_session_id(operation_id),
                     "message": "the first durable correction message",
                 },
             )
@@ -4459,13 +4464,40 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(pull_result, 0)
         self.assertEqual(len(calls), 1)
-        self.assertTrue(calls[0][0].startswith("update-batch-"))
+        self.assertRegex(calls[0][0], r"^op-[A-Za-z0-9_-]{43}$")
         self.assertIn("Process the following submitted RightMemory candidates as one ordered batch.", calls[0][1])
         self.assertIn("[update session: agent-1 | candidate: 1", calls[0][1])
         self.assertIn("[update session: agent-2 | candidate: 1", calls[0][1])
         self.assertIn("status: succeeded", stdout.getvalue())
         self.assertIn("pending: 0", stdout.getvalue())
-        self.assertIn("result: session update-batch-", stdout.getvalue())
+        self.assertIn("result: session op-", stdout.getvalue())
+
+    def test_async_update_batch_keeps_operation_id_out_of_nested_session_paths(self):
+        calls = []
+
+        class RecordingRuntime(FakeRuntime):
+            def run_session_turn(self, session_id: str, message: str, *, operation_id: str) -> str:
+                calls.append((session_id, operation_id, message))
+                return "ok"
+
+        operation_id = "update-batch-" + "a" * 64
+        with (
+            patch("rightmemory.cli.load_config", return_value=object()),
+            patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
+        ):
+            result = _run_async_update_batch(Path("C:/memory"), "update", operation_id, "remember")
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(calls[0][1:], (operation_id, "remember"))
+        self.assertRegex(calls[0][0], r"^op-[A-Za-z0-9_-]{43}$")
+        self.assertLess(len(calls[0][0]), len(operation_id))
+        memory_root = Path("C:/") / ("m" * 64)
+        state_root = memory_root / ".runtime" / "operations" / "state" / ("b" * 64)
+        session_root = state_root / ".runtime" / "sessions" / "update"
+        legacy_lock = session_root / f"{operation_id}.lock"
+        bounded_lock = session_root / f"{calls[0][0]}.lock"
+        self.assertGreaterEqual(len(str(legacy_lock)), 260)
+        self.assertLess(len(str(bounded_lock)), 260)
 
     def test_async_worker_reloads_update_config_between_batches(self):
         runtime_models = []
