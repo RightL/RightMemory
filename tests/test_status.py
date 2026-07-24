@@ -3,12 +3,15 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import rightmemory.status as status_module
 from rightmemory.semantic_operation import OperationEffect, SemanticOperationStore
 from rightmemory.status import (
     DashboardStatus,
     GitStatus,
     SectionStatus,
+    SyncStatus,
     collect_async_update_section,
     collect_dreamer_section,
     collect_git_status,
@@ -16,6 +19,7 @@ from rightmemory.status import (
     collect_managed_watch_sections,
     collect_semantic_operation_section,
     collect_status,
+    collect_sync_status,
     format_status_dashboard,
     read_log_preview,
 )
@@ -95,6 +99,155 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("unavailable", status.summary)
         self.assertIn("git unavailable", status.issue)
 
+    def test_collect_sync_status_reports_enabled_aligned_repository_without_fetching(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            branch = self._init_repo_with_upstream(root)
+
+            with patch("rightmemory.status._run_git", wraps=status_module._run_git) as run_git:
+                status = collect_sync_status(
+                    root,
+                    config_loader=lambda memory_root: type("SyncConfig", (), {"enabled": True})(),
+                )
+
+        self.assertTrue(status.enabled)
+        self.assertEqual(status.upstream, f"origin/{branch}")
+        self.assertEqual((status.ahead, status.behind), (0, 0))
+        self.assertEqual(status.issues, ())
+        commands = [call.args[1:] for call in run_git.call_args_list]
+        self.assertFalse(any(command and command[0] in {"fetch", "pull", "push"} for command in commands))
+
+    def test_collect_sync_status_reports_disabled_configuration(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            self._init_repo_with_upstream(root)
+
+            status = collect_sync_status(
+                root,
+                config_loader=lambda memory_root: type("SyncConfig", (), {"enabled": False})(),
+            )
+
+        self.assertFalse(status.enabled)
+        self.assertEqual((status.ahead, status.behind), (0, 0))
+        self.assertEqual(status.issues, ())
+
+    def test_collect_sync_status_reports_ahead_behind_and_diverged_repositories(self):
+        cases = (
+            ("ahead", (1, 0)),
+            ("behind", (0, 1)),
+            ("diverged", (1, 1)),
+        )
+        for case, expected in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tempdir:
+                root = Path(tempdir)
+                branch = self._init_repo_with_upstream(root)
+                base = self._git(root, "rev-parse", "HEAD")
+                if case in {"behind", "diverged"}:
+                    (root / "REMOTE.md").write_text("remote\n", encoding="utf-8")
+                    self._git(root, "add", "REMOTE.md")
+                    self._git(root, "commit", "-m", "remote state")
+                    self._git(root, "update-ref", f"refs/remotes/origin/{branch}", "HEAD")
+                    self._git(root, "reset", "--hard", base)
+                if case in {"ahead", "diverged"}:
+                    (root / "LOCAL.md").write_text("local\n", encoding="utf-8")
+                    self._git(root, "add", "LOCAL.md")
+                    self._git(root, "commit", "-m", "local state")
+
+                status = collect_sync_status(
+                    root,
+                    config_loader=lambda memory_root: type("SyncConfig", (), {"enabled": True})(),
+                )
+
+            self.assertEqual((status.ahead, status.behind), expected)
+
+    def test_collect_sync_status_handles_missing_upstream_missing_ref_and_detached_head(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            branch = self._init_repo(root)
+            config_loader = lambda memory_root: type("SyncConfig", (), {"enabled": True})()
+
+            missing_upstream = collect_sync_status(root, config_loader=config_loader)
+
+            self._git(root, "config", f"branch.{branch}.remote", "origin")
+            self._git(root, "config", f"branch.{branch}.merge", f"refs/heads/{branch}")
+            missing_ref = collect_sync_status(root, config_loader=config_loader)
+
+            self._git(root, "checkout", "--detach")
+            detached = collect_sync_status(root, config_loader=config_loader)
+
+        self.assertIsNone(missing_upstream.upstream)
+        self.assertIsNone(missing_upstream.ahead)
+        self.assertTrue(any("upstream" in issue for issue in missing_upstream.issues))
+        self.assertEqual(missing_ref.upstream, f"origin/{branch}")
+        self.assertIsNone(missing_ref.behind)
+        self.assertIn("missing", missing_ref.divergence_error)
+        self.assertIsNone(detached.upstream)
+        self.assertIn("detached", detached.divergence_error)
+
+    def test_collect_sync_status_reports_missing_successful_failed_and_malformed_state(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            self._init_repo_with_upstream(root)
+            config_loader = lambda memory_root: type("SyncConfig", (), {"enabled": True})()
+            state_path = root / ".runtime" / "sync" / "state.json"
+
+            missing = collect_sync_status(root, config_loader=config_loader)
+
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "last_successful_pull_at": "2026-07-24T08:00:00+00:00",
+                        "last_status": "synced",
+                        "last_message": "local memory is current",
+                        "last_files": ["MEMORY.md"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            successful = collect_sync_status(root, config_loader=config_loader)
+
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "last_failure_at": "2026-07-24T09:00:00+00:00",
+                        "last_status": "offline",
+                        "last_message": "sync offline: git fetch failed",
+                        "last_files": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            failed = collect_sync_status(root, config_loader=config_loader)
+
+            state_path.write_text("{not json", encoding="utf-8")
+            malformed = collect_sync_status(root, config_loader=config_loader)
+
+        self.assertIsNone(missing.last_status)
+        self.assertEqual(successful.last_status, "synced")
+        self.assertEqual(successful.last_at, "2026-07-24T08:00:00+00:00")
+        self.assertEqual(successful.last_message, "local memory is current")
+        self.assertEqual(successful.last_files, ("MEMORY.md",))
+        self.assertEqual(failed.last_status, "offline")
+        self.assertEqual(failed.last_at, "2026-07-24T09:00:00+00:00")
+        self.assertIn("fetch failed", failed.last_message)
+        self.assertIsNotNone(malformed.last_error)
+        self.assertTrue(any("sync state error" in issue for issue in malformed.issues))
+
+    def test_collect_sync_status_surfaces_unreadable_state_without_crashing(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            self._init_repo_with_upstream(root)
+
+            status = collect_sync_status(
+                root,
+                config_loader=lambda memory_root: type("SyncConfig", (), {"enabled": True})(),
+                state_reader=lambda memory_root: (_ for _ in ()).throw(OSError("denied")),
+            )
+
+        self.assertIn("OSError: denied", status.last_error)
+        self.assertTrue(any("sync state error" in issue for issue in status.issues))
+
     def test_read_log_preview_prefers_recent_failure_line(self):
         with tempfile.TemporaryDirectory() as tempdir:
             log = Path(tempdir) / "dreamer.log"
@@ -155,6 +308,16 @@ class StatusDashboardTests(unittest.TestCase):
         dashboard = DashboardStatus(
             root=Path("/memory/root"),
             git=GitStatus(summary="clean on main @ abc1234"),
+            sync=SyncStatus(
+                enabled=True,
+                upstream="origin/rightmemory-v2",
+                ahead=0,
+                behind=0,
+                last_status="synced",
+                last_at="2026-07-24T08:00:00+00:00",
+                last_message="local memory is current",
+                last_files=("MEMORY.md",),
+            ),
             watches=[
                 SectionStatus(
                     name="review",
@@ -192,6 +355,12 @@ class StatusDashboardTests(unittest.TestCase):
         output = format_status_dashboard(dashboard)
 
         self.assertIn(f"RightMemory\n  root: {Path('/memory/root')}\n  git: clean on main @ abc1234", output)
+        self.assertIn("Sync\n  enabled: yes", output)
+        self.assertIn("upstream: origin/rightmemory-v2", output)
+        self.assertIn("divergence: ahead 0, behind 0 (last fetched)", output)
+        self.assertIn("last: synced at 2026-07-24T08:00:00+00:00", output)
+        self.assertIn("message: local memory is current", output)
+        self.assertIn("files: MEMORY.md", output)
         self.assertIn("Managed Watches", output)
         self.assertIn("review: running pid 123", output)
         self.assertIn("Insight", output)
@@ -285,7 +454,7 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("Recent Issues", output)
         self.assertNotIn("Recovery", output)
 
-    def test_collect_managed_watches_includes_sync_disabled_and_log_preview(self):
+    def test_collect_managed_watches_keeps_sync_watcher_state_and_log_preview(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             log = root / ".runtime" / "watch" / "review.log"
@@ -363,7 +532,6 @@ class StatusDashboardTests(unittest.TestCase):
             watches, issues = collect_managed_watch_sections(
                 root,
                 watch_status_reader=lambda memory_root, name: statuses[name],
-                sync_config_loader=lambda: type("SyncConfig", (), {"enabled": False})(),
             )
 
         self.assertEqual(
@@ -373,7 +541,7 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(watches[0].state, "running pid 123")
         self.assertEqual(watches[0].last, "reviewed 3 sessions")
         self.assertEqual(next(watch.state for watch in watches if watch.name == "pruner"), "stale pid 456")
-        self.assertEqual(next(watch.state for watch in watches if watch.name == "sync"), "disabled")
+        self.assertEqual(next(watch.state for watch in watches if watch.name == "sync"), "stopped")
         self.assertIn("pruner: stale pid 456", issues)
 
     def test_collect_managed_watches_surfaces_failure_preview_as_issue(self):
@@ -400,7 +568,6 @@ class StatusDashboardTests(unittest.TestCase):
             watches, issues = collect_managed_watch_sections(
                 root,
                 watch_status_reader=lambda memory_root, name: statuses[name],
-                sync_config_loader=lambda: type("SyncConfig", (), {"enabled": True})(),
             )
 
         pruner = next(watch for watch in watches if watch.name == "pruner")
@@ -438,7 +605,6 @@ class StatusDashboardTests(unittest.TestCase):
             watches, issues = collect_managed_watch_sections(
                 root,
                 watch_status_reader=lambda memory_root, name: statuses[name],
-                sync_config_loader=lambda: type("SyncConfig", (), {"enabled": False})(),
             )
 
         review = next(watch for watch in watches if watch.name == "review")
@@ -468,7 +634,6 @@ class StatusDashboardTests(unittest.TestCase):
             watches, issues = collect_managed_watch_sections(
                 root,
                 watch_status_reader=lambda memory_root, name: statuses[name],
-                sync_config_loader=lambda: type("SyncConfig", (), {"enabled": False})(),
             )
 
         dreamer = next(watch for watch in watches if watch.name == "dreamer")
@@ -483,7 +648,6 @@ class StatusDashboardTests(unittest.TestCase):
 
             watches, issues = collect_managed_watch_sections(
                 root,
-                sync_config_loader=lambda: type("SyncConfig", (), {"enabled": False})(),
             )
 
             self.assertEqual(
@@ -1027,6 +1191,12 @@ class StatusDashboardTests(unittest.TestCase):
 
             dashboard = collect_status(
                 root,
+                sync_collector=lambda memory_root: SyncStatus(
+                    enabled=True,
+                    upstream="origin/main",
+                    ahead=0,
+                    behind=0,
+                ),
                 watch_collector=lambda memory_root: (
                     [SectionStatus(name="pruner", state="stale pid 42", issue="pruner: stale pid 42")],
                     ["pruner: stale pid 42"],
@@ -1045,11 +1215,90 @@ class StatusDashboardTests(unittest.TestCase):
             )
 
         self.assertEqual(dashboard.root, root)
+        self.assertEqual(dashboard.sync.upstream, "origin/main")
         self.assertEqual(len(dashboard.watches), 1)
         self.assertEqual(dashboard.dreamer.name, "dreamer")
         self.assertEqual(dashboard.insight.name, "insight")
         self.assertEqual(dashboard.update.name, "update")
         self.assertIn("pruner: stale pid 42", dashboard.issues)
+
+    def test_collect_status_adds_queue_view_for_aligned_ahead_behind_and_diverged(self):
+        cases = (
+            ((0, 0), "queue view: current with upstream"),
+            ((1, 0), "queue view: checkout contains local state not yet present upstream"),
+            ((0, 3), "queue view: local checkout only; counts may be incomplete"),
+            ((2, 3), "queue view: checkout is diverged; counts may be incomplete"),
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            self._init_repo(root)
+            for (ahead, behind), expected in cases:
+                with self.subTest(ahead=ahead, behind=behind):
+                    dashboard = collect_status(
+                        root,
+                        sync_collector=lambda memory_root, a=ahead, b=behind: SyncStatus(
+                            enabled=True,
+                            upstream="origin/main",
+                            ahead=a,
+                            behind=b,
+                        ),
+                        watch_collector=lambda memory_root: (
+                            [SectionStatus(name="sync", state="stopped")],
+                            [],
+                        ),
+                        dreamer_collector=lambda memory_root: None,
+                        insight_collector=lambda memory_root: None,
+                        update_collector=lambda memory_root: (
+                            SectionStatus(
+                                name="update",
+                                state="worker: idle",
+                                detail="synchronized: 3 pending, 0 leased",
+                            ),
+                            [],
+                        ),
+                        operation_collector=lambda memory_root: (None, []),
+                    )
+
+                self.assertIn(expected, dashboard.update.detail)
+                output = format_status_dashboard(dashboard)
+                self.assertIn("Managed Watches\n  sync: stopped", output)
+                self.assertNotIn("watcher", output.split("Managed Watches", 1)[0].lower())
+
+    def test_collect_status_does_not_create_runtime_state_or_run_network_git_commands(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            self._init_repo_with_upstream(root)
+            before = sorted(path.relative_to(root) for path in root.rglob("*"))
+
+            with patch("rightmemory.status._run_git", wraps=status_module._run_git) as run_git:
+                collect_status(
+                    root,
+                    sync_collector=None,
+                    watch_collector=lambda memory_root: ([], []),
+                    dreamer_collector=lambda memory_root: None,
+                    insight_collector=lambda memory_root: None,
+                    update_collector=lambda memory_root: (
+                        SectionStatus(name="update", state="worker: idle"),
+                        [],
+                    ),
+                    operation_collector=lambda memory_root: (None, []),
+                )
+
+            after = sorted(path.relative_to(root) for path in root.rglob("*"))
+
+        self.assertEqual(after, before)
+        commands = [call.args[1:] for call in run_git.call_args_list]
+        self.assertFalse(any(command and command[0] in {"fetch", "pull", "push"} for command in commands))
+
+    def test_status_git_commands_disable_optional_locks_and_prompts(self):
+        completed = subprocess.CompletedProcess(["git", "status"], 0, "", "")
+        with patch("rightmemory.status.subprocess.run", return_value=completed) as run:
+            status_module._run_git(Path("/memory/root"), "status", "--short")
+
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env["GIT_OPTIONAL_LOCKS"], "0")
+        self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(env["GIT_ASKPASS"], "true")
 
     def test_collect_status_surfaces_failed_async_session_in_recent_issues(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1109,6 +1358,23 @@ class StatusDashboardTests(unittest.TestCase):
         if result.returncode != 0:
             self.fail(f"git {' '.join(args)} failed:\n{result.stderr}")
         return result.stdout.strip()
+
+    def _init_repo(self, root: Path) -> str:
+        self._git(root, "init")
+        self._git(root, "config", "user.email", "test@example.com")
+        self._git(root, "config", "user.name", "Test User")
+        (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+        self._git(root, "add", "MEMORY.md")
+        self._git(root, "commit", "-m", "initial memory")
+        return self._git(root, "branch", "--show-current")
+
+    def _init_repo_with_upstream(self, root: Path) -> str:
+        branch = self._init_repo(root)
+        self._git(root, "remote", "add", "origin", "https://example.invalid/rightmemory.git")
+        self._git(root, "config", f"branch.{branch}.remote", "origin")
+        self._git(root, "config", f"branch.{branch}.merge", f"refs/heads/{branch}")
+        self._git(root, "update-ref", f"refs/remotes/origin/{branch}", "HEAD")
+        return branch
 
 
 if __name__ == "__main__":

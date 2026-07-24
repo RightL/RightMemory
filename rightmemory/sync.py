@@ -87,6 +87,19 @@ class SyncResult:
         )
 
 
+def read_sync_state(memory_root: Path) -> dict[str, object]:
+    path = Path(memory_root) / ".runtime" / "sync" / "state.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as exc:
+        raise ValueError("sync state is not valid JSON") from exc
+    if not isinstance(data, dict):
+        raise ValueError("sync state must be a JSON object")
+    return data
+
+
 @dataclass(frozen=True)
 class SyncRepairOutcome:
     output: str
@@ -1277,10 +1290,9 @@ class SyncManager:
 
     def _read_state_unlocked(self) -> dict[str, object]:
         try:
-            data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            return read_sync_state(self.memory_root)
+        except (OSError, ValueError):
             return {}
-        return data if isinstance(data, dict) else {}
 
     def _write_state(self, data: dict[str, object]) -> None:
         _ensure_runtime_gitignore(self.memory_root / ".runtime")
