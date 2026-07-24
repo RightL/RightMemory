@@ -113,7 +113,7 @@ RightMemory exposes explicit command roles because operations still have differe
 
 Both install modes expose the same two independently selected skills: read-only `memory-retriever` and full `rightmemory-orchestrator`. The difference between install modes remains the executor behind their commands. Standalone mode runs RightMemory's local Pydantic AI agent and bounded tools; CLI-agent mode delegates the same canonical role behavior while preserving RightMemory's prompts, session records, root, and command surface.
 
-Installation has a strict bootstrap boundary. A genuinely new root receives the semantic seed, while a complete existing root is preserved byte-for-byte and an incomplete existing root is refused before the installer changes either the root or external runtime and skill targets. Runtime refresh and user-state migration are separate responsibilities; letting reinstall synthesize missing documents or refresh examples would turn a package update into an unreviewed semantic edit.
+Installation has a strict bootstrap boundary. A genuinely new root receives the semantic seed and tracked root `.gitignore` control-plane allowlist, while a complete existing root is preserved byte-for-byte and an incomplete existing root is refused before the installer changes either the root or external runtime and skill targets. Runtime refresh and state migration are separate responsibilities; letting reinstall synthesize missing documents, refresh examples, or rewrite the allowlist would turn a package update into an unreviewed synchronized-state edit.
 
 ### CLI-agent conversation lifecycle
 
@@ -135,7 +135,7 @@ Standalone commit tools are role-aware. Unified Update may commit Memory and Pur
 
 ### Global RightMemory sync
 
-Global sync remains local-first: every device keeps a complete RightMemory root, and Git provides distributed transport between those roots. Memory, Pursuit, `corrections.md`, and tracked update-review documents are synchronized state. Review drafts stay local until Ready turns the exact comment into typed work in the synchronized update queue. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
+Global sync remains local-first: every device keeps a complete RightMemory root, and Git provides distributed transport between those roots. Memory, Pursuit, `corrections.md`, tracked update-review documents, and the package-owned root `.gitignore` are synchronized state; the allowlist is control plane rather than semantic Memory. Review drafts stay local until Ready turns the exact comment into typed work in the synchronized update queue. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
 
 Runtime code owns deterministic sync mechanics where they belong in the workflow. It fetches and captures exact commits, then merges incoming history in a leased candidate worktree while the active root remains unchanged. Only a complete candidate whose paths and canonical graph validate may be published, and publication is one guarded fast-forward from the captured active commit. A concurrent active change or failed merge, repair, or validation refuses publication instead of requiring rollback.
 
@@ -145,12 +145,17 @@ The synchronized update queue is a protocol surface rather than model-owned
 content. Only canonical candidate, recovery, and singleton-lease JSON paths are
 admitted, and their complete machine schema validates before incoming state can
 publish. Malformed queue data and queue conflicts fail closed; they never enter
-`sync-reconciler`. Ready update reviews reuse this surface as typed candidates
-and are selected alone, so the existing lease and fenced Git finalization can
-atomically apply a correction and delete or re-ask the tracked review. The
-six-hour lease is an availability window measured by device clocks, so its
-approximate takeover delay assumes reasonable clock synchronization; fencing
-correctness does not.
+`sync-reconciler`. A normal candidate remains self-contained semantic evidence
+without a commit dependency. Before publishing it, the originating device fully
+synchronizes local state; failure leaves the candidate in its local outbox, while
+success makes the queue commit descend naturally from its state context. A
+claimant fully synchronizes again before leasing work. Ready update reviews reuse
+this surface as typed candidates and are selected alone; because a correction
+targets one exact diff, its `review_commit` and `review_blob_oid` remain explicit.
+The existing lease and fenced Git finalization can then atomically apply a
+correction and delete or re-ask the tracked review. The six-hour lease is an
+availability window measured by device clocks, so its approximate takeover delay
+assumes reasonable clock synchronization; fencing correctness does not.
 
 Graph-aware repair stays in `sync-reconciler` because conflicts across Memory, Pursuit, and their relationships require schema judgment rather than Git mechanics alone, but that role edits and commits only the candidate. Durable prepared-operation records make a completed repair recoverable after a crash without another model turn. For `corrections.md`, repair preserves non-identical entries without ranking them; semantic merging and replacement remain updater-owned. Push transport remains a retryable follow-up after local publication, and `sync-reconciler` stays separate from Dreamer because repair is a narrow integrity responsibility while Dreamer owns broader Memory consolidation.
 

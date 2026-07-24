@@ -104,7 +104,7 @@ class GitUpdateQueueClaimTests(GitUpdateQueueTestBase):
         settled = first.publish_outbox()
         self.assertEqual(settled.settled_uids, (candidate.uid,))
 
-    def test_claim_does_not_publish_lease_from_locally_ahead_head(self):
+    def test_claim_synchronizes_locally_ahead_state_before_publishing_lease(self):
         self._outbox_candidate(self.first, "a" * 32)
         coordinator = self._coordinator(self.first, "1" * 32)
         coordinator.publish_outbox()
@@ -119,9 +119,35 @@ class GitUpdateQueueClaimTests(GitUpdateQueueTestBase):
 
         result = coordinator.claim_next(target_batch_candidates=1, max_wait_seconds=0)
 
-        self.assertIsNone(result.claim)
+        self.assertIsNotNone(result.claim)
         self._reset_to_remote(self.second)
-        self.assertIsNone(UpdateQueueStore(self.second).snapshot().lease)
+        self.assertIsNotNone(UpdateQueueStore(self.second).snapshot().lease)
+        self.assertIn(
+            "`local` ahead",
+            (self.second / "MEMORY.md").read_text(encoding="utf-8"),
+        )
+
+    def test_stale_lease_holder_fresh_syncs_candidate_context_before_claim(self):
+        (self.first / "MEMORY.md").write_text(
+            "# Domain\n\n"
+            "- `one` first -> []\n"
+            "- `context` published before candidate -> []\n",
+            encoding="utf-8",
+        )
+        self._git(self.first, "add", "MEMORY.md")
+        self._git(self.first, "commit", "-m", "memory: candidate context")
+        self._outbox_candidate(self.first, "a" * 32)
+        first = self._coordinator(self.first, "1" * 32)
+        second = self._coordinator(self.second, "2" * 32)
+        first.publish_outbox()
+
+        result = second.claim_next(target_batch_candidates=1, max_wait_seconds=0)
+
+        self.assertIsNotNone(result.claim)
+        self.assertIn(
+            "published before candidate",
+            (self.second / "MEMORY.md").read_text(encoding="utf-8"),
+        )
 
     def test_claim_releases_remote_lease_when_local_install_fails(self):
         self._outbox_candidate(self.first, "a" * 32)

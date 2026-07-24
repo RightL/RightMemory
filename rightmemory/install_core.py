@@ -32,6 +32,7 @@ LEGACY_MEMORY_ROOT_LINE_PATTERN = re.compile(
 )
 MEMORY_GITIGNORE = """\
 *
+!.gitignore
 !MEMORY.md
 !MEMORY_*.md
 !PURSUITS.md
@@ -355,9 +356,12 @@ class Installer:
         shutil.copyfile(self.repo_root / "MEMORY.example.md", memory_file)
         shutil.copyfile(self.repo_root / "PURSUITS.example.md", pursuits_file)
         shutil.copyfile(self.repo_root / "PURSUIT_RULES.md", rules_file)
+        gitignore = self.memory_root / ".gitignore"
+        _write_utf8(gitignore, MEMORY_GITIGNORE)
         print(f"  [new]     {memory_file}  (from MEMORY.example.md)")
         print(f"  [new]     {pursuits_file}  (from PURSUITS.example.md)")
         print(f"  [new]     {rules_file}")
+        print(f"  [new]     {gitignore}  (memory allowlist)")
 
     def _preserve_existing_state(self) -> None:
         for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
@@ -371,8 +375,6 @@ class Installer:
             self._git("init", "-q")
             print(f"  [new]     git init in {self.memory_root}")
         self._ensure_git_author()
-        _write_utf8(self.memory_root / ".gitignore", MEMORY_GITIGNORE)
-        print(f"  [refresh] {self.memory_root / '.gitignore'}  (memory allowlist)")
         self._ensure_initial_commit()
 
     def _ensure_git_author(self) -> None:
@@ -397,6 +399,7 @@ class Installer:
             if (self.memory_root / relative).is_file():
                 files.append(relative.replace("\\", "/"))
 
+        add(".gitignore")
         add("MEMORY.md")
         files.extend(path.name for path in sorted(self.memory_root.glob("MEMORY_*.md")) if path.is_file())
         add("PURSUITS.md")
@@ -449,8 +452,11 @@ class Installer:
             print("  [keep]    initial memory commit already exists")
             return
         files = self._initial_memory_files()
-        if files:
-            self._git("add", "--", *files)
+        regular_files = [path for path in files if path != ".gitignore"]
+        if regular_files:
+            self._git("add", "--", *regular_files)
+        if ".gitignore" in files:
+            self._git("add", "-f", "--", ".gitignore")
         staged = self._git_capture("diff", "--cached", "--name-only", "--", *files).splitlines() if files else []
         if not staged:
             print("  [skip]    no memory files to baseline commit")

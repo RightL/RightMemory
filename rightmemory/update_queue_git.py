@@ -159,6 +159,11 @@ class GitUpdateQueueCoordinator:
             candidates = tuple(item for item in candidates if item.uid in candidate_uids)
         if not self.config.enabled or not candidates:
             return QueuePublicationResult(online=False)
+        if not self._synchronize_state():
+            return QueuePublicationResult(
+                unresolved_uids=tuple(item.uid for item in candidates),
+                online=False,
+            )
         upstream = self._fetch_upstream()
         if upstream is None:
             # No publication marker is written until the first successful fetch.
@@ -198,13 +203,20 @@ class GitUpdateQueueCoordinator:
     ) -> QueueClaimResult:
         if not self.config.enabled:
             return QueueClaimResult()
+        upstream = self._fetch_upstream()
+        if upstream is None:
+            return QueueClaimResult(online=False)
+        # Surface malformed remote-owned queue state before local sync
+        # preflight can turn it into an indistinguishable no-op.
+        with self._worktree(upstream.commit) as validation_worktree:
+            UpdateQueueStore(validation_worktree).snapshot()
+        if not self._synchronize_state():
+            return QueueClaimResult(online=False)
         now = _utc_now() if now is None else now.astimezone(UTC)
         for _attempt in range(QUEUE_PUSH_ATTEMPTS):
             upstream = self._fetch_upstream()
             if upstream is None:
                 return QueueClaimResult(online=False)
-            # Surface malformed remote-owned queue state before local sync
-            # preflight can turn it into an indistinguishable no-op.
             with self._worktree(upstream.commit) as validation_worktree:
                 UpdateQueueStore(validation_worktree).snapshot()
             if not self._advance_active(upstream.commit, queue_only=True):
@@ -1026,6 +1038,9 @@ class GitUpdateQueueCoordinator:
         if commit is None:
             return None
         return _Upstream(remote, branch, upstream_name, commit)
+
+    def _synchronize_state(self) -> bool:
+        return SyncManager(self.config).push().status == "pushed"
 
     def _push_cas(self, upstream: _Upstream, commit: str) -> bool:
         result = self._git(

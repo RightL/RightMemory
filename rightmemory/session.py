@@ -39,7 +39,6 @@ class MemoryWriteLock:
         self._lock_handle: Any | None = None
 
     def __enter__(self) -> MemoryWriteLock:
-        _ensure_memory_gitignore(self.runtime_root.parent)
         _ensure_runtime_gitignore(self.runtime_root)
         self._lock_handle = self.lock_path.open("a+", encoding="utf-8")
         lock_file(self._lock_handle)
@@ -151,6 +150,7 @@ def _ensure_memory_gitignore(memory_root: Path) -> None:
         memory_root,
         (
             b"*\n"
+            b"!.gitignore\n"
             b"!MEMORY.md\n"
             b"!MEMORY_*.md\n"
             b"!PURSUITS.md\n"

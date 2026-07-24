@@ -36,6 +36,7 @@ from .update_coordination import (
 
 
 MEMORY_SYNC_PATHS = (
+    ".gitignore",
     "MEMORY.md",
     "MEMORY_*.md",
     "PURSUITS.md",

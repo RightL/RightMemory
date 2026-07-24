@@ -24,6 +24,56 @@ class GitUpdateQueuePublicationTests(GitUpdateQueueTestBase):
         coordinator.clear_local_candidates(result.settled_uids)
         self.assertIsNone(UpdateQueueStore(self.first).read_outbox(candidate.uid))
 
+    def test_publication_pushes_local_state_before_candidate_commit(self):
+        (self.first / "MEMORY.md").write_text(
+            "# Domain\n\n"
+            "- `one` first -> []\n"
+            "- `context` local state before candidate -> []\n",
+            encoding="utf-8",
+        )
+        self._git(self.first, "add", "MEMORY.md")
+        self._git(self.first, "commit", "-m", "memory: candidate context")
+        state_commit = self._git(self.first, "rev-parse", "HEAD")
+        candidate = self._outbox_candidate(self.first, "a" * 32)
+
+        result = self._coordinator(self.first, "1" * 32).publish_outbox()
+
+        self.assertEqual(result.published_uids, (candidate.uid,))
+        self._git(self.second, "fetch", "origin")
+        candidate_commit = self._git(
+            self.second,
+            "log",
+            "-1",
+            "--format=%H",
+            "origin/main",
+            "--",
+            f"update_queue/candidates/{candidate.uid}.json",
+        )
+        self.assertEqual(
+            self._git(self.second, "show", "-s", "--format=%P", candidate_commit),
+            state_commit,
+        )
+        self.assertIn(
+            "local state before candidate",
+            self._git(self.second, "show", "origin/main:MEMORY.md"),
+        )
+
+    def test_publication_retains_outbox_when_state_sync_fails(self):
+        candidate = self._outbox_candidate(self.first, "a" * 32)
+        (self.first / "rightmemory.toml").write_text("[sync]\nenabled = true\n", encoding="utf-8")
+        self._git(self.first, "add", "rightmemory.toml")
+        self._git(self.first, "commit", "-m", "local machine config")
+        remote_head = self._git(self.second, "rev-parse", "origin/main")
+
+        result = self._coordinator(self.first, "1" * 32).publish_outbox()
+
+        self.assertEqual(result.published_uids, ())
+        self.assertEqual(result.unresolved_uids, (candidate.uid,))
+        self.assertFalse(result.online)
+        self.assertIsNotNone(UpdateQueueStore(self.first).read_outbox(candidate.uid))
+        self._git(self.second, "fetch", "origin")
+        self.assertEqual(self._git(self.second, "rev-parse", "origin/main"), remote_head)
+
     def test_publication_rejects_same_uid_with_different_remote_evidence(self):
         remote_candidate = UpdateCandidate(
             uid="a" * 32,

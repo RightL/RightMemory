@@ -152,7 +152,7 @@ CLI-agent mode delegates role execution to Codex CLI or Claude Code CLI while pr
 .\install.ps1 --mode cli-agent ~\.rightmemory ~\.codex\skills
 ```
 
-Install creates semantic state only when bootstrapping a new root. A fresh root receives `MEMORY.md`, `PURSUITS.md`, and `PURSUIT_RULES.md`, then Git baselines the complete synchronized state. A complete pre-existing root is preserved byte-for-byte; reinstall may refresh package-owned runtime files and installed skills, but it does not refresh examples, synthesize missing semantic files, or migrate user state. A complete pre-existing Markdown root without Git history is committed exactly as found.
+Install creates semantic state only when bootstrapping a new root. A fresh root receives `MEMORY.md`, `PURSUITS.md`, `PURSUIT_RULES.md`, and the tracked root `.gitignore` control-plane allowlist, then Git baselines the complete synchronized state. A complete pre-existing root is preserved byte-for-byte; reinstall may refresh package-owned runtime files and installed skills, but it does not refresh the allowlist or examples, synthesize missing semantic files, or migrate user state. A complete pre-existing Markdown root without Git history is committed exactly as found.
 
 If an existing root has a Git commit or any recognized semantic state but lacks a regular, non-symlink required root document, install refuses it before making any change. The memory root, runtime installation, installed skills, and install stamp remain untouched so the user can perform an explicit, reviewed migration first. Fresh installs still baseline current semantic-upgrade notes, while a successful reinstall may report pending notes for a later Dreamer cycle without applying them. Legacy `MEMORY_*.md` files remain protected even when they are not currently reachable from `MEMORY.md`.
 
@@ -558,7 +558,7 @@ The runtime is intentionally small:
 - Every new CLI-agent provider thread receives an ownership record under `<memory-root>/.runtime/agent_cli_threads/`, including one-shot and failed isolated work, so transcript review can exclude internal conversations without relying on an active mapping.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - Use `rightmemory status` for a read-only operational dashboard across the configured memory root. It summarizes Git state, managed watches, Dreamer and Insight trigger progress, async update queues, bounded last-message previews, and file paths for full logs or state. Use `rightmemory watch status` when you need the lower-level managed-watch process view.
-- The installer creates a root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, `PURSUIT_RULES.md`, optional root `corrections.md`, sharing metadata and provider view sources, `insight_logs/*.md`, tracked `update_reviews/*.md`, and the narrowly defined `update_queue/` JSON paths; generated shared-view output stays outside the committed surface.
+- A fresh-root install creates and baselines a tracked root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, `PURSUIT_RULES.md`, optional root `corrections.md`, sharing metadata and provider view sources, `insight_logs/*.md`, tracked `update_reviews/*.md`, and the narrowly defined `update_queue/` JSON paths; generated shared-view output stays outside the committed surface. Reinstall preserves an existing allowlist exactly, so package changes reach existing roots only through an explicit synchronized commit.
 - Async `update submit` calls for the same `--session` accumulate as pending candidates and reset that session's configured quiet period. Start and terminal candidates that reach the same batch are reconciled together, so already-finished work does not leave transient Pursuit state. A global worker batches whole session queues, but the updater groups candidates by the work they describe rather than treating a session as one task. `pull` and `undo` remain per-session. Retrieve can see pending evidence as `Recent submitted RightMemory` before consolidation.
 - Automatic unified-update, dreamer, insight, and pruner turns use isolated Git worktrees when they operate on the main state root. Runtime validates complete role-owned results before landing them. Transcript review remains read-only and queues any resulting candidate.
 - Standalone daemon context is preserved with Pydantic AI message history.
@@ -584,8 +584,15 @@ without requiring a session id. For one session's detailed pending, running,
 result, or error state, continue to use `rightmemory update pull --session <id>`.
 
 When Git sync is enabled, published candidates and their coordination state use
-the tracked `update_queue/` paths. Candidate text therefore remains in the
-private repository's history after processing or undo. Before upgrading, drain
+the tracked `update_queue/` paths. Before a local outbox candidate is published,
+RightMemory synchronizes local state commits; if that fails, the self-contained
+candidate remains in the outbox. Its queue commit then follows that state
+naturally in Git history without storing a state commit id in ordinary candidate
+evidence. A claimant performs another full sync before acquiring the lease.
+Update-review corrections remain the deliberate exception: they retain their
+exact `review_commit` and `review_blob_oid` identity because they correct one
+specific tracked diff. Candidate text therefore remains in the private
+repository's history after processing or undo. Before upgrading, drain
 live updates on every device with its currently installed runtime. Then update
 and reinstall RightMemory everywhere before submitting another candidate; older
 runtimes reject the new paths rather than silently admitting state they cannot
@@ -893,6 +900,8 @@ stale_pull_after_hours = 24
 When sync is enabled, runtime code handles remote Git synchronization around automatic semantic work. It checks upstream state before model work and pushes after successful synchronized-state commits land. Incoming commits never merge directly into the active checkout: RightMemory merges the exact fetched commit in a leased candidate worktree, invokes `sync-reconciler` there only for synchronized conflicts or semantic validation failures, validates the complete candidate, and then fast-forwards the active root to that exact commit. The isolated-write dirty-main check is separate from remote sync: local synchronized files can block automatic semantic writes even when `[sync].enabled` is false.
 
 Retrieve adds a small active-use safety net. At most once every five minutes it performs a pull-only upstream check before reading memory, with the fetch bounded to two seconds. A clean incoming commit is validated and admitted for the current request; the foreground path never pushes and never invokes `sync-reconciler`. Offline, timed-out, dirty, conflicting, or invalid incoming state does not block retrieval: the request uses the last valid local state, then starts one detached full sync cycle after the response finishes. That cycle owns reconciliation and push when needed, and a shared nonblocking cycle lock prevents duplicate watcher, retrieve, and deferred work. If a clean refresh brings synchronized update candidates, the update worker is woken only after retrieval completes. Historical retrieval remains local.
+
+The tracked root `.gitignore` is synchronized package-owned control-plane state rather than semantic Memory. Sync admits it through the same regular-file and path-surface checks as other synchronized files, while reinstall never rewrites an existing copy.
 
 Update-review and update-queue files are protocol state, not semantic repair input. Sync transports only canonical `update_reviews/*.md` documents and candidate, recovery, and singleton-lease queue paths, validates their complete schemas before publication, and fails closed on malformed data or protocol-path merge conflicts. `sync-reconciler` never edits or resolves this state. Ready review comments travel as typed queue candidates, and the queue's global lease fences correction and review settlement across devices.
 

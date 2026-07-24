@@ -121,6 +121,62 @@ class InstallCoreTests(unittest.TestCase):
                 expected,
             )
 
+    def test_existing_git_root_preserves_gitignore_byte_for_byte(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            memory_root.mkdir()
+            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+            gitignore = b"*\r\n!MEMORY.md\r\n!custom-control-plane-entry\r\n"
+            (memory_root / ".gitignore").write_bytes(gitignore)
+            subprocess.run(["git", "init", "-q"], cwd=memory_root, check=True)
+            subprocess.run(
+                ["git", "config", "user.name", "Test User"],
+                cwd=memory_root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=memory_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "add",
+                    "-f",
+                    ".gitignore",
+                    "MEMORY.md",
+                    "PURSUITS.md",
+                    "PURSUIT_RULES.md",
+                ],
+                cwd=memory_root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "initial memory"],
+                cwd=memory_root,
+                check=True,
+            )
+            installer = Installer(REPO_ROOT, "cli-agent", memory_root, [root / "skills"])
+
+            with patch("builtins.print"):
+                installer._ensure_memory_git()
+
+            self.assertEqual((memory_root / ".gitignore").read_bytes(), gitignore)
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "status", "--short"],
+                    cwd=memory_root,
+                    check=True,
+                    text=True,
+                    encoding="utf-8",
+                    stdout=subprocess.PIPE,
+                ).stdout,
+                "",
+            )
+
     def test_incomplete_existing_root_is_rejected_before_any_install_writes(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
