@@ -683,7 +683,10 @@ def _render_selected_tree(
             return "\n\n".join(children)
         if not children:
             return block.line if key in exact_entries else ""
-        return "\n\n".join((block.line, *children))
+        body = "\n".join(
+            part for part in block.logical_parts if isinstance(part, str)
+        ).strip("\r\n")
+        return "\n\n".join(part for part in (block.line, body, *children) if part)
 
     return render_entry(root).strip("\r\n")
 
