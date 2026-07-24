@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rightmemory.graph import build_graph_manifest, build_mf_manifest
+from rightmemory.graph import KNOWN_EDGE_TYPES, build_graph_manifest, build_mf_manifest
 from rightmemory.tools import MemoryTools
 
 
@@ -127,6 +127,117 @@ class CanonicalGraphManifestTests(unittest.TestCase):
         manifest = build_graph_manifest(self.root)
 
         self.assertTrue(any("cyclic F# backing path" in error for error in manifest.errors))
+
+
+class RelAncestorValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+
+    def _manifest(self, memory: str, **detail_files: str):
+        (self.root / "MEMORY.md").write_text(memory, encoding="utf-8")
+        for name, content in detail_files.items():
+            (self.root / name).write_text(content, encoding="utf-8")
+        return build_graph_manifest(self.root)
+
+    def test_rel_to_direct_parent_is_rejected(self):
+        manifest = self._manifest(
+            "# Project {#project}\n\n"
+            "- `repo-path` Repository location. -> [rel:project]\n"
+        )
+
+        self.assertTrue(
+            any(
+                "source item `repo-path` to ancestor heading `project`" in error
+                for error in manifest.errors
+            )
+        )
+
+    def test_rel_to_indirect_ancestor_is_rejected(self):
+        manifest = self._manifest(
+            "# Domain {#domain}\n\n"
+            "## Project {#project}\n\n"
+            "- `repo-path` Repository location. -> [rel:domain]\n"
+        )
+
+        self.assertTrue(
+            any(
+                "source item `repo-path` to ancestor heading `domain`" in error
+                for error in manifest.errors
+            )
+        )
+
+    def test_child_heading_rel_to_ancestor_is_rejected(self):
+        manifest = self._manifest(
+            "# Domain {#domain}\n\n"
+            "## Project {#project}\n\n"
+            "### Repository {#repository} -> [rel:domain]\n"
+        )
+
+        self.assertTrue(
+            any(
+                "source item `repository` to ancestor heading `domain`" in error
+                for error in manifest.errors
+            )
+        )
+
+    def test_rel_uses_logical_ancestry_across_f_detail_files(self):
+        manifest = self._manifest(
+            "# Domain {#domain}\n\n"
+            "## Runtime {F#runtime}\n",
+            **{
+                "MEMORY_runtime.md": (
+                    "### Python {#runtime-python}\n\n"
+                    "- `runtime-install` Install dependencies. -> [rel:domain]\n"
+                )
+            },
+        )
+
+        self.assertTrue(
+            any(
+                "source item `runtime-install` to ancestor heading `domain`" in error
+                for error in manifest.errors
+            )
+        )
+
+    def test_rel_to_siblings_descendants_and_unrelated_items_is_allowed(self):
+        manifest = self._manifest(
+            "# One {#one} -> [rel:child]\n\n"
+            "## Child {#child} -> [rel:sibling]\n\n"
+            "- `first` First node. -> [rel:second]\n"
+            "- `second` Second node. -> []\n\n"
+            "## Sibling {#sibling} -> [rel:other]\n\n"
+            "# Other {#other}\n"
+        )
+
+        self.assertEqual(manifest.errors, [])
+
+    def test_specific_edge_types_to_ancestors_are_allowed(self):
+        edges = ", ".join(
+            f"{edge_type}:project" for edge_type in sorted(KNOWN_EDGE_TYPES - {"rel"})
+        )
+        manifest = self._manifest(
+            "# Project {#project}\n\n"
+            f"- `project-fact` Project fact. -> [{edges}]\n"
+        )
+
+        self.assertEqual(manifest.errors, [])
+
+    def test_existing_duplicate_dangling_and_self_edge_errors_are_preserved(self):
+        manifest = self._manifest(
+            "# Domain {#domain}\n\n"
+            "- `one` First. -> [rel:one, rel:two, rel:two, rel:missing]\n"
+            "- `two` Second. -> []\n"
+            "- `two` Duplicate. -> []\n"
+        )
+        errors = "\n".join(manifest.errors)
+
+        self.assertIn("duplicate id `two`", errors)
+        self.assertIn("self-edge `rel:one`", errors)
+        self.assertIn("duplicate edge `rel:two`", errors)
+        self.assertIn("dangling edge `rel:missing`", errors)
 
 
 class MfGraphManifestTests(unittest.TestCase):

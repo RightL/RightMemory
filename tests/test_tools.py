@@ -665,7 +665,7 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "MEMORY.md").write_text(
             "# Project {#project}\n\n"
             "## Auth API {#auth-api}\n\n"
-            "- `token-expiry` Tokens expire after one hour. -> [rel:auth-api]\n",
+            "- `token-expiry` Tokens expire after one hour. -> [doc:auth-api]\n",
             encoding="utf-8",
         )
         (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
@@ -1282,7 +1282,7 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
-            "## Runtime {F#runtime} → [rel:domain]\n",
+            "## Runtime {F#runtime} → [doc:domain]\n",
             encoding="utf-8",
         )
         (self.root / "MEMORY_runtime.md").write_text(
@@ -1300,9 +1300,9 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
-            "## Two-Side Review {S#two-side-review} → [rel:domain]\n\n"
+            "## Two-Side Review {S#two-side-review} → [doc:domain]\n\n"
             "A reusable instruction asset for opposing review passes.\n\n"
-            "- `review-signal` Use the skill when the user asks for two-side review. → [rel:two-side-review]\n",
+            "- `review-signal` Use the skill when the user asks for two-side review. → [doc:two-side-review]\n",
             encoding="utf-8",
         )
         (self.root / "MEMORY_SKILL_two-side-review.md").write_text(
@@ -1318,7 +1318,7 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY.md").write_text(
             "# Project {#project}\n\n"
-            "## Auth API Files {MF#auth-api-files} → [rel:project]\n\n"
+            "## Auth API Files {MF#auth-api-files} → [doc:project]\n\n"
             "Use this mirrored file view before login changes.\n\n"
             "## Auth API Questions {MQ#auth-api-ask} → [rel:auth-api-files]\n\n"
             "Use this provider question view for live auth API clarification.\n",
@@ -1381,7 +1381,7 @@ class MemoryToolsTests(unittest.TestCase):
     def test_validate_memory_requires_skill_backing_file(self):
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
-            "## Two-Side Review {S#two-side-review} → [rel:domain]\n",
+            "## Two-Side Review {S#two-side-review} → [doc:domain]\n",
             encoding="utf-8",
         )
 
@@ -1393,7 +1393,7 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / "MEMORY.md").write_text(
             "# Domain {#domain}\n\n"
-            "## Two-Side Review {S#two-side-review} → [rel:domain]\n",
+            "## Two-Side Review {S#two-side-review} → [doc:domain]\n",
             encoding="utf-8",
         )
         (self.root / "MEMORY_SKILL_two-side-review.md").write_text(

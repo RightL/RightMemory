@@ -311,8 +311,8 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         (self.root / "MEMORY.md").write_text(
             "# Project {#project}\n\n"
             "## Auth API {#auth-api}\n\n"
-            "- `token-expiry` Tokens expire after one hour. -> [rel:auth-api]\n"
-            "- `private-payroll` Payroll details stay private. -> [rel:auth-api]\n",
+            "- `token-expiry` Tokens expire after one hour. -> [doc:auth-api]\n"
+            "- `private-payroll` Payroll details stay private. -> [doc:auth-api]\n",
             encoding="utf-8",
         )
         (self.root / "PURSUITS.md").write_text("# Pursuits {#pursuits} → []\n", encoding="utf-8")
@@ -471,9 +471,9 @@ class SharedFileViewRecipeTests(unittest.TestCase):
             "## Auth API {#auth-api}\n\n"
             "Public auth context.\n\n"
             "### Internal Tokens {#internal-tokens}\n\n"
-            "- `secret-token` Private token shape. -> [rel:internal-tokens]\n\n"
+            "- `secret-token` Private token shape. -> [doc:internal-tokens]\n\n"
             "### Public Tokens {#public-tokens}\n\n"
-            "- `token-expiry` Tokens expire after one hour. -> [rel:public-tokens]\n",
+            "- `token-expiry` Tokens expire after one hour. -> [doc:public-tokens]\n",
             encoding="utf-8",
         )
         write_extractive_file_view_recipe(
@@ -500,7 +500,7 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         (self.root / "MEMORY.md").write_text(
             "# Alice Auth API {#alice-auth-api}\n\n"
             "## Session Model {#alice-session-model}\n\n"
-            "- `token-expiry` Tokens expire after one hour. -> [rel:alice-session-model]\n\n"
+            "- `token-expiry` Tokens expire after one hour. -> [doc:alice-session-model]\n\n"
             "---\n\n"
             "> Starter template. <!-- rightmemory:example:start -->\n\n"
             "# Sample Project Graph {#sample-project-graph}\n\n"
@@ -905,7 +905,7 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
         (self.root / "MEMORY.md").write_text(
-            "# Project {#project}\n\n## Auth API {#auth-api}\n\n- `token-expiry` Tokens expire. -> [rel:auth-api]\n",
+            "# Project {#project}\n\n## Auth API {#auth-api}\n\n- `token-expiry` Tokens expire. -> [doc:auth-api]\n",
             encoding="utf-8",
         )
         (self.root / "PURSUITS.md").write_text("# Pursuits {#pursuits} → []\n", encoding="utf-8")
