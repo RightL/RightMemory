@@ -890,6 +890,29 @@ def _validate_items(manifest: GraphManifest) -> None:
                     item.file,
                     item.line_number,
                 )
+            elif edge_type == "rel" and _has_logical_ancestor_heading(manifest, item, target):
+                _add_error(
+                    manifest,
+                    f"containment-only `rel:` edge from source item `{item.id}` to ancestor heading "
+                    f"`{target}` at {_loc(manifest.root, item)}; remove the edge because logical "
+                    "heading nesting already expresses this relationship",
+                    item.file,
+                    item.line_number,
+                )
+
+
+def _has_logical_ancestor_heading(
+    manifest: GraphManifest,
+    item: GraphItem,
+    target_id: str,
+) -> bool:
+    current = item.logical_parent
+    while current is not None:
+        block = manifest.blocks[current]
+        if block.kind == "heading" and block.item_id == target_id:
+            return True
+        current = block.logical_parent
+    return False
 
 
 def _validate_focus(manifest: GraphManifest) -> None:
