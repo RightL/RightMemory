@@ -127,8 +127,10 @@ class RetrieveSelectionRendererTests(unittest.TestCase):
         self.assertIn("## Project {#project}", node.text)
         self.assertIn("### Child {#child}", node.text)
         self.assertIn("- `child-fact`", node.text)
-        self.assertNotIn("Project body.", node.text)
-        self.assertNotIn("Child body.", node.text)
+        self.assertIn("Project body.", node.text)
+        self.assertIn("Child body.", node.text)
+        self.assertNotIn("- `project-fact`", node.text)
+        self.assertNotIn("## Detail {F#detail}", node.text)
 
     def test_local_rendering_uses_the_canonical_index_without_shadow_parsers(self):
         rendered = self.renderer.render(RetrieveSelection(ids=["child-fact"]))
@@ -137,7 +139,9 @@ class RetrieveSelectionRendererTests(unittest.TestCase):
             rendered.text,
             "# Memory\n\n"
             "## Project {#project}\n\n"
+            "Project body.\n\n"
             "### Child {#child}\n\n"
+            "Child body.\n\n"
             "- `child-fact` A child fact. → []",
         )
         self.assertFalse(hasattr(retrieve_selection_module, "_TreeParser"))
