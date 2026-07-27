@@ -70,6 +70,10 @@ duplication.
 
 Good Memory is scoped, durable context that helps future agents act, decide, interpret, or retrieve. Live intent, current task state, and next actions belong in Pursuit and follow `PURSUIT_RULES.md`.
 
+Project artifacts are the primary home of project-specific details and guidance.
+Good Memory preserves only a durable takeaway or locator whose value is not
+already supplied by those artifacts.
+
 ### Item Quality
 
 A good memory item states one reusable fact, preference, rule, decision,

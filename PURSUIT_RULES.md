@@ -38,6 +38,12 @@ RightMemory is one graph organized into two document trees. Memory holds durable
 - Tree nesting expresses decomposition. Edges express useful relationships not already clear from containment.
 - Keep one canonical node for each Pursuit. Never copy its State or Next.
 
+## Pursuit Quality
+
+Good Pursuit State is the minimum current context needed for continuation.
+Supporting details, evidence, and completed history are project artifacts
+rather than Pursuit State.
+
 ## Admission and Focus
 
 The unified updater preserves a candidate as Pursuit only when a later agent should intentionally resume or re-evaluate it after the current update. Incompleteness alone is insufficient, and work that begins and finishes within the same reconciled candidate batch normally leaves no Pursuit.
