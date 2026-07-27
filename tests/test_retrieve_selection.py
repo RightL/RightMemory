@@ -249,9 +249,9 @@ class RetrieveSelectionRendererTests(unittest.TestCase):
             RetrieveSelection(
                 sources=[SourceSelection(source_id="MF#billing-api", ids=["tokens"])]
             ),
-            delivered=first.delivery,
         )
 
+        self.assertIn("MF#external-api:tokens", first.delivery.source_items)
         self.assertIn("Billing token body.", second.text)
 
     def test_mf_f_detail_and_qualified_resources(self):
@@ -335,20 +335,144 @@ class RetrieveSelectionRendererTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source_id must be an M#, S#, MF#"):
             SourceSelection(source_id="MQ#provider-context")
 
-    def test_delivery_omits_unchanged_items_and_override_repeats_them(self):
+    def test_delivery_never_suppresses_an_explicit_local_selection(self):
         first = self.renderer.render(RetrieveSelection(ids=["project-fact"]))
-        second = self.renderer.render(
-            RetrieveSelection(ids=["project-fact"]),
-            delivered=first.delivery,
+        unchanged = self.renderer.current_delivery_selection(
+            first.delivery,
+            unchanged_only=True,
         )
-        repeated = self.renderer.render(
-            RetrieveSelection(ids=["project-fact"]),
-            delivered=first.delivery,
-            include_returned=True,
+        second = self.renderer.render(RetrieveSelection(ids=["project-fact"]))
+
+        self.assertEqual(unchanged.ids, ["project-fact"])
+        self.assertIn("- `project-fact`", second.text)
+
+    def test_delivery_never_suppresses_any_explicit_selection_kind(self):
+        entries = [
+            RecentSubmittedMemoryEntry(
+                "session-a",
+                1,
+                "2026-07-18T00:00:00+00:00",
+                "Recent evidence.",
+            )
+        ]
+        selection = RetrieveSelection(
+            ids=["project-fact"],
+            sources=[
+                SourceSelection(
+                    source_id="MF#external-api",
+                    ids=["token-expiry"],
+                ),
+                SourceSelection(source_id="S#review-skill"),
+                SourceSelection(
+                    source_id="M#notes",
+                    ranges=[LineRange(start=7, end=7)],
+                ),
+            ],
+            recent_candidates=["session-a:1"],
+        )
+        first = self.renderer.render(selection, recent_entries=entries)
+        unchanged = self.renderer.current_delivery_selection(
+            first.delivery,
+            recent_entries=entries,
+            unchanged_only=True,
         )
 
-        self.assertEqual(second.text, "no strong match")
+        repeated = self.renderer.render(
+            selection,
+            recent_entries=entries,
+        )
+
+        self.assertEqual(unchanged.ids, ["project-fact"])
+        self.assertEqual(
+            {source.source_id for source in unchanged.sources},
+            {"M#notes", "MF#external-api", "S#review-skill"},
+        )
+        self.assertEqual(unchanged.recent_candidates, ["session-a:1"])
         self.assertIn("- `project-fact`", repeated.text)
+        self.assertIn("Tokens expire hourly.", repeated.text)
+        self.assertIn("Use every instruction.", repeated.text)
+        self.assertIn("Before.", repeated.text)
+        self.assertIn("Recent evidence.", repeated.text)
+
+    def test_current_delivery_selection_can_report_only_unchanged_coverage(self):
+        entries = [
+            RecentSubmittedMemoryEntry(
+                "session-a",
+                1,
+                "2026-07-18T00:00:00+00:00",
+                "Recent evidence.",
+            )
+        ]
+        first = self.renderer.render(
+            RetrieveSelection(
+                ids=["project-fact"],
+                sources=[
+                    SourceSelection(
+                        source_id="MF#external-api",
+                        ids=["token-expiry"],
+                    ),
+                    SourceSelection(source_id="S#review-skill"),
+                    SourceSelection(
+                        source_id="M#notes",
+                        ranges=[LineRange(start=7, end=7)],
+                    ),
+                ],
+                recent_candidates=["session-a:1"],
+            ),
+            recent_entries=entries,
+        )
+
+        unchanged = self.renderer.current_delivery_selection(
+            first.delivery,
+            recent_entries=entries,
+            unchanged_only=True,
+        )
+
+        self.assertEqual(unchanged.ids, ["project-fact"])
+        self.assertEqual(
+            {
+                source.source_id: (
+                    source.ids,
+                    [(item.start, item.end) for item in source.ranges],
+                )
+                for source in unchanged.sources
+            },
+            {
+                "M#notes": ([], [(7, 7)]),
+                "MF#external-api": (["token-expiry"], []),
+                "S#review-skill": ([], []),
+            },
+        )
+        self.assertEqual(unchanged.recent_candidates, ["session-a:1"])
+
+        memory = self.root / "MEMORY.md"
+        memory.write_text(
+            memory.read_text(encoding="utf-8").replace(
+                "A project fact.",
+                "A revised project fact.",
+            ),
+            encoding="utf-8",
+        )
+
+        changed = self.renderer.current_delivery_selection(
+            first.delivery,
+            recent_entries=entries,
+            unchanged_only=True,
+        )
+        revised_recent = RecentSubmittedMemoryEntry(
+            "session-a",
+            1,
+            "2026-07-18T00:05:00+00:00",
+            "Revised recent evidence.",
+        )
+        changed_recent = self.renderer.current_delivery_selection(
+            first.delivery,
+            recent_entries=[revised_recent],
+            unchanged_only=True,
+        )
+
+        self.assertNotIn("project-fact", changed.ids)
+        self.assertEqual(changed_recent.recent_candidates, [])
 
     def test_changed_item_with_same_id_can_return(self):
         first = self.renderer.render(RetrieveSelection(ids=["project-fact"]))
@@ -358,11 +482,100 @@ class RetrieveSelectionRendererTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        revised = self.renderer.render(
-            RetrieveSelection(ids=["project-fact"]),
-            delivered=first.delivery,
+        unchanged = self.renderer.current_delivery_selection(
+            first.delivery,
+            unchanged_only=True,
         )
+        revised = self.renderer.render(RetrieveSelection(ids=["project-fact"]))
+        self.assertNotIn("project-fact", unchanged.ids)
         self.assertIn("A revised project fact.", revised.text)
+
+    def test_changed_delivery_detection_is_consistent_across_selection_kinds(self):
+        entries = [
+            RecentSubmittedMemoryEntry(
+                "session-a",
+                1,
+                "2026-07-18T00:00:00+00:00",
+                "Recent evidence.",
+            )
+        ]
+        first = self.renderer.render(
+            RetrieveSelection(
+                ids=["detail-fact"],
+                sources=[
+                    SourceSelection(
+                        source_id="MF#external-api",
+                        ids=["token-expiry"],
+                    ),
+                    SourceSelection(source_id="S#review-skill"),
+                    SourceSelection(
+                        source_id="M#notes",
+                        ranges=[LineRange(start=7, end=7)],
+                    ),
+                ],
+                recent_candidates=["session-a:1"],
+            ),
+            recent_entries=entries,
+        )
+        replacements = [
+            (self.root / "MEMORY_detail.md", "A detail fact.", "A revised detail fact."),
+            (
+                self.root
+                / ".runtime"
+                / "shared_views"
+                / "imports"
+                / "external-api"
+                / "dist"
+                / "MEMORY.md",
+                "Tokens expire hourly.",
+                "Tokens expire daily.",
+            ),
+            (
+                self.root / "MEMORY_SKILL_review-skill.md",
+                "Use every instruction.",
+                "Use the revised instructions.",
+            ),
+            (self.root / "MEMORY_notes.md", "Before.", "Revised before."),
+        ]
+        for path, old, new in replacements:
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(old, new),
+                encoding="utf-8",
+            )
+        revised_entries = [
+            RecentSubmittedMemoryEntry(
+                "session-a",
+                1,
+                "2026-07-18T00:05:00+00:00",
+                "Revised recent evidence.",
+            )
+        ]
+
+        labels = self.renderer.changed_delivery_labels(
+            first.delivery,
+            recent_entries=revised_entries,
+        )
+        selectable = self.renderer.current_delivery_selection(
+            first.delivery,
+            recent_entries=revised_entries,
+        )
+
+        self.assertEqual(
+            set(labels),
+            {
+                "local item `detail-fact`",
+                "item `token-expiry` in `MF#external-api`",
+                "source `M#notes`",
+                "source `S#review-skill`",
+                "recent candidate `session-a:1`",
+            },
+        )
+        self.assertEqual(selectable.ids, ["detail-fact"])
+        self.assertEqual(
+            {source.source_id for source in selectable.sources},
+            {"M#notes", "MF#external-api", "S#review-skill"},
+        )
+        self.assertEqual(selectable.recent_candidates, ["session-a:1"])
 
     def test_recent_candidates_use_composite_ids_and_preserve_order(self):
         entries = [
@@ -377,7 +590,10 @@ class RetrieveSelectionRendererTests(unittest.TestCase):
         self.assertLess(rendered.text.index("First evidence."), rendered.text.index("Second evidence."))
         self.assertEqual(
             rendered.delivery.recent_candidates,
-            ["session-a:1", "session-a:2"],
+            {
+                "session-a:1": retrieve_selection_module._hash_text("First evidence."),
+                "session-a:2": retrieve_selection_module._hash_text("Second evidence."),
+            },
         )
 
     def test_strict_json_rejects_prose_and_unknown_fields(self):
@@ -404,13 +620,16 @@ class RetrieveSelectionRendererTests(unittest.TestCase):
 
 class RetrieveDeliveryCoverageTests(unittest.TestCase):
     def test_merge_updates_versions_without_dropping_other_kinds(self):
-        old = RetrieveDeliveryCoverage(local_items={"one": "old"}, recent_candidates=["s:1"])
+        old = RetrieveDeliveryCoverage(
+            local_items={"one": "old"},
+            recent_candidates={"s:1": "candidate-hash"},
+        )
         newer = RetrieveDeliveryCoverage(local_items={"one": "new", "two": "v"})
 
         merged = old.merged(newer)
 
         self.assertEqual(merged.local_items, {"one": "new", "two": "v"})
-        self.assertEqual(merged.recent_candidates, ["s:1"])
+        self.assertEqual(merged.recent_candidates, {"s:1": "candidate-hash"})
 
 
 if __name__ == "__main__":

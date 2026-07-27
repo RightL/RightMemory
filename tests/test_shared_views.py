@@ -340,6 +340,92 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         self.assertNotIn("Payroll details", exported.read_text(encoding="utf-8"))
         self.assertIn('kind = "file"', recipe.read_text(encoding="utf-8"))
 
+    def test_exact_node_preserves_ancestor_bodies_without_sibling_leaks(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Project {#project}\n\n"
+            "Project context.\n\n"
+            "## Auth API {#auth-api}\n\n"
+            "Auth context.\n\n"
+            "### Public Tokens {#public-tokens}\n\n"
+            "Public token context.\n\n"
+            "- `token-expiry` Tokens expire after one hour. -> []\n"
+            "- `token-shape` Tokens use JWT. -> []\n\n"
+            "### Private Tokens {#private-tokens}\n\n"
+            "Private token context.\n\n"
+            "- `private-token` Private token material. -> []\n\n"
+            "## Billing {#billing}\n\n"
+            "Billing context.\n\n"
+            "- `invoice-format` Invoices use JSON. -> []\n",
+            encoding="utf-8",
+        )
+        write_extractive_file_view_recipe(
+            self.root,
+            view_id="token-expiry",
+            title="Token Expiry",
+            intent="Expose only token expiry with its interpreting context.",
+            include_nodes=["token-expiry", "private-token"],
+            exclude_ids=["private-tokens"],
+            approved=True,
+        )
+
+        render_file_view(self.root, "token-expiry")
+
+        exported = (self.root / "shared_views" / "token-expiry" / "dist" / "MEMORY.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Project context.", exported)
+        self.assertIn("Auth context.", exported)
+        self.assertIn("Public token context.", exported)
+        self.assertIn("- `token-expiry`", exported)
+        self.assertNotIn("token-shape", exported)
+        self.assertNotIn("Private Tokens", exported)
+        self.assertNotIn("Private token material", exported)
+        self.assertNotIn("Billing", exported)
+        self.assertNotIn("invoice-format", exported)
+
+    def test_exact_f_detail_node_preserves_logical_ancestor_bodies(self):
+        (self.root / "MEMORY.md").write_text(
+            "# Project {#project}\n\n"
+            "Project context.\n\n"
+            "## Auth Detail {F#auth-detail}\n\n"
+            "Auth detail summary.\n\n"
+            "## Unrelated {#unrelated}\n\n"
+            "Unrelated context.\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_auth-detail.md").write_text(
+            "### Token Rules {#token-rules}\n\n"
+            "Token rule context.\n\n"
+            "- `detail-expiry` Detail tokens expire hourly. -> []\n"
+            "- `detail-shape` Detail tokens use JWT. -> []\n\n"
+            "### Internal Rules {#internal-rules}\n\n"
+            "Internal context.\n\n"
+            "- `internal-detail` Internal only. -> []\n",
+            encoding="utf-8",
+        )
+        write_extractive_file_view_recipe(
+            self.root,
+            view_id="auth-detail-expiry",
+            title="Auth Detail Expiry",
+            intent="Expose one F-backed detail node with logical context.",
+            include_nodes=["detail-expiry"],
+            approved=True,
+        )
+
+        render_file_view(self.root, "auth-detail-expiry")
+
+        dist = self.root / "shared_views" / "auth-detail-expiry" / "dist"
+        exported = (dist / "MEMORY.md").read_text(encoding="utf-8")
+        detail = (dist / "MEMORY_auth-detail.md").read_text(encoding="utf-8")
+        self.assertIn("Project context.", exported)
+        self.assertIn("Auth detail summary.", exported)
+        self.assertNotIn("Unrelated context.", exported)
+        self.assertIn("Token rule context.", detail)
+        self.assertIn("- `detail-expiry`", detail)
+        self.assertNotIn("detail-shape", detail)
+        self.assertNotIn("Internal Rules", detail)
+        self.assertNotIn("internal-detail", detail)
+
     def test_file_recipe_discovers_both_graphs_without_parsing_m_or_s_bodies(self):
         (self.root / "MEMORY.md").write_text(
             "# Project {#project}\n\n"

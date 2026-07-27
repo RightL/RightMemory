@@ -1159,7 +1159,7 @@ def _turn_parser(role: str) -> argparse.ArgumentParser:
         parser.add_argument(
             "--include-returned",
             action="store_true",
-            help="include matching content already returned in this retrieve session for this call only",
+            help="attach current forms of previously returned content to this call's retrieval context",
         )
     parser.add_argument("message", nargs=argparse.REMAINDER)
     return parser

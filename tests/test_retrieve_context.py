@@ -1,3 +1,4 @@
+import json
 import subprocess
 import tempfile
 import unittest
@@ -8,13 +9,16 @@ from rightmemory.retrieve_context import (
     RetrieveContextStore,
     build_retrieve_request_text,
     current_memory_head,
+    format_current_material_block,
     format_memory_diff_block,
     format_recent_submitted_context_block,
+    format_updated_material_block,
     load_daily_snapshot,
     memory_diff_since,
     root_memory_paths,
 )
 from rightmemory.recent_submitted import RecentSubmittedMemoryEntry
+from rightmemory.retrieve_selection import RetrieveDeliveryCoverage
 
 
 class RetrieveContextSnapshotTests(unittest.TestCase):
@@ -123,27 +127,27 @@ class RetrieveContextDiffTests(unittest.TestCase):
 
 
 class RetrieveContextRequestTests(unittest.TestCase):
-    def test_request_text_places_snapshot_first_and_query_last(self):
+    def test_request_text_preserves_context_parts_and_places_query_last(self):
         text = build_retrieve_request_text(
-            snapshot_text="Daily RightMemory root snapshot\n===== MEMORY.md =====\n# Root\n",
-            turns=[("find alpha", "alpha answer")],
-            diff_block="# RightMemory root changes since previous retrieve turn\n\n```diff\n+beta\n```",
-            recent_block="Recent submitted RightMemory candidates\n\nremember gamma",
+            context_parts=[
+                "Daily RightMemory root snapshot\n===== MEMORY.md =====\n# Root\n",
+                "# RightMemory root changes since previous retrieve turn\n\n```diff\n+beta\n```",
+                "# Recent submitted RightMemory candidates\n\nremember gamma",
+            ],
             query="find gamma",
         )
 
         self.assertTrue(text.startswith("Daily RightMemory root snapshot\n"))
-        self.assertIn("# Prior retrieve conversation\n\nUser: find alpha\nAssistant: alpha answer", text)
         self.assertIn("# RightMemory root changes since previous retrieve turn", text)
         self.assertIn("Recent submitted RightMemory candidates", text)
         self.assertTrue(text.rstrip().endswith("# Query\n\nfind gamma"))
 
-    def test_request_text_omits_empty_diff_and_recent_blocks(self):
+    def test_request_text_omits_empty_context_parts(self):
         text = build_retrieve_request_text(
-            snapshot_text="Daily RightMemory root snapshot\n===== MEMORY.md =====\n# Root\n",
-            turns=[],
-            diff_block="",
-            recent_block="",
+            context_parts=[
+                "Daily RightMemory root snapshot\n===== MEMORY.md =====\n# Root\n",
+                "",
+            ],
             query="find root",
         )
 
@@ -151,18 +155,16 @@ class RetrieveContextRequestTests(unittest.TestCase):
         self.assertNotIn("Recent submitted RightMemory candidates", text)
         self.assertTrue(text.rstrip().endswith("# Query\n\nfind root"))
 
-    def test_resumed_request_can_omit_snapshot_and_local_history(self):
+    def test_resumed_request_can_contain_only_updates_and_query(self):
         text = build_retrieve_request_text(
-            snapshot_text="",
-            turns=[],
-            diff_block="# RightMemory root changes since previous retrieve turn\n\n```diff\n+new\n```",
-            recent_block="",
+            context_parts=[
+                "# RightMemory root changes since previous retrieve turn\n\n```diff\n+new\n```",
+            ],
             query="find new",
         )
 
         self.assertTrue(text.startswith("# RightMemory root changes since previous retrieve turn\n"))
         self.assertNotIn("Daily RightMemory root snapshot", text)
-        self.assertNotIn("Prior retrieve conversation", text)
         self.assertTrue(text.rstrip().endswith("# Query\n\nfind new"))
 
     def test_recent_submitted_context_block_omits_empty_entries(self):
@@ -180,28 +182,97 @@ class RetrieveContextRequestTests(unittest.TestCase):
         self.assertTrue(block.startswith("# Recent submitted RightMemory candidates"))
         self.assertIn("remember delta", block)
 
-    def test_retrieve_context_store_persists_turns_and_commit_cursor(self):
+    def test_recent_submitted_context_reports_removed_candidates_without_bodies(self):
+        block = format_recent_submitted_context_block(
+            [],
+            no_longer_pending=["update-a:1"],
+        )
+
+        self.assertIn("No longer pending:", block)
+        self.assertIn("`update-a:1`", block)
+
+    def test_material_blocks_are_model_facing_without_delivery_bookkeeping(self):
+        updated = format_updated_material_block(["local item `detail-id`"])
+        current = format_current_material_block("## Detail {#detail-id}\n\nCurrent body.")
+
+        self.assertIn("changed since they were last returned", updated)
+        self.assertIn("local item `detail-id`", updated)
+        self.assertIn("Current retrieval material", current)
+        self.assertNotIn("already_returned", updated + current)
+        self.assertNotIn("avoid_repeats", updated + current)
+
+    def test_retrieve_context_store_persists_native_history_and_cursors(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             store = RetrieveContextStore(root)
+            history = json.dumps(
+                [
+                    {
+                        "kind": "response",
+                        "parts": [{"part_kind": "tool-return", "content": "detail body"}],
+                    }
+                ]
+            ).encode()
 
             state = store.load("retrieve-a")
-            self.assertEqual(state.turns, [])
+            self.assertIsNone(state.model_history_json)
             self.assertIsNone(state.delivered_memory_commit)
 
-            store.record_success("retrieve-a", query="find alpha", answer="alpha answer", memory_commit="abc123")
+            store.record_success(
+                "retrieve-a",
+                memory_commit="abc123",
+                model_history_json=history,
+                visible_recent_candidates={"candidate-key": "update-a:1"},
+                delivery=RetrieveDeliveryCoverage(local_items={"alpha": "hash-a"}),
+            )
             state = store.load("retrieve-a")
 
         self.assertEqual(state.delivered_memory_commit, "abc123")
-        self.assertEqual([(turn.query, turn.answer) for turn in state.turns], [("find alpha", "alpha answer")])
+        self.assertEqual(json.loads(state.model_history_json or b"null"), json.loads(history))
+        self.assertEqual(
+            state.visible_recent_candidates,
+            {"candidate-key": "update-a:1"},
+        )
+        self.assertEqual(state.delivery_coverage.local_items, {"alpha": "hash-a"})
 
     def test_retrieve_context_store_reset_removes_complete_session_state(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = RetrieveContextStore(Path(tempdir))
-            store.record_success("retrieve-a", query="find alpha", answer="answer", memory_commit="abc123")
+            store.record_success(
+                "retrieve-a",
+                memory_commit="abc123",
+                model_history_json=b"[]",
+                visible_recent_candidates={},
+            )
 
             self.assertTrue(store.reset("retrieve-a"))
             state = store.load("retrieve-a")
 
-        self.assertEqual(state.turns, [])
+        self.assertIsNone(state.model_history_json)
         self.assertIsNone(state.delivered_memory_commit)
+
+    def test_legacy_synthetic_turn_state_is_not_silently_reused(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            path = (
+                root
+                / ".runtime"
+                / "retrieve_context"
+                / "sessions"
+                / "retrieve-a.json"
+            )
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "session_id": "retrieve-a",
+                        "delivered_memory_commit": "abc123",
+                        "turns": [{"query": "old", "answer": "old"}],
+                        "delivery_coverage": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "unsupported field.*turns"):
+                RetrieveContextStore(root).load("retrieve-a")

@@ -111,7 +111,7 @@ class RetrieveDeliveryCoverage:
     source_items: dict[str, str] = field(default_factory=dict)
     complete_sources: dict[str, str] = field(default_factory=dict)
     ranges: list[DeliveredRange] = field(default_factory=list)
-    recent_candidates: list[str] = field(default_factory=list)
+    recent_candidates: dict[str, str] = field(default_factory=dict)
 
     def merged(self, newer: RetrieveDeliveryCoverage) -> RetrieveDeliveryCoverage:
         local_items = {**self.local_items, **newer.local_items}
@@ -134,7 +134,7 @@ class RetrieveDeliveryCoverage:
                 ranges.append(item)
                 known_ranges.add(key)
 
-        recent = list(dict.fromkeys((*self.recent_candidates, *newer.recent_candidates)))
+        recent = {**self.recent_candidates, **newer.recent_candidates}
         return RetrieveDeliveryCoverage(
             local_items=local_items,
             source_items=source_items,
@@ -176,31 +176,19 @@ class RetrieveSelectionRenderer:
         self,
         selection: RetrieveSelection,
         *,
-        delivered: RetrieveDeliveryCoverage | None = None,
         recent_entries: list[RecentSubmittedMemoryEntry] | None = None,
-        include_returned: bool = False,
     ) -> RenderedRetrieveSelection:
-        delivered = delivered or RetrieveDeliveryCoverage()
         recent_entries = recent_entries or []
         manifest = build_graph_manifest(self.memory_root)
 
-        local_text, local_delivery = self._render_local(
-            selection.ids,
-            manifest,
-            delivered,
-            include_returned=include_returned,
-        )
+        local_text, local_delivery = self._render_local(selection.ids, manifest)
         source_sections = self._render_sources(
             selection.sources,
             manifest,
-            delivered,
-            include_returned=include_returned,
         )
         recent_text, selected_recent = self._render_recent(
             selection.recent_candidates,
             recent_entries,
-            delivered,
-            include_returned=include_returned,
         )
 
         sections: list[str] = []
@@ -234,17 +222,254 @@ class RetrieveSelectionRenderer:
             source_items=source_items,
             complete_sources=complete_sources,
             ranges=delivered_ranges,
-            recent_candidates=[_candidate_selection_id(entry) for entry in selected_recent],
+            recent_candidates={
+                _candidate_selection_id(entry): _hash_text(_rstrip_newlines(entry.message))
+                for entry in selected_recent
+            },
         )
         return RenderedRetrieveSelection(output, delivery, selected_recent)
+
+    def current_delivery_selection(
+        self,
+        delivered: RetrieveDeliveryCoverage,
+        *,
+        recent_entries: list[RecentSubmittedMemoryEntry] | None = None,
+        unchanged_only: bool = False,
+    ) -> RetrieveSelection:
+        """Return the currently selectable form of previously delivered coverage."""
+        manifest = build_graph_manifest(self.memory_root)
+        local_ids = [
+            item_id
+            for item_id, version in delivered.local_items.items()
+            if (
+                item_id not in manifest.duplicates
+                and (item := manifest.items.get(item_id)) is not None
+                and (not unchanged_only or item.content_hash == version)
+            )
+        ]
+        local_ids.sort(
+            key=lambda item_id: (
+                manifest.items[item_id].traversal_rank,
+                item_id,
+            )
+        )
+
+        source_parts: dict[str, tuple[list[str], list[LineRange]]] = {}
+        for key, version in delivered.source_items.items():
+            try:
+                source_id, item_id = key.rsplit(":", 1)
+            except ValueError:
+                continue
+            match = SOURCE_ID_RE.fullmatch(source_id)
+            if match is None:
+                continue
+            marker, owner_id, qualified_owner_id, _nested_marker, _nested_id = match.groups()
+            if marker != "MF#" or owner_id is None or qualified_owner_id is not None:
+                continue
+            try:
+                self._require_local_source_owner(
+                    manifest,
+                    owner_id,
+                    "MF#",
+                    source_id,
+                )
+                package = self._validated_mf_package(owner_id, source_id)
+            except (OSError, ValueError):
+                continue
+            item = package.manifest.items.get(item_id)
+            if item is None or (unchanged_only and item.content_hash != version):
+                continue
+            ids, _ranges = source_parts.setdefault(source_id, ([], []))
+            ids.append(item_id)
+
+        for source_id, version in delivered.complete_sources.items():
+            text = self._current_linked_source_text(
+                source_id,
+                manifest,
+                expected_marker="S#",
+            )
+            if text is None or (
+                unchanged_only and _hash_text(text.rstrip("\r\n")) != version
+            ):
+                continue
+            source_parts.setdefault(source_id, ([], []))
+
+        current_range_texts: dict[str, str | None] = {}
+        ranges_by_source: dict[str, list[tuple[int, int]]] = {}
+        for delivered_range in delivered.ranges:
+            source_id = delivered_range.source_id
+            if source_id not in current_range_texts:
+                current_range_texts[source_id] = self._current_linked_source_text(
+                    source_id,
+                    manifest,
+                    expected_marker="M#",
+                )
+            text = current_range_texts[source_id]
+            if text is None or (
+                unchanged_only and _hash_text(text) != delivered_range.source_hash
+            ):
+                continue
+            if delivered_range.end > len(text.splitlines()):
+                continue
+            ranges_by_source.setdefault(source_id, []).append(
+                (delivered_range.start, delivered_range.end)
+            )
+        for source_id, intervals in ranges_by_source.items():
+            _ids, ranges = source_parts.setdefault(source_id, ([], []))
+            ranges.extend(
+                LineRange(start=start, end=end)
+                for start, end in _merge_intervals(intervals)
+            )
+
+        recent_candidates = [
+            selection_id
+            for entry in (recent_entries or [])
+            if (
+                (selection_id := _candidate_selection_id(entry))
+                in delivered.recent_candidates
+                and (
+                    not unchanged_only
+                    or delivered.recent_candidates[selection_id]
+                    == _hash_text(_rstrip_newlines(entry.message))
+                )
+            )
+        ]
+        sources = [
+            SourceSelection(
+                source_id=source_id,
+                ids=sorted(set(ids)),
+                ranges=ranges,
+            )
+            for source_id, (ids, ranges) in sorted(source_parts.items())
+        ]
+        return RetrieveSelection(
+            ids=local_ids,
+            sources=sources,
+            recent_candidates=recent_candidates,
+        )
+
+    def changed_delivery_labels(
+        self,
+        delivered: RetrieveDeliveryCoverage,
+        *,
+        recent_entries: list[RecentSubmittedMemoryEntry] | None = None,
+    ) -> list[str]:
+        """Describe selectable delivered material whose current content changed."""
+        current = self.current_delivery_selection(
+            delivered,
+            recent_entries=recent_entries,
+        )
+        unchanged = self.current_delivery_selection(
+            delivered,
+            recent_entries=recent_entries,
+            unchanged_only=True,
+        )
+        manifest = build_graph_manifest(self.memory_root)
+        labels = [
+            f"local item `{item_id}`"
+            for item_id in current.ids
+            if item_id not in set(unchanged.ids)
+            and (block := manifest.block_for_id(item_id)) is not None
+            and block.source_path.name not in {"MEMORY.md", "PURSUITS.md"}
+        ]
+        unchanged_sources = {source.source_id: source for source in unchanged.sources}
+        for source in current.sources:
+            old = unchanged_sources.get(source.source_id)
+            old_ids = set(old.ids if old is not None else [])
+            labels.extend(
+                f"item `{item_id}` in `{source.source_id}`"
+                for item_id in source.ids
+                if item_id not in old_ids
+            )
+            current_ranges = {(item.start, item.end) for item in source.ranges}
+            old_ranges = {
+                (item.start, item.end)
+                for item in (old.ranges if old is not None else [])
+            }
+            if current_ranges and current_ranges != old_ranges:
+                labels.append(f"source `{source.source_id}`")
+            if not source.ids and not source.ranges and old is None:
+                labels.append(f"source `{source.source_id}`")
+        delivered_range_hashes: dict[str, set[str]] = {}
+        for delivered_range in delivered.ranges:
+            delivered_range_hashes.setdefault(delivered_range.source_id, set()).add(
+                delivered_range.source_hash
+            )
+        for source_id, old_hashes in delivered_range_hashes.items():
+            text = self._current_linked_source_text(
+                source_id,
+                manifest,
+                expected_marker="M#",
+            )
+            if (
+                text is not None
+                and _hash_text(text) not in old_hashes
+            ):
+                labels.append(f"source `{source_id}`")
+        old_recent = set(unchanged.recent_candidates)
+        labels.extend(
+            f"recent candidate `{candidate_id}`"
+            for candidate_id in current.recent_candidates
+            if candidate_id not in old_recent
+        )
+        return list(dict.fromkeys(labels))
+
+    def _current_linked_source_text(
+        self,
+        source_id: str,
+        manifest: GraphManifest,
+        *,
+        expected_marker: str,
+    ) -> str | None:
+        match = SOURCE_ID_RE.fullmatch(source_id)
+        if match is None:
+            return None
+        marker, owner_id, qualified_owner_id, nested_marker, nested_id = match.groups()
+        try:
+            if qualified_owner_id is None:
+                if marker != expected_marker or owner_id is None:
+                    return None
+                owner = self._require_local_source_owner(
+                    manifest,
+                    owner_id,
+                    expected_marker,
+                    source_id,
+                )
+                reference = manifest.backing.get(owner.item_id or "")
+                source_root = self.memory_root
+            else:
+                if nested_marker != expected_marker or nested_id is None:
+                    return None
+                self._require_local_source_owner(
+                    manifest,
+                    qualified_owner_id,
+                    "MF#",
+                    source_id,
+                )
+                package = self._validated_mf_package(qualified_owner_id, source_id)
+                nested = package.manifest.block_for_id(nested_id)
+                if (
+                    nested is None
+                    or nested.kind != "heading"
+                    or nested.anchor_kind != expected_marker
+                ):
+                    return None
+                reference = package.manifest.backing.get(nested_id)
+                source_root = package.root
+            if (
+                reference is None
+                or reference.kind != expected_marker
+                or not _safe_source_file(source_root, reference.path)
+            ):
+                return None
+            return _read_text(reference.path)
+        except (OSError, UnicodeError, ValueError):
+            return None
 
     def _render_local(
         self,
         requested_ids: list[str],
         manifest: GraphManifest,
-        delivered: RetrieveDeliveryCoverage,
-        *,
-        include_returned: bool,
     ) -> tuple[str, dict[str, str]]:
         full_entries: set[BlockKey] = set()
         exact_entries: set[BlockKey] = set()
@@ -258,8 +483,6 @@ class RetrieveSelectionRenderer:
             if item is None or entry is None:
                 raise RetrieveSelectionError(f"unknown local graph id `{item_id}`")
             version = item.content_hash
-            if not include_returned and delivered.local_items.get(item_id) == version:
-                continue
             if entry.kind == "heading":
                 full_entries.add(entry.key)
                 if entry.family == "pursuit":
@@ -299,9 +522,6 @@ class RetrieveSelectionRenderer:
         self,
         requested_sources: list[SourceSelection],
         manifest: GraphManifest,
-        delivered: RetrieveDeliveryCoverage,
-        *,
-        include_returned: bool,
     ) -> list[_RenderedSource]:
         merged: dict[str, tuple[list[str], list[LineRange]]] = {}
         for source in requested_sources:
@@ -329,8 +549,6 @@ class RetrieveSelectionRenderer:
                         nested_id or "",
                         ids,
                         ranges,
-                        delivered,
-                        include_returned=include_returned,
                     )
                 )
                 continue
@@ -349,8 +567,6 @@ class RetrieveSelectionRenderer:
                         ids,
                         ranges,
                         manifest,
-                        delivered,
-                        include_returned=include_returned,
                     )
                 )
             elif marker == "S#":
@@ -361,8 +577,6 @@ class RetrieveSelectionRenderer:
                         ids,
                         ranges,
                         manifest,
-                        delivered,
-                        include_returned=include_returned,
                     )
                 )
             else:
@@ -372,8 +586,6 @@ class RetrieveSelectionRenderer:
                         owner,
                         ids,
                         ranges,
-                        delivered,
-                        include_returned=include_returned,
                     )
                 )
         return rendered
@@ -404,9 +616,6 @@ class RetrieveSelectionRenderer:
         ids: list[str],
         ranges: list[LineRange],
         manifest: GraphManifest,
-        delivered: RetrieveDeliveryCoverage,
-        *,
-        include_returned: bool,
     ) -> _RenderedSource:
         if ids:
             raise RetrieveSelectionError(f"`{source_id}` is free-form Markdown; select line ranges, not ids")
@@ -420,8 +629,6 @@ class RetrieveSelectionRenderer:
             source_id,
             text,
             ranges,
-            delivered.ranges,
-            include_returned=include_returned,
         )
         return _RenderedSource(owner.traversal_rank, source_id, resolved.text, ranges=resolved.delivered)
 
@@ -432,9 +639,6 @@ class RetrieveSelectionRenderer:
         ids: list[str],
         ranges: list[LineRange],
         manifest: GraphManifest,
-        delivered: RetrieveDeliveryCoverage,
-        *,
-        include_returned: bool,
     ) -> _RenderedSource:
         if ids or ranges:
             raise RetrieveSelectionError(f"`{source_id}` is selected as one complete skill; ids and ranges are invalid")
@@ -443,8 +647,6 @@ class RetrieveSelectionRenderer:
             raise RetrieveSelectionError(f"missing skill source `{source_id}`")
         text = _read_text(reference.path).rstrip("\r\n")
         version = _hash_text(text)
-        if not include_returned and delivered.complete_sources.get(source_id) == version:
-            return _RenderedSource(owner.traversal_rank, source_id, "")
         return _RenderedSource(
             owner.traversal_rank,
             source_id,
@@ -458,9 +660,6 @@ class RetrieveSelectionRenderer:
         owner: DocumentBlock,
         ids: list[str],
         ranges: list[LineRange],
-        delivered: RetrieveDeliveryCoverage,
-        *,
-        include_returned: bool,
     ) -> _RenderedSource:
         if ranges:
             raise RetrieveSelectionError(
@@ -484,8 +683,6 @@ class RetrieveSelectionRenderer:
                 raise RetrieveSelectionError(f"unknown source-scoped id `{item_id}` in `{source_id}`")
             key = f"{source_id}:{item_id}"
             version = item.content_hash
-            if not include_returned and delivered.source_items.get(key) == version:
-                continue
             if entry.kind == "heading":
                 full_entries.add(entry.key)
                 for descendant in mf_manifest.walk_logical(entry.key, include_self=True):
@@ -525,9 +722,6 @@ class RetrieveSelectionRenderer:
         nested_id: str,
         ids: list[str],
         ranges: list[LineRange],
-        delivered: RetrieveDeliveryCoverage,
-        *,
-        include_returned: bool,
     ) -> _RenderedSource:
         owner_id = owner.item_id or ""
         validated = self._validated_mf_package(owner_id, source_id)
@@ -551,8 +745,6 @@ class RetrieveSelectionRenderer:
                 source_id,
                 _read_text(reference.path),
                 ranges,
-                delivered.ranges,
-                include_returned=include_returned,
             )
             return _RenderedSource(
                 owner.traversal_rank,
@@ -569,8 +761,6 @@ class RetrieveSelectionRenderer:
             )
         text = _read_text(reference.path).rstrip("\r\n")
         version = _hash_text(text)
-        if not include_returned and delivered.complete_sources.get(source_id) == version:
-            return _RenderedSource(owner.traversal_rank, source_id, "")
         return _RenderedSource(
             owner.traversal_rank,
             source_id,
@@ -605,9 +795,6 @@ class RetrieveSelectionRenderer:
         self,
         requested_ids: list[str],
         entries: list[RecentSubmittedMemoryEntry],
-        delivered: RetrieveDeliveryCoverage,
-        *,
-        include_returned: bool,
     ) -> tuple[str, list[RecentSubmittedMemoryEntry]]:
         by_id = {_candidate_selection_id(entry): entry for entry in entries}
         requested = set(_unique(requested_ids))
@@ -618,7 +805,6 @@ class RetrieveSelectionRenderer:
             entry
             for entry in entries
             if _candidate_selection_id(entry) in requested
-            and (include_returned or _candidate_selection_id(entry) not in delivered.recent_candidates)
         ]
         blocks = []
         for entry in selected:
@@ -710,9 +896,7 @@ def _resolve_line_ranges(
     source_id: str,
     text: str,
     requested: list[LineRange],
-    delivered: list[DeliveredRange],
     *,
-    include_returned: bool,
     omit_intervals: list[tuple[int, int]] | None = None,
 ) -> _ResolvedRanges:
     lines = text.splitlines()
@@ -732,13 +916,6 @@ def _resolve_line_ranges(
     intervals = _merge_source_intervals(intervals, heading_lines)
     if omit_intervals:
         intervals = _subtract_intervals(intervals, _merge_intervals(omit_intervals))
-    if not include_returned:
-        old = [
-            (item.start, item.end)
-            for item in delivered
-            if item.source_id == source_id and item.source_hash == source_hash
-        ]
-        intervals = _subtract_intervals(intervals, _merge_intervals(old))
     if not intervals:
         return _ResolvedRanges("", [])
 

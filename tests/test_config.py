@@ -47,6 +47,20 @@ from rightmemory.update_corrector import UpdateCorrectionResult
 EMPTY_RETRIEVE_SELECTION_JSON = '{"ids": [], "sources": [], "recent_candidates": []}'
 
 
+def _history_text(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(_history_text(item) for item in value)
+    if isinstance(value, dict):
+        return "\n".join(_history_text(item) for item in value.values())
+    if hasattr(value, "content"):
+        return _history_text(value.content)
+    if hasattr(value, "parts"):
+        return _history_text(value.parts)
+    return ""
+
+
 class ConfigTests(unittest.TestCase):
     def test_load_config_accepts_explicit_memory_root(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -927,6 +941,15 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("offset, limit", instructions)
         self.assertIn("terminal retrieve-selection output type", instructions)
         self.assertIn('"recent_candidates"', instructions)
+        self.assertIn(
+            "Do not select unchanged content that you have already returned",
+            instructions,
+        )
+        self.assertNotIn("already_returned", instructions)
+        self.assertNotIn("avoid_repeats", instructions)
+        self.assertNotIn("include_returned", instructions)
+        self.assertNotIn("delivery coverage", instructions)
+        self.assertNotIn("prior-delivery omission", instructions)
         self.assertNotIn("Read `MEMORY.md` before retrieval", instructions)
         self.assertNotIn("Follow each with a one-line note", instructions)
         self.assertNotIn("read_command", instructions)
@@ -1127,7 +1150,7 @@ class RuntimeTests(unittest.TestCase):
         root = Path(self.tempdir.name)
         (root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=root)
-        captured: dict[str, str] = {}
+        captured: dict[str, object] = {}
 
         class FakeResult:
             output = RetrieveSelection()
@@ -1138,6 +1161,7 @@ class RuntimeTests(unittest.TestCase):
         class FakeAgent:
             def run_sync(self, message, **kwargs):
                 captured["message"] = message
+                captured["message_history"] = kwargs.get("message_history")
                 return FakeResult()
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
@@ -1147,9 +1171,10 @@ class RuntimeTests(unittest.TestCase):
                 output = runtime.run_session_turn("agent-session", "what do we know?")
 
         self.assertEqual(output, "no strong match")
-        self.assertTrue(captured["message"].startswith("Daily RightMemory root snapshot\n"))
-        self.assertIn("===== MEMORY.md =====", captured["message"])
-        self.assertTrue(captured["message"].rstrip().endswith("# Query\n\nwhat do we know?"))
+        self.assertEqual(captured["message"], "# Query\n\nwhat do we know?")
+        history_text = _history_text(captured["message_history"])
+        self.assertIn("Daily RightMemory root snapshot", history_text)
+        self.assertIn("===== MEMORY.md =====", history_text)
 
     def test_update_turn_publishes_approved_file_views_after_success(self):
         root = Path(self.tempdir.name)
@@ -2238,7 +2263,12 @@ class RuntimeTests(unittest.TestCase):
             [
                 ("locked", NO_SESSION_RIGHTMEMORY_SESSION_ID),
                 "lock_enter",
-                ("agent", "Daily RightMemory root snapshot\n\n# Query\n\nremember one\n"),
+                (
+                    "agent",
+                    "Daily RightMemory root snapshot\n\n"
+                    "# Query\n\n"
+                    "remember one\n",
+                ),
                 "lock_exit",
             ],
         )
@@ -2308,18 +2338,72 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(first, "no strong match")
         self.assertEqual(second, "no strong match")
-        self.assertIsNone(runtime.agent.calls[0]["message_history"])
-        self.assertIsNone(runtime.agent.calls[1]["message_history"])
-        self.assertIn("# Prior retrieve conversation", runtime.agent.calls[1]["message"])
-        self.assertIn("User: remember one", runtime.agent.calls[1]["message"])
-        self.assertIn("Assistant: no strong match", runtime.agent.calls[1]["message"])
+        self.assertEqual(runtime.agent.calls[0]["message"], "# Query\n\nremember one")
+        self.assertIn(
+            "Daily RightMemory root snapshot",
+            _history_text(runtime.agent.calls[0]["message_history"]),
+        )
+        second_history = _history_text(runtime.agent.calls[1]["message_history"])
+        self.assertIn("# Query\n\nremember one", second_history)
+        self.assertIn(RetrieveSelection().model_dump_json(), second_history)
+        self.assertNotIn("Prior retrieve conversation", second_history)
         self.assertEqual(
             runtime.agent.calls[0]["model_settings"],
             {"extra_body": {"chat_template_kwargs": {"thinking": True}}},
         )
         self.assertEqual(runtime.agent.calls[0]["usage_limits"].request_limit, 100)
 
-    def test_retrieve_turn_keeps_unselected_recent_submitted_memory_visible(self):
+    def test_include_returned_attaches_current_content_for_one_call_and_preserves_coverage(self):
+        root = Path(self.tempdir.name)
+        (root / "MEMORY.md").write_text(
+            "# Root {#root}\n\n"
+            "- `fact` Remembered fact. -> []\n",
+            encoding="utf-8",
+        )
+        (root / "PURSUITS.md").write_text("# Pursuits {#pursuits}\n", encoding="utf-8")
+        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=root)
+        selections = iter(
+            [
+                RetrieveSelection(ids=["fact"]),
+                RetrieveSelection(ids=["fact"]),
+                RetrieveSelection(ids=["fact"]),
+                RetrieveSelection(),
+            ]
+        )
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+            runtime.agent.output_values = selections
+            first = runtime.run_session_turn("agent-session", "find it")
+            model_repeated = runtime.run_session_turn(
+                "agent-session",
+                "select it despite coverage",
+            )
+            override_repeated = runtime.run_session_turn(
+                "agent-session",
+                "show it again",
+                include_returned=True,
+            )
+            final = runtime.run_session_turn("agent-session", "anything new?")
+
+        self.assertIn("Remembered fact.", first)
+        self.assertIn("Remembered fact.", model_repeated)
+        self.assertIn("Remembered fact.", override_repeated)
+        self.assertEqual(final, "no strong match")
+        override_history = runtime.agent.calls[2]["message_history"]
+        self.assertIn("Current retrieval material", _history_text(override_history))
+        self.assertIn("Remembered fact.", _history_text(override_history))
+        self.assertTrue(any(hasattr(item, "parts") for item in override_history))
+        final_history = runtime.agent.calls[3]["message_history"]
+        self.assertFalse(any(hasattr(item, "parts") for item in final_history))
+        all_context = "\n".join(
+            _history_text(call["message_history"])
+            for call in runtime.agent.calls
+        )
+        self.assertNotIn("already_returned", all_context)
+        self.assertNotIn("avoid_repeats", all_context)
+        self.assertIn("fact", runtime.retrieve_context.load("agent-session").delivery_coverage.local_items)
+
+    def test_retrieve_turn_appends_only_new_recent_submitted_memory(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
         self._write_async_update_state(
             "update-a",
@@ -2356,31 +2440,51 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(first, "no strong match")
         self.assertEqual(second, "no strong match")
         self.assertEqual(other_session, "no strong match")
-        self.assertIn("Recent submitted RightMemory candidates", runtime.agent.calls[0]["message"])
-        self.assertIn("remember first submitted detail", runtime.agent.calls[0]["message"])
-        self.assertLess(
-            runtime.agent.calls[0]["message"].index("# Recent submitted RightMemory candidates"),
-            runtime.agent.calls[0]["message"].index("# Query"),
-        )
-        self.assertTrue(runtime.agent.calls[0]["message"].rstrip().endswith("# Query\n\nfind one"))
-        self.assertIn("Recent submitted RightMemory candidates", runtime.agent.calls[1]["message"])
-        self.assertIn("remember second submitted detail", runtime.agent.calls[1]["message"])
-        self.assertIn("remember first submitted detail", runtime.agent.calls[1]["message"])
-        self.assertLess(
-            runtime.agent.calls[1]["message"].index("# Recent submitted RightMemory candidates"),
-            runtime.agent.calls[1]["message"].index("# Query"),
-        )
-        self.assertTrue(runtime.agent.calls[1]["message"].rstrip().endswith("# Query\n\nfind two"))
-        self.assertIn("Recent submitted RightMemory candidates", runtime.agent.calls[2]["message"])
-        self.assertIn("remember first submitted detail", runtime.agent.calls[2]["message"])
-        self.assertIn("remember second submitted detail", runtime.agent.calls[2]["message"])
-        self.assertLess(
-            runtime.agent.calls[2]["message"].index("# Recent submitted RightMemory candidates"),
-            runtime.agent.calls[2]["message"].index("# Query"),
-        )
-        self.assertTrue(runtime.agent.calls[2]["message"].rstrip().endswith("# Query\n\nfind three"))
+        first_history = _history_text(runtime.agent.calls[0]["message_history"])
+        bootstrap = runtime.agent.calls[0]["message_history"][0]
+        self.assertEqual(len(bootstrap.parts), 2)
+        self.assertIn("Daily RightMemory root snapshot", bootstrap.parts[0].content)
+        self.assertIn("Recent submitted RightMemory candidates", bootstrap.parts[1].content)
+        second_new_part = runtime.agent.calls[1]["message_history"][-1]
+        other_history = _history_text(runtime.agent.calls[2]["message_history"])
+        self.assertIn("remember first submitted detail", first_history)
+        self.assertIn("remember second submitted detail", _history_text(second_new_part))
+        self.assertNotIn("remember first submitted detail", _history_text(second_new_part))
+        self.assertIn("remember first submitted detail", other_history)
+        self.assertIn("remember second submitted detail", other_history)
+        self.assertEqual(runtime.agent.calls[0]["message"], "# Query\n\nfind one")
+        self.assertEqual(runtime.agent.calls[1]["message"], "# Query\n\nfind two")
+        self.assertEqual(runtime.agent.calls[2]["message"], "# Query\n\nfind three")
 
-    def test_retrieve_turn_sends_snapshot_first_and_stores_only_real_turns(self):
+    def test_retrieve_turn_reports_candidates_that_are_no_longer_pending(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            model_id="openai/test",
+            memory_root=Path(self.tempdir.name),
+        )
+        self._write_async_update_state(
+            "update-a",
+            pending=[
+                {
+                    "id": 1,
+                    "message": "temporary candidate body",
+                    "submitted_at": "2026-05-19T00:00:00+00:00",
+                }
+            ],
+        )
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+            runtime.run_session_turn("agent-session", "find one")
+            self._write_async_update_state("update-a", pending=[])
+            runtime.run_session_turn("agent-session", "find two")
+
+        update = _history_text(runtime.agent.calls[1]["message_history"][-1])
+        self.assertIn("No longer pending:", update)
+        self.assertIn("`update-a:1`", update)
+        self.assertNotIn("temporary candidate body", update)
+
+    def test_retrieve_turn_sends_snapshot_as_history_and_persists_native_history(self):
         root = Path(self.tempdir.name)
         (root / "MEMORY.md").write_text("# Root {#root}\n\nremembered root\n", encoding="utf-8")
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=root)
@@ -2392,25 +2496,22 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(first, "no strong match")
         self.assertEqual(second, "no strong match")
-        self.assertTrue(runtime.agent.calls[0]["message"].startswith("Daily RightMemory root snapshot\n"))
-        self.assertIn("===== MEMORY.md =====", runtime.agent.calls[0]["message"])
-        self.assertTrue(runtime.agent.calls[0]["message"].rstrip().endswith("# Query\n\nfind root"))
-        self.assertIsNone(runtime.agent.calls[0]["message_history"])
-        self.assertIsNone(runtime.agent.calls[1]["message_history"])
-        self.assertIn("# Prior retrieve conversation", runtime.agent.calls[1]["message"])
-        self.assertIn("User: find root", runtime.agent.calls[1]["message"])
-        self.assertIn("Assistant: no strong match", runtime.agent.calls[1]["message"])
+        self.assertEqual(runtime.agent.calls[0]["message"], "# Query\n\nfind root")
+        first_history = _history_text(runtime.agent.calls[0]["message_history"])
+        self.assertIn("Daily RightMemory root snapshot", first_history)
+        self.assertIn("===== MEMORY.md =====", first_history)
+        second_history = _history_text(runtime.agent.calls[1]["message_history"])
+        self.assertIn("# Query\n\nfind root", second_history)
+        self.assertIn(RetrieveSelection().model_dump_json(), second_history)
+        self.assertNotIn("Prior retrieve conversation", second_history)
 
         state_path = root / ".runtime" / "retrieve_context" / "sessions" / "agent-session.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        self.assertEqual(
-            state["turns"],
-            [
-                {"query": "find root", "answer": "no strong match"},
-                {"query": "find again", "answer": "no strong match"},
-            ],
-        )
-        self.assertNotIn("Daily RightMemory root snapshot", state_path.read_text(encoding="utf-8"))
+        self.assertIn("model_history", state)
+        state_text = state_path.read_text(encoding="utf-8")
+        self.assertIn("Daily RightMemory root snapshot", state_text)
+        self.assertIn("# Query\\n\\nfind root", state_text)
+        self.assertIn("# Query\\n\\nfind again", state_text)
 
     def test_retrieve_turn_does_not_record_context_state_after_failure(self):
         root = Path(self.tempdir.name)
@@ -2448,11 +2549,53 @@ class RuntimeTests(unittest.TestCase):
             runtime.run_session_turn("agent-session", "find second")
             runtime.run_session_turn("agent-session", "find third")
 
-        second_message = runtime.agent.calls[1]["message"]
-        third_message = runtime.agent.calls[2]["message"]
-        self.assertIn("# RightMemory root changes since previous retrieve turn", second_message)
-        self.assertIn("+second", second_message)
-        self.assertNotIn("# RightMemory root changes since previous retrieve turn", third_message)
+        second_history = runtime.agent.calls[1]["message_history"]
+        third_history = runtime.agent.calls[2]["message_history"]
+        self.assertTrue(any(hasattr(item, "parts") for item in second_history))
+        self.assertIn(
+            "# RightMemory root changes since previous retrieve turn",
+            _history_text(second_history[-1]),
+        )
+        self.assertIn("+second", _history_text(second_history[-1]))
+        self.assertFalse(any(hasattr(item, "parts") for item in third_history))
+
+    def test_retrieve_surfaces_changed_f_detail_with_the_same_id(self):
+        root = Path(self.tempdir.name)
+        (root / "MEMORY.md").write_text(
+            "# Root {#root}\n\n"
+            "## Detail {F#detail}\n\n"
+            "Detail summary.\n",
+            encoding="utf-8",
+        )
+        detail = root / "MEMORY_detail.md"
+        detail.write_text(
+            "### Topic {#topic}\n\n"
+            "- `detail-fact` Original detail. -> []\n",
+            encoding="utf-8",
+        )
+        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=root)
+
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+            runtime.agent.output_values = iter(
+                [
+                    RetrieveSelection(ids=["detail-fact"]),
+                    RetrieveSelection(ids=["detail-fact"]),
+                ]
+            )
+            first = runtime.run_session_turn("agent-session", "find detail")
+            detail.write_text(
+                "### Topic {#topic}\n\n"
+                "- `detail-fact` Revised detail. -> []\n",
+                encoding="utf-8",
+            )
+            second = runtime.run_session_turn("agent-session", "find revised detail")
+
+        update = _history_text(runtime.agent.calls[1]["message_history"][-1])
+        self.assertIn("Original detail.", first)
+        self.assertIn("Revised detail.", second)
+        self.assertIn("# Updated retrieval material", update)
+        self.assertIn("local item `detail-fact`", update)
 
     def test_retrieve_request_prefix_is_byte_identical_before_first_volatile_block(self):
         root = Path(self.tempdir.name)
@@ -2465,11 +2608,11 @@ class RuntimeTests(unittest.TestCase):
             second_runtime = RightMemoryRuntime(config)
             second_runtime.run_session_turn("session-b", "find beta")
 
-        first = first_runtime.agent.calls[0]["message"].split("# Query", 1)[0]
-        second = second_runtime.agent.calls[0]["message"].split("# Query", 1)[0]
+        first = _history_text(first_runtime.agent.calls[0]["message_history"])
+        second = _history_text(second_runtime.agent.calls[0]["message_history"])
         self.assertEqual(first, second)
 
-    def test_retrieve_turn_records_recent_submitted_delivery_after_success(self):
+    def test_retrieve_turn_records_candidate_visibility_and_delivery_after_success(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
         self._write_async_update_state(
             "update-a",
@@ -2484,23 +2627,27 @@ class RuntimeTests(unittest.TestCase):
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
-
-            def select_candidate(message, **kwargs):
-                return type(
-                    "Result",
-                    (),
-                    {"output": RetrieveSelection(recent_candidates=["update-a:1"])},
-                )()
-
-            runtime.agent.run_sync = select_candidate
+            runtime.agent.output_values = iter(
+                [RetrieveSelection(recent_candidates=["update-a:1"])]
+            )
             runtime.run_session_turn("agent-session", "find one")
 
-        state_path = Path(self.tempdir.name) / ".runtime" / "recent_submitted" / "retrieve" / "agent-session.json"
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        self.assertEqual(state["session_id"], "agent-session")
-        self.assertEqual(state["delivered"], [f"{1:032x}"])
+        state = runtime.retrieve_context.load("agent-session")
+        self.assertEqual(
+            state.visible_recent_candidates,
+            {f"{1:032x}": "update-a:1"},
+        )
+        self.assertIn("update-a:1", state.delivery_coverage.recent_candidates)
+        separate_state = (
+            Path(self.tempdir.name)
+            / ".runtime"
+            / "recent_submitted"
+            / "retrieve"
+            / "agent-session.json"
+        )
+        self.assertFalse(separate_state.exists())
 
-    def test_retrieve_turn_does_not_record_recent_submitted_delivery_after_failure(self):
+    def test_retrieve_turn_does_not_advance_candidate_state_after_failure(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
         self._write_async_update_state(
             "update-a",
@@ -2512,22 +2659,28 @@ class RuntimeTests(unittest.TestCase):
                 }
             ],
         )
-        seen_messages = []
+        seen_histories = []
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
 
             def run_sync(message, message_history=None, model_settings=None, usage_limits=None):
-                seen_messages.append(message)
+                seen_histories.append(message_history)
                 raise RuntimeError("model failed")
 
             runtime.agent.run_sync = run_sync
             with self.assertRaises(RuntimeError):
                 runtime.run_session_turn("agent-session", "find one")
 
-        state_path = Path(self.tempdir.name) / ".runtime" / "recent_submitted" / "retrieve" / "agent-session.json"
+        state_path = (
+            Path(self.tempdir.name)
+            / ".runtime"
+            / "retrieve_context"
+            / "sessions"
+            / "agent-session.json"
+        )
         self.assertFalse(state_path.exists())
-        self.assertIn("remember failed delivery retry", seen_messages[0])
+        self.assertIn("remember failed delivery retry", _history_text(seen_histories[0]))
 
     def test_cli_agent_retrieve_receives_recent_submitted_memory(self):
         config = RuntimeConfig(
@@ -2584,9 +2737,9 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
             runtime.retrieve_context.record_success(
                 "agent-session",
-                query="old question",
-                answer="old answer",
                 memory_commit="old-commit",
+                model_history_json=None,
+                visible_recent_candidates={},
             )
             with (
                 patch("rightmemory.runtime.current_memory_head", return_value="new-commit"),
@@ -2605,7 +2758,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("Prior retrieve conversation", message)
         self.assertNotIn("old question", message)
 
-    def test_cli_agent_new_retrieve_discards_legacy_local_context(self):
+    def test_cli_agent_new_retrieve_starts_fresh_local_context(self):
         root = Path(self.tempdir.name)
         config = RuntimeConfig(
             role="retrieve",
@@ -2621,11 +2774,10 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
             runtime.retrieve_context.record_success(
                 "agent-session",
-                query="legacy question",
-                answer="legacy answer",
                 memory_commit="old-commit",
+                model_history_json=None,
+                visible_recent_candidates={old_entry.key: "update-old:1"},
             )
-            runtime.recent_submitted_delivery.record_delivered("agent-session", [old_entry])
             result = runtime.run_session_turn("agent-session", "fresh question")
 
         self.assertEqual(result, "no strong match")
@@ -2634,8 +2786,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("Prior retrieve conversation", message)
         self.assertNotIn("legacy question", message)
         state = runtime.retrieve_context.load("agent-session")
-        self.assertEqual([(turn.query, turn.answer) for turn in state.turns], [("fresh question", "no strong match")])
-        self.assertEqual(runtime.recent_submitted_delivery.new_entries("agent-session", [old_entry]), [old_entry])
+        self.assertNotEqual(state.delivered_memory_commit, "old-commit")
+        self.assertEqual(state.visible_recent_candidates, {})
 
     def test_cli_agent_chat_uses_process_local_retrieve_continuity(self):
         config = RuntimeConfig(
@@ -3241,6 +3393,29 @@ class RuntimeTests(unittest.TestCase):
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             first_runtime = RightMemoryRuntime(config)
+            first_runtime.agent.extra_history_messages = [
+                {
+                    "kind": "response",
+                    "parts": [
+                        {"part_kind": "thinking", "content": "inspect the detail"},
+                        {
+                            "part_kind": "tool-call",
+                            "tool_name": "read_detail",
+                            "args": {"detail_id": "alpha"},
+                        },
+                    ],
+                },
+                {
+                    "kind": "request",
+                    "parts": [
+                        {
+                            "part_kind": "tool-return",
+                            "tool_name": "read_detail",
+                            "content": "authoritative detail body",
+                        }
+                    ],
+                },
+            ]
             first = first_runtime.run_session_turn("agent-session", "remember one")
             first_runtime.cleanup()
 
@@ -3249,24 +3424,22 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(first, "no strong match")
         self.assertEqual(second, "no strong match")
-        self.assertIsNone(first_runtime.agent.calls[0]["message_history"])
-        self.assertIsNone(second_runtime.agent.calls[0]["message_history"])
-        self.assertIn("# Prior retrieve conversation", second_runtime.agent.calls[0]["message"])
-        self.assertIn("User: remember one", second_runtime.agent.calls[0]["message"])
-        self.assertIn("Assistant: no strong match", second_runtime.agent.calls[0]["message"])
+        first_history = _history_text(first_runtime.agent.calls[0]["message_history"])
+        self.assertIn("Daily RightMemory root snapshot", first_history)
+        second_history = _history_text(second_runtime.agent.calls[0]["message_history"])
+        self.assertIn("inspect the detail", second_history)
+        self.assertIn("read_detail", second_history)
+        self.assertIn("authoritative detail body", second_history)
+        self.assertIn("# Query\n\nremember one", second_history)
+        self.assertNotIn("Prior retrieve conversation", second_history)
         history_path = Path(self.tempdir.name) / ".runtime" / "sessions" / "retrieve" / "agent-session.json"
         self.assertFalse(history_path.exists())
         retrieve_state_path = (
             Path(self.tempdir.name) / ".runtime" / "retrieve_context" / "sessions" / "agent-session.json"
         )
         retrieve_state = json.loads(retrieve_state_path.read_text(encoding="utf-8"))
-        self.assertEqual(
-            retrieve_state["turns"],
-            [
-                {"query": "remember one", "answer": "no strong match"},
-                {"query": "what was that?", "answer": "no strong match"},
-            ],
-        )
+        self.assertIn("model_history", retrieve_state)
+        self.assertIn("authoritative detail body", retrieve_state_path.read_text(encoding="utf-8"))
         gitignore_path = Path(self.tempdir.name) / ".runtime" / ".gitignore"
         self.assertEqual(gitignore_path.read_text(encoding="utf-8"), "*\n")
 
@@ -3388,9 +3561,11 @@ class RuntimeTests(unittest.TestCase):
         retrieve_state_path = (
             Path(self.tempdir.name) / ".runtime" / "retrieve_context" / "sessions" / "agent-session.json"
         )
-        self.assertEqual(
-            json.loads(retrieve_state_path.read_text(encoding="utf-8"))["turns"],
-            [{"query": "remember one", "answer": "no strong match"}],
+        retrieve_state = json.loads(retrieve_state_path.read_text(encoding="utf-8"))
+        self.assertIsInstance(retrieve_state["model_history"], list)
+        self.assertIn(
+            "# Query\\n\\nremember one",
+            retrieve_state_path.read_text(encoding="utf-8"),
         )
         trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "retrieve" / "agent-session.jsonl"
         events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
@@ -3599,6 +3774,29 @@ class RuntimeTests(unittest.TestCase):
         class FakeModelRetry(Exception):
             pass
 
+        class FakeUserPromptPart:
+            def __init__(self, content):
+                self.content = content
+                self.part_kind = "user-prompt"
+
+        class FakeModelRequest:
+            def __init__(self, parts):
+                self.parts = parts
+                self.kind = "request"
+
+        def serialize_message(value):
+            if isinstance(value, FakeModelRequest):
+                return {
+                    "kind": "request",
+                    "parts": [serialize_message(part) for part in value.parts],
+                }
+            if isinstance(value, FakeUserPromptPart):
+                return {
+                    "part_kind": "user-prompt",
+                    "content": value.content,
+                }
+            return value
+
         class FakeAgent:
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
@@ -3606,6 +3804,11 @@ class RuntimeTests(unittest.TestCase):
                 self.model = kwargs["model"]
                 self.tools = kwargs["tools"]
                 self.output_type = kwargs.get("output_type")
+                self.output_validators = []
+
+            def output_validator(self, validator):
+                self.output_validators.append(validator)
+                return validator
 
             def run_sync(self, message, message_history=None, model_settings=None, usage_limits=None):
                 self.calls.append(
@@ -3617,11 +3820,36 @@ class RuntimeTests(unittest.TestCase):
                     }
                 )
                 call_count = len(self.calls)
-                output = self.output_type() if self.output_type is not None else f"reply {call_count}"
+                if hasattr(self, "output_values"):
+                    output = next(self.output_values)
+                else:
+                    output = self.output_type() if self.output_type is not None else f"reply {call_count}"
+                for validator in self.output_validators:
+                    output = validator(output)
+                if self.output_type is RetrieveSelection:
+                    all_messages = [
+                        *(serialize_message(item) for item in (message_history or [])),
+                        {
+                            "kind": "request",
+                            "parts": [{"part_kind": "user-prompt", "content": message}],
+                        },
+                        *getattr(self, "extra_history_messages", []),
+                        {
+                            "kind": "response",
+                            "parts": [
+                                {
+                                    "part_kind": "text",
+                                    "content": output.model_dump_json(),
+                                }
+                            ],
+                        },
+                    ]
+                else:
+                    all_messages = [f"message {call_count}"]
 
                 class FakeResult:
                     def all_messages(self):
-                        return [f"message {call_count}"]
+                        return all_messages
 
                     def all_messages_json(self):
                         return json.dumps(self.all_messages()).encode()
@@ -3659,7 +3887,11 @@ class RuntimeTests(unittest.TestCase):
                 ModelRetry=FakeModelRetry,
                 UsageLimits=FakeUsageLimits,
             ),
-            "pydantic_ai.messages": types.SimpleNamespace(ModelMessagesTypeAdapter=FakeModelMessagesTypeAdapter),
+            "pydantic_ai.messages": types.SimpleNamespace(
+                ModelMessagesTypeAdapter=FakeModelMessagesTypeAdapter,
+                ModelRequest=FakeModelRequest,
+                UserPromptPart=FakeUserPromptPart,
+            ),
             "pydantic_ai.models": types.SimpleNamespace(),
             "pydantic_ai.models.openai": types.SimpleNamespace(OpenAIChatModel=FakeModel),
             "pydantic_ai.providers": types.SimpleNamespace(),
@@ -3673,6 +3905,9 @@ class RuntimeTests(unittest.TestCase):
         class FailingAgent:
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
+
+            def output_validator(self, validator):
+                return validator
 
             def run_sync(self, message, message_history=None, model_settings=None, usage_limits=None):
                 raise RuntimeError("model failed")

@@ -4,7 +4,7 @@
 
 Judge which stored source content is strongly relevant to the current query. Do not write the caller-facing answer, summarize matches, explain choices, or add titles. Finish with exactly one structured selection; RightMemory validates it and renders authoritative source text.
 
-The current query is last. The runtime supplies a daily snapshot of `MEMORY.md` and `PURSUITS.md`, any same-day root diff, prior retrieve turns, and newly visible recent updater candidates before it. Apply a diff over the snapshot: added lines are current and removed lines are obsolete.
+The current query is last. The conversation supplies a daily snapshot of `MEMORY.md` and `PURSUITS.md`, followed when needed by root diffs, updated-source notices, and pending updater-candidate changes. Apply a diff over the snapshot: added lines are current and removed lines are obsolete.
 
 ## Selection Contract
 
@@ -40,6 +40,7 @@ Standalone supplies this contract as the terminal output type. CLI-agent must em
 ## Relevance And Progressive Reads
 
 - Select only strongly relevant content. Consider direct matches, synonyms, abbreviations, useful nearby context, and relevant graph relations, but do not automatically select edge targets.
+- Do not select unchanged content that you have already returned in this conversation.
 - Distinguish durable Memory from live Pursuit intent, Focus, state, and continuity.
 - Include relevant user, workflow, or agent-behavior preferences when they materially shape the caller's next action.
 - There is no fixed id count, hop count, or result quota. Select all strong signal and stop when more content stops adding signal.
@@ -52,4 +53,4 @@ Standalone supplies this contract as the terminal output type. CLI-agent must em
 - For MQ#, select the local graph id when its relationship context is relevant. Do not call a provider, invent a question, or imply an answer exists.
 - Recent submitted candidates are unsettled evidence, not Memory or Pursuit. Select a candidate only when that status and content are relevant.
 
-Runtime handles hierarchy, Focus entries, source ordering, overlap, prior-delivery omission, and final formatting. Never compensate for those behaviors with model-authored text.
+Runtime handles hierarchy, Focus entries, source ordering, overlap, and final formatting. The terminal selection is rendered as given. Never compensate for those behaviors with model-authored text.
