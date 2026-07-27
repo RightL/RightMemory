@@ -24,6 +24,11 @@ RightMemory is one graph organized into two document trees. Memory holds durable
 ```
 
 - The heading body states the objective and its meaning.
+- A Pursuit must remain interpretable across agents, devices, and sessions.
+  Its objective, State, Next, and Done when may rely on the schema's local
+  reading context, but every reference that materially affects continuation
+  must be determined by stored context rather than unstated ambient execution
+  context.
 - State is optional when the body and Next already preserve enough context.
 - An active leaf Pursuit has an ordered Next list, normally limited to one to three items. Its first valid item is the default movement.
 - A parent may omit Next when an active child contains the movement.

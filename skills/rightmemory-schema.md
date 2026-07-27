@@ -43,6 +43,29 @@ Nodes use:
 
 Focus entries in `PURSUITS.md` are ordered references to Pursuit heading ids, not graph nodes. They use ``- `<pursuit-id>` ...`` under `## Focus`; the referenced id must name an addressable Pursuit heading. The ``- `do|ask|wait` ...`` bullets inside a Pursuit's `**Next:**` block are ordered control entries, not graph nodes.
 
+## Reading Context And Referential Clarity
+
+An item's local reading context is the item itself together with the titles and
+bodies of its logical ancestor headings. The logical ancestor chain continues
+across F# detail-file boundaries. Ancestor headings may establish shared
+subject, scope, viewpoint, and reference points for descendants; descendants
+need not restate that context.
+
+A reference that materially affects interpreting or applying an item is clear
+when its intended referent is determined by that local reading context or is
+explicitly identified in the item, including by a graph id or typed edge. Typed
+edges express graph relationships; they do not make their targets' prose part
+of the item's ancestor context.
+
+Context supplied only by the current reader or executing agent is not stored
+context. Perspective-dependent language and relative references are valid only
+when stored context uniquely establishes their viewpoint or base.
+
+Items are judged within their local reading context, not as globally
+self-contained fragments. Eliminating all repeated wording is not a schema
+goal; repetition that preserves necessary scope or independent meaning is not
+duplication.
+
 ## Memory Quality
 
 Good Memory is scoped, durable context that helps future agents act, decide, interpret, or retrieve. Live intent, current task state, and next actions belong in Pursuit and follow `PURSUIT_RULES.md`.
@@ -133,6 +156,10 @@ shared_views/<view-id>/
     MEMORY_SKILL_<id>.md
     manifest.toml
 ```
+
+Every included graph item must be interpretable from local reading context
+contained in the package. Provider-only ancestry and resolver state outside
+the package are not implicit consumer context.
 
 `view.md` and `recipe.toml` are provider-owned file-view source files. The recipe records the approved source headings, nodes, or files chosen by the builder. The generated `dist/` directory is preview or publishing output; it is not active provider memory. A version-two `dist/MEMORY.md` is a schema-valid, Memory-only RightMemory document, not arbitrary Markdown. It has an id namespace local to that view, so its ids do not collide with local ids or ids in another view, and its edges remain inside that namespace.
 
