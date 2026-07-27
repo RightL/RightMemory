@@ -16,8 +16,9 @@ SNAPSHOT_HEADER = "Daily RightMemory root snapshot"
 SNAPSHOT_SCOPE = "rightmemory-roots-v2"
 DIFF_HEADER = "RightMemory root changes since previous retrieve turn"
 RECENT_SUBMITTED_CONTEXT_HEADER = "Recent submitted RightMemory candidates"
+UPDATED_MATERIAL_HEADER = "Updated retrieval material"
+CURRENT_MATERIAL_HEADER = "Current retrieval material"
 QUERY_HEADER = "Query"
-HISTORY_HEADER = "Prior retrieve conversation"
 SNAPSHOT_STATE = ".runtime/retrieve_context/daily-snapshot.json"
 SESSION_STATE_DIR = ".runtime/retrieve_context/sessions"
 
@@ -33,16 +34,11 @@ class DailySnapshot:
 
 
 @dataclass(frozen=True)
-class RetrieveTurn:
-    query: str
-    answer: str
-
-
-@dataclass(frozen=True)
 class RetrieveSessionState:
     session_id: str
     delivered_memory_commit: str | None = None
-    turns: list[RetrieveTurn] = field(default_factory=list)
+    model_history_json: bytes | None = field(default=None, repr=False)
+    visible_recent_candidates: dict[str, str] = field(default_factory=dict)
     delivery_coverage: RetrieveDeliveryCoverage = field(default_factory=RetrieveDeliveryCoverage)
 
 
@@ -58,26 +54,42 @@ class RetrieveContextStore:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or data.get("session_id") != session_id:
             raise ValueError("retrieve context session state is malformed")
+        allowed = {
+            "session_id",
+            "delivered_memory_commit",
+            "model_history",
+            "visible_recent_candidates",
+            "delivery_coverage",
+        }
+        unknown = set(data) - allowed
+        if unknown:
+            raise ValueError(
+                "retrieve context session state has unsupported field(s): "
+                + ", ".join(sorted(unknown))
+            )
         delivered = data.get("delivered_memory_commit")
         if delivered is not None and not isinstance(delivered, str):
             raise ValueError("retrieve context delivered_memory_commit must be a string or null")
-        raw_turns = data.get("turns", [])
-        if not isinstance(raw_turns, list):
-            raise ValueError("retrieve context turns must be a list")
-        turns: list[RetrieveTurn] = []
-        for item in raw_turns:
-            if (
-                not isinstance(item, dict)
-                or not isinstance(item.get("query"), str)
-                or not isinstance(item.get("answer"), str)
-            ):
-                raise ValueError("retrieve context turn entries must contain query and answer strings")
-            turns.append(RetrieveTurn(query=item["query"], answer=item["answer"]))
+        raw_history = data.get("model_history")
+        if raw_history is not None and not isinstance(raw_history, list):
+            raise ValueError("retrieve context model_history must be a list or null")
+        model_history_json = (
+            None
+            if raw_history is None
+            else json.dumps(raw_history, ensure_ascii=False, separators=(",", ":")).encode()
+        )
+        raw_visible = data.get("visible_recent_candidates", {})
+        if not isinstance(raw_visible, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in raw_visible.items()
+        ):
+            raise ValueError("retrieve context visible_recent_candidates must be a string map")
         coverage = _coverage_from_dict(data.get("delivery_coverage", {}))
         return RetrieveSessionState(
             session_id=session_id,
             delivered_memory_commit=delivered,
-            turns=turns,
+            model_history_json=model_history_json,
+            visible_recent_candidates=dict(raw_visible),
             delivery_coverage=coverage,
         )
 
@@ -85,16 +97,17 @@ class RetrieveContextStore:
         self,
         session_id: str,
         *,
-        query: str,
-        answer: str,
         memory_commit: str | None,
+        model_history_json: bytes | None,
+        visible_recent_candidates: dict[str, str],
         delivery: RetrieveDeliveryCoverage | None = None,
     ) -> None:
         state = self.load(session_id)
         next_state = RetrieveSessionState(
             session_id=session_id,
             delivered_memory_commit=memory_commit,
-            turns=[*state.turns, RetrieveTurn(query=query, answer=answer)],
+            model_history_json=model_history_json,
+            visible_recent_candidates=dict(visible_recent_candidates),
             delivery_coverage=state.delivery_coverage.merged(delivery or RetrieveDeliveryCoverage()),
         )
         self._write(next_state)
@@ -115,7 +128,8 @@ class RetrieveContextStore:
         data = {
             "session_id": state.session_id,
             "delivered_memory_commit": state.delivered_memory_commit,
-            "turns": [asdict(turn) for turn in state.turns],
+            "model_history": _model_history_value(state.model_history_json),
+            "visible_recent_candidates": dict(state.visible_recent_candidates),
             "delivery_coverage": _coverage_to_dict(state.delivery_coverage),
         }
         _write_json(self.memory_root, self._state_path(state.session_id), data)
@@ -202,39 +216,62 @@ def format_memory_diff_block(diff: str) -> str:
 
 def build_retrieve_request_text(
     *,
-    snapshot_text: str,
-    turns: list[tuple[str, str]] | list[RetrieveTurn],
-    diff_block: str,
-    recent_block: str,
+    context_parts: list[str] | tuple[str, ...],
     query: str,
 ) -> str:
-    parts: list[str] = []
-    if snapshot_text.strip():
-        parts.append(snapshot_text.rstrip())
-    history = _format_turn_history(turns)
-    if history:
-        parts.append(history)
-    if diff_block.strip():
-        parts.append(diff_block.strip())
-    if recent_block.strip():
-        parts.append(recent_block.strip())
-    parts.append(f"# {QUERY_HEADER}\n\n{query.strip()}")
+    parts = [part.rstrip() for part in context_parts if part.strip()]
+    parts.append(format_query_block(query))
     return "\n\n".join(parts).rstrip() + "\n"
 
 
-def format_recent_submitted_context_block(entries: list[object]) -> str:
-    if not entries:
+def format_query_block(query: str) -> str:
+    return f"# {QUERY_HEADER}\n\n{query.strip()}"
+
+
+def format_recent_submitted_context_block(
+    entries: list[object],
+    *,
+    no_longer_pending: list[str] | tuple[str, ...] = (),
+) -> str:
+    if not entries and not no_longer_pending:
         return ""
     lines = [f"# {RECENT_SUBMITTED_CONTEXT_HEADER}", ""]
-    for entry in entries:
-        lines.append(
-            f"[selection_id: {entry.update_session_id}:{entry.candidate_id} | "
-            f"update session: {entry.update_session_id} | "
-            f"candidate: {entry.candidate_id} | submitted_at: {entry.submitted_at}]"
-        )
-        lines.extend(entry.message.splitlines() or [""])
+    if entries:
+        if no_longer_pending:
+            lines.extend(["New pending:", ""])
+        for entry in entries:
+            lines.append(
+                f"[selection_id: {entry.update_session_id}:{entry.candidate_id} | "
+                f"update session: {entry.update_session_id} | "
+                f"candidate: {entry.candidate_id} | submitted_at: {entry.submitted_at}]"
+            )
+            lines.extend(entry.message.splitlines() or [""])
+            lines.append("")
+    if no_longer_pending:
+        lines.extend(["No longer pending:", ""])
+        lines.extend(f"- `{selection_id}`" for selection_id in no_longer_pending)
         lines.append("")
     return "\n".join(lines).rstrip()
+
+
+def format_updated_material_block(labels: list[str]) -> str:
+    if not labels:
+        return ""
+    lines = [
+        f"# {UPDATED_MATERIAL_HEADER}",
+        "",
+        "These sources changed since they were last returned. Read them again if relevant:",
+        "",
+        *(f"- {label}" for label in labels),
+    ]
+    return "\n".join(lines)
+
+
+def format_current_material_block(text: str) -> str:
+    clean = text.strip()
+    if not clean:
+        return ""
+    return f"# {CURRENT_MATERIAL_HEADER}\n\n{clean}"
 
 
 def _render_snapshot_text(memory_root: Path, paths: list[str]) -> str:
@@ -263,21 +300,6 @@ def _changed_root_memory_paths(memory_root: Path, old_commit: str, new_commit: s
     root_names = {"MEMORY.md", "PURSUITS.md"}
     paths = [raw.strip() for raw in result.stdout.splitlines() if raw.strip() in root_names]
     return sorted(set(paths))
-
-
-def _format_turn_history(turns: list[tuple[str, str]] | list[RetrieveTurn]) -> str:
-    if not turns:
-        return ""
-    lines = [f"# {HISTORY_HEADER}", ""]
-    for turn in turns:
-        if isinstance(turn, RetrieveTurn):
-            query, answer = turn.query, turn.answer
-        else:
-            query, answer = turn
-        lines.append(f"User: {query}")
-        lines.append(f"Assistant: {answer}")
-        lines.append("")
-    return "\n".join(lines).rstrip()
 
 
 def _snapshot_from_dict(data: dict[str, object]) -> DailySnapshot:
@@ -340,15 +362,18 @@ def _coverage_from_dict(value: object) -> RetrieveDeliveryCoverage:
             raise ValueError("retrieve delivery_coverage range entries are malformed")
         ranges.append(DeliveredRange(source_id, start, end, source_hash))
 
-    recent = value.get("recent_candidates", [])
-    if not isinstance(recent, list) or any(not isinstance(item, str) for item in recent):
-        raise ValueError("retrieve delivery_coverage.recent_candidates must be a string list")
+    recent = value.get("recent_candidates", {})
+    if not isinstance(recent, dict) or any(
+        not isinstance(key, str) or not isinstance(item, str)
+        for key, item in recent.items()
+    ):
+        raise ValueError("retrieve delivery_coverage.recent_candidates must be a string map")
     return RetrieveDeliveryCoverage(
         local_items=string_map("local_items"),
         source_items=string_map("source_items"),
         complete_sources=string_map("complete_sources"),
         ranges=ranges,
-        recent_candidates=list(recent),
+        recent_candidates=dict(recent),
     )
 
 
@@ -358,8 +383,17 @@ def _coverage_to_dict(coverage: RetrieveDeliveryCoverage) -> dict[str, object]:
         "source_items": dict(coverage.source_items),
         "complete_sources": dict(coverage.complete_sources),
         "ranges": [asdict(item) for item in coverage.ranges],
-        "recent_candidates": list(coverage.recent_candidates),
+        "recent_candidates": dict(coverage.recent_candidates),
     }
+
+
+def _model_history_value(data: bytes | None) -> list[object] | None:
+    if data is None:
+        return None
+    value = json.loads(data)
+    if not isinstance(value, list):
+        raise ValueError("retrieve model history must encode a list")
+    return value
 
 
 def _write_json(memory_root: Path, path: Path, data: dict[str, object]) -> None:

@@ -687,7 +687,7 @@ api_key = "<token>"
 extra_body = { chat_template_kwargs = { thinking = true, preserve_thinking = true } }
 ```
 
-Retrieve omits unchanged content already returned in the same session. Use `rightmemory retrieve --include-returned --session <id> "<query>"` to bypass that omission for one call without clearing session coverage. `max_output_chars` is a safety limit: oversized selections are rejected for model retry rather than truncated.
+Retrieve retains native per-session model history and asks the model not to reselect unchanged content it already returned. A terminal model selection is always rendered faithfully. `rightmemory retrieve --include-returned --session <id> "<query>"` attaches the current authoritative forms of previously returned content to that call's retrieval context without clearing accumulated coverage; later calls return to the normal context policy. Changed content with the same id is surfaced as changed. `max_output_chars` is a safety limit: oversized selections are rejected for model retry rather than truncated.
 
 Anthropic-compatible dreamer/reviewer config:
 

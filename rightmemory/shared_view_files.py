@@ -771,6 +771,7 @@ class _FileViewProjection:
             if reference.kind == "F#" and reference.id in self.manifest.items
         }
         self.needed: set[BlockKey] = set()
+        self.exact_node_ancestors: set[BlockKey] = set()
         self._select_recipe_content()
 
     def render(self) -> dict[str, str]:
@@ -871,6 +872,14 @@ class _FileViewProjection:
                 self.needed.add(current)
                 block = self.manifest.blocks[current]
                 current = block.logical_parent
+        for key in self.exact_nodes:
+            current = self.manifest.blocks[key].logical_parent
+            while current is not None:
+                block = self.manifest.blocks[current]
+                # MF prose must remain attached to an addressable heading.
+                if block.kind == "heading" and block.item_id is not None:
+                    self.exact_node_ancestors.add(current)
+                current = block.logical_parent
 
     def _render_block(
         self,
@@ -897,7 +906,7 @@ class _FileViewProjection:
                 rendered = self._render_block(part, inherited_full=full)
                 if rendered:
                     pieces.append(rendered)
-            elif full:
+            elif full or key in self.exact_node_ancestors:
                 pieces.append(part)
         return "\n".join(pieces).strip("\n")
 

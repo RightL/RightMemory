@@ -228,13 +228,16 @@ class RuntimeStateRootTests(unittest.TestCase):
                 runtime = RightMemoryRuntime(config)
                 try:
                     session_paths = runtime.sessions.paths("agent-1")
-                    delivery_path = runtime.recent_submitted_delivery._state_path("agent-1")
+                    retrieve_context_path = runtime.retrieve_context._state_path("agent-1")
                 finally:
                     runtime.cleanup()
 
         self.assertEqual(runtime.tools.memory_root, memory_root.resolve())
         self.assertEqual(session_paths.history, state_root / ".runtime" / "sessions" / "retrieve" / "agent-1.json")
-        self.assertEqual(delivery_path, state_root / ".runtime" / "recent_submitted" / "retrieve" / "agent-1.json")
+        self.assertEqual(
+            retrieve_context_path,
+            state_root / ".runtime" / "retrieve_context" / "sessions" / "agent-1.json",
+        )
         executor_class.assert_called_once_with(
             memory_root,
             "retrieve",

@@ -28,6 +28,7 @@ from rightmemory.cli import (
     _run_update_review_scan,
     _run_update_review_correction,
     _stored_correction_message,
+    _turn_parser,
     _verified_update_review,
     cli_main,
     main,
@@ -3987,6 +3988,12 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(calls, [("agent-1", "show it again", True)])
+
+    def test_retrieve_include_returned_help_describes_one_call_context_attachment(self):
+        help_text = _turn_parser("retrieve").format_help()
+
+        self.assertIn("attach current forms of previously returned content", help_text)
+        self.assertIn("this call's retrieval context", help_text)
 
     def test_main_records_one_pressure_unit_for_memory_changing_update_turn(self):
         stdout = io.StringIO()

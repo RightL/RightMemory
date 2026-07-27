@@ -94,9 +94,9 @@ class AgentCliThreadCleanupTests(unittest.TestCase):
             )
             RetrieveContextStore(root).record_success(
                 "session-1",
-                query="old query",
-                answer="old answer",
                 memory_commit="abc123",
+                model_history_json=b'[{"kind":"response","parts":[]}]',
+                visible_recent_candidates={},
             )
             entry = RecentSubmittedMemoryEntry("update-1", 1, CREATED, "candidate")
             RecentSubmittedMemoryDeliveryStore(root).record_delivered("session-1", [entry])
@@ -105,7 +105,9 @@ class AgentCliThreadCleanupTests(unittest.TestCase):
 
             self.assertEqual(result.deleted, 1)
             self.assertIsNone(ProviderSessionStore(root, "retrieve").load("session-1"))
-            self.assertEqual(RetrieveContextStore(root).load("session-1").turns, [])
+            self.assertIsNone(
+                RetrieveContextStore(root).load("session-1").model_history_json
+            )
             self.assertEqual(
                 RecentSubmittedMemoryDeliveryStore(root).new_entries("session-1", [entry]),
                 [entry],
@@ -173,15 +175,17 @@ class AgentCliThreadCleanupTests(unittest.TestCase):
             ProviderSessionStore(root, "retrieve").save(mapping)
             RetrieveContextStore(root).record_success(
                 "session-1",
-                query="keep query",
-                answer="keep answer",
                 memory_commit="abc123",
+                model_history_json=b'[{"kind":"response","parts":[]}]',
+                visible_recent_candidates={},
             )
 
             AgentCliThreadCleanup(root, now=lambda: NOW, client=client).run()
 
             self.assertEqual(ProviderSessionStore(root, "retrieve").load("session-1"), mapping)
-            self.assertEqual(len(RetrieveContextStore(root).load("session-1").turns), 1)
+            self.assertIsNotNone(
+                RetrieveContextStore(root).load("session-1").model_history_json
+            )
             self.assertEqual(client.calls, [["expired-thread"]])
 
     def test_malformed_and_claude_records_are_left_untouched(self):
