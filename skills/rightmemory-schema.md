@@ -73,6 +73,8 @@ Good Memory is scoped, durable context that helps future agents act, decide, int
 Project artifacts are the primary home of project-specific details and guidance.
 Compact, durably useful context is also good Memory when recovering it from
 project artifacts would require substantial search or reasoning.
+A compact, stable lookup rule for a recurring family of project artifacts is
+good Memory; the artifact details remain in the project.
 
 ### Item Quality
 
