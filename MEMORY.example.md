@@ -35,6 +35,14 @@ Release-facing changes should leave concise verification evidence covering the c
 
 ## Example Infrastructure {#sample-infra} → [rel:sample-app]
 
+### Deployment Environments {#sample-deployment-environments}
+
+The example application has distinct `staging` and `production` environments.
+On their respective hosts, both use `/srv/sample-app` as the application root.
+
+- `sample-env-staging` The `staging` environment runs on host `sample-staging-01`. → [rel:proj-deploy]
+- `sample-env-production` The `production` environment runs on host `sample-production-01`. → [rel:proj-deploy]
+
 ### Database Stack {#sample-database-stack}
 
 - `db-postgres` postgres-db — PostgreSQL database used by the API service. → [rel:proj-api]
@@ -70,7 +78,7 @@ Store active goals when they express durable direction rather than a momentary t
 Store cross-project behavior memory here when it should change how future agents work with this user.
 
 - `pref-principle-first` The user prefers principle-first instructions over long category lists; examples are interpretation aids, neither required nor sufficient, and the governing decision test controls each case. → []
-- `pref-env-check` Future agents should check durable memory and local project context for the intended runtime environment before installing dependencies or guessing a Python environment. → []
+- `pref-env-check` Future agents should identify the intended machine, checkout, and runtime environment from stored context and repository guidance before installing dependencies or choosing an environment. → []
 
 ---
 
@@ -78,7 +86,7 @@ Store cross-project behavior memory here when it should change how future agents
 
 This section stores loose ends in memory as short questions for future agents. These questions are not declarative memory facts; they point to related memory with `todo:` and should be removed or revised after the answer is saved as ordinary memory.
 
-- `q-rightmemory-project-context` Which local project path is the active RightMemory checkout, and which runtime environment should agents use when installing, testing, or debugging it? → [todo:pref-env-check]
+- `q-rightmemory-project-context` Which checkout path and runtime environment should agents use on each machine involved in RightMemory development? → [todo:pref-env-check]
 
 ---
 
