@@ -38,7 +38,6 @@ from .config import (
     load_pruner_config,
     load_review_config,
     load_sync_config,
-    load_update_corrector_config,
 )
 from .dreamer_trigger import DreamerTriggerStore
 from .doctor import format_doctor_report, run_agent_cli_doctor
@@ -82,19 +81,6 @@ from .share_results import format_share_operation_result
 from .shares import approve_share, create_share, join_share, list_shares, publish_share, revise_share, share_status
 from .status import collect_status, format_status_dashboard
 from .sync import SyncManager
-from .update_review import (
-    VerifiedUpdateReview,
-    UpdateReviewOutcome,
-    UpdateReviewProcessResult,
-    UpdateReviewRequest,
-    UpdateReviewSourceChanged,
-    UpdateReviewStore,
-    parse_review_markdown,
-    tracked_review_blob_oid,
-    tracked_review_commit,
-    verify_update_review,
-)
-from .update_corrector import parse_update_correction_result
 from .update_queue_git import (
     QUEUE_FINALIZER,
     ClaimedUpdateBatch,
@@ -106,7 +92,6 @@ from .update_queue_git import (
 from .update_queue import (
     UpdateCandidate,
     UpdateQueueStore,
-    candidate_evidence_matches,
 )
 from .watch import (
     MANAGED_WATCH_TARGETS,
@@ -137,7 +122,6 @@ DEFAULT_PRUNER_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 DEFAULT_PRUNER_WATCH_RETRY_SECONDS = 60
 DEFAULT_SYNC_WATCH_INTERVAL_SECONDS = 60 * 60
 DEFAULT_AGENT_CLI_CLEANUP_WATCH_INTERVAL_SECONDS = 60 * 60
-DEFAULT_UPDATE_REVIEW_WATCH_INTERVAL_SECONDS = 60
 DEFAULT_WATCH_MAX_CONSECUTIVE_FAILURES = 3
 DEFAULT_HUB_ROOT = Path("rightmemory-hub")
 WATCH_REFRESH_POLL_SECONDS = 5
@@ -199,8 +183,6 @@ def main(argv: list[str] | None = None) -> int:
         return _web_main(argv[1:], memory_root)
     if argv and argv[0] == "review":
         return _review_main(argv[1:], memory_root)
-    if argv and argv[0] == "update-review":
-        return _update_review_main(argv[1:], memory_root)
     if argv and argv[0] == "sync":
         return _sync_main(argv[1:], memory_root)
     if argv and argv[0] == "doctor":
@@ -1073,8 +1055,6 @@ def _watch_targets(target: str) -> list[str]:
 def _watch_role(name: str) -> str:
     if name == "review":
         return "reviewer"
-    if name == "update-review":
-        return "update"
     if name == "dreamer":
         return "dreamer"
     if name == "pruner":
@@ -1354,320 +1334,6 @@ def _agent_cli_cleanup_watch(interval: int, memory_root: Path) -> int:
         return exit_code
     except KeyboardInterrupt:
         print("rightmemory agent-cli cleanup watch stopped", file=sys.stderr)
-        return 130
-
-
-def _update_review_main(argv: list[str], memory_root: Path) -> int:
-    parser = argparse.ArgumentParser(
-        prog="rightmemory update-review",
-        description="Process human comments on tracked Markdown reviews of unified RightMemory updates.",
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    scan = subparsers.add_parser("scan", help="process one ready update-review comment")
-    scan.add_argument(
-        "--once",
-        action="store_true",
-        help="attempt at most one ready comment and exit",
-    )
-    watch = subparsers.add_parser("watch", help="periodically process ready update-review comments")
-    watch.add_argument("--interval", type=int, default=DEFAULT_UPDATE_REVIEW_WATCH_INTERVAL_SECONDS)
-    args = parser.parse_args(argv)
-
-    if args.command == "scan":
-        if not args.once:
-            raise ValueError("update-review scan currently requires --once")
-        with WatchLock(memory_root, "update-review"):
-            result = _run_update_review_scan(memory_root)
-        print(_format_update_review_result(result))
-        return 0
-    if args.command == "watch":
-        return _update_review_watch(args.interval, memory_root)
-    raise ValueError(f"unknown update-review command: {args.command}")
-
-
-def _run_update_review_scan(memory_root: Path):
-    store = UpdateReviewStore(memory_root)
-    sync_enabled = load_sync_config(memory_root=memory_root).enabled
-    settled_paths: list[Path] = []
-    queued_review = False
-
-    def process(request: UpdateReviewRequest) -> UpdateReviewOutcome:
-        nonlocal queued_review
-        if sync_enabled:
-            outcome = _submit_update_review_candidate(memory_root, request)
-            queued_review = outcome.status == "submitted"
-            return outcome
-        settled_paths.append(request.document_path)
-        return _run_update_review_correction(memory_root, request)
-
-    result = store.process_ready(
-        process,
-        limit=1,
-    )
-    if sync_enabled and queued_review:
-        AsyncUpdateStore(memory_root, "update").wake_worker()
-    if not sync_enabled and settled_paths and not result.failed and not result.changed:
-        _commit_local_review_settlement(memory_root, settled_paths[0])
-    return result
-
-
-def _submit_update_review_candidate(
-    memory_root: Path,
-    request: UpdateReviewRequest,
-) -> UpdateReviewOutcome:
-    verified = _verified_update_review(memory_root, request)
-    digest = sha256(
-        "\0".join(
-            (
-                request.review_id,
-                verified.document_commit,
-                verified.document_blob_oid,
-                request.comment_sha256,
-                request.previous_question or "",
-            )
-        ).encode("utf-8")
-    ).hexdigest()
-    candidate = UpdateCandidate(
-        uid=digest[:32],
-        session_id=request.review_id,
-        display_id=1,
-        message=request.comment,
-        submitted_at=datetime.now(UTC).isoformat(),
-        kind="review",
-        review_id=verified.review_id,
-        review_commit=verified.document_commit,
-        review_blob_oid=verified.document_blob_oid,
-        previous_question=request.previous_question,
-    )
-    queue = UpdateQueueStore(memory_root)
-    existing = [
-        item
-        for item in (*queue.outbox_candidates(), *queue.snapshot().candidates)
-        if item.kind == "review" and item.review_id == request.review_id
-    ]
-    if any(item.uid != candidate.uid for item in existing):
-        raise RuntimeError("this update review already has a different pending correction")
-    if any(not candidate_evidence_matches(item, candidate) for item in existing):
-        raise RuntimeError("this update review already has conflicting queued evidence")
-    if not existing:
-        queue.write_outbox(candidate)
-    return UpdateReviewOutcome.submitted("queued for synchronized correction")
-
-
-def _run_update_review_correction(memory_root: Path, request: UpdateReviewRequest) -> UpdateReviewOutcome:
-    verified = _verified_update_review(memory_root, request)
-    message = _update_review_correction_message(
-        memory_root,
-        request.operation_id,
-        verified,
-        request.comment,
-        request.previous_question,
-    )
-    config = load_update_corrector_config(memory_root=memory_root)
-    runtime = RightMemoryRuntime(config)
-    try:
-        output = runtime.run_session_turn(
-            _operation_session_id(request.operation_id),
-            message,
-            operation_id=request.operation_id,
-        )
-        write_result = runtime.last_write_result
-    finally:
-        runtime.cleanup()
-    decision = parse_update_correction_result(output)
-    if write_result is None or write_result.operation_id != request.operation_id:
-        raise RuntimeError("update correction did not complete its validated semantic operation")
-    _require_completed_correction_operation(memory_root, request.operation_id)
-    if decision.status == "needs_input":
-        if write_result.commits_landed:
-            raise RuntimeError("needs-input update correction unexpectedly landed a state commit")
-        return UpdateReviewOutcome.needs_input(decision.message)
-    if decision.status == "no_change":
-        if write_result.commits_landed:
-            raise RuntimeError("no-change update correction unexpectedly landed a state commit")
-        return UpdateReviewOutcome.resolved(message=decision.message)
-    if write_result.commits_landed != 1:
-        raise RuntimeError("applied update correction did not land its one validated state commit")
-    return UpdateReviewOutcome.resolved(
-        correction_commit=write_result.landed_commit,
-        message=decision.message,
-    )
-
-
-def _update_review_correction_message(
-    memory_root: Path,
-    operation_id: str,
-    verified: VerifiedUpdateReview,
-    comment: str,
-    previous_question: str | None,
-) -> str:
-    message = _stored_correction_message(memory_root, operation_id)
-    if message is not None:
-        return message
-    payload: dict[str, object] = {
-        "original_update": {
-            "operation_id": verified.origin_operation_id,
-            "base_commit": verified.base_commit,
-            "update_commit": verified.creation_commit,
-            "write_surface": verified.write_surface,
-            "changed_paths": list(verified.changed_paths),
-            "summary": verified.summary,
-            "diff": verified.diff,
-        },
-        "human_comment": comment,
-    }
-    if previous_question is not None:
-        payload["previous_corrector_question"] = previous_question
-    return (
-        "Review the verified original Update and apply the submitted correction to the current "
-        "RightMemory state. Preserve unrelated later work.\n\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-    )
-
-
-def _stored_correction_message(memory_root: Path, operation_id: str) -> str | None:
-    record = SemanticOperationStore(memory_root).read(operation_id)
-    if record is None:
-        return None
-    if (
-        record.input_data.get("role") != "update-corrector"
-        or record.input_data.get("kind") != "semantic-turn"
-        or record.input_data.get("session_id") != _operation_session_id(operation_id)
-    ):
-        raise RuntimeError("existing update correction operation has invalid routing")
-    message = record.input_data.get("message")
-    if not isinstance(message, str) or not message.strip():
-        raise RuntimeError("existing update correction operation has no replayable message")
-    return message
-
-
-def _require_completed_correction_operation(memory_root: Path, operation_id: str) -> None:
-    store = SemanticOperationStore(memory_root)
-    record = store.read(operation_id)
-    if record is None:
-        raise RuntimeError("update correction operation receipt is missing")
-    if (
-        record.phase not in FINAL_PHASES
-        or record.input_data.get("role") != "update-corrector"
-        or record.input_data.get("kind") != "semantic-turn"
-    ):
-        raise RuntimeError("update correction operation receipt has invalid terminal routing")
-    pending = tuple(effect.name for effect in store.list_pending_effects(operation_id))
-    if pending:
-        raise RuntimeError(
-            "update correction has pending operation effects: " + ", ".join(pending)
-        )
-
-
-def _verified_update_review(
-    memory_root: Path,
-    request: UpdateReviewRequest,
-) -> VerifiedUpdateReview:
-    verified = verify_update_review(memory_root, request.review_id)
-    if verified.origin_operation_id != request.origin_operation_id:
-        raise ValueError("review origin does not match its creating Git operation")
-    if verified.base_commit != request.base_commit:
-        raise ValueError("review base does not match its creating Git operation")
-    if verified.write_surface != request.write_surface:
-        raise ValueError("review write surface does not match its creating Git operation")
-    draft = parse_review_markdown(request.document)
-    if (
-        draft.question != verified.question
-        or draft.question_operation_id != verified.question_operation_id
-    ):
-        raise ValueError("review draft changed its corrector-owned question")
-    return verified
-
-
-def _commit_local_review_settlement(memory_root: Path, path: Path) -> None:
-    relative = path.resolve().relative_to(Path(memory_root).resolve()).as_posix()
-    _run_review_git(memory_root, "add", "-A", "--", relative)
-    pending = _run_review_git(
-        memory_root,
-        "diff",
-        "--cached",
-        "--quiet",
-        "--",
-        relative,
-        check=False,
-    )
-    if pending.returncode == 0:
-        return
-    if pending.returncode != 1:
-        raise RuntimeError(f"could not inspect local review settlement: {pending.stderr.strip()}")
-    _run_review_git(
-        memory_root,
-        "-c",
-        "user.name=RightMemory",
-        "-c",
-        "user.email=rightmemory@local",
-        "commit",
-        "-m",
-        "update review: settle local correction",
-        "--",
-        relative,
-    )
-
-
-def _run_review_git(
-    root: Path,
-    *args: str,
-    check: bool = True,
-) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=root,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if check and result.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
-    return result
-
-
-def _format_update_review_result(result: UpdateReviewProcessResult) -> str:
-    lines = [
-        f"processed: {result.processed}",
-        f"resolved: {result.resolved}",
-        f"needs_input: {result.needs_input}",
-        f"submitted: {result.submitted}",
-        f"failed: {result.failed}",
-        f"blank: {result.blank}",
-        f"not_ready: {result.not_ready}",
-        f"changed: {result.changed}",
-        f"malformed: {result.malformed}",
-        f"pruned_blank: {result.pruned_blank}",
-    ]
-    lines.extend(f"error: {error}" for error in result.errors)
-    return "\n".join(lines)
-
-
-def _update_review_watch(interval: int, memory_root: Path) -> int:
-    if interval < 1:
-        raise ValueError("--interval must be a positive integer")
-    refresh = InstallStamp(memory_root)
-    try:
-        with _watch_stop_signal("update-review", memory_root) as stop, WatchLock(memory_root, "update-review"):
-            while not stop.requested:
-                _reexec_if_install_changed(refresh, stop)
-                timestamp = datetime.now(UTC).isoformat()
-                print(f"[{timestamp}] rightmemory update-review scan", flush=True)
-                result = _run_update_review_scan(memory_root)
-                print(_format_update_review_result(result), flush=True)
-                _reexec_if_install_changed(refresh, stop)
-                if not stop.requested and result.processed and not result.failed:
-                    continue
-                if not _sleep_with_refresh_check(interval, refresh, stop):
-                    break
-        print("rightmemory update-review watch stopped", file=sys.stderr)
-        return 0
-    except KeyboardInterrupt:
-        print("rightmemory update-review watch stopped", file=sys.stderr)
         return 130
 
 
@@ -2521,25 +2187,12 @@ def _async_worker(memory_root, role: str) -> int:
         while True:
             try:
                 _recover_synchronized_update_operations(memory_root, sync_config)
-                outbox = {
-                    candidate.uid: candidate
-                    for candidate in coordinator.store.outbox_candidates()
-                }
-                review_uids = {
-                    uid for uid, candidate in outbox.items() if candidate.kind == "review"
-                }
                 publication = coordinator.publish_outbox(
-                    store.publishable_candidate_uids() | review_uids
+                    store.publishable_candidate_uids()
                 )
                 settled = frozenset(publication.settled_uids)
                 if settled:
-                    update_settled = frozenset(
-                        uid
-                        for uid in settled
-                        if uid in outbox and outbox[uid].kind == "update"
-                    )
-                    if update_settled:
-                        store.acknowledge_synchronized(update_settled)
+                    store.acknowledge_synchronized(settled)
                     coordinator.clear_local_candidates(publication.settled_uids)
                 claim_result = coordinator.claim_next(
                     target_batch_candidates=async_update_config.target_batch_candidates,
@@ -2582,7 +2235,13 @@ def _async_worker(memory_root, role: str) -> int:
                 return True
 
     def run_batch(batch_session_id: str, message: str) -> str:
-        return _run_async_update_batch(memory_root, role, batch_session_id, message)
+        return _run_async_update_batch(
+            memory_root,
+            role,
+            batch_session_id,
+            message,
+            store.operation_candidates(batch_session_id),
+        )
 
     result = store.run_pending_batches(
         run_batch,
@@ -2601,8 +2260,6 @@ def _run_synchronized_update_batch(
     coordinator: GitUpdateQueueCoordinator,
     claim: ClaimedUpdateBatch,
 ) -> bool:
-    if getattr(claim, "kind", "update") == "review":
-        return _run_synchronized_review_correction(memory_root, coordinator, claim)
     external_finalizer = _queue_external_finalizer(claim.lease.token)
     runtime: RightMemoryRuntime | None = None
     try:
@@ -2636,6 +2293,7 @@ def _run_synchronized_update_batch(
                 claim.message,
                 operation_id=claim.batch_id,
                 external_finalizer=external_finalizer,
+                update_candidates=claim.candidates,
             )
         except Exception:
             coordinator.fail(claim, reason_code="processing_failed")
@@ -2674,145 +2332,6 @@ def _run_synchronized_update_batch(
             runtime.cleanup()
 
 
-def _run_synchronized_review_correction(
-    memory_root: Path,
-    coordinator: GitUpdateQueueCoordinator,
-    claim: ClaimedUpdateBatch,
-) -> bool:
-    candidate = claim.review_candidate
-    if (
-        candidate.review_id is None
-        or candidate.review_commit is None
-        or candidate.review_blob_oid is None
-    ):
-        raise RuntimeError("synchronized review candidate has incomplete source identity")
-    external_finalizer = _queue_external_finalizer(claim.lease.token)
-    runtime: RightMemoryRuntime | None = None
-    try:
-        try:
-            current_blob = tracked_review_blob_oid(memory_root, candidate.review_id)
-            current_commit = tracked_review_commit(memory_root, candidate.review_id)
-        except Exception:
-            coordinator.fail(claim, reason_code="processing_failed")
-            return False
-        if (
-            current_commit != candidate.review_commit
-            or current_blob != candidate.review_blob_oid
-        ):
-            coordinator.supersede_review(claim)
-            return True
-        try:
-            config = load_update_corrector_config(memory_root=memory_root)
-            runtime = RightMemoryRuntime(config)
-        except Exception:
-            coordinator.release(claim)
-            return False
-        try:
-            verified = verify_update_review(memory_root, candidate.review_id)
-        except Exception:
-            coordinator.fail(claim, reason_code="processing_failed")
-            return False
-        if (
-            verified.document_commit != candidate.review_commit
-            or verified.document_blob_oid != candidate.review_blob_oid
-        ):
-            coordinator.supersede_review(claim)
-            return True
-        try:
-            message = _update_review_correction_message(
-                memory_root,
-                claim.batch_id,
-                verified,
-                candidate.message,
-                candidate.previous_question,
-            )
-            record = SemanticOperationStore(memory_root).read(claim.batch_id)
-            recorded_finalizer = (
-                None
-                if record is None or record.phase != "prepared" or record.outcome is None
-                else record.outcome.metadata.get("external_finalizer")
-            )
-            if (
-                _queue_finalizer_token(recorded_finalizer) is not None
-                and recorded_finalizer != external_finalizer
-            ):
-                runtime.restart_session_turn_external(
-                    claim.session_id,
-                    operation_id=claim.batch_id,
-                    external_finalizer=str(recorded_finalizer),
-                    reason="Git lease token changed before review finalization",
-                )
-            prepared = runtime.prepare_session_turn_external(
-                claim.session_id,
-                message,
-                operation_id=claim.batch_id,
-                external_finalizer=external_finalizer,
-            )
-            decision = parse_update_correction_result(str(prepared.output))
-            if decision.status == "needs_input":
-                if prepared.candidate_commit is not None:
-                    raise RuntimeError("needs-input correction prepared a state commit")
-                outcome = UpdateReviewOutcome.needs_input(decision.message)
-            elif decision.status == "no_change":
-                if prepared.candidate_commit is not None:
-                    raise RuntimeError("no-change correction prepared a state commit")
-                outcome = UpdateReviewOutcome.resolved(message=decision.message)
-            else:
-                if prepared.candidate_commit is None:
-                    raise RuntimeError("applied correction prepared no state commit")
-                outcome = UpdateReviewOutcome.resolved(
-                    correction_commit=prepared.candidate_commit,
-                    message=decision.message,
-                )
-        except Exception:
-            coordinator.fail(claim, reason_code="processing_failed")
-            return False
-        try:
-            landed_commit = coordinator.finalize(
-                claim,
-                prepared.candidate_commit,
-                prepared_start_commit=prepared.start_commit,
-                review_outcome=outcome,
-            )
-        except UpdateQueueSemanticBaseChanged:
-            runtime.restart_session_turn_external(
-                claim.session_id,
-                operation_id=claim.batch_id,
-                external_finalizer=external_finalizer,
-                reason="semantic base changed before review finalization",
-            )
-            coordinator.release(claim)
-            return False
-        except UpdateReviewSourceChanged:
-            landed_commit = coordinator.supersede_review(claim)
-            try:
-                runtime.supersede_session_turn_external(
-                    claim.session_id,
-                    operation_id=claim.batch_id,
-                    external_finalizer=external_finalizer,
-                    landed_commit=landed_commit,
-                )
-            except Exception:
-                # Git is terminal; recovery can discard the local prepared receipt.
-                return False
-            return True
-        except Exception:
-            return False
-        try:
-            runtime.complete_session_turn_external(
-                claim.session_id,
-                operation_id=claim.batch_id,
-                external_finalizer=external_finalizer,
-                landed_commit=landed_commit,
-            )
-        except Exception:
-            return False
-        return True
-    finally:
-        if runtime is not None:
-            runtime.cleanup()
-
-
 def _recover_synchronized_update_operations(memory_root: Path, sync_config: Any) -> int:
     """Finish local receipts after Git proves a queue transaction already published."""
     store = SemanticOperationStore(memory_root)
@@ -2827,14 +2346,14 @@ def _recover_synchronized_update_operations(memory_root: Path, sync_config: Any)
         operation_role = record.input_data.get("role")
         running_queue_operation = (
             record.phase == "running"
-            and operation_role in {"update", "update-corrector"}
+            and operation_role == "update"
             and record.input_data.get("kind") == "semantic-turn"
         )
         prepared_or_final = (
             record.phase in {"prepared", *FINAL_PHASES}
             and outcome is not None
             and token is not None
-            and operation_role in {"update", "update-corrector"}
+            and operation_role == "update"
         )
         if not running_queue_operation and not prepared_or_final:
             continue
@@ -2875,11 +2394,7 @@ def _recover_synchronized_update_operations(memory_root: Path, sync_config: Any)
         if not isinstance(session_id, str):
             continue
         try:
-            config = (
-                load_update_corrector_config(memory_root=memory_root)
-                if operation_role == "update-corrector"
-                else load_config("update", memory_root=memory_root)
-            )
+            config = load_config("update", memory_root=memory_root)
             runtime = RightMemoryRuntime(config)
             try:
                 if running_queue_operation and (finalized_commit or superseded_commit):
@@ -2943,7 +2458,7 @@ def _synchronized_update_work_remains(memory_root: Path) -> bool:
     for record in SemanticOperationStore(memory_root).list_outstanding_records():
         if (
             record.phase == "running"
-            and record.input_data.get("role") in {"update", "update-corrector"}
+            and record.input_data.get("role") == "update"
             and record.input_data.get("kind") == "semantic-turn"
         ):
             return True
@@ -2959,7 +2474,13 @@ def _synchronized_update_work_remains(memory_root: Path) -> bool:
     return False
 
 
-def _run_async_update_batch(memory_root, role: str, batch_session_id: str, message: str) -> str:
+def _run_async_update_batch(
+    memory_root,
+    role: str,
+    batch_session_id: str,
+    message: str,
+    candidates: tuple[UpdateCandidate, ...],
+) -> str:
     # Reload per batch so queued retries use current model and executor settings.
     config = load_config(role, memory_root=memory_root)
     runtime = RightMemoryRuntime(config)
@@ -2968,6 +2489,7 @@ def _run_async_update_batch(memory_root, role: str, batch_session_id: str, messa
             _operation_session_id(batch_session_id),
             message,
             operation_id=batch_session_id,
+            update_candidates=candidates,
         )
     finally:
         runtime.cleanup()

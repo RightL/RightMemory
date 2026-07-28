@@ -26,7 +26,12 @@ from .platform import (
 )
 from .semantic_operation import FINAL_PHASES, SemanticOperationStore
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
-from .update_queue import PublicationMarker, UpdateCandidate, UpdateQueueStore
+from .update_queue import (
+    PublicationMarker,
+    UpdateCandidate,
+    UpdateQueueStore,
+    update_candidate_batch_id,
+)
 
 UPDATE_DEBOUNCE_SECONDS = 60 * 60
 UPDATE_RETRY_COOLDOWN_SECONDS = 60 * 60
@@ -353,8 +358,6 @@ class AsyncUpdateStore:
         with self._reservations_locked():
             outbox_by_session: dict[str, list[UpdateCandidate]] = {}
             for candidate in queue_store.outbox_candidates():
-                if candidate.kind != "update":
-                    continue
                 outbox_by_session.setdefault(candidate.session_id, []).append(candidate)
 
             session_ids = {path.stem for path in self._session_state_paths()}
@@ -862,6 +865,17 @@ class AsyncUpdateStore:
         with self._reservations_locked():
             path = self._reservation_path(operation_id)
             return self._read_reservation_path(path) if path.exists() else None
+
+    def operation_candidates(self, operation_id: str) -> tuple[UpdateCandidate, ...]:
+        """Return the exact candidates in one durably reserved local operation."""
+        reservation = self._read_reservation(operation_id)
+        if reservation is None:
+            raise RuntimeError("async update operation has no durable batch reservation")
+        return tuple(
+            self._candidate_from_job(item.session_id, job)
+            for item in reservation.participants
+            for job in item.jobs
+        )
 
     def _read_reservations(self) -> list[AsyncBatchReservation]:
         if not self.reservations_root.exists():
@@ -1428,7 +1442,7 @@ class AsyncUpdateStore:
             candidates = (
                 candidate
                 for candidate in queue_store.outbox_candidates()
-                if candidate.kind == "update" and candidate.session_id == state.session_id
+                if candidate.session_id == state.session_id
             )
         session_candidates = sorted(
             candidates,
@@ -1799,30 +1813,12 @@ def _format_batch_message(batches: list[AsyncUpdateSessionBatch]) -> str:
 
 
 def _batch_session_id(batches: list[AsyncUpdateSessionBatch]) -> str:
-    participants = [
-        {
-            "session_id": batch.session_id,
-            "jobs": [
-                {
-                    "id": job.id,
-                    "candidate_uid": job.candidate_uid,
-                    "message": job.message,
-                    "submitted_at": job.submitted_at,
-                }
-                for job in sorted(batch.jobs, key=lambda item: item.id)
-            ],
-        }
-        for batch in sorted(batches, key=lambda item: item.session_id)
-    ]
-    canonical = json.dumps(
-        participants,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
+    candidates = (
+        AsyncUpdateStore._candidate_from_job(batch.session_id, job)
+        for batch in batches
+        for job in batch.jobs
     )
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return f"update-batch-{digest}"
+    return update_candidate_batch_id(candidates)
 
 
 def _required_time(value: str | None, field: str) -> datetime:

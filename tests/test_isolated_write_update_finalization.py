@@ -3,12 +3,81 @@ from pathlib import Path
 
 from rightmemory.isolated_write import IsolatedWriteSupervisor
 from rightmemory.semantic_operation import SemanticOperationStore
-from rightmemory.update_corrector import UpdateCorrectionResult
-from rightmemory.update_review import UpdateReviewStore, verify_update_review
+from rightmemory.update_queue import UpdateCandidate
+from rightmemory.update_record import UpdateRecord, UpdateRecordStore
 from tests.isolated_write_test_base import IsolatedWriteTestBase
 
 
 class IsolatedWriteUpdateFinalizationTests(IsolatedWriteTestBase):
+    def test_update_lands_candidate_record_with_semantic_edit_in_one_commit(self):
+        candidate = UpdateCandidate(
+            uid="b" * 32,
+            session_id="agent-session",
+            display_id=1,
+            message="remember the durable result",
+            submitted_at="2026-07-27T12:00:00+00:00",
+        )
+        record = UpdateRecord.from_candidates((candidate,))
+
+        def callback(worktree: Path) -> str:
+            self._append_memory(worktree, "- `two` retained update \u2192 []\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "memory: retain update", cwd=worktree)
+            return "updated"
+
+        def prepare(worktree, _base, candidate_commit, paths, _output):
+            self.assertIsNotNone(candidate_commit)
+            self.assertEqual(paths, ("MEMORY.md",))
+            path = UpdateRecordStore(worktree).write(record)
+            return (path.relative_to(worktree).as_posix(),)
+
+        result = IsolatedWriteSupervisor(self.root, "update").run(
+            callback,
+            operation_id=record.operation_id,
+            operation_input={"message": candidate.message},
+            prepare_managed_artifacts=prepare,
+        )
+
+        changed = self._git("show", "--format=", "--name-only", "HEAD").splitlines()
+        self.assertEqual(result.commits_landed, 1)
+        self.assertEqual(self._git("rev-list", "--count", f"{self.initial_head}..HEAD"), "1")
+        self.assertEqual(
+            changed,
+            ["MEMORY.md", f"update_records/{record.operation_id}.json"],
+        )
+        self.assertEqual(result.changed_paths, ("MEMORY.md",))
+
+    def test_update_lands_no_change_candidate_record_as_its_outcome_commit(self):
+        candidate = UpdateCandidate(
+            uid="a" * 32,
+            session_id="agent-session",
+            display_id=1,
+            message="candidate omitted after reconciliation",
+            submitted_at="2026-07-27T12:00:00+00:00",
+        )
+        record = UpdateRecord.from_candidates((candidate,))
+
+        def prepare(worktree, _base, candidate_commit, paths, _output):
+            self.assertIsNone(candidate_commit)
+            self.assertEqual(paths, ())
+            path = UpdateRecordStore(worktree).write(record)
+            return (path.relative_to(worktree).as_posix(),)
+
+        result = IsolatedWriteSupervisor(self.root, "update").run(
+            lambda _worktree: "No candidate survived reconciliation.",
+            operation_id=record.operation_id,
+            operation_input={"message": candidate.message},
+            prepare_managed_artifacts=prepare,
+        )
+
+        self.assertEqual(result.commits_landed, 1)
+        self.assertEqual(result.changed_paths, ())
+        self.assertEqual(UpdateRecordStore(self.root).read(record.operation_id), record)
+        self.assertIn(
+            f"RightMemory-Operation: {record.operation_id}",
+            self._git("log", "-1", "--format=%B"),
+        )
+
     def test_external_finalizer_prepares_without_landing_or_generic_recovery(self):
         calls = []
 
@@ -148,41 +217,6 @@ class IsolatedWriteUpdateFinalizationTests(IsolatedWriteTestBase):
         self.assertEqual(record.effects, ())
         self.assertTrue(record.outcome.metadata["superseded"])
 
-    def test_update_lands_its_runtime_managed_review_in_the_same_commit(self):
-        operation_id = "update-operation-with-review"
-
-        def callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `two` reviewed update → []\n")
-            self._git("add", "MEMORY.md", cwd=worktree)
-            self._git("commit", "-m", "memory: reviewed update", cwd=worktree)
-            return "Added one durable memory."
-
-        def prepare(worktree, base, candidate, paths, output):
-            store = UpdateReviewStore(worktree)
-            record = store.create_review(
-                origin_operation_id=operation_id,
-                base_commit=base,
-                write_surface="Memory",
-                summary=output,
-                diff=self._git("diff", base, candidate, "--", "MEMORY.md", cwd=worktree),
-            )
-            return (store.review_path(record.review_id).relative_to(worktree).as_posix(),)
-
-        result = IsolatedWriteSupervisor(self.root, "update").run(
-            callback,
-            operation_id=operation_id,
-            operation_input={"message": "remember"},
-            prepare_managed_artifacts=prepare,
-        )
-
-        verified = verify_update_review(self.root, next((self.root / "update_reviews").glob("*.md")).stem)
-        changed = self._git("show", "--format=", "--name-only", "HEAD").splitlines()
-        self.assertEqual(result.commits_landed, 1)
-        self.assertEqual(result.changed_paths, ("MEMORY.md",))
-        self.assertIn("MEMORY.md", changed)
-        self.assertIn(f"update_reviews/{verified.review_id}.md", changed)
-        self.assertEqual(verified.origin_operation_id, operation_id)
-
     def test_update_lands_memory_and_pursuit_as_one_transaction(self):
         def callback(worktree: Path) -> str:
             self._append_memory(worktree, "- `durable` durable result → []\n")
@@ -200,69 +234,6 @@ class IsolatedWriteUpdateFinalizationTests(IsolatedWriteTestBase):
         self.assertEqual(result.start_commit, self._git("rev-parse", f"{result.landed_commit}^"))
         self.assertEqual(result.changed_paths, ("MEMORY.md", "PURSUITS.md"))
         self.assertIn("continue", (self.root / "PURSUITS.md").read_text(encoding="utf-8"))
-
-    def test_update_corrector_lands_state_and_feedback_in_one_commit(self):
-        def callback(worktree: Path) -> UpdateCorrectionResult:
-            self._append_memory(worktree, "- `corrected` accepted state → []\n")
-            (worktree / "corrections.md").write_text(
-                "# RightMemory Update Corrections\n\n"
-                "## Keep accepted scope\n\n"
-                "### Background\n\nThe updater broadened the edit.\n\n"
-                "### Proposed edit\n\nRewrite unrelated state.\n\n"
-                "### Accepted edit\n\nChange only the reviewed state.\n",
-                encoding="utf-8",
-            )
-            self._git("add", "MEMORY.md", "corrections.md", cwd=worktree)
-            self._git("commit", "-m", "rightmemory: apply reviewed correction", cwd=worktree)
-            return UpdateCorrectionResult(status="applied", message="corrected")
-
-        result = IsolatedWriteSupervisor(self.root, "update-corrector").run(callback)
-
-        self.assertEqual(result.commits_landed, 1)
-        self.assertEqual(result.changed_paths, ("MEMORY.md", "corrections.md"))
-        self.assertTrue((self.root / "corrections.md").is_file())
-
-    def test_update_corrector_preserves_fixed_agent_correction_references(self):
-        self._add_fixed_agent_correction_collections()
-
-        def callback(worktree: Path) -> UpdateCorrectionResult:
-            memory_path = worktree / "MEMORY.md"
-            memory = memory_path.read_text(encoding="utf-8").replace(
-                "\n### Agent corrections",
-                "\n- `corrected` accepted state → []\n\n### Agent corrections",
-            )
-            memory_path.write_text(memory, encoding="utf-8")
-            self._git("add", "MEMORY.md", cwd=worktree)
-            self._git("commit", "-m", "rightmemory: preserve fixed corrections", cwd=worktree)
-            return UpdateCorrectionResult(status="applied", message="corrected")
-
-        result = IsolatedWriteSupervisor(self.root, "update-corrector").run(callback)
-
-        self.assertEqual(result.commits_landed, 1)
-        memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
-        self.assertIn("{M#agent-corrections-writing}", memory)
-        self.assertIn("{M#agent-corrections-design}", memory)
-
-    def test_update_corrector_accepts_needs_input_without_a_commit(self):
-        result = IsolatedWriteSupervisor(self.root, "update-corrector").run(
-            lambda _worktree: UpdateCorrectionResult(
-                status="needs_input",
-                message="Which scope should change?",
-            )
-        )
-
-        self.assertEqual(result.commits_landed, 0)
-        self.assertEqual(result.landed_commit, self.initial_head)
-
-    def test_update_corrector_accepts_json_after_visible_thinking(self):
-        result = IsolatedWriteSupervisor(self.root, "update-corrector").run(
-            lambda _worktree: (
-                "<think>checking</think>"
-                '{"status":"needs_input","message":"Which scope should change?"}'
-            )
-        )
-
-        self.assertEqual(result.commits_landed, 0)
 
     def test_sync_reconciler_preserves_structured_corrections_over_updater_ceiling(self):
         def callback(worktree: Path) -> str:
@@ -302,30 +273,6 @@ class IsolatedWriteUpdateFinalizationTests(IsolatedWriteTestBase):
             (self.root / "corrections.md").read_text(encoding="utf-8").count("## Entry "),
             16,
         )
-
-    def test_correction_overflow_does_not_block_unrelated_update_correction(self):
-        (self.root / "corrections.md").write_text(
-            self._corrections_markdown(16),
-            encoding="utf-8",
-        )
-        self._git("add", "corrections.md")
-        self._git("commit", "-m", "sync: preserve unresolved correction union")
-
-        def callback(worktree: Path) -> UpdateCorrectionResult:
-            self._append_memory(worktree, "- `corrected` unrelated state repair → []\n")
-            self._git("add", "MEMORY.md", cwd=worktree)
-            self._git("commit", "-m", "rightmemory: unrelated correction", cwd=worktree)
-            return UpdateCorrectionResult(status="applied", message="corrected")
-
-        result = IsolatedWriteSupervisor(self.root, "update-corrector").run(callback)
-
-        self.assertEqual(result.commits_landed, 1)
-        self.assertIn("corrected", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
-        self.assertEqual(
-            (self.root / "corrections.md").read_text(encoding="utf-8").count("## Entry "),
-            16,
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -500,7 +500,7 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.tools.git_add(["rightmemory.toml"])
 
-    def test_only_review_correction_tools_can_write_corrections(self):
+    def test_update_can_read_but_not_write_corrections(self):
         self._git("init")
         corrections = self.root / "corrections.md"
         corrections.write_text("# RightMemory Update Corrections\n", encoding="utf-8")
@@ -512,19 +512,14 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "PURSUIT_\\*\\.md"):
             normal.git_add(["corrections.md"])
 
-        tools = MemoryTools(self.root, role="update-corrector")
-        self.assertEqual(tools.git_add(["corrections.md"]), "staged: corrections.md")
-
-    def test_update_roles_treat_pursuit_rules_as_read_only(self):
+    def test_update_treats_pursuit_rules_as_read_only(self):
         rules = self.root / "PURSUIT_RULES.md"
         rules.write_text("# Pursuit Rules\n", encoding="utf-8")
 
-        for role in ("update", "update-corrector"):
-            with self.subTest(role=role):
-                tools = MemoryTools(self.root, role=role)
-                tools.read("PURSUIT_RULES.md")
-                with self.assertRaisesRegex(ValueError, "PURSUIT_\\*\\.md"):
-                    tools.edit_file("PURSUIT_RULES.md", "Pursuit", "Changed")
+        tools = MemoryTools(self.root, role="update")
+        tools.read("PURSUIT_RULES.md")
+        with self.assertRaisesRegex(ValueError, "PURSUIT_\\*\\.md"):
+            tools.edit_file("PURSUIT_RULES.md", "Pursuit", "Changed")
 
     def test_non_updater_roles_cannot_read_updater_corrections(self):
         (self.root / "corrections.md").write_text("private updater feedback\n", encoding="utf-8")
@@ -552,10 +547,6 @@ class MemoryToolsTests(unittest.TestCase):
         updater = MemoryTools(self.root, role="update")
         updater.read(paths[0])
         self.assertIn("edited", updater.edit_file(paths[0], "Curated", "Updater-owned"))
-
-        corrector = MemoryTools(self.root, role="update-corrector")
-        with self.assertRaisesRegex(ValueError, r"MEMORY_\*\.md"):
-            corrector.edit_file(paths[1], "Curated", "Corrector-owned")
 
     def test_dreamer_can_modify_ordinary_m_and_s_backing_files(self):
         for path in ("MEMORY_research-notes.md", "MEMORY_SKILL_two-pass-review.md"):

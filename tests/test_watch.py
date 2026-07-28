@@ -4,7 +4,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rightmemory.config import MEMORY_ROOT_ENV
 from rightmemory.watch import (
     MANAGED_WATCH_TARGETS,
     MANAGED_WATCH_ENV,
@@ -13,7 +12,6 @@ from rightmemory.watch import (
     ManagedWatchStatus,
     WatchLock,
     consume_watch_stop_request,
-    start_managed_watch,
     stop_managed_watch,
     watch_log_path,
     watch_identity_path,
@@ -23,38 +21,13 @@ from rightmemory.watch import (
 
 
 class WatchControlTests(unittest.TestCase):
-    def test_transcript_and_update_reviews_are_independent_managed_targets(self):
+    def test_transcript_review_is_a_managed_target(self):
         self.assertIn("review", MANAGED_WATCH_TARGETS)
-        self.assertIn("update-review", MANAGED_WATCH_TARGETS)
         self.assertEqual(WATCH_COMMANDS["review"], ("review", "watch"))
-        self.assertEqual(WATCH_COMMANDS["update-review"], ("update-review", "watch"))
 
     def test_agent_cli_cleanup_has_its_own_managed_target(self):
         self.assertIn("agent-cli-cleanup", MANAGED_WATCH_TARGETS)
         self.assertEqual(WATCH_COMMANDS["agent-cli-cleanup"], ("agent-cli", "cleanup", "--watch"))
-
-    def test_starting_update_review_does_not_clean_update_worktrees(self):
-        class FakeProcess:
-            pid = 456
-
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            source_root = Path(__file__).resolve().parents[1]
-            with (
-                patch.dict(os.environ, {"PYTHONPATH": "/existing/path"}, clear=False),
-                patch("rightmemory.watch.IsolatedWriteSupervisor.cleanup_stale") as cleanup,
-                patch("rightmemory.watch.subprocess.Popen", return_value=FakeProcess()) as popen,
-            ):
-                status = start_managed_watch(root, "update-review", "python")
-            env = popen.call_args.kwargs["env"]
-
-        self.assertEqual(status.state, "running")
-        self.assertEqual(status.pid, 456)
-        cleanup.assert_not_called()
-        self.assertEqual(popen.call_args.args[0], ["python", "-m", "rightmemory.cli", "update-review", "watch"])
-        self.assertEqual(env[MEMORY_ROOT_ENV], str(root))
-        self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(source_root))
-        self.assertIn("/existing/path", env["PYTHONPATH"].split(os.pathsep))
 
     def test_managed_watch_registers_and_cleans_its_own_pid(self):
         with tempfile.TemporaryDirectory() as tempdir:

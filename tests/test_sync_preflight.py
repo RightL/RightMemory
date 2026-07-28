@@ -2,6 +2,8 @@ from pathlib import Path
 
 from rightmemory.config import SyncConfig
 from rightmemory.sync import SyncManager
+from rightmemory.update_queue import UpdateCandidate
+from rightmemory.update_record import UpdateRecord, UpdateRecordStore
 from tests.sync_test_base import SyncTestBase
 
 
@@ -26,19 +28,19 @@ class SyncPreflightTests(SyncTestBase):
         self.assertIn("PURSUIT_*.md", MEMORY_SYNC_PATHS)
         self.assertIn("PURSUIT_RULES.md", MEMORY_SYNC_PATHS)
         self.assertIn("corrections.md", MEMORY_SYNC_PATHS)
-        self.assertIn("update_reviews/*.md", MEMORY_SYNC_PATHS)
         self.assertIn("update_queue/candidates/*.json", MEMORY_SYNC_PATHS)
         self.assertIn("update_queue/recovery/*.json", MEMORY_SYNC_PATHS)
         self.assertIn("update_queue/lease.json", MEMORY_SYNC_PATHS)
+        self.assertIn("update_records/*.json", MEMORY_SYNC_PATHS)
         self.assertTrue(_is_sync_path(f"update_queue/candidates/{'a' * 32}.json"))
         self.assertTrue(_is_sync_path(f"update_queue/recovery/update-batch-{'b' * 64}.json"))
         self.assertTrue(_is_sync_path("update_queue/lease.json"))
-        self.assertTrue(_is_sync_path(f"update_reviews/review-{'c' * 64}.md"))
+        self.assertTrue(_is_sync_path(f"update_records/update-batch-{'d' * 64}.json"))
         self.assertFalse(_is_sync_path("update_queue/candidates/not-a-uuid.json"))
         self.assertFalse(_is_sync_path(f"update_queue/candidates/{'A' * 32}.json"))
         self.assertFalse(_is_sync_path(f"update_queue/recovery/{'b' * 64}.json"))
         self.assertFalse(_is_sync_path("update_queue/extra.json"))
-        self.assertFalse(_is_sync_path("update_reviews/not-a-review.md"))
+        self.assertFalse(_is_sync_path("update_records/not-an-operation.json"))
 
     def test_preflight_accepts_incoming_root_gitignore_change(self):
         gitignore = "*\n!MEMORY.md\n!PURSUITS.md\n!PURSUIT_RULES.md\n"
@@ -105,6 +107,25 @@ class SyncPreflightTests(SyncTestBase):
         self.assertEqual(result.status, "synced")
         self.assertIn("two", (self.device / "MEMORY.md").read_text(encoding="utf-8"))
 
+    def test_preflight_transports_valid_retained_candidate_record(self):
+        candidate = UpdateCandidate(
+            uid="a" * 32,
+            session_id="agent-session",
+            display_id=1,
+            message="durable candidate evidence",
+            submitted_at="2026-07-27T12:00:00+00:00",
+        )
+        record = UpdateRecord.from_candidates((candidate,))
+        path = UpdateRecordStore(self.other).write(record)
+        self._git(self.other, "add", "-f", path.relative_to(self.other).as_posix())
+        self._git(self.other, "commit", "-m", "update: retain candidate batch")
+        self._git(self.other, "push")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+        self.assertEqual(result.status, "synced")
+        self.assertEqual(UpdateRecordStore(self.device).read(record.operation_id), record)
+
     def test_preflight_reports_dirty_memory_without_merging(self):
         (self.other / "MEMORY.md").write_text(
             "# Domain\n\n- `one` first → []\n- `two` remote only → []\n",
@@ -143,20 +164,6 @@ class SyncPreflightTests(SyncTestBase):
                     path.unlink()
                 else:
                     path.write_text(original, encoding="utf-8")
-
-    def test_uncommitted_review_draft_does_not_block_unrelated_sync(self):
-        review = self.device / "update_reviews" / f"review-{'a' * 64}.md"
-        review.parent.mkdir()
-        review.write_text("tracked review\n", encoding="utf-8")
-        self._git(self.device, "add", str(review.relative_to(self.device)))
-        self._git(self.device, "commit", "-m", "review: tracked")
-        self._git(self.device, "push", "origin", "HEAD:main")
-        review.write_text("local draft\n", encoding="utf-8")
-
-        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
-
-        self.assertNotEqual(result.status, "dirty")
-        self.assertEqual(review.read_text(encoding="utf-8"), "local draft\n")
 
     def test_clean_git_merge_with_duplicate_cross_tree_id_reports_semantic_conflict(self):
         (self.other / "PURSUITS.md").write_text(

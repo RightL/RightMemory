@@ -467,16 +467,6 @@ class StatusDashboardTests(unittest.TestCase):
                     (),
                     {"name": "review", "state": "running", "pid": 123, "log_path": log},
                 )(),
-                "update-review": type(
-                    "WatchStatus",
-                    (),
-                    {
-                        "name": "update-review",
-                        "state": "stopped",
-                        "pid": None,
-                        "log_path": root / ".runtime" / "watch" / "update-review.log",
-                    },
-                )(),
                 "dreamer": type(
                     "WatchStatus",
                     (),
@@ -536,7 +526,7 @@ class StatusDashboardTests(unittest.TestCase):
 
         self.assertEqual(
             [watch.name for watch in watches],
-            ["review", "update-review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"],
+            ["review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"],
         )
         self.assertEqual(watches[0].state, "running pid 123")
         self.assertEqual(watches[0].last, "reviewed 3 sessions")
@@ -552,7 +542,7 @@ class StatusDashboardTests(unittest.TestCase):
             log.write_text("rightmemory pruner check failed: RuntimeError: boom\n", encoding="utf-8")
 
             statuses = {}
-            for name in ("review", "update-review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"):
+            for name in ("review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"):
                 statuses[name] = type(
                     "WatchStatus",
                     (),
@@ -589,7 +579,7 @@ class StatusDashboardTests(unittest.TestCase):
                 encoding="utf-8",
             )
             statuses = {}
-            for name in ("review", "update-review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"):
+            for name in ("review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"):
                 statuses[name] = type(
                     "WatchStatus",
                     (),
@@ -618,7 +608,7 @@ class StatusDashboardTests(unittest.TestCase):
             log.parent.mkdir(parents=True)
             log.write_text("rightmemory dreamer watch stopping after current work\n", encoding="utf-8")
             statuses = {}
-            for name in ("review", "update-review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"):
+            for name in ("review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"):
                 statuses[name] = type(
                     "WatchStatus",
                     (),
@@ -652,11 +642,10 @@ class StatusDashboardTests(unittest.TestCase):
 
             self.assertEqual(
                 [watch.name for watch in watches],
-                ["review", "update-review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"],
+                ["review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"],
             )
             self.assertEqual(issues, [])
             self.assertFalse((watch_dir / "review.lock").exists())
-            self.assertFalse((watch_dir / "update-review.lock").exists())
             self.assertFalse((watch_dir / "dreamer.lock").exists())
             self.assertFalse((watch_dir / "pruner.lock").exists())
             self.assertFalse((watch_dir / "insight.lock").exists())

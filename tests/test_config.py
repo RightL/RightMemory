@@ -21,7 +21,6 @@ from rightmemory.config import (
     load_pruner_config,
     load_review_config,
     load_sync_config,
-    load_update_corrector_config,
 )
 from rightmemory.isolated_write import IsolatedWriteResult, MainMemoryDirtyError
 from rightmemory.prompt import build_cli_agent_instructions, build_instructions
@@ -41,7 +40,8 @@ from rightmemory.retrieve_selection import RetrieveSelection
 from rightmemory.semantic_upgrades import SemanticUpgradeContext, SemanticUpgradeNote
 from rightmemory.shared_view_files import FileViewPublishResult
 from rightmemory.sync import SyncResult
-from rightmemory.update_corrector import UpdateCorrectionResult
+from rightmemory.update_queue import UpdateCandidate
+from rightmemory.update_record import UpdateRecord, UpdateRecordStore
 
 
 EMPTY_RETRIEVE_SELECTION_JSON = '{"ids": [], "sources": [], "recent_candidates": []}'
@@ -96,28 +96,6 @@ class ConfigTests(unittest.TestCase):
             config = load_config("retrieve", memory_root=root)
 
         self.assertEqual(config.retrieve_max_output_chars, 12345)
-
-    def test_update_corrector_clones_update_executor_as_a_fresh_internal_role(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            (root / "rightmemory.toml").write_text(
-                """
-                [agent_cli]
-                provider = "codex"
-
-                [update.agent_cli]
-                model = "gpt-5"
-                """,
-                encoding="utf-8",
-            )
-
-            update = load_config("update", memory_root=root)
-            corrector = load_update_corrector_config(memory_root=root)
-
-        self.assertEqual(
-            corrector,
-            replace(update, role="update-corrector", fresh_provider_session=True),
-        )
 
     def test_load_review_config_accepts_explicit_memory_root(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1111,18 +1089,6 @@ class RuntimeTests(unittest.TestCase):
             {"read_detail", "read_markdown", "read_skill", "read_mf"},
         )
 
-    def test_standalone_update_corrector_uses_native_terminal_result_type(self):
-        config = RuntimeConfig(
-            role="update-corrector",
-            model_id="openai/test",
-            memory_root=Path(self.tempdir.name),
-        )
-
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-
-        self.assertIs(runtime.agent.kwargs["output_type"], UpdateCorrectionResult)
-
     def test_cli_agent_runtime_uses_executor_without_pydantic_agent(self):
         config = RuntimeConfig(
             role="retrieve",
@@ -1855,7 +1821,7 @@ class RuntimeTests(unittest.TestCase):
             credential_root=root,
         )
 
-    def test_isolated_update_prepares_review_before_state_promotion(self):
+    def test_isolated_update_prepares_managed_artifacts_before_state_promotion(self):
         main_root = Path(self.tempdir.name)
         worktree = main_root / ".runtime" / "worktrees" / "update-123"
         events = []
@@ -1908,53 +1874,43 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
             with patch.object(
                 runtime,
-                "_prepare_update_review_artifact",
-                side_effect=lambda *_args: events.append("review") or ("update_reviews/review.md",),
+                "_prepare_update_artifacts",
+                side_effect=lambda *_args: events.append("artifacts") or (),
             ):
                 result = runtime._run_session_turn_isolated("agent-session", "remember one")
 
         self.assertEqual(result, "updated")
-        self.assertEqual(events, ["review", "landed", "promote"])
+        self.assertEqual(events, ["artifacts", "landed", "promote"])
 
-    def test_update_review_artifact_uses_candidate_metadata(self):
+    def test_candidate_record_is_prepared_for_queued_update(self):
         root = Path(self.tempdir.name)
         config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-        with patch("rightmemory.runtime._git_rightmemory_diff", return_value="diff text") as diff:
-            paths = runtime._prepare_update_review_artifact(
-                "update-op-123",
-                root,
-                "base123",
-                "tip456",
-                ("MEMORY.md",),
-                "updated summary",
-            )
-
-        diff.assert_called_once_with(root, "base123", "tip456")
-        self.assertEqual(len(paths), 1)
-        review = (root / paths[0]).read_text(encoding="utf-8")
-        self.assertIn('"base_commit":"base123"', review)
-        self.assertIn('"write_surface":"Memory"', review)
-        self.assertIn("updated summary", review)
-
-    def test_update_review_artifact_skips_non_state_maintenance_commit(self):
-        root = Path(self.tempdir.name)
-        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
+        candidate = UpdateCandidate(
+            uid="a" * 32,
+            session_id="agent-session",
+            display_id=1,
+            message="exact candidate",
+            submitted_at="2026-07-27T12:00:00+00:00",
+        )
+        record = UpdateRecord.from_candidates((candidate,))
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
 
-        paths = runtime._prepare_update_review_artifact(
-            "update-op-123",
+        paths = runtime._prepare_update_artifacts(
+            record.operation_id,
+            record,
             root,
             "base123",
             "tip456",
-            ("corrections.md",),
-            "maintained correction evidence",
+            ("MEMORY.md",),
+            "updated summary",
         )
 
-        self.assertEqual(paths, ())
-        self.assertFalse((root / "update_reviews").exists())
+        self.assertEqual(
+            paths,
+            (f"update_records/{record.operation_id}.json",),
+        )
+        self.assertEqual(UpdateRecordStore(root).read(record.operation_id), record)
 
     def test_isolated_run_holds_main_session_lock_around_supervisor_execution(self):
         main_root = Path(self.tempdir.name)
@@ -3374,19 +3330,6 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("15", instructions)
         self.assertIn("MEMORY.md", instructions)
         self.assertIn("PURSUITS.md", instructions)
-
-    def test_update_corrector_has_a_separate_typed_role_prompt(self):
-        update = build_instructions(Path("/memory"), "update")
-        corrector = build_instructions(Path("/memory"), "update-corrector")
-
-        self.assertNotIn("Apply one explicitly submitted human review correction", update)
-        self.assertIn("Apply one explicitly submitted human review correction", corrector)
-        self.assertIn('`{"status":"applied"', corrector)
-        self.assertIn("typed correction result", corrector)
-        self.assertIn("fixed writing/design correction collections are read-only", corrector)
-
-        cli_prompt = build_cli_agent_instructions(Path("/memory"), "update-corrector")
-        self.assertIn("exactly one JSON object with only `status` and `message`", cli_prompt)
 
     def test_run_session_turn_preserves_message_history_on_disk(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))

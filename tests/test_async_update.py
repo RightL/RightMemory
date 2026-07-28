@@ -17,10 +17,36 @@ from rightmemory.async_update import (
 )
 from rightmemory.platform import lock_file_nonblocking, unlock_file
 from rightmemory.semantic_operation import OperationEffect, SemanticOperationStore
-from rightmemory.update_queue import UpdateCandidate, UpdateQueueStore
+from rightmemory.update_queue import (
+    UpdateCandidate,
+    UpdateQueueStore,
+    update_candidate_batch_id,
+)
 
 
 class AsyncUpdateStateTests(unittest.TestCase):
+    def test_local_and_synchronized_batches_share_one_operation_identity(self):
+        job = _job(1, "same evidence")
+        batch = [
+            AsyncUpdateSessionBatch(
+                "agent-1",
+                _dt("2000-01-01T00:00:00+00:00"),
+                [job],
+            )
+        ]
+        candidate = UpdateCandidate(
+            uid=job.candidate_uid,
+            session_id="agent-1",
+            display_id=job.id,
+            message=job.message,
+            submitted_at=job.submitted_at,
+        )
+
+        self.assertEqual(
+            _batch_session_id(batch),
+            update_candidate_batch_id((candidate,)),
+        )
+
     def test_worker_command_uses_global_async_worker(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")

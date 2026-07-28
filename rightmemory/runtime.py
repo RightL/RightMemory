@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
 import uuid
 from collections.abc import Callable
@@ -52,6 +51,7 @@ from .semantic_upgrades import SemanticUpgradeContext, mark_absorbed, pending_co
 from .session import (
     MemoryWriteLock,
     MessageSessionStore,
+    UpdateExecutionLock,
     _ensure_durable_directory,
     _ensure_runtime_gitignore,
     _fsync_directory,
@@ -73,12 +73,11 @@ from .sync import (
     schedule_deferred_sync,
 )
 from .tools import MemoryTools
-from .update_corrector import UpdateCorrectionResult, render_update_correction_result
-from .update_queue import UpdateQueueStore
-from .update_review import UpdateExecutionLock, UpdateReviewStore
+from .update_queue import UpdateCandidate, UpdateQueueStore
+from .update_record import UpdateRecord, UpdateRecordStore
 
 
-AUTOMATIC_WRITE_ROLES = {"dreamer", "insight", "pruner", "update", "update-corrector"}
+AUTOMATIC_WRITE_ROLES = {"dreamer", "insight", "pruner", "update"}
 CYCLE_ROLES = {"dreamer", "insight"}
 HISTORY_READ_ROLES = {"historian", "pruner"}
 SYNC_TOOL_ROLES = {"sync-reconciler"}
@@ -267,6 +266,7 @@ class RightMemoryRuntime:
         on_started: Callable[[], None] | None = None,
         include_returned: bool = False,
         operation_id: str | None = None,
+        update_candidates: tuple[UpdateCandidate, ...] | None = None,
     ) -> str:
         with self._update_execution_lock():
             self._last_write_result = None
@@ -276,6 +276,8 @@ class RightMemoryRuntime:
             }
             if operation_id is not None:
                 turn_kwargs["operation_id"] = operation_id
+            if update_candidates is not None:
+                turn_kwargs["update_candidates"] = update_candidates
             return self._run_session_turn_unlocked(session_id, message, **turn_kwargs)
 
     def prepare_session_turn_external(
@@ -285,6 +287,7 @@ class RightMemoryRuntime:
         *,
         operation_id: str,
         external_finalizer: str,
+        update_candidates: tuple[UpdateCandidate, ...] | None = None,
     ) -> IsolatedWriteResult:
         """Prepare an isolated semantic turn without landing it in the active root."""
         if not self._should_isolate_write_turn():
@@ -296,6 +299,7 @@ class RightMemoryRuntime:
                 message,
                 operation_id=operation_id,
                 external_finalizer=external_finalizer,
+                update_candidates=update_candidates,
             )
             if self._last_write_result is None or not self._last_write_result.prepared:
                 raise RuntimeError("external semantic turn did not produce a prepared result")
@@ -429,6 +433,7 @@ class RightMemoryRuntime:
         allow_internal_session: bool = False,
         include_returned: bool = False,
         operation_id: str | None = None,
+        update_candidates: tuple[UpdateCandidate, ...] | None = None,
     ) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
@@ -454,7 +459,11 @@ class RightMemoryRuntime:
                 if include_returned:
                     direct_kwargs["include_returned"] = True
                 direct_callback = lambda: run_session(session_id, message, **direct_kwargs)
-                operation_kwargs = {} if operation_id is None else {"operation_id": operation_id}
+                operation_kwargs: dict[str, object] = {}
+                if operation_id is not None:
+                    operation_kwargs["operation_id"] = operation_id
+                if update_candidates is not None:
+                    operation_kwargs["update_candidates"] = update_candidates
                 if on_started is None:
                     isolated_callback = lambda: self._run_session_turn_isolated(
                         session_id,
@@ -759,6 +768,7 @@ class RightMemoryRuntime:
         on_started: Callable[[], None] | None = None,
         operation_id: str | None = None,
         external_finalizer: str | None = None,
+        update_candidates: tuple[UpdateCandidate, ...] | None = None,
     ):
         def run_in_operation(worktree: Path, state_root: Path):
             if on_started is None:
@@ -777,6 +787,7 @@ class RightMemoryRuntime:
             {"kind": "semantic-turn", "message": message},
             run_in_operation,
             external_finalizer=external_finalizer,
+            update_candidates=update_candidates,
         )
 
     def _run_prune_turn_isolated(
@@ -806,16 +817,31 @@ class RightMemoryRuntime:
         run_in_operation: Callable[[Path, Path], Any],
         *,
         external_finalizer: str | None = None,
+        update_candidates: tuple[UpdateCandidate, ...] | None = None,
     ):
         clean_operation_id = operation_id or f"{self.config.role}-{uuid.uuid4().hex}"
+        update_record = None
+        if update_candidates is not None:
+            if self.config.role != "update":
+                raise ValueError("retained update candidates require the update role")
+            update_record = UpdateRecord.from_candidates(update_candidates)
+            if update_record.operation_id != clean_operation_id:
+                raise ValueError(
+                    "update operation id does not match its retained candidate batch"
+                )
         operation_input = {
             **operation_input,
             "role": self.config.role,
             "session_id": session_id,
+            **(
+                {"update_record": update_record.to_data()}
+                if update_record is not None
+                else {}
+            ),
         }
         pressure_points = (
             memory_change_pressure_points(self.config.memory_root)
-            if self.config.role in {"update", "update-corrector"}
+            if self.config.role == "update"
             else None
         )
         supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
@@ -858,8 +884,9 @@ class RightMemoryRuntime:
                     prepare_effects=self._prepare_operation_effects,
                     prepare_managed_artifacts=(
                         lambda worktree, base_commit, candidate_commit, changed_paths, output: (
-                            self._prepare_update_review_artifact(
+                            self._prepare_update_artifacts(
                                 clean_operation_id,
+                                update_record,
                                 worktree,
                                 base_commit,
                                 candidate_commit,
@@ -915,7 +942,7 @@ class RightMemoryRuntime:
         effects = [OperationEffect(STATE_EFFECT, metadata={"session_id": session_id})]
         effects.append(OperationEffect(PUBLISH_EFFECT))
         if (
-            self.config.role in {"update", "update-corrector"}
+            self.config.role == "update"
             and commits_landed
             and _changed_memory_paths(changed_paths)
         ):
@@ -1695,8 +1722,6 @@ class RightMemoryRuntime:
         }
         if self.config.role == "retrieve":
             kwargs["output_type"] = RetrieveSelection
-        elif self.config.role == "update-corrector":
-            kwargs["output_type"] = UpdateCorrectionResult
         agent = Agent(**kwargs)
         if self.config.role == "retrieve":
             agent.output_validator(self._validate_retrieve_output)
@@ -1822,32 +1847,24 @@ class RightMemoryRuntime:
         return UsageLimits(request_limit=MODEL_REQUEST_LIMIT)
 
     def _update_execution_lock(self):
-        if self.config.role in {"update", "update-corrector"}:
+        if self.config.role == "update":
             return UpdateExecutionLock(self.config.memory_root)
         return nullcontext()
 
-    def _prepare_update_review_artifact(
+    def _prepare_update_artifacts(
         self,
-        origin_operation_id: str,
+        _origin_operation_id: str,
+        update_record: UpdateRecord | None,
         worktree: Path,
-        base_commit: str,
-        candidate_commit: str,
-        changed_paths: tuple[str, ...],
-        summary: str,
+        _base_commit: str,
+        _candidate_commit: str | None,
+        _changed_paths: tuple[str, ...],
+        _summary: str,
     ) -> tuple[str, ...]:
-        write_surface = _rightmemory_write_surface(changed_paths)
-        if write_surface == "RightMemory":
-            return ()
-        diff = _git_rightmemory_diff(worktree, base_commit, candidate_commit)
-        record = UpdateReviewStore(worktree).create_review(
-            origin_operation_id=origin_operation_id,
-            base_commit=base_commit,
-            write_surface=write_surface,
-            summary=summary,
-            diff=diff,
-        )
-        path = UpdateReviewStore(worktree).review_path(record.review_id)
-        return (path.relative_to(worktree).as_posix(),)
+        if update_record is not None:
+            path = UpdateRecordStore(worktree).write(update_record)
+            return (path.relative_to(worktree).as_posix(),)
+        return ()
 
     @property
     def last_write_result(self) -> IsolatedWriteResult | None:
@@ -1907,8 +1924,6 @@ class RightMemoryRuntime:
     def _result_output(self, result: Any) -> str:
         output = getattr(result, "output", None)
         output = output if output is not None else result
-        if isinstance(output, UpdateCorrectionResult):
-            return render_update_correction_result(output)
         text = str(output)
         return _strip_visible_thinking(text)
 
@@ -2088,45 +2103,6 @@ def _write_state_json_file(data: dict[str, Any], destination: Path) -> None:
         tmp_path.unlink(missing_ok=True)
         raise
     _fsync_directory(destination.parent)
-
-
-def _git_rightmemory_diff(memory_root: Path, base_commit: str, update_commit: str) -> str:
-    result = subprocess.run(
-        [
-            "git",
-            "diff",
-            base_commit,
-            update_commit,
-            "--",
-            "MEMORY.md",
-            ":(glob)MEMORY_*.md",
-            "PURSUITS.md",
-            ":(glob)PURSUIT_*.md",
-        ],
-        cwd=memory_root,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"git diff failed: {result.stderr.strip()}")
-    return result.stdout.rstrip()
-
-
-def _rightmemory_write_surface(paths: tuple[str, ...]) -> str:
-    changed_memory = any(path == "MEMORY.md" or path.startswith("MEMORY_") for path in paths)
-    changed_pursuit = any(path == "PURSUITS.md" or path.startswith("PURSUIT_") for path in paths)
-    if changed_memory and changed_pursuit:
-        return "Memory + Pursuit"
-    if changed_memory:
-        return "Memory"
-    if changed_pursuit:
-        return "Pursuit"
-    return "RightMemory"
 
 
 def _changed_memory_paths(paths: tuple[str, ...]) -> bool:

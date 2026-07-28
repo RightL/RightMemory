@@ -20,10 +20,9 @@ from .semantic_operation import (
     SemanticOperationRecord,
     SemanticOperationStore,
 )
-from .graph import MEMORY_DETAIL_FILE_RE, PURSUIT_DETAIL_FILE_RE, build_graph_manifest
+from .graph import MEMORY_DETAIL_FILE_RE, PURSUIT_DETAIL_FILE_RE
 from .tools import (
     CORRECTIONS_PATH,
-    FIXED_CORRECTION_COLLECTION_IDS,
     FIXED_CORRECTION_COLLECTION_PATHS,
     INSIGHT_LOG_FILE_RE,
     PURSUIT_RULES_PATH,
@@ -32,16 +31,12 @@ from .tools import (
     SHARED_VIEW_REGISTRY_PATH,
     MemoryTools,
 )
-from .update_corrector import (
-    UpdateCorrectionResult,
-    parse_update_correction_result,
-    render_update_correction_result,
-)
-from .update_coordination import UPDATE_REVIEW_PATH_RE
-from .update_review import OPERATION_TRAILER, validate_corrections_markdown, validate_update_reviews
+from .update_coordination import UPDATE_RECORD_PATH_RE
+from .update_record import validate_update_records
 
 
 GIT_TIMEOUT_SECONDS = 30
+OPERATION_TRAILER = "RightMemory-Operation"
 ACTIVE_MEMORY_WRITE_PATHS = ("MEMORY.md", "MEMORY_*.md")
 ACTIVE_PURSUIT_WRITE_PATHS = ("PURSUITS.md", "PURSUIT_*.md")
 PROTECTED_RIGHTMEMORY_PATHS = (
@@ -227,7 +222,7 @@ class IsolatedWriteSupervisor:
         effects_for_outcome: Callable[[tuple[str, ...], int], Iterable[OperationEffect]] | None = None,
         prepare_effects: Callable[[str, Path], None] | None = None,
         prepare_managed_artifacts: Callable[
-            [Path, str, str, tuple[str, ...], Any], Iterable[str]
+            [Path, str, str | None, tuple[str, ...], Any], Iterable[str]
         ]
         | None = None,
         external_finalizer: str | None = None,
@@ -269,7 +264,7 @@ class IsolatedWriteSupervisor:
         effects_for_outcome: Callable[[tuple[str, ...], int], Iterable[OperationEffect]] | None = None,
         prepare_effects: Callable[[str, Path], None] | None = None,
         prepare_managed_artifacts: Callable[
-            [Path, str, str, tuple[str, ...], Any], Iterable[str]
+            [Path, str, str | None, tuple[str, ...], Any], Iterable[str]
         ]
         | None = None,
         external_finalizer: str | None = None,
@@ -320,16 +315,6 @@ class IsolatedWriteSupervisor:
                 raise RuntimeError(f"isolated worktree has uncommitted changes:\n{status}")
 
             commits = self._temp_commits(worktree, start_head)
-            if self.role == "update-corrector":
-                decision = _correction_result(output)
-                if decision.status == "applied" and len(commits) != 1:
-                    raise RuntimeError(
-                        "update-corrector `applied` result requires exactly one state commit"
-                    )
-                if decision.status != "applied" and commits:
-                    raise RuntimeError(
-                        f"update-corrector `{decision.status}` result must not create a commit"
-                    )
             if commits:
                 if operation_id is not None:
                     commits = [self._collapse_operation_commits(worktree, start_head, commits, operation_id)]
@@ -345,7 +330,7 @@ class IsolatedWriteSupervisor:
                     raise MainMemoryDirtyError(dirty)
                 current_head = self._git_stdout(self.memory_root, "rev-parse", "HEAD")
                 if current_head != start_head:
-                    if operation_store is None or operation_id is None or not commits:
+                    if operation_store is None or operation_id is None:
                         raise RuntimeError("main HEAD changed during isolated memory write")
                     semantic_changes = self._semantic_changes_between(start_head, current_head)
                     if semantic_changes:
@@ -353,28 +338,33 @@ class IsolatedWriteSupervisor:
                         raise RuntimeError(
                             "main semantic state changed during isolated memory write: " + detail
                         )
-                    commits = [self._rebase_operation_commit(worktree, commits[0], current_head)]
-                    self._validate_candidate(worktree, commits)
+                    if commits:
+                        commits = [self._rebase_operation_commit(worktree, commits[0], current_head)]
+                        self._validate_candidate(worktree, commits)
+                    else:
+                        self._run_git(worktree, "reset", "--hard", current_head)
                     start_head = current_head
                     changed_paths = tuple(
                         sorted({path for commit in commits for path in self._commit_paths(worktree, commit)})
                     )
                 managed_paths: tuple[str, ...] = ()
-                if commits and prepare_managed_artifacts is not None:
+                if prepare_managed_artifacts is not None:
                     managed_paths = self._prepare_managed_artifacts(
                         worktree,
                         start_head,
-                        commits[0],
+                        commits[0] if commits else None,
                         changed_paths,
                         output,
                         prepare_managed_artifacts,
+                        operation_id=operation_id,
                     )
-                    commits = [self._git_stdout(worktree, "rev-parse", "HEAD")]
-                    self._validate_candidate(
-                        worktree,
-                        commits,
-                        managed_paths=frozenset(managed_paths),
-                    )
+                    if managed_paths:
+                        commits = [self._git_stdout(worktree, "rev-parse", "HEAD")]
+                        self._validate_candidate(
+                            worktree,
+                            commits,
+                            managed_paths=frozenset(managed_paths),
+                        )
                 if operation_store is not None and operation_id is not None:
                     if commits:
                         self._pin_operation_ref(operation_id, commits[0])
@@ -630,7 +620,7 @@ class IsolatedWriteSupervisor:
         *,
         managed_paths: frozenset[str] = frozenset(),
     ) -> None:
-        if self.role in {"update", "update-corrector"} and len(commits) > 1:
+        if self.role == "update" and len(commits) > 1:
             raise RuntimeError(f"one {self.role} turn must land at most one commit")
         for commit in commits:
             changed_paths = self._commit_paths(worktree, commit)
@@ -646,15 +636,6 @@ class IsolatedWriteSupervisor:
                 label = "non-insight paths" if self.role == "insight" else "non-memory paths"
                 raise RuntimeError(f"isolated commit touches {label}: {paths}")
             self._validate_commit_tree(worktree, commit, set(changed_paths))
-        if self.role == "update-corrector" and commits:
-            changed_paths = set(self._commit_paths(worktree, commits[0]))
-            if not any(self._is_rightmemory_path(path) for path in changed_paths):
-                raise RuntimeError(
-                    "review correction must change Memory or Pursuit; "
-                    "corrections.md-only commits are not allowed"
-                )
-            if CORRECTIONS_PATH in changed_paths:
-                self._validate_corrections_file(worktree, commits[0])
 
     def _validate_candidate(
         self,
@@ -666,21 +647,20 @@ class IsolatedWriteSupervisor:
         self._validate_commits(worktree, commits, managed_paths=managed_paths)
         if managed_paths:
             if self.role != "update" or any(
-                UPDATE_REVIEW_PATH_RE.fullmatch(path) is None for path in managed_paths
+                not _is_managed_update_artifact_path(path) for path in managed_paths
             ):
                 raise RuntimeError("runtime-managed Update artifacts use an invalid path")
-            diagnostics = validate_update_reviews(worktree)
-            if diagnostics:
-                raise RuntimeError(
-                    "invalid runtime-managed update review:\n"
-                    + "\n".join(f"- {item}" for item in diagnostics)
-                )
+            if any(UPDATE_RECORD_PATH_RE.fullmatch(path) for path in managed_paths):
+                diagnostics = validate_update_records(worktree)
+                if diagnostics:
+                    raise RuntimeError(
+                        "invalid runtime-managed update record:\n"
+                        + "\n".join(f"- {item}" for item in diagnostics)
+                    )
         if self.role == "insight":
             return
-        if self.role == "update-corrector":
-            self._validate_fixed_correction_collections(worktree)
         validation = MemoryTools(worktree, role=self.role).validate_memory(
-            # A pre-existing sync union must not block an unrelated state correction.
+            # A pre-existing sync union must not block an unrelated semantic update.
             enforce_correction_capacity=False
         )
         if validation.startswith("validation failed:"):
@@ -690,22 +670,28 @@ class IsolatedWriteSupervisor:
         self,
         worktree: Path,
         start_commit: str,
-        candidate_commit: str,
+        candidate_commit: str | None,
         changed_paths: tuple[str, ...],
         output: Any,
-        prepare: Callable[[Path, str, str, tuple[str, ...], Any], Iterable[str]],
+        prepare: Callable[[Path, str, str | None, tuple[str, ...], Any], Iterable[str]],
+        *,
+        operation_id: str | None,
     ) -> tuple[str, ...]:
-        paths = tuple(dict.fromkeys(prepare(
-            worktree,
-            start_commit,
-            candidate_commit,
-            changed_paths,
-            output,
-        )))
+        paths = tuple(
+            dict.fromkeys(
+                prepare(
+                    worktree,
+                    start_commit,
+                    candidate_commit,
+                    changed_paths,
+                    output,
+                )
+            )
+        )
         if not paths:
             return ()
         if self.role != "update" or any(
-            not isinstance(path, str) or UPDATE_REVIEW_PATH_RE.fullmatch(path) is None
+            not isinstance(path, str) or not _is_managed_update_artifact_path(path)
             for path in paths
         ):
             raise RuntimeError("runtime-managed Update artifacts use an invalid path")
@@ -718,34 +704,24 @@ class IsolatedWriteSupervisor:
             detail = ", ".join(sorted(dirty ^ set(paths))) or "unknown paths"
             raise RuntimeError(f"runtime-managed Update artifacts changed unexpected paths: {detail}")
         self._run_git(worktree, "add", "-f", "-A", "--", *paths)
-        self._run_git(worktree, "commit", "--amend", "--no-edit")
+        if candidate_commit is None:
+            if operation_id is None:
+                raise RuntimeError("a managed no-change Update artifact requires an operation id")
+            self._run_git(
+                worktree,
+                "commit",
+                "-m",
+                "\n".join(
+                    (
+                        "update: record no-change candidate batch",
+                        "",
+                        f"{OPERATION_TRAILER}: {operation_id}",
+                    )
+                ),
+            )
+        else:
+            self._run_git(worktree, "commit", "--amend", "--no-edit")
         return paths
-
-    def _validate_fixed_correction_collections(self, worktree: Path) -> None:
-        before = build_graph_manifest(self.memory_root)
-        candidate = build_graph_manifest(worktree)
-        for collection_id in sorted(FIXED_CORRECTION_COLLECTION_IDS):
-            original = before.backing.get(collection_id)
-            if original is None or original.kind != "M#":
-                continue
-            current = candidate.backing.get(collection_id)
-            original_block = before.block_for_id(collection_id)
-            current_block = candidate.block_for_id(collection_id)
-            if (
-                current is None
-                or current.kind != "M#"
-                or current.path.relative_to(candidate.root)
-                != original.path.relative_to(before.root)
-                or current.source_file.relative_to(candidate.root)
-                != original.source_file.relative_to(before.root)
-                or original_block is None
-                or current_block is None
-                or current_block.line != original_block.line
-            ):
-                raise RuntimeError(
-                    "update-corrector cannot alter fixed M# collection "
-                    f"`{collection_id}`"
-                )
 
     def _rebase_operation_commit(self, worktree: Path, commit: str, new_base: str) -> str:
         self._run_git(worktree, "reset", "--hard", new_base)
@@ -817,11 +793,6 @@ class IsolatedWriteSupervisor:
             return bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
         if self.role == "reviewer":
             return False
-        if self.role == "update-corrector":
-            return (
-                path not in FIXED_CORRECTION_COLLECTION_PATHS
-                and (self._is_rightmemory_path(path) or path == CORRECTIONS_PATH)
-            )
         if self.role == "update":
             return self._is_rightmemory_path(path)
         if self.role == "sync-reconciler":
@@ -843,15 +814,6 @@ class IsolatedWriteSupervisor:
             or path == "PURSUITS.md"
             or bool(PURSUIT_DETAIL_FILE_RE.fullmatch(path))
         )
-
-    def _validate_corrections_file(self, worktree: Path, commit: str) -> None:
-        tree_entry = self._tree_entry(worktree, commit, CORRECTIONS_PATH)
-        if tree_entry is None:
-            return
-        text = self._git_stdout(worktree, "show", f"{commit}:{CORRECTIONS_PATH}")
-        errors = validate_corrections_markdown(text)
-        if errors:
-            raise RuntimeError("invalid corrections.md:\n" + "\n".join(f"- {error}" for error in errors))
 
     def _validate_regular_memory_path(self, worktree: Path, commit: str, path: str, required: bool) -> None:
         tree_entry = self._tree_entry(worktree, commit, path)
@@ -1027,20 +989,10 @@ class IsolatedWriteSupervisor:
 def _output_text(output: Any) -> str:
     value = getattr(output, "output", None)
     value = value if value is not None else output
-    if isinstance(value, UpdateCorrectionResult):
-        return render_update_correction_result(value)
     text = str(value)
     if "</think>" in text:
         text = text.rsplit("</think>", 1)[1]
     return text.lstrip()
-
-
-def _correction_result(output: Any) -> UpdateCorrectionResult:
-    value = getattr(output, "output", None)
-    value = value if value is not None else output
-    if isinstance(value, (UpdateCorrectionResult, Mapping)):
-        return parse_update_correction_result(value)
-    return parse_update_correction_result(_output_text(value))
 
 
 def _write_worktree_lease(path: Path) -> None:
@@ -1111,6 +1063,10 @@ def _safe_role_slug(role: str) -> str:
     if not slug:
         return "role"
     return slug[:48].rstrip(".-") or "role"
+
+
+def _is_managed_update_artifact_path(path: str) -> bool:
+    return UPDATE_RECORD_PATH_RE.fullmatch(path) is not None
 
 
 def _is_temp_branch_for_role(branch: str, role_slug: str) -> bool:

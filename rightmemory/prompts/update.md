@@ -43,7 +43,7 @@
 - If a concise executable rule captures the correction better, update ordinary Agent Behavior or S# instruction instead of duplicating it as correction evidence.
 - A represented pattern should improve or merge with its existing item. Admit a distinct pattern only when sufficiently reusable; when a 15-item collection is full, replace an existing item only if the new evidence is more important.
 - Judge importance by likely recurrence, cost when repeated, applicability across future tasks, strength of the user's correction, and how fully existing guidance already covers the pattern. Fifteen is a ceiling, not a quota or an automatic eviction trigger.
-- Corrections to RightMemory edits belong to updater-only correction feedback, not these M# collections.
+- Submit corrections to RightMemory edits as ordinary candidates; do not store them in these M# collections.
 
 ## Shared View Connections
 

@@ -5,25 +5,33 @@ from rightmemory.isolated_write import (
     IsolatedWriteSupervisor,
     MainMemoryDirtyError,
 )
-from rightmemory.update_corrector import UpdateCorrectionResult
+from rightmemory.update_queue import UpdateCandidate
+from rightmemory.update_record import UpdateRecord, UpdateRecordStore
 from tests.isolated_write_test_base import IsolatedWriteTestBase
 
 
 class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
-    def test_update_model_cannot_author_a_review_file(self):
+    def test_update_model_cannot_author_a_candidate_record(self):
+        candidate = UpdateCandidate(
+            uid="a" * 32,
+            session_id="agent-session",
+            display_id=1,
+            message="runtime-owned evidence",
+            submitted_at="2026-07-27T12:00:00+00:00",
+        )
+        record = UpdateRecord.from_candidates((candidate,))
+
         def callback(worktree: Path) -> str:
-            review = worktree / "update_reviews" / f"review-{'a' * 64}.md"
-            review.parent.mkdir()
-            review.write_text("model-authored review\n", encoding="utf-8")
-            self._git("add", "-f", str(review.relative_to(worktree)), cwd=worktree)
-            self._git("commit", "-m", "memory: invalid review", cwd=worktree)
+            path = UpdateRecordStore(worktree).write(record)
+            self._git("add", "-f", path.relative_to(worktree).as_posix(), cwd=worktree)
+            self._git("commit", "-m", "update: model-authored record", cwd=worktree)
             return "updated"
 
         with self.assertRaisesRegex(RuntimeError, "non-memory paths"):
             IsolatedWriteSupervisor(self.root, "update").run(
                 callback,
-                operation_id="update-model-review",
-                operation_input={"message": "remember"},
+                operation_id=record.operation_id,
+                operation_input={"message": candidate.message},
             )
 
     def test_non_memory_temp_commit_does_not_land(self):
@@ -204,126 +212,6 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
             "non-memory paths: MEMORY_agent-corrections-writing\\.md",
         ):
             IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
-
-    def test_update_corrector_rejects_removing_a_fixed_agent_correction_reference(self):
-        self._add_fixed_agent_correction_collections()
-        protected_head = self._git("rev-parse", "HEAD")
-
-        def callback(worktree: Path) -> UpdateCorrectionResult:
-            memory = (worktree / "MEMORY.md").read_text(encoding="utf-8")
-            memory = memory.replace(
-                "#### Writing corrections {M#agent-corrections-writing}\n",
-                "",
-            )
-            (worktree / "MEMORY.md").write_text(memory, encoding="utf-8")
-            self._git("add", "MEMORY.md", cwd=worktree)
-            self._git("commit", "-m", "rightmemory: remove fixed corrections", cwd=worktree)
-            return UpdateCorrectionResult(status="applied", message="corrected")
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "cannot alter fixed M# collection `agent-corrections-writing`",
-        ):
-            IsolatedWriteSupervisor(self.root, "update-corrector").run(callback)
-
-        self.assertEqual(self._git("rev-parse", "HEAD"), protected_head)
-
-    def test_update_corrector_rejects_retargeting_a_fixed_agent_correction_reference(self):
-        self._add_fixed_agent_correction_collections()
-        protected_head = self._git("rev-parse", "HEAD")
-
-        def callback(worktree: Path) -> UpdateCorrectionResult:
-            memory = (worktree / "MEMORY.md").read_text(encoding="utf-8")
-            memory = memory.replace(
-                "{M#agent-corrections-design}",
-                "{M#other-design-corrections}",
-            )
-            (worktree / "MEMORY.md").write_text(memory, encoding="utf-8")
-            self._git("add", "MEMORY.md", cwd=worktree)
-            self._git("commit", "-m", "rightmemory: retarget fixed corrections", cwd=worktree)
-            return UpdateCorrectionResult(status="applied", message="corrected")
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "cannot alter fixed M# collection `agent-corrections-design`",
-        ):
-            IsolatedWriteSupervisor(self.root, "update-corrector").run(callback)
-
-        self.assertEqual(self._git("rev-parse", "HEAD"), protected_head)
-
-    def test_update_corrector_rejects_renaming_a_fixed_agent_correction_collection(self):
-        self._add_fixed_agent_correction_collections()
-        protected_head = self._git("rev-parse", "HEAD")
-
-        def callback(worktree: Path) -> UpdateCorrectionResult:
-            memory = (worktree / "MEMORY.md").read_text(encoding="utf-8")
-            memory = memory.replace(
-                "#### Writing corrections {M#agent-corrections-writing}",
-                "#### Preferred prose {M#agent-corrections-writing}",
-            )
-            (worktree / "MEMORY.md").write_text(memory, encoding="utf-8")
-            self._git("add", "MEMORY.md", cwd=worktree)
-            self._git("commit", "-m", "rightmemory: rename fixed corrections", cwd=worktree)
-            return UpdateCorrectionResult(status="applied", message="corrected")
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "cannot alter fixed M# collection `agent-corrections-writing`",
-        ):
-            IsolatedWriteSupervisor(self.root, "update-corrector").run(callback)
-
-        self.assertEqual(self._git("rev-parse", "HEAD"), protected_head)
-
-    def test_update_corrector_rejects_feedback_only_commit(self):
-        def callback(worktree: Path) -> UpdateCorrectionResult:
-            (worktree / "corrections.md").write_text(
-                "# RightMemory Update Corrections\n",
-                encoding="utf-8",
-            )
-            self._git("add", "corrections.md", cwd=worktree)
-            self._git("commit", "-m", "rightmemory: feedback only", cwd=worktree)
-            return UpdateCorrectionResult(status="applied", message="corrected")
-
-        with self.assertRaisesRegex(RuntimeError, "corrections.md-only"):
-            IsolatedWriteSupervisor(self.root, "update-corrector").run(callback)
-
-    def test_update_corrector_enforces_updater_correction_ceiling(self):
-        def callback(worktree: Path) -> UpdateCorrectionResult:
-            self._append_memory(worktree, "- `corrected` accepted state → []\n")
-            (worktree / "corrections.md").write_text(
-                self._corrections_markdown(16),
-                encoding="utf-8",
-            )
-            self._git("add", "MEMORY.md", "corrections.md", cwd=worktree)
-            self._git("commit", "-m", "rightmemory: oversized correction curation", cwd=worktree)
-            return UpdateCorrectionResult(status="applied", message="corrected")
-
-        with self.assertRaisesRegex(RuntimeError, "at most 15 are allowed"):
-            IsolatedWriteSupervisor(self.root, "update-corrector").run(callback)
-
-    def test_update_corrector_rejects_commit_for_needs_input_result(self):
-        def callback(worktree: Path) -> UpdateCorrectionResult:
-            self._append_memory(worktree, "- `speculative` must not land → []\n")
-            self._git("add", "MEMORY.md", cwd=worktree)
-            self._git("commit", "-m", "rightmemory: speculative correction", cwd=worktree)
-            return UpdateCorrectionResult(
-                status="needs_input",
-                message="Which scope should change?",
-            )
-
-        with self.assertRaisesRegex(RuntimeError, "needs_input.*must not create a commit"):
-            IsolatedWriteSupervisor(self.root, "update-corrector").run(callback)
-
-        self.assertNotIn("speculative", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
-
-    def test_update_corrector_rejects_applied_result_without_a_commit(self):
-        with self.assertRaisesRegex(RuntimeError, "applied.*exactly one state commit"):
-            IsolatedWriteSupervisor(self.root, "update-corrector").run(
-                lambda _worktree: UpdateCorrectionResult(
-                    status="applied",
-                    message="corrected",
-                )
-            )
 
     def test_narrow_memory_role_preserves_pursuit_cross_tree_reference(self):
         (self.root / "PURSUITS.md").write_text(

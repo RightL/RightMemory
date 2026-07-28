@@ -17,6 +17,7 @@ from .async_update import AsyncUpdateStore, _state_from_json
 from .platform import prepare_command
 from .review import ReviewDeliveryStore
 from .update_queue import validate_update_queue
+from .update_record import validate_update_records
 
 
 PYTHON_REQUIREMENT = ">=3.11"
@@ -50,14 +51,14 @@ MEMORY_GITIGNORE = """\
 !shared_views/*/.gitignore
 !insight_logs/
 !insight_logs/*.md
-!update_reviews/
-!update_reviews/*.md
 !update_queue/
 !update_queue/candidates/
 !update_queue/candidates/*.json
 !update_queue/recovery/
 !update_queue/recovery/*.json
 !update_queue/lease.json
+!update_records/
+!update_records/*.json
 """
 ROLE_PROMPTS = {
     "{{ROLE_PROMPT_RETRIEVE}}": "retrieve.md",
@@ -102,6 +103,7 @@ class Installer:
 
     def run(self) -> None:
         self._require_valid_update_queue()
+        self._require_valid_update_records()
         self._require_no_live_legacy_async_updates()
         self._require_no_legacy_review_deliveries()
         target = self._inspect_target()
@@ -128,6 +130,15 @@ class Installer:
                 "RightMemory update queue is invalid:\n- "
                 + "\n- ".join(diagnostics)
                 + "\ninstallation made no changes; repair or remove the invalid queue state before reinstalling"
+            )
+
+    def _require_valid_update_records(self) -> None:
+        diagnostics = validate_update_records(self.memory_root)
+        if diagnostics:
+            raise InstallError(
+                "RightMemory update records are invalid:\n- "
+                + "\n- ".join(diagnostics)
+                + "\ninstallation made no changes; repair the invalid retained evidence before reinstalling"
             )
 
     def _require_no_live_legacy_async_updates(self) -> None:
@@ -320,6 +331,9 @@ class Installer:
         update_queue = self.memory_root / "update_queue"
         if update_queue.is_dir() and any(update_queue.iterdir()):
             return True
+        update_records = self.memory_root / "update_records"
+        if update_records.is_dir() and any(update_records.iterdir()):
+            return True
 
         shared_views = self.memory_root / "shared_views"
         if shared_views.is_dir():
@@ -422,13 +436,6 @@ class Installer:
             files.extend(
                 f"insight_logs/{path.name}" for path in sorted(insight_logs.glob("*.md")) if path.is_file()
             )
-        update_reviews = self.memory_root / "update_reviews"
-        if update_reviews.is_dir():
-            files.extend(
-                f"update_reviews/{path.name}"
-                for path in sorted(update_reviews.glob("review-*.md"))
-                if path.is_file() and re.fullmatch(r"review-[0-9a-f]{64}\.md", path.name)
-            )
         update_queue = self.memory_root / "update_queue"
         candidates = update_queue / "candidates"
         if candidates.is_dir():
@@ -445,6 +452,14 @@ class Installer:
                 if path.is_file() and re.fullmatch(r"update-batch-[0-9a-f]{64}\.json", path.name)
             )
         add("update_queue/lease.json")
+        update_records = self.memory_root / "update_records"
+        if update_records.is_dir():
+            files.extend(
+                f"update_records/{path.name}"
+                for path in sorted(update_records.glob("*.json"))
+                if path.is_file()
+                and re.fullmatch(r"update-batch-[0-9a-f]{64}\.json", path.name)
+            )
         return files
 
     def _ensure_initial_commit(self) -> None:
@@ -677,7 +692,7 @@ class Installer:
             "for conditional retrieval and unified updates."
         )
         print(
-            "  4. Optional background transcript review, update review, dreamer, pruning, insight, and sync: "
+            "  4. Optional background transcript review, dreamer, pruning, insight, and sync: "
             "rightmemory watch start"
         )
         print()

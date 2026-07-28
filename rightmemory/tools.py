@@ -7,6 +7,7 @@ from difflib import SequenceMatcher
 from hashlib import sha256
 from pathlib import Path
 
+from .corrections import validate_corrections_markdown
 from .graph import (
     PURSUIT_ACTION_RE,
     PURSUIT_DETAIL_FILE_RE,
@@ -25,7 +26,6 @@ from .shared_view_files import (
 from .shared_view_models import load_connections, validate_heading_id
 from .shared_view_package import FileViewPackageError, validate_file_view_package
 from .shared_view_questions import validate_question_view_source, write_question_view
-from .update_review import validate_corrections_markdown
 
 
 FULL_READ_LINE_LIMIT = 200
@@ -53,9 +53,8 @@ RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX = ".runtime/shared_views/imports/"
 GIT_REVISION_RE = re.compile(r"^[A-Za-z0-9_.^~/-]+$")
 PRUNE_SUBJECT_PREFIX = "prune:"
 ACTIVE_MEMORY_ROLES = {"dreamer", "pruner", "reviewer", "sync-reconciler", "update"}
-FULL_RIGHTMEMORY_WRITE_ROLES = {"update", "update-corrector"}
-CORRECTION_WRITE_ROLES = {"update-corrector"}
-CORRECTIONS_READ_ROLES = {"update", "update-corrector", "sync-reconciler"}
+FULL_RIGHTMEMORY_WRITE_ROLES = {"update"}
+CORRECTIONS_READ_ROLES = {"update", "sync-reconciler"}
 INSIGHT_ROLES = {"insight"}
 RETRIEVE_ROLES = {"retrieve"}
 SYNC_RECONCILER_ROLES = {"sync-reconciler"}
@@ -1385,17 +1384,13 @@ class MemoryTools:
         if self.role in SHARED_VIEW_BUILDER_ROLES:
             return "shared_views/<id> source files"
         if self.role in FULL_RIGHTMEMORY_WRITE_ROLES:
-            suffix = ", or corrections.md" if self.role in CORRECTION_WRITE_ROLES else ""
-            return f"MEMORY.md, MEMORY_*.md, PURSUITS.md, or PURSUIT_*.md{suffix}"
+            return "MEMORY.md, MEMORY_*.md, PURSUITS.md, or PURSUIT_*.md"
         return "MEMORY.md or MEMORY_*.md"
 
     def _is_allowed_write_path(self, relative_path: str) -> bool:
         if (
             relative_path in FIXED_CORRECTION_COLLECTION_PATHS
-            and (
-                self.role == "update-corrector"
-                or self.role not in FULL_RIGHTMEMORY_WRITE_ROLES | SYNC_RECONCILER_ROLES
-            )
+            and self.role not in FULL_RIGHTMEMORY_WRITE_ROLES | SYNC_RECONCILER_ROLES
         ):
             return False
         if self.role in INSIGHT_ROLES:
@@ -1412,9 +1407,7 @@ class MemoryTools:
         if self.role in SHARED_VIEW_BUILDER_ROLES:
             return self._is_shared_view_definition_path(relative_path)
         if self.role in FULL_RIGHTMEMORY_WRITE_ROLES:
-            return self._is_active_rightmemory_path(relative_path) or (
-                self.role in CORRECTION_WRITE_ROLES and relative_path == CORRECTIONS_PATH
-            )
+            return self._is_active_rightmemory_path(relative_path)
         return self._is_active_memory_path(relative_path)
 
     def _allowed_write_path(self, path: str) -> str:
