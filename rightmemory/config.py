@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 import tomllib
@@ -23,8 +23,7 @@ ROLES = {
     "sync-reconciler",
     "update",
 }
-INTERNAL_ROLES = {"update-corrector"}
-RUNTIME_ROLES = ROLES | INTERNAL_ROLES
+RUNTIME_ROLES = ROLES
 MODEL_FALLBACK_ROLES = (
     "update",
     "dreamer",
@@ -207,16 +206,6 @@ def load_config(role: str, memory_root: Path | None = None) -> RuntimeConfig:
         retrieve_max_output_chars=_retrieve_max_output_chars(role, role_section),
         debug_trace=_debug_trace(data.get("debug", {})),
         sync=_sync_config(data.get("sync", {}), memory_root=root),
-    )
-
-
-def load_update_corrector_config(memory_root: Path | None = None) -> RuntimeConfig:
-    """Use Update's executor configuration for the internal corrector role."""
-
-    return replace(
-        load_config("update", memory_root=memory_root),
-        role="update-corrector",
-        fresh_provider_session=True,
     )
 
 

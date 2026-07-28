@@ -18,18 +18,11 @@ from rightmemory.cli import (
     _finish_sync_repair,
     _handle_json_request,
     _insight_watch_once,
-    _operation_session_id,
-    _require_completed_correction_operation,
     _recover_synchronized_update_operations,
     _run_active_sync_reconciler,
     _run_async_update_batch,
-    _run_synchronized_review_correction,
     _run_synchronized_update_batch,
-    _run_update_review_scan,
-    _run_update_review_correction,
-    _stored_correction_message,
     _turn_parser,
-    _verified_update_review,
     cli_main,
     main,
 )
@@ -44,36 +37,11 @@ from rightmemory.share_results import ShareOperationResult
 from rightmemory.shared_view_files import FileViewPullResult
 from rightmemory.shared_view_models import SharedViewConnection, SharedViewTarget, load_shared_view_credential, save_connections
 from rightmemory.watch import MANAGED_WATCH_TARGETS, WATCH_COMMANDS, _process_command, _write_pid, watch_stop_path
-from rightmemory.update_review import (
-    COMMENT_END,
-    COMMENT_START,
-    READY_LABEL,
-    UpdateReviewProcessResult,
-    UpdateReviewRequest,
-    UpdateReviewStore,
-    VerifiedUpdateReview,
-    parse_review_markdown,
+from rightmemory.update_queue import (
+    UpdateCandidate,
+    UpdateQueueStore,
+    update_candidate_batch_id,
 )
-from rightmemory.update_queue import UpdateCandidate, UpdateQueueStore
-
-
-def _verified_review_fixture() -> VerifiedUpdateReview:
-    return VerifiedUpdateReview(
-        review_id="review-1",
-        origin_operation_id="original-operation",
-        base_commit="base",
-        creation_commit="update",
-        write_surface="Memory",
-        summary="trusted update summary",
-        document_commit="c" * 40,
-        document_blob_oid="d" * 40,
-        question="",
-        question_operation_id=None,
-        diff="- before\n+ after",
-        changed_paths=("MEMORY.md",),
-    )
-
-
 class FakeRuntime:
     def __init__(self, config=None):
         self.config = config
@@ -302,106 +270,64 @@ class CliEntrypointTests(unittest.TestCase):
         self.assertFalse(completed)
         coordinator.release.assert_called_once_with(claim)
 
-    def test_synchronized_review_no_change_settles_through_queue_finalizer(self):
+    def test_synchronized_batch_passes_exact_candidates_to_runtime(self):
         candidate = UpdateCandidate(
             uid="a" * 32,
-            session_id="review-" + "b" * 64,
+            session_id="agent-session",
             display_id=1,
-            message="Keep the stable value.",
-            submitted_at="2026-07-22T00:00:00+00:00",
-            kind="review",
-            review_id="review-" + "b" * 64,
-            review_commit="c" * 40,
-            review_blob_oid="d" * 40,
+            message="exact synchronized evidence",
+            submitted_at="2026-07-27T12:00:00+00:00",
         )
+        operation_id = update_candidate_batch_id((candidate,))
         claim = SimpleNamespace(
-            review_candidate=candidate,
-            lease=SimpleNamespace(token="c" * 32),
-            batch_id="update-batch-" + "d" * 64,
-            session_id="update-batch-" + "d" * 64,
+            kind="update",
+            candidates=(candidate,),
+            lease=SimpleNamespace(token="b" * 32),
+            batch_id=operation_id,
+            session_id=operation_id,
+            message="formatted batch",
         )
         coordinator = Mock()
         coordinator.finalize.return_value = "landed"
-        events = []
+        prepared_calls = []
 
-        class CorrectionRuntime:
-            def __init__(self, config):
-                events.append(("init", config))
+        class RecordingRuntime:
+            def __init__(self, _config):
+                pass
 
             def prepare_session_turn_external(self, session_id, message, **kwargs):
-                events.append(("prepare", session_id, message, kwargs))
+                prepared_calls.append((session_id, message, kwargs))
                 return IsolatedWriteResult(
-                    output='{"status":"no_change","message":"Already correct."}',
+                    output="no state change",
                     commits_landed=0,
                     start_commit="base",
-                    operation_id=claim.batch_id,
+                    operation_id=operation_id,
                     prepared=True,
                 )
 
-            def complete_session_turn_external(self, session_id, **kwargs):
-                events.append(("complete", session_id, kwargs))
+            def complete_session_turn_external(self, *_args, **_kwargs):
+                pass
 
             def cleanup(self):
-                events.append(("cleanup",))
+                pass
 
         with (
-            patch("rightmemory.cli.tracked_review_blob_oid", return_value="d" * 40),
-            patch("rightmemory.cli.tracked_review_commit", return_value="c" * 40),
-            patch("rightmemory.cli.verify_update_review", return_value=_verified_review_fixture()),
-            patch("rightmemory.cli.load_update_corrector_config", return_value="config"),
-            patch("rightmemory.cli.RightMemoryRuntime", CorrectionRuntime),
-            patch("rightmemory.cli._stored_correction_message", return_value=None),
+            patch("rightmemory.cli.load_config", return_value=object()),
+            patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
             patch("rightmemory.cli.SemanticOperationStore.read", return_value=None),
         ):
-            completed = _run_synchronized_review_correction(
+            completed = _run_synchronized_update_batch(
                 Path("/memory"),
+                "update",
                 coordinator,
                 claim,
             )
 
         self.assertTrue(completed)
-        outcome = coordinator.finalize.call_args.kwargs["review_outcome"]
-        self.assertEqual(outcome.status, "resolved")
-        self.assertIsNone(coordinator.finalize.call_args.args[1])
-        self.assertEqual(events[-2][0], "complete")
-        self.assertEqual(events[-1], ("cleanup",))
-
-    def test_synchronized_stale_review_is_superseded_without_running_model(self):
-        review_id = "review-" + "b" * 64
-        candidate = UpdateCandidate(
-            uid="a" * 32,
-            session_id=review_id,
-            display_id=1,
-            message="Stale correction.",
-            submitted_at="2026-07-22T00:00:00+00:00",
-            kind="review",
-            review_id=review_id,
-            review_commit="c" * 40,
-            review_blob_oid="d" * 40,
+        self.assertEqual(
+            prepared_calls[0][2]["update_candidates"],
+            (candidate,),
         )
-        claim = SimpleNamespace(
-            review_candidate=candidate,
-            lease=SimpleNamespace(token="e" * 32),
-            batch_id="update-batch-" + "f" * 64,
-            session_id="update-batch-" + "f" * 64,
-        )
-        coordinator = Mock()
-        coordinator.supersede_review.return_value = "terminal"
-
-        with (
-            patch("rightmemory.cli.tracked_review_blob_oid", return_value="d" * 40),
-            patch("rightmemory.cli.tracked_review_commit", return_value="9" * 40),
-            patch("rightmemory.cli.load_update_corrector_config") as load_config,
-        ):
-            completed = _run_synchronized_review_correction(
-                Path("/memory"),
-                coordinator,
-                claim,
-            )
-
-        self.assertTrue(completed)
-        coordinator.supersede_review.assert_called_once_with(claim)
-        load_config.assert_not_called()
 
     def test_cli_main_reports_expected_errors_without_traceback(self):
         stderr = io.StringIO()
@@ -1990,615 +1916,6 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(scan_flags, [False])
         self.assertEqual(stdout.getvalue().strip(), "reviewed: 1")
 
-    def test_update_review_scan_once_uses_independent_checker(self):
-        stdout = io.StringIO()
-        scan_result = UpdateReviewProcessResult(processed=1, resolved=1)
-
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            with (
-                patch("rightmemory.cli.default_memory_root", return_value=root),
-                patch("rightmemory.cli._run_update_review_scan", return_value=scan_result) as scan,
-                patch("sys.stdout", stdout),
-            ):
-                result = main(["update-review", "scan", "--once"])
-
-        self.assertEqual(result, 0)
-        scan.assert_called_once_with(root)
-        self.assertIn("processed: 1", stdout.getvalue())
-        self.assertIn("resolved: 1", stdout.getvalue())
-        self.assertIn("malformed: 0", stdout.getvalue())
-
-    def test_update_review_scan_processes_the_tracked_inbox(self):
-        expected = UpdateReviewProcessResult(blank=1)
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            with (
-                patch(
-                    "rightmemory.cli.load_sync_config",
-                    return_value=SimpleNamespace(enabled=True),
-                ),
-                patch("rightmemory.cli.UpdateReviewStore") as store_class,
-            ):
-                store_class.return_value.process_ready.return_value = expected
-                result = _run_update_review_scan(root)
-
-        self.assertEqual(result, expected)
-        store_class.return_value.process_ready.assert_called_once()
-
-    def test_ready_review_is_queued_and_restored_to_its_tracked_document(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-            subprocess.run(
-                ["git", "config", "user.email", "test@example.com"],
-                cwd=root,
-                check=True,
-            )
-            subprocess.run(
-                ["git", "config", "user.name", "Test User"],
-                cwd=root,
-                check=True,
-            )
-            (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-            (root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-            subprocess.run(
-                ["git", "add", "MEMORY.md", "PURSUITS.md"],
-                cwd=root,
-                check=True,
-            )
-            subprocess.run(["git", "commit", "-qm", "initial"], cwd=root, check=True)
-            base = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=root,
-                check=True,
-                text=True,
-                stdout=subprocess.PIPE,
-            ).stdout.strip()
-            (root / "MEMORY.md").write_text("# Memory\n\nRemember this.\n", encoding="utf-8")
-            operation_id = "update-synchronized-review"
-            store = UpdateReviewStore(root)
-            record = store.create_review(
-                origin_operation_id=operation_id,
-                base_commit=base,
-                write_surface="Memory",
-                summary="Remembered one fact.",
-                diff="- old\n+ new",
-            )
-            subprocess.run(["git", "add", "MEMORY.md", "update_reviews"], cwd=root, check=True)
-            subprocess.run(
-                [
-                    "git",
-                    "commit",
-                    "-qm",
-                    f"memory: update\n\nRightMemory-Operation: {operation_id}",
-                ],
-                cwd=root,
-                check=True,
-            )
-            path = store.review_path(record.review_id)
-            draft = path.read_text(encoding="utf-8")
-            start = draft.index(COMMENT_START) + len(COMMENT_START)
-            end = draft.index(COMMENT_END, start)
-            draft = draft[:start] + "\n\nRemove the snapshot detail.\n\n" + draft[end:]
-            draft = draft.replace(f"- [ ] {READY_LABEL}", f"- [x] {READY_LABEL}", 1)
-            path.write_text(draft, encoding="utf-8")
-
-            with (
-                patch(
-                    "rightmemory.cli.load_sync_config",
-                    return_value=SimpleNamespace(enabled=True),
-                ),
-                patch("rightmemory.cli.AsyncUpdateStore.wake_worker") as wake,
-            ):
-                result = _run_update_review_scan(root)
-
-            queued = UpdateQueueStore(root).outbox_candidates()
-            parsed = parse_review_markdown(path.read_text(encoding="utf-8"))
-            self.assertEqual(result.submitted, 1)
-            self.assertEqual(len(queued), 1)
-            self.assertEqual(queued[0].kind, "review")
-            self.assertEqual(queued[0].message, "Remove the snapshot detail.")
-            self.assertFalse(parsed.ready)
-            self.assertEqual(parsed.comment.strip(), "")
-            wake.assert_called_once()
-
-    def test_sync_disabled_clarification_can_be_answered_on_the_next_scan(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-            subprocess.run(
-                ["git", "config", "user.email", "test@example.com"],
-                cwd=root,
-                check=True,
-            )
-            subprocess.run(
-                ["git", "config", "user.name", "Test User"],
-                cwd=root,
-                check=True,
-            )
-            (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-            (root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-            subprocess.run(
-                ["git", "add", "MEMORY.md", "PURSUITS.md"],
-                cwd=root,
-                check=True,
-            )
-            subprocess.run(["git", "commit", "-qm", "initial"], cwd=root, check=True)
-            base = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=root,
-                text=True,
-                stdout=subprocess.PIPE,
-                check=True,
-            ).stdout.strip()
-            (root / "MEMORY.md").write_text(
-                "# Memory\n\nRemember this.\n",
-                encoding="utf-8",
-            )
-            operation_id = "update-local-review"
-            store = UpdateReviewStore(root)
-            record = store.create_review(
-                origin_operation_id=operation_id,
-                base_commit=base,
-                write_surface="Memory",
-                summary="Remembered one fact.",
-                diff="- old\n+ new",
-            )
-            subprocess.run(["git", "add", "MEMORY.md", "update_reviews"], cwd=root, check=True)
-            subprocess.run(
-                [
-                    "git",
-                    "commit",
-                    "-qm",
-                    f"memory: update\n\nRightMemory-Operation: {operation_id}",
-                ],
-                cwd=root,
-                check=True,
-            )
-            path = store.review_path(record.review_id)
-
-            def submit(comment: str) -> None:
-                draft = path.read_text(encoding="utf-8")
-                start = draft.index(COMMENT_START) + len(COMMENT_START)
-                end = draft.index(COMMENT_END, start)
-                draft = draft[:start] + f"\n\n{comment}\n\n" + draft[end:]
-                draft = draft.replace(f"- [ ] {READY_LABEL}", f"- [x] {READY_LABEL}", 1)
-                path.write_text(draft, encoding="utf-8")
-
-            responses = iter(
-                (
-                    '{"status":"needs_input","message":"Which path should remain?"}',
-                    '{"status":"no_change","message":"Already correct."}',
-                )
-            )
-            messages = []
-
-            class LocalCorrectionRuntime:
-                def __init__(self, _config):
-                    self.last_write_result = None
-
-                def run_session_turn(self, _session_id, message, *, operation_id):
-                    output = next(responses)
-                    messages.append(message)
-                    self.last_write_result = IsolatedWriteResult(
-                        output=output,
-                        commits_landed=0,
-                        start_commit=base,
-                        landed_commit=base,
-                        changed_paths=(),
-                        operation_id=operation_id,
-                    )
-                    return output
-
-                def cleanup(self):
-                    pass
-
-            submit("Keep the durable path.")
-            with (
-                patch(
-                    "rightmemory.cli.load_sync_config",
-                    return_value=SimpleNamespace(enabled=False),
-                ),
-                patch("rightmemory.cli.load_update_corrector_config", return_value=object()),
-                patch("rightmemory.cli.RightMemoryRuntime", LocalCorrectionRuntime),
-                patch("rightmemory.cli._require_completed_correction_operation"),
-            ):
-                first = _run_update_review_scan(root)
-                canonical = parse_review_markdown(path.read_text(encoding="utf-8"))
-                self.assertEqual(canonical.comment.strip(), "")
-                self.assertIn("Which path should remain?", canonical.question)
-
-                submit("Use `/stable/path`.")
-                second = _run_update_review_scan(root)
-
-            self.assertEqual(first.needs_input, 1)
-            self.assertEqual(second.resolved, 1)
-            self.assertFalse(path.exists())
-            self.assertIn("Which path should remain?", messages[1])
-
-    def test_update_review_correction_uses_internal_role_verified_context_and_landed_commit(self):
-        calls = []
-
-        class CorrectionRuntime:
-            def __init__(self, config):
-                calls.append(("init", config))
-                self.last_write_result = IsolatedWriteResult(
-                    output='{"status":"applied","message":"corrected"}',
-                    commits_landed=1,
-                    start_commit="base",
-                    landed_commit="fix-commit",
-                    changed_paths=("MEMORY.md",),
-                    operation_id="correction-operation",
-                )
-
-            def run_session_turn(self, session_id, message, *, operation_id):
-                calls.append(("run", session_id, operation_id, message))
-                return '{"status":"applied","message":"corrected"}'
-
-            def cleanup(self):
-                calls.append(("cleanup",))
-
-        request = UpdateReviewRequest(
-            review_id="review-1",
-            document_path=Path("review.md"),
-            origin_operation_id="original-operation",
-            base_commit="base",
-            write_surface="Memory + Pursuit",
-            document="# RightMemory Update Review\n\nUNTRUSTED EMBEDDED DIFF\n",
-            comment="Human comment here.",
-            comment_sha256="a" * 64,
-            operation_id="correction-operation",
-        )
-        config = object()
-        operation = _verified_review_fixture()
-        with (
-            patch("rightmemory.cli.load_update_corrector_config", return_value=config),
-            patch("rightmemory.cli._verified_update_review", return_value=operation),
-            patch("rightmemory.cli._stored_correction_message", return_value=None),
-            patch("rightmemory.cli._require_completed_correction_operation"),
-            patch("rightmemory.cli.RightMemoryRuntime", CorrectionRuntime),
-        ):
-            outcome = _run_update_review_correction(Path("/memory"), request)
-
-        self.assertEqual(outcome.status, "resolved")
-        self.assertEqual(outcome.correction_commit, "fix-commit")
-        self.assertEqual(calls[0], ("init", config))
-        self.assertEqual(
-            calls[1][1:3],
-            (_operation_session_id("correction-operation"), "correction-operation"),
-        )
-        self.assertIn("Human comment here.", calls[1][3])
-        self.assertIn('"diff": "- before\\n+ after"', calls[1][3])
-        self.assertIn("trusted update summary", calls[1][3])
-        self.assertNotIn("UNTRUSTED EMBEDDED DIFF", calls[1][3])
-
-    def test_update_review_correction_maps_needs_input_without_commit(self):
-        class CorrectionRuntime:
-            def __init__(self, config):
-                self.config = config
-                self.last_write_result = IsolatedWriteResult(
-                    output='{"status":"needs_input","message":"Which preference should win?"}',
-                    commits_landed=0,
-                    landed_commit="update",
-                    operation_id="correction-operation",
-                )
-
-            def run_session_turn(self, session_id, message, *, operation_id):
-                return '{"status":"needs_input","message":"Which preference should win?"}'
-
-            def cleanup(self):
-                pass
-
-        request = UpdateReviewRequest(
-            review_id="review-1",
-            document_path=Path("review.md"),
-            origin_operation_id="original-operation",
-            base_commit="base",
-            write_surface="Memory",
-            document="review",
-            comment="ambiguous",
-            comment_sha256="b" * 64,
-            operation_id="correction-operation",
-        )
-        operation = _verified_review_fixture()
-        with (
-            patch("rightmemory.cli.load_update_corrector_config", return_value=object()),
-            patch("rightmemory.cli._verified_update_review", return_value=operation),
-            patch("rightmemory.cli._stored_correction_message", return_value=None),
-            patch("rightmemory.cli._require_completed_correction_operation"),
-            patch("rightmemory.cli.RightMemoryRuntime", CorrectionRuntime),
-        ):
-            outcome = _run_update_review_correction(Path("/memory"), request)
-
-        self.assertEqual(outcome.status, "needs_input")
-        self.assertEqual(outcome.message, "Which preference should win?")
-        self.assertIsNone(outcome.correction_commit)
-
-    def test_update_review_correction_replays_its_first_journal_message(self):
-        calls = []
-
-        class CorrectionRuntime:
-            def __init__(self, config):
-                self.last_write_result = IsolatedWriteResult(
-                    output='{"status":"no_change","message":"Same revision."}',
-                    commits_landed=0,
-                    landed_commit="update",
-                    operation_id="correction-operation",
-                )
-
-            def run_session_turn(self, session_id, message, *, operation_id):
-                calls.append(message)
-                return '{"status":"no_change","message":"Same revision."}'
-
-            def cleanup(self):
-                pass
-
-        request = UpdateReviewRequest(
-            review_id="review-1",
-            document_path=Path("review.md"),
-            origin_operation_id="original-operation",
-            base_commit="base",
-            write_surface="Memory",
-            document="review",
-            comment="Use the earlier choice.",
-            comment_sha256="e" * 64,
-            operation_id="correction-operation",
-            previous_question="A different later question?",
-        )
-        operation = _verified_review_fixture()
-        with (
-            patch("rightmemory.cli.load_update_corrector_config", return_value=object()),
-            patch("rightmemory.cli._verified_update_review", return_value=operation),
-            patch(
-                "rightmemory.cli._stored_correction_message",
-                return_value="the first durable correction message",
-            ),
-            patch("rightmemory.cli._require_completed_correction_operation"),
-            patch("rightmemory.cli.RightMemoryRuntime", CorrectionRuntime),
-        ):
-            outcome = _run_update_review_correction(Path("/memory"), request)
-
-        self.assertEqual(outcome.status, "resolved")
-        self.assertEqual(calls, ["the first durable correction message"])
-
-    def test_update_review_correction_waits_for_all_durable_effects(self):
-        class CorrectionRuntime:
-            def __init__(self, config):
-                self.last_write_result = IsolatedWriteResult(
-                    output='{"status":"no_change","message":"Already correct."}',
-                    commits_landed=0,
-                    landed_commit="update",
-                    operation_id="correction-operation",
-                )
-
-            def run_session_turn(self, session_id, message, *, operation_id):
-                return '{"status":"no_change","message":"Already correct."}'
-
-            def cleanup(self):
-                pass
-
-        request = UpdateReviewRequest(
-            review_id="review-1",
-            document_path=Path("review.md"),
-            origin_operation_id="original-operation",
-            base_commit="base",
-            write_surface="Memory",
-            document="review",
-            comment="Check the correction.",
-            comment_sha256="d" * 64,
-            operation_id="correction-operation",
-        )
-        operation = _verified_review_fixture()
-        with (
-            patch("rightmemory.cli.load_update_corrector_config", return_value=object()),
-            patch("rightmemory.cli._verified_update_review", return_value=operation),
-            patch("rightmemory.cli._stored_correction_message", return_value=None),
-            patch(
-                "rightmemory.cli._require_completed_correction_operation",
-                side_effect=RuntimeError(
-                    "update correction has pending operation effects: file-view-publish"
-                ),
-            ),
-            patch("rightmemory.cli.RightMemoryRuntime", CorrectionRuntime),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "pending operation effects: file-view-publish"):
-                _run_update_review_correction(Path("/memory"), request)
-
-    def test_completed_correction_gate_reads_the_durable_receipt(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            store = SemanticOperationStore(root)
-            operation_id = "correction-operation"
-            store.begin(
-                operation_id,
-                {
-                    "kind": "semantic-turn",
-                    "role": "update-corrector",
-                    "session_id": _operation_session_id(operation_id),
-                    "message": "the first durable correction message",
-                },
-            )
-            store.prepare_outcome(
-                operation_id,
-                output='{"status":"no_change","message":"Already correct."}',
-                start_commit="update",
-                changed_paths=(),
-                effects=(OperationEffect("file-view-publish"),),
-            )
-            store.complete_no_change(operation_id, "update")
-
-            with self.assertRaisesRegex(RuntimeError, "pending operation effects"):
-                _require_completed_correction_operation(root, operation_id)
-
-            store.mark_effect(operation_id, "file-view-publish", "done")
-            _require_completed_correction_operation(root, operation_id)
-            self.assertEqual(
-                _stored_correction_message(root, operation_id),
-                "the first durable correction message",
-            )
-
-    def test_update_review_correction_rejects_applied_result_without_matching_commit(self):
-        class IncorrectRuntime:
-            def __init__(self, config):
-                self.last_write_result = IsolatedWriteResult(
-                    output='{"status":"applied","message":"done"}',
-                    commits_landed=1,
-                    landed_commit="unexpected",
-                    changed_paths=("MEMORY.md",),
-                    operation_id="different-operation",
-                )
-
-            def run_session_turn(self, session_id, message, *, operation_id):
-                return '{"status":"applied","message":"done"}'
-
-            def cleanup(self):
-                pass
-
-        request = UpdateReviewRequest(
-            review_id="review-1",
-            document_path=Path("review.md"),
-            origin_operation_id="original-operation",
-            base_commit="base",
-            write_surface="Memory",
-            document="review",
-            comment="ambiguous",
-            comment_sha256="c" * 64,
-            operation_id="correction-operation",
-        )
-        operation = _verified_review_fixture()
-        with (
-            patch("rightmemory.cli.load_update_corrector_config", return_value=object()),
-            patch("rightmemory.cli._verified_update_review", return_value=operation),
-            patch("rightmemory.cli._stored_correction_message", return_value=None),
-            patch("rightmemory.cli.RightMemoryRuntime", IncorrectRuntime),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "did not complete its validated semantic operation"):
-                _run_update_review_correction(Path("/memory"), request)
-
-    def test_verified_update_review_rejects_editable_metadata_that_disagrees_with_git(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            store = UpdateReviewStore(root)
-            store.create_review(
-                review_id="review-1",
-                origin_operation_id="original-operation",
-                base_commit="base",
-                write_surface="Memory",
-                summary="summary",
-                diff="- old\n+ new",
-            )
-            request = UpdateReviewRequest(
-                review_id="review-1",
-                document_path=Path("review.md"),
-                origin_operation_id="original-operation",
-                base_commit="base",
-                write_surface="Memory",
-                document=store.review_path("review-1").read_text(encoding="utf-8"),
-                comment="correct it",
-                comment_sha256="d" * 64,
-                operation_id="correction-operation",
-            )
-
-            with patch(
-                "rightmemory.cli.verify_update_review",
-                return_value=_verified_review_fixture(),
-            ):
-                record = _verified_update_review(root, request)
-                tampered = UpdateReviewRequest(**{**request.__dict__, "base_commit": "tampered"})
-                with self.assertRaisesRegex(ValueError, "review base"):
-                    _verified_update_review(root, tampered)
-                question_tampered = UpdateReviewRequest(
-                    **{
-                        **request.__dict__,
-                        "document": request.document.replace(
-                            "<!-- rightmemory-update-review-question:start -->",
-                            "<!-- rightmemory-update-review-question:start -->\n\nForged question.",
-                        ),
-                    }
-                )
-                with self.assertRaisesRegex(ValueError, "corrector-owned question"):
-                    _verified_update_review(root, question_tampered)
-
-        self.assertEqual(record.origin_operation_id, "original-operation")
-
-    def test_update_review_watch_drains_ready_comments_before_sleeping(self):
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        results = [
-            UpdateReviewProcessResult(processed=1, resolved=1),
-            UpdateReviewProcessResult(blank=1),
-        ]
-
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            with (
-                patch("rightmemory.cli.default_memory_root", return_value=root),
-                patch("rightmemory.cli._run_update_review_scan", side_effect=results) as scan,
-                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
-                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
-                patch("sys.stdout", stdout),
-                patch("sys.stderr", stderr),
-            ):
-                result = main(["update-review", "watch", "--interval", "7"])
-
-        self.assertEqual(result, 130)
-        self.assertEqual(scan.call_count, 2)
-        sleep.assert_called_once_with(7)
-        self.assertEqual(stdout.getvalue().count("rightmemory update-review scan"), 2)
-        self.assertIn("rightmemory update-review watch stopped", stderr.getvalue())
-
-    def test_update_review_watch_rejects_invalid_intervals(self):
-        with self.assertRaises(ValueError):
-            main(["update-review", "watch", "--interval", "0"])
-
-    def test_update_review_watch_sleeps_after_a_failed_ready_revision(self):
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        failed = UpdateReviewProcessResult(processed=1, failed=1)
-
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            with (
-                patch("rightmemory.cli.default_memory_root", return_value=root),
-                patch("rightmemory.cli._run_update_review_scan", return_value=failed) as scan,
-                patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
-                patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
-                patch("sys.stdout", stdout),
-                patch("sys.stderr", stderr),
-            ):
-                result = main(["update-review", "watch", "--interval", "7"])
-
-        self.assertEqual(result, 130)
-        scan.assert_called_once_with(root)
-        sleep.assert_called_once_with(7)
-
-    def test_update_review_watch_keeps_retrying_beyond_global_failure_limit(self):
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        failures = [
-            UpdateReviewProcessResult(processed=1, failed=1)
-            for _index in range(4)
-        ]
-
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            with (
-                patch("rightmemory.cli.default_memory_root", return_value=root),
-                patch("rightmemory.cli._run_update_review_scan", side_effect=failures) as scan,
-                patch(
-                    "rightmemory.cli._sleep_with_refresh_check",
-                    side_effect=[True, True, True, KeyboardInterrupt],
-                ),
-                patch("sys.stdout", stdout),
-                patch("sys.stderr", stderr),
-            ):
-                result = main(["update-review", "watch", "--interval", "7"])
-
-        self.assertEqual(result, 130)
-        self.assertEqual(scan.call_count, 4)
-        self.assertEqual([call.args for call in scan.call_args_list], [(root,)] * 4)
-
     def test_review_scan_does_not_add_pressure_before_unified_update(self):
         stdout = io.StringIO()
         scanner_calls = []
@@ -2825,7 +2142,7 @@ class JsonRequestTests(unittest.TestCase):
             "deleted: 2\npending: 1\nskipped: 3\nmalformed: 0",
         )
 
-    def test_watch_start_starts_both_reviews_dreamer_pruner_and_insight_managed_processes(self):
+    def test_watch_start_starts_review_dreamer_pruner_and_insight_managed_processes(self):
         stdout = io.StringIO()
 
         class FakeProcess:
@@ -2856,7 +2173,6 @@ class JsonRequestTests(unittest.TestCase):
                         FakeProcess(103),
                         FakeProcess(104),
                         FakeProcess(105),
-                        FakeProcess(106),
                     ],
                 ) as popen,
                 patch("sys.stdout", stdout),
@@ -2864,9 +2180,6 @@ class JsonRequestTests(unittest.TestCase):
                 result = main(["watch", "start"])
 
             review_pid = (memory_root / ".runtime" / "watch" / "review.pid").read_text(encoding="utf-8")
-            update_review_pid = (memory_root / ".runtime" / "watch" / "update-review.pid").read_text(
-                encoding="utf-8"
-            )
             dreamer_pid = (memory_root / ".runtime" / "watch" / "dreamer.pid").read_text(encoding="utf-8")
             pruner_pid = (memory_root / ".runtime" / "watch" / "pruner.pid").read_text(encoding="utf-8")
             insight_pid = (memory_root / ".runtime" / "watch" / "insight.pid").read_text(encoding="utf-8")
@@ -2875,21 +2188,19 @@ class JsonRequestTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 0)
-        self.assertEqual(roles, ["reviewer", "update", "dreamer", "pruner", "insight"])
-        self.assertEqual(popen.call_count, 6)
+        self.assertEqual(roles, ["reviewer", "dreamer", "pruner", "insight"])
+        self.assertEqual(popen.call_count, 5)
         self.assertEqual(review_pid, "101\n")
-        self.assertEqual(update_review_pid, "102\n")
-        self.assertEqual(dreamer_pid, "103\n")
-        self.assertEqual(pruner_pid, "104\n")
-        self.assertEqual(insight_pid, "105\n")
-        self.assertEqual(cleanup_pid, "106\n")
+        self.assertEqual(dreamer_pid, "102\n")
+        self.assertEqual(pruner_pid, "103\n")
+        self.assertEqual(insight_pid, "104\n")
+        self.assertEqual(cleanup_pid, "105\n")
         self.assertIn("review: running pid 101", stdout.getvalue())
-        self.assertIn("update-review: running pid 102", stdout.getvalue())
-        self.assertIn("dreamer: running pid 103", stdout.getvalue())
-        self.assertIn("pruner: running pid 104", stdout.getvalue())
-        self.assertIn("insight: running pid 105", stdout.getvalue())
+        self.assertIn("dreamer: running pid 102", stdout.getvalue())
+        self.assertIn("pruner: running pid 103", stdout.getvalue())
+        self.assertIn("insight: running pid 104", stdout.getvalue())
         self.assertIn("sync: disabled", stdout.getvalue())
-        self.assertIn("agent-cli-cleanup: running pid 106", stdout.getvalue())
+        self.assertIn("agent-cli-cleanup: running pid 105", stdout.getvalue())
 
     def test_watch_start_starts_sync_when_enabled(self):
         stdout = io.StringIO()
@@ -2921,7 +2232,6 @@ class JsonRequestTests(unittest.TestCase):
                         FakeProcess(104),
                         FakeProcess(105),
                         FakeProcess(106),
-                        FakeProcess(107),
                     ],
                 ) as popen,
                 patch("sys.stdout", stdout),
@@ -2931,9 +2241,9 @@ class JsonRequestTests(unittest.TestCase):
             sync_pid = (memory_root / ".runtime" / "watch" / "sync.pid").read_text(encoding="utf-8")
 
         self.assertEqual(result, 0)
-        self.assertEqual(popen.call_count, 7)
-        self.assertEqual(sync_pid, "106\n")
-        self.assertIn("sync: running pid 106", stdout.getvalue())
+        self.assertEqual(popen.call_count, 6)
+        self.assertEqual(sync_pid, "105\n")
+        self.assertIn("sync: running pid 105", stdout.getvalue())
 
     def test_watch_start_skips_sync_when_disabled(self):
         stdout = io.StringIO()
@@ -2964,7 +2274,6 @@ class JsonRequestTests(unittest.TestCase):
                         FakeProcess(103),
                         FakeProcess(104),
                         FakeProcess(105),
-                        FakeProcess(106),
                     ],
                 ) as popen,
                 patch("sys.stdout", stdout),
@@ -2972,7 +2281,7 @@ class JsonRequestTests(unittest.TestCase):
                 result = main(["watch", "start"])
 
         self.assertEqual(result, 0)
-        self.assertEqual(popen.call_count, 6)
+        self.assertEqual(popen.call_count, 5)
         self.assertIn("sync: disabled", stdout.getvalue())
 
     def test_watch_start_passes_selected_profile_root_to_subprocess_env(self):
@@ -3053,7 +2362,6 @@ class JsonRequestTests(unittest.TestCase):
                         FakeProcess(203),
                         FakeProcess(204),
                         FakeProcess(205),
-                        FakeProcess(206),
                     ],
                 ) as popen,
                 patch("sys.stdout", stdout),
@@ -3067,18 +2375,17 @@ class JsonRequestTests(unittest.TestCase):
             sync_pid = (memory_root / ".runtime" / "watch" / "sync.pid").read_text(encoding="utf-8")
 
         self.assertEqual(result, 1)
-        self.assertEqual(roles, ["reviewer", "update", "dreamer", "pruner", "insight"])
-        self.assertEqual(popen.call_count, 6)
-        self.assertEqual(dreamer_pid, "202\n")
-        self.assertEqual(pruner_pid, "203\n")
-        self.assertEqual(insight_pid, "204\n")
-        self.assertEqual(sync_pid, "205\n")
+        self.assertEqual(roles, ["reviewer", "dreamer", "pruner", "insight"])
+        self.assertEqual(popen.call_count, 5)
+        self.assertEqual(dreamer_pid, "201\n")
+        self.assertEqual(pruner_pid, "202\n")
+        self.assertEqual(insight_pid, "203\n")
+        self.assertEqual(sync_pid, "204\n")
         self.assertIn("review: error: RuntimeError: review unavailable", stderr.getvalue())
-        self.assertIn("update-review: running pid 201", stdout.getvalue())
-        self.assertIn("dreamer: running pid 202", stdout.getvalue())
-        self.assertIn("pruner: running pid 203", stdout.getvalue())
-        self.assertIn("insight: running pid 204", stdout.getvalue())
-        self.assertIn("sync: running pid 205", stdout.getvalue())
+        self.assertIn("dreamer: running pid 201", stdout.getvalue())
+        self.assertIn("pruner: running pid 202", stdout.getvalue())
+        self.assertIn("insight: running pid 203", stdout.getvalue())
+        self.assertIn("sync: running pid 204", stdout.getvalue())
 
     def test_watch_start_cleans_isolated_worktrees_for_write_targets_not_sync(self):
         stdout = io.StringIO()
@@ -3125,7 +2432,6 @@ class JsonRequestTests(unittest.TestCase):
             [
                 ("cleanup", "reviewer"),
                 ("start", "review"),
-                ("start", "update-review"),
                 ("cleanup", "dreamer"),
                 ("start", "dreamer"),
                 ("cleanup", "pruner"),
@@ -3162,7 +2468,6 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("review: stopped", stdout.getvalue())
-        self.assertIn("update-review: stopped", stdout.getvalue())
         self.assertIn("dreamer: stopped", stdout.getvalue())
         self.assertIn("pruner: stopped", stdout.getvalue())
         self.assertIn("insight: stopped", stdout.getvalue())
@@ -4473,19 +3778,39 @@ class JsonRequestTests(unittest.TestCase):
         calls = []
 
         class RecordingRuntime(FakeRuntime):
-            def run_session_turn(self, session_id: str, message: str, *, operation_id: str) -> str:
-                calls.append((session_id, operation_id, message))
+            def run_session_turn(
+                self,
+                session_id: str,
+                message: str,
+                *,
+                operation_id: str,
+                update_candidates: tuple[UpdateCandidate, ...],
+            ) -> str:
+                calls.append((session_id, operation_id, message, update_candidates))
                 return "ok"
 
-        operation_id = "update-batch-" + "a" * 64
+        candidate = UpdateCandidate(
+            uid="a" * 32,
+            session_id="agent-session",
+            display_id=1,
+            message="remember",
+            submitted_at="2026-07-27T12:00:00+00:00",
+        )
+        operation_id = update_candidate_batch_id((candidate,))
         with (
             patch("rightmemory.cli.load_config", return_value=object()),
             patch("rightmemory.cli.RightMemoryRuntime", RecordingRuntime),
         ):
-            result = _run_async_update_batch(Path("C:/memory"), "update", operation_id, "remember")
+            result = _run_async_update_batch(
+                Path("C:/memory"),
+                "update",
+                operation_id,
+                "remember",
+                (candidate,),
+            )
 
         self.assertEqual(result, "ok")
-        self.assertEqual(calls[0][1:], (operation_id, "remember"))
+        self.assertEqual(calls[0][1:], (operation_id, "remember", (candidate,)))
         self.assertRegex(calls[0][0], r"^op-[A-Za-z0-9_-]{43}$")
         self.assertLess(len(calls[0][0]), len(operation_id))
         memory_root = Path("C:/") / ("m" * 64)

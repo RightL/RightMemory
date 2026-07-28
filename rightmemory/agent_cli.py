@@ -26,7 +26,6 @@ WRITE_ROLES = {
     "shared-view-builder",
     "sync-reconciler",
     "update",
-    "update-corrector",
 }
 NO_SESSION_RIGHTMEMORY_SESSION_ID = "__rightmemory_cli_chat__"
 PERSISTENT_POLICY = "persistent"

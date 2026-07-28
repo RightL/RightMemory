@@ -43,7 +43,7 @@
   in bounded parallel processes; use `python -m tests --jobs N` to override the
   default concurrency of six.
 - Run syntax checks with `python -m compileall -q rightmemory tests`.
-- Add or update focused tests when changing prompt behavior, configuration shape, transcript/update-review state, CLI-agent thread lifecycle, or Git/memory safety.
+- Add or update focused tests when changing prompt behavior, configuration shape, transcript/update-record state, CLI-agent thread lifecycle, or Git/memory safety.
 - Prompt tests should verify assembly boundaries and durable invariants rather than pinning exact prose.
 - When changing installer behavior, verify the affected modes with `./install.sh [--mode cli-agent|standalone] <memory-root> <skills-target>` on macOS/Linux/WSL or `.\install.ps1 [--mode cli-agent|standalone] <memory-root> <skills-target>` on Windows PowerShell. Use disposable test roots.
 - When changing semantic upgrade machinery or notes, run `python -m unittest discover -s tests -p 'test_semantic_upgrades.py'`.

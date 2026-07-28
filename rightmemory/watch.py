@@ -29,7 +29,6 @@ WATCH_HANDOFF_PID_ENV = "RIGHTMEMORY_WATCH_HANDOFF_PID"
 WATCH_START_TIMEOUT_SECONDS = 10
 MANAGED_WATCH_TARGETS = (
     "review",
-    "update-review",
     "dreamer",
     "pruner",
     "insight",
@@ -38,7 +37,6 @@ MANAGED_WATCH_TARGETS = (
 )
 WATCH_COMMANDS = {
     "review": ("review", "watch"),
-    "update-review": ("update-review", "watch"),
     "dreamer": ("dreamer", "watch"),
     "pruner": ("prune", "watch"),
     "insight": ("insight", "watch"),

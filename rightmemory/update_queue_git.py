@@ -39,13 +39,6 @@ from .update_queue import (
     validate_update_queue,
 )
 from .update_coordination import is_update_coordination_path
-from .update_review import (
-    UpdateReviewOutcome,
-    UpdateReviewStore,
-    tracked_review_blob_oid,
-    tracked_review_commit,
-    validate_update_reviews,
-)
 
 
 GIT_TIMEOUT_SECONDS = 30
@@ -88,13 +81,6 @@ class ClaimedUpdateBatch:
     candidates: tuple[UpdateCandidate, ...]
     lease_commit: str
 
-    def __post_init__(self) -> None:
-        kinds = {candidate.kind for candidate in self.candidates}
-        if len(kinds) != 1:
-            raise UpdateQueueFormatError("one synchronized batch cannot mix update and review work")
-        if self.kind == "review" and len(self.candidates) != 1:
-            raise UpdateQueueFormatError("one synchronized review batch must contain one candidate")
-
     @property
     def batch_id(self) -> str:
         return self.lease.batch_id
@@ -104,21 +90,7 @@ class ClaimedUpdateBatch:
         return self.batch_id
 
     @property
-    def kind(self) -> str:
-        if not self.candidates:
-            raise UpdateQueueFormatError("claimed synchronized batch has no candidates")
-        return self.candidates[0].kind
-
-    @property
-    def review_candidate(self) -> UpdateCandidate:
-        if self.kind != "review":
-            raise UpdateQueueFormatError("claimed batch is not an update review")
-        return self.candidates[0]
-
-    @property
     def message(self) -> str:
-        if self.kind != "update":
-            raise UpdateQueueFormatError("review batches do not use the Update batch prompt")
         return _format_batch_message(_session_batches(self.candidates))
 
 
@@ -328,19 +300,13 @@ class GitUpdateQueueCoordinator:
         candidate_commit: str | None,
         *,
         prepared_start_commit: str | None = None,
-        review_outcome: UpdateReviewOutcome | None = None,
     ) -> str:
-        if claim.kind == "review" and review_outcome is None:
-            raise ValueError("review batch finalization requires a review outcome")
-        if claim.kind == "update" and review_outcome is not None:
-            raise ValueError("Update batch finalization cannot settle an update review")
         operation_store = SemanticOperationStore(self.memory_root)
         with operation_store.execution_locked():
             return self._finalize_locked(
                 claim,
                 candidate_commit,
                 prepared_start_commit=prepared_start_commit,
-                review_outcome=review_outcome,
             )
 
     def _finalize_locked(
@@ -349,7 +315,6 @@ class GitUpdateQueueCoordinator:
         candidate_commit: str | None,
         *,
         prepared_start_commit: str | None,
-        review_outcome: UpdateReviewOutcome | None,
     ) -> str:
         semantic_base = prepared_start_commit or claim.lease.base_commit
         for _attempt in range(QUEUE_PUSH_ATTEMPTS):
@@ -404,24 +369,6 @@ class GitUpdateQueueCoordinator:
                         raise UpdateQueueSemanticBaseChanged(
                             "prepared update no longer applies to the synchronized queue base"
                         )
-                review_path: str | None = None
-                if review_outcome is not None:
-                    review = claim.review_candidate
-                    if (
-                        review.review_id is None
-                        or review.review_commit is None
-                        or review.review_blob_oid is None
-                    ):
-                        raise UpdateQueueFormatError(
-                            "review candidate has incomplete source identity"
-                        )
-                    review_path = UpdateReviewStore(worktree).settle_tracked(
-                        review.review_id,
-                        review_outcome,
-                        operation_id=claim.batch_id,
-                        expected_commit=review.review_commit,
-                        expected_blob_oid=review.review_blob_oid,
-                    ).relative_to(worktree).as_posix()
                 had_recovery = any(
                     item.batch_id == claim.batch_id for item in snapshot.recoveries
                 )
@@ -432,17 +379,12 @@ class GitUpdateQueueCoordinator:
                 diagnostics = validate_update_queue(worktree)
                 if diagnostics:
                     raise UpdateQueueFormatError("\n".join(diagnostics))
-                review_diagnostics = validate_update_reviews(worktree)
-                if review_diagnostics:
-                    raise UpdateQueueFormatError("\n".join(review_diagnostics))
                 paths = [
                     *(f"update_queue/candidates/{uid}.json" for uid in claim.lease.candidate_uids),
                     "update_queue/lease.json",
                 ]
                 if had_recovery:
                     paths.append(f"update_queue/recovery/{claim.batch_id}.json")
-                if review_path is not None:
-                    paths.append(review_path)
                 final_commit = self._commit_paths(
                     worktree,
                     paths,
@@ -479,70 +421,6 @@ class GitUpdateQueueCoordinator:
 
     def release(self, claim: ClaimedUpdateBatch) -> None:
         self._settle_failed_claim(claim, recovery=None)
-
-    def supersede_review(self, claim: ClaimedUpdateBatch) -> str:
-        """Terminally consume stale review work without touching its current document."""
-        if claim.kind != "review":
-            raise ValueError("only a review claim can be superseded as stale")
-        for _attempt in range(QUEUE_PUSH_ATTEMPTS):
-            upstream = self._fetch_upstream()
-            if upstream is None:
-                raise UpdateQueueUnavailable(
-                    "cannot supersede stale review work while Git is offline"
-                )
-            recovered = self.superseded_batch_commit(upstream.commit, claim.batch_id)
-            if recovered is not None:
-                if not self._advance_active(recovered, queue_only=True):
-                    raise UpdateQueueUnavailable(
-                        "superseded review could not advance the active checkout"
-                    )
-                return recovered
-            with self._worktree(upstream.commit) as worktree:
-                queue_store = UpdateQueueStore(worktree)
-                snapshot = queue_store.snapshot()
-                self._require_claim(snapshot, claim)
-                had_recovery = any(
-                    item.batch_id == claim.batch_id for item in snapshot.recoveries
-                )
-                for uid in claim.lease.candidate_uids:
-                    queue_store.remove_candidate(uid)
-                queue_store.remove_recovery(claim.batch_id)
-                queue_store.remove_lease()
-                diagnostics = validate_update_queue(worktree)
-                if diagnostics:
-                    raise UpdateQueueFormatError("\n".join(diagnostics))
-                paths = [
-                    *(f"update_queue/candidates/{uid}.json" for uid in claim.lease.candidate_uids),
-                    "update_queue/lease.json",
-                ]
-                if had_recovery:
-                    paths.append(f"update_queue/recovery/{claim.batch_id}.json")
-                commit = self._commit_paths(
-                    worktree,
-                    paths,
-                    "\n".join(
-                        (
-                            f"update queue: supersede stale review {claim.batch_id}",
-                            "",
-                            f"{QUEUE_TOKEN_TRAILER}: {claim.lease.token}",
-                            f"{QUEUE_SUPERSEDE_TRAILER}: {claim.batch_id}",
-                        )
-                    ),
-                )
-            if self._push_cas(upstream, commit):
-                if not self._advance_active(commit, queue_only=True):
-                    raise UpdateQueueUnavailable(
-                        "stale review was superseded but the active checkout could not advance"
-                    )
-                return commit
-        upstream = self._fetch_upstream()
-        recovered = None if upstream is None else self.superseded_batch_commit(
-            upstream.commit,
-            claim.batch_id,
-        )
-        if recovered is not None and self._advance_active(recovered, queue_only=True):
-            return recovered
-        raise UpdateQueueLeaseLost("stale review supersession lost its Git lease")
 
     def fail(self, claim: ClaimedUpdateBatch, *, reason_code: str) -> UpdateQueueRecovery:
         upstream = self._fetch_upstream()
@@ -904,65 +782,11 @@ class GitUpdateQueueCoordinator:
                 return "settled"
             with self._worktree(upstream.commit) as worktree:
                 queue_store = UpdateQueueStore(worktree)
-                snapshot = queue_store.snapshot()
-                if candidate.kind == "review":
-                    if (
-                        candidate.review_id is None
-                        or candidate.review_commit is None
-                        or candidate.review_blob_oid is None
-                    ):
-                        raise UpdateQueueFormatError(
-                            "review candidate has incomplete source identity"
-                        )
-                    review_path = f"update_reviews/{candidate.review_id}.md"
-                    source_blob = self._git_stdout(
-                        "rev-parse",
-                        f"{candidate.review_commit}:{review_path}",
-                    )
-                    if source_blob != candidate.review_blob_oid:
-                        raise UpdateQueueFormatError(
-                            "review candidate source commit does not contain its review blob"
-                        )
-                    if not self._is_ancestor(candidate.review_commit, upstream.commit):
-                        # The Update or prior question may not have synchronized yet.
-                        return "unresolved"
-                    current_blob = tracked_review_blob_oid(
-                        worktree,
-                        candidate.review_id,
-                    )
-                    current_commit = tracked_review_commit(
-                        worktree,
-                        candidate.review_id,
-                    )
-                    if (
-                        current_commit != candidate.review_commit
-                        or current_blob != candidate.review_blob_oid
-                    ):
-                        return "settled"
-                    pending = next(
-                        (
-                            item
-                            for item in snapshot.candidates
-                            if item.kind == "review"
-                            and item.review_id == candidate.review_id
-                        ),
-                        None,
-                    )
-                    if pending is not None:
-                        return (
-                            "settled"
-                            if candidate_evidence_matches(pending, candidate)
-                            else "unresolved"
-                        )
-                    marker = self.store.begin_publication(
-                        candidate.uid,
-                        attempted_at=_utc_now().isoformat(),
-                    )
-                else:
-                    marker = AsyncUpdateStore(self.memory_root, "update").begin_publication(
-                        candidate,
-                        attempted_at=_utc_now().isoformat(),
-                    )
+                queue_store.snapshot()
+                marker = AsyncUpdateStore(self.memory_root, "update").begin_publication(
+                    candidate,
+                    attempted_at=_utc_now().isoformat(),
+                )
                 if marker is None:
                     return "unresolved"
                 queue_store.write_candidate(candidate)
@@ -1311,20 +1135,9 @@ def _select_candidates(
         for recovery in snapshot.recoveries
         for uid in recovery.candidate_uids
     }
-    reviews = sorted(
-        (
-            candidate
-            for candidate in snapshot.candidates
-            if candidate.kind == "review" and candidate.session_id not in recovered_sessions
-        ),
-        key=lambda item: (item.submitted_at, item.uid),
-    )
-    if reviews:
-        return (reviews[0],), None
-
     sessions: dict[str, list[UpdateCandidate]] = {}
     for candidate in snapshot.candidates:
-        if candidate.kind == "update" and candidate.session_id not in recovered_sessions:
+        if candidate.session_id not in recovered_sessions:
             sessions.setdefault(candidate.session_id, []).append(candidate)
 
     eligible: list[tuple[datetime, str, tuple[UpdateCandidate, ...]]] = []
@@ -1354,8 +1167,6 @@ def _select_candidates(
 
 
 def _session_batches(candidates: tuple[UpdateCandidate, ...]) -> list[AsyncUpdateSessionBatch]:
-    if any(candidate.kind != "update" for candidate in candidates):
-        raise UpdateQueueFormatError("review candidates cannot use Update session batching")
     sessions: dict[str, list[UpdateCandidate]] = {}
     for candidate in candidates:
         sessions.setdefault(candidate.session_id, []).append(candidate)

@@ -14,8 +14,8 @@ second journal or lease format.
 
 The implementation target described here is the branch containing the current
 install, sync, sync-reconciler, and automatic-write behavior. This document is
-self-contained; the implementation should not depend on the untracked current
-implementation review document being present.
+self-contained; the implementation should not depend on untracked current
+implementation notes being present.
 
 ## Summary
 
@@ -50,9 +50,9 @@ safety principle, but each keeps its own small implementation.
   repeat repair.
 - Current sync result vocabulary remains sufficient; the patch does not add a
   new user-facing sync state machine.
-- Every normal unified Update carries its human review document in the same
-  commit, and synchronized correction processing settles one Ready revision
-  exactly once across devices.
+- Every queued unified Update retains its exact candidate batch in an immutable
+  update record in the same commit as the outcome, in both local and
+  synchronized modes.
 
 ## Non-Goals
 
@@ -69,8 +69,6 @@ safety principle, but each keeps its own small implementation.
   responsible for pre-existing semantic errors.
 - Do not build a second SQLite database, JSON operation journal, sync outbox,
   or sync-specific lease system.
-- Do not add a separate review queue, review service, or distributed lock;
-  Ready reviews reuse the synchronized update queue and its singleton lease.
 - Do not change the separately specified dirty-main recovery policy used by
   automatic writers. Within sync itself, pre-existing dirty or already-invalid
   active state blocks incoming synchronization and is not copied into a sync
@@ -83,10 +81,9 @@ safety principle, but each keeps its own small implementation.
 - **Semantic state files**: `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`,
   `PURSUIT_*.md`, `PURSUIT_RULES.md`, `corrections.md`, shared-view and share
   definitions, and `insight_logs/*.md`.
-- **Update-review document**: the tracked
-  `update_reviews/review-<sha256(operation-id)>.md` file created in the same
-  commit as one normal unified Update. It is synchronized protocol state, not
-  Memory or durable correction evidence.
+- **Update record**: the immutable `update_records/<operation-id>.json` file
+  containing the exact candidate batch for one queued updater outcome. It lands
+  in the outcome commit and is synchronized protocol state, not Memory.
 - **Required root documents**: the regular files `MEMORY.md`, `PURSUITS.md`,
   and `PURSUIT_RULES.md`.
 - **Sync candidate**: a leased temporary Git branch and worktree created from
@@ -133,9 +130,10 @@ safety principle, but each keeps its own small implementation.
   synchronized paths. A remote commit cannot use ordinary Git transport to
   introduce configuration, runtime state, generated output, or an unrelated
   tracked file.
-- Synchronized review paths must use the canonical hashed filename and validate
-  as complete review documents. Malformed review state or a review-path merge
-  conflict fails closed; `sync-reconciler` does not interpret or repair it.
+- Synchronized update-record paths must use the canonical hashed filename and
+  validate as complete immutable records. Malformed record state or a
+  record-path merge conflict fails closed; `sync-reconciler` does not interpret
+  or repair it.
 - Publication occurs only when the active root is still at the captured
   starting commit and synchronized paths are still clean and unconflicted.
 - Publication uses a fast-forward to the exact candidate commit. It does not
@@ -333,29 +331,14 @@ The current caller then invokes sync-reconciler against that already modified
 root. Repair can succeed, but model failure, process failure, or validation
 failure can strand the active root in the invalid intermediate state.
 
-### Synchronized update-review protocol
+### Synchronized update provenance
 
-Every normal unified Update adds one
-`update_reviews/review-<sha256(operation-id)>.md` document to the same commit as
-its Memory or Pursuit change. Git therefore transports the review as part of
-ordinary synchronized state, with no post-commit creation effect or separate
-review store.
-
-Human edits remain ordinary local working-tree drafts until the user checks
-Ready. The scanner binds the normalized comment to the exact tracked review
-commit and blob, publishes that evidence as a typed candidate in the existing
-synchronized update queue, then restores the tracked review file so the local
-draft cannot block sync. The queue candidate carries the submitted comment
-between devices.
-
-Review candidates are selected alone under the queue's singleton lease. Fenced
-Git finalization rechecks the submitted commit and blob, consumes the candidate, and
-atomically applies any prepared correction plus either deleting the resolved
-review or writing a clarification and clearing Ready. Exact duplicates converge;
-stale candidates are terminally consumed without touching the current review.
-This gives retries and multiple devices one settlement point without another
-queue or lease. When sync is disabled, correction and review settlement follow
-the same rules but commit directly to local Git.
+Every queued updater outcome adds one canonical
+`update_records/<operation-id>.json` file to the same commit as its Memory or
+Pursuit change. A no-change outcome creates a record-only commit. Git therefore
+transports the exact candidate evidence with the outcome, while the commit diff
+remains the authoritative state change. Local and synchronized processing use
+the same operation identity and record shape.
 
 ### Public method responsibilities
 
@@ -685,7 +668,7 @@ ready-to-land public phases.
 
 - Add pure target inspection before all mutation.
 - Split new-state bootstrap from existing-state preservation.
-- Include canonical `update_reviews/*.md` paths in the root Git allowlist.
+- Include canonical `update_records/*.json` paths in the root Git allowlist.
 - Stop refreshing or migrating semantic examples in existing roots.
 - Remove the existing-`HEAD` path that leaves newly created state uncommitted.
 - Simplify or remove `new_managed_state_files` when unused.
@@ -702,7 +685,7 @@ ready-to-land public phases.
 - Push exact commits rather than symbolic `HEAD`.
 - Keep `state.json` observational.
 - Update conflict messages for unchanged active-root behavior.
-- Admit and validate canonical update-review documents as synchronized protocol
+- Admit and validate canonical update records as synchronized protocol
   paths, and fail closed on their merge conflicts without model repair.
 
 ### `rightmemory/runtime.py`
@@ -712,16 +695,14 @@ ready-to-land public phases.
   isolated active `state_root`.
 - Reuse the first group's operation phases and prepared recovery.
 - Preserve automatic writer recovery and post-write push semantics.
-- Add each generated update-review document to its normal Update commit rather
-  than creating it as a later runtime effect.
+- Add each queued outcome's immutable update record to its Update commit.
 
 ### `rightmemory/cli.py`
 
 - Update sync watch to call `background_sync()` without an outer memory lock.
 - Run repair in the supplied candidate root.
 - Keep watcher lifecycle, failure counting, and stop behavior unchanged.
-- Publish Ready revisions as typed update-queue candidates and route claimed
-  review work through fenced correction and review settlement.
+- Route claimed candidate batches through fenced queue finalization.
 
 ### First-group operation/worktree modules
 
@@ -767,8 +748,8 @@ and Git status before each operation.
 - No incoming commit returns current without creating a repair operation.
 - A remote advance after fetch is not accidentally merged; the next cycle sees
   it.
-- A canonical update-review document is transported and validated with its
-  originating Update commit.
+- A canonical update record is transported and validated with its originating
+  Update commit.
 
 ### Dirty and invalid local state
 
@@ -797,8 +778,8 @@ and Git status before each operation.
   invalid graph is rejected before publication.
 - Transporting correction entries above the updater-only ceiling remains
   allowed when the full sync validation profile otherwise passes.
-- A malformed review document, noncanonical review filename, or review-path
-  merge conflict is rejected without invoking `sync-reconciler`.
+- A malformed update record, noncanonical record filename, or record-path merge
+  conflict is rejected without invoking `sync-reconciler`.
 
 ### Publication races
 
@@ -840,11 +821,11 @@ and Git status before each operation.
 - Automatic writer pre-sync uses staged admission.
 - Post-write push rejection uses staged admission and does not invalidate the
   already durable writer outcome.
-- A Ready review becomes one typed queue candidate; the global lease prevents
-  two devices from processing it, and finalization applies correction plus
-  review deletion or clarification in one fenced Git transaction.
-- With sync disabled, review settlement is committed locally without queue
-  publication.
+- Every queued candidate batch uses the same claim and finalization path; the
+  global lease prevents two devices from processing it.
+- Finalization publishes the semantic outcome and immutable update record in
+  one fenced Git transaction. A no-change outcome publishes only the record.
+- With sync disabled, the same outcome finalization is committed locally.
 - Watch failure counting, retry cadence, cooperative stop, and install-refresh
   re-exec remain unchanged.
 
@@ -907,8 +888,8 @@ and Git status before each operation.
 - Update `README.md`, `DESIGN_NOTES.md`, and `AGENTS.md` coherently.
 - Run focused install, sync, runtime, CLI, operation, worktree, and status tests.
 - Run the complete unit test suite and compile check.
-- Commit only intended files; do not add worktrees, `.runtime/`, the untracked
-  current implementation review, or unrelated user files.
+- Commit only intended files; do not add worktrees, `.runtime/`, untracked
+  implementation notes, or unrelated user files.
 
 ## Verification Commands
 

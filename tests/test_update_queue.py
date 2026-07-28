@@ -24,10 +24,6 @@ TOKEN = "ffeeddccbbaa00998877665544332211"
 ATTEMPT = "1234567890abcdef1234567890abcdef"
 BATCH_A = f"update-batch-{'a' * 64}"
 BATCH_B = f"update-batch-{'b' * 64}"
-REVIEW_A = f"review-{'a' * 64}"
-REVIEW_B = f"review-{'b' * 64}"
-REVIEW_COMMIT = "c" * 40
-REVIEW_BLOB_OID = "e" * 40
 COMMIT = "c" * 40
 SUBMITTED_AT = "2026-07-21T08:30:00+00:00"
 EXPIRES_AT = "2026-07-21T09:30:00+00:00"
@@ -120,183 +116,61 @@ class UpdateQueueWireFormatTests(unittest.TestCase):
                 submitted_at="2026-07-21T16:30:00+08:00",
             )
 
-    def test_review_candidate_round_trips_with_typed_review_context(self):
+    def test_candidate_round_trips_with_minimal_wire_format(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = UpdateQueueStore(Path(tempdir))
-            candidate = _review_candidate(
-                UID_A,
-                previous_question="Which project did this refer to?",
-            )
+            candidate = _candidate(UID_A)
 
             path = store.write_candidate(candidate)
             data = json.loads(path.read_text(encoding="utf-8"))
 
             self.assertEqual(store.read_candidate(UID_A), candidate)
-            self.assertEqual(data["schema_version"], 2)
-            self.assertEqual(data["kind"], "review")
-            self.assertEqual(data["review_id"], REVIEW_A)
-            self.assertEqual(data["review_commit"], REVIEW_COMMIT)
             self.assertEqual(
-                data["review_blob_oid"],
-                REVIEW_BLOB_OID,
-            )
-            self.assertEqual(
-                data["previous_question"],
-                "Which project did this refer to?",
+                data,
+                {
+                    "schema_version": 3,
+                    "uid": UID_A,
+                    "session_id": "session-a",
+                    "display_id": 1,
+                    "message": f"candidate {UID_A}",
+                    "submitted_at": SUBMITTED_AT,
+                },
             )
 
-    def test_candidate_kind_enforces_review_specific_fields(self):
-        invalid_candidates = (
-            (
-                "kind must be update or review",
-                {"kind": "other"},
-            ),
-            (
-                "must be null",
-                {"review_id": REVIEW_A},
-            ),
-            (
-                "review_id must use review-",
-                {"kind": "review"},
-            ),
-            (
-                "review_id must use review-",
-                {"kind": "review", "review_id": "review-not-a-digest"},
-            ),
-            (
-                "message must be a non-empty string",
-                {
-                    "kind": "review",
-                    "review_id": REVIEW_A,
-                    "review_commit": REVIEW_COMMIT,
-                    "review_blob_oid": REVIEW_BLOB_OID,
-                    "message": "   ",
-                },
-            ),
-            (
-                "previous_question must be a non-empty string",
-                {
-                    "kind": "review",
-                    "review_id": REVIEW_A,
-                    "review_commit": REVIEW_COMMIT,
-                    "review_blob_oid": REVIEW_BLOB_OID,
-                    "previous_question": "\t",
-                },
-            ),
-            (
-                "review_commit must be a lowercase Git object id",
-                {"kind": "review", "review_id": REVIEW_A},
-            ),
-            (
-                "review_blob_oid must be a lowercase Git object id",
-                {
-                    "kind": "review",
-                    "review_id": REVIEW_A,
-                    "review_commit": REVIEW_COMMIT,
-                },
-            ),
-            (
-                "review_blob_oid must be a lowercase Git object id",
-                {
-                    "kind": "review",
-                    "review_id": REVIEW_A,
-                    "review_commit": REVIEW_COMMIT,
-                    "review_blob_oid": "not-an-object-id",
-                },
-            ),
-            (
-                "must be null",
-                {"review_blob_oid": REVIEW_BLOB_OID},
-            ),
-            (
-                "must be null",
-                {"review_commit": REVIEW_COMMIT},
-            ),
-        )
-        for expected, overrides in invalid_candidates:
-            values = {
-                "uid": UID_A,
-                "session_id": REVIEW_A,
-                "display_id": 1,
-                "message": "candidate",
-                "submitted_at": SUBMITTED_AT,
-            }
-            values.update(overrides)
-            with self.subTest(overrides=overrides):
-                with self.assertRaisesRegex(UpdateQueueFormatError, expected):
-                    UpdateCandidate(**values)
+    def test_candidate_requires_non_empty_message(self):
+        with self.assertRaisesRegex(UpdateQueueFormatError, "message must be a non-empty string"):
+            UpdateCandidate(
+                uid=UID_A,
+                session_id="session-a",
+                display_id=1,
+                message="   ",
+                submitted_at=SUBMITTED_AT,
+            )
 
-    def test_candidate_parser_requires_typed_fields_and_nullable_strings(self):
+    def test_candidate_parser_requires_exact_typed_fields(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = UpdateQueueStore(Path(tempdir))
             path = store.write_candidate(_candidate(UID_A))
             data = json.loads(path.read_text(encoding="utf-8"))
 
-            data.pop("kind")
+            data.pop("message")
             path.write_text(json.dumps(data), encoding="utf-8")
-            self.assertIn("missing field(s): kind", validate_update_queue(Path(tempdir))[0])
+            self.assertIn("missing field(s): message", validate_update_queue(Path(tempdir))[0])
 
-            data["kind"] = "update"
-            data.pop("review_blob_oid")
+            data["message"] = "candidate"
+            data["session_id"] = 42
             path.write_text(json.dumps(data), encoding="utf-8")
             self.assertIn(
-                "missing field(s): review_blob_oid",
+                "session_id must be a string",
                 validate_update_queue(Path(tempdir))[0],
             )
 
-            data["kind"] = "review"
-            data["review_commit"] = REVIEW_COMMIT
-            data["review_blob_oid"] = REVIEW_BLOB_OID
-            data["review_id"] = 42
+            data["session_id"] = "session-a"
+            data["legacy_field"] = "value"
             path.write_text(json.dumps(data), encoding="utf-8")
             self.assertIn(
-                "review_id must be a string or null",
+                "unsupported field(s): legacy_field",
                 validate_update_queue(Path(tempdir))[0],
-            )
-
-    def test_batch_identity_includes_review_candidate_context(self):
-        ordinary = _candidate(UID_A)
-        review = _review_candidate(UID_A)
-        other_review = _review_candidate(UID_A, review_id=REVIEW_B)
-        other_commit = _review_candidate(
-            UID_A,
-            review_commit="d" * 40,
-        )
-        other_document = _review_candidate(
-            UID_A,
-            review_blob_oid="f" * 40,
-        )
-        follow_up = _review_candidate(
-            UID_A,
-            previous_question="Which project did this refer to?",
-        )
-
-        identities = {
-            update_candidate_batch_id((ordinary,)),
-            update_candidate_batch_id((review,)),
-            update_candidate_batch_id((other_review,)),
-            update_candidate_batch_id((other_commit,)),
-            update_candidate_batch_id((other_document,)),
-            update_candidate_batch_id((follow_up,)),
-        }
-
-        self.assertEqual(len(identities), 6)
-
-    def test_validator_rejects_multiple_tracked_candidates_for_one_review(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            store = UpdateQueueStore(root)
-            store.write_candidate(_review_candidate(UID_A))
-            store.write_candidate(_review_candidate(UID_B))
-
-            errors = validate_update_queue(root)
-
-            self.assertTrue(
-                any(
-                    REVIEW_A in error and UID_A in error and UID_B in error
-                    for error in errors
-                ),
-                errors,
             )
 
     def test_validator_rejects_unknown_fields_and_boolean_display_id(self):
@@ -327,16 +201,11 @@ class UpdateQueueWireFormatTests(unittest.TestCase):
             candidates.mkdir(parents=True)
             source = json.dumps(
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "uid": UID_A,
                     "session_id": "session-a",
                     "display_id": 1,
-                    "kind": "update",
                     "message": "candidate",
-                    "previous_question": None,
-                    "review_id": None,
-                    "review_commit": None,
-                    "review_blob_oid": None,
                     "submitted_at": SUBMITTED_AT,
                 }
             )
@@ -595,7 +464,7 @@ class LocalUpdateOutboxTests(unittest.TestCase):
             marker_path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "candidate_uid": UID_B,
                         "attempt_id": ATTEMPT,
                         "attempted_at": SUBMITTED_AT,
@@ -618,29 +487,5 @@ def _candidate(uid: str, *, display_id: int = 1) -> UpdateCandidate:
         message=f"candidate {uid}",
         submitted_at=SUBMITTED_AT,
     )
-
-
-def _review_candidate(
-    uid: str,
-    *,
-    review_id: str = REVIEW_A,
-    previous_question: str | None = None,
-    review_commit: str = REVIEW_COMMIT,
-    review_blob_oid: str = REVIEW_BLOB_OID,
-) -> UpdateCandidate:
-    return UpdateCandidate(
-        uid=uid,
-        session_id=review_id,
-        display_id=1,
-        message=f"candidate {uid}",
-        submitted_at=SUBMITTED_AT,
-        kind="review",
-        review_id=review_id,
-        review_commit=review_commit,
-        previous_question=previous_question,
-        review_blob_oid=review_blob_oid,
-    )
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -27,11 +27,11 @@ from .semantic_operation import FINAL_PHASES, OperationEffect, SemanticOperation
 from .session import MemoryWriteLock, _ensure_runtime_gitignore, _fsync_directory
 from .tools import MemoryTools
 from .update_queue import validate_update_queue
-from .update_review import validate_update_reviews
+from .update_record import validate_update_records
 from .update_coordination import (
     UPDATE_QUEUE_CANDIDATE_PATH_RE,
     UPDATE_QUEUE_RECOVERY_PATH_RE,
-    UPDATE_REVIEW_PATH_RE,
+    UPDATE_RECORD_PATH_RE,
 )
 
 
@@ -51,10 +51,10 @@ MEMORY_SYNC_PATHS = (
     "shared_views/*/question.toml",
     "shared_views/*/.gitignore",
     "insight_logs/*.md",
-    "update_reviews/*.md",
     "update_queue/candidates/*.json",
     "update_queue/recovery/*.json",
     "update_queue/lease.json",
+    "update_records/*.json",
 )
 REQUIRED_ROOT_DOCUMENTS = ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md")
 GIT_TIMEOUT_SECONDS = 30
@@ -713,7 +713,10 @@ class SyncManager:
             coordination_conflicts = [
                 path
                 for path in conflicts
-                if _is_update_queue_path(path) or _is_update_review_path(path)
+                if (
+                    _is_update_queue_path(path)
+                    or _is_update_record_path(path)
+                )
             ]
             if coordination_conflicts:
                 return _CandidateInspection(
@@ -817,9 +820,9 @@ class SyncManager:
         invalid_queue = _invalid_update_queue_result(candidate_root)
         if invalid_queue is not None:
             return invalid_queue
-        invalid_reviews = _invalid_update_reviews_result(candidate_root)
-        if invalid_reviews is not None:
-            return invalid_reviews
+        invalid_records = _invalid_update_records_result(candidate_root)
+        if invalid_records is not None:
+            return invalid_records
         return self._invalid_graph_result(candidate_root)
 
     def _active_preflight(self) -> SyncResult | None:
@@ -837,6 +840,9 @@ class SyncManager:
         invalid_queue = _invalid_update_queue_result(self.memory_root)
         if invalid_queue is not None:
             return invalid_queue
+        invalid_records = _invalid_update_records_result(self.memory_root)
+        if invalid_records is not None:
+            return invalid_records
         return self._invalid_graph_result(self.memory_root)
 
     def _capture_valid_tip(self, upstream_commit: str) -> str | SyncResult:
@@ -1131,9 +1137,7 @@ class SyncManager:
         return self._git("push", remote, f"{commit}:{branch}")
 
     def _dirty_memory_files(self) -> list[str]:
-        # Review drafts are working-tree UI, so they must not block unrelated sync.
-        paths = tuple(path for path in MEMORY_SYNC_PATHS if not path.startswith("update_reviews/"))
-        result = self._git("status", "--porcelain", "--", *paths)
+        result = self._git("status", "--porcelain", "--", *MEMORY_SYNC_PATHS)
         if result.returncode != 0:
             return []
         return _porcelain_paths(result.stdout)
@@ -1353,8 +1357,8 @@ class SyncManager:
 def _is_sync_path(path: str) -> bool:
     if path.startswith("update_queue/"):
         return _is_update_queue_path(path)
-    if path.startswith("update_reviews/"):
-        return _is_update_review_path(path)
+    if path.startswith("update_records/"):
+        return _is_update_record_path(path)
     for pattern in MEMORY_SYNC_PATHS:
         expression = re.escape(pattern).replace(r"\*", "[^/]*")
         if re.fullmatch(expression, path):
@@ -1377,8 +1381,8 @@ def _is_update_queue_path(path: str) -> bool:
     )
 
 
-def _is_update_review_path(path: str) -> bool:
-    return UPDATE_REVIEW_PATH_RE.fullmatch(path) is not None
+def _is_update_record_path(path: str) -> bool:
+    return UPDATE_RECORD_PATH_RE.fullmatch(path) is not None
 
 
 def _invalid_update_queue_result(root: Path) -> SyncResult | None:
@@ -1400,14 +1404,14 @@ def _invalid_update_queue_result(root: Path) -> SyncResult | None:
     )
 
 
-def _invalid_update_reviews_result(root: Path) -> SyncResult | None:
-    diagnostics = validate_update_reviews(root)
+def _invalid_update_records_result(root: Path) -> SyncResult | None:
+    diagnostics = validate_update_records(root)
     if not diagnostics:
         return None
     files = sorted({item.partition(":")[0] for item in diagnostics})
     return SyncResult(
         "error",
-        "invalid synchronized update reviews:\n"
+        "invalid synchronized update records:\n"
         + "\n".join(f"- {item}" for item in diagnostics),
         files,
     )

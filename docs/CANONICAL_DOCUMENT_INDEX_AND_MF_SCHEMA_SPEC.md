@@ -21,8 +21,8 @@ The group contains two connected changes:
 Implementation should begin from the branch containing the two preceding
 safety groups. The implementing agent must inspect their final interfaces and
 adapt names as necessary, but must preserve the behavior and invariants in this
-document. This specification is self-contained and must not depend on the
-untracked implementation-review document being present.
+document. This specification is self-contained and must not depend on
+untracked implementation notes being present.
 
 ## Summary
 

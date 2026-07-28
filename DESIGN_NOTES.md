@@ -61,21 +61,22 @@ Updating RightMemory is one judgment over two lifecycles. The updater treats rel
 
 This separation keeps orchestration simple: the skill reports task state, while the updater owns storage judgment and matching against existing Pursuits. Memory retains its strict durable filter and does not become a bug database, implementation log, experiment ledger, or duplicate of project-local artifacts. Pursuit shares the existing update queue, model role, and schedule because a second pipeline would make one task settle at two different times.
 
-### Three correction surfaces
+The exact reconciled candidate batch is durable input provenance rather than
+queue history. Runtime writes one immutable
+`update_records/<operation-id>.json` in the same commit as the semantic outcome;
+a no-change outcome creates a record-only commit. The record contains source
+evidence only. Its filename and the commit's `RightMemory-Operation` trailer bind
+input to outcome, while Git supplies the diff, so the record does not duplicate
+derived paths, diffs, or model-authored candidate-to-hunk claims. Local and
+synchronized batching use the same canonical operation identity.
+
+### Two correction surfaces
 
 Corrections to ordinary agent writing, reasoning, or behavior may become Writing or Design M# evidence when the rejected/accepted contrast is useful during a future second pass. A directly executable rule belongs in ordinary Agent Behavior or S# instead, because storing the same lesson as both instruction and correction evidence would increase prompt weight without increasing guidance.
 
-Reusable feedback about Update's state judgment belongs in root-level `corrections.md`, which only Update and the internal update-corrector consume semantically. Keeping updater feedback outside Memory prevents ordinary retrieval and Memory maintenance from treating those examples as user knowledge.
+Reusable feedback about Update's state judgment belongs in root-level `corrections.md`, which only Update consumes semantically. Keeping updater feedback outside Memory prevents ordinary retrieval and Memory maintenance from treating those examples as user knowledge.
 
-The tracked update-review Markdown document is neither kind of durable correction evidence. It is a disposable synchronized human interface that owns the current comment and explicit submission intent. Keeping that temporary request separate from both durable surfaces prevents UI state from becoming Memory and prevents one correction event from being stored redundantly.
-
-### Synchronized review and correction feedback
-
-Each normal unified-updater commit includes one tracked `update_reviews/review-<sha256(operation-id)>.md` document in the same commit as the state change; correction and maintenance commits do not. The document gives a natural account of the change, one free-form human comment area, and an explicit Ready checkbox. Git sync therefore transports the review naturally, while an uncommitted draft remains local until Ready supplies an unambiguous submission boundary.
-
-With sync enabled, the scanner binds a Ready comment to the exact tracked review commit and blob, publishes that evidence as typed work in the existing synchronized update queue, then restores the tracked document so local UI edits do not block sync. The queue selects review work alone and reuses its global lease, fencing, and recovery rather than introducing another distributed queue. The internal update-corrector receives only the submitted comment plus context re-derived from the review's creation commit and operation trailer in Git; it never trusts the editable displayed diff. Finalization rechecks the commit and blob, atomically consumes the candidate, applies any prepared correction, and either deletes the resolved review or writes a clarification and clears Ready. Duplicate evidence converges, while stale evidence is terminally consumed without touching newer review state. With sync disabled, the same correction and settlement commit through local Git.
-
-A successful state correction is independent from feedback admission. The state change lands whenever it succeeds; its `corrections.md` candidates may be merged, admitted, or discarded, with any accepted feedback included in the same commit. This preserves the user's requested state without forcing a weak example into the bounded feedback set.
+A correction to an updater result follows the ordinary candidate path rather than becoming a distinct work type. Update reconciles that evidence against current state, and the outcome receives the same immutable candidate record as any other queued update. This keeps correction processing, provenance, and multi-device fencing in one model.
 
 ### Bounded agent correction memory
 
@@ -85,7 +86,7 @@ The M# collections and updater-only `corrections.md` are bounded priority sets r
 
 ### Automatic write isolation
 
-Automatic semantic turns run in temporary Git worktrees when they operate on the main state root. Each role keeps an explicit write boundary: unified Update may maintain Memory and Pursuit together, update-corrector may additionally update `corrections.md` only alongside a real state correction, Memory-oriented maintenance roles preserve cross-tree references, and Insight commits only reflective logs. Runtime validates the role-owned result before landing it and promotes temporary session/provider state only after the isolated turn succeeds.
+Automatic semantic turns run in temporary Git worktrees when they operate on the main state root. Each role keeps an explicit write boundary: unified Update may maintain Memory and Pursuit together, Memory-oriented maintenance roles preserve cross-tree references, and Insight commits only reflective logs. Runtime validates the role-owned result before landing it and promotes temporary session/provider state only after the isolated turn succeeds.
 
 This keeps the user-facing RightMemory repo focused on completed commits instead of partial agent editing state. Failed or interrupted work is discarded because its source input remains retryable. Dirty user-owned state blocks automatic semantic writes independently of remote sync so local edits remain visible instead of being blended into a model-created change.
 
@@ -99,7 +100,7 @@ Historical retrieval is explicit. Ordinary retrieval stays focused on the curren
 
 ### Change-triggered dreamer
 
-Dreamer watch is driven by accumulated successful Memory work rather than elapsed time. Unified updates and review corrections add consolidation pressure only when they change Memory; Pursuit-only activity does not make Dreamer responsible for live-state maintenance. The watcher consumes its threshold only after a successful cycle or valid no-op, which keeps Dreamer a Memory consolidation pressure valve rather than a second Pursuit updater.
+Dreamer watch is driven by accumulated successful Memory work rather than elapsed time. Unified updates add consolidation pressure only when they change Memory; Pursuit-only activity does not make Dreamer responsible for live-state maintenance. The watcher consumes its threshold only after a successful cycle or valid no-op, which keeps Dreamer a Memory consolidation pressure valve rather than a second Pursuit updater.
 
 ### Insight logs
 
@@ -107,7 +108,7 @@ Insight logs are a reflective artifact stream inside the RightMemory repo. They 
 
 ### Command-backed roles
 
-RightMemory exposes explicit command roles because operations still have different authority boundaries even though Memory and Pursuit share one graph. `retrieve` is read-only over current RightMemory. Transcript review extracts candidates from idle sessions and routes them through `update` rather than writing the graph itself. `history`, `dreamer`, `insight`, and `pruner` remain Memory-oriented, while `update` performs the unified durable-versus-live reconciliation across both document trees. Review correction is a separate internal role because its authority, evidence, commit contract, and terminal result differ from ordinary candidate reconciliation. It inherits Update's executor configuration for operational simplicity but has its own prompt and fresh one-shot conversation; it is not a public CLI or TOML role.
+RightMemory exposes explicit command roles because operations still have different authority boundaries even though Memory and Pursuit share one graph. `retrieve` is read-only over current RightMemory. Transcript review extracts candidates from idle sessions and routes them through `update` rather than writing the graph itself. `history`, `dreamer`, `insight`, and `pruner` remain Memory-oriented, while `update` performs the unified durable-versus-live reconciliation across both document trees, including ordinary candidates that correct an earlier result.
 
 ### Command-backed install modes
 
@@ -131,11 +132,11 @@ Standalone mode exposes narrow filesystem and Git tools instead of arbitrary Pyt
 
 ### Standalone commit boundary
 
-Standalone commit tools are role-aware. Unified Update may commit Memory and Pursuit files together, and runtime adds the generated update-review document to that same commit; update-corrector may additionally commit `corrections.md` with a state correction but cannot edit the fixed writing/design M# collections. Memory-oriented maintenance roles retain their smaller surfaces; Insight commits `insight_logs/*.md`. Empty commits remain reserved for `prune:` checkpoints. Retrieval roles receive no write tools, and unrelated files remain outside model-driven stage and commit allowlists.
+Standalone commit tools are role-aware. Unified Update may commit Memory and Pursuit files together, and runtime adds an immutable candidate record to that same commit for queued work. Memory-oriented maintenance roles retain their smaller surfaces; Insight commits `insight_logs/*.md`. Empty commits remain reserved for `prune:` checkpoints. Retrieval roles receive no write tools, and unrelated files remain outside model-driven stage and commit allowlists.
 
 ### Global RightMemory sync
 
-Global sync remains local-first: every device keeps a complete RightMemory root, and Git provides distributed transport between those roots. Memory, Pursuit, `corrections.md`, tracked update-review documents, and the package-owned root `.gitignore` are synchronized state; the allowlist is control plane rather than semantic Memory. Review drafts stay local until Ready turns the exact comment into typed work in the synchronized update queue. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
+Global sync remains local-first: every device keeps a complete RightMemory root, and Git provides distributed transport between those roots. Memory, Pursuit, `corrections.md`, immutable update records, and the package-owned root `.gitignore` are synchronized state; the allowlist is control plane rather than semantic Memory. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
 
 Runtime code owns deterministic sync mechanics where they belong in the workflow. It fetches and captures exact commits, then merges incoming history in a leased candidate worktree while the active root remains unchanged. Only a complete candidate whose paths and canonical graph validate may be published, and publication is one guarded fast-forward from the captured active commit. A concurrent active change or failed merge, repair, or validation refuses publication instead of requiring rollback.
 
@@ -145,19 +146,18 @@ The synchronized update queue is a protocol surface rather than model-owned
 content. Only canonical candidate, recovery, and singleton-lease JSON paths are
 admitted, and their complete machine schema validates before incoming state can
 publish. Malformed queue data and queue conflicts fail closed; they never enter
-`sync-reconciler`. A normal candidate remains self-contained semantic evidence
+`sync-reconciler`. Immutable operation records are validated and synchronized by
+the same fail-closed boundary but remain outside the queue lifecycle. A normal candidate remains self-contained semantic evidence
 without a commit dependency. Before publishing it, the originating device fully
 synchronizes local state; failure leaves the candidate in its local outbox, while
 success makes the queue commit descend naturally from its state context. A
-claimant fully synchronizes again before leasing work. Ready update reviews reuse
-this surface as typed candidates and are selected alone; because a correction
-targets one exact diff, its `review_commit` and `review_blob_oid` remain explicit.
-The existing lease and fenced Git finalization can then atomically apply a
-correction and delete or re-ask the tracked review. The six-hour lease is an
-availability window measured by device clocks, so its approximate takeover delay
-assumes reasonable clock synchronization; fencing correctness does not.
+claimant fully synchronizes again before leasing work. The existing lease and
+fenced Git finalization atomically settle each candidate batch. The six-hour
+lease is an availability window measured by device clocks, so its approximate
+takeover delay assumes reasonable clock synchronization; fencing correctness
+does not.
 
-Graph-aware repair stays in `sync-reconciler` because conflicts across Memory, Pursuit, and their relationships require schema judgment rather than Git mechanics alone, but that role edits and commits only the candidate. Durable prepared-operation records make a completed repair recoverable after a crash without another model turn. For `corrections.md`, repair preserves non-identical entries without ranking them; semantic merging and replacement remain updater-owned. Push transport remains a retryable follow-up after local publication, and `sync-reconciler` stays separate from Dreamer because repair is a narrow integrity responsibility while Dreamer owns broader Memory consolidation.
+Graph-aware repair stays in `sync-reconciler` because conflicts across Memory, Pursuit, and their relationships require schema judgment rather than Git mechanics alone, but that role edits and commits only the candidate. Durable prepared-operation records make a completed repair recoverable after a crash without another model turn. For `corrections.md`, repair preserves non-identical entries without ranking them; semantic curation remains outside sync repair. Push transport remains a retryable follow-up after local publication, and `sync-reconciler` stays separate from Dreamer because repair is a narrow integrity responsibility while Dreamer owns broader Memory consolidation.
 
 ### Standalone tool retry behavior
 

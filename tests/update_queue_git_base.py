@@ -2,14 +2,12 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
 from rightmemory.config import SyncConfig
 from rightmemory.update_queue import UpdateCandidate, UpdateQueueStore
 from rightmemory.update_queue_git import GitUpdateQueueCoordinator
-from rightmemory.update_review import UpdateReviewStore, tracked_review_blob_oid
 
 
 class GitUpdateQueueTestBase(unittest.TestCase):
@@ -63,62 +61,6 @@ class GitUpdateQueueTestBase(unittest.TestCase):
         )
         UpdateQueueStore(root).write_outbox(candidate)
         return candidate
-
-    def _review_candidate(
-        self,
-        root: Path,
-        review_id: str,
-        message: str,
-        *,
-        uid: str | None = None,
-        submitted_at: str = "2026-07-21T00:00:00+00:00",
-        review_commit: str | None = None,
-    ) -> UpdateCandidate:
-        review_blob_oid = tracked_review_blob_oid(root, review_id)
-        self.assertIsNotNone(review_blob_oid)
-        candidate = UpdateCandidate(
-            uid=uid or uuid.uuid4().hex,
-            session_id=review_id,
-            display_id=1,
-            message=message,
-            submitted_at=submitted_at,
-            kind="review",
-            review_id=review_id,
-            review_commit=review_commit or self._git(root, "rev-parse", "HEAD"),
-            review_blob_oid=review_blob_oid,
-        )
-        UpdateQueueStore(root).write_outbox(candidate)
-        return candidate
-
-    def _create_tracked_review(self) -> str:
-        operation_id = "update-review-origin"
-        base = self._git(self.first, "rev-parse", "HEAD")
-        (self.first / "MEMORY.md").write_text(
-            "# Domain\n\n- `one` first → []\n- `two` reviewed → []\n",
-            encoding="utf-8",
-        )
-        store = UpdateReviewStore(self.first)
-        record = store.create_review(
-            origin_operation_id=operation_id,
-            base_commit=base,
-            write_surface="Memory",
-            summary="Added reviewed memory.",
-            diff=self._git(self.first, "diff", "--", "MEMORY.md"),
-        )
-        self._git(
-            self.first,
-            "add",
-            "MEMORY.md",
-            str(store.review_path(record.review_id).relative_to(self.first)),
-        )
-        self._git(
-            self.first,
-            "commit",
-            "-m",
-            f"memory: reviewed update\n\nRightMemory-Operation: {operation_id}",
-        )
-        self._git(self.first, "push", "origin", "HEAD:main")
-        return record.review_id
 
     def _coordinator(self, root: Path, device_id: str) -> GitUpdateQueueCoordinator:
         return GitUpdateQueueCoordinator(

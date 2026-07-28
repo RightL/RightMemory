@@ -77,23 +77,29 @@ Corrections to an agent's ordinary writing, reasoning, decisions, or actions may
 - `MEMORY_agent-corrections-writing.md` contains corrections where changing expression or presentation would resolve the objection.
 - `MEMORY_agent-corrections-design.md` contains corrections where the underlying reasoning, decision, behavior, or action must change.
 
-If a concise directly executable instruction captures the correction better, update ordinary Agent Behavior or S# instead of preserving duplicate correction evidence. A correction to a RightMemory state edit belongs only to updater correction feedback, not to these M# collections.
+If a concise directly executable instruction captures the correction better, update ordinary Agent Behavior or S# instead of preserving duplicate correction evidence. Submit a correction to a RightMemory state edit as an ordinary update candidate, not as content for these M# collections.
 
 Each collection is a bounded curated set rather than an append-only log or FIFO window. A represented pattern improves its existing item or replaces weaker evidence. A distinct pattern is retained only when sufficiently reusable; when the collection is full, it replaces an existing item only if it is more important. If every existing item is more important, the candidate is discarded.
 
 Importance reflects likely recurrence, cost if repeated, applicability across future tasks, strength of the user's correction, and whether existing guidance already covers it. Each collection may contain at most 15 compact items, but 15 is a ceiling rather than a target or automatic eviction trigger. General agents consult the relevant collection after forming an initial draft, design, or implementation direction.
 
-### Update review
+### Update provenance
 
-Every normal unified-updater commit produces one tracked `update_reviews/review-<sha256(operation-id)>.md` document in the same commit as its state change; correction and maintenance commits do not. Its generated portion explains the update naturally and may include the relevant diff, but it has one free-form human comment area for the whole update and one visible `Ready for correction` checkbox. Git sync transports the document without requiring a separate review service.
+Every queued updater outcome retains its exact candidate batch in
+`update_records/<operation-id>.json`. The immutable record lands in the same
+commit as the Memory/Pursuit edit; a no-change outcome lands as a record-only
+commit. The record filename and commit operation trailer bind input to outcome,
+while Git supplies the authoritative diff without duplicating it in another
+artifact. Local and synchronized processing use the same identity. Explicit
+Update turns without queued candidates create no provenance artifact.
 
-A non-empty comment remains a local working-tree draft until Ready is checked; no file-age or modification-time heuristic infers submission. With sync enabled, the scanner binds the normalized comment to the exact tracked review commit and blob, publishes that evidence as typed review work in the existing synchronized update queue, and restores the tracked document. The queue's singleton lease selects one review request alone and fences processing across devices. With sync disabled, the same request is processed and settled in local Git.
-
-The internal update-corrector receives the submitted comment plus original-update context re-derived from the review's creation commit and operation trailer in Git; it does not trust the editable displayed diff. It preserves unrelated later work and commits nothing when the requested result is ambiguous or already satisfied. Fenced queue finalization rechecks the review commit and blob, atomically applies any prepared correction, consumes the candidate, and either deletes the resolved review or writes a clarification and clears Ready. Exact duplicates converge, while stale candidates are terminally consumed without changing a newer review.
+A correction to an earlier updater result uses the same candidate type, queue,
+lease, updater role, and record contract as any other update. There is no
+correction-specific queue path or runtime role.
 
 ### Updater correction feedback
 
-A successful state correction produces zero or more feedback candidates for `corrections.md` at the RightMemory root. The file is human-readable Markdown using this natural entry shape:
+Reusable feedback about updater judgment may be curated in `corrections.md` at the RightMemory root. The file is human-readable Markdown using this natural entry shape:
 
 ```md
 ## Short correction title
@@ -111,19 +117,15 @@ A successful state correction produces zero or more feedback candidates for `cor
 ...
 ```
 
-`corrections.md` is tracked and synchronized, but it is not Memory and is not part of the graph. Only the updater consumes its semantic content, after forming a tentative update. Sync machinery transports it; if a conflict requires repair, it preserves non-identical entries without ranking them and leaves semantic merging or replacement to the updater.
+`corrections.md` is tracked and synchronized, but it is not Memory and is not part of the graph. Only the updater consumes its semantic content, after forming a tentative update. Sync machinery transports it; if a conflict requires repair, it preserves non-identical entries without ranking them and does not perform semantic curation.
 
-The requested state correction lands whenever it succeeds. Its feedback candidates may be merged, admitted, or discarded independently. Any resulting `corrections.md` change lands in the same commit, but rejecting a feedback candidate never blocks the state correction. Failed or ambiguous corrections add no feedback.
-
-`corrections.md` follows the same bounded priority principle as the M# collections: represented patterns improve existing examples; distinct candidates are admitted only when useful enough; a full file rejects a candidate unless it is more important than an existing item. Its 15-entry limit is a ceiling, not a reason to evict automatically. There is no JSON duplicate, visible scope label, or generalized lesson-generation pass.
-
-Existing updater-edit corrections stored in the old Memory-backed form may be imported into `corrections.md`; after import they are no longer Memory. The same correction is not stored in both channels.
+`corrections.md` follows the same bounded priority principle as the M# collections: represented patterns improve existing examples; distinct examples are admitted only when useful enough; a full file rejects an example unless it is more important than an existing item. Its 15-entry limit is a ceiling, not a reason to evict automatically. Update reads it only as a late second-pass filter; it is not graph content or ordinary retrieval context.
 
 ## Runtime ownership
 
-Unified updates run in isolated worktrees, validate the complete graph, and land only completed role-owned commits. Runtime adds one tracked update-review document to each normal Update commit, and Git synchronizes it alongside Memory, Pursuit, and `corrections.md`; uncommitted review drafts remain local until Ready.
+Unified updates run in isolated worktrees, validate the complete graph, and land only completed role-owned commits. Runtime adds one immutable candidate record to each queued outcome, and Git synchronizes it alongside Memory, Pursuit, and `corrections.md`.
 
-Memory-oriented Dreamer, Insight, Historian, and Pruner remain narrower than the unified updater and do not independently maintain Pursuit or the curated correction collections. Transcript review extracts candidates from idle sessions and submits them through unified update rather than editing the graph independently. The unified updater owns lifecycle transitions between live Pursuit and durable Memory as well as admission to correction feedback.
+Memory-oriented Dreamer, Insight, Historian, and Pruner remain narrower than the unified updater and do not independently maintain Pursuit or the curated correction collections. Transcript review extracts candidates from idle sessions and submits them through unified update rather than editing the graph independently. The unified updater owns lifecycle transitions between live Pursuit and durable Memory as well as admission to general correction M# evidence.
 
 ## Compatibility posture
 

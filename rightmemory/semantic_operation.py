@@ -1060,10 +1060,6 @@ def _input_metadata(value: dict[str, Any]) -> dict[str, Any]:
             "policy_sha256",
         )
         return {key: value[key] for key in keys if key in value}
-    if value.get("role") == "update-corrector" and value.get("kind") == "semantic-turn":
-        # The deterministic correction id must replay its first verified request verbatim.
-        keys = ("role", "session_id", "kind", "message")
-        return {key: value[key] for key in keys if key in value}
     keys = ("role", "session_id", "kind")
     return {key: value[key] for key in keys if key in value}
 

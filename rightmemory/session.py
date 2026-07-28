@@ -54,6 +54,31 @@ class MemoryWriteLock:
             self._lock_handle = None
 
 
+class UpdateExecutionLock:
+    """Serialize complete Update turns over shared semantic state."""
+
+    def __init__(self, memory_root: Path):
+        self.runtime_root = memory_root / ".runtime"
+        self.lock_path = self.runtime_root / "update" / "execution.lock"
+        self._lock_handle: Any | None = None
+
+    def __enter__(self) -> UpdateExecutionLock:
+        _ensure_runtime_gitignore(self.runtime_root)
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock_handle = self.lock_path.open("a+", encoding="utf-8")
+        lock_file(self._lock_handle)
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if self._lock_handle is None:
+            return
+        try:
+            unlock_file(self._lock_handle)
+        finally:
+            self._lock_handle.close()
+            self._lock_handle = None
+
+
 class LockedMessageSession:
     def __init__(self, paths: SessionPaths):
         self.paths = paths
@@ -168,14 +193,14 @@ def _ensure_memory_gitignore(memory_root: Path) -> None:
             b"!shared_views/*/.gitignore\n"
             b"!insight_logs/\n"
             b"!insight_logs/*.md\n"
-            b"!update_reviews/\n"
-            b"!update_reviews/*.md\n"
             b"!update_queue/\n"
             b"!update_queue/candidates/\n"
             b"!update_queue/candidates/*.json\n"
             b"!update_queue/recovery/\n"
             b"!update_queue/recovery/*.json\n"
             b"!update_queue/lease.json\n"
+            b"!update_records/\n"
+            b"!update_records/*.json\n"
         ),
     )
 
