@@ -512,28 +512,6 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "PURSUIT_\\*\\.md"):
             normal.git_add(["corrections.md"])
 
-    def test_update_treats_pursuit_rules_as_read_only(self):
-        rules = self.root / "PURSUIT_RULES.md"
-        rules.write_text("# Pursuit Rules\n", encoding="utf-8")
-
-        tools = MemoryTools(self.root, role="update")
-        tools.read("PURSUIT_RULES.md")
-        with self.assertRaisesRegex(ValueError, "PURSUIT_\\*\\.md"):
-            tools.edit_file("PURSUIT_RULES.md", "Pursuit", "Changed")
-
-    def test_update_treats_agent_correction_memory_rules_as_read_only(self):
-        rules = self.root / "AGENT_CORRECTION_MEMORY_RULES.md"
-        rules.write_text("# Agent Correction Memory Rules\n", encoding="utf-8")
-
-        tools = MemoryTools(self.root, role="update")
-        tools.read("AGENT_CORRECTION_MEMORY_RULES.md")
-        with self.assertRaisesRegex(ValueError, "PURSUIT_\\*\\.md"):
-            tools.edit_file(
-                "AGENT_CORRECTION_MEMORY_RULES.md",
-                "Agent Correction",
-                "Changed",
-            )
-
     def test_non_updater_roles_cannot_read_updater_corrections(self):
         (self.root / "corrections.md").write_text("private updater feedback\n", encoding="utf-8")
 
@@ -1573,7 +1551,7 @@ class MemoryToolsTests(unittest.TestCase):
 
         result = self._validate_complete_graph()
 
-        self.assertIn("reserved for PURSUIT_RULES.md", result)
+        self.assertIn("reserved for the legacy root reference path", result)
 
     def test_validate_memory_requires_both_canonical_roots(self):
         (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")

@@ -5,6 +5,7 @@ from pathlib import Path
 from shlex import quote
 
 from .config import MEMORY_ROOT_ENV
+from .reference import read_reference
 from .semantic_upgrades import SemanticUpgradeContext, render_prompt_context
 
 
@@ -28,7 +29,8 @@ def build_cli_agent_instructions(
 ) -> str:
     if role not in ROLE_PROMPTS:
         raise ValueError(f"role must be one of: {_role_list()}")
-    schema = _read_prompt_file("skills/rightmemory-schema.md")
+    schema = read_reference("schema")
+    reference_guidance = _role_reference_guidance(role)
     role_guidance = _read_prompt_file(f"prompts/{role}.md")
     cli_agent_guidance = _cli_agent_guidance(memory_root, role)
     semantic_guidance = _semantic_upgrade_guidance(role, semantic_upgrades)
@@ -47,19 +49,18 @@ RightMemory store:
 - MEMORY_*.md
 - PURSUITS.md
 - PURSUIT_*.md
-- PURSUIT_RULES.md
-- AGENT_CORRECTION_MEMORY_RULES.md
 {corrections_store}- shared_views.toml
 - shares.toml
 - shared_views/<view-id>/view.md, recipe.toml, question.toml, retriever.md
 - insight_logs/
 
-Follow the canonical role instructions below. Use the embedded schema as the schema source of truth.
+Follow the canonical role instructions below. Use the embedded package references as the schema and rule source of truth.
 {final_reply}
 {cli_agent_guidance}
 
 RightMemory schema:
 {schema}
+{reference_guidance}
 {semantic_guidance}
 
 Role instructions:
@@ -74,7 +75,8 @@ def build_instructions(
 ) -> str:
     if role not in ROLE_PROMPTS:
         raise ValueError(f"role must be one of: {_role_list()}")
-    schema = _read_prompt_file("skills/rightmemory-schema.md")
+    schema = read_reference("schema")
+    reference_guidance = _role_reference_guidance(role)
     role_guidance = _read_prompt_file(f"prompts/{role}.md")
     command_guidance = _command_guidance(role)
     sync_guidance = _sync_guidance(role)
@@ -103,8 +105,8 @@ Workspace rule:
 RightMemory source of truth:
 - Durable Memory begins at MEMORY.md; live Pursuit begins at PURSUITS.md.
 - F# detail files use the containing tree's MEMORY_<slug>.md or PURSUIT_<slug>.md name.
-- PURSUIT_RULES.md defines Pursuit-specific maintenance judgment.
-- AGENT_CORRECTION_MEMORY_RULES.md defines the fixed Agent Correction Memory module.
+- The package-owned Pursuit rules define Pursuit-specific maintenance judgment.
+- The package-owned Agent Correction Memory rules define the fixed correction module.
 - corrections.md is RightMemory edit feedback read by Update, not graph content or ordinary retrieval context.
 - Insight logs are stored under insight_logs/.
 - Share relationships are stored in shares.toml.
@@ -114,9 +116,10 @@ RightMemory source of truth:
 
 RightMemory schema:
 {schema}
+{reference_guidance}
 
 Standalone adaptation:
-- Treat the embedded schema above as the schema source of truth. Do not try to read skill or schema files outside the memory store; the provided tools only expose that store.
+- Treat the embedded package references above as the schema and rule source of truth. Do not try to read reference files outside the memory store; the provided tools only expose that store.
 - Treat the caller's message according to the command-selected behavior and the role instructions below.
 {semantic_guidance}
 
@@ -296,7 +299,7 @@ def _tool_guidance(role: str) -> str:
     if role == "sync-reconciler":
         guidance += (
             "\n- Commit and edit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`, `PURSUIT_*.md`, "
-            "`PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`, `corrections.md`, "
+            "`corrections.md`, "
             "`shared_views.toml`, `shares.toml`, "
             "`shared_views/<view-id>/view.md`, `shared_views/<view-id>/retriever.md`, "
             "`shared_views/<view-id>/recipe.toml`, `shared_views/<view-id>/question.toml`, and `insight_logs/*.md` for sync repair; keep unrelated untracked files out of repair commits "
@@ -307,8 +310,7 @@ def _tool_guidance(role: str) -> str:
     elif role == "update":
         guidance += (
             "\n- Commit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`, `PURSUIT_*.md`, "
-            "and their graph state. `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`, and "
-            "`corrections.md` are read-only; keep unrelated "
+            "and their graph state. `corrections.md` is read-only; keep unrelated "
             "files out of commits."
         )
     else:
@@ -317,6 +319,19 @@ def _tool_guidance(role: str) -> str:
             "untracked files out of memory commits unless the caller explicitly asks about them."
         )
     return guidance
+
+
+def _role_reference_guidance(role: str) -> str:
+    if role not in {"sync-reconciler", "update"}:
+        return ""
+    return (
+        "\nPursuit rules:\n"
+        f"{read_reference('pursuit')}\n"
+        "\nAgent Correction Memory rules:\n"
+        f"{read_reference('agent-correction')}\n"
+        "\nRightMemory edit-correction rules:\n"
+        f"{read_reference('edit-correction')}\n"
+    )
 
 
 def _read_prompt_file(relative_path: str) -> str:

@@ -43,7 +43,7 @@ The full orchestrator submits lightweight task-state candidates when non-trivial
 
 ### Schema, rules, and examples
 
-`skills/rightmemory-schema.md`, `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`, and the Memory/Pursuit examples define stored-document semantics. `RIGHTMEMORY_EDIT_CORRECTION_RULES.md` separately defines non-semantic feedback about RightMemory edits. Skills define host-agent workflow, while role prompts define runtime judgment.
+The model-facing schema and rules live together under `rightmemory/reference/`, at the same package-relative paths in the source tree and installed runtime. They are product definitions owned by the software version that implements them, not editable or synchronized Memory state. Runtime prompt assembly reads those package resources directly, while host skills obtain them through `rightmemory reference`; skills define workflow rather than owning shared definitions. The Memory/Pursuit examples remain installer seeds, and `corrections.md` plus the fixed Agent Correction Memory collections remain root-local evidence governed by the package rules.
 
 ### User context and agent behavior domains
 
@@ -136,7 +136,7 @@ Standalone commit tools are role-aware. Unified Update may commit Memory and Pur
 
 ### Global RightMemory sync
 
-Global sync remains local-first: every device keeps a complete RightMemory root, and Git provides distributed transport between those roots. Memory, Pursuit, `AGENT_CORRECTION_MEMORY_RULES.md`, `corrections.md`, immutable update records, and the package-owned root `.gitignore` are synchronized state; the allowlist is control plane rather than semantic Memory. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
+Global sync remains local-first: every device keeps a complete RightMemory root, and Git provides distributed transport between those roots. Memory, Pursuit, `corrections.md`, immutable update records, and the package-owned root `.gitignore` are synchronized state; the allowlist is control plane rather than semantic Memory. Schema and rule references travel with the installed package so runtime behavior and its definitions remain version-coherent. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
 
 Runtime code owns deterministic sync mechanics where they belong in the workflow. It fetches and captures exact commits, then merges incoming history in a leased candidate worktree while the active root remains unchanged. Only a complete candidate whose paths and canonical graph validate may be published, and publication is one guarded fast-forward from the captured active commit. A concurrent active change or failed merge, repair, or validation refuses publication instead of requiring rollback.
 

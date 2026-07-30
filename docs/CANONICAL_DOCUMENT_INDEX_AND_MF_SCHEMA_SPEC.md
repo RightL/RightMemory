@@ -824,7 +824,7 @@ alone does not require Dreamer to rewrite local Memory.
 - Remove direct MF range guidance.
 - Keep local M# range and complete S# behavior unchanged.
 
-### `skills/rightmemory-schema.md`
+### `rightmemory/reference/rightmemory-schema.md`
 
 - Replace the statement that MF linked content is not parsed as graph structure
   with the version-two MF document rule.

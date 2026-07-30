@@ -236,8 +236,6 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
     def test_dirty_pursuit_rules_or_corrections_blocks_narrow_writer(self):
         for name in (
             "PURSUITS.md",
-            "PURSUIT_RULES.md",
-            "AGENT_CORRECTION_MEMORY_RULES.md",
             "corrections.md",
         ):
             with self.subTest(name=name):

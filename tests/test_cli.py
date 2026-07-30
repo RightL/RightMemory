@@ -2498,16 +2498,24 @@ class JsonRequestTests(unittest.TestCase):
         collect_status.assert_called_once_with(Path("/memory/root"))
         self.assertEqual(stdout.getvalue().strip(), dashboard)
 
+    def test_main_reference_prints_package_owned_reference_without_resolving_root(self):
+        with (
+            patch(
+                "rightmemory.cli.resolve_memory_root",
+                side_effect=AssertionError("product references must not resolve a memory root"),
+            ),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = main(["reference", "pursuit"])
+
+        self.assertEqual(result, 0)
+        self.assertTrue(stdout.getvalue().startswith("# Pursuit Rules\n"))
+
     def test_main_validate_uses_explicit_root_and_exit_status(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir).resolve()
             (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
             (root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-            (root / "PURSUIT_RULES.md").write_text("# Pursuit Rules\n", encoding="utf-8")
-            (root / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
-                "# Agent Correction Memory Rules\n",
-                encoding="utf-8",
-            )
 
             with (
                 patch("rightmemory.cli.default_memory_root", return_value=Path("/default")),
@@ -2543,8 +2551,7 @@ class JsonRequestTests(unittest.TestCase):
     def test_main_validate_rejects_missing_required_root_document(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir).resolve()
-            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
-                (root / name).write_text(f"# {name}\n", encoding="utf-8")
+            (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
 
             with (
                 patch("rightmemory.cli.default_memory_root", return_value=Path("/default")),
@@ -2557,19 +2564,14 @@ class JsonRequestTests(unittest.TestCase):
         tools.assert_not_called()
         self.assertIn(
             "required root document is not a regular file: "
-            "AGENT_CORRECTION_MEMORY_RULES.md",
+            "PURSUITS.md",
             stdout.getvalue(),
         )
 
     def test_main_validate_rejects_non_regular_optional_corrections(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir).resolve()
-            for name in (
-                "MEMORY.md",
-                "PURSUITS.md",
-                "PURSUIT_RULES.md",
-                "AGENT_CORRECTION_MEMORY_RULES.md",
-            ):
+            for name in ("MEMORY.md", "PURSUITS.md"):
                 (root / name).write_text(f"# {name}\n", encoding="utf-8")
             (root / "corrections.md").mkdir()
 
@@ -2583,6 +2585,22 @@ class JsonRequestTests(unittest.TestCase):
         tools.assert_not_called()
         self.assertIn(
             "optional root document is not a regular file: corrections.md",
+            stdout.getvalue(),
+        )
+
+    def test_main_validate_rejects_legacy_root_reference(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir).resolve()
+            for name in ("MEMORY.md", "PURSUITS.md"):
+                (root / name).write_text(f"# {name}\n", encoding="utf-8")
+            (root / "PURSUIT_RULES.md").write_text("# Legacy rules\n", encoding="utf-8")
+
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                result = main(["validate", "--root", str(root)])
+
+        self.assertEqual(result, 1)
+        self.assertIn(
+            "legacy package reference must be removed from the root: PURSUIT_RULES.md",
             stdout.getvalue(),
         )
 

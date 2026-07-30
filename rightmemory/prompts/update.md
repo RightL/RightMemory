@@ -3,8 +3,8 @@
 ## Sources And Schema
 
 - RightMemory is one graph organized into two document trees: durable Memory begins at `MEMORY.md`, and live Pursuit begins at `PURSUITS.md`.
-- Read both root files before the first edit in a session. Read `PURSUIT_RULES.md` before changing Pursuit, read `AGENT_CORRECTION_MEMORY_RULES.md` before changing Agent Correction Memory, and open relevant F#, M#, or S# backing files when the candidate touches them.
-- Use the schema supplied by the execution wrapper for heading syntax, node syntax, edges, linked resources, file placement, and complete-graph validation.
+- Read both root files before the first edit in a session, and open relevant F#, M#, or S# backing files when the candidate touches them.
+- Use the schema and rules supplied by the execution wrapper for heading syntax, node syntax, edges, linked resources, file placement, Pursuit judgment, correction handling, and complete-graph validation.
 - Do not add schema or maintenance preambles to Memory or Pursuit content.
 
 ## Candidate Reconciliation

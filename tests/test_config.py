@@ -24,6 +24,7 @@ from rightmemory.config import (
 )
 from rightmemory.isolated_write import IsolatedWriteResult, MainMemoryDirtyError
 from rightmemory.prompt import build_cli_agent_instructions, build_instructions
+from rightmemory.reference import REFERENCE_FILES, read_reference
 from rightmemory.provider_sessions import ProviderSessionStore
 from rightmemory.provider_threads import ProviderThreadStore
 from rightmemory.prune import PruneDueStatus
@@ -3324,7 +3325,7 @@ class RuntimeTests(unittest.TestCase):
         instructions = build_instructions(Path("/memory"), "update")
 
         self.assertIn("evolving account", instructions)
-        self.assertIn("AGENT_CORRECTION_MEMORY_RULES.md", instructions)
+        self.assertIn("Agent Correction Memory rules:", instructions)
         self.assertIn("MEMORY_agent-corrections-writing.md", instructions)
         self.assertIn("MEMORY_agent-corrections-design.md", instructions)
         self.assertIn("corrections.md", instructions)
@@ -3968,7 +3969,8 @@ class PromptTests(unittest.TestCase):
         prompt = build_instructions(Path("/memory"), "sync-reconciler")
 
         self.assertIn("Commit and edit tools are scoped", prompt)
-        self.assertIn("AGENT_CORRECTION_MEMORY_RULES.md", prompt)
+        self.assertIn("Agent Correction Memory rules:", prompt)
+        self.assertIn("The two collections are fixed", prompt)
         self.assertIn("shared_views.toml", prompt)
         self.assertIn("shares.toml", prompt)
         self.assertIn("shared_views/<view-id>/view.md", prompt)
@@ -4034,19 +4036,15 @@ class PromptTests(unittest.TestCase):
 
         self.assertNotIn("example-note", prompt)
 
-    def test_external_skill_assets_are_included_in_wheel(self):
+    def test_package_references_need_no_wheel_remapping(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 
         force_include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
-        self.assertEqual(force_include["skills"], "rightmemory/skills")
-        self.assertEqual(
-            force_include["AGENT_CORRECTION_MEMORY_RULES.md"],
-            "rightmemory/AGENT_CORRECTION_MEMORY_RULES.md",
-        )
-        self.assertEqual(
-            force_include["RIGHTMEMORY_EDIT_CORRECTION_RULES.md"],
-            "rightmemory/RIGHTMEMORY_EDIT_CORRECTION_RULES.md",
-        )
+        self.assertNotIn("skills", force_include)
+        for filename in REFERENCE_FILES.values():
+            self.assertTrue((Path("rightmemory") / "reference" / filename).is_file())
+        self.assertIn("# RightMemory Schema", read_reference("schema"))
+        self.assertIn("# Pursuit Rules", read_reference("pursuit"))
         self.assertNotIn("rightmemory/prompts", force_include)
         self.assertNotIn("rightmemory/semantic_upgrades", force_include)
 

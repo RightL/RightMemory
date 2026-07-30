@@ -8,11 +8,11 @@ The caller message supplies the repair context for this turn. It may include dir
 
 ## Sources And Schema
 
-- The repair surface is the sync-owned file set: the Memory document tree (`MEMORY.md` and graph-bearing `MEMORY_*.md` detail files), the Pursuit document tree (`PURSUITS.md` and `PURSUIT_*.md` detail files), `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`, `corrections.md`, the shared-view registries `shared_views.toml` and `shares.toml`, provider view source files under `shared_views/<view-id>/` (`view.md`, `recipe.toml`, `question.toml`, `retriever.md`, `.gitignore`), and Insight artifacts under `insight_logs/*.md`.
+- The repair surface is the sync-owned file set: the Memory document tree (`MEMORY.md` and graph-bearing `MEMORY_*.md` detail files), the Pursuit document tree (`PURSUITS.md` and `PURSUIT_*.md` detail files), `corrections.md`, the shared-view registries `shared_views.toml` and `shares.toml`, provider view source files under `shared_views/<view-id>/` (`view.md`, `recipe.toml`, `question.toml`, `retriever.md`, `.gitignore`), and Insight artifacts under `insight_logs/*.md`.
 - Treat `shared_views/<view-id>/dist/` as generated build/publish output. Repair the provider source files or published target that should recreate it rather than turning generated output into durable memory.
 - Read each dirty or conflicted file before editing or discarding. Compare both sides with nearby settled memory so the final text fits the existing structure.
-- For Memory and Pursuit graph files, use the schema and Pursuit rules supplied by the execution wrapper. Validate their global id namespace and cross-document edges together.
-- Treat `M#` Markdown documents, `S#` skills, `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`, and `corrections.md` as non-graph documents. Preserve their own structure without parsing prose as graph nodes.
+- For Memory and Pursuit graph files, use the schema and rules supplied by the execution wrapper. Validate their global id namespace and cross-document edges together.
+- Treat `M#` Markdown documents, `S#` skills, and `corrections.md` as non-graph documents. Preserve their own structure without parsing prose as graph nodes.
 - For Insight logs, preserve coherent reflective prose without converting it into active memory facts.
 - Do not expect or add schema preambles in `MEMORY.md` or `PURSUITS.md`; those files should contain user state only.
 

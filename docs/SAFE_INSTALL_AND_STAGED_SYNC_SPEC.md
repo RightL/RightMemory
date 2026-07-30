@@ -79,13 +79,12 @@ safety principle, but each keeps its own small implementation.
 
 - **Active root**: the selected memory root and its checked-out Git branch.
 - **Semantic state files**: `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`,
-  `PURSUIT_*.md`, `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`,
-  `corrections.md`, shared-view and share definitions, and `insight_logs/*.md`.
+  `PURSUIT_*.md`, `corrections.md`, shared-view and share definitions, and
+  `insight_logs/*.md`.
 - **Update record**: the immutable `update_records/<operation-id>.json` file
   containing the exact candidate batch for one queued updater outcome. It lands
   in the outcome commit and is synchronized protocol state, not Memory.
-- **Required root documents**: the regular files `MEMORY.md`, `PURSUITS.md`,
-  `PURSUIT_RULES.md`, and `AGENT_CORRECTION_MEMORY_RULES.md`.
+- **Required root documents**: the regular files `MEMORY.md` and `PURSUITS.md`.
 - **Sync candidate**: a leased temporary Git branch and worktree created from
   one exact active-root commit and merged with one exact fetched upstream
   commit.
@@ -157,9 +156,9 @@ safety principle, but each keeps its own small implementation.
 `Installer.run()` currently creates or refreshes Memory and Pursuit documents
 before `_ensure_initial_commit()` determines whether the repository already
 has a `HEAD`. When an older repository has `MEMORY.md` but lacks current
-Pursuit documents, install copies `PURSUITS.md` and `PURSUIT_RULES.md`, reports
-success, and leaves those protected files untracked. Automatic writers then
-refuse to run because the active state is dirty.
+Pursuit documents, install copies `PURSUITS.md`, reports success, and leaves it
+untracked. Automatic writers then refuse to run because the active state is
+dirty.
 
 Reinstall can also refresh managed example blocks inside existing Memory and
 Pursuit files. That makes package refresh responsible for editing semantic
@@ -211,7 +210,7 @@ The error must:
 Example shape:
 
 ```text
-existing RightMemory root is incomplete: missing required files: AGENT_CORRECTION_MEMORY_RULES.md, PURSUITS.md, PURSUIT_RULES.md
+existing RightMemory root is incomplete: missing required files: PURSUITS.md
 installation made no changes; migrate and review this root explicitly before reinstalling
 ```
 
@@ -225,8 +224,8 @@ For a new target, retain the current bootstrap behavior:
 
 - create `MEMORY.md` from the current seed;
 - create `PURSUITS.md` from the current seed;
-- create `PURSUIT_RULES.md`;
-- create `AGENT_CORRECTION_MEMORY_RULES.md`;
+- read schema and semantic rules from the installed package rather than copying
+  them into the Memory root;
 - initialize Git when needed;
 - configure a repository-local author when needed;
 - write the memory-root `.gitignore` allowlist;
@@ -301,8 +300,9 @@ behavioral cases:
 - Refusal preserves the original `HEAD`, complete directory snapshot, Git
   status, configured author, runtime installation target, skills target, and
   absence or prior contents of `.runtime/install.stamp`.
-- The refusal error lists `AGENT_CORRECTION_MEMORY_RULES.md`, `PURSUITS.md`,
-  and `PURSUIT_RULES.md` and says no changes were made.
+- The refusal error lists `PURSUITS.md` and says no changes were made.
+- A root containing the legacy package-reference copies `PURSUIT_RULES.md` or
+  `AGENT_CORRECTION_MEMORY_RULES.md` is refused for explicit review and removal.
 - A required path that is a directory or symlink is refused as non-regular.
 - A complete committed root reinstalls successfully without changing the byte
   hashes of any semantic state file.

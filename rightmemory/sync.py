@@ -41,8 +41,6 @@ MEMORY_SYNC_PATHS = (
     "MEMORY_*.md",
     "PURSUITS.md",
     "PURSUIT_*.md",
-    "PURSUIT_RULES.md",
-    "AGENT_CORRECTION_MEMORY_RULES.md",
     "corrections.md",
     "shared_views.toml",
     "shares.toml",
@@ -57,11 +55,9 @@ MEMORY_SYNC_PATHS = (
     "update_queue/lease.json",
     "update_records/*.json",
 )
-REQUIRED_ROOT_DOCUMENTS = (
-    "MEMORY.md",
-    "PURSUITS.md",
-    "PURSUIT_RULES.md",
-    "AGENT_CORRECTION_MEMORY_RULES.md",
+REQUIRED_ROOT_DOCUMENTS = ("MEMORY.md", "PURSUITS.md")
+LEGACY_ROOT_REFERENCE_PATHS = frozenset(
+    {"PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"}
 )
 GIT_TIMEOUT_SECONDS = 30
 RETRIEVE_SYNC_REFRESH_SECONDS = 5 * 60
@@ -1146,7 +1142,7 @@ class SyncManager:
         result = self._git("status", "--porcelain", "--", *MEMORY_SYNC_PATHS)
         if result.returncode != 0:
             return []
-        return _porcelain_paths(result.stdout)
+        return [path for path in _porcelain_paths(result.stdout) if _is_sync_path(path)]
 
     def _conflicted_files(self, root: Path) -> list[str]:
         result = self._run_git(root, "diff", "--name-only", "--diff-filter=U")
@@ -1361,6 +1357,8 @@ class SyncManager:
 
 
 def _is_sync_path(path: str) -> bool:
+    if path in LEGACY_ROOT_REFERENCE_PATHS:
+        return False
     if path.startswith("update_queue/"):
         return _is_update_queue_path(path)
     if path.startswith("update_records/"):

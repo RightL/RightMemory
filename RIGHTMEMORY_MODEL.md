@@ -29,7 +29,7 @@ M# and S# are Memory-only linked-resource forms. Their headings remain addressab
 
 File globs do not determine graph membership. Updater corrections are not M# or S# content.
 
-The shared schema defines graph and file semantics, `PURSUIT_RULES.md` defines Pursuit-specific lifecycle judgment, `AGENT_CORRECTION_MEMORY_RULES.md` defines the fixed correction module, and the Memory and Pursuit examples show valid starting shapes.
+The package-owned shared schema defines graph and file semantics, the package-owned Pursuit rules define lifecycle judgment, the package-owned Agent Correction Memory rules define the fixed correction module, and the Memory and Pursuit examples show valid starting shapes. These references live under `rightmemory/reference/` and are not Memory-root state.
 
 ## Agent-facing skills
 
@@ -100,7 +100,7 @@ correction-specific queue path or runtime role.
 
 ### RightMemory edit corrections
 
-Reusable feedback about edits of RightMemory may be curated in `corrections.md` at the RightMemory root. `RIGHTMEMORY_EDIT_CORRECTION_RULES.md` defines the collection. Each entry uses:
+Reusable feedback about edits of RightMemory may be curated in `corrections.md` at the RightMemory root. The package-owned RightMemory edit-correction rules define the collection. Each entry uses:
 
 ```md
 ## Short correction title

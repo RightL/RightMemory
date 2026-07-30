@@ -26,8 +26,10 @@ class SyncPreflightTests(SyncTestBase):
         self.assertIn("shared_views/*/question.toml", MEMORY_SYNC_PATHS)
         self.assertIn("PURSUITS.md", MEMORY_SYNC_PATHS)
         self.assertIn("PURSUIT_*.md", MEMORY_SYNC_PATHS)
-        self.assertIn("PURSUIT_RULES.md", MEMORY_SYNC_PATHS)
-        self.assertIn("AGENT_CORRECTION_MEMORY_RULES.md", MEMORY_SYNC_PATHS)
+        self.assertNotIn("PURSUIT_RULES.md", MEMORY_SYNC_PATHS)
+        self.assertNotIn("AGENT_CORRECTION_MEMORY_RULES.md", MEMORY_SYNC_PATHS)
+        self.assertFalse(_is_sync_path("PURSUIT_RULES.md"))
+        self.assertFalse(_is_sync_path("AGENT_CORRECTION_MEMORY_RULES.md"))
         self.assertIn("corrections.md", MEMORY_SYNC_PATHS)
         self.assertIn("update_queue/candidates/*.json", MEMORY_SYNC_PATHS)
         self.assertIn("update_queue/recovery/*.json", MEMORY_SYNC_PATHS)
@@ -44,7 +46,7 @@ class SyncPreflightTests(SyncTestBase):
         self.assertFalse(_is_sync_path("update_records/not-an-operation.json"))
 
     def test_preflight_accepts_incoming_root_gitignore_change(self):
-        gitignore = "*\n!MEMORY.md\n!PURSUITS.md\n!PURSUIT_RULES.md\n"
+        gitignore = "*\n!MEMORY.md\n!PURSUITS.md\n"
         (self.other / ".gitignore").write_text(gitignore, encoding="utf-8")
         self._git(self.other, "add", "-f", ".gitignore")
         self._git(self.other, "commit", "-m", "sync: update managed gitignore")
@@ -108,22 +110,24 @@ class SyncPreflightTests(SyncTestBase):
         self.assertEqual(result.status, "synced")
         self.assertIn("two", (self.device / "MEMORY.md").read_text(encoding="utf-8"))
 
-    def test_preflight_fast_forwards_agent_correction_memory_rules(self):
-        rules = "# Agent Correction Memory Rules\n\nRemote rule update.\n"
-        (self.other / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
-            rules,
+    def test_preflight_fast_forwards_pursuit_detail(self):
+        pursuit_detail = "# Pursuit Detail\n\nRemote pursuit update.\n"
+        (self.other / "PURSUIT_remote.md").write_text(pursuit_detail, encoding="utf-8")
+        pursuits = (self.other / "PURSUITS.md").read_text(encoding="utf-8")
+        (self.other / "PURSUITS.md").write_text(
+            pursuits + "\n## Remote {F#remote}\n",
             encoding="utf-8",
         )
-        self._git(self.other, "add", "AGENT_CORRECTION_MEMORY_RULES.md")
-        self._git(self.other, "commit", "-m", "sync: update agent correction rules")
+        self._git(self.other, "add", "PURSUITS.md", "PURSUIT_remote.md")
+        self._git(self.other, "commit", "-m", "sync: update pursuit detail")
         self._git(self.other, "push")
 
         result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
 
         self.assertEqual(result.status, "synced")
         self.assertEqual(
-            (self.device / "AGENT_CORRECTION_MEMORY_RULES.md").read_text(encoding="utf-8"),
-            rules,
+            (self.device / "PURSUIT_remote.md").read_text(encoding="utf-8"),
+            pursuit_detail,
         )
 
     def test_preflight_transports_valid_retained_candidate_record(self):
@@ -170,8 +174,6 @@ class SyncPreflightTests(SyncTestBase):
     def test_preflight_reports_each_new_synchronized_state_path_as_dirty(self):
         for name in (
             "PURSUITS.md",
-            "PURSUIT_RULES.md",
-            "AGENT_CORRECTION_MEMORY_RULES.md",
             "corrections.md",
         ):
             with self.subTest(name=name):
