@@ -48,6 +48,7 @@ RightMemory store:
 - PURSUITS.md
 - PURSUIT_*.md
 - PURSUIT_RULES.md
+- AGENT_CORRECTION_MEMORY_RULES.md
 {corrections_store}- shared_views.toml
 - shares.toml
 - shared_views/<view-id>/view.md, recipe.toml, question.toml, retriever.md
@@ -103,7 +104,8 @@ RightMemory source of truth:
 - Durable Memory begins at MEMORY.md; live Pursuit begins at PURSUITS.md.
 - F# detail files use the containing tree's MEMORY_<slug>.md or PURSUIT_<slug>.md name.
 - PURSUIT_RULES.md defines Pursuit-specific maintenance judgment.
-- corrections.md is updater-only feedback, not graph content or ordinary retrieval context.
+- AGENT_CORRECTION_MEMORY_RULES.md defines the fixed Agent Correction Memory module.
+- corrections.md is RightMemory edit feedback read by Update, not graph content or ordinary retrieval context.
 - Insight logs are stored under insight_logs/.
 - Share relationships are stored in shares.toml.
 - Shared-view resolver metadata is stored in shared_views.toml.
@@ -294,7 +296,8 @@ def _tool_guidance(role: str) -> str:
     if role == "sync-reconciler":
         guidance += (
             "\n- Commit and edit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`, `PURSUIT_*.md`, "
-            "`PURSUIT_RULES.md`, `corrections.md`, `shared_views.toml`, `shares.toml`, "
+            "`PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`, `corrections.md`, "
+            "`shared_views.toml`, `shares.toml`, "
             "`shared_views/<view-id>/view.md`, `shared_views/<view-id>/retriever.md`, "
             "`shared_views/<view-id>/recipe.toml`, `shared_views/<view-id>/question.toml`, and `insight_logs/*.md` for sync repair; keep unrelated untracked files out of repair commits "
             "unless the caller explicitly asks about them.\n"
@@ -304,7 +307,8 @@ def _tool_guidance(role: str) -> str:
     elif role == "update":
         guidance += (
             "\n- Commit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`, `PURSUIT_*.md`, "
-            "and their graph state. `PURSUIT_RULES.md` and `corrections.md` are read-only; keep unrelated "
+            "and their graph state. `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`, and "
+            "`corrections.md` are read-only; keep unrelated "
             "files out of commits."
         )
     else:

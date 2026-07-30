@@ -43,7 +43,7 @@ The full orchestrator submits lightweight task-state candidates when non-trivial
 
 ### Schema, rules, and examples
 
-`skills/rightmemory-schema.md`, `PURSUIT_RULES.md`, and the Memory/Pursuit examples are sufficient for stored-document semantics. Skills separately define host-agent workflow, while role prompts define runtime judgment. Adding another documentation-first instruction layer would duplicate those sources without improving the model.
+`skills/rightmemory-schema.md`, `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`, and the Memory/Pursuit examples define stored-document semantics. `RIGHTMEMORY_EDIT_CORRECTION_RULES.md` separately defines non-semantic feedback about RightMemory edits. Skills define host-agent workflow, while role prompts define runtime judgment.
 
 ### User context and agent behavior domains
 
@@ -51,7 +51,7 @@ The full orchestrator submits lightweight task-state candidates when non-trivial
 
 ### Agent-facing skill surfaces
 
-RightMemory installs two user-selected surfaces without implicit priority between them. `memory-retriever` is read-only; `rightmemory-orchestrator` combines conditional retrieval with full Memory + Pursuit maintenance. The orchestrator inherits the existing selective retrieval policy rather than retrieving everything: factual or project context is fetched when the conversation lacks it, while preference and behavior guidance is fetched more proactively when it will shape a decision. Correction M# evidence remains a late second-pass resource rather than part of that proactive retrieval.
+RightMemory installs three user-selected surfaces without implicit priority between them. `memory-retriever` is read-only; `rightmemory-orchestrator` combines conditional retrieval with updater-driven Memory + Pursuit maintenance; explicit-only `maintain-rightmemory` lets the current agent maintain Memory, Pursuit, linked content, and both correction surfaces directly under their definitions. The orchestrator inherits the existing selective retrieval policy rather than retrieving everything: factual or project context is fetched when the conversation lacks it, while preference and behavior guidance is fetched more proactively when it will shape a decision. Correction M# evidence remains a late second-pass resource rather than part of that proactive retrieval.
 
 The Memory-only orchestrator is superseded because it no longer represents a useful target authority choice. Keeping it alongside the full orchestrator would preserve another prompt and install surface without giving Pursuit a coherent owner.
 
@@ -59,7 +59,7 @@ The Memory-only orchestrator is superseded because it no longer represents a use
 
 Updating RightMemory is one judgment over two lifecycles. The updater treats related candidates for the same work or Pursuit as an evolving account, reconciles those submissions together, and decides what remains live, what became independently durable, and what should be omitted. Session ids remain transport and batching provenance rather than task identity. The updater may change Memory, Pursuit, both, or neither in one isolated transaction and one commit.
 
-This separation keeps orchestration simple: the skill reports task state, while the updater owns storage judgment and matching against existing Pursuits. Memory retains its strict durable filter and does not become a bug database, implementation log, experiment ledger, or duplicate of project-local artifacts. Pursuit shares the existing update queue, model role, and schedule because a second pipeline would make one task settle at two different times.
+This separation keeps candidate-driven orchestration simple: the orchestrator reports task state, while the updater owns storage judgment and matching against existing Pursuits. Memory retains its strict durable filter and does not become a bug database, implementation log, experiment ledger, or duplicate of project-local artifacts. Pursuit shares the existing update queue, model role, and schedule because a second automatic pipeline would make one task settle at two different times.
 
 The exact reconciled candidate batch is durable input provenance rather than
 queue history. Runtime writes one immutable
@@ -72,17 +72,17 @@ synchronized batching use the same canonical operation identity.
 
 ### Two correction surfaces
 
-Corrections to ordinary agent writing, reasoning, or behavior may become Writing or Design M# evidence when the rejected/accepted contrast is useful during a future second pass. A directly executable rule belongs in ordinary Agent Behavior or S# instead, because storing the same lesson as both instruction and correction evidence would increase prompt weight without increasing guidance.
+Corrections to ordinary agent writing, reasoning, or behavior may become Writing or Design M# evidence when the rejected/accepted contrast is useful during a future second pass. The same lesson is not duplicated in ordinary Agent Behavior or S# unless that representation adds distinct value.
 
-Reusable feedback about Update's state judgment belongs in root-level `corrections.md`, which only Update consumes semantically. Keeping updater feedback outside Memory prevents ordinary retrieval and Memory maintenance from treating those examples as user knowledge.
+Reusable feedback about RightMemory edits belongs in root-level `corrections.md`. Runtime Update consumes it only after forming a tentative edit, while direct maintenance may curate it under its own rules. Keeping this feedback outside Memory prevents ordinary retrieval and Memory maintenance from treating those examples as user knowledge.
 
 A correction to an updater result follows the ordinary candidate path rather than becoming a distinct work type. Update reconciles that evidence against current state, and the outcome receives the same immutable candidate record as any other queued update. This keeps correction processing, provenance, and multi-device fencing in one model.
 
 ### Bounded agent correction memory
 
-Explicit user corrections can be durable evidence about how future agents should write, reason, decide, or act, so orchestrators with update authority may submit the raw correction event as a candidate. The updater, rather than the orchestrator, decides whether it is reusable and maintains fixed Writing and Design M# collections, classified by whether expression alone or the underlying reasoning and action must change. Fixed categories prevent a correction-file hierarchy from growing around projects and tools.
+Explicit user corrections can be durable evidence about how future agents should write, reason, decide, or act, so orchestrators with update authority may submit the raw correction event as a candidate. In that candidate flow, the updater rather than the orchestrator decides whether it is reusable and maintains the fixed Writing and Design M# collections. Fixed categories prevent a correction-file hierarchy from growing around projects and tools.
 
-The M# collections and updater-only `corrections.md` are bounded priority sets rather than append-only logs or FIFO windows. A related correction improves or replaces weaker evidence in an existing item. A distinct correction is admitted only when reusable enough; when its collection is full, it replaces an item only if it is more important and is otherwise discarded. The maximum of 15 compact items is therefore a ceiling, not a quota or automatic eviction trigger. Consulting correction evidence after a tentative draft or update avoids anchoring every task on a large correction prompt.
+The M# collections and RightMemory edit `corrections.md` are bounded priority sets rather than append-only logs or FIFO windows. A related correction improves or replaces weaker evidence in an existing item. A distinct correction is admitted only when reusable enough; when its collection is full, it replaces an item only if it is more important and is otherwise discarded. The maximum of 15 compact items is therefore a ceiling, not a quota or automatic eviction trigger. Consulting correction evidence after a tentative draft or update avoids anchoring every task on a large correction prompt.
 
 ### Automatic write isolation
 
@@ -112,7 +112,7 @@ RightMemory exposes explicit command roles because operations still have differe
 
 ### Command-backed install modes
 
-Both install modes expose the same two independently selected skills: read-only `memory-retriever` and full `rightmemory-orchestrator`. The difference between install modes remains the executor behind their commands. Standalone mode runs RightMemory's local Pydantic AI agent and bounded tools; CLI-agent mode delegates the same canonical role behavior while preserving RightMemory's prompts, session records, root, and command surface.
+Both install modes expose the same three independently selected skills: read-only `memory-retriever`, updater-driven `rightmemory-orchestrator`, and direct `maintain-rightmemory`. The mode difference affects the executor behind command-backed role calls; direct maintenance remains with the invoking agent. Standalone mode runs RightMemory's local Pydantic AI agent and bounded tools; CLI-agent mode delegates the same canonical role behavior while preserving RightMemory's prompts, session records, root, and command surface.
 
 Installation has a strict bootstrap boundary. A genuinely new root receives the semantic seed and tracked root `.gitignore` control-plane allowlist, while a complete existing root is preserved byte-for-byte and an incomplete existing root is refused before the installer changes either the root or external runtime and skill targets. Runtime refresh and state migration are separate responsibilities; letting reinstall synthesize missing documents, refresh examples, or rewrite the allowlist would turn a package update into an unreviewed synchronized-state edit.
 
@@ -136,7 +136,7 @@ Standalone commit tools are role-aware. Unified Update may commit Memory and Pur
 
 ### Global RightMemory sync
 
-Global sync remains local-first: every device keeps a complete RightMemory root, and Git provides distributed transport between those roots. Memory, Pursuit, `corrections.md`, immutable update records, and the package-owned root `.gitignore` are synchronized state; the allowlist is control plane rather than semantic Memory. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
+Global sync remains local-first: every device keeps a complete RightMemory root, and Git provides distributed transport between those roots. Memory, Pursuit, `AGENT_CORRECTION_MEMORY_RULES.md`, `corrections.md`, immutable update records, and the package-owned root `.gitignore` are synchronized state; the allowlist is control plane rather than semantic Memory. The runtime depends on the ordinary upstream branch contract rather than a hosted-provider API, so a private GitHub repository is convenient but not structurally special.
 
 Runtime code owns deterministic sync mechanics where they belong in the workflow. It fetches and captures exact commits, then merges incoming history in a leased candidate worktree while the active root remains unchanged. Only a complete candidate whose paths and canonical graph validate may be published, and publication is one guarded fast-forward from the captured active commit. A concurrent active change or failed merge, repair, or validation refuses publication instead of requiring rollback.
 
@@ -157,7 +157,7 @@ lease is an availability window measured by device clocks, so its approximate
 takeover delay assumes reasonable clock synchronization; fencing correctness
 does not.
 
-Graph-aware repair stays in `sync-reconciler` because conflicts across Memory, Pursuit, and their relationships require schema judgment rather than Git mechanics alone, but that role edits and commits only the candidate. Durable prepared-operation records make a completed repair recoverable after a crash without another model turn. For `corrections.md`, repair preserves non-identical entries without ranking them; semantic curation remains outside sync repair. Push transport remains a retryable follow-up after local publication, and `sync-reconciler` stays separate from Dreamer because repair is a narrow integrity responsibility while Dreamer owns broader Memory consolidation.
+Graph-aware repair stays in `sync-reconciler` because conflicts across Memory, Pursuit, and their relationships require schema judgment rather than Git mechanics alone, but that role edits and commits only the candidate. Durable prepared-operation records make a completed repair recoverable after a crash without another model turn. For `corrections.md`, repair preserves non-identical entries without ranking them; explicit direct maintenance handles later semantic curation. Push transport remains a retryable follow-up after local publication, and `sync-reconciler` stays separate from Dreamer because repair is a narrow integrity responsibility while Dreamer owns broader Memory consolidation.
 
 ### Standalone tool retry behavior
 

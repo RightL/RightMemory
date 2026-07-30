@@ -73,8 +73,40 @@ class InstallCoreTests(unittest.TestCase):
 
             for target in targets:
                 self.assertTrue((target / "rightmemory-schema.md").is_file())
+                edit_rules = target / "rightmemory-edit-correction-rules.md"
+                self.assertEqual(
+                    edit_rules.read_bytes(),
+                    (REPO_ROOT / "RIGHTMEMORY_EDIT_CORRECTION_RULES.md").read_bytes(),
+                )
                 self.assertTrue((target / "memory-retriever" / "SKILL.md").is_file())
                 self.assertTrue((target / "rightmemory-orchestrator" / "SKILL.md").is_file())
+                maintainer = (target / "maintain-rightmemory" / "SKILL.md")
+                self.assertTrue(maintainer.is_file())
+                maintainer_text = maintainer.read_text(encoding="utf-8")
+                for path in (
+                    f"{target}/rightmemory-schema.md",
+                    f"{target}/rightmemory-edit-correction-rules.md",
+                    str(root / "memory"),
+                    "<root>/PURSUIT_RULES.md",
+                    "<root>/AGENT_CORRECTION_MEMORY_RULES.md",
+                ):
+                    self.assertIn(path, maintainer_text)
+                self.assertIn("`Strongly recommended`", maintainer_text)
+                self.assertIn("wait for explicit approval", maintainer_text)
+                self.assertIn("dedicated temporary Git worktree", maintainer_text)
+                self.assertIn(
+                    "`maintain: <concise maintenance summary>`",
+                    maintainer_text,
+                )
+                self.assertIn("`git merge --ff-only`", maintainer_text)
+                self.assertIn("without creating another commit", maintainer_text)
+                self.assertIn(
+                    "rightmemory validate --root <worktree>",
+                    maintainer_text,
+                )
+                self.assertIn("rightmemory validate --root <root>", maintainer_text)
+                self.assertNotIn("{{MEMORY_ROOT}}", maintainer_text)
+                self.assertNotIn("{{SKILLS_ROOT}}", maintainer_text)
 
     def test_existing_install_preserves_semantic_state_byte_for_byte(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -92,6 +124,9 @@ class InstallCoreTests(unittest.TestCase):
                     "# Stale Release Readiness\n"
                 ),
                 "PURSUIT_RULES.md": "# Custom Rules\n\nKeep these rules.\n",
+                "AGENT_CORRECTION_MEMORY_RULES.md": (
+                    "# Agent Correction Memory Rules\n\nKeep these rules.\n"
+                ),
             }
             for name, text in files.items():
                 (memory_root / name).write_text(text, encoding="utf-8")
@@ -126,7 +161,12 @@ class InstallCoreTests(unittest.TestCase):
             root = Path(tempdir)
             memory_root = root / "memory"
             memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+            for name in (
+                "MEMORY.md",
+                "PURSUITS.md",
+                "PURSUIT_RULES.md",
+                "AGENT_CORRECTION_MEMORY_RULES.md",
+            ):
                 (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
             gitignore = b"*\r\n!MEMORY.md\r\n!custom-control-plane-entry\r\n"
             (memory_root / ".gitignore").write_bytes(gitignore)
@@ -150,6 +190,7 @@ class InstallCoreTests(unittest.TestCase):
                     "MEMORY.md",
                     "PURSUITS.md",
                     "PURSUIT_RULES.md",
+                    "AGENT_CORRECTION_MEMORY_RULES.md",
                 ],
                 cwd=memory_root,
                 check=True,
@@ -215,7 +256,8 @@ class InstallCoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     InstallError,
                     "existing RightMemory root is incomplete: "
-                    "missing required files: PURSUITS.md, PURSUIT_RULES.md",
+                    "missing required files: AGENT_CORRECTION_MEMORY_RULES.md, "
+                    "PURSUITS.md, PURSUIT_RULES.md",
                 ) as raised:
                     installer.run()
 

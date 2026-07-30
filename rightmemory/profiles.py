@@ -189,6 +189,11 @@ def initialize_memory_root(memory_root: Path, *, source_root: Path) -> None:
         (root / "PURSUITS.md").write_text(_pursuits_example_text(), encoding="utf-8")
     if not (root / "PURSUIT_RULES.md").exists():
         (root / "PURSUIT_RULES.md").write_text(_pursuit_rules_text(), encoding="utf-8")
+    if not (root / "AGENT_CORRECTION_MEMORY_RULES.md").exists():
+        (root / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
+            _agent_correction_memory_rules_text(),
+            encoding="utf-8",
+        )
     _ensure_memory_gitignore(root)
     _ensure_runtime_gitignore(root / ".runtime")
     _ensure_git_repo(root)
@@ -199,7 +204,16 @@ def initialize_memory_root(memory_root: Path, *, source_root: Path) -> None:
 
 
 def _looks_like_memory_root(path: Path) -> bool:
-    return (path / "MEMORY.md").is_file() and (path / "insight_logs").is_dir()
+    required = (
+        "MEMORY.md",
+        "PURSUITS.md",
+        "PURSUIT_RULES.md",
+        "AGENT_CORRECTION_MEMORY_RULES.md",
+    )
+    return all(
+        (path / name).is_file() and not (path / name).is_symlink()
+        for name in required
+    ) and (path / "insight_logs").is_dir()
 
 
 def _normalize_profile_root(path: str | Path, *, base: Path | None = None) -> Path:
@@ -231,6 +245,17 @@ def _pursuit_rules_text() -> str:
     return resources.files("rightmemory").joinpath("PURSUIT_RULES.md").read_text(encoding="utf-8")
 
 
+def _agent_correction_memory_rules_text() -> str:
+    source_tree_rules = Path(__file__).resolve().parents[1] / "AGENT_CORRECTION_MEMORY_RULES.md"
+    if source_tree_rules.exists():
+        return source_tree_rules.read_text(encoding="utf-8")
+    return (
+        resources.files("rightmemory")
+        .joinpath("AGENT_CORRECTION_MEMORY_RULES.md")
+        .read_text(encoding="utf-8")
+    )
+
+
 def _ensure_git_repo(root: Path) -> None:
     if (root / ".git").is_dir():
         return
@@ -251,7 +276,12 @@ def _ensure_git_author(root: Path) -> None:
 def _ensure_initial_memory_commit(root: Path) -> None:
     if _git(root, "rev-parse", "--verify", "HEAD", check=False).returncode == 0:
         return
-    memory_files = ["MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"]
+    memory_files = [
+        "MEMORY.md",
+        "PURSUITS.md",
+        "PURSUIT_RULES.md",
+        "AGENT_CORRECTION_MEMORY_RULES.md",
+    ]
     memory_files.extend(sorted(path.name for path in root.glob("MEMORY_*.md")))
     memory_files.extend(
         sorted(path.name for path in root.glob("PURSUIT_*.md") if path.name != "PURSUIT_RULES.md")

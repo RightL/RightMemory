@@ -34,7 +34,18 @@ class GitUpdateQueueTestBase(unittest.TestCase):
         )
         (first / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (first / "PURSUIT_RULES.md").write_text("# Pursuit Rules\n", encoding="utf-8")
-        cls._run_git(first, "add", "MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md")
+        (first / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
+            "# Agent Correction Memory Rules\n",
+            encoding="utf-8",
+        )
+        cls._run_git(
+            first,
+            "add",
+            "MEMORY.md",
+            "PURSUITS.md",
+            "PURSUIT_RULES.md",
+            "AGENT_CORRECTION_MEMORY_RULES.md",
+        )
         cls._run_git(first, "commit", "-m", "initial memory")
         cls._run_git(first, "push", "-u", "origin", "HEAD:main")
         cls._run_git(first, "branch", "--set-upstream-to", "origin/main")

@@ -22,6 +22,7 @@ from .semantic_operation import (
 )
 from .graph import MEMORY_DETAIL_FILE_RE, PURSUIT_DETAIL_FILE_RE
 from .tools import (
+    AGENT_CORRECTION_MEMORY_RULES_PATH,
     CORRECTIONS_PATH,
     FIXED_CORRECTION_COLLECTION_PATHS,
     INSIGHT_LOG_FILE_RE,
@@ -43,6 +44,7 @@ PROTECTED_RIGHTMEMORY_PATHS = (
     *ACTIVE_MEMORY_WRITE_PATHS,
     *ACTIVE_PURSUIT_WRITE_PATHS,
     PURSUIT_RULES_PATH,
+    AGENT_CORRECTION_MEMORY_RULES_PATH,
     CORRECTIONS_PATH,
 )
 INSIGHT_WRITE_PATHS = ("insight_logs/*.md",)
@@ -770,7 +772,14 @@ class IsolatedWriteSupervisor:
         return (
             self._is_rightmemory_path(path)
             or path in FIXED_CORRECTION_COLLECTION_PATHS
-            or path in {PURSUIT_RULES_PATH, CORRECTIONS_PATH, SHARED_VIEW_REGISTRY_PATH, SHARE_REGISTRY_PATH}
+            or path
+            in {
+                PURSUIT_RULES_PATH,
+                AGENT_CORRECTION_MEMORY_RULES_PATH,
+                CORRECTIONS_PATH,
+                SHARED_VIEW_REGISTRY_PATH,
+                SHARE_REGISTRY_PATH,
+            }
             or bool(SHARED_VIEW_DEFINITION_FILE_RE.fullmatch(path))
             or bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
         )
@@ -798,7 +807,12 @@ class IsolatedWriteSupervisor:
         if self.role == "sync-reconciler":
             return (
                 self._is_rightmemory_path(path)
-                or path in {PURSUIT_RULES_PATH, CORRECTIONS_PATH}
+                or path
+                in {
+                    PURSUIT_RULES_PATH,
+                    AGENT_CORRECTION_MEMORY_RULES_PATH,
+                    CORRECTIONS_PATH,
+                }
                 or path in {SHARED_VIEW_REGISTRY_PATH, SHARE_REGISTRY_PATH}
                 or bool(SHARED_VIEW_DEFINITION_FILE_RE.fullmatch(path))
                 or bool(INSIGHT_LOG_FILE_RE.fullmatch(path))

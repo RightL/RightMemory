@@ -135,6 +135,9 @@ class ProfileTests(unittest.TestCase):
             memory_exists = (profile.root / "MEMORY.md").exists()
             pursuits_exists = (profile.root / "PURSUITS.md").exists()
             pursuit_rules_exists = (profile.root / "PURSUIT_RULES.md").exists()
+            correction_rules_exists = (
+                profile.root / "AGENT_CORRECTION_MEMORY_RULES.md"
+            ).exists()
             insight_exists = (profile.root / "insight_logs").is_dir()
             runtime_gitignore = (profile.root / ".runtime" / ".gitignore").read_text(encoding="utf-8")
             gitignore = (profile.root / ".gitignore").read_text(encoding="utf-8")
@@ -145,6 +148,7 @@ class ProfileTests(unittest.TestCase):
         self.assertTrue(memory_exists)
         self.assertTrue(pursuits_exists)
         self.assertTrue(pursuit_rules_exists)
+        self.assertTrue(correction_rules_exists)
         self.assertTrue(insight_exists)
         self.assertEqual(runtime_gitignore, "*\n")
         self.assertEqual(
@@ -156,6 +160,7 @@ class ProfileTests(unittest.TestCase):
             "!PURSUITS.md\n"
             "!PURSUIT_*.md\n"
             "!PURSUIT_RULES.md\n"
+            "!AGENT_CORRECTION_MEMORY_RULES.md\n"
             "!corrections.md\n"
             "!shared_views.toml\n"
             "!shares.toml\n"
@@ -186,11 +191,28 @@ class ProfileTests(unittest.TestCase):
             existing = Path(tempdir) / "existing"
             existing.mkdir()
             (existing / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+            (existing / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+            (existing / "PURSUIT_RULES.md").write_text("# Pursuit Rules\n", encoding="utf-8")
+            (existing / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
+                "# Agent Correction Memory Rules\n",
+                encoding="utf-8",
+            )
             (existing / "insight_logs").mkdir()
             subprocess.run(["git", "init", "-q"], cwd=existing, check=True)
             subprocess.run(["git", "config", "user.name", "Existing User"], cwd=existing, check=True)
             subprocess.run(["git", "config", "user.email", "existing@example.com"], cwd=existing, check=True)
-            subprocess.run(["git", "add", "MEMORY.md"], cwd=existing, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "add",
+                    "MEMORY.md",
+                    "PURSUITS.md",
+                    "PURSUIT_RULES.md",
+                    "AGENT_CORRECTION_MEMORY_RULES.md",
+                ],
+                cwd=existing,
+                check=True,
+            )
             subprocess.run(["git", "commit", "-q", "-m", "memory: existing"], cwd=existing, check=True)
             before = self._git(existing, "rev-parse", "HEAD")
 
@@ -198,13 +220,19 @@ class ProfileTests(unittest.TestCase):
             profiles = load_profiles(default_root)
             after = self._git(existing, "rev-parse", "HEAD")
             status = self._git(existing, "status", "--short")
+            pursuits_exists = (existing / "PURSUITS.md").exists()
+            pursuit_rules_exists = (existing / "PURSUIT_RULES.md").exists()
+            correction_rules_exists = (
+                existing / "AGENT_CORRECTION_MEMORY_RULES.md"
+            ).exists()
 
         self.assertEqual(profile.root, existing)
         self.assertEqual(profiles["existing"].root, existing)
         self.assertEqual(after, before)
         self.assertEqual(status, "")
-        self.assertFalse((existing / "PURSUITS.md").exists())
-        self.assertFalse((existing / "PURSUIT_RULES.md").exists())
+        self.assertTrue(pursuits_exists)
+        self.assertTrue(pursuit_rules_exists)
+        self.assertTrue(correction_rules_exists)
 
     def test_create_profile_serializes_concurrent_registry_updates(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -215,6 +243,12 @@ class ProfileTests(unittest.TestCase):
                 root = Path(tempdir) / name
                 root.mkdir()
                 (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+                (root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+                (root / "PURSUIT_RULES.md").write_text("# Pursuit Rules\n", encoding="utf-8")
+                (root / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
+                    "# Agent Correction Memory Rules\n",
+                    encoding="utf-8",
+                )
                 (root / "insight_logs").mkdir()
                 items.append((name, root))
 
@@ -270,6 +304,19 @@ class ProfileTests(unittest.TestCase):
 
             with self.assertRaises(ProfileError) as caught:
                 create_profile(default_root, "bad", root=existing)
+
+        self.assertIn("does not look like a RightMemory root", str(caught.exception))
+
+    def test_create_profile_rejects_incomplete_existing_memory_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            default_root = Path(tempdir) / "default"
+            existing = Path(tempdir) / "incomplete"
+            existing.mkdir()
+            (existing / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+            (existing / "insight_logs").mkdir()
+
+            with self.assertRaises(ProfileError) as caught:
+                create_profile(default_root, "incomplete", root=existing)
 
         self.assertIn("does not look like a RightMemory root", str(caught.exception))
 

@@ -3,7 +3,7 @@
 ## Sources And Schema
 
 - RightMemory is one graph organized into two document trees: durable Memory begins at `MEMORY.md`, and live Pursuit begins at `PURSUITS.md`.
-- Read both root files before the first edit in a session. Read `PURSUIT_RULES.md` before changing Pursuit, and open relevant F#, M#, or S# backing files when the candidate touches them.
+- Read both root files before the first edit in a session. Read `PURSUIT_RULES.md` before changing Pursuit, read `AGENT_CORRECTION_MEMORY_RULES.md` before changing Agent Correction Memory, and open relevant F#, M#, or S# backing files when the candidate touches them.
 - Use the schema supplied by the execution wrapper for heading syntax, node syntax, edges, linked resources, file placement, and complete-graph validation.
 - Do not add schema or maintenance preambles to Memory or Pursuit content.
 
@@ -38,9 +38,9 @@
 ## General Agent Corrections
 
 - An explicit correction to ordinary agent work may be reusable evidence. Preserve the concrete rejected/accepted contrast only when it will improve future second-pass review.
-- Expression or presentation corrections belong in `MEMORY_agent-corrections-writing.md`; corrections requiring different reasoning, decisions, behavior, or action belong in `MEMORY_agent-corrections-design.md`.
+- A correction belongs in `MEMORY_agent-corrections-writing.md` when changing expression or presentation would resolve the objection; otherwise it belongs in `MEMORY_agent-corrections-design.md`.
 - Maintain these as the two fixed M# collections named `agent-corrections-writing` and `agent-corrections-design`; ensure their headings remain reachable from Memory and do not create project- or tool-specific correction files.
-- If a concise executable rule captures the correction better, update ordinary Agent Behavior or S# instruction instead of duplicating it as correction evidence.
+- Do not duplicate the same lesson in Agent Behavior or S# unless that representation adds distinct value.
 - A represented pattern should improve or merge with its existing item. Admit a distinct pattern only when sufficiently reusable; when a 15-item collection is full, replace an existing item only if the new evidence is more important.
 - Judge importance by likely recurrence, cost when repeated, applicability across future tasks, strength of the user's correction, and how fully existing guidance already covers the pattern. Fifteen is a ceiling, not a quota or an automatic eviction trigger.
 - Submit corrections to RightMemory edits as ordinary candidates; do not store them in these M# collections.

@@ -3324,6 +3324,7 @@ class RuntimeTests(unittest.TestCase):
         instructions = build_instructions(Path("/memory"), "update")
 
         self.assertIn("evolving account", instructions)
+        self.assertIn("AGENT_CORRECTION_MEMORY_RULES.md", instructions)
         self.assertIn("MEMORY_agent-corrections-writing.md", instructions)
         self.assertIn("MEMORY_agent-corrections-design.md", instructions)
         self.assertIn("corrections.md", instructions)
@@ -3967,6 +3968,7 @@ class PromptTests(unittest.TestCase):
         prompt = build_instructions(Path("/memory"), "sync-reconciler")
 
         self.assertIn("Commit and edit tools are scoped", prompt)
+        self.assertIn("AGENT_CORRECTION_MEMORY_RULES.md", prompt)
         self.assertIn("shared_views.toml", prompt)
         self.assertIn("shares.toml", prompt)
         self.assertIn("shared_views/<view-id>/view.md", prompt)
@@ -4037,6 +4039,14 @@ class PromptTests(unittest.TestCase):
 
         force_include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
         self.assertEqual(force_include["skills"], "rightmemory/skills")
+        self.assertEqual(
+            force_include["AGENT_CORRECTION_MEMORY_RULES.md"],
+            "rightmemory/AGENT_CORRECTION_MEMORY_RULES.md",
+        )
+        self.assertEqual(
+            force_include["RIGHTMEMORY_EDIT_CORRECTION_RULES.md"],
+            "rightmemory/RIGHTMEMORY_EDIT_CORRECTION_RULES.md",
+        )
         self.assertNotIn("rightmemory/prompts", force_include)
         self.assertNotIn("rightmemory/semantic_upgrades", force_include)
 

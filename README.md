@@ -59,7 +59,7 @@ cd RightMemory
 .\install.ps1
 ```
 
-The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs exactly two command-backed user-facing skills into both `~/.codex/skills` and `~/.claude/skills`: `memory-retriever` for read-only use and `rightmemory-orchestrator` for full retrieval and state maintenance. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
+The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs three user-facing skills into both `~/.codex/skills` and `~/.claude/skills`: command-backed `memory-retriever` for read-only use, command-backed `rightmemory-orchestrator` for full retrieval and updater-driven maintenance, and `maintain-rightmemory` for explicitly requested direct maintenance by the current agent. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
 
 If you already use Codex CLI or Claude Code CLI and want RightMemory roles to run through those tools:
 
@@ -78,10 +78,11 @@ After install, add a short instruction to your agent guidance file, such as
 
 ```markdown
 Use memory-retriever when I choose read-only RightMemory retrieval.
-Use rightmemory-orchestrator when I choose full RightMemory retrieval and maintenance.
+Use rightmemory-orchestrator when I choose full RightMemory retrieval and updater-driven maintenance.
+Use maintain-rightmemory only when I explicitly ask the current agent to edit RightMemory directly.
 ```
 
-The two skills are independent and user-selected; neither has priority over the other. The shared schema and `PURSUIT_RULES.md` support those skills rather than forming a parallel agent-instruction layer.
+The three skills are independent and user-selected; none has implicit priority. The shared schema and focused rule documents define valid state, while each skill defines how the host agent accesses that state.
 
 Then start the background manager. It reviews idle agent sessions, evaluates prune generations, runs Dreamer consolidation, and produces Insight reflections when enough work has accumulated:
 
@@ -125,7 +126,7 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 - Separate Memory and Pursuit heading trees for durable context and live intent.
 - One global id namespace and typed graph edges such as `dep:`, `cfg:`, `ver:`, `doc:`, and `todo:` across both trees.
 - Multi-device memory continuity across laptops, desktops, agent clients, and project-specific roots.
-- Independent command-backed `memory-retriever` and `rightmemory-orchestrator` skills, selected by the user.
+- Independent `memory-retriever`, `rightmemory-orchestrator`, and explicit-only `maintain-rightmemory` skills, selected by the user.
 - Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex/Claude CLI role execution.
 - Model-selected, runtime-rendered retrieval output without model-authored summaries or commentary.
 - One updater for Memory and Pursuit, automatic transcript-review candidate extraction, and immutable candidate records for input-to-edit provenance.
@@ -152,7 +153,7 @@ CLI-agent mode delegates role execution to Codex CLI or Claude Code CLI while pr
 .\install.ps1 --mode cli-agent ~\.rightmemory ~\.codex\skills
 ```
 
-Install creates semantic state only when bootstrapping a new root. A fresh root receives `MEMORY.md`, `PURSUITS.md`, `PURSUIT_RULES.md`, and the tracked root `.gitignore` control-plane allowlist, then Git baselines the complete synchronized state. A complete pre-existing root is preserved byte-for-byte; reinstall may refresh package-owned runtime files and installed skills, but it does not refresh the allowlist or examples, synthesize missing semantic files, or migrate user state. A complete pre-existing Markdown root without Git history is committed exactly as found.
+Install creates semantic state only when bootstrapping a new root. A fresh root receives `MEMORY.md`, `PURSUITS.md`, `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`, and the tracked root `.gitignore` control-plane allowlist, then Git baselines the complete synchronized state. A complete pre-existing root is preserved byte-for-byte; reinstall may refresh package-owned runtime files and installed skills, but it does not refresh the allowlist or examples, synthesize missing semantic files, or migrate user state. A complete pre-existing Markdown root without Git history is committed exactly as found.
 
 If an existing root has a Git commit or any recognized semantic state but lacks a regular, non-symlink required root document, install refuses it before making any change. The memory root, runtime installation, installed skills, and install stamp remain untouched so the user can perform an explicit, reviewed migration first. Fresh installs still baseline current semantic-upgrade notes, while a successful reinstall may report pending notes for a later Dreamer cycle without applying them. Legacy `MEMORY_*.md` files remain protected even when they are not currently reachable from `MEMORY.md`.
 
@@ -164,7 +165,7 @@ candidate identities during package installation.
 
 The memory root must be a standalone, non-bare Git working tree. An existing target nested inside another working tree, a bare repository, or an unusable `.git` entry is refused before installation writes anything.
 
-Reinstall replaces the superseded managed Memory-only orchestrator with the current two-skill surface; it does not keep an alias or a second behavior path. Removal is limited to content recognized as RightMemory-managed.
+Reinstall replaces the superseded managed Memory-only orchestrator with the current three-skill surface; it does not keep an alias or a second behavior path. Removal is limited to content recognized as RightMemory-managed.
 
 ### Profiles
 
@@ -182,6 +183,8 @@ default to a sibling profile-root area, such as
 root has its own `MEMORY.md`, `PURSUITS.md`, optional `corrections.md`,
 `rightmemory.toml`, `.runtime/`, change history, watcher state, async update
 queues, sessions, and insight logs.
+
+Creating a new profile root bootstraps all required root documents. Registering an existing root requires those documents to be complete and regular; profile creation does not synthesize missing state in an existing root.
 
 A project can opt into a local default profile by adding `.rightmemory-profile`
 with the profile name:
@@ -372,13 +375,13 @@ Tree nesting already expresses containment. Do not add edges from a child node t
 
 RightMemory separates corrections to general agent work from corrections to RightMemory edits.
 
-Reusable rejected/accepted evidence about ordinary agent work may be curated into two fixed Memory-only M# collections: `MEMORY_agent-corrections-writing.md` for expression and presentation, and `MEMORY_agent-corrections-design.md` for underlying reasoning, decisions, behavior, or action. Each is a priority-curated set of at most 15 compact items, not an append-only log or FIFO. Agents consult relevant correction evidence only after forming an initial draft or direction. When a concise executable instruction captures the lesson better, ordinary Agent Behavior or S# guidance replaces duplicate correction evidence.
+Reusable rejected/accepted evidence about ordinary agent work may be curated into the fixed Agent Correction Memory module: `MEMORY_agent-corrections-writing.md` for objections resolved by changing expression or presentation, and `MEMORY_agent-corrections-design.md` for objections that expression or presentation alone cannot resolve. `AGENT_CORRECTION_MEMORY_RULES.md` defines the module. Each collection is a priority-curated set of at most 15 compact items, not an append-only log or FIFO. Agents consult relevant correction evidence only after forming an initial draft or direction. Do not duplicate the same lesson in ordinary Agent Behavior or S# unless that representation adds distinct value.
 
-Root `corrections.md` is synchronized updater-only feedback, not Memory and not graph content. Candidate-backed updater outcomes retain their exact input under `update_records/`, while Git supplies the corresponding Memory/Pursuit diff. General writing/design correction M# collections remain an independent surface.
+Root `corrections.md` is synchronized feedback about edits to RightMemory, not Memory, graph content, or Agent Correction Memory. Each entry preserves the relevant candidate text, proposed edit, and accepted edit under [the edit-correction rules](RIGHTMEMORY_EDIT_CORRECTION_RULES.md); [the example](RIGHTMEMORY_EDIT_CORRECTIONS.example.md) illustrates the format. Candidate-backed updater outcomes retain their exact input under `update_records/`, while Git supplies the corresponding Memory/Pursuit diff.
 
 ## Agent Roles
 
-RightMemory separates ordinary work from state ownership. It installs exactly two independent, user-selected skills:
+RightMemory separates ordinary work from state ownership. It installs three independent, user-selected skills:
 
 ```text
 memory-retriever
@@ -387,6 +390,11 @@ memory-retriever
 rightmemory-orchestrator
   +--> rightmemory retrieve         conditional Memory + Pursuit retrieval
   +--> rightmemory update submit    task-state and durable-context evidence
+
+maintain-rightmemory
+  +--> MEMORY*.md                   direct coherent maintenance
+  +--> PURSUIT*.md                  direct coherent maintenance
+  +--> correction surfaces          direct rule-governed curation
 
 transcript review
   +--> candidate extraction         idle supported sessions
@@ -400,13 +408,14 @@ unified updater
 
 - `memory-retriever` retrieves relevant context and never submits updates.
 - `rightmemory-orchestrator` retrieves conditionally, then submits evidence when non-trivial work starts, completes, blocks, changes direction, or reaches a useful handoff state. It still submits a terminal candidate when an initially small task becomes completion-, block-, direction-, or handoff-worthy.
+- `maintain-rightmemory` is explicit-only. The current agent edits Memory, Pursuit, linked content, and either correction surface directly under the schema and focused rules; it does not call Update, submit candidates, or invoke another RightMemory model role.
 - Conditional retrieval loads factual or project context when the conversation lacks needed background, skips self-contained requests, and retrieves preference or workflow guidance more proactively when it will shape the work. Correction M# bodies are consulted only after an initial draft, design, or implementation direction exists.
 - Candidate submission is evidence, not an instruction to create Memory or Pursuit. Session ids provide provenance and batching boundaries, not task identity.
 - The unified updater reconciles related candidates and may change Memory, Pursuit, both, or neither in one isolated transaction.
 - Dreamer, Insight, Historian, and Pruner remain Memory-oriented maintenance roles. They must preserve ids and edges referenced from Pursuit. Sync repair transports the wider synchronized surface without taking over semantic updater judgment.
 - Standalone mode uses RightMemory's bounded tools, while CLI-agent mode delegates roles to Codex or Claude CLI with role-specific sandbox or permission defaults.
 
-The host agent should avoid reading or editing RightMemory state directly. Access goes through the user-selected skill and runtime roles, which keeps ownership clear and reduces partial or competing edits.
+The host agent should avoid reading or editing RightMemory state directly unless the user explicitly selects `maintain-rightmemory`. Other access goes through the command-backed skills and runtime roles, which keeps ownership clear and reduces partial or competing edits.
 
 ## Prompt Sources
 
@@ -423,18 +432,18 @@ rightmemory/prompts/pruner.md
 rightmemory/prompts/sync-reconciler.md
 ```
 
-Both install modes use these files through the `rightmemory` runtime. Standalone mode loads them into the local Pydantic AI agent and tool loop. CLI-agent mode wraps the same role instructions into prompts sent to Codex CLI or Claude Code CLI. Other command-capable agents can call the same CLI or daemon surface without changing the schema. The installed `memory-retriever` and `rightmemory-orchestrator` skills remain thin command dispatchers, so role behavior belongs in the canonical prompt files rather than a parallel documentation-first layer.
+Both install modes use these files through the `rightmemory` runtime. Standalone mode loads them into the local Pydantic AI agent and tool loop. CLI-agent mode wraps the same role instructions into prompts sent to Codex CLI or Claude Code CLI. Other command-capable agents can call the same CLI or daemon surface without changing the schema. The installed `memory-retriever` and `rightmemory-orchestrator` skills remain thin command dispatchers, so runtime role behavior belongs in the canonical prompt files. `maintain-rightmemory` instead applies the schema and focused rules directly when the user explicitly requests direct maintenance.
 
 `reviewer.md` extracts candidate evidence from supported transcripts and submits it through unified Update.
 
 ## Install Modes
 
-RightMemory has two command-backed install modes. The default is `standalone`.
+RightMemory has two install modes. The default is `standalone`.
 
 | Mode | Use When | What Gets Installed |
 | --- | --- | --- |
-| `standalone` | You want RightMemory to run its own local Pydantic AI role agents and tools. | The command-backed `memory-retriever` and `rightmemory-orchestrator` skills plus the `rightmemory` CLI. |
-| `cli-agent` | You want RightMemory to delegate each role turn to Codex CLI or Claude Code CLI. | The same two command-backed skills plus the `rightmemory` CLI. |
+| `standalone` | You want RightMemory to run its own local Pydantic AI role agents and tools. | `memory-retriever`, `rightmemory-orchestrator`, explicit-only `maintain-rightmemory`, their shared definitions, and the `rightmemory` CLI. |
+| `cli-agent` | You want RightMemory to delegate each runtime role turn to Codex CLI or Claude Code CLI. | The same three skills and shared definitions plus the `rightmemory` CLI. |
 
 The installer arguments are:
 
@@ -446,9 +455,9 @@ The installer arguments are:
 .\install.ps1 [--mode cli-agent|standalone] [<memory-root> <skills-target>]
 ```
 
-- `<memory-root>` is where Memory, Pursuit, optional updater corrections, sharing state, and `insight_logs/` live.
+- `<memory-root>` is where Memory, Pursuit, optional RightMemory edit corrections, sharing state, and `insight_logs/` live.
 - `<skills-target>` is where your agent loads skills from, such as `~/.claude/skills` or `~/.codex/skills`.
-- With no path arguments, the installer uses `~/.rightmemory` and installs both skills into `~/.codex/skills` and `~/.claude/skills`.
+- With no path arguments, the installer uses `~/.rightmemory` and installs all three skills into `~/.codex/skills` and `~/.claude/skills`.
 
 Both modes require `git` and `uv`. On macOS, Linux, and WSL, the runtime is
 installed under `${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`, and the
@@ -475,16 +484,16 @@ semantic work and push successful memory changes after they land.
 
 ## Everyday Use
 
-1. Tell the agent to use `memory-retriever` for read-only access or `rightmemory-orchestrator` for full orchestration, according to your choice.
+1. Tell the agent to use `memory-retriever` for read-only access, `rightmemory-orchestrator` for updater-driven orchestration, or `maintain-rightmemory` when you explicitly want that agent to edit RightMemory directly.
 2. Run `rightmemory watch start` for transcript extraction, pruning, consolidation, Insight cycles, and optional sync.
-3. Let the selected skill handle retrieval and let the unified updater decide what belongs in Memory or Pursuit.
+3. Let the command-backed skill handle retrieval and updater submission, or let the direct maintainer apply the schema and focused rules itself.
 4. Use `rightmemory status` when you need to inspect watcher, queue, and sync state.
 
 Dreamer consolidates durable Memory when it needs structural cleanup. Insight commits timestamped reflections under `insight_logs/` when broader patterns, risks, or next-step ideas are worth preserving.
 
 ## Command Runtime
 
-Both install modes expose the same command surface. The installed skills call role commands such as `rightmemory retrieve` and `rightmemory update`; the selected mode determines who executes the role prompt after the command starts.
+Both install modes expose the same command surface. The command-backed skills call roles such as `rightmemory retrieve` and `rightmemory update`; the selected mode determines who executes the role prompt after the command starts. `maintain-rightmemory` does not invoke those maintenance roles.
 
 ```bash
 rightmemory retrieve --session <agent-session-id> "find memory about the standalone mode"
@@ -551,7 +560,8 @@ The runtime is intentionally small:
 - Every new CLI-agent provider thread receives an ownership record under `<memory-root>/.runtime/agent_cli_threads/`, including one-shot and failed isolated work, so transcript review can exclude internal conversations without relying on an active mapping.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - Use `rightmemory status` for a read-only operational dashboard across the configured memory root. Its `Sync` section reports whether sync is configured, the upstream tracking reference, ahead/behind counts relative to the last-fetched upstream, and the latest recorded sync outcome. Sync watcher process state remains under `Managed Watches`. The dashboard also summarizes Git state, Dreamer and Insight trigger progress, async update queues, bounded last-message previews, and file paths for full logs or state. Status never fetches, pulls, pushes, starts watchers, invokes a model, or writes runtime state. Use `rightmemory watch status` when you need the lower-level managed-watch process view.
-- A fresh-root install creates and baselines a tracked root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, `PURSUIT_RULES.md`, optional root `corrections.md`, sharing metadata and provider view sources, `insight_logs/*.md`, immutable `update_records/*.json`, and the narrowly defined `update_queue/` JSON paths; generated shared-view output stays outside the committed surface. Reinstall preserves an existing allowlist exactly, so package changes reach existing roots only through an explicit synchronized commit.
+- Use `rightmemory validate` for a read-only check of the configured root, or `rightmemory validate --root <path>` for an explicit root such as a maintenance worktree. It requires the canonical root documents, validates the complete Memory/Pursuit graph and `corrections.md`, and exits nonzero on failure.
+- A fresh-root install creates and baselines a tracked root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`, optional root `corrections.md`, sharing metadata and provider view sources, `insight_logs/*.md`, immutable `update_records/*.json`, and the narrowly defined `update_queue/` JSON paths; generated shared-view output stays outside the committed surface. Reinstall preserves an existing allowlist exactly, so package changes reach existing roots only through an explicit synchronized commit.
 - Async `update submit` calls for the same `--session` accumulate as pending candidates and reset that session's configured quiet period. Start and terminal candidates that reach the same batch are reconciled together, so already-finished work does not leave transient Pursuit state. A global worker batches whole session queues, but the updater groups candidates by the work they describe rather than treating a session as one task. `pull` and `undo` remain per-session. Retrieve can see pending evidence as `Recent submitted RightMemory` before consolidation.
 - Automatic unified-update, dreamer, insight, and pruner turns use isolated Git worktrees when they operate on the main state root. Runtime validates complete role-owned results before landing them. Transcript review remains read-only and queues any resulting candidate.
 - Standalone daemon context is preserved with Pydantic AI message history.
@@ -853,7 +863,7 @@ update_candidate_points = 1.0
 check_interval_seconds = 3000
 ```
 
-`rightmemory insight watch` checks `<memory-root>/.runtime/insight/trigger-state.json` and writes timestamped reflection artifacts under `insight_logs/` when useful. Insight reads active Memory and prior Insight logs; it edits neither Memory nor Pursuit and does not read updater-only `corrections.md`. With the default `[insight.watch]` settings, each Memory-changing unified update contributes `1.0` point, the trigger threshold is `150`, and the watcher checks every `3000` seconds.
+`rightmemory insight watch` checks `<memory-root>/.runtime/insight/trigger-state.json` and writes timestamped reflection artifacts under `insight_logs/` when useful. Insight reads active Memory and prior Insight logs; it edits neither Memory nor Pursuit and does not read RightMemory edit `corrections.md`. With the default `[insight.watch]` settings, each Memory-changing unified update contributes `1.0` point, the trigger threshold is `150`, and the watcher checks every `3000` seconds.
 
 ```toml
 [insight.watch]
@@ -907,7 +917,7 @@ Update records and update-queue files are non-graph state, not semantic repair i
 
 Managed watch includes a `sync` target. `rightmemory watch start` starts it when sync is enabled, and `rightmemory watch start sync` runs that target by itself. The watcher is an optional low-latency accelerator; retrieve's bounded check also restores progress during active use when no watcher is running. Every normal watcher cycle fetches the upstream so newly published candidates become locally visible; it pulls immediately when the fetched tip changed. When the tip is unchanged, `stale_pull_after_hours` controls how often a no-change pull checkpoint is recorded. Clean pulls and fresh checks stay deterministic and do not call a model.
 
-Pre-existing dirty or already-invalid active state blocks incoming sync before a candidate can land. If candidate merge, repair, validation, or final publication checks fail, the active branch and semantic files remain unchanged; conflict markers exist only in the candidate. A prepared repair is durably recoverable without another model turn. For `corrections.md`, candidate repair preserves non-identical entries without ranking them; semantic curation remains outside sync repair. A network push failure after local publication leaves the valid local commit in place and can retry without repeating repair.
+Pre-existing dirty or already-invalid active state blocks incoming sync before a candidate can land. If candidate merge, repair, validation, or final publication checks fail, the active branch and semantic files remain unchanged; conflict markers exist only in the candidate. A prepared repair is durably recoverable without another model turn. For `corrections.md`, candidate repair preserves non-identical entries without ranking them; explicit direct maintenance handles later semantic curation. A network push failure after local publication leaves the valid local commit in place and can retry without repeating repair.
 
 Run standalone mode from this repository during development:
 
@@ -942,18 +952,22 @@ RightMemory/
 ├── MEMORY.example.md
 ├── PURSUITS.example.md
 ├── PURSUIT_RULES.md
+├── AGENT_CORRECTION_MEMORY_RULES.md
+├── RIGHTMEMORY_EDIT_CORRECTION_RULES.md
+├── RIGHTMEMORY_EDIT_CORRECTIONS.example.md
 ├── rightmemory/
 │   ├── install_core.py
 │   ├── platform.py
 │   └── prompts/
 └── skills/
     ├── rightmemory-schema.md
+    ├── maintain-rightmemory/SKILL.md
     ├── memory-retriever-cli/SKILL.md
     ├── rightmemory-orchestrator-cli/SKILL.md
     └── provider-transcript-normalizer/SKILL.md
 ```
 
-`provider-transcript-normalizer` is an internal transcript-adapter asset, not a third installed user-facing skill.
+`provider-transcript-normalizer` is an internal transcript-adapter asset, not an installed user-facing skill.
 
 After install:
 
@@ -965,7 +979,8 @@ After install:
 ├── PURSUITS.md
 ├── PURSUIT_<slug>.md
 ├── PURSUIT_RULES.md
-├── corrections.md              # created only when updater feedback is admitted
+├── AGENT_CORRECTION_MEMORY_RULES.md
+├── corrections.md              # created only when edit feedback is admitted
 ├── insight_logs/
 ├── update_records/             # immutable exact candidate batches
 ├── update_queue/               # appears when synchronized queue state exists
@@ -973,6 +988,8 @@ After install:
 
 ~/.codex/skills/
 ├── rightmemory-schema.md
+├── rightmemory-edit-correction-rules.md
+├── maintain-rightmemory/SKILL.md
 ├── memory-retriever/SKILL.md
 └── rightmemory-orchestrator/SKILL.md
 ```
@@ -985,10 +1002,10 @@ is `%LOCALAPPDATA%\RightMemory\bin\rightmemory.cmd`.
 - Memory and Pursuit are separate document trees in one globally addressable graph.
 - Human readability is useful, but agent retrieval is the primary design center.
 - `MEMORY.md` and `PURSUITS.md` remain useful documents, not routing-only indexes.
-- The unified updater owns lifecycle transitions between live Pursuit and durable Memory.
-- Dedicated RightMemory roles own state edits so the host agent does not race itself or leave partial writes.
+- Within candidate-driven orchestration, the unified updater owns lifecycle transitions between live Pursuit and durable Memory.
+- Automatic state edits remain owned by dedicated RightMemory roles; direct host-agent edits require explicit selection of `maintain-rightmemory`.
 - Dreamer consolidation and Insight reflection are explicit because structural cleanup and reflective artifacts have different authority boundaries.
-- `corrections.md` stays updater-only feedback rather than becoming Memory or graph content.
+- `corrections.md` stays RightMemory-edit feedback rather than becoming Memory or graph content.
 
 ## License
 

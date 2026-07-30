@@ -1,0 +1,14 @@
+---
+name: maintain-rightmemory
+description: "Use when the user explicitly asks the current agent to inspect, organize, consolidate, or clean a RightMemory root directly. Preview proposed maintenance for approval, then apply only approved changes without invoking Update or another RightMemory model role."
+---
+
+- Resolve `<root>` from any user-specified root or profile, `RIGHTMEMORY_ROOT`, or the current project binding; otherwise use `{{MEMORY_ROOT}}`. Never call `rightmemory update`, submit candidates, or invoke another RightMemory model role.
+- Run `rightmemory validate --root <root>` before reading RightMemory state. Never follow or read a path it reports as non-regular; treat other findings as maintenance evidence.
+- Read `{{SKILLS_ROOT}}/rightmemory-schema.md`, available regular `<root>/MEMORY.md`, `<root>/PURSUITS.md`, relevant reachable backings, and relevant Git history or `update_records/*.json`. Read `<root>/PURSUIT_RULES.md`, `<root>/AGENT_CORRECTION_MEMORY_RULES.md`, or `{{SKILLS_ROOT}}/rightmemory-edit-correction-rules.md` before judging its corresponding content; never edit immutable update records. Inspect the complete reachable state and identify concrete organization, consolidation, and cleanup that would make future retrieval and maintenance more coherent and useful.
+- Before writing, present a concise proposal split into `Strongly recommended` items that materially affect correctness, coherence, or future use and `Optional` items that are discretionary organization or clarity improvements. Name the affected files or ids, intended change, and reason; wait for explicit approval and apply only approved items.
+- After approval, require the active root to be clean, capture its branch and HEAD, and create a dedicated temporary Git worktree and branch from that HEAD. Do not stash, discard, or absorb unrelated changes.
+- Apply the approved changes in the worktree. Edit Memory, Pursuit, their F# backings, Memory M#/S# backings, correction content, and cross-tree references together when needed; keep Agent Correction Memory separate from root `corrections.md`.
+- Run `rightmemory validate --root <worktree>` and require a successful exit immediately before committing the approved result with subject `maintain: <concise maintenance summary>`. Use body sections `Strongly recommended:`, `Optional:`, and `Validation:`; omit an empty change section.
+- Before landing, require the active root to remain clean and at the captured HEAD; otherwise stop and present a refreshed proposal. Land the exact validated commit with `git merge --ff-only`, without creating another commit, then require `rightmemory validate --root <root>` to pass. Remove the temporary worktree and branch; push when sync is configured.
+- Report the applied changes, validation result, landed commit hash, and push result, or `no commit`.

@@ -39,6 +39,7 @@ MEMORY_GITIGNORE = """\
 !PURSUITS.md
 !PURSUIT_*.md
 !PURSUIT_RULES.md
+!AGENT_CORRECTION_MEMORY_RULES.md
 !corrections.md
 !shared_views.toml
 !shares.toml
@@ -257,7 +258,12 @@ class Installer:
         missing: list[str] = []
         invalid: list[str] = []
         if kind == "existing":
-            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+            for name in (
+                "MEMORY.md",
+                "PURSUITS.md",
+                "PURSUIT_RULES.md",
+                "AGENT_CORRECTION_MEMORY_RULES.md",
+            ):
                 path = self.memory_root / name
                 if not os.path.lexists(path):
                     missing.append(name)
@@ -316,6 +322,7 @@ class Installer:
                 "MEMORY.md",
                 "PURSUITS.md",
                 "PURSUIT_RULES.md",
+                "AGENT_CORRECTION_MEMORY_RULES.md",
                 "corrections.md",
                 "shared_views.toml",
                 "shares.toml",
@@ -367,18 +374,29 @@ class Installer:
         memory_file = self.memory_root / "MEMORY.md"
         pursuits_file = self.memory_root / "PURSUITS.md"
         rules_file = self.memory_root / "PURSUIT_RULES.md"
+        correction_rules_file = self.memory_root / "AGENT_CORRECTION_MEMORY_RULES.md"
         shutil.copyfile(self.repo_root / "MEMORY.example.md", memory_file)
         shutil.copyfile(self.repo_root / "PURSUITS.example.md", pursuits_file)
         shutil.copyfile(self.repo_root / "PURSUIT_RULES.md", rules_file)
+        shutil.copyfile(
+            self.repo_root / "AGENT_CORRECTION_MEMORY_RULES.md",
+            correction_rules_file,
+        )
         gitignore = self.memory_root / ".gitignore"
         _write_utf8(gitignore, MEMORY_GITIGNORE)
         print(f"  [new]     {memory_file}  (from MEMORY.example.md)")
         print(f"  [new]     {pursuits_file}  (from PURSUITS.example.md)")
         print(f"  [new]     {rules_file}")
+        print(f"  [new]     {correction_rules_file}")
         print(f"  [new]     {gitignore}  (memory allowlist)")
 
     def _preserve_existing_state(self) -> None:
-        for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md"):
+        for name in (
+            "MEMORY.md",
+            "PURSUITS.md",
+            "PURSUIT_RULES.md",
+            "AGENT_CORRECTION_MEMORY_RULES.md",
+        ):
             print(f"  [keep]    {self.memory_root / name} already exists")
 
     def _ensure_memory_git(self) -> None:
@@ -423,6 +441,7 @@ class Installer:
             if path.is_file() and path.name != "PURSUIT_RULES.md"
         )
         add("PURSUIT_RULES.md")
+        add("AGENT_CORRECTION_MEMORY_RULES.md")
         add("corrections.md")
         add("shared_views.toml")
         add("shares.toml")
@@ -558,6 +577,12 @@ class Installer:
             schema = target / "rightmemory-schema.md"
             shutil.copyfile(self.repo_root / "skills" / "rightmemory-schema.md", schema)
             print(f"  [install] {schema}")
+            edit_correction_rules = target / "rightmemory-edit-correction-rules.md"
+            shutil.copyfile(
+                self.repo_root / "RIGHTMEMORY_EDIT_CORRECTION_RULES.md",
+                edit_correction_rules,
+            )
+            print(f"  [install] {edit_correction_rules}")
             self._install_skill(
                 self.repo_root / "skills" / "memory-retriever-cli" / "SKILL.md",
                 "memory-retriever",
@@ -566,6 +591,11 @@ class Installer:
             self._install_skill(
                 self.repo_root / "skills" / "rightmemory-orchestrator-cli" / "SKILL.md",
                 "rightmemory-orchestrator",
+                target,
+            )
+            self._install_skill(
+                self.repo_root / "skills" / "maintain-rightmemory" / "SKILL.md",
+                "maintain-rightmemory",
                 target,
             )
             self._remove_old_skill("memory-orchestrator", target)
@@ -688,8 +718,9 @@ class Installer:
                 f"{self.memory_root}{separator}rightmemory.toml."
             )
         print(
-            "  3. Choose memory-retriever for read-only context or rightmemory-orchestrator "
-            "for conditional retrieval and unified updates."
+            "  3. Choose memory-retriever for read-only context, rightmemory-orchestrator "
+            "for conditional retrieval and unified updates, or maintain-rightmemory when you "
+            "explicitly want the current agent to edit RightMemory directly."
         )
         print(
             "  4. Optional background transcript review, dreamer, pruning, insight, and sync: "
@@ -699,7 +730,8 @@ class Installer:
         print("Re-run the installer any time you pull updates from the RightMemory repo;")
         print(
             "your existing MEMORY.md, MEMORY_*.md, PURSUITS.md, PURSUIT_*.md, "
-            "PURSUIT_RULES.md, corrections.md, insight_logs/, and pending update queue are preserved."
+            "PURSUIT_RULES.md, AGENT_CORRECTION_MEMORY_RULES.md, corrections.md, "
+            "insight_logs/, and pending update queue are preserved."
         )
 
     def _git(self, *args: str) -> None:
