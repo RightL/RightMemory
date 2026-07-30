@@ -178,7 +178,7 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
     def test_normal_update_rejects_corrections_file(self):
         def callback(worktree: Path) -> str:
             (worktree / "corrections.md").write_text(
-                "# RightMemory Update Corrections\n",
+                "# RightMemory Edit Corrections\n",
                 encoding="utf-8",
             )
             self._git("add", "corrections.md", cwd=worktree)
@@ -234,7 +234,12 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
         self.assertEqual(self._git("rev-parse", "HEAD"), current_head)
 
     def test_dirty_pursuit_rules_or_corrections_blocks_narrow_writer(self):
-        for name in ("PURSUITS.md", "PURSUIT_RULES.md", "corrections.md"):
+        for name in (
+            "PURSUITS.md",
+            "PURSUIT_RULES.md",
+            "AGENT_CORRECTION_MEMORY_RULES.md",
+            "corrections.md",
+        ):
             with self.subTest(name=name):
                 path = self.root / name
                 existed = path.exists()
@@ -262,8 +267,8 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
     def test_sync_reconciler_still_rejects_malformed_correction_entries(self):
         def callback(worktree: Path) -> str:
             (worktree / "corrections.md").write_text(
-                "# RightMemory Update Corrections\n\n"
-                "## Incomplete\n\n### Background\n\nOnly one section.\n",
+                "# RightMemory Edit Corrections\n\n"
+                "## Incomplete\n\n### Candidate\n\nOnly one section.\n",
                 encoding="utf-8",
             )
             self._git("add", "corrections.md", cwd=worktree)

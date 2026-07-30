@@ -126,6 +126,10 @@ Clearly not good behavior memory:
 - Project-specific workflow stored as a global default.
 - Examples repeated after the rule is already clear.
 
+## Agent Correction Memory
+
+Agent Correction Memory is a fixed Memory module consisting of the M# collections `agent-corrections-writing` and `agent-corrections-design`. Root `AGENT_CORRECTION_MEMORY_RULES.md` defines their semantics.
+
 ## Memory Skills
 
 A memory skill is a reusable instruction asset. It can be a workflow, a judgment

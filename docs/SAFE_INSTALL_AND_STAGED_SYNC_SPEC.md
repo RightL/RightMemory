@@ -79,13 +79,13 @@ safety principle, but each keeps its own small implementation.
 
 - **Active root**: the selected memory root and its checked-out Git branch.
 - **Semantic state files**: `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`,
-  `PURSUIT_*.md`, `PURSUIT_RULES.md`, `corrections.md`, shared-view and share
-  definitions, and `insight_logs/*.md`.
+  `PURSUIT_*.md`, `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`,
+  `corrections.md`, shared-view and share definitions, and `insight_logs/*.md`.
 - **Update record**: the immutable `update_records/<operation-id>.json` file
   containing the exact candidate batch for one queued updater outcome. It lands
   in the outcome commit and is synchronized protocol state, not Memory.
 - **Required root documents**: the regular files `MEMORY.md`, `PURSUITS.md`,
-  and `PURSUIT_RULES.md`.
+  `PURSUIT_RULES.md`, and `AGENT_CORRECTION_MEMORY_RULES.md`.
 - **Sync candidate**: a leased temporary Git branch and worktree created from
   one exact active-root commit and merged with one exact fetched upstream
   commit.
@@ -125,7 +125,7 @@ safety principle, but each keeps its own small implementation.
 - A sync repair edits and commits only inside the candidate worktree.
 - Candidate validation uses the current sync validation profile, including
   complete Memory/Pursuit graph validation and correction-structure validation
-  without enforcing the updater-only correction capacity.
+  without enforcing the semantic correction capacity.
 - The complete candidate diff from the active starting commit may contain only
   synchronized paths. A remote commit cannot use ordinary Git transport to
   introduce configuration, runtime state, generated output, or an unrelated
@@ -211,7 +211,7 @@ The error must:
 Example shape:
 
 ```text
-existing RightMemory root is incomplete: missing required files: PURSUITS.md, PURSUIT_RULES.md
+existing RightMemory root is incomplete: missing required files: AGENT_CORRECTION_MEMORY_RULES.md, PURSUITS.md, PURSUIT_RULES.md
 installation made no changes; migrate and review this root explicitly before reinstalling
 ```
 
@@ -226,6 +226,7 @@ For a new target, retain the current bootstrap behavior:
 - create `MEMORY.md` from the current seed;
 - create `PURSUITS.md` from the current seed;
 - create `PURSUIT_RULES.md`;
+- create `AGENT_CORRECTION_MEMORY_RULES.md`;
 - initialize Git when needed;
 - configure a repository-local author when needed;
 - write the memory-root `.gitignore` allowlist;
@@ -300,8 +301,8 @@ behavioral cases:
 - Refusal preserves the original `HEAD`, complete directory snapshot, Git
   status, configured author, runtime installation target, skills target, and
   absence or prior contents of `.runtime/install.stamp`.
-- The refusal error lists `PURSUITS.md` and `PURSUIT_RULES.md` and says no
-  changes were made.
+- The refusal error lists `AGENT_CORRECTION_MEMORY_RULES.md`, `PURSUITS.md`,
+  and `PURSUIT_RULES.md` and says no changes were made.
 - A required path that is a directory or symlink is refused as non-regular.
 - A complete committed root reinstalls successfully without changing the byte
   hashes of any semantic state file.
@@ -485,7 +486,7 @@ After the turn:
 - the candidate worktree must be clean;
 - the repair commit may touch only sync-reconciler-owned paths;
 - required root files and all changed files must remain regular files;
-- complete validation must pass with updater correction capacity disabled.
+- complete validation must pass with semantic correction capacity disabled.
 
 The prompt should describe the candidate as speculative incoming state and
 make clear that the role commits the repair but does not publish, push, abort,
@@ -776,7 +777,7 @@ and Git status before each operation.
   is rejected before repair and publication.
 - A repair leaving unmerged entries, an uncommitted edit, a symlink, or an
   invalid graph is rejected before publication.
-- Transporting correction entries above the updater-only ceiling remains
+- Transporting correction entries above the semantic ceiling remains
   allowed when the full sync validation profile otherwise passes.
 - A malformed update record, noncanonical record filename, or record-path merge
   conflict is rejected without invoking `sync-reconciler`.

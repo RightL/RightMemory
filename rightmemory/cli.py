@@ -80,7 +80,8 @@ from .shared_views import (
 from .share_results import format_share_operation_result
 from .shares import approve_share, create_share, join_share, list_shares, publish_share, revise_share, share_status
 from .status import collect_status, format_status_dashboard
-from .sync import SyncManager
+from .sync import REQUIRED_ROOT_DOCUMENTS, SyncManager
+from .tools import MemoryTools
 from .update_queue_git import (
     QUEUE_FINALIZER,
     ClaimedUpdateBatch,
@@ -173,6 +174,8 @@ def main(argv: list[str] | None = None) -> int:
     if argv[0] in {"-h", "--help"}:
         _top_level_parser().parse_args(argv)
         return 0
+    if argv[0] == "validate":
+        return _validate_main(argv[1:], profile_name)
     active = resolve_memory_root(profile_name=profile_name, cwd=Path.cwd(), default_root=default_memory_root())
     memory_root = active.memory_root
     if argv and argv[0] == "watch":
@@ -1342,6 +1345,47 @@ def _status_main(argv: list[str], memory_root: Path) -> int:
     parser.parse_args(argv)
     print(format_status_dashboard(collect_status(memory_root)))
     return 0
+
+
+def _validate_main(argv: list[str], profile_name: str | None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="rightmemory validate",
+        description="validate one complete RightMemory root without modifying it",
+    )
+    parser.add_argument("--root", type=Path, help="RightMemory root to validate")
+    args = parser.parse_args(argv)
+    if args.root is not None:
+        root = args.root.expanduser().resolve()
+    else:
+        active = resolve_memory_root(
+            profile_name=profile_name,
+            cwd=Path.cwd(),
+            default_root=default_memory_root(),
+        )
+        root = active.memory_root.expanduser().resolve()
+
+    document_errors = [
+        f"required root document is not a regular file: {name}"
+        for name in REQUIRED_ROOT_DOCUMENTS
+        if (root / name).is_symlink() or not (root / name).is_file()
+    ]
+    corrections_path = root / "corrections.md"
+    if corrections_path.is_symlink() or (
+        corrections_path.exists() and not corrections_path.is_file()
+    ):
+        document_errors.append(
+            "optional root document is not a regular file: corrections.md"
+        )
+    if document_errors:
+        print(
+            "validation failed:\n"
+            + "\n".join(f"- {error}" for error in document_errors)
+        )
+        return 1
+
+    report = MemoryTools(root, role="sync-reconciler").validate_memory()
+    print(report)
+    return 0 if report.startswith("validation passed:") else 1
 
 
 def _prune_main(argv: list[str], memory_root: Path) -> int:

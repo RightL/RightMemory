@@ -3,11 +3,11 @@ from __future__ import annotations
 import re
 
 
-_SECTIONS = ("Background", "Proposed edit", "Accepted edit")
+_SECTIONS = ("Candidate", "Proposed edit", "Accepted edit")
 
 
 def validate_corrections_markdown(text: str) -> list[str]:
-    """Validate the bounded updater-only correction collection shape."""
+    """Validate the bounded RightMemory edit-correction collection shape."""
     errors: list[str] = []
     entries: list[tuple[str, int, list[tuple[str, int]]]] = []
     current: tuple[str, int, list[tuple[str, int]]] | None = None
@@ -29,7 +29,7 @@ def validate_corrections_markdown(text: str) -> list[str]:
         if fence_char is not None:
             continue
 
-        heading = re.match(r"^ {0,3}(#{2,3})[ \t]+(.+?)[ \t]*#*[ \t]*$", line)
+        heading = re.match(r"^ {0,3}(#{2,3})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$", line)
         if heading is None:
             continue
         level = len(heading.group(1))
@@ -71,7 +71,7 @@ def validate_corrections_markdown(text: str) -> list[str]:
         if all(names.count(name) == 1 for name in expected) and recognized != expected:
             errors.append(
                 f"line {line_number}: correction entry `{title}` sections must be ordered as "
-                "Background, Proposed edit, Accepted edit"
+                "Candidate, Proposed edit, Accepted edit"
             )
         entry_end = (
             entries[entry_index + 1][1] - 1

@@ -503,7 +503,7 @@ class MemoryToolsTests(unittest.TestCase):
     def test_update_can_read_but_not_write_corrections(self):
         self._git("init")
         corrections = self.root / "corrections.md"
-        corrections.write_text("# RightMemory Update Corrections\n", encoding="utf-8")
+        corrections.write_text("# RightMemory Edit Corrections\n", encoding="utf-8")
 
         normal = MemoryTools(self.root, role="update")
         normal.read("corrections.md")
@@ -520,6 +520,19 @@ class MemoryToolsTests(unittest.TestCase):
         tools.read("PURSUIT_RULES.md")
         with self.assertRaisesRegex(ValueError, "PURSUIT_\\*\\.md"):
             tools.edit_file("PURSUIT_RULES.md", "Pursuit", "Changed")
+
+    def test_update_treats_agent_correction_memory_rules_as_read_only(self):
+        rules = self.root / "AGENT_CORRECTION_MEMORY_RULES.md"
+        rules.write_text("# Agent Correction Memory Rules\n", encoding="utf-8")
+
+        tools = MemoryTools(self.root, role="update")
+        tools.read("AGENT_CORRECTION_MEMORY_RULES.md")
+        with self.assertRaisesRegex(ValueError, "PURSUIT_\\*\\.md"):
+            tools.edit_file(
+                "AGENT_CORRECTION_MEMORY_RULES.md",
+                "Agent Correction",
+                "Changed",
+            )
 
     def test_non_updater_roles_cannot_read_updater_corrections(self):
         (self.root / "corrections.md").write_text("private updater feedback\n", encoding="utf-8")
@@ -1601,7 +1614,7 @@ class MemoryToolsTests(unittest.TestCase):
         for index in range(16):
             entries.append(
                 f"## Correction {index}\n\n"
-                "### Background\n\ncontext\n\n"
+                "### Candidate\n\ncandidate\n\n"
                 "### Proposed edit\n\nproposal\n\n"
                 "### Accepted edit\n\naccepted\n"
             )

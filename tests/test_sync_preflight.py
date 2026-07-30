@@ -27,6 +27,7 @@ class SyncPreflightTests(SyncTestBase):
         self.assertIn("PURSUITS.md", MEMORY_SYNC_PATHS)
         self.assertIn("PURSUIT_*.md", MEMORY_SYNC_PATHS)
         self.assertIn("PURSUIT_RULES.md", MEMORY_SYNC_PATHS)
+        self.assertIn("AGENT_CORRECTION_MEMORY_RULES.md", MEMORY_SYNC_PATHS)
         self.assertIn("corrections.md", MEMORY_SYNC_PATHS)
         self.assertIn("update_queue/candidates/*.json", MEMORY_SYNC_PATHS)
         self.assertIn("update_queue/recovery/*.json", MEMORY_SYNC_PATHS)
@@ -107,6 +108,24 @@ class SyncPreflightTests(SyncTestBase):
         self.assertEqual(result.status, "synced")
         self.assertIn("two", (self.device / "MEMORY.md").read_text(encoding="utf-8"))
 
+    def test_preflight_fast_forwards_agent_correction_memory_rules(self):
+        rules = "# Agent Correction Memory Rules\n\nRemote rule update.\n"
+        (self.other / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
+            rules,
+            encoding="utf-8",
+        )
+        self._git(self.other, "add", "AGENT_CORRECTION_MEMORY_RULES.md")
+        self._git(self.other, "commit", "-m", "sync: update agent correction rules")
+        self._git(self.other, "push")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+        self.assertEqual(result.status, "synced")
+        self.assertEqual(
+            (self.device / "AGENT_CORRECTION_MEMORY_RULES.md").read_text(encoding="utf-8"),
+            rules,
+        )
+
     def test_preflight_transports_valid_retained_candidate_record(self):
         candidate = UpdateCandidate(
             uid="a" * 32,
@@ -149,7 +168,12 @@ class SyncPreflightTests(SyncTestBase):
         self.assertNotIn("remote only", memory)
 
     def test_preflight_reports_each_new_synchronized_state_path_as_dirty(self):
-        for name in ("PURSUITS.md", "PURSUIT_RULES.md", "corrections.md"):
+        for name in (
+            "PURSUITS.md",
+            "PURSUIT_RULES.md",
+            "AGENT_CORRECTION_MEMORY_RULES.md",
+            "corrections.md",
+        ):
             with self.subTest(name=name):
                 path = self.device / name
                 existed = path.exists()
@@ -202,7 +226,7 @@ class SyncPreflightTests(SyncTestBase):
         self.assertIn("exactly duplicated", prompt)
         self.assertIn("do not rank", prompt)
         self.assertIn("may exceed that ceiling", prompt)
-        self.assertIn("unresolved updater-owned semantic maintenance", prompt)
+        self.assertIn("preserve the overflow for later explicit direct maintenance", prompt)
 
     def test_preflight_reports_dirty_shared_view_registry_and_ignores_runtime_shared_views(self):
         runtime_cache = self.device / ".runtime" / "shared_views" / "cache" / "alice-auth-api.txt"

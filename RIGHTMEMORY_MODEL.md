@@ -29,14 +29,15 @@ M# and S# are Memory-only linked-resource forms. Their headings remain addressab
 
 File globs do not determine graph membership. Updater corrections are not M# or S# content.
 
-The shared schema defines graph and file semantics, `PURSUIT_RULES.md` defines Pursuit-specific maintenance judgment, and the Memory and Pursuit examples show valid starting shapes. RightMemory does not add a parallel documentation-first instruction layer.
+The shared schema defines graph and file semantics, `PURSUIT_RULES.md` defines Pursuit-specific lifecycle judgment, `AGENT_CORRECTION_MEMORY_RULES.md` defines the fixed correction module, and the Memory and Pursuit examples show valid starting shapes.
 
 ## Agent-facing skills
 
-RightMemory installs two independent, user-selected skills. Neither has trigger priority over the other.
+RightMemory installs three independent, user-selected skills. None has implicit trigger priority.
 
 - `memory-retriever` provides read-only retrieval from relevant RightMemory context and never submits updates.
-- `rightmemory-orchestrator` conditionally retrieves relevant RightMemory context and maintains the full Memory + Pursuit state.
+- `rightmemory-orchestrator` conditionally retrieves relevant RightMemory context and submits evidence for updater-driven Memory + Pursuit maintenance.
+- Explicit-only `maintain-rightmemory` lets the current agent directly maintain Memory, Pursuit, linked content, Agent Correction Memory, and RightMemory edit corrections without submitting candidates or invoking another model role.
 
 The orchestrator does not retrieve everything before every task. It preserves the existing conditional policy: retrieve factual, project, or domain context when the conversation lacks background needed to work well; skip it when the request is self-contained; retrieve preference, workflow, and behavior guidance more proactively when those concerns will shape the work. Correction M# bodies are the exception: consult them only after an initial draft, design, or implementation direction exists.
 
@@ -74,10 +75,10 @@ RightMemory keeps two correction channels because they improve different work.
 
 Corrections to an agent's ordinary writing, reasoning, decisions, or actions may become Memory when their rejected/accepted contrast is reusable evidence for future second-pass review. The updater maintains two fixed M# collections:
 
-- `MEMORY_agent-corrections-writing.md` contains corrections where changing expression or presentation would resolve the objection.
-- `MEMORY_agent-corrections-design.md` contains corrections where the underlying reasoning, decision, behavior, or action must change.
+- `MEMORY_agent-corrections-writing.md` contains corrections whose objection can be resolved by changing expression or presentation.
+- `MEMORY_agent-corrections-design.md` contains corrections whose objection cannot be resolved by changing expression or presentation alone.
 
-If a concise directly executable instruction captures the correction better, update ordinary Agent Behavior or S# instead of preserving duplicate correction evidence. Submit a correction to a RightMemory state edit as an ordinary update candidate, not as content for these M# collections.
+Do not duplicate the same lesson in ordinary Agent Behavior or S# unless that representation adds distinct value. Submit a correction to a RightMemory state edit as an ordinary update candidate, not as content for these M# collections.
 
 Each collection is a bounded curated set rather than an append-only log or FIFO window. A represented pattern improves its existing item or replaces weaker evidence. A distinct pattern is retained only when sufficiently reusable; when the collection is full, it replaces an existing item only if it is more important. If every existing item is more important, the candidate is discarded.
 
@@ -97,14 +98,14 @@ A correction to an earlier updater result uses the same candidate type, queue,
 lease, updater role, and record contract as any other update. There is no
 correction-specific queue path or runtime role.
 
-### Updater correction feedback
+### RightMemory edit corrections
 
-Reusable feedback about updater judgment may be curated in `corrections.md` at the RightMemory root. The file is human-readable Markdown using this natural entry shape:
+Reusable feedback about edits of RightMemory may be curated in `corrections.md` at the RightMemory root. `RIGHTMEMORY_EDIT_CORRECTION_RULES.md` defines the collection. Each entry uses:
 
 ```md
 ## Short correction title
 
-### Background
+### Candidate
 
 ...
 
@@ -117,15 +118,17 @@ Reusable feedback about updater judgment may be curated in `corrections.md` at t
 ...
 ```
 
-`corrections.md` is tracked and synchronized, but it is not Memory and is not part of the graph. Only the updater consumes its semantic content, after forming a tentative update. Sync machinery transports it; if a conflict requires repair, it preserves non-identical entries without ranking them and does not perform semantic curation.
+`Candidate` preserves every candidate that materially shaped the edit, using its actual relevant text rather than an id, record path, or paraphrase. `Proposed edit` and `Accepted edit` preserve the smallest exact, self-contained RightMemory fragments needed for comparison, with `[no change]` when a proposed file edit was rejected entirely.
 
-`corrections.md` follows the same bounded priority principle as the M# collections: represented patterns improve existing examples; distinct examples are admitted only when useful enough; a full file rejects an example unless it is more important than an existing item. Its 15-entry limit is a ceiling, not a reason to evict automatically. Update reads it only as a late second-pass filter; it is not graph content or ordinary retrieval context.
+`corrections.md` is tracked and synchronized, but it is not Memory, Agent Correction Memory, or graph content. Sync machinery transports it; if a conflict requires repair, it preserves non-identical entries without ranking them and does not perform semantic curation.
+
+The collection follows the same bounded priority principle as the M# collections: represented patterns improve existing examples; distinct examples are admitted only when useful enough; a full file rejects an example unless it is more important than an existing item. Its 15-entry limit is a ceiling, not a reason to evict automatically. Update reads it only as a late second-pass filter; it is not ordinary retrieval context.
 
 ## Runtime ownership
 
 Unified updates run in isolated worktrees, validate the complete graph, and land only completed role-owned commits. Runtime adds one immutable candidate record to each queued outcome, and Git synchronizes it alongside Memory, Pursuit, and `corrections.md`.
 
-Memory-oriented Dreamer, Insight, Historian, and Pruner remain narrower than the unified updater and do not independently maintain Pursuit or the curated correction collections. Transcript review extracts candidates from idle sessions and submits them through unified update rather than editing the graph independently. The unified updater owns lifecycle transitions between live Pursuit and durable Memory as well as admission to general correction M# evidence.
+Memory-oriented Dreamer, Insight, Historian, and Pruner remain narrower than the unified updater and do not independently maintain Pursuit or the curated correction collections. Transcript review extracts candidates from idle sessions and submits them through unified update rather than editing the graph independently. Within the automatic candidate pipeline, the unified updater owns lifecycle transitions and admission to general correction M# evidence; explicit direct maintenance applies the same definitions without entering that pipeline.
 
 ## Compatibility posture
 

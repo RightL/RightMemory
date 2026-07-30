@@ -181,6 +181,7 @@ def _ensure_memory_gitignore(memory_root: Path) -> None:
             b"!PURSUITS.md\n"
             b"!PURSUIT_*.md\n"
             b"!PURSUIT_RULES.md\n"
+            b"!AGENT_CORRECTION_MEMORY_RULES.md\n"
             b"!corrections.md\n"
             b"!shared_views.toml\n"
             b"!shares.toml\n"

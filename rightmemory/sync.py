@@ -42,6 +42,7 @@ MEMORY_SYNC_PATHS = (
     "PURSUITS.md",
     "PURSUIT_*.md",
     "PURSUIT_RULES.md",
+    "AGENT_CORRECTION_MEMORY_RULES.md",
     "corrections.md",
     "shared_views.toml",
     "shares.toml",
@@ -56,7 +57,12 @@ MEMORY_SYNC_PATHS = (
     "update_queue/lease.json",
     "update_records/*.json",
 )
-REQUIRED_ROOT_DOCUMENTS = ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md")
+REQUIRED_ROOT_DOCUMENTS = (
+    "MEMORY.md",
+    "PURSUITS.md",
+    "PURSUIT_RULES.md",
+    "AGENT_CORRECTION_MEMORY_RULES.md",
+)
 GIT_TIMEOUT_SECONDS = 30
 RETRIEVE_SYNC_REFRESH_SECONDS = 5 * 60
 RETRIEVE_SYNC_FETCH_TIMEOUT_SECONDS = 2

@@ -6,19 +6,19 @@ from rightmemory.corrections import validate_corrections_markdown
 class CorrectionsMarkdownValidationTests(unittest.TestCase):
     def test_valid_collection_ignores_headings_inside_fences(self):
         text = """\
-# RightMemory Update Corrections
+# RightMemory Edit Corrections
 
 ## Stable paths
 
-### Background
+### Candidate ###
 
-The updater included snapshot values.
+The updater candidate included snapshot values.
 
 ### Proposed edit
 
 ```md
 ## This is evidence, not another entry
-### Background
+### Candidate
 ```
 
 ### Accepted edit
@@ -30,7 +30,7 @@ Keep only the stable path.
 
     def test_reports_missing_duplicate_and_unexpected_sections(self):
         text = """\
-# RightMemory Update Corrections
+# RightMemory Edit Corrections
 
 ## Bad entry
 
@@ -38,11 +38,11 @@ Keep only the stable path.
 
 x
 
-### Background
+### Candidate
 
 y
 
-### Background
+### Candidate
 
 z
 
@@ -54,21 +54,56 @@ extra
         errors = validate_corrections_markdown(text)
 
         self.assertTrue(any("missing `### Proposed edit`" in error for error in errors))
-        self.assertTrue(any("repeats `### Background`" in error for error in errors))
+        self.assertTrue(any("repeats `### Candidate`" in error for error in errors))
         self.assertTrue(any("unexpected `### Lesson`" in error for error in errors))
+
+    def test_rejects_legacy_glued_and_out_of_order_sections(self):
+        text = """\
+## Legacy and loose headings
+
+### Background
+legacy
+
+### Candidate#
+glued
+
+### Proposed edit
+proposed
+
+### Accepted edit
+accepted
+
+## Out of order
+
+### Accepted edit
+accepted
+
+### Candidate
+candidate
+
+### Proposed edit
+proposed
+"""
+
+        errors = validate_corrections_markdown(text)
+
+        self.assertTrue(any("unexpected `### Background`" in error for error in errors))
+        self.assertTrue(any("unexpected `### Candidate#`" in error for error in errors))
+        self.assertTrue(any("missing `### Candidate`" in error for error in errors))
+        self.assertTrue(any("sections must be ordered" in error for error in errors))
 
     def test_rejects_more_than_fifteen_entries(self):
         entry = """\
 ## Entry {number}
 
-### Background
+### Candidate
 a
 ### Proposed edit
 b
 ### Accepted edit
 c
 """
-        text = "# RightMemory Update Corrections\n\n" + "\n".join(
+        text = "# RightMemory Edit Corrections\n\n" + "\n".join(
             entry.format(number=index) for index in range(1, 17)
         )
 
@@ -80,7 +115,7 @@ c
         text = """\
 ## Empty proposal
 
-### Background
+### Candidate
 context
 
 ### Proposed edit

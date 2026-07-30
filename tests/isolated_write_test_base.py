@@ -38,7 +38,21 @@ class IsolatedWriteTestBase(unittest.TestCase):
             encoding="utf-8",
         )
         (cls._seed_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-        seed_git("add", "MEMORY.md", "PURSUITS.md")
+        (cls._seed_root / "PURSUIT_RULES.md").write_text(
+            "# Pursuit Rules\n",
+            encoding="utf-8",
+        )
+        (cls._seed_root / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
+            "# Agent Correction Memory Rules\n",
+            encoding="utf-8",
+        )
+        seed_git(
+            "add",
+            "MEMORY.md",
+            "PURSUITS.md",
+            "PURSUIT_RULES.md",
+            "AGENT_CORRECTION_MEMORY_RULES.md",
+        )
         seed_git("commit", "-m", "initial memory")
         cls._seed_head = seed_git("rev-parse", "HEAD")
 
@@ -98,11 +112,11 @@ class IsolatedWriteTestBase(unittest.TestCase):
         for index in range(count):
             entries.append(
                 f"## Entry {index}\n\n"
-                "### Background\n\nBackground.\n\n"
+                "### Candidate\n\nCandidate.\n\n"
                 "### Proposed edit\n\nProposed.\n\n"
                 "### Accepted edit\n\nAccepted.\n"
             )
-        return "# RightMemory Update Corrections\n\n" + "\n".join(entries)
+        return "# RightMemory Edit Corrections\n\n" + "\n".join(entries)
 
     def _assert_isolated_cleanup(self) -> None:
         worktrees = self._git("worktree", "list", "--porcelain")
