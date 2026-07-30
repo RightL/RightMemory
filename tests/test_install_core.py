@@ -109,7 +109,14 @@ class InstallCoreTests(unittest.TestCase):
                     "rightmemory reference edit-correction",
                 ):
                     self.assertIn(command, maintainer_text)
-                self.assertIn(str(root / "memory"), maintainer_text)
+                self.assertNotIn(str(root / "memory"), maintainer_text)
+                self.assertIn("`rightmemory status`", maintainer_text)
+                self.assertIn(
+                    "`rightmemory --profile <name> status`",
+                    maintainer_text,
+                )
+                self.assertIn("use the reported `root:`", maintainer_text)
+                self.assertIn("do not infer or guess it", maintainer_text)
                 self.assertIn("`Strongly recommended`", maintainer_text)
                 self.assertIn("wait for explicit approval", maintainer_text)
                 self.assertIn("dedicated temporary Git worktree", maintainer_text)
