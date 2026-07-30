@@ -22,11 +22,9 @@ from .semantic_operation import (
 )
 from .graph import MEMORY_DETAIL_FILE_RE, PURSUIT_DETAIL_FILE_RE
 from .tools import (
-    AGENT_CORRECTION_MEMORY_RULES_PATH,
     CORRECTIONS_PATH,
     FIXED_CORRECTION_COLLECTION_PATHS,
     INSIGHT_LOG_FILE_RE,
-    PURSUIT_RULES_PATH,
     SHARED_VIEW_DEFINITION_FILE_RE,
     SHARE_REGISTRY_PATH,
     SHARED_VIEW_REGISTRY_PATH,
@@ -43,11 +41,12 @@ ACTIVE_PURSUIT_WRITE_PATHS = ("PURSUITS.md", "PURSUIT_*.md")
 PROTECTED_RIGHTMEMORY_PATHS = (
     *ACTIVE_MEMORY_WRITE_PATHS,
     *ACTIVE_PURSUIT_WRITE_PATHS,
-    PURSUIT_RULES_PATH,
-    AGENT_CORRECTION_MEMORY_RULES_PATH,
     CORRECTIONS_PATH,
 )
 INSIGHT_WRITE_PATHS = ("insight_logs/*.md",)
+LEGACY_ROOT_REFERENCE_PATHS = frozenset(
+    {"PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"}
+)
 ROLE_SAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 TEMP_BRANCH_PREFIX = "rightmemory-isolated-"
 WORKTREE_LEASE_DIR = "worktree-leases"
@@ -604,7 +603,11 @@ class IsolatedWriteSupervisor:
 
     def _dirty_memory_files(self) -> list[str]:
         status = self._git_stdout(self.memory_root, "status", "--porcelain", "--", *self._write_paths())
-        return _porcelain_paths(status)
+        return [
+            path
+            for path in _porcelain_paths(status)
+            if path not in LEGACY_ROOT_REFERENCE_PATHS
+        ]
 
     def _write_paths(self) -> tuple[str, ...]:
         if self.role == "insight":
@@ -774,8 +777,6 @@ class IsolatedWriteSupervisor:
             or path in FIXED_CORRECTION_COLLECTION_PATHS
             or path
             in {
-                PURSUIT_RULES_PATH,
-                AGENT_CORRECTION_MEMORY_RULES_PATH,
                 CORRECTIONS_PATH,
                 SHARED_VIEW_REGISTRY_PATH,
                 SHARE_REGISTRY_PATH,
@@ -807,12 +808,7 @@ class IsolatedWriteSupervisor:
         if self.role == "sync-reconciler":
             return (
                 self._is_rightmemory_path(path)
-                or path
-                in {
-                    PURSUIT_RULES_PATH,
-                    AGENT_CORRECTION_MEMORY_RULES_PATH,
-                    CORRECTIONS_PATH,
-                }
+                or path == CORRECTIONS_PATH
                 or path in {SHARED_VIEW_REGISTRY_PATH, SHARE_REGISTRY_PATH}
                 or bool(SHARED_VIEW_DEFINITION_FILE_RE.fullmatch(path))
                 or bool(INSIGHT_LOG_FILE_RE.fullmatch(path))

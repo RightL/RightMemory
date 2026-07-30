@@ -61,8 +61,6 @@ SYNC_RECONCILER_ROLES = {"sync-reconciler"}
 SHARED_VIEW_BUILDER_ROLES = {"shared-view-builder"}
 INSIGHT_READ_PATHS = ("MEMORY.md", "MEMORY_*.md", "insight_logs/*.md")
 RETRIEVE_READ_PATHS = ("MEMORY.md", "MEMORY_*.md", "PURSUITS.md", "PURSUIT_*.md")
-PURSUIT_RULES_PATH = "PURSUIT_RULES.md"
-AGENT_CORRECTION_MEMORY_RULES_PATH = "AGENT_CORRECTION_MEMORY_RULES.md"
 CORRECTIONS_PATH = "corrections.md"
 FIXED_CORRECTION_COLLECTION_IDS = {
     "agent-corrections-design",
@@ -1399,12 +1397,7 @@ class MemoryTools:
         if self.role in SYNC_RECONCILER_ROLES:
             return (
                 self._is_active_rightmemory_path(relative_path)
-                or relative_path
-                in {
-                    PURSUIT_RULES_PATH,
-                    AGENT_CORRECTION_MEMORY_RULES_PATH,
-                    CORRECTIONS_PATH,
-                }
+                or relative_path == CORRECTIONS_PATH
                 or relative_path == SHARED_VIEW_REGISTRY_PATH
                 or relative_path == SHARE_REGISTRY_PATH
                 or self._is_shared_view_definition_path(relative_path)

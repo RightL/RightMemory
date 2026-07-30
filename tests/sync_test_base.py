@@ -74,19 +74,7 @@ class SyncTestBase(unittest.TestCase):
             cls._git(repo, "remote", "set-url", "origin", "../remote.git")
         (device / "MEMORY.md").write_text("# Domain\n\n- `one` first → []\n", encoding="utf-8")
         (device / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-        (device / "PURSUIT_RULES.md").write_text("# Pursuit Rules\n", encoding="utf-8")
-        (device / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
-            "# Agent Correction Memory Rules\n",
-            encoding="utf-8",
-        )
-        cls._git(
-            device,
-            "add",
-            "MEMORY.md",
-            "PURSUITS.md",
-            "PURSUIT_RULES.md",
-            "AGENT_CORRECTION_MEMORY_RULES.md",
-        )
+        cls._git(device, "add", "MEMORY.md", "PURSUITS.md")
         cls._git(device, "commit", "-m", "initial memory")
         cls._git(device, "push", "-u", "origin", "HEAD:main")
         cls._git(device, "branch", "--set-upstream-to", "origin/main")

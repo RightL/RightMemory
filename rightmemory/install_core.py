@@ -38,8 +38,7 @@ MEMORY_GITIGNORE = """\
 !MEMORY_*.md
 !PURSUITS.md
 !PURSUIT_*.md
-!PURSUIT_RULES.md
-!AGENT_CORRECTION_MEMORY_RULES.md
+PURSUIT_RULES.md
 !corrections.md
 !shared_views.toml
 !shares.toml
@@ -67,6 +66,16 @@ ROLE_PROMPTS = {
     "{{ROLE_PROMPT_DREAMER}}": "dreamer.md",
     "{{ROLE_PROMPT_REVIEWER}}": "reviewer.md",
 }
+LEGACY_ROOT_REFERENCE_FILES = (
+    "PURSUIT_RULES.md",
+    "AGENT_CORRECTION_MEMORY_RULES.md",
+)
+LEGACY_LOOSE_REFERENCE_SHA256 = {
+    "rightmemory-schema.md": "34d7aeb28bd49cb49f3ddc057ed12e964029a59d443704f0699081778b70598d",
+    "rightmemory-edit-correction-rules.md": (
+        "6c4a3bf3171d1cd4115d9f7ffbe136b1fcf540961e69c9b86fcc4563dd0e3286"
+    ),
+}
 
 
 class InstallError(RuntimeError):
@@ -79,6 +88,7 @@ class InstallTarget:
     has_head: bool
     missing_required: tuple[str, ...]
     invalid_required: tuple[str, ...]
+    legacy_references: tuple[str, ...] = ()
     git_layout_error: str | None = None
 
 
@@ -258,22 +268,21 @@ class Installer:
         missing: list[str] = []
         invalid: list[str] = []
         if kind == "existing":
-            for name in (
-                "MEMORY.md",
-                "PURSUITS.md",
-                "PURSUIT_RULES.md",
-                "AGENT_CORRECTION_MEMORY_RULES.md",
-            ):
+            for name in ("MEMORY.md", "PURSUITS.md"):
                 path = self.memory_root / name
                 if not os.path.lexists(path):
                     missing.append(name)
                 elif path.is_symlink() or not path.is_file():
                     invalid.append(name)
+        legacy_references = tuple(
+            name for name in LEGACY_ROOT_REFERENCE_FILES if os.path.lexists(self.memory_root / name)
+        )
         return InstallTarget(
             kind,
             has_head,
             tuple(sorted(missing)),
             tuple(sorted(invalid)),
+            legacy_references,
             git_layout_error,
         )
 
@@ -358,6 +367,13 @@ class Installer:
             )
         if target.kind != "existing":
             return
+        if target.legacy_references:
+            raise InstallError(
+                "existing RightMemory root contains legacy package-reference files: "
+                f"{', '.join(target.legacy_references)}\n"
+                "installation made no changes; these files are no longer read as root state. "
+                "Review any local changes, remove them explicitly, commit that removal, and rerun the installer"
+            )
         if target.missing_required or target.invalid_required:
             details: list[str] = []
             if target.missing_required:
@@ -373,30 +389,16 @@ class Installer:
         self.memory_root.mkdir(parents=True, exist_ok=True)
         memory_file = self.memory_root / "MEMORY.md"
         pursuits_file = self.memory_root / "PURSUITS.md"
-        rules_file = self.memory_root / "PURSUIT_RULES.md"
-        correction_rules_file = self.memory_root / "AGENT_CORRECTION_MEMORY_RULES.md"
         shutil.copyfile(self.repo_root / "MEMORY.example.md", memory_file)
         shutil.copyfile(self.repo_root / "PURSUITS.example.md", pursuits_file)
-        shutil.copyfile(self.repo_root / "PURSUIT_RULES.md", rules_file)
-        shutil.copyfile(
-            self.repo_root / "AGENT_CORRECTION_MEMORY_RULES.md",
-            correction_rules_file,
-        )
         gitignore = self.memory_root / ".gitignore"
         _write_utf8(gitignore, MEMORY_GITIGNORE)
         print(f"  [new]     {memory_file}  (from MEMORY.example.md)")
         print(f"  [new]     {pursuits_file}  (from PURSUITS.example.md)")
-        print(f"  [new]     {rules_file}")
-        print(f"  [new]     {correction_rules_file}")
         print(f"  [new]     {gitignore}  (memory allowlist)")
 
     def _preserve_existing_state(self) -> None:
-        for name in (
-            "MEMORY.md",
-            "PURSUITS.md",
-            "PURSUIT_RULES.md",
-            "AGENT_CORRECTION_MEMORY_RULES.md",
-        ):
+        for name in ("MEMORY.md", "PURSUITS.md"):
             print(f"  [keep]    {self.memory_root / name} already exists")
 
     def _ensure_memory_git(self) -> None:
@@ -438,10 +440,8 @@ class Installer:
         files.extend(
             path.name
             for path in sorted(self.memory_root.glob("PURSUIT_*.md"))
-            if path.is_file() and path.name != "PURSUIT_RULES.md"
+            if path.is_file()
         )
-        add("PURSUIT_RULES.md")
-        add("AGENT_CORRECTION_MEMORY_RULES.md")
         add("corrections.md")
         add("shared_views.toml")
         add("shares.toml")
@@ -574,15 +574,16 @@ class Installer:
     def _install_skills(self) -> None:
         for target in self.skills_targets:
             target.mkdir(parents=True, exist_ok=True)
-            schema = target / "rightmemory-schema.md"
-            shutil.copyfile(self.repo_root / "skills" / "rightmemory-schema.md", schema)
-            print(f"  [install] {schema}")
-            edit_correction_rules = target / "rightmemory-edit-correction-rules.md"
-            shutil.copyfile(
-                self.repo_root / "RIGHTMEMORY_EDIT_CORRECTION_RULES.md",
-                edit_correction_rules,
+            self._remove_old_loose_reference(
+                target,
+                "rightmemory-schema.md",
+                self.repo_root / "rightmemory" / "reference" / "rightmemory-schema.md",
             )
-            print(f"  [install] {edit_correction_rules}")
+            self._remove_old_loose_reference(
+                target,
+                "rightmemory-edit-correction-rules.md",
+                self.repo_root / "rightmemory" / "reference" / "RIGHTMEMORY_EDIT_CORRECTION_RULES.md",
+            )
             self._install_skill(
                 self.repo_root / "skills" / "memory-retriever-cli" / "SKILL.md",
                 "memory-retriever",
@@ -602,6 +603,25 @@ class Installer:
             self._remove_old_skill("memory-curator", target)
             self._remove_old_skill("memory-dreamer", target)
         print(f"  [skip]    generated role skills; {self.mode} mode uses rightmemory")
+
+    def _remove_old_loose_reference(self, target: Path, name: str, canonical: Path) -> None:
+        legacy = target / name
+        if not os.path.lexists(legacy):
+            return
+        if legacy.is_symlink() or not legacy.is_file():
+            print(f"  [skip]    {legacy} is not a managed regular reference; left untouched")
+            return
+        legacy_bytes = legacy.read_bytes()
+        known_legacy_hash = LEGACY_LOOSE_REFERENCE_SHA256[name]
+        if (
+            legacy_bytes != canonical.read_bytes()
+            and sha256(legacy_bytes.replace(b"\r\n", b"\n")).hexdigest()
+            != known_legacy_hash
+        ):
+            print(f"  [skip]    {legacy} differs from the canonical reference; left untouched")
+            return
+        legacy.unlink()
+        print(f"  [remove]  {legacy}  (superseded loose reference)")
 
     def _install_skill(self, source: Path, skill_name: str, target: Path) -> None:
         destination = target / skill_name / "SKILL.md"
@@ -730,8 +750,7 @@ class Installer:
         print("Re-run the installer any time you pull updates from the RightMemory repo;")
         print(
             "your existing MEMORY.md, MEMORY_*.md, PURSUITS.md, PURSUIT_*.md, "
-            "PURSUIT_RULES.md, AGENT_CORRECTION_MEMORY_RULES.md, corrections.md, "
-            "insight_logs/, and pending update queue are preserved."
+            "corrections.md, insight_logs/, and pending update queue are preserved."
         )
 
     def _git(self, *args: str) -> None:

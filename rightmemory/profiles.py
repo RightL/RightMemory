@@ -187,13 +187,6 @@ def initialize_memory_root(memory_root: Path, *, source_root: Path) -> None:
         (root / "MEMORY.md").write_text(_memory_example_text(), encoding="utf-8")
     if not (root / "PURSUITS.md").exists():
         (root / "PURSUITS.md").write_text(_pursuits_example_text(), encoding="utf-8")
-    if not (root / "PURSUIT_RULES.md").exists():
-        (root / "PURSUIT_RULES.md").write_text(_pursuit_rules_text(), encoding="utf-8")
-    if not (root / "AGENT_CORRECTION_MEMORY_RULES.md").exists():
-        (root / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
-            _agent_correction_memory_rules_text(),
-            encoding="utf-8",
-        )
     _ensure_memory_gitignore(root)
     _ensure_runtime_gitignore(root / ".runtime")
     _ensure_git_repo(root)
@@ -204,13 +197,9 @@ def initialize_memory_root(memory_root: Path, *, source_root: Path) -> None:
 
 
 def _looks_like_memory_root(path: Path) -> bool:
-    required = (
-        "MEMORY.md",
-        "PURSUITS.md",
-        "PURSUIT_RULES.md",
-        "AGENT_CORRECTION_MEMORY_RULES.md",
-    )
-    return all(
+    required = ("MEMORY.md", "PURSUITS.md")
+    legacy_references = ("PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md")
+    return not any(os.path.lexists(path / name) for name in legacy_references) and all(
         (path / name).is_file() and not (path / name).is_symlink()
         for name in required
     ) and (path / "insight_logs").is_dir()
@@ -238,24 +227,6 @@ def _pursuits_example_text() -> str:
     return resources.files("rightmemory").joinpath("PURSUITS.example.md").read_text(encoding="utf-8")
 
 
-def _pursuit_rules_text() -> str:
-    source_tree_rules = Path(__file__).resolve().parents[1] / "PURSUIT_RULES.md"
-    if source_tree_rules.exists():
-        return source_tree_rules.read_text(encoding="utf-8")
-    return resources.files("rightmemory").joinpath("PURSUIT_RULES.md").read_text(encoding="utf-8")
-
-
-def _agent_correction_memory_rules_text() -> str:
-    source_tree_rules = Path(__file__).resolve().parents[1] / "AGENT_CORRECTION_MEMORY_RULES.md"
-    if source_tree_rules.exists():
-        return source_tree_rules.read_text(encoding="utf-8")
-    return (
-        resources.files("rightmemory")
-        .joinpath("AGENT_CORRECTION_MEMORY_RULES.md")
-        .read_text(encoding="utf-8")
-    )
-
-
 def _ensure_git_repo(root: Path) -> None:
     if (root / ".git").is_dir():
         return
@@ -276,15 +247,10 @@ def _ensure_git_author(root: Path) -> None:
 def _ensure_initial_memory_commit(root: Path) -> None:
     if _git(root, "rev-parse", "--verify", "HEAD", check=False).returncode == 0:
         return
-    memory_files = [
-        "MEMORY.md",
-        "PURSUITS.md",
-        "PURSUIT_RULES.md",
-        "AGENT_CORRECTION_MEMORY_RULES.md",
-    ]
+    memory_files = ["MEMORY.md", "PURSUITS.md"]
     memory_files.extend(sorted(path.name for path in root.glob("MEMORY_*.md")))
     memory_files.extend(
-        sorted(path.name for path in root.glob("PURSUIT_*.md") if path.name != "PURSUIT_RULES.md")
+        sorted(path.name for path in root.glob("PURSUIT_*.md"))
     )
     if (root / "corrections.md").is_file():
         memory_files.append("corrections.md")

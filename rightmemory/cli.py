@@ -53,6 +53,7 @@ from .profiles import (
     resolve_memory_root,
     validate_profile_name,
 )
+from .reference import REFERENCE_FILES, read_reference
 from .platform import restart_current_process
 from .review import ReviewScanner, normalize_transcript
 from .runtime import (
@@ -80,7 +81,7 @@ from .shared_views import (
 from .share_results import format_share_operation_result
 from .shares import approve_share, create_share, join_share, list_shares, publish_share, revise_share, share_status
 from .status import collect_status, format_status_dashboard
-from .sync import REQUIRED_ROOT_DOCUMENTS, SyncManager
+from .sync import LEGACY_ROOT_REFERENCE_PATHS, REQUIRED_ROOT_DOCUMENTS, SyncManager
 from .tools import MemoryTools
 from .update_queue_git import (
     QUEUE_FINALIZER,
@@ -154,6 +155,10 @@ def _watch_failure_limit_reached(label: str, failures: int) -> bool:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     profile_name, argv = _parse_global_args(argv)
+    if argv and argv[0] == "reference":
+        if profile_name is not None:
+            raise ValueError("--profile is for memory commands, not product references")
+        return _reference_main(argv[1:])
     if argv and argv[0] == "profile":
         if profile_name is not None:
             raise ValueError("--profile is for runtime commands, not profile management")
@@ -304,6 +309,17 @@ def _top_level_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", help="named memory profile for runtime commands")
     parser.add_argument("role", nargs="?", choices=tuple(sorted(ROLES)), help="RightMemory runtime role")
     return parser
+
+
+def _reference_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="rightmemory reference",
+        description="Print one package-owned RightMemory reference",
+    )
+    parser.add_argument("name", choices=tuple(REFERENCE_FILES))
+    args = parser.parse_args(argv)
+    print(read_reference(args.name), end="")
+    return 0
 
 
 def _profile_main(argv: list[str]) -> int:
@@ -1369,6 +1385,11 @@ def _validate_main(argv: list[str], profile_name: str | None) -> int:
         for name in REQUIRED_ROOT_DOCUMENTS
         if (root / name).is_symlink() or not (root / name).is_file()
     ]
+    document_errors.extend(
+        f"legacy package reference must be removed from the root: {name}"
+        for name in sorted(LEGACY_ROOT_REFERENCE_PATHS)
+        if os.path.lexists(root / name)
+    )
     corrections_path = root / "corrections.md"
     if corrections_path.is_symlink() or (
         corrections_path.exists() and not corrections_path.is_file()

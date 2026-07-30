@@ -153,9 +153,9 @@ CLI-agent mode delegates role execution to Codex CLI or Claude Code CLI while pr
 .\install.ps1 --mode cli-agent ~\.rightmemory ~\.codex\skills
 ```
 
-Install creates semantic state only when bootstrapping a new root. A fresh root receives `MEMORY.md`, `PURSUITS.md`, `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`, and the tracked root `.gitignore` control-plane allowlist, then Git baselines the complete synchronized state. A complete pre-existing root is preserved byte-for-byte; reinstall may refresh package-owned runtime files and installed skills, but it does not refresh the allowlist or examples, synthesize missing semantic files, or migrate user state. A complete pre-existing Markdown root without Git history is committed exactly as found.
+Install creates semantic state only when bootstrapping a new root. A fresh root receives `MEMORY.md`, `PURSUITS.md`, and the tracked root `.gitignore` control-plane allowlist, then Git baselines the complete synchronized state. The schema and semantic rules live with the installed RightMemory package rather than in each Memory or skills root. A complete pre-existing root is preserved byte-for-byte; reinstall may refresh package-owned runtime files and installed skills, but it does not refresh the allowlist or examples, synthesize missing semantic files, or migrate user state. A complete pre-existing Markdown root without Git history is committed exactly as found.
 
-If an existing root has a Git commit or any recognized semantic state but lacks a regular, non-symlink required root document, install refuses it before making any change. The memory root, runtime installation, installed skills, and install stamp remain untouched so the user can perform an explicit, reviewed migration first. Fresh installs still baseline current semantic-upgrade notes, while a successful reinstall may report pending notes for a later Dreamer cycle without applying them. Legacy `MEMORY_*.md` files remain protected even when they are not currently reachable from `MEMORY.md`.
+If an existing root has a Git commit or any recognized semantic state but lacks a regular, non-symlink required root document, install refuses it before making any change. It also refuses legacy root copies named `PURSUIT_RULES.md` or `AGENT_CORRECTION_MEMORY_RULES.md`; review any local changes and remove those obsolete package references explicitly before reinstalling. The memory root, runtime installation, installed skills, and install stamp remain untouched so the user can perform an explicit, reviewed transition first. Fresh installs still baseline current semantic-upgrade notes, while a successful reinstall may report pending notes for a later Dreamer cycle without applying them. Legacy `MEMORY_*.md` files remain protected even when they are not currently reachable from `MEMORY.md`.
 
 Installer admission also validates any existing tracked update queue and checks
 for live async jobs from the pre-queue runtime. It changes nothing when either is
@@ -165,7 +165,7 @@ candidate identities during package installation.
 
 The memory root must be a standalone, non-bare Git working tree. An existing target nested inside another working tree, a bare repository, or an unusable `.git` entry is refused before installation writes anything.
 
-Reinstall replaces the superseded managed Memory-only orchestrator with the current three-skill surface; it does not keep an alias or a second behavior path. Removal is limited to content recognized as RightMemory-managed.
+Reinstall replaces the superseded managed Memory-only orchestrator with the current three-skill surface and removes exact managed copies of the former loose skills-root references. Modified loose files are left untouched. It does not keep an alias or a second behavior path.
 
 ### Profiles
 
@@ -214,7 +214,7 @@ RightMemory is one graph organized into two ordinary Markdown document trees:
 - `MEMORY.md` and `MEMORY_<id>.md` hold durable knowledge, context, preferences, decisions, constraints, and reusable guidance.
 - `PURSUITS.md` and `PURSUIT_<id>.md` hold live intent, Focus, current state, and next movements that should still shape future action.
 
-All addressable headings and nodes share one globally unique id namespace, and typed edges may cross between Memory and Pursuit. The trees differ by lifecycle, not graph membership. `PURSUIT_RULES.md` defines the additional Pursuit structure and maintenance judgment.
+All addressable headings and nodes share one globally unique id namespace, and typed edges may cross between Memory and Pursuit. The trees differ by lifecycle, not graph membership. The package-owned [Pursuit rules](rightmemory/reference/PURSUIT_RULES.md) define the additional structure and maintenance judgment.
 
 RightMemory parses this syntax once per operation into one canonical in-memory document index. Validation, structured retrieval, graph-aware tools, sync validation, and shared-view extraction all use that index for ids, hierarchy, F# expansion, backing references, source spans, and diagnostics. The index is rebuilt from the authoritative Markdown rather than persisted as a second database.
 
@@ -375,9 +375,9 @@ Tree nesting already expresses containment. Do not add edges from a child node t
 
 RightMemory separates corrections to general agent work from corrections to RightMemory edits.
 
-Reusable rejected/accepted evidence about ordinary agent work may be curated into the fixed Agent Correction Memory module: `MEMORY_agent-corrections-writing.md` for objections resolved by changing expression or presentation, and `MEMORY_agent-corrections-design.md` for objections that expression or presentation alone cannot resolve. `AGENT_CORRECTION_MEMORY_RULES.md` defines the module. Each collection is a priority-curated set of at most 15 compact items, not an append-only log or FIFO. Agents consult relevant correction evidence only after forming an initial draft or direction. Do not duplicate the same lesson in ordinary Agent Behavior or S# unless that representation adds distinct value.
+Reusable rejected/accepted evidence about ordinary agent work may be curated into the fixed Agent Correction Memory module: `MEMORY_agent-corrections-writing.md` for objections resolved by changing expression or presentation, and `MEMORY_agent-corrections-design.md` for objections that expression or presentation alone cannot resolve. The package-owned [Agent Correction Memory rules](rightmemory/reference/AGENT_CORRECTION_MEMORY_RULES.md) define the module. Each collection is a priority-curated set of at most 15 compact items, not an append-only log or FIFO. Agents consult relevant correction evidence only after forming an initial draft or direction. Do not duplicate the same lesson in ordinary Agent Behavior or S# unless that representation adds distinct value.
 
-Root `corrections.md` is synchronized feedback about edits to RightMemory, not Memory, graph content, or Agent Correction Memory. Each entry preserves the relevant candidate text, proposed edit, and accepted edit under [the edit-correction rules](RIGHTMEMORY_EDIT_CORRECTION_RULES.md); [the example](RIGHTMEMORY_EDIT_CORRECTIONS.example.md) illustrates the format. Candidate-backed updater outcomes retain their exact input under `update_records/`, while Git supplies the corresponding Memory/Pursuit diff.
+Root `corrections.md` is synchronized feedback about edits to RightMemory, not Memory, graph content, or Agent Correction Memory. Each entry preserves the relevant candidate text, proposed edit, and accepted edit under [the edit-correction rules](rightmemory/reference/RIGHTMEMORY_EDIT_CORRECTION_RULES.md); [the example](RIGHTMEMORY_EDIT_CORRECTIONS.example.md) illustrates the format. Candidate-backed updater outcomes retain their exact input under `update_records/`, while Git supplies the corresponding Memory/Pursuit diff.
 
 ## Agent Roles
 
@@ -561,7 +561,8 @@ The runtime is intentionally small:
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - Use `rightmemory status` for a read-only operational dashboard across the configured memory root. Its `Sync` section reports whether sync is configured, the upstream tracking reference, ahead/behind counts relative to the last-fetched upstream, and the latest recorded sync outcome. Sync watcher process state remains under `Managed Watches`. The dashboard also summarizes Git state, Dreamer and Insight trigger progress, async update queues, bounded last-message previews, and file paths for full logs or state. Status never fetches, pulls, pushes, starts watchers, invokes a model, or writes runtime state. Use `rightmemory watch status` when you need the lower-level managed-watch process view.
 - Use `rightmemory validate` for a read-only check of the configured root, or `rightmemory validate --root <path>` for an explicit root such as a maintenance worktree. It requires the canonical root documents, validates the complete Memory/Pursuit graph and `corrections.md`, and exits nonzero on failure.
-- A fresh-root install creates and baselines a tracked root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md`, optional root `corrections.md`, sharing metadata and provider view sources, `insight_logs/*.md`, immutable `update_records/*.json`, and the narrowly defined `update_queue/` JSON paths; generated shared-view output stays outside the committed surface. Reinstall preserves an existing allowlist exactly, so package changes reach existing roots only through an explicit synchronized commit.
+- A fresh-root install creates and baselines a tracked root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, optional root `corrections.md`, sharing metadata and provider view sources, `insight_logs/*.md`, immutable `update_records/*.json`, and the narrowly defined `update_queue/` JSON paths; generated shared-view output stays outside the committed surface. Reinstall preserves an existing allowlist exactly. Package reference changes arrive with the installed software rather than through Memory sync.
+- Use `rightmemory reference schema|pursuit|agent-correction|edit-correction` to print a canonical package-owned reference without resolving or reading a Memory root.
 - Async `update submit` calls for the same `--session` accumulate as pending candidates and reset that session's configured quiet period. Start and terminal candidates that reach the same batch are reconciled together, so already-finished work does not leave transient Pursuit state. A global worker batches whole session queues, but the updater groups candidates by the work they describe rather than treating a session as one task. `pull` and `undo` remain per-session. Retrieve can see pending evidence as `Recent submitted RightMemory` before consolidation.
 - Automatic unified-update, dreamer, insight, and pruner turns use isolated Git worktrees when they operate on the main state root. Runtime validates complete role-owned results before landing them. Transcript review remains read-only and queues any resulting candidate.
 - Standalone daemon context is preserved with Pydantic AI message history.
@@ -951,16 +952,17 @@ RightMemory/
 ├── install.ps1
 ├── MEMORY.example.md
 ├── PURSUITS.example.md
-├── PURSUIT_RULES.md
-├── AGENT_CORRECTION_MEMORY_RULES.md
-├── RIGHTMEMORY_EDIT_CORRECTION_RULES.md
 ├── RIGHTMEMORY_EDIT_CORRECTIONS.example.md
 ├── rightmemory/
 │   ├── install_core.py
 │   ├── platform.py
-│   └── prompts/
+│   ├── prompts/
+│   └── reference/
+│       ├── rightmemory-schema.md
+│       ├── PURSUIT_RULES.md
+│       ├── AGENT_CORRECTION_MEMORY_RULES.md
+│       └── RIGHTMEMORY_EDIT_CORRECTION_RULES.md
 └── skills/
-    ├── rightmemory-schema.md
     ├── maintain-rightmemory/SKILL.md
     ├── memory-retriever-cli/SKILL.md
     ├── rightmemory-orchestrator-cli/SKILL.md
@@ -978,8 +980,6 @@ After install:
 ├── MEMORY_<slug>.md
 ├── PURSUITS.md
 ├── PURSUIT_<slug>.md
-├── PURSUIT_RULES.md
-├── AGENT_CORRECTION_MEMORY_RULES.md
 ├── corrections.md              # created only when edit feedback is admitted
 ├── insight_logs/
 ├── update_records/             # immutable exact candidate batches
@@ -987,8 +987,6 @@ After install:
 └── .runtime/                   # machine-local runtime state
 
 ~/.codex/skills/
-├── rightmemory-schema.md
-├── rightmemory-edit-correction-rules.md
 ├── maintain-rightmemory/SKILL.md
 ├── memory-retriever/SKILL.md
 └── rightmemory-orchestrator/SKILL.md

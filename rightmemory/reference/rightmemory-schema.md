@@ -68,7 +68,7 @@ duplication.
 
 ## Memory Quality
 
-Good Memory is scoped, durable context that helps future agents act, decide, interpret, or retrieve. Live intent, current task state, and next actions belong in Pursuit and follow `PURSUIT_RULES.md`.
+Good Memory is scoped, durable context that helps future agents act, decide, interpret, or retrieve. Live intent, current task state, and next actions belong in Pursuit and follow the package-owned Pursuit rules supplied by the runtime.
 
 Project artifacts are the primary home of project-specific details and guidance.
 Compact, durably useful context is also good Memory when recovering it from
@@ -128,7 +128,7 @@ Clearly not good behavior memory:
 
 ## Agent Correction Memory
 
-Agent Correction Memory is a fixed Memory module consisting of the M# collections `agent-corrections-writing` and `agent-corrections-design`. Root `AGENT_CORRECTION_MEMORY_RULES.md` defines their semantics.
+Agent Correction Memory is a fixed Memory module consisting of the M# collections `agent-corrections-writing` and `agent-corrections-design`. The package-owned Agent Correction Memory rules supplied by the runtime define their semantics.
 
 ## Memory Skills
 

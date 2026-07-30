@@ -40,9 +40,5 @@ rightmemory = "rightmemory.cli:cli_main"
 packages = ["rightmemory"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"skills" = "rightmemory/skills"
 "MEMORY.example.md" = "rightmemory/MEMORY.example.md"
 "PURSUITS.example.md" = "rightmemory/PURSUITS.example.md"
-"PURSUIT_RULES.md" = "rightmemory/PURSUIT_RULES.md"
-"AGENT_CORRECTION_MEMORY_RULES.md" = "rightmemory/AGENT_CORRECTION_MEMORY_RULES.md"
-"RIGHTMEMORY_EDIT_CORRECTION_RULES.md" = "rightmemory/RIGHTMEMORY_EDIT_CORRECTION_RULES.md"

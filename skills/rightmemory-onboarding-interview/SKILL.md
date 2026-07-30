@@ -9,7 +9,7 @@ Run a short, evidence-aware interview that produces reviewable RightMemory draft
 
 ## Workflow
 
-1. Read `skills/rightmemory-schema.md` and `MEMORY.example.md` when available. Treat the schema as authoritative and the example as illustrative, never as user facts.
+1. Read `rightmemory/reference/rightmemory-schema.md` and `MEMORY.example.md` when available. Treat the schema as authoritative and the example as illustrative, never as user facts.
 2. Use the requested staging location, or `./tmp` by default. Do not overwrite a real memory root without explicit permission.
 3. If the user asks what the interview covers, give a compact preview before starting.
 4. Begin with the highest-yield question:

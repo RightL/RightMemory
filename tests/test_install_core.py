@@ -67,29 +67,48 @@ class InstallCoreTests(unittest.TestCase):
             root = Path(tempdir)
             targets = [root / "codex-skills", root / "claude-skills"]
             installer = Installer(REPO_ROOT, "standalone", root / "memory", targets)
+            for index, target in enumerate(targets):
+                target.mkdir()
+                current_schema = (
+                    REPO_ROOT / "rightmemory" / "reference" / "rightmemory-schema.md"
+                ).read_text(encoding="utf-8")
+                legacy_schema = current_schema.replace(
+                    "follow the package-owned Pursuit rules supplied by the runtime.",
+                    "follow `PURSUIT_RULES.md`.",
+                ).replace(
+                    "The package-owned Agent Correction Memory rules supplied by the runtime define their semantics.",
+                    "Root `AGENT_CORRECTION_MEMORY_RULES.md` defines their semantics.",
+                )
+                if index == 1:
+                    legacy_schema = legacy_schema.replace("\n", "\r\n")
+                (target / "rightmemory-schema.md").write_bytes(legacy_schema.encode("utf-8"))
+                (target / "rightmemory-edit-correction-rules.md").write_bytes(
+                    (
+                        REPO_ROOT
+                        / "rightmemory"
+                        / "reference"
+                        / "RIGHTMEMORY_EDIT_CORRECTION_RULES.md"
+                    ).read_bytes()
+                )
 
             with patch("builtins.print"):
                 installer._install_skills()
 
             for target in targets:
-                self.assertTrue((target / "rightmemory-schema.md").is_file())
-                edit_rules = target / "rightmemory-edit-correction-rules.md"
-                self.assertEqual(
-                    edit_rules.read_bytes(),
-                    (REPO_ROOT / "RIGHTMEMORY_EDIT_CORRECTION_RULES.md").read_bytes(),
-                )
+                self.assertFalse((target / "rightmemory-schema.md").exists())
+                self.assertFalse((target / "rightmemory-edit-correction-rules.md").exists())
                 self.assertTrue((target / "memory-retriever" / "SKILL.md").is_file())
                 self.assertTrue((target / "rightmemory-orchestrator" / "SKILL.md").is_file())
                 maintainer = (target / "maintain-rightmemory" / "SKILL.md")
                 self.assertTrue(maintainer.is_file())
                 maintainer_text = maintainer.read_text(encoding="utf-8")
-                for path in (
-                    f"{target}/rightmemory-schema.md",
-                    f"{target}/rightmemory-edit-correction-rules.md",
-                    "<root>/PURSUIT_RULES.md",
-                    "<root>/AGENT_CORRECTION_MEMORY_RULES.md",
+                for command in (
+                    "rightmemory reference schema",
+                    "rightmemory reference pursuit",
+                    "rightmemory reference agent-correction",
+                    "rightmemory reference edit-correction",
                 ):
-                    self.assertIn(path, maintainer_text)
+                    self.assertIn(command, maintainer_text)
                 self.assertNotIn(str(root / "memory"), maintainer_text)
                 self.assertIn("`rightmemory status`", maintainer_text)
                 self.assertIn(
@@ -115,6 +134,20 @@ class InstallCoreTests(unittest.TestCase):
                 self.assertNotIn("{{MEMORY_ROOT}}", maintainer_text)
                 self.assertNotIn("{{SKILLS_ROOT}}", maintainer_text)
 
+    def test_install_skills_preserves_modified_loose_reference(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            target = root / "skills"
+            target.mkdir()
+            legacy = target / "rightmemory-schema.md"
+            legacy.write_text("# User-owned reference\n", encoding="utf-8")
+            installer = Installer(REPO_ROOT, "standalone", root / "memory", [target])
+
+            with patch("builtins.print"):
+                installer._install_skills()
+
+            self.assertEqual(legacy.read_text(encoding="utf-8"), "# User-owned reference\n")
+
     def test_existing_install_preserves_semantic_state_byte_for_byte(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -129,10 +162,6 @@ class InstallCoreTests(unittest.TestCase):
                 "PURSUITS.md": (
                     "# User Pursuits\n\n## Continue {#continue}\n\nKeep this.\n\n"
                     "# Stale Release Readiness\n"
-                ),
-                "PURSUIT_RULES.md": "# Custom Rules\n\nKeep these rules.\n",
-                "AGENT_CORRECTION_MEMORY_RULES.md": (
-                    "# Agent Correction Memory Rules\n\nKeep these rules.\n"
                 ),
             }
             for name, text in files.items():
@@ -168,12 +197,7 @@ class InstallCoreTests(unittest.TestCase):
             root = Path(tempdir)
             memory_root = root / "memory"
             memory_root.mkdir()
-            for name in (
-                "MEMORY.md",
-                "PURSUITS.md",
-                "PURSUIT_RULES.md",
-                "AGENT_CORRECTION_MEMORY_RULES.md",
-            ):
+            for name in ("MEMORY.md", "PURSUITS.md"):
                 (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
             gitignore = b"*\r\n!MEMORY.md\r\n!custom-control-plane-entry\r\n"
             (memory_root / ".gitignore").write_bytes(gitignore)
@@ -196,8 +220,6 @@ class InstallCoreTests(unittest.TestCase):
                     ".gitignore",
                     "MEMORY.md",
                     "PURSUITS.md",
-                    "PURSUIT_RULES.md",
-                    "AGENT_CORRECTION_MEMORY_RULES.md",
                 ],
                 cwd=memory_root,
                 check=True,
@@ -263,8 +285,7 @@ class InstallCoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     InstallError,
                     "existing RightMemory root is incomplete: "
-                    "missing required files: AGENT_CORRECTION_MEMORY_RULES.md, "
-                    "PURSUITS.md, PURSUIT_RULES.md",
+                    "missing required files: PURSUITS.md",
                 ) as raised:
                     installer.run()
 
@@ -272,6 +293,34 @@ class InstallCoreTests(unittest.TestCase):
             self.assertEqual(_snapshot(memory_root), before_memory)
             self.assertEqual(_snapshot(skills_target), before_skills)
             self.assertEqual(_snapshot(runtime_home), before_runtime)
+
+    def test_existing_root_with_legacy_references_is_rejected_without_writes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            skills_target = root / "skills"
+            memory_root.mkdir()
+            (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+            (memory_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+            for name in ("PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"):
+                (memory_root / name).write_text(f"# Custom {name}\n", encoding="utf-8")
+            before = _snapshot(memory_root)
+            installer = Installer(REPO_ROOT, "cli-agent", memory_root, [skills_target])
+
+            with (
+                patch.object(installer, "_inspect_target_git", return_value=(True, None)),
+                patch.object(installer, "_print_layout"),
+            ):
+                with self.assertRaisesRegex(
+                    InstallError,
+                    "legacy package-reference files: "
+                    "PURSUIT_RULES.md, AGENT_CORRECTION_MEMORY_RULES.md",
+                ) as raised:
+                    installer.run()
+
+            self.assertIn("remove them explicitly", str(raised.exception))
+            self.assertEqual(_snapshot(memory_root), before)
+            self.assertFalse(skills_target.exists())
 
     def test_semantic_upgrade_failure_prevents_success_stamp_and_remaining_install(self):
         with tempfile.TemporaryDirectory() as tempdir:
