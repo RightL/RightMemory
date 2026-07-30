@@ -525,7 +525,7 @@ def _parse_document(
                 if anchor_kind == "F#" and document.family == "pursuit" and item_id.casefold() == "rules":
                     _add_error(
                         manifest,
-                        f"Pursuit F# id `{item_id}` is reserved for PURSUIT_RULES.md at "
+                        f"Pursuit F# id `{item_id}` remains reserved for the legacy root reference path at "
                         f"{_loc(manifest.root, item)}",
                         document.path,
                         line_number,

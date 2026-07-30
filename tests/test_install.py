@@ -184,14 +184,12 @@ class InstallScriptTests(unittest.TestCase):
 
             memory = (memory_root / "MEMORY.md").read_text(encoding="utf-8")
             pursuits = (memory_root / "PURSUITS.md").read_text(encoding="utf-8")
-            pursuit_rules = (memory_root / "PURSUIT_RULES.md").read_text(encoding="utf-8")
-            correction_rules = (
-                memory_root / "AGENT_CORRECTION_MEMORY_RULES.md"
-            ).read_text(encoding="utf-8")
             state = (memory_root / ".runtime" / "semantic-upgrades.json").read_text(encoding="utf-8")
             install_stamp_exists = (memory_root / ".runtime" / "install.stamp").exists()
             insight_logs_exists = (memory_root / "insight_logs").is_dir()
             dream_logs_exists = (memory_root / "dream_logs").exists()
+            pursuit_rules_exists = (memory_root / "PURSUIT_RULES.md").exists()
+            correction_rules_exists = (memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").exists()
 
         self.assertIn(EXAMPLE_START, memory)
         self.assertIn(EXAMPLE_END, memory)
@@ -199,8 +197,8 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("q-rightmemory-project-context", memory)
         self.assertIn(PURSUIT_EXAMPLE_START, pursuits)
         self.assertIn(PURSUIT_EXAMPLE_END, pursuits)
-        self.assertIn("# Pursuit Rules", pursuit_rules)
-        self.assertIn("# Agent Correction Memory Rules", correction_rules)
+        self.assertFalse(pursuit_rules_exists)
+        self.assertFalse(correction_rules_exists)
         self.assertIn("user-context-agent-behavior-split", state)
         self.assertIn("open-context-questions", state)
         self.assertTrue(install_stamp_exists)
@@ -238,8 +236,8 @@ class InstallScriptTests(unittest.TestCase):
 
             self.assertTrue((memory_root / "MEMORY.md").is_file())
             self.assertTrue((memory_root / "PURSUITS.md").is_file())
-            self.assertTrue((memory_root / "PURSUIT_RULES.md").is_file())
-            self.assertTrue((memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").is_file())
+            self.assertFalse((memory_root / "PURSUIT_RULES.md").exists())
+            self.assertFalse((memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").exists())
             self.assertIn("memory: initial baseline", self._git(memory_root, "log", "--oneline", "-1"))
             self.assertEqual(self._git(memory_root, "status", "--short"), "")
             self.assertIn("from MEMORY.example.md", result.stdout)
@@ -253,8 +251,6 @@ class InstallScriptTests(unittest.TestCase):
             expected = {
                 "MEMORY.md": b"# Existing Memory\n\xff\x00",
                 "PURSUITS.md": b"# Existing Pursuits\r\n",
-                "PURSUIT_RULES.md": b"# Existing Rules\n",
-                "AGENT_CORRECTION_MEMORY_RULES.md": b"# Existing Agent Correction Rules\n",
             }
             for name, content in expected.items():
                 (memory_root / name).write_bytes(content)
@@ -273,8 +269,6 @@ class InstallScriptTests(unittest.TestCase):
             memory_root.mkdir()
             (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
             (memory_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-            (memory_root / "PURSUIT_RULES.md").write_text("# Rules\n", encoding="utf-8")
-            (memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").write_text("# Agent Correction Rules\n", encoding="utf-8")
             (memory_root / "shared_views.toml").write_text(
                 '[connections.alice-auth-api]\ntype = "file"\nref = "rightmemory://mf/current"\n',
                 encoding="utf-8",
@@ -295,8 +289,6 @@ class InstallScriptTests(unittest.TestCase):
             memory_root.mkdir()
             (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
             (memory_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-            (memory_root / "PURSUIT_RULES.md").write_text("# Rules\n", encoding="utf-8")
-            (memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").write_text("# Agent Correction Rules\n", encoding="utf-8")
             (memory_root / "shares.toml").write_text(
                 '[shares.auth-api]\n'
                 'version = 1\n'
@@ -326,8 +318,6 @@ class InstallScriptTests(unittest.TestCase):
             memory_root.mkdir()
             (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
             (memory_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-            (memory_root / "PURSUIT_RULES.md").write_text("# Rules\n", encoding="utf-8")
-            (memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").write_text("# Agent Correction Rules\n", encoding="utf-8")
             candidate_uid = "a" * 32
             timestamp = datetime.now(UTC).isoformat()
             queue = UpdateQueueStore(memory_root)
@@ -362,8 +352,6 @@ class InstallScriptTests(unittest.TestCase):
             memory_root.mkdir()
             (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
             (memory_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-            (memory_root / "PURSUIT_RULES.md").write_text("# Rules\n", encoding="utf-8")
-            (memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").write_text("# Agent Correction Rules\n", encoding="utf-8")
             candidate = memory_root / "update_queue" / "candidates" / f"{'a' * 32}.json"
             candidate.parent.mkdir(parents=True)
             candidate.write_text("{not json\n", encoding="utf-8")
@@ -414,7 +402,7 @@ class InstallScriptTests(unittest.TestCase):
             memory_root = root / "memory"
             skills_target = root / "skills"
             memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"):
+            for name in ("MEMORY.md", "PURSUITS.md"):
                 (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
             state_path = memory_root / ".runtime" / "async" / "update" / "legacy-session.json"
             state_path.parent.mkdir(parents=True)
@@ -456,7 +444,7 @@ class InstallScriptTests(unittest.TestCase):
             memory_root = root / "memory"
             skills_target = root / "skills"
             memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"):
+            for name in ("MEMORY.md", "PURSUITS.md"):
                 (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
             state_path = memory_root / ".runtime" / "async" / "update" / "drained-session.json"
             state_path.parent.mkdir(parents=True)
@@ -484,7 +472,7 @@ class InstallScriptTests(unittest.TestCase):
             memory_root = root / "memory"
             skills_target = root / "skills"
             memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"):
+            for name in ("MEMORY.md", "PURSUITS.md"):
                 (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
             async_root = memory_root / ".runtime" / "async" / "update"
             async_root.parent.mkdir(parents=True)
@@ -512,7 +500,7 @@ class InstallScriptTests(unittest.TestCase):
                     memory_root = root / name / "memory"
                     skills_target = root / name / "skills"
                     memory_root.mkdir(parents=True)
-                    for required in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"):
+                    for required in ("MEMORY.md", "PURSUITS.md"):
                         (memory_root / required).write_text(f"# {required}\n", encoding="utf-8")
                     container = memory_root / relative
                     container.parent.mkdir(parents=True)
@@ -536,7 +524,7 @@ class InstallScriptTests(unittest.TestCase):
             memory_root = root / "memory"
             skills_target = root / "skills"
             memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"):
+            for name in ("MEMORY.md", "PURSUITS.md"):
                 (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
             state_path = memory_root / ".runtime" / "async" / "update" / "drained-session.json"
             state_path.parent.mkdir(parents=True)
@@ -569,7 +557,7 @@ class InstallScriptTests(unittest.TestCase):
             memory_root = root / "memory"
             skills_target = root / "skills"
             memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"):
+            for name in ("MEMORY.md", "PURSUITS.md"):
                 (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
             reservation = (
                 memory_root
@@ -618,7 +606,7 @@ class InstallScriptTests(unittest.TestCase):
             memory_root = root / "memory"
             skills_target = root / "skills"
             memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"):
+            for name in ("MEMORY.md", "PURSUITS.md"):
                 (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
             delivery = memory_root / ".runtime" / "review" / "deliveries" / "legacy.json"
             delivery.parent.mkdir(parents=True)
@@ -641,7 +629,7 @@ class InstallScriptTests(unittest.TestCase):
             memory_root = root / "memory"
             skills_target = root / "skills"
             memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"):
+            for name in ("MEMORY.md", "PURSUITS.md"):
                 (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
             batch_id = "review-batch"
             filename = hashlib.sha256(batch_id.encode("utf-8")).hexdigest() + ".json"
@@ -672,7 +660,7 @@ class InstallScriptTests(unittest.TestCase):
             memory_root = root / "memory"
             skills_target = root / "skills"
             memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"):
+            for name in ("MEMORY.md", "PURSUITS.md"):
                 (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
             batch_id = "review-batch"
             reviewed_at = "2026-07-20T00:00:00+00:00"
@@ -712,7 +700,7 @@ class InstallScriptTests(unittest.TestCase):
             memory_root = root / "memory"
             skills_target = root / "skills"
             memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"):
+            for name in ("MEMORY.md", "PURSUITS.md"):
                 (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
             reviewed_at = "2026-07-20T00:00:00+00:00"
             delivery = memory_root / ".runtime" / "review" / "deliveries" / "wrong.json"
@@ -753,7 +741,7 @@ class InstallScriptTests(unittest.TestCase):
             memory_root = root / "memory"
             skills_target = root / "skills"
             memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md", "PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"):
+            for name in ("MEMORY.md", "PURSUITS.md"):
                 (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
             external = root / "external-deliveries"
             external.mkdir()
@@ -827,8 +815,7 @@ class InstallScriptTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("existing RightMemory root is incomplete", result.stderr)
             self.assertIn(
-                "missing required files: AGENT_CORRECTION_MEMORY_RULES.md, "
-                "PURSUITS.md, PURSUIT_RULES.md",
+                "missing required files: PURSUITS.md",
                 result.stderr,
             )
             self.assertIn("installation made no changes", result.stderr)
@@ -852,11 +839,6 @@ class InstallScriptTests(unittest.TestCase):
                     skills_target = root / case / "skills"
                     memory_root.mkdir(parents=True)
                     (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-                    (memory_root / "PURSUIT_RULES.md").write_text("# Rules\n", encoding="utf-8")
-                    (memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
-                        "# Agent Correction Rules\n",
-                        encoding="utf-8",
-                    )
                     pursuits = memory_root / "PURSUITS.md"
                     if case == "directory":
                         pursuits.mkdir()
@@ -945,8 +927,6 @@ class InstallScriptTests(unittest.TestCase):
                 "MEMORY_detail.md": b"detail\n",
                 "PURSUITS.md": b"# Custom Pursuits\n",
                 "PURSUIT_work.md": b"work\r\n",
-                "PURSUIT_RULES.md": b"# Custom Rules\n",
-                "AGENT_CORRECTION_MEMORY_RULES.md": b"# Custom Agent Correction Rules\n",
                 "corrections.md": b"# Corrections\n",
                 "shared_views.toml": b"[connections]\n",
                 "shares.toml": b"[shares]\n",
@@ -981,7 +961,6 @@ class InstallScriptTests(unittest.TestCase):
                 b"*\r\n"
                 b"!MEMORY.md\r\n"
                 b"!PURSUITS.md\r\n"
-                b"!PURSUIT_RULES.md\r\n"
                 b"!local-control-plane-entry\r\n"
             )
             (memory_root / ".gitignore").write_bytes(custom_gitignore)
@@ -1023,8 +1002,7 @@ class InstallScriptTests(unittest.TestCase):
             "!MEMORY_*.md\n"
             "!PURSUITS.md\n"
             "!PURSUIT_*.md\n"
-            "!PURSUIT_RULES.md\n"
-            "!AGENT_CORRECTION_MEMORY_RULES.md\n"
+            "PURSUIT_RULES.md\n"
             "!corrections.md\n"
             "!shared_views.toml\n"
             "!shares.toml\n"
@@ -1057,9 +1035,6 @@ class InstallScriptTests(unittest.TestCase):
             retriever = (skills_target / "memory-retriever" / "SKILL.md").read_text(encoding="utf-8")
             orchestrator = (skills_target / "rightmemory-orchestrator" / "SKILL.md").read_text(encoding="utf-8")
             maintainer = (skills_target / "maintain-rightmemory" / "SKILL.md").read_text(encoding="utf-8")
-            edit_correction_rules = (
-                skills_target / "rightmemory-edit-correction-rules.md"
-            ).read_text(encoding="utf-8")
             install_stamp = (memory_root / ".runtime" / "install.stamp").read_text(encoding="utf-8")
             wrapper = (root / "home" / ".local" / "bin" / "rightmemory").read_text(encoding="utf-8")
             installed_skill_directories = sorted(path.name for path in skills_target.iterdir() if path.is_dir())
@@ -1087,11 +1062,8 @@ class InstallScriptTests(unittest.TestCase):
         self.assertNotIn("standalone runtime", orchestrator)
         self.assertIn("user explicitly asks the current agent", maintainer)
         self.assertIn(str(memory_root), maintainer)
-        self.assertIn("<root>/AGENT_CORRECTION_MEMORY_RULES.md", maintainer)
-        self.assertIn(
-            f"{skills_target}/rightmemory-edit-correction-rules.md",
-            maintainer,
-        )
+        self.assertIn("rightmemory reference schema", maintainer)
+        self.assertIn("rightmemory reference edit-correction", maintainer)
         self.assertIn("user-specified root or profile", maintainer)
         self.assertIn("Never call `rightmemory update`, submit candidates", maintainer)
         self.assertIn("`Strongly recommended`", maintainer)
@@ -1103,7 +1075,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("rightmemory validate --root <worktree>", maintainer)
         self.assertIn("rightmemory validate --root <root>", maintainer)
         self.assertIn("push when sync is configured", maintainer)
-        self.assertIn("# RightMemory Edit Correction Rules", edit_correction_rules)
+        self.assertFalse((skills_target / "rightmemory-edit-correction-rules.md").exists())
         self.assertEqual(
             installed_skill_directories,
             ["maintain-rightmemory", "memory-retriever", "rightmemory-orchestrator"],
@@ -1152,7 +1124,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(refreshed_pursuits.count(PURSUIT_EXAMPLE_START), 1)
         self.assertEqual(refreshed_pursuits.count(PURSUIT_EXAMPLE_END), 1)
 
-    def test_rerun_preserves_unmanaged_pursuit_and_rules_files(self):
+    def test_rerun_refuses_legacy_root_references_without_mutation(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
@@ -1166,11 +1138,16 @@ class InstallScriptTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self._install(memory_root, skills_target)
+            before = self._snapshot(memory_root)
+            result = self._run_install(memory_root, skills_target, check=False)
 
             pursuits = (memory_root / "PURSUITS.md").read_text(encoding="utf-8")
             rules = (memory_root / "PURSUIT_RULES.md").read_text(encoding="utf-8")
+            after = self._snapshot(memory_root)
 
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("legacy package-reference files", result.stderr)
+        self.assertEqual(after, before)
         self.assertEqual(pursuits, "# User Pursuits\n\nDo not replace.\n")
         self.assertEqual(rules, "# Custom Rules\n\nDo not replace.\n")
 
@@ -1189,11 +1166,6 @@ class InstallScriptTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (memory_root / "PURSUITS.md").write_text("# Existing Pursuits\n", encoding="utf-8")
-            (memory_root / "PURSUIT_RULES.md").write_text("# Existing Rules\n", encoding="utf-8")
-            (memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
-                "# Existing Agent Correction Rules\n",
-                encoding="utf-8",
-            )
             expected = (memory_root / "MEMORY.md").read_bytes()
 
             self._install(memory_root, skills_target)
@@ -1225,13 +1197,11 @@ class InstallScriptTests(unittest.TestCase):
             home = root / "home"
             self.assertTrue((home / ".rightmemory" / "MEMORY.md").exists())
             self.assertTrue((home / ".rightmemory" / "PURSUITS.md").exists())
-            self.assertTrue((home / ".rightmemory" / "PURSUIT_RULES.md").exists())
-            self.assertTrue(
-                (home / ".rightmemory" / "AGENT_CORRECTION_MEMORY_RULES.md").exists()
-            )
+            self.assertFalse((home / ".rightmemory" / "PURSUIT_RULES.md").exists())
+            self.assertFalse((home / ".rightmemory" / "AGENT_CORRECTION_MEMORY_RULES.md").exists())
             self.assertTrue((home / ".rightmemory" / ".runtime" / "install.stamp").exists())
             for target in (home / ".codex" / "skills", home / ".claude" / "skills"):
-                self.assertTrue((target / "rightmemory-edit-correction-rules.md").exists())
+                self.assertFalse((target / "rightmemory-edit-correction-rules.md").exists())
                 self.assertTrue((target / "maintain-rightmemory" / "SKILL.md").exists())
                 self.assertTrue((target / "memory-retriever" / "SKILL.md").exists())
                 self.assertTrue((target / "rightmemory-orchestrator" / "SKILL.md").exists())
@@ -1336,11 +1306,6 @@ class InstallScriptTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (memory_root / "PURSUITS.md").write_text("# Existing Pursuits\n", encoding="utf-8")
-            (memory_root / "PURSUIT_RULES.md").write_text("# Existing Rules\n", encoding="utf-8")
-            (memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
-                "# Existing Agent Correction Rules\n",
-                encoding="utf-8",
-            )
 
             result = self._install(memory_root, skills_target)
             state_exists = (memory_root / ".runtime" / "semantic-upgrades.json").exists()
