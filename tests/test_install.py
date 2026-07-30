@@ -1086,13 +1086,16 @@ class InstallScriptTests(unittest.TestCase):
         self.assertNotIn("standalone mode", orchestrator)
         self.assertNotIn("standalone runtime", orchestrator)
         self.assertIn("user explicitly asks the current agent", maintainer)
-        self.assertIn(str(memory_root), maintainer)
+        self.assertNotIn(str(memory_root), maintainer)
         self.assertIn("<root>/AGENT_CORRECTION_MEMORY_RULES.md", maintainer)
         self.assertIn(
             f"{skills_target}/rightmemory-edit-correction-rules.md",
             maintainer,
         )
-        self.assertIn("user-specified root or profile", maintainer)
+        self.assertIn("`rightmemory status`", maintainer)
+        self.assertIn("`rightmemory --profile <name> status`", maintainer)
+        self.assertIn("use the reported `root:`", maintainer)
+        self.assertIn("do not infer or guess it", maintainer)
         self.assertIn("Never call `rightmemory update`, submit candidates", maintainer)
         self.assertIn("`Strongly recommended`", maintainer)
         self.assertIn("wait for explicit approval", maintainer)

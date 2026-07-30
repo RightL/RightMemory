@@ -86,11 +86,18 @@ class InstallCoreTests(unittest.TestCase):
                 for path in (
                     f"{target}/rightmemory-schema.md",
                     f"{target}/rightmemory-edit-correction-rules.md",
-                    str(root / "memory"),
                     "<root>/PURSUIT_RULES.md",
                     "<root>/AGENT_CORRECTION_MEMORY_RULES.md",
                 ):
                     self.assertIn(path, maintainer_text)
+                self.assertNotIn(str(root / "memory"), maintainer_text)
+                self.assertIn("`rightmemory status`", maintainer_text)
+                self.assertIn(
+                    "`rightmemory --profile <name> status`",
+                    maintainer_text,
+                )
+                self.assertIn("use the reported `root:`", maintainer_text)
+                self.assertIn("do not infer or guess it", maintainer_text)
                 self.assertIn("`Strongly recommended`", maintainer_text)
                 self.assertIn("wait for explicit approval", maintainer_text)
                 self.assertIn("dedicated temporary Git worktree", maintainer_text)
