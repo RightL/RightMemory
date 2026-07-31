@@ -99,6 +99,12 @@ class InstallCoreTests(unittest.TestCase):
                 self.assertFalse((target / "rightmemory-edit-correction-rules.md").exists())
                 self.assertTrue((target / "memory-retriever" / "SKILL.md").is_file())
                 self.assertTrue((target / "rightmemory-orchestrator" / "SKILL.md").is_file())
+                retriever_text = (target / "memory-retriever" / "SKILL.md").read_text(encoding="utf-8")
+                orchestrator_text = (target / "rightmemory-orchestrator" / "SKILL.md").read_text(encoding="utf-8")
+                for skill_text in (retriever_text, orchestrator_text):
+                    self.assertIn("rightmemory agent-corrections writing", skill_text)
+                    self.assertIn("rightmemory agent-corrections design", skill_text)
+                    self.assertIn("do not run both by default", skill_text)
                 maintainer = (target / "maintain-rightmemory" / "SKILL.md")
                 self.assertTrue(maintainer.is_file())
                 maintainer_text = maintainer.read_text(encoding="utf-8")

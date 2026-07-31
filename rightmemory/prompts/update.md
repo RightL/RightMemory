@@ -39,7 +39,7 @@
 
 - An explicit correction to ordinary agent work may be reusable evidence. Preserve the concrete rejected/accepted contrast only when it will improve future second-pass review.
 - A correction belongs in `MEMORY_agent-corrections-writing.md` when changing expression or presentation would resolve the objection; otherwise it belongs in `MEMORY_agent-corrections-design.md`.
-- Maintain these as the two fixed M# collections named `agent-corrections-writing` and `agent-corrections-design`; ensure their headings remain reachable from Memory and do not create project- or tool-specific correction files.
+- Maintain these as the two fixed M# collections named `agent-corrections-writing` and `agent-corrections-design`; do not add or retain headings for them in `MEMORY.md`, and do not create project- or tool-specific correction files.
 - Do not duplicate the same lesson in Agent Behavior or S# unless that representation adds distinct value.
 - A represented pattern should improve or merge with its existing item. Admit a distinct pattern only when sufficiently reusable; when a 15-item collection is full, replace an existing item only if the new evidence is more important.
 - Judge importance by likely recurrence, cost when repeated, applicability across future tasks, strength of the user's correction, and how fully existing guidance already covers the pattern. Fifteen is a ceiling, not a quota or an automatic eviction trigger.

@@ -3328,6 +3328,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("Agent Correction Memory rules:", instructions)
         self.assertIn("MEMORY_agent-corrections-writing.md", instructions)
         self.assertIn("MEMORY_agent-corrections-design.md", instructions)
+        self.assertIn("fixed M# collections", instructions)
+        self.assertIn("do not add or retain headings for them in `MEMORY.md`", instructions)
+        self.assertNotIn("headings remain reachable from Memory", instructions)
         self.assertIn("corrections.md", instructions)
         self.assertIn("15", instructions)
         self.assertIn("MEMORY.md", instructions)
@@ -3891,6 +3894,15 @@ class RuntimeTests(unittest.TestCase):
 
 
 class PromptTests(unittest.TestCase):
+    def test_retrieve_prompt_does_not_expand_agent_corrections_through_memory(self):
+        for build in (build_instructions, build_cli_agent_instructions):
+            with self.subTest(builder=build.__name__):
+                prompt = build(Path("/memory"), "retrieve")
+                self.assertNotIn(
+                    "Writing and Design correction M# collections are second-pass evidence",
+                    prompt,
+                )
+
     def test_cli_agent_prompt_assembles_without_standalone_tools(self):
         for role in (
             "dreamer",

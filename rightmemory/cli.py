@@ -195,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
         return _sync_main(argv[1:], memory_root)
     if argv and argv[0] == "doctor":
         return _doctor_main(argv[1:], memory_root)
+    if argv and argv[0] == "agent-corrections":
+        return _agent_corrections_main(argv[1:], memory_root)
     if argv and argv[0] == "status":
         return _status_main(argv[1:], memory_root)
     if argv and argv[0] == "prune":
@@ -1360,6 +1362,21 @@ def _status_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory status")
     parser.parse_args(argv)
     print(format_status_dashboard(collect_status(memory_root)))
+    return 0
+
+
+def _agent_corrections_main(argv: list[str], memory_root: Path) -> int:
+    parser = argparse.ArgumentParser(
+        prog="rightmemory agent-corrections",
+        description="Print one fixed Agent Correction Memory collection",
+    )
+    parser.add_argument("collection", choices=("writing", "design"))
+    args = parser.parse_args(argv)
+    filename = f"MEMORY_agent-corrections-{args.collection}.md"
+    path = memory_root / filename
+    if not path.is_file():
+        raise FileNotFoundError(f"agent correction collection not found: {filename}")
+    print(path.read_text(encoding="utf-8"), end="")
     return 0
 
 

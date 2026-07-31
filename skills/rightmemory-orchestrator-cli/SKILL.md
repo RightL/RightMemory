@@ -16,7 +16,7 @@ description: "Use when the user explicitly chooses full RightMemory orchestratio
 - Describe the context needed from the user's intent instead of blindly forwarding the user's message.
 - For factual, project, or domain context, retrieve when the conversation lacks background needed to work well; skip retrieval when the request is self-contained.
 - Retrieve preference, workflow, and behavior guidance more proactively when it will shape collaboration, implementation, verification, communication, or completion choices. Treat phase and topic changes as strong triggers.
-- Writing and Design correction M# collections are an exception: unless the user asks for them directly, retrieve their full contents only after an initial draft, design, or implementation direction exists.
+- Agent Correction Memory is second-pass evidence. Unless the user asks for it directly, wait until an initial draft, design, or implementation direction exists; then use `rightmemory agent-corrections writing` for expression or presentation review, or `rightmemory agent-corrections design` for reasoning, decisions, actions, or behavior. Run only the relevant command; do not run both by default.
 - Give the retrieve command up to 3 minutes to return. Await or poll that command; do not run a separate blocking wait, explore files, or advance the task while it is pending.
 - The retriever skips unchanged content already returned in this session. When the user needs matching content repeated, add `--include-returned` for that call; do not change the session id.
 - Treat Memory as durable context and Pursuit as live intent or continuity. Retrieval output is authoritative source Markdown selected by the model and rendered by RightMemory, not a model-written summary.
