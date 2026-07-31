@@ -508,6 +508,8 @@ rightmemory insight watch
 rightmemory prune
 rightmemory prune watch
 rightmemory history --session <agent-session-id> "find pruned memory about the old setup"
+rightmemory agent-corrections writing
+rightmemory agent-corrections design
 rightmemory agent-cli cleanup --once
 rightmemory shared-view list
 rightmemory shared-view build-file <view-id> "intent" --title "View Title" --hub-url <url> --credential-id <id>

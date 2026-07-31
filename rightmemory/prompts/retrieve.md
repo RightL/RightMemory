@@ -48,7 +48,6 @@ Standalone supplies this contract as the terminal output type. CLI-agent must em
 - Use `read_markdown` for relevant M# free-form evidence, then select line ranges.
 - Use `read_skill` when the complete S# instruction is needed; never select a partial skill.
 - Use `read_mf(mf_id)` for the canonical mirrored document and its available typed resource ids. Use `read_mf(mf_id, resource_id)` to inspect a referenced F#, M#, or S# resource.
-- Writing and Design correction M# collections are second-pass evidence. Expand them only when the query specifically needs that evidence.
 - Selecting a local M#, S#, MF#, or MQ# heading does not automatically select linked content.
 - For MQ#, select the local graph id when its relationship context is relevant. Do not call a provider, invent a question, or imply an answer exists.
 - Recent submitted candidates are unsettled evidence, not Memory or Pursuit. Select a candidate only when that status and content are relevant.

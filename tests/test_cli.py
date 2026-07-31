@@ -2498,6 +2498,61 @@ class JsonRequestTests(unittest.TestCase):
         collect_status.assert_called_once_with(Path("/memory/root"))
         self.assertEqual(stdout.getvalue().strip(), dashboard)
 
+    def test_main_agent_corrections_prints_only_the_selected_collection(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            collections = {
+                "writing": (
+                    "MEMORY_agent-corrections-writing.md",
+                    "# Writing corrections\n\nWriting evidence.\n",
+                ),
+                "design": (
+                    "MEMORY_agent-corrections-design.md",
+                    "# Design corrections\n\nDesign evidence.\n",
+                ),
+            }
+            for filename, content in collections.values():
+                (root / filename).write_text(content, encoding="utf-8")
+
+            for collection, (_, expected) in collections.items():
+                with (
+                    self.subTest(collection=collection),
+                    patch("rightmemory.cli.default_memory_root", return_value=Path("/default")),
+                    patch(
+                        "rightmemory.cli.resolve_memory_root",
+                        return_value=SimpleNamespace(memory_root=root),
+                    ) as resolve_memory_root,
+                    patch("sys.stdout", new_callable=io.StringIO) as stdout,
+                ):
+                    result = main(["--profile", "work", "agent-corrections", collection])
+
+                self.assertEqual(result, 0)
+                self.assertEqual(stdout.getvalue(), expected)
+                resolve_memory_root.assert_called_once_with(
+                    profile_name="work",
+                    cwd=Path.cwd(),
+                    default_root=Path("/default"),
+                )
+
+    def test_cli_main_agent_corrections_reports_a_missing_collection(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch(
+                    "rightmemory.cli.resolve_memory_root",
+                    return_value=SimpleNamespace(memory_root=root),
+                ),
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                result = cli_main(["agent-corrections", "writing"])
+
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "error: agent correction collection not found: "
+            "MEMORY_agent-corrections-writing.md\n",
+        )
+
     def test_main_reference_prints_package_owned_reference_without_resolving_root(self):
         with (
             patch(
