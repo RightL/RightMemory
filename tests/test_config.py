@@ -900,6 +900,9 @@ class ConfigTests(unittest.TestCase):
         instructions = build_instructions(Path("/memory"), "retrieve")
 
         self.assertIn("supplies a daily snapshot", instructions)
+        self.assertIn("stored source content is relevant", instructions)
+        self.assertNotIn("strongly relevant", instructions)
+        self.assertIn("no relevant match", instructions)
         self.assertIn("MEMORY.md", instructions)
         self.assertIn("PURSUITS.md", instructions)
         self.assertIn("read_detail", instructions)

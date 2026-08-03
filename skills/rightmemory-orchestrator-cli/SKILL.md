@@ -16,12 +16,14 @@ description: "Use when the user explicitly chooses full RightMemory orchestratio
 - Describe the context needed from the user's intent instead of blindly forwarding the user's message.
 - For factual, project, or domain context, retrieve when the conversation lacks background needed to work well; skip retrieval when the request is self-contained.
 - Retrieve preference, workflow, and behavior guidance more proactively when it will shape collaboration, implementation, verification, communication, or completion choices. Treat phase and topic changes as strong triggers.
-- Agent Correction Memory is second-pass evidence. Unless the user asks for it directly, wait until an initial draft, design, or implementation direction exists; then use `rightmemory agent-corrections writing` for expression or presentation review, or `rightmemory agent-corrections design` for reasoning, decisions, actions, or behavior. Run only the relevant command; do not run both by default.
+- Before drafting, designing, or implementing, review Agent Correction Memory. Use `rightmemory agent-corrections writing` for expression or presentation, or `rightmemory agent-corrections design` for reasoning, decisions, actions, or behavior. Run only the relevant command; do not run both by default.
 - Give the retrieve command up to 3 minutes to return. Await or poll that command; do not run a separate blocking wait, explore files, or advance the task while it is pending.
 - The retriever skips unchanged content already returned in this session. When the user needs matching content repeated, add `--include-returned` for that call; do not change the session id.
 - Treat Memory as durable context and Pursuit as live intent or continuity. Retrieval output is authoritative source Markdown selected by the model and rendered by RightMemory, not a model-written summary.
 - A selected F# heading includes its parsed detail subtree. A local M#, S#, or MF# heading does not by itself expand linked content; local M# evidence uses source ranges and local S# expands only as a complete instruction. Imported MF# graph content uses ids scoped to `MF#<view-id>`, including F# detail items; direct MF ranges are invalid. Imported M# ranges and complete S# instructions use qualified sources such as `MF#<view-id>/M#<id>` and `MF#<view-id>/S#<id>`.
-- Apply retrieved guidance when the fit is clear. If it is stale, wrong, too broad, or misleading, include the correction in the next candidate.
+- Returned content may include weaker matches. Apply only what fits.
+- Briefly tell the user which guidance you decide to follow as it becomes relevant.
+- If retrieved guidance is stale, wrong, too broad, or misleading, include the correction in the next candidate.
 - Treat retrieved open-context questions as questions rather than facts. If current task context already answers one, include its id and answer in the next candidate; do not investigate solely because it appeared.
 - Treat `Provider question context` for an `MQ#` heading as an optional external ask opportunity. When it would materially help, call `rightmemory shared-view ask <mq-id> "<question>"` using the actual task context. If unavailable, continue with local context and tell the user.
 

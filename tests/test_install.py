@@ -1048,6 +1048,8 @@ class InstallScriptTests(unittest.TestCase):
         self.assertNotIn("rightmemory update submit", retriever)
         self.assertIn("user explicitly chooses full RightMemory orchestration", orchestrator)
         self.assertIn("rightmemory retrieve --session <stable-session-id>", orchestrator)
+        self.assertIn("Returned content may include weaker matches", orchestrator)
+        self.assertIn("briefly tell the user which retrieved requirements", orchestrator)
         self.assertIn("rightmemory update submit --session <stable-session-id>", orchestrator)
         self.assertIn("including initially small work", orchestrator)
         self.assertIn("open-context questions", orchestrator)
