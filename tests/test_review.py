@@ -385,7 +385,7 @@ class ReviewScannerTests(unittest.TestCase):
 
             with (
                 patch.object(scanner.update_store, "_start_worker_if_needed"),
-                patch.object(scanner.state_store, "save", side_effect=OSError("state write failed")),
+                patch.object(scanner.state_store, "mark_reviewed", side_effect=OSError("state write failed")),
             ):
                 with self.assertRaisesRegex(OSError, "state write failed"):
                     scanner.scan_once(now=10_000)
@@ -513,7 +513,7 @@ class ReviewScannerTests(unittest.TestCase):
             )
 
             with patch.object(scanner.update_store, "_start_worker_if_needed"):
-                with patch.object(scanner.state_store, "save", side_effect=OSError("state write failed")):
+                with patch.object(scanner.state_store, "mark_reviewed", side_effect=OSError("state write failed")):
                     with self.assertRaisesRegex(OSError, "state write failed"):
                         scanner.scan_once(now=10_000)
 

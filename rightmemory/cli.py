@@ -55,7 +55,7 @@ from .profiles import (
 )
 from .reference import REFERENCE_FILES, read_reference
 from .platform import restart_current_process
-from .review import ReviewScanner, normalize_transcript
+from .review import ReviewScanner, ReviewSessionState, ReviewStateStore, normalize_transcript
 from .runtime import (
     AUTOMATIC_WRITE_ROLES,
     STATE_EFFECT,
@@ -1281,10 +1281,29 @@ def _review_main(argv: list[str], memory_root: Path) -> int:
     normalize = subparsers.add_parser("normalize", help="print normalized transcript JSON without running reviewer")
     normalize.add_argument("--source", choices=("codex", "claude"), required=True, help="transcript provider format")
     normalize.add_argument("--path", required=True, help="path to one provider transcript file")
+    status = subparsers.add_parser("status", help="report whether one provider session has been reviewed")
+    status.add_argument("identity", type=_review_identity, metavar="SOURCE:SESSION_ID")
+    mark = subparsers.add_parser("mark", help="mark one provider session reviewed")
+    mark.add_argument("identity", type=_review_identity, metavar="SOURCE:SESSION_ID")
     args = parser.parse_args(argv)
 
     if args.command == "normalize":
         return _review_normalize(args.source, args.path)
+    if args.command == "status":
+        source, session_id = args.identity
+        key = f"{source}:{session_id}"
+        print("reviewed" if key in ReviewStateStore(memory_root).load().sessions else "not reviewed")
+        return 0
+    if args.command == "mark":
+        source, session_id = args.identity
+        session = ReviewSessionState(
+            source=source,
+            session_id=session_id,
+            last_reviewed_at=datetime.now(UTC).isoformat(),
+        )
+        added = ReviewStateStore(memory_root).mark_reviewed((session,))
+        print("marked reviewed" if added else "already reviewed")
+        return 0
 
     if args.command == "scan":
         if not args.once:
@@ -1294,6 +1313,13 @@ def _review_main(argv: list[str], memory_root: Path) -> int:
     if args.command == "watch":
         return _review_watch(args.interval, args.since_days, memory_root)
     raise ValueError(f"unknown review command: {args.command}")
+
+
+def _review_identity(value: str) -> tuple[str, str]:
+    source, separator, session_id = value.partition(":")
+    if separator != ":" or source not in {"codex", "claude"} or not session_id:
+        raise argparse.ArgumentTypeError("review identity must be codex:<session-id> or claude:<session-id>")
+    return source, session_id
 
 
 def _agent_cli_main(argv: list[str], memory_root: Path) -> int:

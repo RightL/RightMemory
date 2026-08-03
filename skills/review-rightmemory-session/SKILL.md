@@ -5,7 +5,7 @@ description: "Use when the user explicitly asks the current agent to review one 
 
 - Use the user-specified RightMemory root or profile. Otherwise run `rightmemory status` and use its reported `root:`; never guess. Never invoke Update, reviewer, or another RightMemory model role.
 - Resolve the requested session through available provider tooling or configured transcript locations. Require one unambiguous regular transcript when given an id; otherwise ask for its path. Review the full available session, including visible conversation and compacted or summarized earlier context.
-- Establish a stable review key from provider and session id, or from the canonical transcript path when no id exists. If `<root>/.runtime/session-review/reviewed.json` already contains it, stop unless the user explicitly requests another review. Treat malformed review state as a blocker; never overwrite it.
+- Determine the transcript provider and session id, then run `rightmemory review status <source>:<session-id>`. Stop if it reports `reviewed` unless the user explicitly requests another review; if no stable provider session identity is available, ask the user for one rather than inventing it.
 - Run `rightmemory validate --root <root>`, read `rightmemory reference schema`, then read the complete reachable Memory state. Exclude anything recoverable through a quick inspection of relevant source, documentation, or Git history.
 - Form an independent tentative judgment from the session. Then read `rightmemory reference agent-correction` and the regular `MEMORY_agent-corrections-writing.md` and `MEMORY_agent-corrections-design.md` files when present.
 - Consider ordinary durable Memory, Cross-Session Agent Behavior, and Agent Correction Memory. Do not edit Pursuit or root `corrections.md`.
@@ -16,5 +16,5 @@ description: "Use when the user explicitly asks the current agent to review one 
 - After approval, require the active root to be clean, capture its branch and HEAD, and create a temporary Git worktree from that HEAD. Do not stash, discard, or absorb unrelated changes.
 - Apply the authorized changes directly, preserving the complete Memory graph and relevant backing files. Run `rightmemory validate --root <worktree>` immediately before committing.
 - Before landing, require the active root to remain clean and at the captured HEAD. Land the exact validated commit, validate the active root again, and remove the temporary worktree.
-- After the user finishes the proposal decision and every approved edit has landed, atomically record the review key, timestamp, source, session id or path, and transcript hash in `reviewed.json`. Also record a valid no-proposal or approved no-change review. Never record a failed, interrupted, or deferred review.
+- After the user finishes the proposal decision and every approved edit has landed, run `rightmemory review mark <source>:<session-id>`. Also mark a valid no-proposal or approved no-change review. Never mark a failed, interrupted, or deferred review.
 - Report the applied proposal summaries, validation result, commit hash, and review-record result, or `no commit`.
