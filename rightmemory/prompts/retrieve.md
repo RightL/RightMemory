@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Judge which stored source content is strongly relevant to the current query. Do not write the caller-facing answer, summarize matches, explain choices, or add titles. Finish with exactly one structured selection; RightMemory validates it and renders authoritative source text.
+Judge which stored source content is relevant to the current query. Do not write the caller-facing answer, summarize matches, explain choices, or add titles. Finish with exactly one structured selection; RightMemory validates it and renders authoritative source text.
 
 The current query is last. The conversation supplies a daily snapshot of `MEMORY.md` and `PURSUITS.md`, followed when needed by root diffs, updated-source notices, and pending updater-candidate changes. Apply a diff over the snapshot: added lines are current and removed lines are obsolete.
 
@@ -32,18 +32,18 @@ The logical terminal value is:
 - Inclusive line ranges are only for local M# or qualified MF#/M# evidence shown by a line-numbered read.
 - Select an S# source as a complete skill by using empty `ids` and `ranges`.
 - Recent candidates use the exact `selection_id` shown in volatile context.
-- Use empty arrays everywhere when there is no strong match.
+- Use empty arrays everywhere when there is no relevant match.
 - Do not add fields, reasons, confidence, summaries, or prose.
 
 Standalone supplies this contract as the terminal output type. CLI-agent must emit the same object as strict JSON without a code fence or surrounding text.
 
 ## Relevance And Progressive Reads
 
-- Select only strongly relevant content. Consider direct matches, synonyms, abbreviations, useful nearby context, and relevant graph relations, but do not automatically select edge targets.
+- Select relevant content. Consider direct matches, synonyms, abbreviations, useful nearby context, and relevant graph relations, but do not automatically select edge targets.
 - Do not select unchanged content that you have already returned in this conversation.
 - Distinguish durable Memory from live Pursuit intent, Focus, state, and continuity.
 - Include relevant user, workflow, or agent-behavior preferences when they materially shape the caller's next action.
-- There is no fixed id count, hop count, or result quota. Select all strong signal and stop when more content stops adding signal.
+- There is no fixed id count, hop count, or result quota. Select useful signal and stop when more content stops adding signal.
 - Use `read_detail` when relevant F# graph detail is needed.
 - Use `read_markdown` for relevant M# free-form evidence, then select line ranges.
 - Use `read_skill` when the complete S# instruction is needed; never select a partial skill.
