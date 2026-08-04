@@ -32,6 +32,7 @@ from rightmemory.doctor import DoctorCheck
 from rightmemory.hub.store import HubStore
 from rightmemory.insight_trigger import InsightTriggerStore
 from rightmemory.isolated_write import IsolatedWriteResult
+from rightmemory.review import ReviewStateStore
 from rightmemory.semantic_operation import OperationEffect, SemanticOperationStore
 from rightmemory.share_results import ShareOperationResult
 from rightmemory.shared_view_files import FileViewPullResult
@@ -1915,6 +1916,53 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(roles, ["reviewer"])
         self.assertEqual(scan_flags, [False])
         self.assertEqual(stdout.getvalue().strip(), "reviewed: 1")
+
+    def test_review_status_and_mark_use_canonical_review_state(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            active = SimpleNamespace(memory_root=memory_root)
+            with (
+                patch("rightmemory.cli.resolve_memory_root", return_value=active),
+                patch("sys.stdout", stdout),
+            ):
+                self.assertEqual(main(["review", "status", "codex:s1"]), 0)
+                self.assertEqual(main(["review", "mark", "codex:s1"]), 0)
+                first = ReviewStateStore(memory_root).load().sessions["codex:s1"]
+                self.assertEqual(main(["review", "mark", "codex:s1"]), 0)
+                self.assertEqual(main(["review", "status", "codex:s1"]), 0)
+                second = ReviewStateStore(memory_root).load().sessions["codex:s1"]
+
+        self.assertEqual(
+            stdout.getvalue().splitlines(),
+            ["not reviewed", "marked reviewed", "already reviewed", "reviewed"],
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(first.source, "codex")
+        self.assertEqual(first.session_id, "s1")
+        self.assertIsNotNone(first.last_reviewed_at)
+
+    def test_review_mark_preserves_existing_sessions(self):
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            active = SimpleNamespace(memory_root=memory_root)
+            with (
+                patch("rightmemory.cli.resolve_memory_root", return_value=active),
+                patch("sys.stdout", stdout),
+            ):
+                self.assertEqual(main(["review", "mark", "codex:s1"]), 0)
+                self.assertEqual(main(["review", "mark", "claude:s2"]), 0)
+            state = ReviewStateStore(memory_root).load()
+
+        self.assertEqual(set(state.sessions), {"codex:s1", "claude:s2"})
+
+    def test_review_status_rejects_invalid_identity(self):
+        with patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                main(["review", "status", "missing-source"])
+
+        self.assertEqual(caught.exception.code, 2)
 
     def test_review_scan_does_not_add_pressure_before_unified_update(self):
         stdout = io.StringIO()

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from .async_update import (
 )
 from .config import ReviewConfig, ReviewSourceConfig
 from .provider_sessions import ProviderSessionStore
+from .platform import lock_file, unlock_file
 from .session import _ensure_runtime_gitignore, _fsync_directory
 from .transcripts import claude, codex
 from .transcripts.model import NormalizedSession, TranscriptFile
@@ -95,6 +97,7 @@ class ReviewDeliveryReceipt:
 class ReviewStateStore:
     def __init__(self, memory_root: Path):
         self.path = memory_root / ".runtime" / "review" / "state.json"
+        self.lock_path = self.path.with_name("state.lock")
         self.runtime_root = memory_root / ".runtime"
 
     def load(self) -> ReviewState:
@@ -114,8 +117,38 @@ class ReviewStateStore:
         return ReviewState(sessions=sessions)
 
     def save(self, state: ReviewState) -> None:
+        with self._locked():
+            self._write(state)
+
+    def mark_reviewed(self, reviewed_sessions: tuple[ReviewSessionState, ...]) -> int:
+        if not reviewed_sessions:
+            return 0
+        with self._locked():
+            state = self.load()
+            sessions = dict(state.sessions)
+            added = 0
+            for session in reviewed_sessions:
+                key = _state_key(session.source, session.session_id)
+                if key in sessions:
+                    continue
+                sessions[key] = session
+                added += 1
+            if added:
+                self._write(ReviewState(sessions=sessions))
+            return added
+
+    @contextmanager
+    def _locked(self):
         _ensure_runtime_gitignore(self.runtime_root)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+", encoding="utf-8") as handle:
+            lock_file(handle)
+            try:
+                yield
+            finally:
+                unlock_file(handle)
+
+    def _write(self, state: ReviewState) -> None:
         tmp_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
         content = json.dumps(
             {"sessions": {key: asdict(value) for key, value in state.sessions.items()}},
@@ -236,7 +269,7 @@ class ReviewScanner:
                 counts["failed"] += 1
                 return ReviewScanResult(**counts)
             if receipt is not None:
-                return self._recover_delivery(receipt, sessions, counts)
+                return self._recover_delivery(receipt, counts)
 
         candidates: list[ReviewCandidate] = []
 
@@ -329,9 +362,7 @@ class ReviewScanner:
         if not success:
             return ReviewScanResult(**counts)
 
-        for session in reviewed_sessions:
-            sessions[_state_key(session.source, session.session_id)] = session
-        self.state_store.save(ReviewState(sessions=sessions))
+        self.state_store.mark_reviewed(reviewed_sessions)
         if receipt_batch_id is not None:
             self.delivery_store.delete(receipt_batch_id)
         counts["reviewed"] += len(normalized_batch)
@@ -388,7 +419,6 @@ class ReviewScanner:
     def _recover_delivery(
         self,
         receipt: ReviewDeliveryReceipt,
-        sessions: dict[str, ReviewSessionState],
         counts: dict[str, int],
     ) -> ReviewScanResult:
         try:
@@ -397,9 +427,7 @@ class ReviewScanner:
             counts["failed"] += 1
             return ReviewScanResult(**counts)
 
-        for session in receipt.sessions:
-            sessions[_state_key(session.source, session.session_id)] = session
-        self.state_store.save(ReviewState(sessions=sessions))
+        self.state_store.mark_reviewed(receipt.sessions)
         self.delivery_store.delete(receipt.batch_id)
         counts["reviewed"] += receipt.reviewed_count
         counts["skipped_duplicate"] += receipt.skipped_duplicate_count

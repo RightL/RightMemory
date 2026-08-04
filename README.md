@@ -806,6 +806,15 @@ For debugging an adapter without calling a model:
 rightmemory review normalize --source claude --path ~/.claude/projects/<project>/<session>.jsonl
 ```
 
+Explicit session-review workflows can check and record the existing reviewed-session state without running the automatic reviewer:
+
+```bash
+rightmemory review status codex:<session-id>
+rightmemory review mark codex:<session-id>
+```
+
+`status` prints `reviewed` or `not reviewed`. `mark` is atomic and idempotent; use it only after the review has completed successfully.
+
 Add source presets to `<memory-root>/rightmemory.toml`:
 
 ```toml
