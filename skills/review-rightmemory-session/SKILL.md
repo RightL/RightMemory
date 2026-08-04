@@ -5,7 +5,7 @@ description: "Use when the user explicitly asks the current agent to review one 
 
 - Use the user-specified RightMemory root or profile. Otherwise run `rightmemory status` and use its reported `root:`; never guess. Never invoke Update, reviewer, or another RightMemory model role.
 - Resolve the requested session through available provider tooling or configured transcript locations. Require one unambiguous regular transcript when given an id; otherwise ask for its path. Review the full available session, including visible conversation and compacted or summarized earlier context.
-- Determine the transcript provider and session id, then run `rightmemory review status <source>:<session-id>`. Stop if it reports `reviewed` unless the user explicitly requests another review; if no stable provider session identity is available, ask the user for one rather than inventing it.
+- Set `source` to the reviewed session's provider, such as `codex` or `claude`; ask if unclear. Then run `rightmemory review status <source>:<session-id>`. Stop if it reports `reviewed` unless the user explicitly requests another review; ask for a stable session id rather than inventing one.
 - Run `rightmemory validate --root <root>`, read `rightmemory reference schema`, then read the complete reachable Memory state. Exclude anything recoverable through a quick inspection of relevant source, documentation, or Git history.
 - Form an independent tentative judgment from the session. Then read `rightmemory reference agent-correction` and the regular `MEMORY_agent-corrections-writing.md` and `MEMORY_agent-corrections-design.md` files when present.
 - Consider ordinary durable Memory, Cross-Session Agent Behavior, and Agent Correction Memory. Do not edit Pursuit or root `corrections.md`.
