@@ -20,7 +20,16 @@ description: "Use when the user explicitly chooses read-only RightMemory retriev
 - Retrieval output is authoritative source Markdown selected by the model and rendered by RightMemory, not a model-written summary.
 - A selected F# heading includes its parsed detail subtree. A local M#, S#, or MF# heading does not by itself expand linked content; local M# evidence uses source ranges and local S# expands only as a complete instruction. Imported MF# graph content uses ids scoped to `MF#<view-id>`, including F# detail items; direct MF ranges are invalid. Imported M# ranges and complete S# instructions use qualified sources such as `MF#<view-id>/M#<id>` and `MF#<view-id>/S#<id>`.
 - Agent Correction Memory is second-pass evidence. Unless the user asks for it directly, wait until an initial draft, design, or implementation direction exists; then use `rightmemory agent-corrections writing` for expression or presentation review, or `rightmemory agent-corrections design` for reasoning, decisions, actions, or behavior. Run only the relevant command; do not run both by default.
-- Apply retrieved preferences, workflow guidance, and memory skills when the fit is clear. If retrieved state appears stale, wrong, or misleading, report the discrepancy without submitting a correction.
+- For retrieved preferences, workflow or behavior guidance, reusable instructions, and Agent Correction Memory—but not ordinary facts, knowledge, or descriptive context—use this fixed user-visible format when such guidance is active or may apply later:
+
+  ```text
+  [RightMemory] Retrieved guidance
+  - Active: <guidance being followed now>
+  - Deferred: <guidance that may apply later, with its applicability condition stated in the sentence>
+  ```
+
+- Omit empty lines and weak or rejected matches. Show the block before active guidance first affects the work. Reassess deferred guidance as context changes, and repeat the block only when its status changes.
+- If retrieved state appears stale, wrong, or misleading, report the discrepancy without submitting a correction.
 - Treat retrieved open-context questions as agent-facing questions, not settled facts, and do not investigate merely because one was surfaced.
 - Treat `Provider question context` for an `MQ#` heading as an optional external ask opportunity, not a known answer.
 - When provider context would materially help, call `rightmemory shared-view ask <mq-id> "<question>"` after retrieve returns. Phrase the question from the actual task; do not forward a question invented by retrieve.
