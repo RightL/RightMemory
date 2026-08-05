@@ -81,6 +81,10 @@ good Memory; the artifact details remain in the project.
 A good memory item states one reusable fact, preference, rule, decision,
 conclusion, or unresolved question at the right scope.
 
+An item is trivial when keeping it would neither materially improve future
+work nor save substantial search or reasoning. Truth and durability do not
+make a trivial item good Memory.
+
 Clearly not good memory:
 
 - Raw chat transcripts.
