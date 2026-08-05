@@ -72,16 +72,10 @@ class InstallCoreTests(unittest.TestCase):
                 current_schema = (
                     REPO_ROOT / "rightmemory" / "reference" / "rightmemory-schema.md"
                 ).read_text(encoding="utf-8")
-                legacy_schema = current_schema.replace(
-                    "follow the package-owned Pursuit rules supplied by the runtime.",
-                    "follow `PURSUIT_RULES.md`.",
-                ).replace(
-                    "The package-owned Agent Correction Memory rules supplied by the runtime define their semantics.",
-                    "Root `AGENT_CORRECTION_MEMORY_RULES.md` defines their semantics.",
-                )
+                loose_schema = current_schema
                 if index == 1:
-                    legacy_schema = legacy_schema.replace("\n", "\r\n")
-                (target / "rightmemory-schema.md").write_bytes(legacy_schema.encode("utf-8"))
+                    loose_schema = loose_schema.replace("\n", "\r\n")
+                (target / "rightmemory-schema.md").write_bytes(loose_schema.encode("utf-8"))
                 (target / "rightmemory-edit-correction-rules.md").write_bytes(
                     (
                         REPO_ROOT
@@ -91,7 +85,14 @@ class InstallCoreTests(unittest.TestCase):
                     ).read_bytes()
                 )
 
-            with patch("builtins.print"):
+            current_schema_hash = install_core.sha256(current_schema.encode("utf-8")).hexdigest()
+            with (
+                patch("builtins.print"),
+                patch.dict(
+                    install_core.LEGACY_LOOSE_REFERENCE_SHA256,
+                    {"rightmemory-schema.md": current_schema_hash},
+                ),
+            ):
                 installer._install_skills()
 
             for target in targets:
