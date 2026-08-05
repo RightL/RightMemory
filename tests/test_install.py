@@ -1049,7 +1049,12 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("user explicitly chooses full RightMemory orchestration", orchestrator)
         self.assertIn("rightmemory retrieve --session <stable-session-id>", orchestrator)
         self.assertIn("Returned content may include weaker matches", orchestrator)
-        self.assertIn("briefly tell the user which retrieved requirements", orchestrator)
+        for skill_text in (retriever, orchestrator):
+            self.assertIn("[RightMemory] Retrieved guidance", skill_text)
+            self.assertIn("- Active: <guidance being followed now>", skill_text)
+            self.assertIn("- Deferred: <guidance that may apply later", skill_text)
+            self.assertNotIn("- Active (", skill_text)
+            self.assertNotIn("- Deferred (", skill_text)
         self.assertIn("rightmemory update submit --session <stable-session-id>", orchestrator)
         self.assertIn("including initially small work", orchestrator)
         self.assertIn("open-context questions", orchestrator)

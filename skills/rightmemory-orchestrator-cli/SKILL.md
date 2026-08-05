@@ -22,7 +22,15 @@ description: "Use when the user explicitly chooses full RightMemory orchestratio
 - Treat Memory as durable context and Pursuit as live intent or continuity. Retrieval output is authoritative source Markdown selected by the model and rendered by RightMemory, not a model-written summary.
 - A selected F# heading includes its parsed detail subtree. A local M#, S#, or MF# heading does not by itself expand linked content; local M# evidence uses source ranges and local S# expands only as a complete instruction. Imported MF# graph content uses ids scoped to `MF#<view-id>`, including F# detail items; direct MF ranges are invalid. Imported M# ranges and complete S# instructions use qualified sources such as `MF#<view-id>/M#<id>` and `MF#<view-id>/S#<id>`.
 - Returned content may include weaker matches. Apply only what fits.
-- Briefly tell the user which guidance you decide to follow as it becomes relevant.
+- For retrieved preferences, workflow or behavior guidance, reusable instructions, and Agent Correction Memory—but not ordinary facts, knowledge, or descriptive context—use this fixed user-visible format when such guidance is active or may apply later:
+
+  ```text
+  [RightMemory] Retrieved guidance
+  - Active: <guidance being followed now>
+  - Deferred: <guidance that may apply later, with its applicability condition stated in the sentence>
+  ```
+
+- Omit empty lines and weak or rejected matches. Show the block before active guidance first affects the work. Reassess deferred guidance as context changes, and repeat the block only when its status changes.
 - If retrieved guidance is stale, wrong, too broad, or misleading, include the correction in the next candidate.
 - Treat retrieved open-context questions as questions rather than facts. If current task context already answers one, include its id and answer in the next candidate; do not investigate solely because it appeared.
 - Treat `Provider question context` for an `MQ#` heading as an optional external ask opportunity. When it would materially help, call `rightmemory shared-view ask <mq-id> "<question>"` using the actual task context. If unavailable, continue with local context and tell the user.
