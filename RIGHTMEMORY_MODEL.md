@@ -82,7 +82,7 @@ Do not duplicate the same lesson in ordinary Agent Behavior or S# unless that re
 
 Each collection is a bounded curated set rather than an append-only log or FIFO window. A represented pattern improves its existing item or replaces weaker evidence. A distinct pattern is retained only when sufficiently reusable; when the collection is full, it replaces an existing item only if it is more important. If every existing item is more important, the candidate is discarded.
 
-Importance reflects likely recurrence, cost if repeated, applicability across future tasks, strength of the user's correction, and whether existing guidance already covers it. Each collection may contain at most 15 compact items, but 15 is a ceiling rather than a target or automatic eviction trigger. General agents consult the relevant collection after forming an initial draft, design, or implementation direction.
+Importance reflects likely recurrence, cost if repeated, applicability across future tasks, strength of the user's correction, and whether existing guidance already covers it. Each collection may contain at most 15 entries and 180 non-empty lines, with at most 16 non-empty lines per entry and 200 characters per line; 15 is a ceiling rather than a target or automatic eviction trigger. General agents consult the relevant collection after forming an initial draft, design, or implementation direction.
 
 ### Update provenance
 
