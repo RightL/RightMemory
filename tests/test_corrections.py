@@ -1,6 +1,88 @@
 import unittest
 
-from rightmemory.corrections import validate_corrections_markdown
+from rightmemory.corrections import (
+    validate_agent_correction_markdown,
+    validate_corrections_markdown,
+)
+
+
+class AgentCorrectionMarkdownValidationTests(unittest.TestCase):
+    def test_accepts_entry_and_line_limits_and_ignores_fenced_headings(self):
+        lines = [
+            "# Agent Corrections",
+            "### 1. Compact correction",
+            "```md",
+            "### 2. Example heading",
+            "```",
+            *(f"evidence {index}" for index in range(1, 12)),
+            "汉" * 200,
+        ]
+
+        self.assertEqual(
+            validate_agent_correction_markdown(
+                "\n".join(lines),
+                "MEMORY_agent-corrections-writing.md",
+            ),
+            [],
+        )
+
+    def test_rejects_more_than_fifteen_entries(self):
+        text = "# Agent Corrections\n" + "\n".join(
+            f"### {index}. Entry {index}\nevidence" for index in range(1, 17)
+        )
+
+        errors = validate_agent_correction_markdown(
+            text,
+            "MEMORY_agent-corrections-design.md",
+        )
+
+        self.assertTrue(any("contains 16 entries" in error for error in errors))
+
+    def test_rejects_entry_over_sixteen_non_empty_lines(self):
+        text = "\n".join(
+            ["# Agent Corrections", "### 1. Oversized entry"]
+            + [f"evidence {index}" for index in range(1, 17)]
+        )
+
+        errors = validate_agent_correction_markdown(
+            text,
+            "MEMORY_agent-corrections-writing.md",
+        )
+
+        self.assertTrue(any("contains 17 non-empty lines" in error for error in errors))
+
+    def test_rejects_collection_over_one_hundred_eighty_non_empty_lines(self):
+        lines = ["# Agent Corrections"]
+        for entry in range(1, 16):
+            lines.append(f"### {entry}. Entry {entry}")
+            lines.extend(f"evidence {entry}-{line}" for line in range(1, 12))
+
+        self.assertEqual(
+            validate_agent_correction_markdown(
+                "\n".join(lines[:-1]),
+                "MEMORY_agent-corrections-design.md",
+            ),
+            [],
+        )
+
+        errors = validate_agent_correction_markdown(
+            "\n".join(lines),
+            "MEMORY_agent-corrections-design.md",
+        )
+
+        self.assertTrue(any("contains 181 non-empty lines" in error for error in errors))
+
+    def test_rejects_lines_over_two_hundred_characters(self):
+        text = "\n".join(
+            ["# Agent Corrections", "### 1. Wide entry", "汉" * 201]
+        )
+
+        errors = validate_agent_correction_markdown(
+            text,
+            "MEMORY_agent-corrections-writing.md",
+        )
+
+        self.assertTrue(any("line 3 has 201 characters" in error for error in errors))
 
 
 class CorrectionsMarkdownValidationTests(unittest.TestCase):

@@ -3336,6 +3336,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("headings remain reachable from Memory", instructions)
         self.assertIn("corrections.md", instructions)
         self.assertIn("15", instructions)
+        self.assertIn("180 non-empty lines", instructions)
+        self.assertIn("16 non-empty lines", instructions)
+        self.assertIn("200 characters", instructions)
         self.assertIn("MEMORY.md", instructions)
         self.assertIn("PURSUITS.md", instructions)
 

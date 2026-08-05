@@ -15,7 +15,8 @@ Agent Correction Memory preserves reusable user corrections as concrete second-p
 ## Entry Rules
 
 - The two collections are fixed; their contents are editable.
-- Each collection contains at most 15 compact entries and retains the highest-value reusable patterns rather than acting as an append-only log or FIFO window.
+- Each collection contains at most 15 entries and 180 non-empty lines. Each entry contains at most 16 non-empty lines, and no line exceeds 200 characters.
+- Retain the highest-value reusable patterns rather than treating either collection as an append-only log or FIFO window.
 - Each entry preserves enough context to understand what the user requested, what the agent proposed or did, what was rejected, and what was accepted instead.
 - Prefer concrete before/after evidence and keep explanatory lessons brief.
 - Keep reusable correction evidence in Agent Correction Memory. Do not duplicate the same lesson in ordinary Agent Behavior or S#; add guidance there only when it has distinct value beyond the correction evidence.

@@ -4,17 +4,15 @@ import re
 
 
 _SECTIONS = ("Candidate", "Proposed edit", "Accepted edit")
+_AGENT_CORRECTION_MAX_ENTRIES = 15
+_AGENT_CORRECTION_MAX_ENTRY_LINES = 16
+_AGENT_CORRECTION_MAX_COLLECTION_LINES = 180
+_AGENT_CORRECTION_MAX_LINE_LENGTH = 200
 
 
-def validate_corrections_markdown(text: str) -> list[str]:
-    """Validate the bounded RightMemory edit-correction collection shape."""
-    errors: list[str] = []
-    entries: list[tuple[str, int, list[tuple[str, int]]]] = []
-    current: tuple[str, int, list[tuple[str, int]]] | None = None
+def _iter_unfenced_lines(lines: list[str]):
     fence_char: str | None = None
     fence_length = 0
-
-    lines = text.splitlines()
     for line_number, line in enumerate(lines, start=1):
         fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
         if fence is not None:
@@ -26,9 +24,71 @@ def validate_corrections_markdown(text: str) -> list[str]:
                 fence_char = None
                 fence_length = 0
             continue
-        if fence_char is not None:
-            continue
+        if fence_char is None:
+            yield line_number, line
 
+
+def validate_agent_correction_markdown(text: str, path: str) -> list[str]:
+    """Validate one fixed Agent Correction Memory collection."""
+    errors: list[str] = []
+    lines = text.splitlines()
+    entries: list[tuple[str, int]] = []
+
+    for line_number, line in _iter_unfenced_lines(lines):
+        heading = re.match(r"^ {0,3}###[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$", line)
+        if heading is not None:
+            entries.append((heading.group(1).strip(), line_number))
+
+    if len(entries) > _AGENT_CORRECTION_MAX_ENTRIES:
+        errors.append(
+            f"{path} contains {len(entries)} entries; "
+            f"at most {_AGENT_CORRECTION_MAX_ENTRIES} are allowed"
+        )
+
+    collection_lines = sum(1 for line in lines if line.strip())
+    if collection_lines > _AGENT_CORRECTION_MAX_COLLECTION_LINES:
+        errors.append(
+            f"{path} contains {collection_lines} non-empty lines; "
+            f"at most {_AGENT_CORRECTION_MAX_COLLECTION_LINES} are allowed"
+        )
+
+    for entry_index, (title, line_number) in enumerate(entries):
+        entry_end = (
+            entries[entry_index + 1][1] - 1
+            if entry_index + 1 < len(entries)
+            else len(lines)
+        )
+        entry_lines = sum(1 for line in lines[line_number - 1 : entry_end] if line.strip())
+        if entry_lines > _AGENT_CORRECTION_MAX_ENTRY_LINES:
+            errors.append(
+                f"{path} line {line_number}: correction entry `{title}` contains "
+                f"{entry_lines} non-empty lines; at most "
+                f"{_AGENT_CORRECTION_MAX_ENTRY_LINES} are allowed"
+            )
+
+    overlong_lines = [
+        (line_number, len(line))
+        for line_number, line in enumerate(lines, start=1)
+        if len(line) > _AGENT_CORRECTION_MAX_LINE_LENGTH
+    ]
+    if overlong_lines:
+        line_number, line_length = overlong_lines[0]
+        errors.append(
+            f"{path} has {len(overlong_lines)} lines over "
+            f"{_AGENT_CORRECTION_MAX_LINE_LENGTH} characters; "
+            f"line {line_number} has {line_length} characters"
+        )
+
+    return errors
+
+
+def validate_corrections_markdown(text: str) -> list[str]:
+    """Validate the bounded RightMemory edit-correction collection shape."""
+    errors: list[str] = []
+    entries: list[tuple[str, int, list[tuple[str, int]]]] = []
+    current: tuple[str, int, list[tuple[str, int]]] | None = None
+    lines = text.splitlines()
+    for line_number, line in _iter_unfenced_lines(lines):
         heading = re.match(r"^ {0,3}(#{2,3})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$", line)
         if heading is None:
             continue

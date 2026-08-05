@@ -7,7 +7,10 @@ from difflib import SequenceMatcher
 from hashlib import sha256
 from pathlib import Path
 
-from .corrections import validate_corrections_markdown
+from .corrections import (
+    validate_agent_correction_markdown,
+    validate_corrections_markdown,
+)
 from .graph import (
     PURSUIT_ACTION_RE,
     PURSUIT_DETAIL_FILE_RE,
@@ -832,7 +835,7 @@ class MemoryTools:
         return "discarded: " + ", ".join(relative_paths)
 
     def validate_memory(self, *, enforce_correction_capacity: bool = True) -> str:
-        """Validate the complete RightMemory graph and updater correction file."""
+        """Validate the complete RightMemory graph and correction collections."""
         manifest = build_graph_manifest(self.memory_root)
         errors = [*manifest.errors]
         corrections_path = self.memory_root / CORRECTIONS_PATH
@@ -843,6 +846,15 @@ class MemoryTools:
                     error for error in correction_errors if not CORRECTIONS_CAPACITY_ERROR_RE.fullmatch(error)
                 ]
             errors.extend(correction_errors)
+        for correction_path in sorted(FIXED_CORRECTION_COLLECTION_PATHS):
+            path = self.memory_root / correction_path
+            if path.is_file():
+                errors.extend(
+                    validate_agent_correction_markdown(
+                        path.read_text(encoding="utf-8"),
+                        correction_path,
+                    )
+                )
         if errors:
             return "validation failed:\n" + "\n".join(f"- {error}" for error in errors)
         return f"validation passed: {len(manifest.items)} ids across {len(manifest.files)} RightMemory files"

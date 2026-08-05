@@ -1606,6 +1606,19 @@ class MemoryToolsTests(unittest.TestCase):
             self.tools.validate_memory(enforce_correction_capacity=False),
         )
 
+    def test_validate_memory_always_enforces_agent_correction_limits(self):
+        (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+        (self.root / "MEMORY_agent-corrections-writing.md").write_text(
+            "# Agent Corrections\n\n### 1. Wide entry\n\n" + "x" * 201 + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.tools.validate_memory(enforce_correction_capacity=False)
+
+        self.assertIn("MEMORY_agent-corrections-writing.md", result)
+        self.assertIn("has 201 characters", result)
+
     def test_validate_memory_resolves_f_backing_relative_to_document_root(self):
         (self.root / "MEMORY.md").write_text("# Durable {F#durable}\n", encoding="utf-8")
         (self.root / "MEMORY_durable.md").write_text("- `durable-fact` Durable. → []\n", encoding="utf-8")
