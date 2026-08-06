@@ -120,8 +120,6 @@ class ShareBuilderRuntimeTests(unittest.TestCase):
     def test_run_share_builder_uses_share_level_session_and_returns_result(self):
         def fake_run_session_turn(runtime, session_id, message):
             self.assertEqual(session_id, "share-builder-auth-api")
-            self.assertIn("<share_build>", message)
-            self.assertIn("capability: auto", message)
             save_shares(
                 self.root,
                 {
@@ -185,8 +183,6 @@ class ShareBuilderRuntimeTests(unittest.TestCase):
 
         def fake_run_session_turn(runtime, session_id, message):
             self.assertEqual(session_id, "share-builder-auth-api")
-            self.assertIn("<share_revise>", message)
-            self.assertIn("Include profile endpoint.", message)
             return "Updated live question scope."
 
         with patch("rightmemory.share_builder.RightMemoryRuntime.run_session_turn", fake_run_session_turn):

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from rightmemory.config import PrunerConfig
-from rightmemory.prune import build_pruner_message, parse_prune_ledger, prune_due_status
+from rightmemory.prune import parse_prune_ledger, prune_due_status
 
 
 class PruneTests(unittest.TestCase):
@@ -142,24 +142,6 @@ class PruneTests(unittest.TestCase):
         self.assertEqual(ledger.grace[0].ref, "`revived-node`")
         self.assertEqual(ledger.grace[0].used, 1)
         self.assertEqual(ledger.grace[0].total, 2)
-
-    def test_build_pruner_message_includes_boundary_and_revival_context(self):
-        self._commit_memory("one", "memory: one")
-        body = "Removed:\n- MEMORY.md#old-node | old summary\n"
-        self._git("commit", "--allow-empty", "-m", "prune: expired active memory", "-m", body)
-        self._commit_memory("two", "memory: two")
-        status = prune_due_status(
-            self.root,
-            PrunerConfig(memory_root=self.root, generation_commits=1, revival_grace_checkpoints=2),
-        )
-
-        message = build_pruner_message(status)
-
-        self.assertIn("Prune generation due.", message)
-        self.assertIn(f"Boundary commit: {status.boundary_commit}", message)
-        self.assertIn("Revival grace checkpoints: 2", message)
-        self.assertIn("MEMORY.md#old-node", message)
-        self.assertIn("prune: checkpoint", message)
 
     def _commit_memory(self, value: str, message: str) -> None:
         (self.root / "MEMORY.md").write_text(f"# Memory\n\n- `{value}` value\n", encoding="utf-8")

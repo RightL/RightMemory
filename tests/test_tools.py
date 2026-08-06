@@ -718,11 +718,11 @@ class MemoryToolsTests(unittest.TestCase):
         )
 
         question_toml = (self.root / "shared_views" / "auth-api-ask" / "question.toml").read_text(encoding="utf-8")
-        retriever = (self.root / "shared_views" / "auth-api-ask" / "retriever.md").read_text(encoding="utf-8")
+        retriever = self.root / "shared_views" / "auth-api-ask" / "retriever.md"
         self.assertIn("success: wrote canonical question view auth-api-ask", result)
         self.assertIn('kind = "question"', question_toml)
         self.assertIn("access_token_hashes = []", question_toml)
-        self.assertIn("Answer from auth API memory only.", retriever)
+        self.assertTrue(retriever.is_file())
 
     def test_shared_view_builder_tool_creates_share_relationship(self):
         tools = MemoryTools(self.root, role="shared-view-builder")

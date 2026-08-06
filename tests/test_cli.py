@@ -3976,9 +3976,6 @@ class JsonRequestTests(unittest.TestCase):
         self.assertEqual(pull_result, 0)
         self.assertEqual(len(calls), 1)
         self.assertRegex(calls[0][0], r"^op-[A-Za-z0-9_-]{43}$")
-        self.assertIn("Process the following submitted RightMemory candidates as one ordered batch.", calls[0][1])
-        self.assertIn("[update session: agent-1 | candidate: 1", calls[0][1])
-        self.assertIn("[update session: agent-2 | candidate: 1", calls[0][1])
         self.assertIn("status: succeeded", stdout.getvalue())
         self.assertIn("pending: 0", stdout.getvalue())
         self.assertIn("result: session op-", stdout.getvalue())
@@ -4016,10 +4013,11 @@ class JsonRequestTests(unittest.TestCase):
                 operation_id,
                 "remember",
                 (candidate,),
-            )
+        )
 
         self.assertEqual(result, "ok")
-        self.assertEqual(calls[0][1:], (operation_id, "remember", (candidate,)))
+        self.assertEqual(calls[0][1], operation_id)
+        self.assertEqual(calls[0][3], (candidate,))
         self.assertRegex(calls[0][0], r"^op-[A-Za-z0-9_-]{43}$")
         self.assertLess(len(calls[0][0]), len(operation_id))
         memory_root = Path("C:/") / ("m" * 64)

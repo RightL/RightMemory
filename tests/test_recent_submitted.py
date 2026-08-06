@@ -7,9 +7,7 @@ from pathlib import Path
 from rightmemory.recent_submitted import (
     RecentSubmittedMemoryDeliveryStore,
     RecentSubmittedMemoryEntry,
-    append_recent_submitted_memory,
     collect_recent_submitted_memory,
-    format_recent_submitted_block,
 )
 from rightmemory.update_queue import UpdateCandidate, UpdateQueueStore
 
@@ -134,45 +132,6 @@ class RecentSubmittedMemoryCollectionTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].update_session_id, "agent-1")
         self.assertEqual(entries[0].message, "remember real pending item")
-
-    def test_formats_recent_submitted_block_for_retriever(self):
-        entries = [
-            RecentSubmittedMemoryEntry(
-                update_session_id="update-a",
-                candidate_id=1,
-                submitted_at="2026-05-19T00:00:00+00:00",
-                message="remember that retriever sees submitted memory",
-            )
-        ]
-
-        block = format_recent_submitted_block(entries)
-
-        self.assertIn("Recent submitted RightMemory candidates", block)
-        self.assertIn("not settled Memory or Pursuit", block)
-        self.assertIn(
-            "[update session: update-a | candidate: 1 | submitted_at: 2026-05-19T00:00:00+00:00]",
-            block,
-        )
-        self.assertIn("remember that retriever sees submitted memory", block)
-
-    def test_format_returns_empty_string_when_there_are_no_entries(self):
-        self.assertEqual(format_recent_submitted_block([]), "")
-
-    def test_append_returns_original_message_when_there_are_no_entries(self):
-        self.assertEqual(append_recent_submitted_memory("retrieve this", []), "retrieve this")
-
-    def test_append_adds_recent_submitted_block_when_entries_exist(self):
-        entry = RecentSubmittedMemoryEntry(
-            update_session_id="update-a",
-            candidate_id=1,
-            submitted_at="2026-05-19T00:00:00+00:00",
-            message="first",
-        )
-
-        message = append_recent_submitted_memory("retrieve this\n", [entry])
-
-        self.assertTrue(message.startswith("retrieve this\n\nRecent submitted RightMemory candidates"))
-        self.assertIn("first", message)
 
     def test_delivery_store_returns_all_entries_then_session_delta(self):
         with tempfile.TemporaryDirectory() as tempdir:

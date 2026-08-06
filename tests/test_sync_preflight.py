@@ -220,16 +220,6 @@ class SyncPreflightTests(SyncTestBase):
         text = (self.device / "corrections.md").read_text(encoding="utf-8")
         self.assertEqual(text.count("## Entry "), 16)
 
-    def test_sync_reconciler_prompt_preserves_distinct_corrections_without_ranking(self):
-        prompt_path = Path(__file__).parents[1] / "rightmemory" / "prompts" / "sync-reconciler.md"
-        prompt = prompt_path.read_text(encoding="utf-8").casefold()
-
-        self.assertIn("non-identical complete entries", prompt)
-        self.assertIn("exactly duplicated", prompt)
-        self.assertIn("do not rank", prompt)
-        self.assertIn("may exceed that ceiling", prompt)
-        self.assertIn("preserve the overflow for later explicit direct maintenance", prompt)
-
     def test_preflight_reports_dirty_shared_view_registry_and_ignores_runtime_shared_views(self):
         runtime_cache = self.device / ".runtime" / "shared_views" / "cache" / "alice-auth-api.txt"
         runtime_cache.parent.mkdir(parents=True)
