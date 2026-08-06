@@ -80,9 +80,9 @@ A correction to an updater result follows the ordinary candidate path rather tha
 
 ### Bounded agent correction memory
 
-Explicit user corrections can be durable evidence about how future agents should write, reason, decide, or act, so orchestrators with update authority may submit the raw correction event as a candidate. In that candidate flow, the updater rather than the orchestrator decides whether it is reusable and maintains the fixed Writing and Design M# collections. Fixed categories prevent a correction-file hierarchy from growing around projects and tools.
+Explicit user corrections can be durable evidence about how future agents should write, reason, decide, or act, so orchestrators with update authority may submit the raw correction event as a candidate. In that candidate flow, the updater rather than the orchestrator decides whether it is reusable and maintains the fixed standalone Writing and Design collections outside the addressable graph. Fixed categories prevent a correction-file hierarchy from growing around projects and tools.
 
-The M# collections and RightMemory edit `corrections.md` are bounded priority sets rather than append-only logs or FIFO windows. A related correction improves or replaces weaker evidence in an existing item. A distinct correction is admitted only when reusable enough; when its collection is full, it replaces an item only if it is more important and is otherwise discarded. The maximum of 15 compact items is therefore a ceiling, not a quota or automatic eviction trigger. Consulting correction evidence after a tentative draft or update avoids anchoring every task on a large correction prompt.
+The Agent Correction collections and RightMemory edit `corrections.md` are bounded priority sets rather than append-only logs or FIFO windows. A related correction improves or replaces weaker evidence in an existing item. A distinct correction is admitted only when reusable enough; when its collection is full, it replaces an item only if it is more important and is otherwise discarded. The maximum of 15 compact items is therefore a ceiling, not a quota or automatic eviction trigger. Consulting correction evidence after a tentative draft or update avoids anchoring every task on a large correction prompt.
 
 ### Automatic write isolation
 

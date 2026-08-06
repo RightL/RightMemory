@@ -3331,7 +3331,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("Agent Correction Memory rules:", instructions)
         self.assertIn("MEMORY_agent-corrections-writing.md", instructions)
         self.assertIn("MEMORY_agent-corrections-design.md", instructions)
-        self.assertIn("fixed M# collections", instructions)
+        self.assertIn("standalone fixed correction collections", instructions)
         self.assertIn("do not add or retain headings for them in `MEMORY.md`", instructions)
         self.assertNotIn("headings remain reachable from Memory", instructions)
         self.assertIn("corrections.md", instructions)
@@ -3905,7 +3905,7 @@ class PromptTests(unittest.TestCase):
             with self.subTest(builder=build.__name__):
                 prompt = build(Path("/memory"), "retrieve")
                 self.assertNotIn(
-                    "Writing and Design correction M# collections are second-pass evidence",
+                    "Writing and Design correction collections are second-pass evidence",
                     prompt,
                 )
 

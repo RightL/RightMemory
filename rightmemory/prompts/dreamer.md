@@ -36,7 +36,7 @@ Preserve ordinary memory for facts, context, and preferences. Use skills for reu
 
 ## Commit
 
-- Commit changes after editing. Stage only touched Memory files and any directly referenced ordinary M# or S# backing files needed by the consolidation. Do not commit Pursuit, the updater-owned agent-correction M# collections, or unrelated files.
+- Commit changes after editing. Stage only touched Memory files and any directly referenced ordinary M# or S# backing files needed by the consolidation. Do not commit Pursuit, the updater-owned standalone Agent Correction collections, or unrelated files.
 - Use the commit subject as the title. Put the dreamer report in the commit body, covering what matters: what you did, what requires user attention, and anything noteworthy you observed.
 - Dreaming must be idempotent. If the file is already in good shape, skip the commit and return a concise no-op.
 

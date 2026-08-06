@@ -73,12 +73,12 @@ RightMemory keeps two correction channels because they improve different work.
 
 ### General agent corrections
 
-Corrections to an agent's ordinary writing, reasoning, decisions, or actions may become Memory when their rejected/accepted contrast is reusable evidence for future second-pass review. The updater maintains two fixed M# collections:
+Corrections to an agent's ordinary writing, reasoning, decisions, or actions may become Memory when their rejected/accepted contrast is reusable evidence for future second-pass review. The updater maintains two fixed standalone collections outside the addressable graph:
 
 - `MEMORY_agent-corrections-writing.md` contains corrections whose objection can be resolved by changing expression or presentation.
 - `MEMORY_agent-corrections-design.md` contains corrections whose objection cannot be resolved by changing expression or presentation alone.
 
-Do not duplicate the same lesson in ordinary Agent Behavior or S# unless that representation adds distinct value. Submit a correction to a RightMemory state edit as an ordinary update candidate, not as content for these M# collections.
+Do not duplicate the same lesson in ordinary Agent Behavior or S# unless that representation adds distinct value. Submit a correction to a RightMemory state edit as an ordinary update candidate, not as content for these Agent Correction collections.
 
 Each collection is a bounded curated set rather than an append-only log or FIFO window. A represented pattern improves its existing item or replaces weaker evidence. A distinct pattern is retained only when sufficiently reusable; when the collection is full, it replaces an existing item only if it is more important. If every existing item is more important, the candidate is discarded.
 
@@ -122,13 +122,13 @@ Reusable feedback about edits of RightMemory may be curated in `corrections.md` 
 
 `corrections.md` is tracked and synchronized, but it is not Memory, Agent Correction Memory, or graph content. Sync machinery transports it; if a conflict requires repair, it preserves non-identical entries without ranking them and does not perform semantic curation.
 
-The collection follows the same bounded priority principle as the M# collections: represented patterns improve existing examples; distinct examples are admitted only when useful enough; a full file rejects an example unless it is more important than an existing item. Its 15-entry limit is a ceiling, not a reason to evict automatically. Update reads it only as a late second-pass filter; it is not ordinary retrieval context.
+The collection follows the same bounded priority principle as the Agent Correction collections: represented patterns improve existing examples; distinct examples are admitted only when useful enough; a full file rejects an example unless it is more important than an existing item. Its 15-entry limit is a ceiling, not a reason to evict automatically. Update reads it only as a late second-pass filter; it is not ordinary retrieval context.
 
 ## Runtime ownership
 
 Unified updates run in isolated worktrees, validate the complete graph, and land only completed role-owned commits. Runtime adds one immutable candidate record to each queued outcome, and Git synchronizes it alongside Memory, Pursuit, and `corrections.md`.
 
-Memory-oriented Dreamer, Insight, Historian, and Pruner remain narrower than the unified updater and do not independently maintain Pursuit or the curated correction collections. Transcript review extracts candidates from idle sessions and submits them through unified update rather than editing the graph independently. Within the automatic candidate pipeline, the unified updater owns lifecycle transitions and admission to general correction M# evidence; explicit direct maintenance applies the same definitions without entering that pipeline.
+Memory-oriented Dreamer, Insight, Historian, and Pruner remain narrower than the unified updater and do not independently maintain Pursuit or the curated correction collections. Transcript review extracts candidates from idle sessions and submits them through unified update rather than editing the graph independently. Within the automatic candidate pipeline, the unified updater owns lifecycle transitions and admission to general Agent Correction evidence; explicit direct maintenance applies the same definitions without entering that pipeline.
 
 ## Compatibility posture
 

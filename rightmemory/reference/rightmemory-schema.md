@@ -132,7 +132,7 @@ Clearly not good behavior memory:
 
 ## Agent Correction Memory
 
-Agent Correction Memory is a fixed Memory module consisting of the M# collections `agent-corrections-writing` and `agent-corrections-design`. The package-owned Agent Correction Memory rules supplied by the runtime define their semantics.
+Agent Correction Memory is a fixed root-local module outside the addressable Memory and Pursuit graph. It consists of the standalone collections `MEMORY_agent-corrections-writing.md` and `MEMORY_agent-corrections-design.md`. The package-owned Agent Correction Memory rules supplied by the runtime define their semantics.
 
 ## Memory Skills
 

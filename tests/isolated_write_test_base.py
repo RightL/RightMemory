@@ -69,14 +69,6 @@ class IsolatedWriteTestBase(unittest.TestCase):
         memory.write_text(memory.read_text(encoding="utf-8") + text, encoding="utf-8")
 
     def _add_fixed_agent_correction_collections(self) -> None:
-        memory = self.root / "MEMORY.md"
-        memory.write_text(
-            memory.read_text(encoding="utf-8")
-            + "\n### Agent corrections\n\n"
-            "#### Writing corrections {M#agent-corrections-writing}\n\n"
-            "#### Design corrections {M#agent-corrections-design}\n",
-            encoding="utf-8",
-        )
         (self.root / "MEMORY_agent-corrections-writing.md").write_text(
             "# Curated writing corrections\n",
             encoding="utf-8",
@@ -87,7 +79,6 @@ class IsolatedWriteTestBase(unittest.TestCase):
         )
         self._git(
             "add",
-            "MEMORY.md",
             "MEMORY_agent-corrections-writing.md",
             "MEMORY_agent-corrections-design.md",
         )
