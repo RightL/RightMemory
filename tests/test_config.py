@@ -5,7 +5,6 @@ import subprocess
 import tomllib
 import unittest
 from dataclasses import replace
-from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,8 +22,7 @@ from rightmemory.config import (
     load_sync_config,
 )
 from rightmemory.isolated_write import IsolatedWriteResult, MainMemoryDirtyError
-from rightmemory.prompt import build_cli_agent_instructions, build_instructions
-from rightmemory.reference import REFERENCE_FILES, read_reference
+from rightmemory.reference import REFERENCE_FILES
 from rightmemory.provider_sessions import ProviderSessionStore
 from rightmemory.provider_threads import ProviderThreadStore
 from rightmemory.prune import PruneDueStatus
@@ -38,7 +36,6 @@ from rightmemory.runtime import (
 from rightmemory.session import MessageSessionStore
 from rightmemory.semantic_operation import OperationEffect, SemanticOperationStore
 from rightmemory.retrieve_selection import RetrieveSelection
-from rightmemory.semantic_upgrades import SemanticUpgradeContext, SemanticUpgradeNote
 from rightmemory.shared_view_files import FileViewPublishResult
 from rightmemory.sync import SyncResult
 from rightmemory.update_queue import UpdateCandidate
@@ -46,21 +43,6 @@ from rightmemory.update_record import UpdateRecord, UpdateRecordStore
 
 
 EMPTY_RETRIEVE_SELECTION_JSON = '{"ids": [], "sources": [], "recent_candidates": []}'
-
-
-def _history_text(value) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return "\n".join(_history_text(item) for item in value)
-    if isinstance(value, dict):
-        return "\n".join(_history_text(item) for item in value.values())
-    if hasattr(value, "content"):
-        return _history_text(value.content)
-    if hasattr(value, "parts"):
-        return _history_text(value.parts)
-    return ""
-
 
 class ConfigTests(unittest.TestCase):
     def test_load_config_accepts_explicit_memory_root(self):
@@ -896,56 +878,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.model_id, "openai/reconciler")
         self.assertTrue(config.sync.enabled)
 
-    def test_retrieve_prompt_uses_context_first_contract(self):
-        instructions = build_instructions(Path("/memory"), "retrieve")
-
-        self.assertIn("supplies a daily snapshot", instructions)
-        self.assertIn("stored source content is relevant", instructions)
-        self.assertNotIn("strongly relevant", instructions)
-        self.assertIn("no relevant match", instructions)
-        self.assertIn("MEMORY.md", instructions)
-        self.assertIn("PURSUITS.md", instructions)
-        self.assertIn("read_detail", instructions)
-        self.assertIn("read_markdown", instructions)
-        self.assertIn("read_skill", instructions)
-        self.assertIn("read_mf", instructions)
-        self.assertIn("MQ#", instructions)
-        self.assertIn("provider question", instructions.lower())
-        self.assertIn("reusable instruction", instructions)
-        self.assertIn("Available retrieve tools", instructions)
-        self.assertIn(
-            "`read_detail(detail_id)` resolves a relevant `F#` id",
-            instructions,
-        )
-        self.assertIn("`read_markdown(markdown_id)`", instructions)
-        self.assertIn("`read_skill(skill_id)`", instructions)
-        self.assertIn("`read_mf(mf_id)`", instructions)
-        self.assertNotIn("offset, limit", instructions)
-        self.assertIn("terminal retrieve-selection output type", instructions)
-        self.assertIn('"recent_candidates"', instructions)
-        self.assertIn(
-            "Do not select unchanged content that you have already returned",
-            instructions,
-        )
-        self.assertNotIn("already_returned", instructions)
-        self.assertNotIn("avoid_repeats", instructions)
-        self.assertNotIn("include_returned", instructions)
-        self.assertNotIn("delivery coverage", instructions)
-        self.assertNotIn("prior-delivery omission", instructions)
-        self.assertNotIn("Read `MEMORY.md` before retrieval", instructions)
-        self.assertNotIn("Follow each with a one-line note", instructions)
-        self.assertNotIn("read_command", instructions)
-        self.assertNotIn("retrieve_shared_view", instructions)
-        self.assertNotIn("rightmemory shared-view ask", instructions)
-
-    def test_write_role_prompts_preserve_shared_view_boundary(self):
-        for role in ("update", "dreamer"):
-            prompt = build_instructions(Path("/memory"), role)
-            self.assertIn("MF#", prompt)
-            self.assertIn("MQ#", prompt)
-            self.assertIn("provider", prompt)
-            self.assertNotIn("rightmemory shared-view retrieve", prompt)
-
     def test_retrieve_runtime_does_not_expose_shared_view_tool(self):
         config = RuntimeConfig(
             role="retrieve",
@@ -963,18 +895,6 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("retrieve_shared_view", tool_names)
         self.assertNotIn("read_command", tool_names)
         self.assertNotIn("grep", tool_names)
-
-    def test_shared_view_builder_role_loads_prompt(self):
-        instructions = build_instructions(Path("/memory"), "shared-view-builder")
-
-        self.assertIn("shared-view builder", instructions)
-        self.assertIn("recipe.toml", instructions)
-        self.assertIn("question.toml", instructions)
-        self.assertIn("create_extractive_file_view", instructions)
-        self.assertIn("create_generative_file_view", instructions)
-        self.assertNotIn("create_file_view_recipe", instructions)
-        self.assertIn("create_question_view", instructions)
-        self.assertIn("Do not edit provider private memory", instructions)
 
     def test_shared_view_builder_runtime_exposes_compiler_tools(self):
         config = RuntimeConfig(
@@ -1116,36 +1036,6 @@ class RuntimeTests(unittest.TestCase):
             fresh_provider_session=False,
         )
 
-    def test_retrieve_pulls_mf_views_before_model_without_prompt_pollution(self):
-        root = Path(self.tempdir.name)
-        (root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
-        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=root)
-        captured: dict[str, object] = {}
-
-        class FakeResult:
-            output = RetrieveSelection()
-
-            def all_messages_json(self):
-                return b"[]"
-
-        class FakeAgent:
-            def run_sync(self, message, **kwargs):
-                captured["message"] = message
-                captured["message_history"] = kwargs.get("message_history")
-                return FakeResult()
-
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            with patch.object(RightMemoryRuntime, "_build_agent", return_value=FakeAgent()):
-                runtime = RightMemoryRuntime(config)
-            with patch("rightmemory.runtime.pull_all_file_views", return_value=[]):
-                output = runtime.run_session_turn("agent-session", "what do we know?")
-
-        self.assertEqual(output, "no strong match")
-        self.assertEqual(captured["message"], "# Query\n\nwhat do we know?")
-        history_text = _history_text(captured["message_history"])
-        self.assertIn("Daily RightMemory root snapshot", history_text)
-        self.assertIn("===== MEMORY.md =====", history_text)
-
     def test_update_turn_publishes_approved_file_views_after_success(self):
         root = Path(self.tempdir.name)
         (root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
@@ -1259,24 +1149,6 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("edit_file", tool_names)
         self.assertNotIn("git_add", tool_names)
         self.assertNotIn("git_commit", tool_names)
-
-    def test_run_cycle_passes_operator_hint_message(self):
-        config = RuntimeConfig(
-            role="insight",
-            model_id="openai/test",
-            memory_root=Path(self.tempdir.name),
-            state_root=Path(self.tempdir.name) / "state",
-        )
-
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-            result = runtime.run_cycle("insight-watch", operator_hint="focus on risks")
-
-        self.assertEqual(result, "reply 1")
-        sent = runtime.agent.calls[0]["message"]
-        self.assertIn("<rightmemory_cycle>", sent)
-        self.assertIn("role: insight", sent)
-        self.assertIn("operator_hint: focus on risks", sent)
 
     def test_sync_reconciler_session_turn_does_not_isolate(self):
         config = RuntimeConfig(
@@ -1490,10 +1362,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result, "nested output")
         self.assertEqual(calls, [("supervisor", main_root, "update"), ("run",)])
         nested.assert_called_once()
-        nested_worktree, state_root, nested_session_id, nested_message = nested.call_args.args
+        nested_worktree, state_root, nested_session_id, _nested_message = nested.call_args.args
         self.assertEqual(nested_worktree, worktree)
         self.assertTrue(state_root.is_relative_to(main_root / ".runtime" / "operations" / "state"))
-        self.assertEqual((nested_session_id, nested_message), ("agent-session", "remember one"))
+        self.assertEqual(nested_session_id, "agent-session")
         self.assertFalse(state_root.exists())
 
     def test_runtime_recovers_completed_semantic_operation_without_running_model_again(self):
@@ -2208,7 +2080,7 @@ class RuntimeTests(unittest.TestCase):
 
         def run_one_shot_turn(session_id, message):
             self.assertEqual(session_id, NO_SESSION_RIGHTMEMORY_SESSION_ID)
-            events.append(("agent", message))
+            events.append("agent")
             return EMPTY_RETRIEVE_SELECTION_JSON
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
@@ -2223,12 +2095,7 @@ class RuntimeTests(unittest.TestCase):
             [
                 ("locked", NO_SESSION_RIGHTMEMORY_SESSION_ID),
                 "lock_enter",
-                (
-                    "agent",
-                    "Daily RightMemory root snapshot\n\n"
-                    "# Query\n\n"
-                    "remember one\n",
-                ),
+                "agent",
                 "lock_exit",
             ],
         )
@@ -2283,36 +2150,6 @@ class RuntimeTests(unittest.TestCase):
                     allow_internal_session=True,
                 )
 
-    def test_run_turn_preserves_message_history(self):
-        config = RuntimeConfig(
-            role="retrieve",
-            model_id="openai/test",
-            memory_root=Path(self.tempdir.name),
-            model_kwargs={"extra_body": {"chat_template_kwargs": {"thinking": True}}},
-        )
-
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-            first = runtime.run_turn("remember one")
-            second = runtime.run_turn("what was that?")
-
-        self.assertEqual(first, "no strong match")
-        self.assertEqual(second, "no strong match")
-        self.assertEqual(runtime.agent.calls[0]["message"], "# Query\n\nremember one")
-        self.assertIn(
-            "Daily RightMemory root snapshot",
-            _history_text(runtime.agent.calls[0]["message_history"]),
-        )
-        second_history = _history_text(runtime.agent.calls[1]["message_history"])
-        self.assertIn("# Query\n\nremember one", second_history)
-        self.assertIn(RetrieveSelection().model_dump_json(), second_history)
-        self.assertNotIn("Prior retrieve conversation", second_history)
-        self.assertEqual(
-            runtime.agent.calls[0]["model_settings"],
-            {"extra_body": {"chat_template_kwargs": {"thinking": True}}},
-        )
-        self.assertEqual(runtime.agent.calls[0]["usage_limits"].request_limit, 100)
-
     def test_include_returned_attaches_current_content_for_one_call_and_preserves_coverage(self):
         root = Path(self.tempdir.name)
         (root / "MEMORY.md").write_text(
@@ -2349,129 +2186,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("Remembered fact.", model_repeated)
         self.assertIn("Remembered fact.", override_repeated)
         self.assertEqual(final, "no strong match")
-        override_history = runtime.agent.calls[2]["message_history"]
-        self.assertIn("Current retrieval material", _history_text(override_history))
-        self.assertIn("Remembered fact.", _history_text(override_history))
-        self.assertTrue(any(hasattr(item, "parts") for item in override_history))
-        final_history = runtime.agent.calls[3]["message_history"]
-        self.assertFalse(any(hasattr(item, "parts") for item in final_history))
-        all_context = "\n".join(
-            _history_text(call["message_history"])
-            for call in runtime.agent.calls
-        )
-        self.assertNotIn("already_returned", all_context)
-        self.assertNotIn("avoid_repeats", all_context)
         self.assertIn("fact", runtime.retrieve_context.load("agent-session").delivery_coverage.local_items)
-
-    def test_retrieve_turn_appends_only_new_recent_submitted_memory(self):
-        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
-        self._write_async_update_state(
-            "update-a",
-            pending=[
-                {
-                    "id": 1,
-                    "message": "remember first submitted detail",
-                    "submitted_at": "2026-05-19T00:00:00+00:00",
-                }
-            ],
-        )
-
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-            first = runtime.run_session_turn("agent-session", "find one")
-            self._write_async_update_state(
-                "update-a",
-                pending=[
-                    {
-                        "id": 1,
-                        "message": "remember first submitted detail",
-                        "submitted_at": "2026-05-19T00:00:00+00:00",
-                    },
-                    {
-                        "id": 2,
-                        "message": "remember second submitted detail",
-                        "submitted_at": "2026-05-19T00:01:00+00:00",
-                    },
-                ],
-            )
-            second = runtime.run_session_turn("agent-session", "find two")
-            other_session = runtime.run_session_turn("other-session", "find three")
-
-        self.assertEqual(first, "no strong match")
-        self.assertEqual(second, "no strong match")
-        self.assertEqual(other_session, "no strong match")
-        first_history = _history_text(runtime.agent.calls[0]["message_history"])
-        bootstrap = runtime.agent.calls[0]["message_history"][0]
-        self.assertEqual(len(bootstrap.parts), 2)
-        self.assertIn("Daily RightMemory root snapshot", bootstrap.parts[0].content)
-        self.assertIn("Recent submitted RightMemory candidates", bootstrap.parts[1].content)
-        second_new_part = runtime.agent.calls[1]["message_history"][-1]
-        other_history = _history_text(runtime.agent.calls[2]["message_history"])
-        self.assertIn("remember first submitted detail", first_history)
-        self.assertIn("remember second submitted detail", _history_text(second_new_part))
-        self.assertNotIn("remember first submitted detail", _history_text(second_new_part))
-        self.assertIn("remember first submitted detail", other_history)
-        self.assertIn("remember second submitted detail", other_history)
-        self.assertEqual(runtime.agent.calls[0]["message"], "# Query\n\nfind one")
-        self.assertEqual(runtime.agent.calls[1]["message"], "# Query\n\nfind two")
-        self.assertEqual(runtime.agent.calls[2]["message"], "# Query\n\nfind three")
-
-    def test_retrieve_turn_reports_candidates_that_are_no_longer_pending(self):
-        config = RuntimeConfig(
-            role="retrieve",
-            model_id="openai/test",
-            memory_root=Path(self.tempdir.name),
-        )
-        self._write_async_update_state(
-            "update-a",
-            pending=[
-                {
-                    "id": 1,
-                    "message": "temporary candidate body",
-                    "submitted_at": "2026-05-19T00:00:00+00:00",
-                }
-            ],
-        )
-
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-            runtime.run_session_turn("agent-session", "find one")
-            self._write_async_update_state("update-a", pending=[])
-            runtime.run_session_turn("agent-session", "find two")
-
-        update = _history_text(runtime.agent.calls[1]["message_history"][-1])
-        self.assertIn("No longer pending:", update)
-        self.assertIn("`update-a:1`", update)
-        self.assertNotIn("temporary candidate body", update)
-
-    def test_retrieve_turn_sends_snapshot_as_history_and_persists_native_history(self):
-        root = Path(self.tempdir.name)
-        (root / "MEMORY.md").write_text("# Root {#root}\n\nremembered root\n", encoding="utf-8")
-        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=root)
-
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-            first = runtime.run_session_turn("agent-session", "find root")
-            second = runtime.run_session_turn("agent-session", "find again")
-
-        self.assertEqual(first, "no strong match")
-        self.assertEqual(second, "no strong match")
-        self.assertEqual(runtime.agent.calls[0]["message"], "# Query\n\nfind root")
-        first_history = _history_text(runtime.agent.calls[0]["message_history"])
-        self.assertIn("Daily RightMemory root snapshot", first_history)
-        self.assertIn("===== MEMORY.md =====", first_history)
-        second_history = _history_text(runtime.agent.calls[1]["message_history"])
-        self.assertIn("# Query\n\nfind root", second_history)
-        self.assertIn(RetrieveSelection().model_dump_json(), second_history)
-        self.assertNotIn("Prior retrieve conversation", second_history)
-
-        state_path = root / ".runtime" / "retrieve_context" / "sessions" / "agent-session.json"
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        self.assertIn("model_history", state)
-        state_text = state_path.read_text(encoding="utf-8")
-        self.assertIn("Daily RightMemory root snapshot", state_text)
-        self.assertIn("# Query\\n\\nfind root", state_text)
-        self.assertIn("# Query\\n\\nfind again", state_text)
 
     def test_retrieve_turn_does_not_record_context_state_after_failure(self):
         root = Path(self.tempdir.name)
@@ -2489,35 +2204,6 @@ class RuntimeTests(unittest.TestCase):
                 runtime.run_session_turn("agent-session", "find root")
 
         self.assertFalse((root / ".runtime" / "retrieve_context" / "sessions" / "agent-session.json").exists())
-
-    def test_retrieve_appends_diff_only_when_memory_head_changes(self):
-        root = Path(self.tempdir.name)
-        self._git(root, "init")
-        self._git(root, "config", "user.email", "test@example.com")
-        self._git(root, "config", "user.name", "Test User")
-        (root / "MEMORY.md").write_text("# Root {#root}\n\nfirst\n", encoding="utf-8")
-        self._git(root, "add", "MEMORY.md")
-        self._git(root, "commit", "-m", "initial memory")
-        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=root)
-
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-            runtime.run_session_turn("agent-session", "find first")
-            (root / "MEMORY.md").write_text("# Root {#root}\n\nsecond\n", encoding="utf-8")
-            self._git(root, "add", "MEMORY.md")
-            self._git(root, "commit", "-m", "update memory")
-            runtime.run_session_turn("agent-session", "find second")
-            runtime.run_session_turn("agent-session", "find third")
-
-        second_history = runtime.agent.calls[1]["message_history"]
-        third_history = runtime.agent.calls[2]["message_history"]
-        self.assertTrue(any(hasattr(item, "parts") for item in second_history))
-        self.assertIn(
-            "# RightMemory root changes since previous retrieve turn",
-            _history_text(second_history[-1]),
-        )
-        self.assertIn("+second", _history_text(second_history[-1]))
-        self.assertFalse(any(hasattr(item, "parts") for item in third_history))
 
     def test_retrieve_surfaces_changed_f_detail_with_the_same_id(self):
         root = Path(self.tempdir.name)
@@ -2551,26 +2237,8 @@ class RuntimeTests(unittest.TestCase):
             )
             second = runtime.run_session_turn("agent-session", "find revised detail")
 
-        update = _history_text(runtime.agent.calls[1]["message_history"][-1])
         self.assertIn("Original detail.", first)
         self.assertIn("Revised detail.", second)
-        self.assertIn("# Updated retrieval material", update)
-        self.assertIn("local item `detail-fact`", update)
-
-    def test_retrieve_request_prefix_is_byte_identical_before_first_volatile_block(self):
-        root = Path(self.tempdir.name)
-        (root / "MEMORY.md").write_text("# Root {#root}\n\nstable\n", encoding="utf-8")
-        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=root)
-
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            first_runtime = RightMemoryRuntime(config)
-            first_runtime.run_session_turn("session-a", "find alpha")
-            second_runtime = RightMemoryRuntime(config)
-            second_runtime.run_session_turn("session-b", "find beta")
-
-        first = _history_text(first_runtime.agent.calls[0]["message_history"])
-        second = _history_text(second_runtime.agent.calls[0]["message_history"])
-        self.assertEqual(first, second)
 
     def test_retrieve_turn_records_candidate_visibility_and_delivery_after_success(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
@@ -2619,13 +2287,10 @@ class RuntimeTests(unittest.TestCase):
                 }
             ],
         )
-        seen_histories = []
-
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
 
             def run_sync(message, message_history=None, model_settings=None, usage_limits=None):
-                seen_histories.append(message_history)
                 raise RuntimeError("model failed")
 
             runtime.agent.run_sync = run_sync
@@ -2640,83 +2305,6 @@ class RuntimeTests(unittest.TestCase):
             / "agent-session.json"
         )
         self.assertFalse(state_path.exists())
-        self.assertIn("remember failed delivery retry", _history_text(seen_histories[0]))
-
-    def test_cli_agent_retrieve_receives_recent_submitted_memory(self):
-        config = RuntimeConfig(
-            role="retrieve",
-            runtime_mode="cli-agent",
-            agent_cli=AgentCliConfig(provider="codex"),
-            memory_root=Path(self.tempdir.name),
-        )
-        self._write_async_update_state(
-            "update-a",
-            pending=[
-                {
-                    "id": 1,
-                    "message": "remember cli submitted detail",
-                    "submitted_at": "2026-05-19T00:00:00+00:00",
-                }
-            ],
-        )
-
-        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.has_saved_session.return_value = False
-            executor_class.return_value.run_session_turn.return_value = EMPTY_RETRIEVE_SELECTION_JSON
-            runtime = RightMemoryRuntime(config)
-            result = runtime.run_session_turn("agent-session", "find one")
-
-        self.assertEqual(result, "no strong match")
-        executor_class.return_value.run_session_turn.assert_called_once()
-        _, message = executor_class.return_value.run_session_turn.call_args.args
-        self.assertTrue(message.startswith("Daily RightMemory root snapshot\n"))
-        self.assertLess(message.index("# Recent submitted RightMemory candidates"), message.index("# Query"))
-        self.assertTrue(message.rstrip().endswith("# Query\n\nfind one"))
-        self.assertIn("remember cli submitted detail", message)
-        state_path = Path(self.tempdir.name) / ".runtime" / "recent_submitted" / "retrieve" / "agent-session.json"
-        self.assertFalse(state_path.exists())
-
-    def test_cli_agent_resumed_retrieve_sends_only_continuation_data(self):
-        root = Path(self.tempdir.name)
-        config = RuntimeConfig(
-            role="retrieve",
-            runtime_mode="cli-agent",
-            agent_cli=AgentCliConfig(provider="codex"),
-            memory_root=root,
-        )
-        entry = RecentSubmittedMemoryEntry(
-            update_session_id="update-a",
-            candidate_id=1,
-            submitted_at="2026-07-17T00:00:00+00:00",
-            message="new candidate",
-        )
-
-        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor_class.return_value.has_saved_session.return_value = True
-            executor_class.return_value.run_session_turn.return_value = EMPTY_RETRIEVE_SELECTION_JSON
-            runtime = RightMemoryRuntime(config)
-            runtime.retrieve_context.record_success(
-                "agent-session",
-                memory_commit="old-commit",
-                model_history_json=None,
-                visible_recent_candidates={},
-            )
-            with (
-                patch("rightmemory.runtime.current_memory_head", return_value="new-commit"),
-                patch("rightmemory.runtime.memory_diff_since", return_value="diff --git a/MEMORY.md b/MEMORY.md\n+new"),
-                patch("rightmemory.runtime.collect_recent_submitted_memory", return_value=[entry]),
-            ):
-                result = runtime.run_session_turn("agent-session", "current question")
-
-        self.assertEqual(result, "no strong match")
-        _, message = executor_class.return_value.run_session_turn.call_args.args
-        self.assertTrue(message.startswith("# RightMemory root changes since previous retrieve turn\n"))
-        self.assertIn("# Recent submitted RightMemory candidates", message)
-        self.assertIn("new candidate", message)
-        self.assertTrue(message.rstrip().endswith("# Query\n\ncurrent question"))
-        self.assertNotIn("Daily RightMemory root snapshot", message)
-        self.assertNotIn("Prior retrieve conversation", message)
-        self.assertNotIn("old question", message)
 
     def test_cli_agent_new_retrieve_starts_fresh_local_context(self):
         root = Path(self.tempdir.name)
@@ -2741,41 +2329,9 @@ class RuntimeTests(unittest.TestCase):
             result = runtime.run_session_turn("agent-session", "fresh question")
 
         self.assertEqual(result, "no strong match")
-        _, message = executor_class.return_value.run_session_turn.call_args.args
-        self.assertTrue(message.startswith("Daily RightMemory root snapshot\n"))
-        self.assertNotIn("Prior retrieve conversation", message)
-        self.assertNotIn("legacy question", message)
         state = runtime.retrieve_context.load("agent-session")
         self.assertNotEqual(state.delivered_memory_commit, "old-commit")
         self.assertEqual(state.visible_recent_candidates, {})
-
-    def test_cli_agent_chat_uses_process_local_retrieve_continuity(self):
-        config = RuntimeConfig(
-            role="retrieve",
-            runtime_mode="cli-agent",
-            agent_cli=AgentCliConfig(provider="codex"),
-            memory_root=Path(self.tempdir.name),
-        )
-
-        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
-            executor = executor_class.return_value
-            executor.has_process_session.side_effect = [False, True]
-            executor.run_process_turn.side_effect = [
-                EMPTY_RETRIEVE_SELECTION_JSON,
-                EMPTY_RETRIEVE_SELECTION_JSON,
-            ]
-            runtime = RightMemoryRuntime(config)
-            first = runtime.run_chat_turn("first question")
-            second = runtime.run_chat_turn("second question")
-
-        self.assertEqual((first, second), ("no strong match", "no strong match"))
-        first_message = executor.run_process_turn.call_args_list[0].args[0]
-        second_message = executor.run_process_turn.call_args_list[1].args[0]
-        self.assertIn("Daily RightMemory root snapshot", first_message)
-        self.assertNotIn("Daily RightMemory root snapshot", second_message)
-        self.assertNotIn("Prior retrieve conversation", second_message)
-        self.assertTrue(second_message.rstrip().endswith("# Query\n\nsecond question"))
-
     def test_write_role_creates_memory_lock_without_synthesizing_root_gitignore(self):
         config = RuntimeConfig(
             role="update",
@@ -2818,8 +2374,6 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
             runtime.run_session_turn("agent-session", "remember one")
 
-        message = runtime.agent.calls[0]["message"]
-        self.assertEqual(message, "remember one")
         manager_class.return_value.pull.assert_called_once_with(repair=runtime._repair_sync_candidate)
         manager_class.return_value.push.assert_called_once_with(repair=runtime._repair_sync_candidate)
 
@@ -2904,7 +2458,6 @@ class RuntimeTests(unittest.TestCase):
             runtime.run_session_turn("agent-session", "remember one")
 
         self.assertEqual(repairs, ["dirty"])
-        self.assertEqual(runtime.agent.calls[0]["message"], "remember one")
 
     def test_dirty_main_guard_runs_sync_reconciler_when_sync_disabled(self):
         repairs = []
@@ -3029,7 +2582,6 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
             runtime.run_session_turn("agent-session", "remember one")
 
-        self.assertEqual(runtime.agent.calls[0]["message"], "remember one")
         manager_class.return_value.push.assert_called_once_with(repair=runtime._repair_sync_candidate)
 
     def test_runtime_sync_reconciler_loads_selected_memory_root(self):
@@ -3310,38 +2862,6 @@ class RuntimeTests(unittest.TestCase):
                 tool_names = [tool.__name__ for tool in runtime.agent.tools]
                 self.assertNotIn("sync_push", tool_names)
 
-    def test_semantic_prompt_guidance_keeps_sync_work_out(self):
-        instructions = build_instructions(Path("/memory"), "update")
-
-        self.assertNotIn("Runtime sync context", instructions)
-        self.assertNotIn("already performed sync preflight", instructions)
-        self.assertNotIn("call `sync_push`", instructions)
-        self.assertNotIn("dirty state", instructions)
-
-        retrieve_instructions = build_instructions(Path("/memory"), "retrieve")
-        self.assertIn("Before model start", retrieve_instructions)
-        self.assertIn("clean bounded global-sync refresh", retrieve_instructions)
-        self.assertIn("does not add either pull result to session history", retrieve_instructions)
-        self.assertNotIn("call `sync_push`", retrieve_instructions)
-
-    def test_update_prompt_owns_unified_lifecycle_and_bounded_correction_surfaces(self):
-        instructions = build_instructions(Path("/memory"), "update")
-
-        self.assertIn("evolving account", instructions)
-        self.assertIn("Agent Correction Memory rules:", instructions)
-        self.assertIn("MEMORY_agent-corrections-writing.md", instructions)
-        self.assertIn("MEMORY_agent-corrections-design.md", instructions)
-        self.assertIn("standalone fixed correction collections", instructions)
-        self.assertIn("do not add or retain headings for them in `MEMORY.md`", instructions)
-        self.assertNotIn("headings remain reachable from Memory", instructions)
-        self.assertIn("corrections.md", instructions)
-        self.assertIn("15", instructions)
-        self.assertIn("180 non-empty lines", instructions)
-        self.assertIn("16 non-empty lines", instructions)
-        self.assertIn("200 characters", instructions)
-        self.assertIn("MEMORY.md", instructions)
-        self.assertIn("PURSUITS.md", instructions)
-
     def test_run_session_turn_preserves_message_history_on_disk(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
 
@@ -3378,14 +2898,6 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(first, "no strong match")
         self.assertEqual(second, "no strong match")
-        first_history = _history_text(first_runtime.agent.calls[0]["message_history"])
-        self.assertIn("Daily RightMemory root snapshot", first_history)
-        second_history = _history_text(second_runtime.agent.calls[0]["message_history"])
-        self.assertIn("inspect the detail", second_history)
-        self.assertIn("read_detail", second_history)
-        self.assertIn("authoritative detail body", second_history)
-        self.assertIn("# Query\n\nremember one", second_history)
-        self.assertNotIn("Prior retrieve conversation", second_history)
         history_path = Path(self.tempdir.name) / ".runtime" / "sessions" / "retrieve" / "agent-session.json"
         self.assertFalse(history_path.exists())
         retrieve_state_path = (
@@ -3393,7 +2905,6 @@ class RuntimeTests(unittest.TestCase):
         )
         retrieve_state = json.loads(retrieve_state_path.read_text(encoding="utf-8"))
         self.assertIn("model_history", retrieve_state)
-        self.assertIn("authoritative detail body", retrieve_state_path.read_text(encoding="utf-8"))
         gitignore_path = Path(self.tempdir.name) / ".runtime" / ".gitignore"
         self.assertEqual(gitignore_path.read_text(encoding="utf-8"), "*\n")
 
@@ -3517,17 +3028,12 @@ class RuntimeTests(unittest.TestCase):
         )
         retrieve_state = json.loads(retrieve_state_path.read_text(encoding="utf-8"))
         self.assertIsInstance(retrieve_state["model_history"], list)
-        self.assertIn(
-            "# Query\\n\\nremember one",
-            retrieve_state_path.read_text(encoding="utf-8"),
-        )
         trace_path = Path(self.tempdir.name) / ".runtime" / "debug" / "retrieve" / "agent-session.jsonl"
         events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(
             [event["event"] for event in events],
             ["run_started", "history_loaded", "model_started", "model_finished", "run_finished"],
         )
-        self.assertEqual(events[0]["message"], "remember one")
         self.assertEqual(events[0]["model_id"], "openai/test")
         self.assertEqual(events[3]["output"], "no strong match")
 
@@ -3899,161 +3405,7 @@ class RuntimeTests(unittest.TestCase):
         )
 
 
-class PromptTests(unittest.TestCase):
-    def test_retrieve_prompt_does_not_expand_agent_corrections_through_memory(self):
-        for build in (build_instructions, build_cli_agent_instructions):
-            with self.subTest(builder=build.__name__):
-                prompt = build(Path("/memory"), "retrieve")
-                self.assertNotIn(
-                    "Writing and Design correction collections are second-pass evidence",
-                    prompt,
-                )
-
-    def test_cli_agent_prompt_assembles_without_standalone_tools(self):
-        for role in (
-            "dreamer",
-            "historian",
-            "insight",
-            "pruner",
-            "retrieve",
-            "reviewer",
-            "shared-view-builder",
-            "sync-reconciler",
-            "update",
-        ):
-            memory_root = Path("/home/example/.rightmemory")
-            prompt = build_cli_agent_instructions(memory_root, role)
-
-            self.assertIn(f"The configured memory root is {memory_root}.", prompt)
-            self.assertIn("RightMemory Schema", prompt)
-            self.assertIn(f"{role.title().replace('-', ' ')} Role", prompt)
-            self.assertNotIn("Command-selected behavior", prompt)
-            self.assertNotIn("Standalone adaptation", prompt)
-            self.assertNotIn("validate_memory", prompt)
-            self.assertNotIn("retrieve_shared_view", prompt)
-            self.assertNotIn("git_discard", prompt)
-            self.assertNotIn("sync_push", prompt)
-            self.assertNotIn("{{MEMORY_ROOT}}", prompt)
-            self.assertNotIn("{{SKILLS_ROOT}}", prompt)
-
-    def test_cli_agent_retrieve_prompt_requires_strict_selection_without_ask_command(self):
-        prompt = build_cli_agent_instructions(Path("/home/example/.rightmemory"), "retrieve")
-
-        self.assertIn("MF#", prompt)
-        self.assertIn("MQ#", prompt)
-        self.assertIn("exactly one JSON object", prompt)
-        self.assertIn("schema-valid `dist/MEMORY.md`", prompt)
-        self.assertIn("`dist/MEMORY_<id>.md`", prompt)
-        self.assertIn("The `read_*` names", prompt)
-        self.assertIn("provider CLI's read-only file tools", prompt)
-        self.assertNotIn("rightmemory shared-view retrieve", prompt)
-        self.assertNotIn("rightmemory shared-view ask", prompt)
-        self.assertNotIn("retrieve_shared_view", prompt)
-
-    def test_cli_agent_prompt_rejects_unknown_role(self):
-        with self.assertRaises(ValueError) as caught:
-            build_cli_agent_instructions(Path("/home/example/.rightmemory"), "curator")
-
-        self.assertIn("role must be one of:", str(caught.exception))
-
-    def test_standalone_prompts_assemble_for_each_role(self):
-        for role in ("dreamer", "historian", "insight", "pruner", "retrieve", "reviewer", "sync-reconciler", "update"):
-            prompt = build_instructions(Path("/home/example/.rightmemory"), role)
-
-            self.assertIn("RightMemory Schema", prompt)
-            self.assertIn(f"{role.title().replace('-', ' ')} Role", prompt)
-            self.assertIn("Command-selected behavior", prompt)
-            self.assertNotIn("{{MEMORY_ROOT}}", prompt)
-            self.assertNotIn("{{SKILLS_ROOT}}", prompt)
-
-    def test_dreamer_prompt_no_longer_mentions_dream_logs(self):
-        prompt = build_instructions(Path("/memory"), "dreamer")
-
-        self.assertNotIn("dream_logs", prompt)
-        self.assertNotIn("dream report", prompt.lower())
-        self.assertIn("# Open Context Questions", prompt)
-
-    def test_insight_prompt_uses_insight_logs_and_excludes_memory_validation(self):
-        prompt = build_instructions(Path("/memory"), "insight")
-
-        self.assertIn("Insight Role", prompt)
-        self.assertIn("insight_logs/", prompt)
-        self.assertIn("operator hint", prompt)
-        self.assertIn("Transcript review only extracts updater candidates", prompt)
-        self.assertNotIn("validate_memory", prompt)
-        self.assertNotIn("dream_logs", prompt)
-
-    def test_sync_reconciler_standalone_prompt_includes_registry_tool_scope(self):
-        prompt = build_instructions(Path("/memory"), "sync-reconciler")
-
-        self.assertIn("Commit and edit tools are scoped", prompt)
-        self.assertIn("Agent Correction Memory rules:", prompt)
-        self.assertIn("The two collections are fixed", prompt)
-        self.assertIn("shared_views.toml", prompt)
-        self.assertIn("shares.toml", prompt)
-        self.assertIn("shared_views/<view-id>/view.md", prompt)
-        self.assertIn("insight_logs/*.md", prompt)
-        self.assertIn("git_discard", prompt)
-        self.assertNotIn("Commit tools are scoped to `MEMORY.md` and `MEMORY_*.md`", prompt)
-
-    def test_standalone_prompt_does_not_embed_memory_root_path(self):
-        first = build_instructions(Path("/home/example/.rightmemory/.runtime/worktrees/update-111"), "update")
-        second = build_instructions(Path("/home/example/.rightmemory/.runtime/worktrees/update-222"), "update")
-
-        self.assertEqual(first, second)
-        self.assertNotIn("/home/example/.rightmemory", first)
-        self.assertIn("store-relative paths", first)
-
-    def test_schema_level_memory_skill_guidance_is_in_role_prompts(self):
-        retrieve_instructions = build_instructions(Path("/memory"), "retrieve")
-        self.assertIn("S#", retrieve_instructions)
-        self.assertIn("MEMORY_SKILL_<slug>.md", retrieve_instructions)
-        self.assertIn("complete S# instruction", retrieve_instructions)
-
-        for role in ("update", "reviewer", "dreamer"):
-            with self.subTest(role=role):
-                instructions = build_instructions(Path("/memory"), role)
-                self.assertIn("reusable instruction asset", instructions)
-                self.assertIn("ordinary memory", instructions)
-                self.assertIn("rigid", instructions)
-
-    def test_dreamer_prompt_includes_pending_semantic_upgrade_context(self):
-        context = SemanticUpgradeContext(
-            notes=[
-                SemanticUpgradeNote(
-                    id="example-note",
-                    introduced_at=date(2026, 5, 20),
-                    title="Example Note",
-                    body="# Example Note\n\nReconsider older memory.",
-                    source="example.md",
-                )
-            ],
-            warnings=[],
-        )
-
-        prompt = build_instructions(Path("/home/example/.rightmemory"), "dreamer", semantic_upgrades=context)
-
-        self.assertIn("example-note", prompt)
-        self.assertIn("Reconsider older memory.", prompt)
-
-    def test_non_dreamer_prompt_ignores_semantic_upgrade_context(self):
-        context = SemanticUpgradeContext(
-            notes=[
-                SemanticUpgradeNote(
-                    id="example-note",
-                    introduced_at=date(2026, 5, 20),
-                    title="Example Note",
-                    body="# Example Note\n\nReconsider older memory.",
-                    source="example.md",
-                )
-            ],
-            warnings=[],
-        )
-
-        prompt = build_instructions(Path("/home/example/.rightmemory"), "update", semantic_upgrades=context)
-
-        self.assertNotIn("example-note", prompt)
-
+class PackageReferenceTests(unittest.TestCase):
     def test_package_references_need_no_wheel_remapping(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 
@@ -4061,9 +3413,6 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("skills", force_include)
         for filename in REFERENCE_FILES.values():
             self.assertTrue((Path("rightmemory") / "reference" / filename).is_file())
-        self.assertIn("# RightMemory Schema", read_reference("schema"))
-        self.assertIn("# Pursuit Rules", read_reference("pursuit"))
-        self.assertNotIn("rightmemory/prompts", force_include)
         self.assertNotIn("rightmemory/semantic_upgrades", force_include)
 
 

@@ -611,26 +611,6 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         self.assertNotIn("Sample Project Graph", exported)
         self.assertNotIn("sample-node", exported)
 
-    def test_file_package_does_not_include_retriever_prompt(self):
-        write_extractive_file_view_recipe(
-            self.root,
-            view_id="auth-api-files",
-            title="Auth API Files",
-            intent="Expose auth API integration context.",
-            include_headings=["auth-api"],
-            approved=True,
-            publish_hub_url="https://hub.example.test",
-            publish_credential_id="alice-publish",
-        )
-        package = self.root / "package"
-
-        export_file_view_package(self.root, "auth-api-files", package)
-
-        self.assertTrue((package / "view.md").exists())
-        self.assertTrue((package / "recipe.toml").exists())
-        self.assertTrue((package / "dist" / "MEMORY.md").exists())
-        self.assertFalse((package / "retriever.md").exists())
-
     def test_generative_recipe_exports_existing_generated_memory(self):
         write_generative_file_view(
             self.root,

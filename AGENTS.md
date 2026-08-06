@@ -42,19 +42,22 @@
 ## Verification
 
 - Run the full test suite with `python -m tests` for changes that affect executable
-  behavior beyond prompt text. It runs every `test_*.py` module in bounded parallel
-  processes; use `python -m tests --jobs N` to override the default concurrency of six.
-- For prompt-only edits, do not run the full test suite by default. Run only focused
-  prompt assembly or invariant tests and relevant syntax checks. Run the full suite
-  only when prompt construction, role selection, runtime integration, or other
-  executable behavior also changes, or when the user explicitly requests it.
+  behavior beyond agent-facing text. It runs every `test_*.py` module in bounded
+  parallel processes; use `python -m tests --jobs N` to override the default
+  concurrency of six.
+- For changes limited to agent-facing text, do not run the full test suite. Run only
+  relevant non-test validation such as syntax or packaging checks when applicable.
+  Run tests only when executable behavior also changes or when the user explicitly
+  requests them.
 - Run syntax checks with `python -m compileall -q rightmemory tests`.
-- Add or update focused tests when changing prompt behavior, configuration shape, transcript/update-record state, CLI-agent thread lifecycle, or Git/memory safety.
-- Prompt tests must verify assembly boundaries and durable invariants rather than
-  human-readable wording. Do not assert exact prompt prose, sentence fragments, or
-  the absence of obsolete wording. A wording-only prompt edit must not require test
-  changes. Tests may still assert machine-readable output schemas, stable identifiers,
-  and other text that is itself an executable contract.
+- Add or update focused tests when changing configuration shape, transcript/update-record state, CLI-agent thread lifecycle, or Git/memory safety.
+- Do not test agent-facing text. Tests must not inspect, compare, snapshot, parse, or
+  assert any content supplied to an agent, including prompts, assembled instructions,
+  schemas and references embedded in prompts, runtime context blocks, formatting
+  markers, tool descriptions, or output-format instructions. Do not read canonical
+  prompt files from tests. Test only non-text behavior at the surrounding boundary,
+  such as role and tool selection, state transitions, persistence, invocation, and
+  parsing of agent output. Editing agent-facing text must never require test changes.
 - When changing installer behavior, verify the affected modes with `./install.sh [--mode cli-agent|standalone] <memory-root> <skills-target>` on macOS/Linux/WSL or `.\install.ps1 [--mode cli-agent|standalone] <memory-root> <skills-target>` on Windows PowerShell. Use disposable test roots.
 - When changing semantic upgrade machinery or notes, run `python -m unittest discover -s tests -p 'test_semantic_upgrades.py'`.
 

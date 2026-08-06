@@ -20,7 +20,6 @@ from rightmemory.semantic_upgrades import (
     mark_absorbed,
     parse_note_text,
     pending_context,
-    render_prompt_context,
 )
 
 
@@ -96,18 +95,6 @@ class SemanticUpgradeParserTests(unittest.TestCase):
         self.assertIn("schema-level-memory-skills", notes_by_id)
         self.assertIn("shared-view-headings", notes_by_id)
         self.assertIn("memory-pursuit-unified-graph", notes_by_id)
-        self.assertIn("# Open Context Questions {#open-context-questions}", notes_by_id["open-context-questions"].body)
-        self.assertIn("not declarative memory facts", notes_by_id["open-context-questions"].body)
-        self.assertIn("Uncertain:", notes_by_id["uncertain-memory-marker"].body)
-        self.assertIn("S#slug", notes_by_id["schema-level-memory-skills"].body)
-        self.assertIn("reusable instruction assets", notes_by_id["schema-level-memory-skills"].body)
-        self.assertIn("MF#slug", notes_by_id["shared-view-headings"].body)
-        self.assertIn("MQ#slug", notes_by_id["shared-view-headings"].body)
-        self.assertIn("shared view", notes_by_id["shared-view-headings"].body)
-        self.assertIn("every legacy sibling `MEMORY_*.md`", notes_by_id["memory-pursuit-unified-graph"].body)
-        self.assertIn("Do not delete, overwrite, truncate", notes_by_id["memory-pursuit-unified-graph"].body)
-        self.assertIn("cross-tree references", notes_by_id["memory-pursuit-unified-graph"].body)
-        self.assertIn("Memory-only authority", notes_by_id["memory-pursuit-unified-graph"].body)
         self.assertEqual([], result.warnings)
 
 
@@ -187,26 +174,6 @@ class SemanticUpgradeStateTests(unittest.TestCase):
         self.assertIn("1 semantic upgrade note(s) pending", summary)
         self.assertIn("example-note", summary)
         self.assertIn("broken.md: missing front matter", summary)
-
-    def test_render_prompt_context_includes_note_content(self):
-        context = SemanticUpgradeContext(
-            notes=[
-                SemanticUpgradeNote(
-                    id="example-note",
-                    introduced_at=date(2026, 5, 20),
-                    title="Example Note",
-                    body="# Example Note\n\nBody.",
-                    source="example.md",
-                )
-            ],
-            warnings=[],
-        )
-
-        rendered = render_prompt_context(context)
-
-        self.assertIn("example-note", rendered)
-        self.assertIn("Body.", rendered)
-
 
 class RuntimeStateRootTests(unittest.TestCase):
     def test_runtime_state_stores_use_state_root_while_tools_use_memory_root(self):

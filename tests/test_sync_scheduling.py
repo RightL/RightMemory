@@ -292,15 +292,3 @@ class SyncSchedulingTests(SyncTestBase):
         result = manager.background_pull()
 
         self.assertEqual(result.status, "synced")
-
-    def test_repair_message_describes_dirty_and_conflict_states(self):
-        manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True))
-
-        dirty = manager.repair_message(SyncResult("dirty", "dirty memory", ["MEMORY.md"]))
-        conflict = manager.repair_message(
-            SyncResult("conflict", "memory sync conflict", ["MEMORY.md"])
-        )
-
-        self.assertIn("inspect and repair dirty memory state", dirty)
-        self.assertIn("staged incoming candidate", conflict)
-        self.assertIn("active memory root is unchanged", conflict)

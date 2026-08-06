@@ -754,7 +754,6 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], operation_id)
-        self.assertIn("retry only this", calls[0][1])
         self.assertEqual(state.status, "succeeded")
         self.assertEqual(state.last_operation_id, operation_id)
 
@@ -875,9 +874,6 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], operation_id)
-        self.assertIn("first original", calls[0][1])
-        self.assertIn("second original", calls[0][1])
-        self.assertNotIn("newer candidate", calls[0][1])
         self.assertEqual(first.last_operation_id, operation_id)
         self.assertEqual(first.pending, [newer_job])
         self.assertEqual(second.last_operation_id, operation_id)
@@ -939,8 +935,6 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(result.processed, 2)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], operation_id)
-        self.assertIn("already moved", calls[0][1])
-        self.assertIn("not moved yet", calls[0][1])
         self.assertEqual(
             [state.current_operation_id for state in callback_states],
             [operation_id, operation_id],
@@ -1364,8 +1358,6 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(result.processed, 1)
         self.assertEqual(len(calls), 1)
-        self.assertNotIn("cancel me", calls[0][1])
-        self.assertIn("keep me", calls[0][1])
         self.assertEqual(state.current_batch, [])
         self.assertEqual(state.pending, [])
 
@@ -1444,11 +1436,6 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(len([call for call in calls if isinstance(call, tuple)]), 1)
         batch_session_id, message = [call for call in calls if isinstance(call, tuple)][0]
         self.assertTrue(batch_session_id.startswith("update-batch-"))
-        self.assertIn("[update session: agent-1 | candidate: 1", message)
-        self.assertIn("[update session: agent-1 | candidate: 2", message)
-        self.assertIn("[update session: agent-2 | candidate: 1", message)
-        self.assertIn("a1", message)
-        self.assertIn("b1", message)
         self.assertIn(3, calls)
 
     def test_global_worker_includes_whole_session_when_it_overshoots_target(self):
@@ -1488,7 +1475,6 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
         self.assertEqual(result.processed, 4)
         self.assertEqual(len(calls), 1)
-        self.assertIn("b2", calls[0])
 
     def test_single_session_reaching_target_runs_before_quiet_period(self):
         calls = []
@@ -1521,7 +1507,6 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(result.processed, 3)
         self.assertEqual(len(calls), 1)
-        self.assertIn("a3", calls[0])
 
     def test_single_session_below_target_is_not_eligible_before_quiet_period(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1679,7 +1664,6 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(slept, [])
         self.assertEqual(len(calls), 1)
-        self.assertIn("retry me", calls[0][1])
         self.assertEqual(state.status, "succeeded")
 
     def test_failed_session_in_cooldown_waits_until_retry_deadline(self):
@@ -1718,7 +1702,6 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(slept, [_dt("2026-05-15T00:00:30+00:00")])
         self.assertEqual(len(calls), 1)
-        self.assertIn("retry later", calls[0])
 
     def test_retryable_sessions_run_before_normal_batching(self):
         calls = []
@@ -1764,8 +1747,6 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
         self.assertEqual(result.status, "succeeded")
         self.assertGreaterEqual(len(calls), 1)
-        self.assertIn("retry first", calls[0])
-        self.assertNotIn("normal later", calls[0])
 
     def test_global_worker_failure_returns_all_current_batches_to_pending(self):
         retry_ready = False

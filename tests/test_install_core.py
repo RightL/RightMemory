@@ -100,52 +100,8 @@ class InstallCoreTests(unittest.TestCase):
                 self.assertFalse((target / "rightmemory-edit-correction-rules.md").exists())
                 self.assertTrue((target / "memory-retriever" / "SKILL.md").is_file())
                 self.assertTrue((target / "rightmemory-orchestrator" / "SKILL.md").is_file())
-                retriever_text = (target / "memory-retriever" / "SKILL.md").read_text(encoding="utf-8")
-                orchestrator_text = (target / "rightmemory-orchestrator" / "SKILL.md").read_text(encoding="utf-8")
-                for skill_text in (retriever_text, orchestrator_text):
-                    self.assertIn("rightmemory agent-corrections writing", skill_text)
-                    self.assertIn("rightmemory agent-corrections design", skill_text)
-                    self.assertIn("do not run both by default", skill_text)
-                    self.assertIn("[RightMemory] Retrieved guidance", skill_text)
-                    self.assertIn("- Active: <guidance being followed now>", skill_text)
-                    self.assertIn("- Deferred: <guidance that may apply later", skill_text)
-                    self.assertIn("ordinary facts, knowledge, or descriptive context", skill_text)
-                    self.assertNotIn("- Active (", skill_text)
-                    self.assertNotIn("- Deferred (", skill_text)
                 maintainer = (target / "maintain-rightmemory" / "SKILL.md")
                 self.assertTrue(maintainer.is_file())
-                maintainer_text = maintainer.read_text(encoding="utf-8")
-                for command in (
-                    "rightmemory reference schema",
-                    "rightmemory reference pursuit",
-                    "rightmemory reference agent-correction",
-                    "rightmemory reference edit-correction",
-                ):
-                    self.assertIn(command, maintainer_text)
-                self.assertNotIn(str(root / "memory"), maintainer_text)
-                self.assertIn("`rightmemory status`", maintainer_text)
-                self.assertIn(
-                    "`rightmemory --profile <name> status`",
-                    maintainer_text,
-                )
-                self.assertIn("use the reported `root:`", maintainer_text)
-                self.assertIn("do not infer or guess it", maintainer_text)
-                self.assertIn("`Strongly recommended`", maintainer_text)
-                self.assertIn("wait for explicit approval", maintainer_text)
-                self.assertIn("dedicated temporary Git worktree", maintainer_text)
-                self.assertIn(
-                    "`maintain: <concise maintenance summary>`",
-                    maintainer_text,
-                )
-                self.assertIn("`git merge --ff-only`", maintainer_text)
-                self.assertIn("without creating another commit", maintainer_text)
-                self.assertIn(
-                    "rightmemory validate --root <worktree>",
-                    maintainer_text,
-                )
-                self.assertIn("rightmemory validate --root <root>", maintainer_text)
-                self.assertNotIn("{{MEMORY_ROOT}}", maintainer_text)
-                self.assertNotIn("{{SKILLS_ROOT}}", maintainer_text)
 
     def test_install_skills_preserves_modified_loose_reference(self):
         with tempfile.TemporaryDirectory() as tempdir:
