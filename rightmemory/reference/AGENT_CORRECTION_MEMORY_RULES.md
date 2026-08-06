@@ -19,5 +19,5 @@ Agent Correction Memory preserves reusable user corrections as concrete second-p
 - Retain the highest-value reusable patterns rather than treating either collection as an append-only log or FIFO window.
 - Each entry preserves enough context to understand what the user requested, what the agent proposed or did, what was rejected, and what was accepted instead.
 - Prefer concrete before/after evidence and keep explanatory lessons brief.
-- Keep reusable correction evidence in Agent Correction Memory. Do not duplicate the same lesson in ordinary Agent Behavior or S#; add guidance there only when it has distinct value beyond the correction evidence.
+- Do not duplicate guidance already captured elsewhere, whether inside or outside the Memory root. Keep correction evidence only when its rejected/accepted contrast adds distinct value for future second-pass review.
 - Corrections to RightMemory state and root `corrections.md` are outside this module.

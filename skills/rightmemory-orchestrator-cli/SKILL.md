@@ -52,7 +52,10 @@ description: "Use when the user explicitly chooses full RightMemory orchestratio
 - Do not submit ordinary bug causes, implementation steps, experiment runs, generated artifact lists, or task results as durable context merely because work occurred.
 - For recurring artifact families, prefer one compact lookup rule or durable conclusion over one candidate per artifact.
 - Include uncertainty and surrounding context when a user preference, workflow, behavior, project fact, constraint, decision, or domain interpretation may be durable but is not settled.
-- For an explicit user correction to ordinary agent work, submit the concrete event: what the user requested, what the agent proposed or did, what the user rejected, and what was accepted. Do not choose the final correction category or force persistence.
+- Treat a user response as correction evidence when, in context, it steers the agent to reconsider, change, or complete something the agent proposed, did, or omitted. The user need not explicitly reject the prior work or state the desired outcome: an expression of unease, a request for a better approach, a follow-up question that exposes an omission, or added information that calls for reconsideration can be an implicit correction. Do not treat an ordinary question or new information as a correction unless it redirects prior agent work.
+- When you recognize correction evidence, briefly say `Correction noted.` and continue the normal response. This acknowledgment does not trigger submission.
+- Do not submit correction evidence while the direction is still being worked out. After the correction is reflected in a settled decision or completed work, submit the resolved event with enough context to show the relevant request, what the agent proposed, did, or omitted, how the user redirected it, and the settled outcome.
+- If the settled outcome is corrected again, submit the later event only after it is also settled. Do not choose the final correction category or force persistence.
 - For stale or wrong retrieved state, identify it well enough for the updater to find and say whether the evidence supports revision, narrowing, or deletion.
 
 ## Update Status
