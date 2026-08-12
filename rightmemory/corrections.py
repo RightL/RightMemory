@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 
 _SECTIONS = ("Candidate", "Proposed edit", "Accepted edit")
@@ -8,6 +9,20 @@ _AGENT_CORRECTION_MAX_ENTRIES = 15
 _AGENT_CORRECTION_MAX_ENTRY_LINES = 16
 _AGENT_CORRECTION_MAX_COLLECTION_LINES = 180
 _AGENT_CORRECTION_MAX_LINE_LENGTH = 200
+AGENT_CORRECTION_SOURCE_PATHS = {
+    "AC#writing": "MEMORY_agent-corrections-writing.md",
+    "AC#design": "MEMORY_agent-corrections-design.md",
+}
+
+
+@dataclass(frozen=True)
+class AgentCorrectionEntry:
+    """One position-addressed entry in a fixed Agent Correction collection."""
+
+    position: int
+    title: str
+    start_line: int
+    text: str
 
 
 def _iter_unfenced_lines(lines: list[str]):
@@ -28,16 +43,50 @@ def _iter_unfenced_lines(lines: list[str]):
             yield line_number, line
 
 
-def validate_agent_correction_markdown(text: str, path: str) -> list[str]:
-    """Validate one fixed Agent Correction Memory collection."""
-    errors: list[str] = []
+def agent_correction_entries(text: str) -> list[AgentCorrectionEntry]:
+    """Return complete ``###`` entries with stable one-based positions."""
     lines = text.splitlines()
-    entries: list[tuple[str, int]] = []
-
+    headings: list[tuple[str, int]] = []
     for line_number, line in _iter_unfenced_lines(lines):
         heading = re.match(r"^ {0,3}###[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$", line)
         if heading is not None:
-            entries.append((heading.group(1).strip(), line_number))
+            headings.append((heading.group(1).strip(), line_number))
+
+    entries: list[AgentCorrectionEntry] = []
+    for index, (title, line_number) in enumerate(headings):
+        end_line = headings[index + 1][1] - 1 if index + 1 < len(headings) else len(lines)
+        entry_text = "\n".join(lines[line_number - 1 : end_line]).rstrip("\r\n")
+        entries.append(
+            AgentCorrectionEntry(
+                position=index + 1,
+                title=title,
+                start_line=line_number,
+                text=entry_text,
+            )
+        )
+    return entries
+
+
+def annotate_agent_correction_entries(text: str, source_id: str) -> str:
+    """Expose each entry's retrieval id immediately before its heading."""
+    if source_id not in AGENT_CORRECTION_SOURCE_PATHS:
+        raise ValueError(f"unknown Agent Correction source: {source_id}")
+    entries = agent_correction_entries(text)
+    positions = {entry.start_line: entry.position for entry in entries}
+    rendered: list[str] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        position = positions.get(line_number)
+        if position is not None:
+            rendered.append(f"[source_id: {source_id} | entry_position: {position}]")
+        rendered.append(line)
+    return "\n".join(rendered)
+
+
+def validate_agent_correction_markdown(text: str, path: str) -> list[str]:
+    """Validate one fixed Agent Corrections collection."""
+    errors: list[str] = []
+    lines = text.splitlines()
+    entries = agent_correction_entries(text)
 
     if len(entries) > _AGENT_CORRECTION_MAX_ENTRIES:
         errors.append(
@@ -52,9 +101,11 @@ def validate_agent_correction_markdown(text: str, path: str) -> list[str]:
             f"at most {_AGENT_CORRECTION_MAX_COLLECTION_LINES} are allowed"
         )
 
-    for entry_index, (title, line_number) in enumerate(entries):
+    for entry_index, entry in enumerate(entries):
+        title = entry.title
+        line_number = entry.start_line
         entry_end = (
-            entries[entry_index + 1][1] - 1
+            entries[entry_index + 1].start_line - 1
             if entry_index + 1 < len(entries)
             else len(lines)
         )

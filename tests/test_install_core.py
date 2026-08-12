@@ -100,6 +100,7 @@ class InstallCoreTests(unittest.TestCase):
                 self.assertFalse((target / "rightmemory-edit-correction-rules.md").exists())
                 self.assertTrue((target / "memory-retriever" / "SKILL.md").is_file())
                 self.assertTrue((target / "rightmemory-orchestrator" / "SKILL.md").is_file())
+                self.assertTrue((target / "rightmemory-auto-orchestrator" / "SKILL.md").is_file())
                 maintainer = (target / "maintain-rightmemory" / "SKILL.md")
                 self.assertTrue(maintainer.is_file())
 

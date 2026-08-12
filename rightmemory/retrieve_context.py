@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
@@ -8,12 +9,13 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .corrections import AGENT_CORRECTION_SOURCE_PATHS, annotate_agent_correction_entries
 from .retrieve_selection import DeliveredRange, RetrieveDeliveryCoverage
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
 
 
 SNAPSHOT_HEADER = "Daily RightMemory root snapshot"
-SNAPSHOT_SCOPE = "rightmemory-roots-v2"
+SNAPSHOT_SCOPE = "rightmemory-roots-v3"
 DIFF_HEADER = "RightMemory root changes since previous retrieve turn"
 RECENT_SUBMITTED_CONTEXT_HEADER = "Recent submitted RightMemory candidates"
 UPDATED_MATERIAL_HEADER = "Updated retrieval material"
@@ -137,7 +139,12 @@ class RetrieveContextStore:
 
 def root_memory_paths(memory_root: Path) -> list[str]:
     root = Path(memory_root)
-    return [name for name in ("MEMORY.md", "PURSUITS.md") if (root / name).is_file()]
+    names = [
+        "MEMORY.md",
+        "PURSUITS.md",
+        *AGENT_CORRECTION_SOURCE_PATHS.values(),
+    ]
+    return [name for name in names if (root / name).is_file()]
 
 
 def load_daily_snapshot(memory_root: Path, *, now: datetime | None = None) -> DailySnapshot:
@@ -185,19 +192,52 @@ def memory_diff_since(memory_root: Path, old_commit: str | None, new_commit: str
     changed = _changed_root_memory_paths(memory_root, old_commit, new_commit)
     if not changed:
         return ""
-    result = subprocess.run(
-        ["git", "diff", old_commit, new_commit, "--", *changed],
-        cwd=memory_root,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"git diff failed: {result.stderr.strip()}")
-    return result.stdout.strip()
+    correction_sources = {
+        path: source_id
+        for source_id, path in AGENT_CORRECTION_SOURCE_PATHS.items()
+    }
+    ordinary_paths = [path for path in changed if path not in correction_sources]
+    parts: list[str] = []
+    if ordinary_paths:
+        result = subprocess.run(
+            ["git", "diff", old_commit, new_commit, "--", *ordinary_paths],
+            cwd=memory_root,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"git diff failed: {result.stderr.strip()}")
+        if result.stdout.strip():
+            parts.append(result.stdout.strip())
+
+    for path in changed:
+        source_id = correction_sources.get(path)
+        if source_id is None:
+            continue
+        old_text = _git_file_text(memory_root, old_commit, path)
+        new_text = _git_file_text(memory_root, new_commit, path)
+        old_annotated = (
+            "" if old_text is None else annotate_agent_correction_entries(old_text, source_id)
+        )
+        new_annotated = (
+            "" if new_text is None else annotate_agent_correction_entries(new_text, source_id)
+        )
+        rendered = "\n".join(
+            difflib.unified_diff(
+                old_annotated.splitlines(),
+                new_annotated.splitlines(),
+                fromfile="/dev/null" if old_text is None else f"a/{path}",
+                tofile="/dev/null" if new_text is None else f"b/{path}",
+                lineterm="",
+            )
+        )
+        if rendered:
+            parts.append(rendered)
+    return "\n\n".join(parts)
 
 
 def format_memory_diff_block(diff: str) -> str:
@@ -276,8 +316,15 @@ def format_current_material_block(text: str) -> str:
 
 def _render_snapshot_text(memory_root: Path, paths: list[str]) -> str:
     parts = [SNAPSHOT_HEADER, ""]
+    correction_sources = {
+        path: source_id
+        for source_id, path in AGENT_CORRECTION_SOURCE_PATHS.items()
+    }
     for relative in paths:
         text = (memory_root / relative).read_text(encoding="utf-8")
+        source_id = correction_sources.get(relative)
+        if source_id is not None:
+            text = annotate_agent_correction_entries(text, source_id)
         parts.append(f"===== {relative} =====")
         parts.append(text.rstrip())
         parts.append("")
@@ -285,8 +332,13 @@ def _render_snapshot_text(memory_root: Path, paths: list[str]) -> str:
 
 
 def _changed_root_memory_paths(memory_root: Path, old_commit: str, new_commit: str) -> list[str]:
+    root_names = {
+        "MEMORY.md",
+        "PURSUITS.md",
+        *AGENT_CORRECTION_SOURCE_PATHS.values(),
+    }
     result = subprocess.run(
-        ["git", "diff", "--name-only", old_commit, new_commit, "--", "MEMORY.md", "PURSUITS.md"],
+        ["git", "diff", "--name-only", old_commit, new_commit, "--", *sorted(root_names)],
         cwd=memory_root,
         text=True,
         encoding="utf-8",
@@ -297,9 +349,33 @@ def _changed_root_memory_paths(memory_root: Path, old_commit: str, new_commit: s
     )
     if result.returncode != 0:
         raise RuntimeError(f"git diff --name-only failed: {result.stderr.strip()}")
-    root_names = {"MEMORY.md", "PURSUITS.md"}
     paths = [raw.strip() for raw in result.stdout.splitlines() if raw.strip() in root_names]
     return sorted(set(paths))
+
+
+def _git_file_text(memory_root: Path, commit: str, path: str) -> str | None:
+    exists = subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}:{path}"],
+        cwd=memory_root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if exists.returncode != 0:
+        return None
+    result = subprocess.run(
+        ["git", "show", f"{commit}:{path}"],
+        cwd=memory_root,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"git show failed for {path}: {result.stderr.strip()}")
+    return result.stdout
 
 
 def _snapshot_from_dict(data: dict[str, object]) -> DailySnapshot:

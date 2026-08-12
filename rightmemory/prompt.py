@@ -103,11 +103,11 @@ Workspace rule:
 {final_reply}
 
 RightMemory source of truth:
-- Durable Memory begins at MEMORY.md; live Pursuit begins at PURSUITS.md.
+- Memory begins at MEMORY.md; Pursuit begins at PURSUITS.md.
+- Agent Corrections uses the fixed MEMORY_agent-corrections-writing.md and MEMORY_agent-corrections-design.md collections.
 - F# detail files use the containing tree's MEMORY_<slug>.md or PURSUIT_<slug>.md name.
-- The package-owned Pursuit rules define Pursuit-specific maintenance judgment.
-- The package-owned Agent Correction Memory rules define the fixed correction module.
-- corrections.md is RightMemory edit feedback read by Update, not graph content or ordinary retrieval context.
+- The package-owned module rules define what belongs in Memory, Pursuit, and Agent Corrections.
+- corrections.md contains RightMemory Edit Feedback read by Update; it is not semantic RightMemory state or ordinary retrieval context.
 - Insight logs are stored under insight_logs/.
 - Share relationships are stored in shares.toml.
 - Shared-view resolver metadata is stored in shared_views.toml.
@@ -171,8 +171,9 @@ def _command_guidance(role: str) -> str:
         return (
             "- The `rightmemory update` command selected unified updating. Treat every caller message as a "
             "RightMemory candidate without requiring a dispatch prefix.\n"
-            "- A caller message may contain one candidate or an ordered batch. Reconcile live Pursuit, durable "
-            "Memory, both, or neither instead of treating candidate text as final stored content."
+            "- A caller message may contain one candidate or an ordered batch. Reconcile the evidence into "
+            "Memory, Pursuit, Agent Corrections, any meaningful combination of them, or nowhere instead of "
+            "treating candidate text as final stored content."
         )
     if role == "pruner":
         return (
@@ -310,8 +311,8 @@ def _tool_guidance(role: str) -> str:
     elif role == "update":
         guidance += (
             "\n- Commit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`, `PURSUIT_*.md`, "
-            "and their graph state. `corrections.md` is read-only; keep unrelated "
-            "files out of commits."
+            "and the fixed Agent Corrections collections. `corrections.md` is read-only; keep unrelated files "
+            "out of commits."
         )
     else:
         guidance += (
@@ -322,16 +323,36 @@ def _tool_guidance(role: str) -> str:
 
 
 def _role_reference_guidance(role: str) -> str:
-    if role not in {"sync-reconciler", "update"}:
-        return ""
-    return (
-        "\nPursuit rules:\n"
-        f"{read_reference('pursuit')}\n"
-        "\nAgent Correction Memory rules:\n"
-        f"{read_reference('agent-correction')}\n"
-        "\nRightMemory edit-correction rules:\n"
-        f"{read_reference('edit-correction')}\n"
-    )
+    guidance = ""
+    semantic_writers = {
+        "dreamer",
+        "pruner",
+        "shared-view-builder",
+        "sync-reconciler",
+        "update",
+    }
+    if role in semantic_writers:
+        guidance += "\nMemory rules:\n" f"{read_reference('memory')}\n"
+    if role in {"sync-reconciler", "update"}:
+        guidance += (
+            "\nPursuit rules:\n"
+            f"{read_reference('pursuit')}\n"
+            "\nAgent Correction rules:\n"
+            f"{read_reference('agent-correction')}\n"
+        )
+    if role in semantic_writers:
+        guidance += "\nShared View rules:\n" f"{read_reference('shared-view')}\n"
+    if role in {"sync-reconciler", "update"}:
+        guidance += (
+            "\nRightMemory edit-correction rules:\n"
+            f"{read_reference('edit-correction')}\n"
+        )
+    if role == "retrieve":
+        guidance += (
+            "\nRetrieve runtime contract:\n"
+            f"{read_reference('retrieve-contract')}\n"
+        )
+    return guidance
 
 
 def _read_prompt_file(relative_path: str) -> str:

@@ -595,6 +595,11 @@ class Installer:
                 target,
             )
             self._install_skill(
+                self.repo_root / "skills" / "rightmemory-auto-orchestrator-cli" / "SKILL.md",
+                "rightmemory-auto-orchestrator",
+                target,
+            )
+            self._install_skill(
                 self.repo_root / "skills" / "maintain-rightmemory" / "SKILL.md",
                 "maintain-rightmemory",
                 target,
@@ -739,8 +744,9 @@ class Installer:
             )
         print(
             "  3. Choose memory-retriever for read-only context, rightmemory-orchestrator "
-            "for conditional retrieval and unified updates, or maintain-rightmemory when you "
-            "explicitly want the current agent to edit RightMemory directly."
+            "for approval-gated orchestration, rightmemory-auto-orchestrator for automatic "
+            "orchestration, or maintain-rightmemory when you explicitly want the current agent "
+            "to edit RightMemory directly."
         )
         print(
             "  4. Optional background transcript review, dreamer, pruning, insight, and sync: "

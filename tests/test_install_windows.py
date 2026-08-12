@@ -43,6 +43,9 @@ class WindowsInstallScriptTests(unittest.TestCase):
             ).exists()
             retriever_exists = (skills_target / "memory-retriever" / "SKILL.md").exists()
             orchestrator_exists = (skills_target / "rightmemory-orchestrator" / "SKILL.md").exists()
+            auto_orchestrator_exists = (
+                skills_target / "rightmemory-auto-orchestrator" / "SKILL.md"
+            ).exists()
             maintainer = (skills_target / "maintain-rightmemory" / "SKILL.md")
             maintainer_exists = maintainer.exists()
             legacy_orchestrator_exists = (skills_target / "memory-orchestrator").exists()
@@ -65,7 +68,9 @@ class WindowsInstallScriptTests(unittest.TestCase):
         self.assertFalse(edit_correction_rules_exist)
         self.assertTrue(retriever_exists)
         self.assertTrue(orchestrator_exists)
+        self.assertTrue(auto_orchestrator_exists)
         self.assertTrue(maintainer_exists)
+        self.assertIn("rightmemory-auto-orchestrator", result.stdout)
         self.assertFalse(legacy_orchestrator_exists)
         self.assertIn('set "PYTHONUTF8=1"', wrapper_text)
         self.assertIn('set "RIGHTMEMORY_ROOT=', wrapper_text)
@@ -104,6 +109,13 @@ class WindowsInstallScriptTests(unittest.TestCase):
                         encoding="utf-8"
                     ),
                 )
+                for skill_name in (
+                    "memory-retriever",
+                    "rightmemory-orchestrator",
+                    "rightmemory-auto-orchestrator",
+                    "maintain-rightmemory",
+                ):
+                    self.assertTrue((skills_target / skill_name / "SKILL.md").is_file())
 
     def test_windows_installer_reports_missing_uv_before_writes(self):
         with tempfile.TemporaryDirectory() as tempdir:

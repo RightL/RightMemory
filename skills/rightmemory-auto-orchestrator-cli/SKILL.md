@@ -1,9 +1,9 @@
 ---
-name: rightmemory-orchestrator
-description: "Use when the user explicitly chooses approval-gated RightMemory orchestration for ordinary work."
+name: rightmemory-auto-orchestrator
+description: "Use when the user explicitly chooses automatic RightMemory orchestration for ordinary work."
 ---
 
-# Use RightMemory
+# Use RightMemory Automatically
 
 RightMemory contains durable Memory, live Pursuit, and Agent Corrections. Use it as a client during ordinary work; do not curate its files directly unless the user explicitly requests maintenance.
 
@@ -22,20 +22,18 @@ Choose one stable session id for the conversation and reuse it for every RightMe
 
 - Reconcile retrieved content with the current conversation and current evidence. Current user instructions take precedence over stale or conflicting stored state.
 - Apply relevant guidance in the work itself; do not merely quote or acknowledge it.
-- If retrieved content is stale, wrong, misleading, or overbroad, do not follow it. Submit the problem and current evidence immediately without waiting for approval.
+- If retrieved content is stale, wrong, misleading, or overbroad, do not follow it. Submit the problem and current evidence immediately.
 - Ordinary retrieval already considers relevant Agent Corrections. Use `rightmemory agent-corrections writing` or `rightmemory agent-corrections design` only when the user explicitly requests a whole-collection review. Use `writing` when changing expression or presentation alone could resolve the issue; use `design` when reasoning, decisions, actions, omissions, workflow, or behavior must change. Run both commands only when the requested review spans both collections.
 
-## Propose Updates
+## Submit Updates
 
-- Apart from stale, wrong, misleading, or overbroad retrieved state, propose possible updates instead of submitting them automatically.
-- Propose only when omitting the evidence would likely:
+- Submit automatically only when omitting the evidence would likely:
   - cause poorer future decisions or substantial rediscovery (**Memory**);
   - lose track of a meaningful pursuit, its place in the hierarchy, or its current direction (**Pursuit**); or
   - make repetition of a settled, reusable failure pattern more likely (**Agent Corrections**).
-- Do not propose transient progress, routine task results, unfinished work by itself, or implementation detail already adequately preserved in project-local artifacts.
-- Name the apparent module and briefly explain why the evidence passes this bar. Do not propose final stored wording, ids, or edits.
-- Present the proposal once the evidence is clear and the conversation reaches a natural boundary. Completion is not required. If nothing passes the bar, say nothing about updating RightMemory.
-- After approval, combine related approved evidence into one candidate. An explicit request to submit counts as approval.
+- Do not submit transient progress, routine task results, unfinished work by itself, or implementation detail already adequately preserved in project-local artifacts.
+- Submit once the evidence is clear and the work reaches a natural boundary—for example, when a pursuit becomes established or materially changes, a durable outcome settles, a redirection settles, or the conversation moves away from the work. Completion is not required. If nothing passes the bar, submit nothing.
+- Combine related evidence due at the same boundary into one candidate. State what happened, what is true now, and why it may matter; do not prescribe final stored wording, ids, classification, placement, or edits.
 - Submit with:
 
   `rightmemory update submit --session <session-id> "<candidate>"`
@@ -48,4 +46,4 @@ A user redirection occurs when the user's response, explicitly or implicitly, ma
 
 Unease, a guiding question, or added information may qualify. Mere continuation, selection among intentionally open options, or a new task does not.
 
-When the outcome is clear and the redirection passes the proposal bar, propose the original need, prior attempt or omission, user redirection, and resulting direction as Agent Correction evidence.
+When the outcome is clear and the redirection passes the submission bar, include the original need, prior attempt or omission, user redirection, and resulting direction in the next candidate submitted at a natural boundary.

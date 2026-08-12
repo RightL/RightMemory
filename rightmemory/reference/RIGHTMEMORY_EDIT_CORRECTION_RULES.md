@@ -1,14 +1,32 @@
-# RightMemory Edit Correction Rules
+# RightMemory Edit Feedback
 
-RightMemory Edit Corrections preserve user corrections to edits of Memory, Pursuit, or their linked content. The active collection is the optional root `corrections.md`. It is editing feedback, not semantic RightMemory state or Agent Correction Memory.
+RightMemory Edit Feedback records concrete user feedback on proposed edits to Memory, Pursuit, Agent Corrections, or linked RightMemory content.
 
-Read relevant entries only after forming a tentative edit.
+The optional root file is `corrections.md`. It is operational curation feedback, not semantic RightMemory state, part of the Memory/Pursuit graph, or part of Agent Corrections.
 
-## Entries
+## Entry Form
 
-- Record only proposed RightMemory edits that the user corrected, rejected, or replaced; do not record ordinary accepted edits.
-- Each `##` entry contains, in order, `### Candidate`, `### Proposed edit`, and `### Accepted edit`.
-- `Candidate` preserves the relevant candidate text verbatim. Include every candidate that materially shaped the proposed edit, but omit unrelated candidates from the same batch. Do not substitute record paths, ids, or summaries.
-- Preserve the smallest self-contained RightMemory fragment needed to compare the proposed and accepted edits. Use `[no change]` for a file whose proposed edit was rejected entirely.
-- Keep evidence exact and omit derived lessons or general behavior guidance.
-- Keep at most 15 distinct, reusable entries. This is a bounded priority set, not an append-only log or FIFO window; retain the entries most likely to prevent costly repeated edit errors.
+Each `##` entry contains, in order:
+
+```md
+## <Edit pattern title>
+
+### Candidate
+<The candidate evidence that materially shaped the proposed edit.>
+
+### Proposed edit
+<The smallest self-contained RightMemory fragment needed to show the rejected edit.>
+
+### Accepted edit
+<The corresponding accepted state, or [no change].>
+```
+
+## Rules
+
+- Record only proposed RightMemory edits that the user corrected, rejected, or replaced. Do not record ordinary accepted edits.
+- Preserve relevant candidate text exactly. Include every candidate that materially shaped the proposal, but omit unrelated candidates from the same batch.
+- Preserve the smallest self-contained fragments needed to compare the proposed and accepted edits.
+- Use `[no change]` when a proposed edit was rejected entirely.
+- Keep evidence exact. Do not derive general behavior lessons inside this collection.
+- Keep at most 15 distinct, reusable entries.
+- Treat the collection as a bounded priority set, not a log or FIFO window. Retain the examples most likely to prevent costly repeated curation mistakes.

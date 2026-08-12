@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,6 +74,20 @@ class RetrieveSelectionRendererTests(unittest.TestCase):
             "**State:** in progress\n\n"
             "**Next:**\n\n"
             "- `do` continue implementation\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_agent-corrections-writing.md").write_text(
+            "# Agent Corrections\n\n"
+            "### Prefer direct prose\n\n"
+            "The earlier answer hid the conclusion behind excessive structure.\n\n"
+            "### Define necessary terms\n\n"
+            "The revised answer defined an unfamiliar term when it first appeared.\n",
+            encoding="utf-8",
+        )
+        (self.root / "MEMORY_agent-corrections-design.md").write_text(
+            "# Agent Corrections\n\n"
+            "### Verify before changing behavior\n\n"
+            "The earlier change assumed the cause instead of reproducing the failure.\n",
             encoding="utf-8",
         )
         canonical = self.root / ".runtime" / "shared_views" / "imports" / "external-api" / "dist"
@@ -334,6 +349,81 @@ class RetrieveSelectionRendererTests(unittest.TestCase):
         self.assertIn("Provider question context is available for `MQ#provider-context`.", rendered.text)
         with self.assertRaisesRegex(ValueError, "source_id must be an M#, S#, MF#"):
             SourceSelection(source_id="MQ#provider-context")
+
+    def test_agent_correction_sources_use_numeric_entry_positions_without_ranges(self):
+        source = SourceSelection(source_id="AC#writing", ids=["2"])
+
+        self.assertEqual(source.ids, ["2"])
+        for invalid_id in ("0", "01", "term"):
+            with self.subTest(invalid_id=invalid_id):
+                with self.assertRaisesRegex(ValueError, "one-based entry positions"):
+                    SourceSelection(source_id="AC#writing", ids=[invalid_id])
+        with self.assertRaisesRegex(ValueError, "does not accept line ranges"):
+            SourceSelection(
+                source_id="AC#design",
+                ids=["1"],
+                ranges=[LineRange(start=1, end=1)],
+            )
+
+    def test_agent_correction_selection_returns_the_complete_current_entry(self):
+        rendered = self.renderer.render(
+            RetrieveSelection(
+                sources=[SourceSelection(source_id="AC#writing", ids=["2"])]
+            )
+        )
+
+        self.assertEqual(
+            rendered.delivery.source_items,
+            {
+                "AC#writing:2": hashlib.sha256(
+                    (
+                        "### Define necessary terms\n\n"
+                        "The revised answer defined an unfamiliar term when it first appeared."
+                    ).encode("utf-8")
+                ).hexdigest()
+            },
+        )
+
+        with self.assertRaisesRegex(RetrieveSelectionError, "unknown Agent Correction entry"):
+            self.renderer.render(
+                RetrieveSelection(
+                    sources=[SourceSelection(source_id="AC#writing", ids=["3"])]
+                )
+            )
+        with self.assertRaisesRegex(RetrieveSelectionError, "requires at least one entry id"):
+            self.renderer.render(
+                RetrieveSelection(sources=[SourceSelection(source_id="AC#writing")])
+            )
+
+    def test_agent_correction_entry_change_is_not_suppressed(self):
+        selection = RetrieveSelection(
+            sources=[SourceSelection(source_id="AC#design", ids=["1"])]
+        )
+        first = self.renderer.render(selection)
+
+        unchanged = self.renderer.current_delivery_selection(
+            first.delivery,
+            unchanged_only=True,
+        )
+        self.assertEqual(unchanged.sources[0].ids, ["1"])
+
+        path = self.root / "MEMORY_agent-corrections-design.md"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "assumed the cause",
+                "guessed the cause",
+            ),
+            encoding="utf-8",
+        )
+
+        changed = self.renderer.current_delivery_selection(
+            first.delivery,
+            unchanged_only=True,
+        )
+        revised = self.renderer.render(selection)
+
+        self.assertEqual(changed.sources, [])
+        self.assertNotEqual(first.delivery.source_items, revised.delivery.source_items)
 
     def test_delivery_never_suppresses_an_explicit_local_selection(self):
         first = self.renderer.render(RetrieveSelection(ids=["project-fact"]))
