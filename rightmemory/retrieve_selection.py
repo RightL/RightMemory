@@ -9,6 +9,11 @@ from typing import Iterable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .corrections import (
+    AGENT_CORRECTION_SOURCE_PATHS,
+    AgentCorrectionEntry,
+    agent_correction_entries,
+)
 from .graph import (
     ITEM_ID_PATTERN,
     BlockKey,
@@ -24,8 +29,9 @@ from .shared_view_package import FileViewPackageError, ValidatedFileViewPackage,
 
 NO_STRONG_MATCH = "no strong match"
 SOURCE_ID_RE = re.compile(
-    rf"^(?:(M#|S#|MF#)({ITEM_ID_PATTERN})|MF#({ITEM_ID_PATTERN})/(M#|S#)({ITEM_ID_PATTERN}))$"
+    rf"^(?:(M#|S#|MF#)({ITEM_ID_PATTERN})|MF#({ITEM_ID_PATTERN})/(M#|S#)({ITEM_ID_PATTERN})|AC#(?:writing|design))$"
 )
+AGENT_CORRECTION_POSITION_RE = re.compile(r"^[1-9][0-9]*$")
 HEADING_RE = re.compile(r"^(#{1,})\s+")
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 MF_CANONICAL_PATH = Path(".runtime/shared_views/imports")
@@ -60,7 +66,8 @@ class SourceSelection(BaseModel):
     def validate_source_id(cls, value: str) -> str:
         if SOURCE_ID_RE.fullmatch(value) is None:
             raise ValueError(
-                "source_id must be an M#, S#, MF#, or qualified MF#/M# or MF#/S# id"
+                "source_id must be an M#, S#, MF#, qualified MF#/M# or MF#/S#, "
+                "or fixed AC# id"
             )
         return value
 
@@ -71,6 +78,18 @@ class SourceSelection(BaseModel):
             if not is_valid_item_id(value):
                 raise ValueError(f"invalid source-scoped id: {value!r}")
         return values
+
+    @model_validator(mode="after")
+    def validate_source_specific_selection(self) -> SourceSelection:
+        if self.source_id in AGENT_CORRECTION_SOURCE_PATHS:
+            if self.ranges:
+                raise ValueError(f"{self.source_id} does not accept line ranges")
+            for value in self.ids:
+                if AGENT_CORRECTION_POSITION_RE.fullmatch(value) is None:
+                    raise ValueError(
+                        f"{self.source_id} ids must be one-based entry positions encoded as strings"
+                    )
+        return self
 
 
 class RetrieveSelection(BaseModel):
@@ -260,6 +279,21 @@ class RetrieveSelectionRenderer:
                 source_id, item_id = key.rsplit(":", 1)
             except ValueError:
                 continue
+            if source_id in AGENT_CORRECTION_SOURCE_PATHS:
+                entries = self._current_agent_correction_entries(source_id)
+                if entries is None or AGENT_CORRECTION_POSITION_RE.fullmatch(item_id) is None:
+                    continue
+                if len(item_id) > len(str(len(entries))):
+                    continue
+                position = int(item_id)
+                if position > len(entries):
+                    continue
+                entry = entries[position - 1]
+                if unchanged_only and _hash_text(entry.text) != version:
+                    continue
+                ids, _ranges = source_parts.setdefault(source_id, ([], []))
+                ids.append(item_id)
+                continue
             match = SOURCE_ID_RE.fullmatch(source_id)
             if match is None:
                 continue
@@ -337,7 +371,11 @@ class RetrieveSelectionRenderer:
         sources = [
             SourceSelection(
                 source_id=source_id,
-                ids=sorted(set(ids)),
+                ids=(
+                    sorted(set(ids), key=int)
+                    if source_id in AGENT_CORRECTION_SOURCE_PATHS
+                    else sorted(set(ids))
+                ),
                 ranges=ranges,
             )
             for source_id, (ids, ranges) in sorted(source_parts.items())
@@ -376,8 +414,9 @@ class RetrieveSelectionRenderer:
         for source in current.sources:
             old = unchanged_sources.get(source.source_id)
             old_ids = set(old.ids if old is not None else [])
+            item_label = "entry" if source.source_id in AGENT_CORRECTION_SOURCE_PATHS else "item"
             labels.extend(
-                f"item `{item_id}` in `{source.source_id}`"
+                f"{item_label} `{item_id}` in `{source.source_id}`"
                 for item_id in source.ids
                 if item_id not in old_ids
             )
@@ -531,6 +570,16 @@ class RetrieveSelectionRenderer:
 
         rendered: list[_RenderedSource] = []
         for source_id, (ids, ranges) in merged.items():
+            if source_id in AGENT_CORRECTION_SOURCE_PATHS:
+                rendered.append(
+                    self._render_agent_correction_source(
+                        source_id,
+                        ids,
+                        ranges,
+                        manifest,
+                    )
+                )
+                continue
             match = SOURCE_ID_RE.fullmatch(source_id)
             assert match is not None
             marker, owner_id, qualified_owner_id, nested_marker, nested_id = match.groups()
@@ -589,6 +638,58 @@ class RetrieveSelectionRenderer:
                     )
                 )
         return rendered
+
+    def _render_agent_correction_source(
+        self,
+        source_id: str,
+        ids: list[str],
+        ranges: list[LineRange],
+        manifest: GraphManifest,
+    ) -> _RenderedSource:
+        if ranges:
+            raise RetrieveSelectionError(
+                f"`{source_id}` uses one-based entry ids; line ranges are invalid"
+            )
+        if not ids:
+            raise RetrieveSelectionError(f"`{source_id}` requires at least one entry id")
+        entries = self._current_agent_correction_entries(source_id)
+        if entries is None:
+            raise RetrieveSelectionError(f"missing Agent Correction source `{source_id}`")
+
+        by_position = {str(entry.position): entry for entry in entries}
+        requested = set(_unique(ids))
+        unknown = sorted(requested - set(by_position), key=lambda value: (len(value), value))
+        if unknown:
+            raise RetrieveSelectionError(
+                f"unknown Agent Correction entry id `{unknown[0]}` in `{source_id}`"
+            )
+        selected = [entry for entry in entries if str(entry.position) in requested]
+        delivery = {
+            f"{source_id}:{entry.position}": _hash_text(entry.text)
+            for entry in selected
+        }
+        source_order = list(AGENT_CORRECTION_SOURCE_PATHS).index(source_id)
+        return _RenderedSource(
+            len(manifest.blocks) + source_order,
+            source_id,
+            "\n\n".join(entry.text for entry in selected),
+            source_items=delivery,
+        )
+
+    def _current_agent_correction_entries(
+        self,
+        source_id: str,
+    ) -> list[AgentCorrectionEntry] | None:
+        relative = AGENT_CORRECTION_SOURCE_PATHS.get(source_id)
+        if relative is None:
+            return None
+        path = self.memory_root / relative
+        if not _safe_source_file(self.memory_root, path):
+            return None
+        try:
+            return agent_correction_entries(_read_text(path))
+        except (OSError, UnicodeError):
+            return None
 
     def _require_local_source_owner(
         self,

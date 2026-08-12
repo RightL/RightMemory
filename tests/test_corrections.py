@@ -1,12 +1,26 @@
 import unittest
 
 from rightmemory.corrections import (
+    agent_correction_entries,
     validate_agent_correction_markdown,
     validate_corrections_markdown,
 )
 
 
 class AgentCorrectionMarkdownValidationTests(unittest.TestCase):
+    def test_entry_positions_are_one_based_and_ignore_fenced_headings(self):
+        entries = agent_correction_entries(
+            "# Agent Corrections\n\n"
+            "### First\n\nBody.\n\n"
+            "```md\n### Example only\n```\n\n"
+            "### Second\n\nBody.\n"
+        )
+
+        self.assertEqual(
+            [(entry.position, entry.start_line) for entry in entries],
+            [(1, 3), (2, 11)],
+        )
+
     def test_accepts_entry_and_line_limits_and_ignores_fenced_headings(self):
         lines = [
             "# Agent Corrections",

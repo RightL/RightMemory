@@ -1796,8 +1796,8 @@ def manual_recovery_warning(state: AsyncUpdateState) -> str | None:
 def _format_batch_message(batches: list[AsyncUpdateSessionBatch]) -> str:
     lines = [
         "Process the following submitted RightMemory candidates as one ordered batch.",
-        "Treat them as evidence about evolving tasks, possible durable context, and explicit corrections.",
-        "Use the update instructions to decide what belongs in live Pursuit, durable Memory, both, or neither.",
+        "Treat them as evidence that may affect Pursuit, Memory, or Agent Corrections.",
+        "Use the update instructions to decide which semantic modules, if any, should change.",
         "",
         "Candidates:",
     ]

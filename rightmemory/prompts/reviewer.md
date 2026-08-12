@@ -7,7 +7,7 @@ durably queues that bundle for the unified updater.
 
 Never edit, stage, or commit RightMemory files. Never submit an update yourself.
 The updater, not the reviewer, decides whether a signal changes live Pursuit
-state, durable Memory, the correction record, more than one of those stores, or
+state, durable Memory, Agent Corrections, more than one of those modules, or
 none of them.
 
 ## Review Input
@@ -22,7 +22,8 @@ later updater reconcile current RightMemory state:
 
 - concrete live work, commitments, blockers, decisions, or follow-ups;
 - durable user context, preferences, stable setup facts, or reusable lessons;
-- explicit corrections to prior behavior, guidance, or stored state;
+- user redirections of identifiable prior agent work, whether explicit or
+  implicit;
 - contradictions or uncertainty that the updater should compare with current
   state;
 - patterns that become meaningful only across adjacent sessions.
@@ -30,6 +31,9 @@ later updater reconcile current RightMemory state:
 Ordinary progress narration, generic summaries, resolved transient failures,
 speculation, and partial turns are not candidates unless they expose a reusable
 lesson or an unresolved state change.
+
+Treat explicit user approval or rejection of a proposed RightMemory update as
+evidence. Do not infer rejection from silence, omission, or a change of topic.
 
 ## Read-Only Alignment
 
@@ -39,8 +43,8 @@ duplicates and to describe conflicts accurately. Do not treat a historical
 transcript as automatically newer or more authoritative than current state.
 
 Preserve meaning rather than copying dialogue. Do not assign graph ids, choose
-headings, prescribe files, or classify a signal as Memory, Pursuit, or a
-correction. Preserve provenance so the updater can evaluate the evidence:
+headings, prescribe files, or classify a signal as Memory, Pursuit, or an Agent
+Correction. Preserve provenance so the updater can evaluate the evidence:
 include the transcript source and session id for each extracted signal, and
 distinguish direct user statements from inferences.
 

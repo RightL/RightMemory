@@ -1394,7 +1394,7 @@ def _status_main(argv: list[str], memory_root: Path) -> int:
 def _agent_corrections_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(
         prog="rightmemory agent-corrections",
-        description="Print one fixed Agent Correction Memory collection",
+        description="Print one fixed Agent Corrections collection",
     )
     parser.add_argument("collection", choices=("writing", "design"))
     args = parser.parse_args(argv)

@@ -213,6 +213,50 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
         ):
             IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
 
+    def test_update_lands_fixed_agent_correction_collection_write(self):
+        self._add_fixed_agent_correction_collections()
+
+        def callback(worktree: Path) -> str:
+            path = worktree / "MEMORY_agent-corrections-writing.md"
+            path.write_text(
+                path.read_text(encoding="utf-8")
+                + "\n### Keep the concrete contrast\n\nPreserve the redirected result.\n",
+                encoding="utf-8",
+            )
+            self._git("add", path.name, cwd=worktree)
+            self._git("commit", "-m", "update: curate expression correction", cwd=worktree)
+            return "updated"
+
+        result = IsolatedWriteSupervisor(self.root, "update").run(callback)
+
+        self.assertEqual(result.changed_paths, ("MEMORY_agent-corrections-writing.md",))
+        self.assertIn(
+            "Keep the concrete contrast",
+            (self.root / "MEMORY_agent-corrections-writing.md").read_text(encoding="utf-8"),
+        )
+
+    def test_sync_reconciler_lands_fixed_agent_correction_collection_write(self):
+        self._add_fixed_agent_correction_collections()
+
+        def callback(worktree: Path) -> str:
+            path = worktree / "MEMORY_agent-corrections-design.md"
+            path.write_text(
+                path.read_text(encoding="utf-8")
+                + "\n### Preserve the settled workflow\n\nKeep the resulting process concrete.\n",
+                encoding="utf-8",
+            )
+            self._git("add", path.name, cwd=worktree)
+            self._git("commit", "-m", "sync: reconcile substance correction", cwd=worktree)
+            return "repaired"
+
+        result = IsolatedWriteSupervisor(self.root, "sync-reconciler").run(callback)
+
+        self.assertEqual(result.changed_paths, ("MEMORY_agent-corrections-design.md",))
+        self.assertIn(
+            "Preserve the settled workflow",
+            (self.root / "MEMORY_agent-corrections-design.md").read_text(encoding="utf-8"),
+        )
+
     def test_narrow_memory_role_preserves_pursuit_cross_tree_reference(self):
         (self.root / "PURSUITS.md").write_text(
             "# Pursuits\n\n## Continue {#continue} \u2192 [dep:one]\n",

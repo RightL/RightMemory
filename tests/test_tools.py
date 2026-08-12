@@ -519,7 +519,7 @@ class MemoryToolsTests(unittest.TestCase):
             MemoryTools(self.root, role="dreamer").read("corrections.md")
         self.assertIn("private updater feedback", MemoryTools(self.root, role="update").read("corrections.md"))
 
-    def test_narrow_memory_roles_cannot_modify_fixed_agent_correction_collections(self):
+    def test_only_update_and_sync_can_modify_fixed_agent_correction_collections(self):
         paths = (
             "MEMORY_agent-corrections-writing.md",
             "MEMORY_agent-corrections-design.md",
@@ -530,14 +530,25 @@ class MemoryToolsTests(unittest.TestCase):
                 with self.subTest(path=path, role=role):
                     tools = MemoryTools(self.root, role=role)
                     tools.read(path)
-                    with self.assertRaisesRegex(ValueError, r"MEMORY\.md or MEMORY_\*\.md"):
+                    with self.assertRaises(ValueError):
                         tools.edit_file(path, "Curated", "Changed")
-                    with self.assertRaisesRegex(ValueError, r"MEMORY\.md or MEMORY_\*\.md"):
+                    with self.assertRaises(ValueError):
                         tools.delete_file(path)
 
+        self._git("init")
         updater = MemoryTools(self.root, role="update")
         updater.read(paths[0])
-        self.assertIn("edited", updater.edit_file(paths[0], "Curated", "Updater-owned"))
+        updater.edit_file(paths[0], "Curated", "Updater-owned")
+        updater.git_add([paths[0]])
+        self.assertIn("Updater-owned", (self.root / paths[0]).read_text(encoding="utf-8"))
+
+        reconciler = MemoryTools(self.root, role="sync-reconciler")
+        reconciler.read(paths[1])
+        reconciler.edit_file(paths[1], "Curated", "Sync-owned")
+        reconciler.git_add([paths[1]])
+        self.assertIn("Sync-owned", (self.root / paths[1]).read_text(encoding="utf-8"))
+        self.assertIn(paths[0], self._git("diff", "--cached", "--name-only"))
+        self.assertIn(paths[1], self._git("diff", "--cached", "--name-only"))
 
     def test_dreamer_can_modify_ordinary_m_and_s_backing_files(self):
         for path in ("MEMORY_research-notes.md", "MEMORY_SKILL_two-pass-review.md"):
@@ -568,7 +579,7 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "dream_logs" / "2026-05-30.md").write_text("# Dream\n", encoding="utf-8")
         tools = MemoryTools(self.root, role="dreamer")
 
-        with self.assertRaisesRegex(ValueError, r"MEMORY.md or MEMORY_\*\.md"):
+        with self.assertRaises(ValueError):
             tools.git_add(["dream_logs/2026-05-30.md"])
 
     def test_insight_create_file_rejects_active_memory(self):
@@ -590,10 +601,7 @@ class MemoryToolsTests(unittest.TestCase):
         result = tools.git_add(["MEMORY.md", "insight_logs/2026-05-30-143012.md"])
 
         self.assertEqual(result, "staged: MEMORY.md, insight_logs/2026-05-30-143012.md")
-        with self.assertRaisesRegex(
-            ValueError,
-            r"RightMemory state files, shared-view source files, or insight_logs/\*\.md",
-        ):
+        with self.assertRaises(ValueError):
             tools.git_add(["rightmemory.toml"])
 
     def test_sync_reconciler_can_repair_shared_view_registry(self):

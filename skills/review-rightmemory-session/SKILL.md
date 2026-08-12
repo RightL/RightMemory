@@ -1,20 +1,60 @@
 ---
 name: review-rightmemory-session
-description: "Use when the user explicitly asks the current agent to review one agent session by session id or saved transcript path and directly curate durable RightMemory from it. Preview summarized proposals for approval by default, apply only authorized Memory changes, and record completed reviews without invoking Update or another model role."
+description: "Use when the user explicitly asks to review a saved agent session or transcript and directly curate RightMemory from it."
 ---
 
-- Use the user-specified RightMemory root or profile. Otherwise run `rightmemory status` and use its reported `root:`; never guess. Run every RightMemory command from that root or with the selected profile. Never invoke Update, reviewer, or another RightMemory model role.
-- Resolve the requested session through available provider tooling or configured transcript locations. Require one unambiguous regular transcript when given an id; otherwise ask for its path. Review the full available session, including visible conversation and compacted or summarized earlier context.
-- Set `source` to the reviewed session's provider, such as `codex` or `claude`; ask if unclear. Then run `rightmemory review status <source>:<session-id>`. Stop if it reports `reviewed` unless the user explicitly requests another review; ask for a stable session id rather than inventing one.
-- Run `rightmemory validate --root <root>`, read `rightmemory reference schema`, then read the complete reachable Memory state.
-- Form an independent tentative judgment from the session. Then read `rightmemory reference agent-correction` and the regular `MEMORY_agent-corrections-writing.md` and `MEMORY_agent-corrections-design.md` files when present.
-- Consider ordinary durable Memory, Cross-Session Agent Behavior, and Agent Correction Memory. Do not edit Pursuit or root `corrections.md`.
-- Admit only durable, reusable, correctly scoped content whose absence would make the information impossible to recover or require substantial investigation. Exclude anything recoverable through a quick inspection of relevant source, documentation, or Git history, along with transcript narration, completed progress, transient state, speculation, and duplicates.
-- Store future-facing guidance about how agents should communicate, reason, use tools, or collaborate under Cross-Session Agent Behavior, with project scope when appropriate.
-- Preserve an agent correction only when the session contains an actual reusable rejected/accepted contrast. Classify it as writing when expression alone resolves the objection; otherwise classify it as design/behavior. Merge or replace weaker existing evidence rather than growing either fixed collection beyond 15 entries. Do not duplicate the same lesson in ordinary Behavior Memory unless it has distinct standalone value.
-- Unless the user explicitly requests direct editing, present proposal summaries under `Strongly recommended` and `Optional`, naming each item's destination, scope, substance, and reason without showing exact wording, graph ids, or a patch. Wait for explicit approval and apply only approved items. When direct editing is explicitly requested, skip this pause but keep all validation, worktree, and reporting safeguards.
-- Before editing, require the active root to be clean, capture its branch and HEAD, and create a temporary Git worktree from that HEAD. Do not stash, discard, or absorb unrelated changes.
-- Apply the authorized changes directly, preserving the complete Memory graph and relevant backing files. Run `rightmemory validate --root <worktree>` immediately before committing.
-- Before landing, require the active root to remain clean and at the captured HEAD. Land the exact validated commit, validate the active root again, and remove the temporary worktree.
-- After the review completes and every authorized edit has landed, run `rightmemory review mark <source>:<session-id>`. Also mark a valid no-change review. Never mark a failed, interrupted, or deferred review.
-- Report the applied proposal summaries, validation result, commit hash, and review-record result, or `no commit`.
+# Review A RightMemory Session
+
+This is an explicit direct-curation workflow. Do not route the transcript through Update or another RightMemory model role.
+
+## Resolve The Review
+
+- Use the user-selected RightMemory root or profile. Otherwise run `rightmemory status` and use its reported root; never guess. Keep that root or profile consistent for every RightMemory command in this workflow.
+- Resolve the requested regular transcript through provider tooling or configured transcript locations. Require one unambiguous transcript when given an id; otherwise ask for its path.
+- Review the full available session, including visible conversation and any compacted or summarized earlier context.
+- Derive the provider and stable session id from the resolved transcript. If either cannot be determined reliably, ask rather than inventing it. Then run `rightmemory review status <provider>:<session-id>`.
+- Stop when it is already marked reviewed unless the user explicitly requests another review.
+
+## Form Proposals
+
+1. Run `rightmemory validate --root <root>`.
+2. Read the canonical RightMemory schema, Memory rules, Agent Corrections rules, and `RIGHTMEMORY_EDIT_CORRECTION_RULES.md` (RightMemory Edit Feedback).
+3. Read the complete reachable Memory state relevant to the session.
+4. Form an independent tentative judgment from the transcript and express it as tentative proposals.
+5. Then read root `corrections.md`, when present, as a late check against repeated RightMemory curation mistakes.
+6. Then read `MEMORY_agent-corrections-writing.md` (Expression) and `MEMORY_agent-corrections-design.md` (Substance), when present, to merge, replace, or reject duplicates.
+
+Consider only:
+
+- ordinary durable Memory;
+- Cross-Session Agent Behavior;
+- Agent Corrections.
+
+Do not edit Pursuit or root `corrections.md` in this workflow.
+
+Apply the canonical admission, scope, classification, and retention rules. Do not reproduce those rules locally in this skill.
+
+## Approval
+
+Unless the user explicitly requests direct editing, present proposal summaries under `Strongly recommended` and `Optional`.
+
+For each proposal, state its destination, scope, substance, and reason. Do not present exact final wording, graph ids, or a patch before approval.
+
+Apply only explicitly approved proposals. When direct editing was explicitly requested, skip the approval pause but keep every validation and landing safeguard below.
+
+## Edit And Land
+
+- Require the active root to be clean. Capture its branch and HEAD.
+- Create a temporary Git worktree from that HEAD. Do not stash, discard, or absorb unrelated changes.
+- Apply the authorized changes directly while preserving the complete Memory graph and relevant backing files.
+- Run `rightmemory validate --root <worktree>` immediately before committing.
+- Before landing, require the active root to remain clean and at the captured HEAD.
+- Land the exact validated commit, validate the active root again, and remove the temporary worktree.
+
+After every successful review—including an authorized no-change review—run:
+
+`rightmemory review mark <provider>:<session-id>`
+
+Never mark a failed, interrupted, or deferred review.
+
+Report the applied proposal summaries, validation result, commit hash or `no commit`, and review-record result.

@@ -1391,19 +1391,22 @@ class MemoryTools:
         if self.role in INSIGHT_ROLES:
             return "insight_logs/*.md"
         if self.role in SYNC_RECONCILER_ROLES:
-            return "RightMemory state files, shared-view source files, or insight_logs/*.md"
+            return (
+                "RightMemory state files (including fixed Agent Correction collections), "
+                "shared-view source files, or insight_logs/*.md"
+            )
         if self.role in SHARED_VIEW_BUILDER_ROLES:
             return "shared_views/<id> source files"
         if self.role in FULL_RIGHTMEMORY_WRITE_ROLES:
-            return "MEMORY.md, MEMORY_*.md, PURSUITS.md, or PURSUIT_*.md"
-        return "MEMORY.md or MEMORY_*.md"
+            return (
+                "MEMORY.md, ordinary MEMORY_*.md, PURSUITS.md, PURSUIT_*.md, "
+                "or fixed Agent Correction collections"
+            )
+        return "MEMORY.md or ordinary MEMORY_*.md files"
 
     def _is_allowed_write_path(self, relative_path: str) -> bool:
-        if (
-            relative_path in FIXED_CORRECTION_COLLECTION_PATHS
-            and self.role not in FULL_RIGHTMEMORY_WRITE_ROLES | SYNC_RECONCILER_ROLES
-        ):
-            return False
+        if relative_path in FIXED_CORRECTION_COLLECTION_PATHS:
+            return self.role in FULL_RIGHTMEMORY_WRITE_ROLES | SYNC_RECONCILER_ROLES
         if self.role in INSIGHT_ROLES:
             return self._is_insight_log_path(relative_path)
         if self.role in SYNC_RECONCILER_ROLES:

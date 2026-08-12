@@ -1,8 +1,12 @@
 # Pursuit Rules
 
-A Pursuit is live intent: what should become true, why it matters, the current situation, and the next movement. It is neither a backlog nor a work log, and task duration does not determine whether it belongs here.
+## Purpose
 
-RightMemory is one graph organized into two document trees. Memory holds durable context; Pursuit holds intent and commitments still being carried forward. Addressable ids are globally unique across both trees, and typed edges may cross between them.
+A Pursuit is live intent organized into a hierarchy: what should become true, why it matters, and how the pursuit currently decomposes into active directions. It is neither a backlog, a work log, nor a detailed execution record. Task duration does not determine whether something belongs in Pursuit.
+
+A candidate belongs in Pursuit when the intent should remain part of the active or deliberately parked pursuit structure after the current update. Incompleteness alone is insufficient.
+
+Pursuit preserves the objective, its meaning, its position in the hierarchy, and the current direction needed to understand it. Detailed execution state and instructions for resuming project work belong primarily in project-local artifacts.
 
 ## Structure
 
@@ -11,58 +15,76 @@ RightMemory is one graph organized into two document trees. Memory holds durable
 
 <What should become true and why it matters.>
 
-**State:** <Current context that materially affects what to do next.>
+**State:** <Optional current context that materially affects the pursuit's present position or direction.>
 
 **Next:**
-- `do` <An action the agent may perform now within existing authority>
-- `ask` <Information, judgment, or authorization needed from a person>
-- `wait` <An external condition that must change first>
+- `do` <Action an agent may perform now within existing authority.>
+- `ask` <Information, judgment, or authorization needed from a person.>
+- `wait` <External condition that must change first.>
 
 **Done when:** <Optional observable completion condition.>
+```
 
+A deliberately parked Pursuit additionally uses:
+
+```md
 **Status:** parked
 ```
 
-- The heading body states the objective and its meaning.
-- A Pursuit must remain interpretable across agents, devices, and sessions.
-  Its objective, State, Next, and Done when may rely on the schema's local
-  reading context, but every reference that materially affects continuation
-  must be determined by stored context rather than unstated ambient execution
-  context.
-- State is optional when the body and Next already preserve enough context.
-- An active leaf Pursuit has an ordered Next list, normally limited to one to three items. Its first valid item is the default movement.
+Rules:
+
+- The heading body states the objective and why it matters.
+- State is optional when the objective and Next already preserve enough context to understand the pursuit's present position or direction.
+- A Pursuit must remain interpretable from stored context under the model's reading-context rules.
+- An active leaf has an ordered Next list, normally one to three items. Its first valid item is the default movement.
 - A parent may omit Next when an active child contains the movement.
-- Next records direction; it grants no authority beyond the current task and environment.
-- Use `Done when` only when a Pursuit has a clear observable endpoint.
-- Use `Status: parked` only while later reconsideration is still intended and the Pursuit is deliberately outside the current movement.
-- Tree nesting expresses decomposition. Edges express useful relationships not already clear from containment.
-- Keep one canonical node for each Pursuit. Never copy its State or Next.
+- Next records the current movement, not a detailed resume plan. Refer to project-local artifacts when execution detail matters. It grants no authority beyond the current task and environment.
+- Use `Done when` only when there is a clear observable endpoint.
+- Use `Status: parked` only when later reconsideration is still intended and the Pursuit is deliberately outside current movement.
+- Tree nesting expresses decomposition. Add edges only for useful relationships not already clear from containment.
+- Keep one canonical Pursuit for each intent. Never copy its State or Next into another node.
 
-## Pursuit Quality
+## State Quality
 
-Good Pursuit State is the minimum current context needed for continuation.
-Supporting details, evidence, and completed history are project artifacts
-rather than Pursuit State.
+Good State is the minimum current context required to understand the pursuit's present position, constraints, or direction.
 
-## Admission and Focus
+Supporting evidence, completed history, detailed experiments, implementation narration, and operational resume instructions belong in project artifacts or durable Memory when they independently satisfy Memory admission.
 
-The unified updater preserves a candidate as Pursuit only when a later agent should intentionally resume or re-evaluate it after the current update. Incompleteness alone is insufficient, and work that begins and finishes within the same reconciled candidate batch normally leaves no Pursuit.
+State should describe what is true now. Do not preserve every transition that led there.
 
-Focus lists the active Pursuits the agent is committed to continuing when there is no newer user instruction. Each entry is a backticked id of an addressable Pursuit heading. Focus order is the default resume order, not a ranking of everything important.
+## Admission And Removal
 
-Important active Pursuits may remain outside Focus. Parked Pursuits remain only while the commitment is intentionally being carried forward. Completed or dropped Pursuits leave the active tree after any independently durable conclusion is preserved in Memory and all affected graph references are repaired; Git history retains their past state.
+Work that starts and finishes within one reconciled candidate thread normally leaves no Pursuit.
 
-## Files
+Create or retain a Pursuit when an objective remains meaningfully active, under reconsideration, deliberately parked, blocked, waiting, handed off, or otherwise part of the pursuit hierarchy being carried forward.
 
-Start with `PURSUITS.md`. When a subtree becomes hard to navigate, mark its heading with `{F#id}` and move its child content to `PURSUIT_id.md`, keeping the heading and optional summary in its containing file.
+Do not create a Pursuit merely because a task is unfinished or because detailed work may need to resume later. Project-local artifacts should preserve that operational continuity.
 
-F# is root-relative: Memory F# uses `MEMORY_id.md`, while Pursuit F# uses `PURSUIT_id.md`. M#, S#, MF#, and MQ# are Memory-only forms. Free-form M# and S# backing files are not parsed as graph content.
+A parked Pursuit remains only while future reconsideration is genuinely intended. Importance alone does not justify keeping inactive intent.
+
+When a Pursuit completes, is abandoned, or is superseded:
+
+1. preserve only independently durable consequences in Memory;
+2. repair affected references and Focus entries;
+3. remove the terminal Pursuit from the active tree.
+
+Git history preserves its former state. Pursuit should not accumulate completed history.
+
+## Focus
+
+`## Focus` lists the Pursuits currently receiving attention or expected to guide near-term work when no newer user instruction takes precedence.
+
+Each entry is a backticked id of an addressable Pursuit heading. Order expresses the default attention order, not a global ranking of importance.
+
+Important active Pursuits may remain outside Focus. Parked Pursuits do not appear in Focus.
 
 ## Maintenance
 
-1. Read the selected Pursuit, its relevant ancestors and active children, and reachable Memory context.
-2. Verify State against current code, files, tests, or external reality.
-3. Reconsider the Pursuit when assumptions fail, cost becomes unreasonable, it becomes infeasible, or a better direction replaces it. Do not mechanically execute stale Next text.
-4. If it remains valid, perform the first valid `do`, surface an `ask` instead of guessing, or check the condition behind a `wait`.
-5. After material work, update the canonical node and remove stale content. Update ancestors only when their meaning, direction, blockage, or completion changes.
-6. When the Pursuit ends, remove it from Focus and the active tree after preserving only facts, decisions, rules, or lessons that independently remain useful in Memory. Inspect incoming and outgoing cross-tree edges before changing ids or deleting graph objects.
+When acting from Pursuit:
+
+1. Read the selected Pursuit, relevant ancestors and active descendants, and reachable Memory context.
+2. Verify claims that may have changed against current files, tests, tools, or external reality.
+3. Reconsider the Pursuit when assumptions fail, cost changes materially, it becomes infeasible, or a better direction replaces it.
+4. If it remains valid, perform the first valid `do`, surface an `ask` rather than guessing, or check the condition behind a `wait`.
+5. After material work, update the canonical node and remove stale State or Next content.
+6. Update ancestors only when their objective, direction, blockage, or completion changed.

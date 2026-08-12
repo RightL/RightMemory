@@ -773,7 +773,7 @@ class IsolatedWriteSupervisor:
 
     def _is_semantic_read_path(self, path: str) -> bool:
         return (
-            self._is_rightmemory_path(path)
+            self._is_graph_rightmemory_path(path)
             or path in FIXED_CORRECTION_COLLECTION_PATHS
             or path
             in {
@@ -803,21 +803,23 @@ class IsolatedWriteSupervisor:
             return bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
         if self.role == "reviewer":
             return False
+        if path in FIXED_CORRECTION_COLLECTION_PATHS:
+            return self.role in {"update", "sync-reconciler"}
         if self.role == "update":
-            return self._is_rightmemory_path(path)
+            return self._is_graph_rightmemory_path(path)
         if self.role == "sync-reconciler":
             return (
-                self._is_rightmemory_path(path)
+                self._is_graph_rightmemory_path(path)
                 or path == CORRECTIONS_PATH
                 or path in {SHARED_VIEW_REGISTRY_PATH, SHARE_REGISTRY_PATH}
                 or bool(SHARED_VIEW_DEFINITION_FILE_RE.fullmatch(path))
                 or bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
             )
-        if path in FIXED_CORRECTION_COLLECTION_PATHS:
-            return False
         return path == "MEMORY.md" or bool(MEMORY_DETAIL_FILE_RE.fullmatch(path))
 
-    def _is_rightmemory_path(self, path: str) -> bool:
+    def _is_graph_rightmemory_path(self, path: str) -> bool:
+        if path in FIXED_CORRECTION_COLLECTION_PATHS:
+            return False
         return (
             path == "MEMORY.md"
             or bool(MEMORY_DETAIL_FILE_RE.fullmatch(path))
