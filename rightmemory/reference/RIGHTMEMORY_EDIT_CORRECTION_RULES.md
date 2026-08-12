@@ -28,5 +28,5 @@ Each `##` entry contains, in order:
 - Preserve the smallest self-contained fragments needed to compare the proposed and accepted edits.
 - Use `[no change]` when a proposed edit was rejected entirely.
 - Keep evidence exact. Do not derive general behavior lessons inside this collection.
-- Keep at most 15 distinct, reusable entries.
+- Keep at most 10 distinct, reusable entries.
 - Treat the collection as a bounded priority set, not a log or FIFO window. Retain the examples most likely to prevent costly repeated curation mistakes.

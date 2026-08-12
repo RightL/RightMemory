@@ -8,6 +8,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from .corrections import (
+    CORRECTION_COLLECTION_MAX_ENTRIES,
     validate_agent_correction_markdown,
     validate_corrections_markdown,
 )
@@ -73,7 +74,8 @@ FIXED_CORRECTION_COLLECTION_PATHS = {
     f"MEMORY_{collection_id}.md" for collection_id in FIXED_CORRECTION_COLLECTION_IDS
 }
 CORRECTIONS_CAPACITY_ERROR_RE = re.compile(
-    r"^corrections\.md contains \d+ entries; at most 15 are allowed$"
+    rf"^corrections\.md contains \d+ entries; at most "
+    rf"{CORRECTION_COLLECTION_MAX_ENTRIES} are allowed$"
 )
 
 
