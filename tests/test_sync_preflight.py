@@ -207,7 +207,7 @@ class SyncPreflightTests(SyncTestBase):
 
     def test_sync_transports_structured_corrections_over_updater_ceiling(self):
         (self.other / "corrections.md").write_text(
-            self._corrections_markdown(16),
+            self._corrections_markdown(11),
             encoding="utf-8",
         )
         self._git(self.other, "add", "corrections.md")
@@ -218,7 +218,7 @@ class SyncPreflightTests(SyncTestBase):
 
         self.assertEqual(result.status, "synced")
         text = (self.device / "corrections.md").read_text(encoding="utf-8")
-        self.assertEqual(text.count("## Entry "), 16)
+        self.assertEqual(text.count("## Entry "), 11)
 
     def test_preflight_reports_dirty_shared_view_registry_and_ignores_runtime_shared_views(self):
         runtime_cache = self.device / ".runtime" / "shared_views" / "cache" / "alice-auth-api.txt"

@@ -85,7 +85,7 @@ The physical filenames, CLI arguments, and `AC#writing` / `AC#design` retrieval 
 
 Each collection is a bounded curated set rather than an append-only log or FIFO window. A represented pattern improves its existing item or replaces weaker evidence. A distinct pattern is retained only when sufficiently reusable; when the collection is full, it replaces an existing item only if it is more important. If every existing item is more important, the candidate is discarded.
 
-Importance reflects likely recurrence, cost if repeated, breadth of future applicability, strength and clarity of evidence, and whether existing guidance already covers it. Each collection may contain at most 15 entries and 180 non-empty lines, with at most 16 non-empty lines per entry and 200 characters per line; 15 is a ceiling rather than a target or automatic eviction trigger. Ordinary Retrieve selects a relevant complete entry when its failure pattern could materially affect the current query.
+Importance reflects likely recurrence, cost if repeated, breadth of future applicability, strength and clarity of evidence, and whether existing guidance already covers it. Each collection may contain at most 10 entries and 180 non-empty lines, with at most 16 non-empty lines per entry and 200 characters per line; 10 is a ceiling rather than a target or automatic eviction trigger. Ordinary Retrieve selects a relevant complete entry when its failure pattern could materially affect the current query.
 
 ### Update provenance
 
@@ -125,7 +125,7 @@ Reusable feedback about proposed edits of RightMemory may be curated in `correct
 
 `corrections.md` is tracked and synchronized, but it is not semantic RightMemory state, Agent Corrections, or graph content. Sync machinery transports it; if a conflict requires repair, it preserves non-identical entries without ranking them and does not perform semantic curation.
 
-The collection follows the same bounded priority principle as the Agent Correction collections: represented patterns improve existing examples; distinct examples are admitted only when useful enough; a full file rejects an example unless it is more important than an existing item. Its 15-entry limit is a ceiling, not a reason to evict automatically. Update forms a tentative edit before reading relevant entries as a late check. Explicit session review likewise forms tentative proposals before consulting the file and does not modify it during that review. Ordinary Retrieve excludes it.
+The collection follows the same bounded priority principle as the Agent Correction collections: represented patterns improve existing examples; distinct examples are admitted only when useful enough; a full file rejects an example unless it is more important than an existing item. Its 10-entry limit is a ceiling, not a reason to evict automatically. Update forms a tentative edit before reading relevant entries as a late check. Explicit session review likewise forms tentative proposals before consulting the file and does not modify it during that review. Ordinary Retrieve excludes it.
 
 ## Runtime ownership
 
