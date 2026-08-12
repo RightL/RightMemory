@@ -5,10 +5,10 @@ from dataclasses import dataclass
 
 
 _SECTIONS = ("Candidate", "Proposed edit", "Accepted edit")
-_AGENT_CORRECTION_MAX_ENTRIES = 15
-_AGENT_CORRECTION_MAX_ENTRY_LINES = 16
-_AGENT_CORRECTION_MAX_COLLECTION_LINES = 180
-_AGENT_CORRECTION_MAX_LINE_LENGTH = 200
+CORRECTION_COLLECTION_MAX_ENTRIES = 10
+AGENT_CORRECTION_MAX_ENTRY_LINES = 16
+AGENT_CORRECTION_MAX_COLLECTION_LINES = 180
+AGENT_CORRECTION_MAX_LINE_LENGTH = 200
 AGENT_CORRECTION_SOURCE_PATHS = {
     "AC#writing": "MEMORY_agent-corrections-writing.md",
     "AC#design": "MEMORY_agent-corrections-design.md",
@@ -88,17 +88,17 @@ def validate_agent_correction_markdown(text: str, path: str) -> list[str]:
     lines = text.splitlines()
     entries = agent_correction_entries(text)
 
-    if len(entries) > _AGENT_CORRECTION_MAX_ENTRIES:
+    if len(entries) > CORRECTION_COLLECTION_MAX_ENTRIES:
         errors.append(
             f"{path} contains {len(entries)} entries; "
-            f"at most {_AGENT_CORRECTION_MAX_ENTRIES} are allowed"
+            f"at most {CORRECTION_COLLECTION_MAX_ENTRIES} are allowed"
         )
 
     collection_lines = sum(1 for line in lines if line.strip())
-    if collection_lines > _AGENT_CORRECTION_MAX_COLLECTION_LINES:
+    if collection_lines > AGENT_CORRECTION_MAX_COLLECTION_LINES:
         errors.append(
             f"{path} contains {collection_lines} non-empty lines; "
-            f"at most {_AGENT_CORRECTION_MAX_COLLECTION_LINES} are allowed"
+            f"at most {AGENT_CORRECTION_MAX_COLLECTION_LINES} are allowed"
         )
 
     for entry_index, entry in enumerate(entries):
@@ -110,23 +110,23 @@ def validate_agent_correction_markdown(text: str, path: str) -> list[str]:
             else len(lines)
         )
         entry_lines = sum(1 for line in lines[line_number - 1 : entry_end] if line.strip())
-        if entry_lines > _AGENT_CORRECTION_MAX_ENTRY_LINES:
+        if entry_lines > AGENT_CORRECTION_MAX_ENTRY_LINES:
             errors.append(
                 f"{path} line {line_number}: correction entry `{title}` contains "
                 f"{entry_lines} non-empty lines; at most "
-                f"{_AGENT_CORRECTION_MAX_ENTRY_LINES} are allowed"
+                f"{AGENT_CORRECTION_MAX_ENTRY_LINES} are allowed"
             )
 
     overlong_lines = [
         (line_number, len(line))
         for line_number, line in enumerate(lines, start=1)
-        if len(line) > _AGENT_CORRECTION_MAX_LINE_LENGTH
+        if len(line) > AGENT_CORRECTION_MAX_LINE_LENGTH
     ]
     if overlong_lines:
         line_number, line_length = overlong_lines[0]
         errors.append(
             f"{path} has {len(overlong_lines)} lines over "
-            f"{_AGENT_CORRECTION_MAX_LINE_LENGTH} characters; "
+            f"{AGENT_CORRECTION_MAX_LINE_LENGTH} characters; "
             f"line {line_number} has {line_length} characters"
         )
 
@@ -156,8 +156,11 @@ def validate_corrections_markdown(text: str) -> list[str]:
             continue
         current[2].append((title, line_number))
 
-    if len(entries) > 15:
-        errors.append(f"corrections.md contains {len(entries)} entries; at most 15 are allowed")
+    if len(entries) > CORRECTION_COLLECTION_MAX_ENTRIES:
+        errors.append(
+            f"corrections.md contains {len(entries)} entries; "
+            f"at most {CORRECTION_COLLECTION_MAX_ENTRIES} are allowed"
+        )
 
     expected = list(_SECTIONS)
     for entry_index, (title, line_number, sections) in enumerate(entries):

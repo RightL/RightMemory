@@ -1597,7 +1597,7 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")
         (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         entries = []
-        for index in range(16):
+        for index in range(11):
             entries.append(
                 f"## Correction {index}\n\n"
                 "### Candidate\n\ncandidate\n\n"
@@ -1608,7 +1608,7 @@ class MemoryToolsTests(unittest.TestCase):
 
         result = self.tools.validate_memory()
 
-        self.assertIn("at most 15 are allowed", result)
+        self.assertIn("at most 10 are allowed", result)
         self.assertIn(
             "validation passed",
             self.tools.validate_memory(enforce_correction_capacity=False),

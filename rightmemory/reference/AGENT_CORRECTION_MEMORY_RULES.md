@@ -57,7 +57,7 @@ No field labels or rigid body template are required. Prefer concrete contrast, p
 
 ## Retention And Maintenance
 
-- Each collection contains at most 15 entries and 180 non-empty lines.
+- Each collection contains at most 10 entries and 180 non-empty lines.
 - Each entry contains at most 16 non-empty lines.
 - No line exceeds 200 characters.
 - The collections are bounded priority sets, not logs, quotas, or FIFO windows.

@@ -40,17 +40,24 @@ class AgentCorrectionMarkdownValidationTests(unittest.TestCase):
             [],
         )
 
-    def test_rejects_more_than_fifteen_entries(self):
-        text = "# Agent Corrections\n" + "\n".join(
-            f"### {index}. Entry {index}\nevidence" for index in range(1, 17)
+    def test_rejects_more_than_ten_entries(self):
+        entries = [
+            f"### {index}. Entry {index}\nevidence" for index in range(1, 12)
+        ]
+        self.assertEqual(
+            validate_agent_correction_markdown(
+                "# Agent Corrections\n" + "\n".join(entries[:10]),
+                "MEMORY_agent-corrections-design.md",
+            ),
+            [],
         )
 
         errors = validate_agent_correction_markdown(
-            text,
+            "# Agent Corrections\n" + "\n".join(entries),
             "MEMORY_agent-corrections-design.md",
         )
 
-        self.assertTrue(any("contains 16 entries" in error for error in errors))
+        self.assertTrue(any("contains 11 entries" in error for error in errors))
 
     def test_rejects_entry_over_sixteen_non_empty_lines(self):
         text = "\n".join(
@@ -67,9 +74,10 @@ class AgentCorrectionMarkdownValidationTests(unittest.TestCase):
 
     def test_rejects_collection_over_one_hundred_eighty_non_empty_lines(self):
         lines = ["# Agent Corrections"]
-        for entry in range(1, 16):
+        lines.extend(f"collection context {line}" for line in range(1, 21))
+        for entry in range(1, 11):
             lines.append(f"### {entry}. Entry {entry}")
-            lines.extend(f"evidence {entry}-{line}" for line in range(1, 12))
+            lines.extend(f"evidence {entry}-{line}" for line in range(1, 16))
 
         self.assertEqual(
             validate_agent_correction_markdown(
@@ -188,7 +196,7 @@ proposed
         self.assertTrue(any("missing `### Candidate`" in error for error in errors))
         self.assertTrue(any("sections must be ordered" in error for error in errors))
 
-    def test_rejects_more_than_fifteen_entries(self):
+    def test_rejects_more_than_ten_entries(self):
         entry = """\
 ## Entry {number}
 
@@ -199,13 +207,19 @@ b
 ### Accepted edit
 c
 """
-        text = "# RightMemory Edit Corrections\n\n" + "\n".join(
-            entry.format(number=index) for index in range(1, 17)
+        entries = [entry.format(number=index) for index in range(1, 12)]
+        self.assertEqual(
+            validate_corrections_markdown(
+                "# RightMemory Edit Corrections\n\n" + "\n".join(entries[:10])
+            ),
+            [],
         )
 
-        errors = validate_corrections_markdown(text)
+        errors = validate_corrections_markdown(
+            "# RightMemory Edit Corrections\n\n" + "\n".join(entries)
+        )
 
-        self.assertTrue(any("contains 16 entries" in error for error in errors))
+        self.assertTrue(any("contains 11 entries" in error for error in errors))
 
     def test_rejects_empty_required_section_content(self):
         text = """\
