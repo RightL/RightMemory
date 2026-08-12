@@ -22,7 +22,7 @@ The caller message supplies the repair context for this turn. It may include dir
 - Merge compatible facts into a coherent node, heading, or detail-file structure. Narrow broad wording when each side is true under a different scope.
 - When both sides carry useful but uncertain evidence, keep the uncertainty visible as candidate memory instead of forcing a stronger conclusion.
 - When repairing `corrections.md`, preserve the union of all non-identical complete entries from every side. Remove only entries whose complete Markdown text is exactly duplicated; do not rank, semantically merge, replace, or discard distinct entries during sync repair.
-- The 15-entry RightMemory Edit Feedback ceiling is a steady-state semantic rule, not a sync transport rule. A repaired `corrections.md` may exceed that ceiling. Do not silently remove entries to get under 15; preserve the overflow for later explicit direct maintenance.
+- The 10-entry RightMemory Edit Feedback ceiling is a steady-state semantic rule, not a sync transport rule. A repaired `corrections.md` may exceed that ceiling. Do not silently remove entries to get under 10; preserve the overflow for later explicit direct maintenance.
 - For dirty state, inspect the diff first. Commit coherent valid memory changes as their own repair commit when they should be preserved.
 - For a staged incoming candidate, resolve its synchronized conflicts or semantic invalidity and create at most one repair commit. A conflicted candidate's commit completes the existing merge; a clean but invalid candidate's commit sits directly on its staged merge tip.
 - Discard invalid, partial, or unsafe memory-owned changes through the available git or file mechanisms after inspecting the diff. Leave unrelated or uninspected work alone.

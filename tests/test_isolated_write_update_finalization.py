@@ -238,7 +238,7 @@ class IsolatedWriteUpdateFinalizationTests(IsolatedWriteTestBase):
     def test_sync_reconciler_preserves_structured_corrections_over_updater_ceiling(self):
         def callback(worktree: Path) -> str:
             (worktree / "corrections.md").write_text(
-                self._corrections_markdown(16),
+                self._corrections_markdown(11),
                 encoding="utf-8",
             )
             self._git("add", "corrections.md", cwd=worktree)
@@ -249,11 +249,11 @@ class IsolatedWriteUpdateFinalizationTests(IsolatedWriteTestBase):
 
         self.assertEqual(result.commits_landed, 1)
         text = (self.root / "corrections.md").read_text(encoding="utf-8")
-        self.assertEqual(text.count("## Entry "), 16)
+        self.assertEqual(text.count("## Entry "), 11)
 
     def test_correction_overflow_does_not_block_unrelated_normal_update(self):
         (self.root / "corrections.md").write_text(
-            self._corrections_markdown(16),
+            self._corrections_markdown(11),
             encoding="utf-8",
         )
         self._git("add", "corrections.md")
@@ -271,7 +271,7 @@ class IsolatedWriteUpdateFinalizationTests(IsolatedWriteTestBase):
         self.assertIn("later", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
         self.assertEqual(
             (self.root / "corrections.md").read_text(encoding="utf-8").count("## Entry "),
-            16,
+            11,
         )
 
 if __name__ == "__main__":
