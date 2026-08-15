@@ -566,8 +566,8 @@ class SyncManager:
             current_head = self._required_head(self.memory_root)
             if self._is_ancestor(candidate_commit, current_head):
                 self._cleanup_recorded_candidate(claimed, require_removed=True)
-                store.complete_commit(record.operation_id, candidate_commit)
-                return self._result_from_record(store.read(record.operation_id) or record)
+                store.complete_commit(claimed.operation_id, candidate_commit)
+                return self._result_from_record(store.read(claimed.operation_id) or claimed)
             if current_head != outcome.start_commit:
                 raise RuntimeError("active HEAD changed incompatibly with a prepared sync candidate")
             candidate = self._open_recorded_candidate(claimed)

@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -69,6 +70,21 @@ Two.
         self.assertTrue(any("duplicate" in error for error in errors))
         self.assertTrue(any("Submitted" in error for error in errors))
 
+    def test_validation_rejects_content_before_first_entry(self):
+        malformed = "# Pending Agent Guidance\n\nOrphan evidence.\n"
+        errors = validate_guidance_inbox(malformed)
+        self.assertTrue(any("before first guidance entry" in error for error in errors))
+
+    def test_parser_ignores_reserved_heading_inside_fence(self):
+        fenced = SAMPLE_ONE.replace(
+            "The agent over-structured a simple prompt change.",
+            "```markdown\n## GI-20260815-deadbeef\n```\n\n"
+            "The agent over-structured a simple prompt change.",
+        )
+        entries = parse_guidance_inbox(fenced)
+        self.assertEqual(len(entries), 1)
+        self.assertIn("## GI-20260815-deadbeef", entries[0].body)
+
     def test_three_way_merge_unions_independent_additions(self):
         merged = merge_guidance_inbox(
             "# Pending Agent Guidance\n",
@@ -106,6 +122,27 @@ class GuidanceSubmitTests(IsolatedWriteTestBase):
         self.assertEqual(self._git("ls-files", GUIDANCE_INBOX_PATH), GUIDANCE_INBOX_PATH)
         self.assertFalse((self.root / ".runtime" / "async" / "update").exists())
         self.assertNotIn("rightmemory-guidance-", self._git("branch", "--list"))
+
+        marker = "UNREVIEWED-GUIDANCE-MARKER"
+        inbox.write_text(inbox.read_text(encoding="utf-8") + marker + "\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="update")
+        self.assertNotIn(marker, tools.git_diff())
+        self.assertNotIn(GUIDANCE_INBOX_PATH, tools.git_status())
+        self._git("checkout", "--", GUIDANCE_INBOX_PATH)
+        self._assert_isolated_cleanup()
+
+    @unittest.skipIf(os.name == "nt", "symlink semantics require POSIX")
+    def test_submit_rejects_broken_symlink_inbox(self):
+        inbox = self.root / GUIDANCE_INBOX_PATH
+        target = self.root / "missing-guidance-target"
+        inbox.symlink_to(target)
+        self._git("add", "-f", GUIDANCE_INBOX_PATH)
+        self._git("commit", "-m", "seed broken guidance symlink")
+
+        with self.assertRaises(ValueError):
+            submit_guidance(self.root, "session-one", "Evidence.")
+
+        self.assertFalse(target.exists())
         self._assert_isolated_cleanup()
 
     def test_submit_refuses_a_malformed_existing_inbox(self):
@@ -127,11 +164,26 @@ class GuidanceIsolationTests(unittest.TestCase):
         (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / GUIDANCE_INBOX_PATH).write_text(SAMPLE_ONE, encoding="utf-8")
 
-    def test_retrieve_file_tools_cannot_see_inbox(self):
-        tools = MemoryTools(self.root, role="retrieve")
-        self.assertNotIn(GUIDANCE_INBOX_PATH, tools.list_files("*.md"))
-        with self.assertRaises(ValueError):
-            tools.read(GUIDANCE_INBOX_PATH)
+    def test_model_role_file_tools_cannot_see_inbox(self):
+        for role in (
+            None,
+            "retrieve",
+            "update",
+            "dreamer",
+            "pruner",
+            "reviewer",
+            "sync-reconciler",
+            "insight",
+            "shared-view-builder",
+        ):
+            with self.subTest(role=role):
+                tools = MemoryTools(self.root, role=role)
+                self.assertNotIn(GUIDANCE_INBOX_PATH, tools.list_files("*.md"))
+                with self.assertRaises(ValueError):
+                    tools.read(GUIDANCE_INBOX_PATH)
+                with self.assertRaises(ValueError):
+                    tools.read_command(f"cat {GUIDANCE_INBOX_PATH}")
+                self.assertNotIn(GUIDANCE_INBOX_PATH, tools.read_command("rg --files"))
 
     def test_validation_boundary_keeps_inbox_out_of_semantic_graph(self):
         tools = MemoryTools(self.root)

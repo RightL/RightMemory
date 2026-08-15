@@ -14,6 +14,7 @@ from .session import MemoryWriteLock, _ensure_runtime_gitignore
 GUIDANCE_INBOX_PATH = "AGENT_GUIDANCE_INBOX.md"
 GUIDANCE_INBOX_HEADING = "# Pending Agent Guidance"
 _GUIDANCE_HEADING_RE = re.compile(r"^## (GI-\d{8}-[0-9a-f]{8})$")
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 
 class GuidanceConflictError(ValueError):
@@ -122,7 +123,7 @@ def submit_guidance(memory_root: Path, session_id: str, evidence: str) -> Guidan
 
 def _append_guidance(worktree: Path, session_id: str, evidence: str) -> GuidanceEntry:
     path = worktree / GUIDANCE_INBOX_PATH
-    if path.exists() and (path.is_symlink() or not path.is_file()):
+    if path.is_symlink() or (path.exists() and not path.is_file()):
         raise ValueError(f"{GUIDANCE_INBOX_PATH} must be a regular file")
     existing_text = path.read_text(encoding="utf-8") if path.is_file() else GUIDANCE_INBOX_HEADING + "\n"
     entries = parse_guidance_inbox(existing_text)
@@ -150,10 +151,30 @@ def _parse_guidance_inbox(text: str) -> tuple[list[str], list[GuidanceEntry]]:
         return errors, entries
 
     starts: list[tuple[int, str]] = []
+    fence_char: str | None = None
+    fence_length = 0
     for index, line in enumerate(lines[1:], start=1):
+        fence = _FENCE_RE.match(line)
+        if fence is not None:
+            marker = fence.group(1)
+            if fence_char is None:
+                fence_char = marker[0]
+                fence_length = len(marker)
+            elif marker[0] == fence_char and len(marker) >= fence_length:
+                fence_char = None
+                fence_length = 0
+            continue
+        if fence_char is not None:
+            continue
         match = _GUIDANCE_HEADING_RE.fullmatch(line)
         if match is not None:
             starts.append((index, match.group(1)))
+        elif line.startswith("## GI-"):
+            errors.append(f"line {index + 1}: malformed guidance entry heading")
+
+    preamble_end = starts[0][0] if starts else len(lines)
+    if any(line.strip() for line in lines[1:preamble_end]):
+        errors.append("content appears before first guidance entry")
 
     seen: set[str] = set()
     for position, (start, entry_id) in enumerate(starts):
@@ -184,10 +205,6 @@ def _parse_guidance_inbox(text: str) -> tuple[list[str], list[GuidanceEntry]]:
         if not body:
             errors.append(f"{entry_id} has empty guidance evidence")
         entries.append(GuidanceEntry(entry_id, session_id, submitted_at, body))
-
-    for index, line in enumerate(lines[1:], start=2):
-        if line.startswith("## GI-") and _GUIDANCE_HEADING_RE.fullmatch(line) is None:
-            errors.append(f"line {index}: malformed guidance entry heading")
 
     return errors, entries
 
