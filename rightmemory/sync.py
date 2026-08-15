@@ -15,13 +15,6 @@ from pathlib import Path
 from typing import Iterator
 
 from .config import MEMORY_ROOT_ENV, SyncConfig
-from .guidance import (
-    GUIDANCE_INBOX_HEADING,
-    GUIDANCE_INBOX_PATH,
-    GuidanceConflictError,
-    merge_guidance_inbox,
-    validate_guidance_inbox,
-)
 from .isolated_write import WorktreeLease
 from .platform import (
     detached_process_kwargs,
@@ -48,7 +41,6 @@ MEMORY_SYNC_PATHS = (
     "MEMORY_*.md",
     "PURSUITS.md",
     "PURSUIT_*.md",
-    GUIDANCE_INBOX_PATH,
     "corrections.md",
     "shared_views.toml",
     "shares.toml",
@@ -190,6 +182,7 @@ class SyncManager:
     def _admit_fetched(self, upstream_commit: str, repair: SyncRepair | None) -> SyncResult:
         store = SemanticOperationStore(self.memory_root)
         try:
+            # This matches automatic-write lock order: operation execution, then active memory.
             with store.execution_locked(), MemoryWriteLock(self.memory_root):
                 result = self._pull_locked(upstream_commit, repair, store)
         except Exception as exc:
@@ -199,6 +192,7 @@ class SyncManager:
         return self._record_failure(result)
 
     def refresh_for_retrieve(self, *, now: datetime | None = None) -> SyncResult:
+        """Perform a bounded, pull-only refresh when the retrieve freshness gate is due."""
         if not self.config.enabled:
             return SyncResult("disabled", "sync disabled")
 
@@ -223,24 +217,38 @@ class SyncManager:
             self._record_remote_check_success(checked_at)
             upstream_commit = self._resolve_commit(upstream)
             if upstream_commit is None:
-                return self._record_failure(SyncResult("error", "sync failed: upstream commit is unavailable"))
+                return self._record_failure(
+                    SyncResult("error", "sync failed: upstream commit is unavailable")
+                )
             admitted = self._admit_fetched(upstream_commit, repair=None)
             if admitted.status != "synced":
                 return admitted
             active_commit = self._resolve_commit("HEAD")
             if active_commit is None:
-                return self._record_failure(SyncResult("error", "sync failed: local commit is unavailable"))
+                return self._record_failure(
+                    SyncResult("error", "sync failed: local commit is unavailable")
+                )
             ahead_behind = self._ahead_behind(active_commit, upstream_commit)
             if ahead_behind is None:
-                return self._record_failure(SyncResult("error", "sync failed: could not compare refreshed memory"))
+                return self._record_failure(
+                    SyncResult("error", "sync failed: could not compare refreshed memory")
+                )
             ahead, behind = ahead_behind
             if behind > 0:
-                return self._record_failure(SyncResult("error", "sync failed: refreshed memory is still behind upstream"))
+                return self._record_failure(
+                    SyncResult("error", "sync failed: refreshed memory is still behind upstream")
+                )
             if ahead > 0:
-                return SyncResult("ahead", "local memory has commits pending deferred sync", admitted.files, admitted.operation_id)
+                return SyncResult(
+                    "ahead",
+                    "local memory has commits pending deferred sync",
+                    admitted.files,
+                    admitted.operation_id,
+                )
             return admitted
 
     def preflight(self, repair: SyncRepair | None = None) -> SyncResult:
+        """Compatibility alias for callers migrating to truthful pull naming."""
         return self.pull(repair=repair)
 
     def push(self, repair: SyncRepair | None = None) -> SyncResult:
@@ -275,10 +283,19 @@ class SyncManager:
             return self._record_failure(captured)
         retry = self._push(push_target, captured)
         if retry.returncode == 0:
-            return self._record_success("push", SyncResult("pushed", "local memory reconciled and pushed", operation_id=pulled.operation_id))
+            return self._record_success(
+                "push",
+                SyncResult(
+                    "pushed",
+                    "local memory reconciled and pushed",
+                    operation_id=pulled.operation_id,
+                ),
+            )
         status = "offline" if _looks_like_transport_failure(retry) else "error"
         message = "sync offline: git push failed" if status == "offline" else "sync failed: git push rejected"
-        return self._record_failure(SyncResult(status, message, operation_id=pulled.operation_id))
+        return self._record_failure(
+            SyncResult(status, message, operation_id=pulled.operation_id)
+        )
 
     def background_sync(
         self,
@@ -287,6 +304,7 @@ class SyncManager:
     ) -> SyncResult:
         if not self.config.enabled:
             return self.pull(repair=repair)
+
         with self._cycle_locked_nonblocking() as acquired:
             if not acquired:
                 return SyncResult("busy", "another sync cycle is already running")
@@ -307,7 +325,11 @@ class SyncManager:
         if upstream_commit is None:
             return self._record_failure(SyncResult("error", "sync failed: upstream commit is unavailable"))
         captured = self._capture_valid_tip(upstream_commit)
-        if isinstance(captured, SyncResult) and captured.status in {"dirty", "conflict"} and active_repair is not None:
+        if (
+            isinstance(captured, SyncResult)
+            and captured.status in {"dirty", "conflict"}
+            and active_repair is not None
+        ):
             active_repair(captured)
             captured = self._capture_valid_tip(upstream_commit)
         if isinstance(captured, SyncResult):
@@ -320,6 +342,7 @@ class SyncManager:
             return self.push(repair=repair)
         if behind > 0:
             return self._admit_fetched(upstream_commit, repair)
+
         last_pull = self._last_successful_pull_at()
         stale_after = timedelta(hours=self.config.stale_pull_after_hours)
         if last_pull is not None and datetime.now(UTC) - last_pull < stale_after:
@@ -327,6 +350,7 @@ class SyncManager:
         return self._admit_fetched(upstream_commit, repair)
 
     def background_pull(self, repair: SyncRepair | None = None) -> SyncResult:
+        """Compatibility alias for callers migrating to background_sync."""
         return self.background_sync(repair=repair)
 
     def repair_message(self, result: SyncResult) -> str:
@@ -335,7 +359,10 @@ class SyncManager:
             return f"{result.message}; inspect and repair dirty memory state in {files}"
         if result.status != "conflict":
             return result.message
-        return f"{result.message}; repair the staged incoming candidate in {files}; the active memory root is unchanged"
+        return (
+            f"{result.message}; repair the staged incoming candidate in {files}; "
+            "the active memory root is unchanged"
+        )
 
     def _pull_locked(
         self,
@@ -359,7 +386,11 @@ class SyncManager:
 
         unexpected = [path for path in self._incoming_paths(start_commit, upstream_commit) if not _is_sync_path(path)]
         if unexpected:
-            return SyncResult("error", "sync refused incoming paths outside the synchronized state", sorted(unexpected))
+            return SyncResult(
+                "error",
+                "sync refused incoming paths outside the synchronized state",
+                sorted(unexpected),
+            )
 
         stage_id = uuid.uuid4().hex
         candidate = self._create_candidate(
@@ -379,7 +410,8 @@ class SyncManager:
             if repair is None:
                 return SyncResult(
                     "conflict",
-                    f"incoming memory could not be admitted: {inspection.repair.message}; active memory was left unchanged",
+                    f"incoming memory could not be admitted: {inspection.repair.message}; "
+                    "active memory was left unchanged",
                     inspection.repair.files,
                 )
 
@@ -415,6 +447,7 @@ class SyncManager:
                 "merge_conflicted": inspection.merge_conflicted,
                 "repair_input_sha256": repair_input_sha256,
                 "policy_sha256": policy_sha256,
+                # The full diagnostic binds operation identity but is not retained in the receipt.
                 "repair_diagnostic": {
                     "status": inspection.repair.status,
                     "message": inspection.repair.message,
@@ -427,12 +460,19 @@ class SyncManager:
         existing = store.read(operation_id)
         candidate: _Candidate | None = None
         if existing is not None:
+            # A divergent merge commit is not reproducible byte-for-byte, so recovery
+            # uses the exact pre-repair tip captured by the first durable receipt.
             for key in ("pre_repair_tip", "expected_merge_parent", "merge_conflicted"):
                 if key in existing.input_data:
                     input_data[key] = existing.input_data[key]
         else:
             self._discard_unrecorded_candidate(final_branch, final_path, operation_digest)
-            candidate = self._create_candidate(start_commit, final_branch, operation_digest, final_path)
+            candidate = self._create_candidate(
+                start_commit,
+                final_branch,
+                operation_digest,
+                final_path,
+            )
             final_inspection = self._inspect_new_candidate(candidate, start_commit, upstream_commit)
             if final_inspection.repair is None or final_inspection.fatal is not None:
                 self._remove_candidate(candidate)
@@ -457,15 +497,28 @@ class SyncManager:
             if candidate is not None:
                 self._remove_candidate(candidate)
             return self._result_from_record(record)
+
         if candidate is None:
-            candidate = self._open_or_recreate_operation_candidate(record, start_commit, upstream_commit, repair_input_sha256)
+            candidate = self._open_or_recreate_operation_candidate(
+                record,
+                start_commit,
+                upstream_commit,
+                repair_input_sha256,
+            )
         retain_candidate = True
         try:
             if record.phase == "prepared":
                 result = self._publish_prepared(store, record, candidate)
                 retain_candidate = False
                 return result
-            result = self._run_or_adopt_repair(store, record, candidate, inspection.repair, repair)
+
+            result = self._run_or_adopt_repair(
+                store,
+                record,
+                candidate,
+                inspection.repair,
+                repair,
+            )
             retain_candidate = result.status == "error"
             return result
         except Exception as exc:
@@ -481,10 +534,16 @@ class SyncManager:
 
     def _recover_prepared_sync(self, store: SemanticOperationStore) -> SyncResult | None:
         records = [
-            record for record in store.list_outstanding_records()
+            record
+            for record in store.list_outstanding_records()
             if record.phase == "prepared" and record.input_data.get("kind") == "sync-repair"
         ]
-        records.sort(key=lambda record: (record.outcome.sequence if record.outcome is not None else 0, record.operation_id))
+        records.sort(
+            key=lambda record: (
+                record.outcome.sequence if record.outcome is not None else 0,
+                record.operation_id,
+            )
+        )
         for record in records:
             claimed = store.claim_prepared(record.operation_id)
             outcome = claimed.outcome
@@ -492,14 +551,15 @@ class SyncManager:
                 raise RuntimeError("prepared sync operation has no outcome")
             candidate_commit = outcome.metadata.get("candidate_commit")
             if not isinstance(candidate_commit, str) or not candidate_commit:
+                # Prepared no-change is completed without touching active history.
                 self._cleanup_recorded_candidate(claimed, require_removed=True)
                 store.complete_no_change(claimed.operation_id, outcome.start_commit)
                 return self._result_from_record(store.read(claimed.operation_id) or claimed)
             current_head = self._required_head(self.memory_root)
             if self._is_ancestor(candidate_commit, current_head):
                 self._cleanup_recorded_candidate(claimed, require_removed=True)
-                store.complete_commit(record.operation_id, candidate_commit)
-                return self._result_from_record(store.read(record.operation_id) or record)
+                store.complete_commit(claimed.operation_id, candidate_commit)
+                return self._result_from_record(store.read(claimed.operation_id) or claimed)
             if current_head != outcome.start_commit:
                 raise RuntimeError("active HEAD changed incompatibly with a prepared sync candidate")
             candidate = self._open_recorded_candidate(claimed)
@@ -525,11 +585,20 @@ class SyncManager:
         effects: tuple[OperationEffect, ...] = ()
         if current_tip == pre_tip:
             raw_outcome = repair(candidate.path, diagnostic, record.operation_id)
-            repair_outcome = raw_outcome if isinstance(raw_outcome, SyncRepairOutcome) else SyncRepairOutcome(str(raw_outcome))
+            repair_outcome = (
+                raw_outcome
+                if isinstance(raw_outcome, SyncRepairOutcome)
+                else SyncRepairOutcome(str(raw_outcome))
+            )
             effects = repair_outcome.effects
             current_tip = self._required_head(candidate.path)
         elif SemanticOperationStore(self.memory_root).state_root(record.operation_id).exists():
-            effects = (OperationEffect("session-state", metadata={"role": "sync-reconciler", "session_id": "runtime-sync-repair"}),)
+            effects = (
+                OperationEffect(
+                    "session-state",
+                    metadata={"role": "sync-reconciler", "session_id": "runtime-sync-repair"},
+                ),
+            )
 
         if current_tip == pre_tip:
             conflict = SyncResult(
@@ -547,11 +616,20 @@ class SyncManager:
                 metadata={"candidate_commit": None},
             )
             self._remove_candidate(candidate, require_removed=True)
-            store.complete_no_change(record.operation_id, _required_record_string(record, "active_start_commit"))
+            store.complete_no_change(
+                record.operation_id,
+                _required_record_string(record, "active_start_commit"),
+            )
             return conflict
 
         self._validate_repair_commit(record, candidate, current_tip)
-        changed_paths = tuple(self._diff_paths(candidate.path, _required_record_string(record, "active_start_commit"), current_tip))
+        changed_paths = tuple(
+            self._diff_paths(
+                candidate.path,
+                _required_record_string(record, "active_start_commit"),
+                current_tip,
+            )
+        )
         prepared_result = SyncResult(
             "synced",
             "validated incoming memory repair published",
@@ -564,14 +642,22 @@ class SyncManager:
             start_commit=_required_record_string(record, "active_start_commit"),
             changed_paths=changed_paths,
             effects=effects,
-            metadata={"candidate_commit": current_tip, "candidate_branch": candidate.branch},
+            metadata={
+                "candidate_commit": current_tip,
+                "candidate_branch": candidate.branch,
+            },
         )
         prepared = store.read(record.operation_id)
         if prepared is None:
             raise RuntimeError("sync repair operation disappeared after preparation")
         return self._publish_prepared(store, prepared, candidate)
 
-    def _publish_prepared(self, store: SemanticOperationStore, record: SemanticOperationRecord, candidate: _Candidate) -> SyncResult:
+    def _publish_prepared(
+        self,
+        store: SemanticOperationStore,
+        record: SemanticOperationRecord,
+        candidate: _Candidate,
+    ) -> SyncResult:
         outcome = record.outcome
         if outcome is None:
             raise RuntimeError("prepared sync operation has no outcome")
@@ -585,6 +671,7 @@ class SyncManager:
             return self._result_from_record(store.read(record.operation_id) or record)
         if current_head != outcome.start_commit:
             raise RuntimeError("active HEAD changed before prepared sync candidate could publish")
+
         branch_commit = self._resolve_commit(candidate.branch)
         if branch_commit != candidate_commit:
             raise RuntimeError("prepared sync candidate branch is missing or moved")
@@ -616,49 +703,31 @@ class SyncManager:
         if dirty:
             raise RuntimeError("published sync candidate left synchronized files dirty")
 
-    def _inspect_new_candidate(self, candidate: _Candidate, start_commit: str, upstream_commit: str) -> _CandidateInspection:
+    def _inspect_new_candidate(
+        self,
+        candidate: _Candidate,
+        start_commit: str,
+        upstream_commit: str,
+    ) -> _CandidateInspection:
         merge = self._run_git(candidate.path, "merge", "--no-edit", upstream_commit)
         if merge.returncode != 0:
             conflicts = self._conflicted_files(candidate.path)
-            if GUIDANCE_INBOX_PATH in conflicts:
-                if conflicts != [GUIDANCE_INBOX_PATH]:
-                    return _CandidateInspection(
-                        None,
-                        SyncResult(
-                            "conflict",
-                            "agent guidance inbox conflicted alongside other synchronized state",
-                            conflicts,
-                        ),
-                        start_commit,
-                        upstream_commit,
-                        True,
-                    )
-                guidance_conflict = self._resolve_guidance_conflict(candidate.path)
-                if guidance_conflict is not None:
-                    return _CandidateInspection(None, guidance_conflict, start_commit, upstream_commit, True)
-                committed = self._run_git(candidate.path, "commit", "--no-edit")
-                if committed.returncode != 0:
-                    return _CandidateInspection(
-                        None,
-                        SyncResult("error", "could not commit deterministic agent guidance merge", [GUIDANCE_INBOX_PATH]),
-                        start_commit,
-                        upstream_commit,
-                        True,
-                    )
-                candidate_commit = self._required_head(candidate.path)
-                invalid = self._validate_candidate(candidate.path, start_commit, candidate_commit)
-                if invalid is None:
-                    return _CandidateInspection(None, None, candidate_commit, None, False)
-                return _CandidateInspection(None if invalid.status == "error" else invalid, invalid if invalid.status == "error" else None, candidate_commit, None, False)
-
             coordination_conflicts = [
-                path for path in conflicts
-                if _is_update_queue_path(path) or _is_update_record_path(path)
+                path
+                for path in conflicts
+                if (
+                    _is_update_queue_path(path)
+                    or _is_update_record_path(path)
+                )
             ]
             if coordination_conflicts:
                 return _CandidateInspection(
                     None,
-                    SyncResult("error", "incoming update coordination state has a coordination conflict", sorted(coordination_conflicts)),
+                    SyncResult(
+                        "error",
+                        "incoming update coordination state has a coordination conflict",
+                        sorted(coordination_conflicts),
+                    ),
                     start_commit,
                     upstream_commit,
                     True,
@@ -666,10 +735,22 @@ class SyncManager:
             invalid_conflicts = [path for path in conflicts if not _is_sync_path(path)]
             if not conflicts or invalid_conflicts:
                 files = invalid_conflicts or conflicts
-                return _CandidateInspection(None, SyncResult("error", "sync candidate merge failed outside repairable state", files), start_commit, upstream_commit, True)
+                return _CandidateInspection(
+                    None,
+                    SyncResult("error", "sync candidate merge failed outside repairable state", files),
+                    start_commit,
+                    upstream_commit,
+                    True,
+                )
             invalid_queue = _invalid_update_queue_result(candidate.path)
             if invalid_queue is not None:
-                return _CandidateInspection(None, invalid_queue, start_commit, upstream_commit, True)
+                return _CandidateInspection(
+                    None,
+                    invalid_queue,
+                    start_commit,
+                    upstream_commit,
+                    True,
+                )
             return _CandidateInspection(
                 SyncResult("conflict", "incoming candidate has merge conflicts", conflicts),
                 None,
@@ -686,33 +767,20 @@ class SyncManager:
             return _CandidateInspection(None, invalid, candidate_commit, None, False)
         return _CandidateInspection(invalid, None, candidate_commit, None, False)
 
-    def _resolve_guidance_conflict(self, root: Path) -> SyncResult | None:
-        base = self._guidance_stage_text(root, 1)
-        ours = self._guidance_stage_text(root, 2)
-        theirs = self._guidance_stage_text(root, 3)
-        try:
-            merged = merge_guidance_inbox(base, ours, theirs)
-        except (GuidanceConflictError, ValueError) as exc:
-            return SyncResult(
-                "conflict",
-                f"agent guidance inbox requires manual review: {exc}",
-                [GUIDANCE_INBOX_PATH],
-            )
-        (root / GUIDANCE_INBOX_PATH).write_text(merged, encoding="utf-8")
-        added = self._run_git(root, "add", "--", GUIDANCE_INBOX_PATH)
-        if added.returncode != 0:
-            return SyncResult("error", "could not stage deterministic agent guidance merge", [GUIDANCE_INBOX_PATH])
-        return None
-
-    def _guidance_stage_text(self, root: Path, stage: int) -> str:
-        result = self._run_git(root, "show", f":{stage}:{GUIDANCE_INBOX_PATH}")
-        if result.returncode != 0:
-            return GUIDANCE_INBOX_HEADING + "\n"
-        return result.stdout
-
-    def _validate_repair_commit(self, record: SemanticOperationRecord, candidate: _Candidate, candidate_commit: str) -> None:
+    def _validate_repair_commit(
+        self,
+        record: SemanticOperationRecord,
+        candidate: _Candidate,
+        candidate_commit: str,
+    ) -> None:
         pre_tip = _required_record_string(record, "pre_repair_tip")
-        commits = self._git_stdout(candidate.path, "rev-list", "--first-parent", "--reverse", f"{pre_tip}..{candidate_commit}").splitlines()
+        commits = self._git_stdout(
+            candidate.path,
+            "rev-list",
+            "--first-parent",
+            "--reverse",
+            f"{pre_tip}..{candidate_commit}",
+        ).splitlines()
         if len(commits) != 1 or commits[0].strip() != candidate_commit:
             raise RuntimeError("sync repair must create exactly one first-parent commit")
         parents = self._git_stdout(candidate.path, "show", "-s", "--format=%P", candidate_commit).split()
@@ -722,24 +790,35 @@ class SyncManager:
                 raise RuntimeError("sync repair commit does not complete the expected merge")
         elif parents != [pre_tip]:
             raise RuntimeError("sync repair commit is not directly based on the staged merge")
+
         status = self._git_stdout(candidate.path, "status", "--porcelain")
         if status:
             raise RuntimeError("sync repair candidate has uncommitted changes")
-        invalid = self._validate_candidate(candidate.path, _required_record_string(record, "active_start_commit"), candidate_commit)
+        invalid = self._validate_candidate(
+            candidate.path,
+            _required_record_string(record, "active_start_commit"),
+            candidate_commit,
+        )
         if invalid is not None:
             raise RuntimeError(invalid.message)
 
-    def _validate_candidate(self, candidate_root: Path, start_commit: str, candidate_commit: str) -> SyncResult | None:
+    def _validate_candidate(
+        self,
+        candidate_root: Path,
+        start_commit: str,
+        candidate_commit: str,
+    ) -> SyncResult | None:
         changed_paths = self._diff_paths(candidate_root, start_commit, candidate_commit)
         unexpected = [path for path in changed_paths if not _is_sync_path(path)]
         if unexpected:
-            return SyncResult("error", "sync candidate changes paths outside the synchronized state", unexpected)
+            return SyncResult(
+                "error",
+                "sync candidate changes paths outside the synchronized state",
+                unexpected,
+            )
         invalid_files = self._non_regular_paths(candidate_root, changed_paths)
         if invalid_files:
             return SyncResult("error", "sync candidate contains a missing or non-regular required path", invalid_files)
-        invalid_guidance = _invalid_guidance_result(candidate_root)
-        if invalid_guidance is not None:
-            return invalid_guidance
         invalid_queue = _invalid_update_queue_result(candidate_root)
         if invalid_queue is not None:
             return invalid_queue
@@ -760,9 +839,6 @@ class SyncManager:
         invalid_files = self._non_regular_paths(self.memory_root, ())
         if invalid_files:
             return SyncResult("conflict", "local memory root is incomplete", invalid_files)
-        invalid_guidance = _invalid_guidance_result(self.memory_root)
-        if invalid_guidance is not None:
-            return invalid_guidance
         invalid_queue = _invalid_update_queue_result(self.memory_root)
         if invalid_queue is not None:
             return invalid_queue
@@ -779,14 +855,28 @@ class SyncManager:
                 if blocked is not None:
                     return blocked
                 captured = self._required_head(self.memory_root)
-                unexpected = [path for path in self._outgoing_paths(upstream_commit, captured) if not _is_sync_path(path)]
+                unexpected = [
+                    path
+                    for path in self._outgoing_paths(upstream_commit, captured)
+                    if not _is_sync_path(path)
+                ]
                 if unexpected:
-                    return SyncResult("error", "sync refused local commits containing paths outside the synchronized state", sorted(unexpected))
+                    return SyncResult(
+                        "error",
+                        "sync refused local commits containing paths outside the synchronized state",
+                        sorted(unexpected),
+                    )
                 return captured
         except Exception as exc:
             return SyncResult("error", f"sync failed: {type(exc).__name__}: {exc}")
 
-    def _create_candidate(self, start_commit: str, branch: str, lease_id: str, path: Path) -> _Candidate:
+    def _create_candidate(
+        self,
+        start_commit: str,
+        branch: str,
+        lease_id: str,
+        path: Path,
+    ) -> _Candidate:
         _ensure_runtime_gitignore(self.memory_root / ".runtime")
         relative = path.relative_to(self.memory_root).as_posix()
         ignored = self._git("check-ignore", "-q", relative)
@@ -851,6 +941,7 @@ class SyncManager:
                 self._remove_candidate(candidate)
                 raise RuntimeError("recorded sync candidate commit is missing and cannot be reconstructed")
             return candidate
+
         return self._open_recorded_candidate(record)
 
     def _open_recorded_candidate(self, record: SemanticOperationRecord) -> _Candidate:
@@ -874,14 +965,22 @@ class SyncManager:
             lease.release()
             raise
 
-    def _cleanup_recorded_candidate(self, record: SemanticOperationRecord, *, require_removed: bool = False) -> None:
+    def _cleanup_recorded_candidate(
+        self,
+        record: SemanticOperationRecord,
+        *,
+        require_removed: bool = False,
+    ) -> None:
         branch, path, lease_id = self._recorded_candidate_identity(record)
         lease = WorktreeLease(self.memory_root, "sync", lease_id)
         lease.acquire()
         if self._resolve_commit(branch) is None and not path.exists():
             lease.release()
             return
-        self._remove_candidate(_Candidate(branch, path, lease), require_removed=require_removed)
+        self._remove_candidate(
+            _Candidate(branch, path, lease),
+            require_removed=require_removed,
+        )
 
     def _remove_candidate(self, candidate: _Candidate, *, require_removed: bool = False) -> None:
         if candidate.removed:
@@ -890,13 +989,18 @@ class SyncManager:
             self._git("worktree", "remove", "--force", str(candidate.path))
             self._git("worktree", "prune")
             self._git("branch", "-D", candidate.branch)
-            if require_removed and (candidate.path.exists() or self._resolve_commit(candidate.branch) is not None):
+            if require_removed and (
+                candidate.path.exists() or self._resolve_commit(candidate.branch) is not None
+            ):
                 raise RuntimeError("could not remove settled sync candidate")
             candidate.removed = not candidate.path.exists() and self._resolve_commit(candidate.branch) is None
         finally:
             candidate.lease.release()
 
-    def _recorded_candidate_identity(self, record: SemanticOperationRecord) -> tuple[str, Path, str]:
+    def _recorded_candidate_identity(
+        self,
+        record: SemanticOperationRecord,
+    ) -> tuple[str, Path, str]:
         prefix = "sync-repair-"
         if not record.operation_id.startswith(prefix):
             raise RuntimeError("sync operation id does not identify a repair candidate")
@@ -921,7 +1025,12 @@ class SyncManager:
         return self._diff_paths(self.memory_root, merge_base, upstream_commit)
 
     def _outgoing_paths(self, upstream_commit: str, captured_commit: str) -> list[str]:
-        result = self._run_git(self.memory_root, "rev-list", "--reverse", f"{upstream_commit}..{captured_commit}")
+        result = self._run_git(
+            self.memory_root,
+            "rev-list",
+            "--reverse",
+            f"{upstream_commit}..{captured_commit}",
+        )
         if result.returncode != 0:
             raise RuntimeError("could not inspect outgoing sync history")
         paths: set[str] = set()
@@ -947,7 +1056,15 @@ class SyncManager:
         return sorted(paths)
 
     def _diff_paths(self, cwd: Path, start_commit: str, end_commit: str) -> list[str]:
-        result = self._run_git(cwd, "diff", "--name-status", "-M", "-z", start_commit, end_commit)
+        result = self._run_git(
+            cwd,
+            "diff",
+            "--name-status",
+            "-M",
+            "-z",
+            start_commit,
+            end_commit,
+        )
         if result.returncode != 0:
             raise RuntimeError("could not inspect sync candidate paths")
         return sorted(set(_name_status_paths(result.stdout)))
@@ -1034,7 +1151,9 @@ class SyncManager:
         return sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
 
     def _invalid_graph_result(self, root: Path) -> SyncResult | None:
-        validation = MemoryTools(root, role="sync-reconciler").validate_memory(enforce_correction_capacity=False)
+        validation = MemoryTools(root, role="sync-reconciler").validate_memory(
+            enforce_correction_capacity=False
+        )
         if not validation.startswith("validation failed:"):
             return None
         files = [name for name in REQUIRED_ROOT_DOCUMENTS if (root / name).exists()]
@@ -1080,16 +1199,30 @@ class SyncManager:
 
     def _retrieve_refresh_due(self, now: datetime) -> bool:
         last_attempt = self._state_datetime("last_remote_check_attempt_at")
-        return last_attempt is None or now - last_attempt >= timedelta(seconds=RETRIEVE_SYNC_REFRESH_SECONDS)
+        return (
+            last_attempt is None
+            or now - last_attempt >= timedelta(seconds=RETRIEVE_SYNC_REFRESH_SECONDS)
+        )
 
     def _record_remote_check_attempt(self, checked_at: datetime) -> None:
-        self._mutate_state(lambda state: state.__setitem__("last_remote_check_attempt_at", checked_at.isoformat()))
+        self._mutate_state(
+            lambda state: state.__setitem__(
+                "last_remote_check_attempt_at",
+                checked_at.isoformat(),
+            )
+        )
 
     def _record_remote_check_success(self, checked_at: datetime) -> None:
-        self._mutate_state(lambda state: state.__setitem__("last_successful_remote_check_at", checked_at.isoformat()))
+        self._mutate_state(
+            lambda state: state.__setitem__(
+                "last_successful_remote_check_at",
+                checked_at.isoformat(),
+            )
+        )
 
     def _record_success(self, operation: str, result: SyncResult) -> SyncResult:
         now = datetime.now(UTC).isoformat()
+
         def mutate(state: dict[str, object]) -> None:
             state[f"last_successful_{operation}_at"] = now
             state["last_status"] = result.status
@@ -1099,6 +1232,7 @@ class SyncManager:
             state.pop("last_failure_status", None)
             state.pop("last_failure_message", None)
             state.pop("last_failure_files", None)
+
         self._mutate_state(mutate)
         return result
 
@@ -1111,6 +1245,7 @@ class SyncManager:
             state["last_failure_status"] = result.status
             state["last_failure_message"] = result.message
             state["last_failure_files"] = result.files
+
         self._mutate_state(mutate)
         return result
 
@@ -1177,7 +1312,11 @@ class SyncManager:
         os.replace(tmp_path, self.state_path)
         _fsync_directory(self.state_path.parent)
 
-    def _git(self, *args: str, timeout_seconds: int = GIT_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+    def _git(
+        self,
+        *args: str,
+        timeout_seconds: int = GIT_TIMEOUT_SECONDS,
+    ) -> subprocess.CompletedProcess[str]:
         return self._run_git(self.memory_root, *args, timeout_seconds=timeout_seconds)
 
     def _git_stdout(self, cwd: Path, *args: str) -> str:
@@ -1231,25 +1370,6 @@ def _is_sync_path(path: str) -> bool:
     return False
 
 
-def _invalid_guidance_result(root: Path) -> SyncResult | None:
-    path = root / GUIDANCE_INBOX_PATH
-    if not path.exists() and not path.is_symlink():
-        return None
-    if path.is_symlink() or not path.is_file():
-        return SyncResult("conflict", "agent guidance inbox must be a regular file", [GUIDANCE_INBOX_PATH])
-    try:
-        errors = validate_guidance_inbox(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError) as exc:
-        return SyncResult("conflict", f"agent guidance inbox could not be read: {exc}", [GUIDANCE_INBOX_PATH])
-    if not errors:
-        return None
-    return SyncResult(
-        "conflict",
-        "invalid agent guidance inbox:\n" + "\n".join(f"- {error}" for error in errors),
-        [GUIDANCE_INBOX_PATH],
-    )
-
-
 def _utc_now(value: datetime | None = None) -> datetime:
     current = datetime.now(UTC) if value is None else value
     if current.tzinfo is None:
@@ -1295,7 +1415,8 @@ def _invalid_update_records_result(root: Path) -> SyncResult | None:
     files = sorted({item.partition(":")[0] for item in diagnostics})
     return SyncResult(
         "error",
-        "invalid synchronized update records:\n" + "\n".join(f"- {item}" for item in diagnostics),
+        "invalid synchronized update records:\n"
+        + "\n".join(f"- {item}" for item in diagnostics),
         files,
     )
 
