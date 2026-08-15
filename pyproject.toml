@@ -34,7 +34,7 @@ dependencies = [
 ]
 
 [project.scripts]
-rightmemory = "rightmemory.cli:cli_main"
+rightmemory = "rightmemory.entrypoint:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rightmemory"]

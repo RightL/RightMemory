@@ -85,20 +85,21 @@ class AsyncUpdateStateTests(unittest.TestCase):
     def test_submit_replaces_stale_worker_pid_that_belongs_to_another_process(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
-            with store._worker_locked():
-                store._write_worker_locked(
-                    status="running",
-                    pid=4,
-                    batch_id=None,
-                    session_ids=[],
-                    error=None,
-                )
+            with patch("rightmemory.async_update.process_identity", return_value="proc:original"):
+                with store._worker_locked():
+                    store._write_worker_locked(
+                        status="running",
+                        pid=4,
+                        batch_id=None,
+                        session_ids=[],
+                        error=None,
+                    )
             process = Mock(pid=4242)
 
             with (
                 patch("rightmemory.async_update.subprocess.Popen", return_value=process) as popen,
                 patch("rightmemory.async_update._process_exists", return_value=True),
-                patch("rightmemory.async_update.process_command", return_value="[kworker/R-rcu_g]"),
+                patch("rightmemory.async_update.process_identity", return_value="proc:replacement"),
             ):
                 state = store.submit("agent-1", "first")
 

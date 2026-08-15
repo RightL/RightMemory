@@ -38,6 +38,7 @@ MEMORY_GITIGNORE = """\
 !MEMORY_*.md
 !PURSUITS.md
 !PURSUIT_*.md
+!AGENT_GUIDANCE_INBOX.md
 PURSUIT_RULES.md
 !corrections.md
 !shared_views.toml
@@ -442,6 +443,7 @@ class Installer:
             for path in sorted(self.memory_root.glob("PURSUIT_*.md"))
             if path.is_file()
         )
+        add("AGENT_GUIDANCE_INBOX.md")
         add("corrections.md")
         add("shared_views.toml")
         add("shares.toml")
@@ -540,7 +542,7 @@ class Installer:
                 "setlocal\n"
                 'set "PYTHONUTF8=1"\n'
                 f'set "RIGHTMEMORY_ROOT={root}"\n'
-                f'{call}"{python}" -m rightmemory.cli %*\n'
+                f'{call}"{python}" -m rightmemory.entrypoint %*\n'
                 "exit /b %ERRORLEVEL%\n"
             )
         else:
@@ -548,7 +550,7 @@ class Installer:
                 "#!/usr/bin/env sh\n"
                 "export PYTHONUTF8=1\n"
                 f'export RIGHTMEMORY_ROOT="{_shell_double_quoted(str(self.memory_root))}"\n'
-                f'exec "{_shell_double_quoted(str(self.runtime_python))}" -m rightmemory.cli "$@"\n'
+                f'exec "{_shell_double_quoted(str(self.runtime_python))}" -m rightmemory.entrypoint "$@"\n'
             )
         _write_utf8(self.runtime_command, text)
         if not self.is_windows:
@@ -602,6 +604,11 @@ class Installer:
             self._install_skill(
                 self.repo_root / "skills" / "maintain-rightmemory" / "SKILL.md",
                 "maintain-rightmemory",
+                target,
+            )
+            self._install_skill(
+                self.repo_root / "skills" / "review-agent-guidance-inbox" / "SKILL.md",
+                "review-agent-guidance-inbox",
                 target,
             )
             self._remove_old_skill("memory-orchestrator", target)
@@ -745,8 +752,8 @@ class Installer:
         print(
             "  3. Choose memory-retriever for read-only context, rightmemory-orchestrator "
             "for approval-gated orchestration, rightmemory-auto-orchestrator for automatic "
-            "orchestration, or maintain-rightmemory when you explicitly want the current agent "
-            "to edit RightMemory directly."
+            "orchestration, maintain-rightmemory when you explicitly want the current agent "
+            "to edit RightMemory directly, or review-agent-guidance-inbox to review pending guidance."
         )
         print(
             "  4. Optional background transcript review, dreamer, pruning, insight, and sync: "
@@ -756,7 +763,7 @@ class Installer:
         print("Re-run the installer any time you pull updates from the RightMemory repo;")
         print(
             "your existing MEMORY.md, MEMORY_*.md, PURSUITS.md, PURSUIT_*.md, "
-            "corrections.md, insight_logs/, and pending update queue are preserved."
+            "AGENT_GUIDANCE_INBOX.md, corrections.md, insight_logs/, and pending update queue are preserved."
         )
 
     def _git(self, *args: str) -> None:

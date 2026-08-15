@@ -59,7 +59,7 @@ cd RightMemory
 .\install.ps1
 ```
 
-The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs four user-facing skills into both `~/.codex/skills` and `~/.claude/skills`: `memory-retriever` for read-only use, approval-gated `rightmemory-orchestrator`, automatic `rightmemory-auto-orchestrator`, and `maintain-rightmemory` for explicitly requested direct maintenance by the current agent. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
+The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs five user-facing skills into both `~/.codex/skills` and `~/.claude/skills`: `memory-retriever` for read-only use, approval-gated `rightmemory-orchestrator`, automatic `rightmemory-auto-orchestrator`, `maintain-rightmemory` for explicitly requested direct maintenance by the current agent, and `review-agent-guidance-inbox` for explicitly reviewing pending agent guidance before formal admission. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
 
 If you already use Codex CLI or Claude Code CLI and want RightMemory roles to run through those tools:
 
@@ -81,9 +81,10 @@ Use memory-retriever when I choose read-only RightMemory retrieval.
 Use rightmemory-orchestrator when I choose approval-gated RightMemory orchestration.
 Use rightmemory-auto-orchestrator when I choose automatic RightMemory orchestration.
 Use maintain-rightmemory only when I explicitly ask the current agent to edit RightMemory directly.
+Use review-agent-guidance-inbox when I explicitly ask to review pending agent guidance.
 ```
 
-The four skills are user-selected. When using orchestration, the user chooses one of the two orchestrator skills for the conversation; the agent does not invoke both. Both are installed, and the choice is not an installer option, CLI flag, profile value, or persisted RightMemory setting. The shared schema and focused rule documents define valid state, while each skill defines how the host agent accesses it.
+The five skills are user-selected. When using orchestration, the user chooses one of the two orchestrator skills for the conversation; the agent does not invoke both. Both are installed, and the choice is not an installer option, CLI flag, profile value, or persisted RightMemory setting. The shared schema and focused rule documents define valid state, while each skill defines how the host agent accesses it.
 
 Then start the background manager. It reviews idle agent sessions, evaluates prune generations, runs Dreamer consolidation, and produces Insight reflections when enough work has accumulated:
 
@@ -115,6 +116,11 @@ At a natural boundary, once evidence clears the admission bar:
 After approval, or automatically in auto mode:
   rightmemory update submit --session <id> "settled evidence and why it may matter"
 
+When automatic orchestration encounters settled, potentially reusable agent guidance without an explicit request to remember it:
+  rightmemory guidance submit --session <id> "settled guidance evidence"
+
+The guidance inbox is synchronized but excluded from ordinary retrieval until the user explicitly reviews and promotes selected entries.
+
 Later:
   the unified updater may change any combination of the three modules, or none
   each queued outcome keeps its exact candidate batch beside the corresponding Git change
@@ -129,7 +135,7 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 - Three semantic modules: durable Memory, live Pursuit, and reusable Agent Corrections.
 - One global id namespace and typed graph edges such as `dep:`, `cfg:`, `ver:`, `doc:`, and `todo:` across both trees.
 - Multi-device memory continuity across laptops, desktops, agent clients, and project-specific roots.
-- Four installed skills: read-only retrieval, approval-gated orchestration, automatic orchestration, and explicit direct maintenance.
+- Five installed skills: read-only retrieval, approval-gated orchestration, automatic orchestration, explicit direct maintenance, and pending agent-guidance review.
 - Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex/Claude CLI role execution.
 - Model-selected, runtime-rendered retrieval output without model-authored summaries or commentary.
 - One updater for all three semantic modules, automatic transcript-review candidate extraction, and immutable candidate records for input-to-edit provenance.

@@ -19,6 +19,7 @@ from .graph import (
     resolve_backing_reference,
     validate_item_id,
 )
+from .guidance import GUIDANCE_INBOX_PATH
 from .share_models import ShareFilePart, ShareQuestionPart, ShareRelationship, load_shares, save_shares, validate_share_id
 from .share_results import normalize_share_capability
 from .shared_view_files import (
@@ -667,7 +668,9 @@ class MemoryTools:
         """Return short git status for the RightMemory root."""
         if self._has_role_read_scope():
             return self._run_git(["git", "status", "--short", "--", *self._role_read_patterns()])
-        return self._run_git(["git", "status", "--short"])
+        return self._run_git(
+            ["git", "status", "--short", "--", ".", f":(exclude){GUIDANCE_INBOX_PATH}"]
+        )
 
     def git_diff(self, paths: list[str] | None = None) -> str:
         """Return git diff for selected paths, or the whole RightMemory root."""
@@ -679,6 +682,8 @@ class MemoryTools:
                 command.append(resolved.relative_to(self.memory_root).as_posix())
         elif self._has_role_read_scope():
             command.extend(["--", *self._role_read_patterns()])
+        else:
+            command.extend(["--", ".", f":(exclude){GUIDANCE_INBOX_PATH}"])
         return self._run_git(command)
 
     def git_log(self, grep: str = r"^prune:", max_count: int = 20) -> str:
@@ -1110,10 +1115,10 @@ class MemoryTools:
     def _read_command_git(self, args: list[str]) -> str:
         if args == ["git", "status", "--short"]:
             return self.git_status()
+        if args == ["git", "diff"]:
+            return self.git_diff()
         if len(args) >= 2 and args[1] == "diff":
             self._validate_git_diff_command(args)
-            if self._has_role_read_scope() and len(args) == 2:
-                return self.git_diff()
             return self._run_git(args)
         raise ValueError("supported git read commands are: git status --short, git diff")
 
@@ -1213,6 +1218,8 @@ class MemoryTools:
                     raise ValueError("read command paths must stay under the RightMemory root")
             resolved = self._resolve_path(token)
             relative_path = resolved.relative_to(self.memory_root).as_posix()
+            if relative_path == GUIDANCE_INBOX_PATH:
+                raise ValueError("agent guidance inbox is not available to RightMemory model roles")
             if self._is_runtime_shared_view_path(relative_path):
                 raise ValueError("runtime shared-view packages are only readable through read_mf")
             if self._has_role_read_scope():
@@ -1245,7 +1252,14 @@ class MemoryTools:
 
     def _exclude_runtime_shared_view_rg_paths(self, args: list[str]) -> list[str]:
         insert_at = args.index("--") if "--" in args else len(args)
-        return [*args[:insert_at], "--glob", f"!{RUNTIME_SHARED_VIEW_PATH_PREFIX}**", *args[insert_at:]]
+        return [
+            *args[:insert_at],
+            "--glob",
+            f"!{RUNTIME_SHARED_VIEW_PATH_PREFIX}**",
+            "--glob",
+            f"!{GUIDANCE_INBOX_PATH}",
+            *args[insert_at:],
+        ]
 
     def _filter_runtime_shared_view_rg_output(self, output: str) -> str:
         if not output:
@@ -1254,6 +1268,7 @@ class MemoryTools:
             line
             for line in output.splitlines()
             if not line.startswith(RUNTIME_SHARED_VIEW_PATH_PREFIX)
+            and not line.startswith(GUIDANCE_INBOX_PATH)
         ]
         return "\n".join(kept)
 
@@ -1461,6 +1476,8 @@ class MemoryTools:
 
     def _is_allowed_read_file(self, path: Path) -> bool:
         relative_path = path.relative_to(self.memory_root).as_posix()
+        if relative_path == GUIDANCE_INBOX_PATH:
+            return False
         if relative_path == CORRECTIONS_PATH and self.role not in CORRECTIONS_READ_ROLES:
             return False
         if self._is_runtime_shared_view_path(relative_path):
@@ -1470,6 +1487,8 @@ class MemoryTools:
         return self._is_allowed_read_relative_file(relative_path)
 
     def _is_allowed_read_relative_file(self, relative_path: str) -> bool:
+        if relative_path == GUIDANCE_INBOX_PATH:
+            return False
         if relative_path == CORRECTIONS_PATH and self.role not in CORRECTIONS_READ_ROLES:
             return False
         if self._is_runtime_shared_view_path(relative_path):
@@ -1493,9 +1512,11 @@ class MemoryTools:
         raise ValueError(f"can only search {self._read_policy_label()}: {relative_path or original_path}")
 
     def _is_allowed_read_command_candidate(self, path: Path) -> bool:
+        relative_path = path.relative_to(self.memory_root).as_posix()
+        if relative_path == GUIDANCE_INBOX_PATH:
+            return False
         if not self._has_role_read_scope():
             return True
-        relative_path = path.relative_to(self.memory_root).as_posix()
         if path.is_dir():
             return relative_path == "insight_logs"
         return self._is_allowed_read_relative_file(relative_path)
