@@ -15,6 +15,13 @@ from pathlib import Path
 from typing import Iterator
 
 from .config import MEMORY_ROOT_ENV, SyncConfig
+from .guidance import (
+    GUIDANCE_INBOX_HEADING,
+    GUIDANCE_INBOX_PATH,
+    GuidanceConflictError,
+    merge_guidance_inbox,
+    validate_guidance_inbox,
+)
 from .isolated_write import WorktreeLease
 from .platform import (
     detached_process_kwargs,
@@ -41,6 +48,7 @@ MEMORY_SYNC_PATHS = (
     "MEMORY_*.md",
     "PURSUITS.md",
     "PURSUIT_*.md",
+    GUIDANCE_INBOX_PATH,
     "corrections.md",
     "shared_views.toml",
     "shares.toml",
@@ -558,8 +566,8 @@ class SyncManager:
             current_head = self._required_head(self.memory_root)
             if self._is_ancestor(candidate_commit, current_head):
                 self._cleanup_recorded_candidate(claimed, require_removed=True)
-                store.complete_commit(claimed.operation_id, candidate_commit)
-                return self._result_from_record(store.read(claimed.operation_id) or claimed)
+                store.complete_commit(record.operation_id, candidate_commit)
+                return self._result_from_record(store.read(record.operation_id) or record)
             if current_head != outcome.start_commit:
                 raise RuntimeError("active HEAD changed incompatibly with a prepared sync candidate")
             candidate = self._open_recorded_candidate(claimed)
@@ -712,6 +720,49 @@ class SyncManager:
         merge = self._run_git(candidate.path, "merge", "--no-edit", upstream_commit)
         if merge.returncode != 0:
             conflicts = self._conflicted_files(candidate.path)
+            if GUIDANCE_INBOX_PATH in conflicts:
+                if len(conflicts) != 1:
+                    return _CandidateInspection(
+                        None,
+                        SyncResult(
+                            "conflict",
+                            "agent guidance inbox conflicted alongside other synchronized state",
+                            conflicts,
+                        ),
+                        start_commit,
+                        upstream_commit,
+                        True,
+                    )
+                guidance_conflict = self._resolve_guidance_conflict(candidate.path)
+                if guidance_conflict is not None:
+                    return _CandidateInspection(
+                        None,
+                        guidance_conflict,
+                        start_commit,
+                        upstream_commit,
+                        True,
+                    )
+                committed = self._run_git(candidate.path, "commit", "--no-edit")
+                if committed.returncode != 0:
+                    return _CandidateInspection(
+                        None,
+                        SyncResult(
+                            "error",
+                            "could not commit deterministic agent guidance merge",
+                            [GUIDANCE_INBOX_PATH],
+                        ),
+                        start_commit,
+                        upstream_commit,
+                        True,
+                    )
+                candidate_commit = self._required_head(candidate.path)
+                invalid = self._validate_candidate(candidate.path, start_commit, candidate_commit)
+                if invalid is None:
+                    return _CandidateInspection(None, None, candidate_commit, None, False)
+                if invalid.status == "error":
+                    return _CandidateInspection(None, invalid, candidate_commit, None, False)
+                return _CandidateInspection(invalid, None, candidate_commit, None, False)
+
             coordination_conflicts = [
                 path
                 for path in conflicts
@@ -767,6 +818,33 @@ class SyncManager:
             return _CandidateInspection(None, invalid, candidate_commit, None, False)
         return _CandidateInspection(invalid, None, candidate_commit, None, False)
 
+    def _resolve_guidance_conflict(self, root: Path) -> SyncResult | None:
+        try:
+            merged = merge_guidance_inbox(
+                self._guidance_stage_text(root, 1),
+                self._guidance_stage_text(root, 2),
+                self._guidance_stage_text(root, 3),
+            )
+        except (GuidanceConflictError, ValueError) as exc:
+            return SyncResult(
+                "conflict",
+                f"agent guidance inbox requires manual review: {exc}",
+                [GUIDANCE_INBOX_PATH],
+            )
+        (root / GUIDANCE_INBOX_PATH).write_text(merged, encoding="utf-8")
+        added = self._run_git(root, "add", "--", GUIDANCE_INBOX_PATH)
+        if added.returncode != 0:
+            return SyncResult(
+                "error",
+                "could not stage deterministic agent guidance merge",
+                [GUIDANCE_INBOX_PATH],
+            )
+        return None
+
+    def _guidance_stage_text(self, root: Path, stage: int) -> str:
+        result = self._run_git(root, "show", f":{stage}:{GUIDANCE_INBOX_PATH}")
+        return result.stdout if result.returncode == 0 else GUIDANCE_INBOX_HEADING + "\n"
+
     def _validate_repair_commit(
         self,
         record: SemanticOperationRecord,
@@ -819,6 +897,9 @@ class SyncManager:
         invalid_files = self._non_regular_paths(candidate_root, changed_paths)
         if invalid_files:
             return SyncResult("error", "sync candidate contains a missing or non-regular required path", invalid_files)
+        invalid_guidance = _invalid_guidance_result(candidate_root)
+        if invalid_guidance is not None:
+            return invalid_guidance
         invalid_queue = _invalid_update_queue_result(candidate_root)
         if invalid_queue is not None:
             return invalid_queue
@@ -839,6 +920,9 @@ class SyncManager:
         invalid_files = self._non_regular_paths(self.memory_root, ())
         if invalid_files:
             return SyncResult("conflict", "local memory root is incomplete", invalid_files)
+        invalid_guidance = _invalid_guidance_result(self.memory_root)
+        if invalid_guidance is not None:
+            return invalid_guidance
         invalid_queue = _invalid_update_queue_result(self.memory_root)
         if invalid_queue is not None:
             return invalid_queue
@@ -1368,6 +1452,33 @@ def _is_sync_path(path: str) -> bool:
         if re.fullmatch(expression, path):
             return True
     return False
+
+
+def _invalid_guidance_result(root: Path) -> SyncResult | None:
+    path = root / GUIDANCE_INBOX_PATH
+    if not path.exists() and not path.is_symlink():
+        return None
+    if path.is_symlink() or not path.is_file():
+        return SyncResult(
+            "conflict",
+            "agent guidance inbox must be a regular file",
+            [GUIDANCE_INBOX_PATH],
+        )
+    try:
+        errors = validate_guidance_inbox(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError) as exc:
+        return SyncResult(
+            "conflict",
+            f"agent guidance inbox could not be read: {exc}",
+            [GUIDANCE_INBOX_PATH],
+        )
+    if not errors:
+        return None
+    return SyncResult(
+        "conflict",
+        "invalid agent guidance inbox:\n" + "\n".join(f"- {item}" for item in errors),
+        [GUIDANCE_INBOX_PATH],
+    )
 
 
 def _utc_now(value: datetime | None = None) -> datetime:
