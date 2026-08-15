@@ -20,6 +20,8 @@ jobs:
           python-version: '3.11'
       - name: Install package
         run: python -m pip install -e .
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Add valid parser regression tests
         shell: bash
         run: |
