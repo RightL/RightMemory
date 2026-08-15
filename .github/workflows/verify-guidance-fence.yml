@@ -1,0 +1,103 @@
+name: Verify guidance fence safety
+
+on:
+  push:
+    branches:
+      - feat/agent-guidance-inbox
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package and test tools
+        run: |
+          python -m pip install -e .
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      - name: Add fence regression test
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/test_guidance.py")
+          text = path.read_text(encoding="utf-8")
+          marker = "    def test_three_way_merge_unions_independent_additions(self):\n"
+          test = "\n".join(
+              [
+                  "    def test_validation_rejects_unclosed_fenced_body(self):",
+                  "        malformed = SAMPLE_ONE.replace(",
+                  '            "The agent over-structured a simple prompt change.",',
+                  '            "```markdown\\nThe agent over-structured a simple prompt change.",',
+                  "        )",
+                  "        errors = validate_guidance_inbox(malformed)",
+                  '        self.assertTrue(any("unclosed fenced code block" in error for error in errors))',
+                  "",
+                  "",
+              ]
+          )
+          if text.count(marker) != 1:
+              raise SystemExit("tests/test_guidance.py: fence-test insertion point changed")
+          path.write_text(text.replace(marker, test + marker, 1), encoding="utf-8")
+          PY
+      - name: Verify fence regression is red
+        shell: bash
+        run: |
+          set +e
+          python -m unittest \
+            tests.test_guidance.GuidanceFormatTests.test_validation_rejects_unclosed_fenced_body
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "unclosed-fence regression unexpectedly passed before the fix" >&2
+            exit 1
+          fi
+      - name: Reject unclosed fences
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("rightmemory/guidance.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''        elif line.startswith("## GI-"):
+              errors.append(f"line {index + 1}: malformed guidance entry heading")
+
+          preamble_end = starts[0][0] if starts else len(lines)
+          '''
+          new = '''        elif line.startswith("## GI-"):
+              errors.append(f"line {index + 1}: malformed guidance entry heading")
+
+          if fence_char is not None:
+              errors.append("unclosed fenced code block")
+
+          preamble_end = starts[0][0] if starts else len(lines)
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("rightmemory/guidance.py: fence validation insertion point changed")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+      - name: Compile
+        run: python -m compileall -q rightmemory tests
+      - name: Focused tests
+        run: python -m unittest tests.test_guidance
+      - name: Full tests
+        run: python -m tests
+      - name: Commit verified fence fix
+        shell: bash
+        run: |
+          rm -f .github/workflows/verify-guidance-fence.yml
+          git config user.name "RightMemory Verification"
+          git config user.email "rightmemory@localhost"
+          git add -A
+          git commit -m "fix: reject unclosed guidance fences" -m "Prevent malformed free-form evidence from swallowing later inbox entries; add a focused regression and verify the complete suite."
+          git push origin HEAD:feat/agent-guidance-inbox
