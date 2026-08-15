@@ -7,8 +7,6 @@ description: "Use when the user explicitly chooses automatic RightMemory orchest
 
 RightMemory contains durable Memory, live Pursuit, and Agent Corrections. Use it as a client during ordinary work; do not curate its files directly unless the user explicitly requests maintenance.
 
-Submissions are evidence for Update; Update decides whether and how RightMemory changes.
-
 ## Session
 
 Choose one stable session id for the conversation and reuse it for every RightMemory call.
@@ -29,10 +27,9 @@ Choose one stable session id for the conversation and reuse it for every RightMe
 
 - Submit automatically only when omitting the evidence would likely:
   - cause poorer future decisions or substantial rediscovery (**Memory**);
-  - lose track of a meaningful pursuit, its place in the hierarchy, or its current direction (**Pursuit**); or
-  - make repetition of a settled, reusable failure pattern more likely (**Agent Corrections**).
+  - lose track of a meaningful pursuit, its place in the hierarchy, or its current direction (**Pursuit**).
 - Do not submit transient progress, routine task results, unfinished work by itself, or implementation detail already adequately preserved in project-local artifacts.
-- Submit once the evidence is clear and the work reaches a natural boundary—for example, when a pursuit becomes established or materially changes, a durable outcome settles, a redirection settles, or the conversation moves away from the work. Completion is not required. If nothing passes the bar, submit nothing.
+- Submit once the evidence is clear and the work reaches a natural boundary—for example, when a pursuit becomes established or materially changes, a durable outcome settles, or the conversation moves away from the work. Completion is not required. If nothing passes the bar, submit nothing.
 - Combine related evidence due at the same boundary into one candidate. State what happened, what is true now, and why it may matter; do not prescribe final stored wording, ids, classification, placement, or edits.
 - Submit with:
 
@@ -40,10 +37,20 @@ Choose one stable session id for the conversation and reuse it for every RightMe
 
   Continue the user's task without waiting for Update.
 
-## User Redirections
+## Capture Agent Guidance
+
+Capture guidance about how an agent should handle similar future work, including guidance revealed by a user redirection.
 
 A user redirection occurs when the user's response, explicitly or implicitly, materially changes the course of identifiable prior work. Judge it by the settled contrast between what you were on course to produce or do and the resulting direction; the difference may concern the conclusion, scope, reasoning, process, omissions, behavior, or presentation.
 
 Unease, a guiding question, or added information may qualify. Mere continuation, selection among intentionally open options, or a new task does not.
 
-When the outcome is clear and the redirection passes the submission bar, include the original need, prior attempt or omission, user redirection, and resulting direction in the next candidate submitted at a natural boundary.
+Capture it when the resulting direction is clear and it may be useful in similar future work. Do not capture unresolved discussion or an obviously one-off local adjustment. Task completion is not required.
+
+If the user explicitly asks RightMemory to remember the guidance or follow it in future, submit it through Update. Otherwise use:
+
+  `rightmemory guidance submit --session <session-id> "<candidate>"`
+
+For a redirection, include the prior attempt or omission, the user redirection, and the resulting direction. For direct guidance, include the guidance and enough context to judge its scope. Do not prescribe final stored wording or destination.
+
+One interaction may produce both an Update candidate and a guidance candidate when they preserve distinct evidence. Continue the user's task without waiting.
