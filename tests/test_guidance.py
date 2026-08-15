@@ -175,7 +175,7 @@ class GuidanceSyncTests(SyncTestBase):
         (self.device / GUIDANCE_INBOX_PATH).write_text(SAMPLE_ONE, encoding="utf-8")
         self._git(self.device, "add", GUIDANCE_INBOX_PATH)
         self._git(self.device, "commit", "-m", "seed guidance")
-        self._git(self.device, "push")
+        self._git(self.device, "push", "origin", "HEAD:main")
         self._git(self.other, "pull", "--ff-only")
 
         (self.device / GUIDANCE_INBOX_PATH).write_text("# Pending Agent Guidance\n", encoding="utf-8")
@@ -204,7 +204,7 @@ class GuidanceSyncTests(SyncTestBase):
         (self.device / GUIDANCE_INBOX_PATH).write_text(SAMPLE_ONE, encoding="utf-8")
         self._git(self.device, "add", GUIDANCE_INBOX_PATH)
         self._git(self.device, "commit", "-m", "seed guidance")
-        self._git(self.device, "push")
+        self._git(self.device, "push", "origin", "HEAD:main")
         self._git(self.other, "pull", "--ff-only")
 
         local = SAMPLE_ONE.replace("keep the judgment direct", "keep the judgment concise")
