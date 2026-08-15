@@ -1,42 +1,33 @@
-# RightMemory Edit Corrections: Example
+# RightMemory Edit Feedback: Example
 
-This file illustrates the correction format only. Its ids and content are not user state.
+This file illustrates the feedback format only. Its content is not user state.
 
-## Keep unfinished work in Pursuit
+## Do not create a Pursuit from incompleteness alone
 
 ### Candidate
 
 ```text
-The parser change is implemented, but compatibility tests still fail. Continue by fixing the remaining failures.
+The parser change is implemented, but compatibility tests still fail. The remaining
+failures and continuation commands are recorded in the repository's local handoff.
 ```
 
 ### Proposed edit
-
-`MEMORY.md`:
-
-```md
-- `parser-upgrade-complete` The parser upgrade is complete and verified. →[]
-```
-
-### Accepted edit
-
-`MEMORY.md`:
-
-```text
-[no change]
-```
 
 `PURSUITS.md`:
 
 ```md
 ## Finish parser compatibility work {#finish-parser-compatibility}
 
-Complete the parser upgrade without leaving compatibility regressions.
-
-**State:** The implementation is present, but compatibility tests still fail.
+Fix the remaining compatibility failures.
 
 **Next:**
-- `do` Fix the remaining compatibility failures and rerun the affected tests.
+- `do` Fix the failing tests and rerun the affected suite.
+```
 
-**Done when:** The compatibility test suite passes.
+### Accepted edit
+
+`PURSUITS.md`:
+
+```text
+[no change]
 ```
