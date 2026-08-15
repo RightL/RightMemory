@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from rightmemory.config import SyncConfig
 from rightmemory.entrypoint import _guidance_validation_errors
 from rightmemory.guidance import (
     GUIDANCE_INBOX_PATH,
@@ -11,8 +12,11 @@ from rightmemory.guidance import (
     submit_guidance,
     validate_guidance_inbox,
 )
+from rightmemory.install_core import Installer, MEMORY_GITIGNORE
+from rightmemory.sync import SyncManager
 from rightmemory.tools import MemoryTools
 from tests.isolated_write_test_base import IsolatedWriteTestBase
+from tests.sync_test_base import SyncTestBase
 
 
 SAMPLE_ONE = """# Pending Agent Guidance
@@ -142,6 +146,134 @@ class GuidanceIsolationTests(unittest.TestCase):
         (self.root / GUIDANCE_INBOX_PATH).write_text("# Wrong Heading\n", encoding="utf-8")
         self.assertTrue(tools.validate_memory().startswith("validation passed:"))
         self.assertTrue(_guidance_validation_errors(self.root))
+
+
+class GuidanceSyncTests(SyncTestBase):
+    def test_sync_unions_independent_guidance_additions(self):
+        (self.device / GUIDANCE_INBOX_PATH).write_text(SAMPLE_ONE, encoding="utf-8")
+        self._git(self.device, "add", GUIDANCE_INBOX_PATH)
+        self._git(self.device, "commit", "-m", "local guidance")
+
+        (self.other / GUIDANCE_INBOX_PATH).write_text(SAMPLE_TWO, encoding="utf-8")
+        self._git(self.other, "add", GUIDANCE_INBOX_PATH)
+        self._git(self.other, "commit", "-m", "remote guidance")
+        self._git(self.other, "push")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+        self.assertEqual(result.status, "synced")
+        entries = parse_guidance_inbox(
+            (self.device / GUIDANCE_INBOX_PATH).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            {entry.entry_id for entry in entries},
+            {"GI-20260815-a1b2c3d4", "GI-20260815-e5f6a7b8"},
+        )
+        self._assert_no_sync_candidates()
+
+    def test_sync_preserves_guidance_deletion_against_unchanged_remote(self):
+        (self.device / GUIDANCE_INBOX_PATH).write_text(SAMPLE_ONE, encoding="utf-8")
+        self._git(self.device, "add", GUIDANCE_INBOX_PATH)
+        self._git(self.device, "commit", "-m", "seed guidance")
+        self._git(self.device, "push")
+        self._git(self.other, "pull", "--ff-only")
+
+        (self.device / GUIDANCE_INBOX_PATH).write_text("# Pending Agent Guidance\n", encoding="utf-8")
+        self._git(self.device, "add", GUIDANCE_INBOX_PATH)
+        self._git(self.device, "commit", "-m", "review guidance")
+
+        (self.other / "MEMORY.md").write_text(
+            "# Domain\n\n- `one` first → []\n- `two` remote fact → []\n",
+            encoding="utf-8",
+        )
+        self._git(self.other, "add", "MEMORY.md")
+        self._git(self.other, "commit", "-m", "remote memory")
+        self._git(self.other, "push")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+        self.assertEqual(result.status, "synced")
+        self.assertEqual(
+            parse_guidance_inbox(
+                (self.device / GUIDANCE_INBOX_PATH).read_text(encoding="utf-8")
+            ),
+            [],
+        )
+
+    def test_sync_rejects_incompatible_edits_to_same_guidance_id(self):
+        (self.device / GUIDANCE_INBOX_PATH).write_text(SAMPLE_ONE, encoding="utf-8")
+        self._git(self.device, "add", GUIDANCE_INBOX_PATH)
+        self._git(self.device, "commit", "-m", "seed guidance")
+        self._git(self.device, "push")
+        self._git(self.other, "pull", "--ff-only")
+
+        local = SAMPLE_ONE.replace("keep the judgment direct", "keep the judgment concise")
+        remote = SAMPLE_ONE.replace("keep the judgment direct", "always add a schema")
+        (self.device / GUIDANCE_INBOX_PATH).write_text(local, encoding="utf-8")
+        self._git(self.device, "add", GUIDANCE_INBOX_PATH)
+        self._git(self.device, "commit", "-m", "local guidance edit")
+        local_head = self._git(self.device, "rev-parse", "HEAD")
+
+        (self.other / GUIDANCE_INBOX_PATH).write_text(remote, encoding="utf-8")
+        self._git(self.other, "add", GUIDANCE_INBOX_PATH)
+        self._git(self.other, "commit", "-m", "remote guidance edit")
+        self._git(self.other, "push")
+
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+
+        self.assertEqual(result.status, "conflict")
+        self.assertEqual(result.files, [GUIDANCE_INBOX_PATH])
+        self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), local_head)
+        self.assertEqual(
+            (self.device / GUIDANCE_INBOX_PATH).read_text(encoding="utf-8"),
+            local,
+        )
+        self._assert_no_sync_candidates()
+
+
+class GuidanceInstallTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+        self.memory_root = self.root / "memory"
+        self.skills_root = self.root / "skills"
+        self.repo_root = Path(__file__).resolve().parents[1]
+        self.installer = Installer(
+            self.repo_root,
+            "standalone",
+            self.memory_root,
+            [self.skills_root],
+        )
+
+    def test_new_root_allows_but_does_not_precreate_guidance_inbox(self):
+        self.installer._bootstrap_state()
+
+        self.assertIn("!AGENT_GUIDANCE_INBOX.md", MEMORY_GITIGNORE)
+        self.assertFalse((self.memory_root / GUIDANCE_INBOX_PATH).exists())
+
+    def test_existing_optional_inbox_is_included_in_initial_baseline(self):
+        self.installer._bootstrap_state()
+        (self.memory_root / GUIDANCE_INBOX_PATH).write_text(SAMPLE_ONE, encoding="utf-8")
+
+        self.assertIn(GUIDANCE_INBOX_PATH, self.installer._initial_memory_files())
+
+    def test_installer_installs_guidance_review_skill(self):
+        self.installer._install_skills()
+
+        self.assertTrue(
+            (self.skills_root / "review-agent-guidance-inbox" / "SKILL.md").is_file()
+        )
+
+    def test_runtime_wrapper_dispatches_through_entrypoint(self):
+        self.installer.is_windows = False
+        self.installer.runtime_python = Path("/tmp/rightmemory-python")
+        self.installer.runtime_command = self.root / "rightmemory"
+
+        self.installer._write_runtime_wrapper()
+
+        wrapper = self.installer.runtime_command.read_text(encoding="utf-8")
+        self.assertIn("-m rightmemory.entrypoint", wrapper)
 
 
 if __name__ == "__main__":
