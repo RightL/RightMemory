@@ -1,0 +1,126 @@
+name: Verify dirty guidance boundary
+
+on:
+  push:
+    branches:
+      - feat/agent-guidance-inbox
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package and test tools
+        run: |
+          python -m pip install -e .
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      - name: Add dirty-inbox regression
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/test_guidance.py")
+          text = path.read_text(encoding="utf-8")
+          marker = "    def test_background_sync_does_not_model_repair_invalid_guidance(self):\n"
+          test = "\n".join(
+              [
+                  "    def test_background_sync_does_not_model_repair_dirty_guidance(self):",
+                  "        inbox = self.device / GUIDANCE_INBOX_PATH",
+                  "        inbox.write_text(SAMPLE_ONE, encoding=\"utf-8\")",
+                  '        self._git(self.device, "add", GUIDANCE_INBOX_PATH)',
+                  '        self._git(self.device, "commit", "-m", "seed local guidance")',
+                  "        inbox.write_text(",
+                  '            inbox.read_text(encoding="utf-8").replace(',
+                  '                "keep the judgment direct", "keep the judgment concise"',
+                  "            ),",
+                  '            encoding="utf-8",',
+                  "        )",
+                  "        repairs = []",
+                  "",
+                  "        result = SyncManager(",
+                  "            SyncConfig(memory_root=self.device, enabled=True)",
+                  "        ).background_sync(active_repair=repairs.append)",
+                  "",
+                  '        self.assertEqual(result.status, "error")',
+                  "        self.assertEqual(result.files, [GUIDANCE_INBOX_PATH])",
+                  "        self.assertEqual(repairs, [])",
+                  "",
+                  "",
+              ]
+          )
+          if text.count(marker) != 1:
+              raise SystemExit("tests/test_guidance.py: dirty-boundary insertion point changed")
+          path.write_text(text.replace(marker, test + marker, 1), encoding="utf-8")
+          PY
+      - name: Verify regression is red
+        shell: bash
+        run: |
+          if python -m unittest \
+            tests.test_guidance.GuidanceSyncTests.test_background_sync_does_not_model_repair_dirty_guidance
+          then
+            echo "dirty guidance regression unexpectedly passed before the fix" >&2
+            exit 1
+          fi
+      - name: Keep dirty and conflicted inbox state out of model repair
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("rightmemory/sync.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''        conflicted = self._conflicted_files(self.memory_root)
+          if conflicted:
+              return SyncResult("conflict", "local synchronized state is already conflicted", conflicted)
+          dirty = self._dirty_memory_files()
+          if dirty:
+              return SyncResult("dirty", "local memory has uncommitted changes", dirty)
+          '''
+          new = '''        conflicted = self._conflicted_files(self.memory_root)
+          if GUIDANCE_INBOX_PATH in conflicted:
+              return SyncResult(
+                  "error",
+                  "agent guidance inbox has unresolved Git conflicts and requires manual review",
+                  conflicted,
+              )
+          if conflicted:
+              return SyncResult("conflict", "local synchronized state is already conflicted", conflicted)
+          dirty = self._dirty_memory_files()
+          if GUIDANCE_INBOX_PATH in dirty:
+              return SyncResult(
+                  "error",
+                  "agent guidance inbox has uncommitted changes and requires manual review",
+                  dirty,
+              )
+          if dirty:
+              return SyncResult("dirty", "local memory has uncommitted changes", dirty)
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("rightmemory/sync.py: active-preflight insertion point changed")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+      - name: Compile
+        run: python -m compileall -q rightmemory tests
+      - name: Focused tests
+        run: python -m unittest tests.test_guidance
+      - name: Full tests
+        run: python -m tests
+      - name: Commit verified fix
+        shell: bash
+        run: |
+          rm -f .github/workflows/verify-guidance-dirty-boundary.yml
+          git config user.name "RightMemory Verification"
+          git config user.email "rightmemory@localhost"
+          git add -A
+          git commit -m "fix: keep dirty guidance out of model repair" -m "Require manual handling for dirty or conflicted inbox state instead of routing hidden guidance to sync-reconciler. Add a focused regression and verify the complete suite."
+          git push origin HEAD:feat/agent-guidance-inbox
