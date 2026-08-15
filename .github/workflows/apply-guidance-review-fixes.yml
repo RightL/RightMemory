@@ -1,0 +1,107 @@
+name: Apply reviewed guidance fixes
+
+on:
+  push:
+    branches:
+      - feat/agent-guidance-inbox
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package
+        run: python -m pip install -e .
+      - name: Add valid parser regression tests
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          path = Path('tests/test_guidance.py')
+          text = path.read_text(encoding='utf-8')
+          marker = '    def test_three_way_merge_unions_independent_additions(self):\n'
+          addition = textwrap.indent(
+              textwrap.dedent('''
+              def test_validation_rejects_content_before_first_entry(self):
+                  malformed = "# Pending Agent Guidance\\n\\nOrphan evidence.\\n"
+                  errors = validate_guidance_inbox(malformed)
+                  self.assertTrue(any("before first guidance entry" in error for error in errors))
+
+              def test_parser_ignores_reserved_heading_inside_fence(self):
+                  fenced = SAMPLE_ONE.replace(
+                      "The agent over-structured a simple prompt change.",
+                      "```markdown\\n## GI-20260815-deadbeef\\n```\\n\\n"
+                      "The agent over-structured a simple prompt change.",
+                  )
+                  entries = parse_guidance_inbox(fenced)
+                  self.assertEqual(len(entries), 1)
+                  self.assertIn("## GI-20260815-deadbeef", entries[0].body)
+
+              ''').lstrip(),
+              '    ',
+          )
+          if text.count(marker) != 1:
+              raise SystemExit('tests/test_guidance.py: parser-test insertion point changed')
+          path.write_text(text.replace(marker, addition + marker, 1), encoding='utf-8')
+          PY
+      - name: Verify parser regressions are red
+        shell: bash
+        run: |
+          set +e
+          python -m unittest \
+            tests.test_guidance.GuidanceFormatTests.test_validation_rejects_content_before_first_entry \
+            tests.test_guidance.GuidanceFormatTests.test_parser_ignores_reserved_heading_inside_fence
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "parser regression tests unexpectedly passed before the fix" >&2
+            exit 1
+          fi
+      - name: Execute reviewed patch from the superseded workflow
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path('.github/workflows/verify-guidance-inbox.yml')
+          source = workflow.read_text(encoding='utf-8')
+          step = source.index('      - name: Apply reviewed implementation and test fixes\n')
+          marker = "          python - <<'PY'\n"
+          start = source.index(marker, step) + len(marker)
+          end = source.index("\n          PY\n      - name: Compile", start)
+          script = textwrap.dedent(source[start:end])
+          exec(compile(script, str(workflow) + ':reviewed-patch', 'exec'), {})
+          PY
+      - name: Compile
+        run: python -m compileall -q rightmemory tests
+      - name: Focused and regression tests
+        shell: bash
+        run: |
+          python -m unittest tests.test_guidance
+          python -m unittest \
+            tests.test_install.InstallScriptTests.test_new_root_installs_current_memory_gitignore_allowlist \
+            tests.test_install.InstallScriptTests.test_cli_agent_installs_all_user_facing_skills
+          python -m unittest \
+            tests.test_async_update.AsyncUpdateStateTests.test_submit_replaces_stale_worker_pid_that_belongs_to_another_process
+      - name: Full tests
+        run: python -m tests
+      - name: Commit verified fixes
+        shell: bash
+        run: |
+          rm .github/workflows/apply-guidance-review-fixes.yml
+          git config user.name "RightMemory Verification"
+          git config user.email "rightmemory@localhost"
+          git add -A
+          git commit -m "fix: finalize agent guidance inbox" -m "Apply structural model-role isolation, robust inbox parsing, sync recovery correction, aligned install tests, and focused product documentation after focused and full-suite verification."
+          git push origin HEAD:feat/agent-guidance-inbox
