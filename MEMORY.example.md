@@ -1,32 +1,40 @@
-> This starter template is managed by RightMemory install. Add real user/project memory before this template block. Do not treat sample nodes as user facts. Once real memory before this template section exceeds 50 lines, the dreamer may remove this entire example/template section from the installed `MEMORY.md`. <!-- rightmemory:example:start -->
+> This starter template is copied into a new RightMemory root during bootstrap.
+> Add real user/project Memory before this block, and do not treat sample nodes as user facts.
+> Dreamer may remove the block once real Memory provides a clear working structure. <!-- rightmemory:example:start -->
 
 # Sample Project Graph — Example Domain {#sample-project-graph}
 
-> Replace this whole `#` section with your own domains. The memory schema lives in the installed RightMemory skills, not in this file.
+> Replace this whole `#` section with your own domains. Canonical schema and module rules
+> live in the installed RightMemory package, not in this file.
 
 ## Example Application {#sample-app} → [rel:sample-infra]
 
-This example domain shows durable product context with graph-addressable headings, compact fact nodes, and project-scoped preferences. Live release intent belongs in Pursuit rather than this durable tree.
+This example shows durable context that affects future interpretation, decisions, or
+verification. Repository files remain the primary source for ordinary implementation
+detail, and live release intent belongs in Pursuit.
 
 ### Project Working Preferences {#sample-project-working-preferences}
 
-Use project-scoped preferences when the guidance belongs to one project or domain rather than the user's broader cross-session behavior guidance.
+Use project-scoped preferences when guidance belongs to one project or domain rather
+than the user's broader cross-session behavior guidance.
 
 - `proj-pref-contract-first` When changing frontend/backend data flow, update the API contract before changing UI call sites. → [rel:api-public-contract, rel:proj-web, rel:proj-api]
 - `proj-pref-release-proof` Release-facing changes should leave a short verification note in the release runbook. → [rel:sample-release-runbook, rel:proj-deploy]
 
-### Deployable Units {#sample-deployable-units} → [rel:sample-release-runbook]
+### Durable Architecture Context {#sample-architecture-context} → [rel:sample-release-runbook]
 
-This group tracks the example application's deployable services and shared code.
+Keep relationships here when they are expensive to reconstruct or easy to misread.
+Ordinary source layout, dependency versions, and component inventories remain in
+project artifacts.
 
-- `proj-web` web-app — example frontend, TypeScript + Vite, calls `proj-api` for data. → [dep:lib-utils, dep:proj-api, rel:proj-deploy]
-- `proj-api` api-server — example backend service, Python + FastAPI, reads from `db-postgres`. → [dep:lib-utils, dep:db-postgres, rel:proj-deploy]
-- `lib-utils` shared-utils — small utility library reused by both frontend and backend. → [rel:proj-web, rel:proj-api]
-- `proj-deploy` deploy-bundle — production deployment package combining frontend and backend artifacts. → [agg:proj-web, agg:proj-api]
+- `proj-web` The browser client depends on `proj-api`; API compatibility is therefore release-relevant. → [dep:proj-api, rel:proj-deploy]
+- `proj-api` The API service is the only production writer to `db-postgres`; maintenance tooling should preserve its validation path. → [dep:db-postgres, rel:proj-deploy]
+- `proj-deploy` A production release combines compatible client and API artifacts; deploy either independently only when contract compatibility is verified. → [agg:proj-web, agg:proj-api]
 
-### Release Runbook {#sample-release-runbook} → [dep:sample-deployable-units]
+### Release Runbook {#sample-release-runbook} → [dep:sample-architecture-context]
 
-Release-facing changes should leave concise verification evidence covering the checklist, rollout, rollback, and environment-specific considerations.
+Release-facing changes should leave concise verification evidence covering the
+checklist, rollout, rollback, and environment-specific considerations.
 
 ### Interface Contracts {#sample-interface-contracts}
 
@@ -37,18 +45,17 @@ Release-facing changes should leave concise verification evidence covering the c
 
 ### Deployment Environments {#sample-deployment-environments}
 
-The example application has distinct `staging` and `production` environments.
-On their respective hosts, both use `/srv/sample-app` as the application root.
+Store environment facts only when they materially affect future work rather than
+merely restating deployment configuration.
 
-- `sample-env-staging` The `staging` environment runs on host `sample-staging-01`. → [rel:proj-deploy]
-- `sample-env-production` The `production` environment runs on host `sample-production-01`. → [rel:proj-deploy]
+- `sample-env-staging` Staging mirrors production authentication and schema migration behavior but uses synthetic data. → [ver:proj-deploy]
+- `sample-env-production` Production releases require staging verification and a rollback note. → [dep:sample-env-staging, rel:proj-deploy]
 
-### Database Stack {#sample-database-stack}
+### Database Safety {#sample-database-safety}
 
-- `db-postgres` postgres-db — PostgreSQL database used by the API service. → [rel:proj-api]
-- `db-backup-job` backup-job — nightly logical backup for `db-postgres`, verified by restore drills before major releases. → [bak:db-postgres, rel:sample-backup-drill]
-
-- `sample-backup-drill` Restore drills verify that the nightly backup is usable before major releases; keep the latest durable conclusion here and detailed run evidence with the project. → [ver:db-backup-job]
+- `db-postgres` PostgreSQL is the application's authoritative state store. → [rel:proj-api]
+- `db-backup-job` Nightly logical backups protect `db-postgres`; restore drills, not job success alone, establish recoverability. → [bak:db-postgres, rel:sample-backup-drill]
+- `sample-backup-drill` Restore drills verify that the nightly backup is usable before major releases; keep detailed run evidence with the project. → [ver:db-backup-job]
 
 ---
 
@@ -58,14 +65,16 @@ This example domain stores a compact, evidence-grounded context profile for the 
 
 ## User Direction {#sample-user-direction}
 
-Use this area for evidence-based context about what the user is pursuing, what matters across sessions, and why.
+Use this area for evidence-based context about what the user is pursuing, what matters
+across sessions, and why.
 
 - `sample-user-current-focus` Sample user is shaping a local-first memory system for AI agents. → [rel:sample-project-graph, rel:sample-agent-behavior]
 - `sample-user-memory-direction` Sample user wants memory to preserve durable context while staying coherent, reviewable, and useful for future agents. → [rel:sample-user-goals, rel:sample-agent-behavior]
 
 ## User Goals And Priorities {#sample-user-goals}
 
-Store active goals when they express durable direction rather than a momentary task list.
+Store active goals here only when they express durable direction rather than
+momentary task state.
 
 - `sample-user-goal-durable-memory` Sample user wants memory to distinguish durable direction from momentary task state. → [rel:sample-user-memory-direction, rel:sample-agent-behavior]
 
@@ -73,9 +82,10 @@ Store active goals when they express durable direction rather than a momentary t
 
 # Cross-Session Agent Behavior — Example Domain {#sample-agent-behavior}
 
-## User and Workflow Preferences {#sample-user-workflow-preferences}
+## User And Workflow Preferences {#sample-user-workflow-preferences}
 
-Store cross-project behavior memory here when it should change how future agents work with this user.
+Store cross-project behavior memory here when it should change how future agents work
+with this user.
 
 - `pref-principle-first` The user prefers principle-first instructions over long category lists; examples are interpretation aids, neither required nor sufficient, and the governing decision test controls each case. → []
 - `pref-env-check` Future agents should identify the intended machine, checkout, and runtime environment from stored context and repository guidance before installing dependencies or choosing an environment. → []
@@ -84,7 +94,9 @@ Store cross-project behavior memory here when it should change how future agents
 
 # Open Context Questions {#open-context-questions}
 
-This section stores loose ends in memory as short questions for future agents. These questions are not declarative memory facts; they point to related memory with `todo:` and should be removed or revised after the answer is saved as ordinary memory.
+This section stores loose ends as short questions. They are not declarative Memory
+facts; connect them with `todo:` when they concern a specific item, then remove or
+revise them after the answer is stored.
 
 - `q-rightmemory-project-context` Which checkout path and runtime environment should agents use on each machine involved in RightMemory development? → [todo:pref-env-check]
 
