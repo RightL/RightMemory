@@ -6,25 +6,39 @@ from pathlib import Path
 
 from . import cli
 from .config import default_memory_root
-from .guidance import submit_guidance
+from .guidance import GUIDANCE_INBOX_PATH, submit_guidance, validate_guidance_inbox
 from .profiles import ProfileError, resolve_memory_root
 
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     profile_name, remaining = _parse_global_args(args)
-    if remaining[:1] != ["guidance"]:
-        return cli.cli_main(args)
+    if remaining[:1] == ["guidance"]:
+        try:
+            active = resolve_memory_root(
+                profile_name=profile_name,
+                cwd=Path.cwd(),
+                default_root=default_memory_root(),
+            )
+            return _guidance_main(remaining[1:], active.memory_root)
+        except (ValueError, ProfileError, FileNotFoundError, RuntimeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    result = cli.cli_main(args)
+    if result != 0 or remaining[:1] != ["validate"]:
+        return result
     try:
-        active = resolve_memory_root(
-            profile_name=profile_name,
-            cwd=Path.cwd(),
-            default_root=default_memory_root(),
-        )
-        return _guidance_main(remaining[1:], active.memory_root)
-    except (ValueError, ProfileError, FileNotFoundError, RuntimeError) as exc:
+        root = _validation_root(profile_name, remaining[1:])
+        errors = _guidance_validation_errors(root)
+    except (ValueError, ProfileError, FileNotFoundError, OSError, UnicodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    if errors:
+        print("guidance validation failed:", file=sys.stderr)
+        for error in errors:
+            print(f"- {error}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _parse_global_args(argv: list[str]) -> tuple[str | None, list[str]]:
@@ -49,6 +63,29 @@ def _guidance_main(argv: list[str], memory_root: Path) -> int:
     entry = submit_guidance(memory_root, args.session, evidence)
     print(f"captured pending guidance: {entry.entry_id}")
     return 0
+
+
+def _validation_root(profile_name: str | None, argv: list[str]) -> Path:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--root", type=Path)
+    namespace, _remaining = parser.parse_known_args(argv)
+    if namespace.root is not None:
+        return namespace.root.expanduser().resolve()
+    active = resolve_memory_root(
+        profile_name=profile_name,
+        cwd=Path.cwd(),
+        default_root=default_memory_root(),
+    )
+    return active.memory_root
+
+
+def _guidance_validation_errors(memory_root: Path) -> list[str]:
+    path = memory_root / GUIDANCE_INBOX_PATH
+    if not path.exists() and not path.is_symlink():
+        return []
+    if path.is_symlink() or not path.is_file():
+        return [f"{GUIDANCE_INBOX_PATH} must be a regular file"]
+    return validate_guidance_inbox(path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
