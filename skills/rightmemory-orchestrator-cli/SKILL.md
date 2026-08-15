@@ -35,7 +35,7 @@ Choose one stable session id for the conversation and reuse it for every RightMe
 - Do not propose transient progress, routine task results, unfinished work by itself, or implementation detail already adequately preserved in project-local artifacts.
 - Name the apparent module and briefly explain why the evidence passes this bar. Do not propose final stored wording, ids, or edits.
 - Present the proposal once the evidence is clear and the conversation reaches a natural boundary. Completion is not required. If nothing passes the bar, say nothing about updating RightMemory.
-- After approval, combine related approved evidence into one candidate. An explicit request to submit counts as approval.
+- After approval, combine related approved evidence into one candidate. An explicit request to submit, save, or remember the evidence, or to follow it in future, counts as approval.
 - Submit with:
 
   `rightmemory update submit --session <session-id> "<candidate>"`

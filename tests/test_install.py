@@ -1002,6 +1002,7 @@ class InstallScriptTests(unittest.TestCase):
             "!MEMORY_*.md\n"
             "!PURSUITS.md\n"
             "!PURSUIT_*.md\n"
+            "!AGENT_GUIDANCE_INBOX.md\n"
             "PURSUIT_RULES.md\n"
             "!corrections.md\n"
             "!shared_views.toml\n"
@@ -1025,7 +1026,7 @@ class InstallScriptTests(unittest.TestCase):
             "!update_records/*.json\n",
         )
 
-    def test_cli_agent_installs_three_command_skills_and_direct_maintainer(self):
+    def test_cli_agent_installs_all_user_facing_skills(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
@@ -1038,6 +1039,9 @@ class InstallScriptTests(unittest.TestCase):
                 skills_target / "rightmemory-auto-orchestrator" / "SKILL.md"
             ).is_file()
             maintainer_exists = (skills_target / "maintain-rightmemory" / "SKILL.md").is_file()
+            guidance_reviewer_exists = (
+                skills_target / "review-agent-guidance-inbox" / "SKILL.md"
+            ).is_file()
             install_stamp = (memory_root / ".runtime" / "install.stamp").read_text(encoding="utf-8")
             wrapper = (root / "home" / ".local" / "bin" / "rightmemory").read_text(encoding="utf-8")
             installed_skill_directories = sorted(path.name for path in skills_target.iterdir() if path.is_dir())
@@ -1050,17 +1054,20 @@ class InstallScriptTests(unittest.TestCase):
         self.assertTrue(orchestrator_exists)
         self.assertTrue(auto_orchestrator_exists)
         self.assertTrue(maintainer_exists)
+        self.assertTrue(guidance_reviewer_exists)
         self.assertIn("rightmemory-auto-orchestrator", result.stdout)
+        self.assertIn("review-agent-guidance-inbox", result.stdout)
         self.assertIn("export PYTHONUTF8=1", wrapper)
         self.assertIn('export RIGHTMEMORY_ROOT="', wrapper)
         self.assertIn('exec "', wrapper)
-        self.assertIn(' -m rightmemory.cli "$@"', wrapper)
+        self.assertIn(' -m rightmemory.entrypoint "$@"', wrapper)
         self.assertFalse((skills_target / "rightmemory-edit-correction-rules.md").exists())
         self.assertEqual(
             installed_skill_directories,
             [
                 "maintain-rightmemory",
                 "memory-retriever",
+                "review-agent-guidance-inbox",
                 "rightmemory-auto-orchestrator",
                 "rightmemory-orchestrator",
             ],

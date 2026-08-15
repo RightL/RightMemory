@@ -184,3 +184,7 @@ Role prompts live as role-specific Markdown files under the runtime package beca
 ### Compatibility posture
 
 RightMemory favors one coherent current model over compatibility scaffolding. When a managed prompt, skill, schema interpretation, test, or code path is superseded, it should be replaced or removed rather than preserved through aliases, dual formats, and migration branches. Current user-authored Memory, Pursuit, and correction content remains protected from accidental overwrite, but obsolete managed behavior does not justify another subsystem.
+
+## Agent Guidance Inbox
+
+`AGENT_GUIDANCE_INBOX.md` is synchronized pending-review evidence, not a fourth semantic module. Automatic orchestration may capture settled, potentially reusable agent guidance there with `rightmemory guidance submit`; explicit requests to remember guidance continue through Update. The inbox is excluded from the graph, ordinary retrieval, shared views, and model-role file tools. A user explicitly invokes `review-agent-guidance-inbox` to decide which entries become Cross-Session Agent Behavior, Agent Corrections, both, or neither. Reviewed entries are removed; Git history is the audit trail.
