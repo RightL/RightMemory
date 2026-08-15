@@ -1,4 +1,4 @@
-name: Verify guidance fence safety
+name: Verify final guidance boundaries
 
 on:
   push:
@@ -23,7 +23,7 @@ jobs:
           python -m pip install -e .
           sudo apt-get update
           sudo apt-get install -y ripgrep
-      - name: Add fence regression test
+      - name: Add boundary regression tests
         shell: bash
         run: |
           python - <<'PY'
@@ -31,8 +31,9 @@ jobs:
 
           path = Path("tests/test_guidance.py")
           text = path.read_text(encoding="utf-8")
-          marker = "    def test_three_way_merge_unions_independent_additions(self):\n"
-          test = "\n".join(
+
+          format_marker = "    def test_three_way_merge_unions_independent_additions(self):\n"
+          format_test = "\n".join(
               [
                   "    def test_validation_rejects_unclosed_fenced_body(self):",
                   "        malformed = SAMPLE_ONE.replace(",
@@ -45,46 +46,74 @@ jobs:
                   "",
               ]
           )
-          if text.count(marker) != 1:
+          if text.count(format_marker) != 1:
               raise SystemExit("tests/test_guidance.py: fence-test insertion point changed")
-          path.write_text(text.replace(marker, test + marker, 1), encoding="utf-8")
+          text = text.replace(format_marker, format_test + format_marker, 1)
+
+          sync_marker = "    def test_sync_unions_independent_guidance_additions(self):\n"
+          sync_test = "\n".join(
+              [
+                  "    def test_background_sync_does_not_model_repair_invalid_guidance(self):",
+                  "        (self.device / GUIDANCE_INBOX_PATH).write_text(",
+                  '            "# Wrong Heading\\n", encoding="utf-8"',
+                  "        )",
+                  '        self._git(self.device, "add", GUIDANCE_INBOX_PATH)',
+                  '        self._git(self.device, "commit", "-m", "malformed local guidance")',
+                  "        repairs = []",
+                  "",
+                  "        result = SyncManager(",
+                  "            SyncConfig(memory_root=self.device, enabled=True)",
+                  "        ).background_sync(active_repair=repairs.append)",
+                  "",
+                  '        self.assertEqual(result.status, "error")',
+                  "        self.assertEqual(result.files, [GUIDANCE_INBOX_PATH])",
+                  "        self.assertEqual(repairs, [])",
+                  "",
+                  "",
+              ]
+          )
+          if text.count(sync_marker) != 1:
+              raise SystemExit("tests/test_guidance.py: sync-boundary insertion point changed")
+          path.write_text(text.replace(sync_marker, sync_test + sync_marker, 1), encoding="utf-8")
           PY
-      - name: Verify fence regression is red
+      - name: Verify regressions are red
         shell: bash
         run: |
-          set +e
-          python -m unittest \
-            tests.test_guidance.GuidanceFormatTests.test_validation_rejects_unclosed_fenced_body
-          status=$?
-          set -e
-          if [ "$status" -eq 0 ]; then
-            echo "unclosed-fence regression unexpectedly passed before the fix" >&2
-            exit 1
-          fi
-      - name: Reject unclosed fences
+          for test in \
+            tests.test_guidance.GuidanceFormatTests.test_validation_rejects_unclosed_fenced_body \
+            tests.test_guidance.GuidanceSyncTests.test_background_sync_does_not_model_repair_invalid_guidance
+          do
+            if python -m unittest "$test"; then
+              echo "$test unexpectedly passed before its fix" >&2
+              exit 1
+            fi
+          done
+      - name: Apply boundary fixes
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          path = Path("rightmemory/guidance.py")
-          text = path.read_text(encoding="utf-8")
-          old = '''        elif line.startswith("## GI-"):
-              errors.append(f"line {index + 1}: malformed guidance entry heading")
-
-          preamble_end = starts[0][0] if starts else len(lines)
-          '''
-          new = '''        elif line.startswith("## GI-"):
-              errors.append(f"line {index + 1}: malformed guidance entry heading")
-
-          if fence_char is not None:
-              errors.append("unclosed fenced code block")
-
-          preamble_end = starts[0][0] if starts else len(lines)
-          '''
-          if text.count(old) != 1:
+          guidance = Path("rightmemory/guidance.py")
+          text = guidance.read_text(encoding="utf-8")
+          anchor = "    preamble_end = starts[0][0] if starts else len(lines)\n"
+          addition = (
+              '    if fence_char is not None:\n'
+              '        errors.append("unclosed fenced code block")\n\n'
+          )
+          if text.count(anchor) != 1 or addition in text:
               raise SystemExit("rightmemory/guidance.py: fence validation insertion point changed")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          guidance.write_text(text.replace(anchor, addition + anchor, 1), encoding="utf-8")
+
+          sync = Path("rightmemory/sync.py")
+          text = sync.read_text(encoding="utf-8")
+          start = text.index("def _invalid_guidance_result(root: Path) -> SyncResult | None:\n")
+          end = text.index("\ndef _utc_now(value: datetime | None = None) -> datetime:\n", start)
+          segment = text[start:end]
+          if segment.count('        "conflict",\n') != 3:
+              raise SystemExit("rightmemory/sync.py: guidance result statuses changed")
+          segment = segment.replace('        "conflict",\n', '        "error",\n')
+          sync.write_text(text[:start] + segment + text[end:], encoding="utf-8")
           PY
       - name: Compile
         run: python -m compileall -q rightmemory tests
@@ -92,12 +121,12 @@ jobs:
         run: python -m unittest tests.test_guidance
       - name: Full tests
         run: python -m tests
-      - name: Commit verified fence fix
+      - name: Commit verified fixes
         shell: bash
         run: |
           rm -f .github/workflows/verify-guidance-fence.yml
           git config user.name "RightMemory Verification"
           git config user.email "rightmemory@localhost"
           git add -A
-          git commit -m "fix: reject unclosed guidance fences" -m "Prevent malformed free-form evidence from swallowing later inbox entries; add a focused regression and verify the complete suite."
+          git commit -m "fix: close final guidance boundaries" -m "Reject unclosed fenced evidence before it can absorb later entries, and keep malformed inbox state out of model-based sync repair. Add focused regressions and verify the complete suite."
           git push origin HEAD:feat/agent-guidance-inbox
