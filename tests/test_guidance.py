@@ -209,6 +209,27 @@ class GuidanceIsolationTests(unittest.TestCase):
 
 
 class GuidanceSyncTests(SyncTestBase):
+    def test_background_sync_does_not_model_repair_dirty_guidance(self):
+        inbox = self.device / GUIDANCE_INBOX_PATH
+        inbox.write_text(SAMPLE_ONE, encoding="utf-8")
+        self._git(self.device, "add", GUIDANCE_INBOX_PATH)
+        self._git(self.device, "commit", "-m", "seed local guidance")
+        inbox.write_text(
+            inbox.read_text(encoding="utf-8").replace(
+                "keep the judgment direct", "keep the judgment concise"
+            ),
+            encoding="utf-8",
+        )
+        repairs = []
+
+        result = SyncManager(
+            SyncConfig(memory_root=self.device, enabled=True)
+        ).background_sync(active_repair=repairs.append)
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.files, [GUIDANCE_INBOX_PATH])
+        self.assertEqual(repairs, [])
+
     def test_background_sync_does_not_model_repair_invalid_guidance(self):
         (self.device / GUIDANCE_INBOX_PATH).write_text(
             "# Wrong Heading\n", encoding="utf-8"

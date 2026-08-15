@@ -912,9 +912,21 @@ class SyncManager:
         if not self._is_git_repo():
             return SyncResult("unconfigured", "sync unconfigured")
         conflicted = self._conflicted_files(self.memory_root)
+        if GUIDANCE_INBOX_PATH in conflicted:
+            return SyncResult(
+                "error",
+                "agent guidance inbox has unresolved Git conflicts and requires manual review",
+                conflicted,
+            )
         if conflicted:
             return SyncResult("conflict", "local synchronized state is already conflicted", conflicted)
         dirty = self._dirty_memory_files()
+        if GUIDANCE_INBOX_PATH in dirty:
+            return SyncResult(
+                "error",
+                "agent guidance inbox has uncommitted changes and requires manual review",
+                dirty,
+            )
         if dirty:
             return SyncResult("dirty", "local memory has uncommitted changes", dirty)
         invalid_files = self._non_regular_paths(self.memory_root, ())
