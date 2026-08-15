@@ -84,6 +84,24 @@ jobs:
           end = source.index("\n          PY\n      - name: Compile", start)
           script = textwrap.dedent(source[start:end])
           exec(compile(script, str(workflow) + ':reviewed-patch', 'exec'), {})
+
+          path = Path('tests/test_install.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''                "maintain-rightmemory",
+                  "memory-retriever",
+                  "rightmemory-auto-orchestrator",
+                  "rightmemory-orchestrator",
+                  "review-agent-guidance-inbox",
+          '''
+          new = '''                "maintain-rightmemory",
+                  "memory-retriever",
+                  "review-agent-guidance-inbox",
+                  "rightmemory-auto-orchestrator",
+                  "rightmemory-orchestrator",
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('tests/test_install.py: skill-order expectation changed')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
           PY
       - name: Compile
         run: python -m compileall -q rightmemory tests
