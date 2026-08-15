@@ -172,6 +172,9 @@ def _parse_guidance_inbox(text: str) -> tuple[list[str], list[GuidanceEntry]]:
         elif line.startswith("## GI-"):
             errors.append(f"line {index + 1}: malformed guidance entry heading")
 
+    if fence_char is not None:
+        errors.append("unclosed fenced code block")
+
     preamble_end = starts[0][0] if starts else len(lines)
     if any(line.strip() for line in lines[1:preamble_end]):
         errors.append("content appears before first guidance entry")

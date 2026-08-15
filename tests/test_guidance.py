@@ -85,6 +85,14 @@ Two.
         self.assertEqual(len(entries), 1)
         self.assertIn("## GI-20260815-deadbeef", entries[0].body)
 
+    def test_validation_rejects_unclosed_fenced_body(self):
+        malformed = SAMPLE_ONE.replace(
+            "The agent over-structured a simple prompt change.",
+            "```markdown\nThe agent over-structured a simple prompt change.",
+        )
+        errors = validate_guidance_inbox(malformed)
+        self.assertTrue(any("unclosed fenced code block" in error for error in errors))
+
     def test_three_way_merge_unions_independent_additions(self):
         merged = merge_guidance_inbox(
             "# Pending Agent Guidance\n",
@@ -201,6 +209,22 @@ class GuidanceIsolationTests(unittest.TestCase):
 
 
 class GuidanceSyncTests(SyncTestBase):
+    def test_background_sync_does_not_model_repair_invalid_guidance(self):
+        (self.device / GUIDANCE_INBOX_PATH).write_text(
+            "# Wrong Heading\n", encoding="utf-8"
+        )
+        self._git(self.device, "add", GUIDANCE_INBOX_PATH)
+        self._git(self.device, "commit", "-m", "malformed local guidance")
+        repairs = []
+
+        result = SyncManager(
+            SyncConfig(memory_root=self.device, enabled=True)
+        ).background_sync(active_repair=repairs.append)
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.files, [GUIDANCE_INBOX_PATH])
+        self.assertEqual(repairs, [])
+
     def test_sync_unions_independent_guidance_additions(self):
         (self.device / GUIDANCE_INBOX_PATH).write_text(SAMPLE_ONE, encoding="utf-8")
         self._git(self.device, "add", GUIDANCE_INBOX_PATH)

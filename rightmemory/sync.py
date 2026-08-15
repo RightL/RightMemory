@@ -1460,7 +1460,7 @@ def _invalid_guidance_result(root: Path) -> SyncResult | None:
         return None
     if path.is_symlink() or not path.is_file():
         return SyncResult(
-            "conflict",
+            "error",
             "agent guidance inbox must be a regular file",
             [GUIDANCE_INBOX_PATH],
         )
@@ -1468,14 +1468,14 @@ def _invalid_guidance_result(root: Path) -> SyncResult | None:
         errors = validate_guidance_inbox(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError) as exc:
         return SyncResult(
-            "conflict",
+            "error",
             f"agent guidance inbox could not be read: {exc}",
             [GUIDANCE_INBOX_PATH],
         )
     if not errors:
         return None
     return SyncResult(
-        "conflict",
+        "error",
         "invalid agent guidance inbox:\n" + "\n".join(f"- {item}" for item in errors),
         [GUIDANCE_INBOX_PATH],
     )
