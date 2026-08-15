@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from rightmemory.entrypoint import _guidance_validation_errors
 from rightmemory.guidance import (
     GUIDANCE_INBOX_PATH,
     GuidanceConflictError,
@@ -100,6 +101,7 @@ class GuidanceSubmitTests(IsolatedWriteTestBase):
         self.assertEqual(self._git("status", "--short"), "")
         self.assertEqual(self._git("ls-files", GUIDANCE_INBOX_PATH), GUIDANCE_INBOX_PATH)
         self.assertFalse((self.root / ".runtime" / "async" / "update").exists())
+        self.assertNotIn("rightmemory-guidance-", self._git("branch", "--list"))
         self._assert_isolated_cleanup()
 
     def test_submit_refuses_a_malformed_existing_inbox(self):
@@ -127,7 +129,7 @@ class GuidanceIsolationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             tools.read(GUIDANCE_INBOX_PATH)
 
-    def test_validation_checks_inbox_without_counting_it_as_graph_file(self):
+    def test_validation_boundary_keeps_inbox_out_of_semantic_graph(self):
         tools = MemoryTools(self.root)
         self.assertTrue(tools.validate_memory().startswith("validation passed:"))
         manifest_files = {
@@ -135,9 +137,11 @@ class GuidanceIsolationTests(unittest.TestCase):
             for path in tools._memory_files()
         }
         self.assertNotIn(GUIDANCE_INBOX_PATH, manifest_files)
+        self.assertEqual(_guidance_validation_errors(self.root), [])
 
         (self.root / GUIDANCE_INBOX_PATH).write_text("# Wrong Heading\n", encoding="utf-8")
-        self.assertIn("validation failed:", tools.validate_memory())
+        self.assertTrue(tools.validate_memory().startswith("validation passed:"))
+        self.assertTrue(_guidance_validation_errors(self.root))
 
 
 if __name__ == "__main__":
