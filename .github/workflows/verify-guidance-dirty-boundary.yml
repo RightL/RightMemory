@@ -36,7 +36,7 @@ jobs:
               [
                   "    def test_background_sync_does_not_model_repair_dirty_guidance(self):",
                   "        inbox = self.device / GUIDANCE_INBOX_PATH",
-                  "        inbox.write_text(SAMPLE_ONE, encoding=\"utf-8\")",
+                  '        inbox.write_text(SAMPLE_ONE, encoding="utf-8")',
                   '        self._git(self.device, "add", GUIDANCE_INBOX_PATH)',
                   '        self._git(self.device, "commit", "-m", "seed local guidance")',
                   "        inbox.write_text(",
@@ -79,35 +79,41 @@ jobs:
 
           path = Path("rightmemory/sync.py")
           text = path.read_text(encoding="utf-8")
-          old = '''        conflicted = self._conflicted_files(self.memory_root)
-          if conflicted:
-              return SyncResult("conflict", "local synchronized state is already conflicted", conflicted)
-          dirty = self._dirty_memory_files()
-          if dirty:
-              return SyncResult("dirty", "local memory has uncommitted changes", dirty)
-          '''
-          new = '''        conflicted = self._conflicted_files(self.memory_root)
-          if GUIDANCE_INBOX_PATH in conflicted:
-              return SyncResult(
-                  "error",
-                  "agent guidance inbox has unresolved Git conflicts and requires manual review",
-                  conflicted,
-              )
-          if conflicted:
-              return SyncResult("conflict", "local synchronized state is already conflicted", conflicted)
-          dirty = self._dirty_memory_files()
-          if GUIDANCE_INBOX_PATH in dirty:
-              return SyncResult(
-                  "error",
-                  "agent guidance inbox has uncommitted changes and requires manual review",
-                  dirty,
-              )
-          if dirty:
-              return SyncResult("dirty", "local memory has uncommitted changes", dirty)
-          '''
-          if text.count(old) != 1:
-              raise SystemExit("rightmemory/sync.py: active-preflight insertion point changed")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          start = text.index("    def _active_preflight(self) -> SyncResult | None:\n")
+          end = text.index("\n    def _capture_valid_tip", start)
+          segment = text[start:end]
+
+          conflict_anchor = '        if conflicted:\n'
+          conflict_guard = "\n".join(
+              [
+                  "        if GUIDANCE_INBOX_PATH in conflicted:",
+                  "            return SyncResult(",
+                  '                "error",',
+                  '                "agent guidance inbox has unresolved Git conflicts and requires manual review",',
+                  "                conflicted,",
+                  "            )",
+                  "",
+              ]
+          )
+          dirty_anchor = '        if dirty:\n'
+          dirty_guard = "\n".join(
+              [
+                  "        if GUIDANCE_INBOX_PATH in dirty:",
+                  "            return SyncResult(",
+                  '                "error",',
+                  '                "agent guidance inbox has uncommitted changes and requires manual review",',
+                  "                dirty,",
+                  "            )",
+                  "",
+              ]
+          )
+          if segment.count(conflict_anchor) != 1 or segment.count(dirty_anchor) != 1:
+              raise SystemExit("rightmemory/sync.py: active-preflight anchors changed")
+          if "GUIDANCE_INBOX_PATH in conflicted" in segment or "GUIDANCE_INBOX_PATH in dirty" in segment:
+              raise SystemExit("rightmemory/sync.py: dirty guidance guards already exist")
+          segment = segment.replace(conflict_anchor, conflict_guard + conflict_anchor, 1)
+          segment = segment.replace(dirty_anchor, dirty_guard + dirty_anchor, 1)
+          path.write_text(text[:start] + segment + text[end:], encoding="utf-8")
           PY
       - name: Compile
         run: python -m compileall -q rightmemory tests
