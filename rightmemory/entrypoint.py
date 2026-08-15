@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
         except (ValueError, ProfileError, FileNotFoundError, RuntimeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-    result = cli.cli_main(args)
+    result = cli.main(args)
     if result != 0 or remaining[:1] != ["validate"]:
         return result
     try:
