@@ -1,0 +1,104 @@
+name: Apply README semantic-model edit
+
+on:
+  push:
+    branches:
+      - agent/expose-semantic-model
+
+permissions:
+  contents: write
+
+jobs:
+  edit-readme:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/expose-semantic-model
+
+      - name: Update README
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("README.md")
+          text = path.read_text(encoding="utf-8")
+
+          insertion_marker = """- **Vendor-neutral command surface:** Codex CLI and Claude Code CLI have built-in delegated execution today; Gemini CLI-style workflows and other command-capable agents can use the same `rightmemory` CLI or JSON-over-stdio daemon surface.
+
+## Who It Is For
+"""
+
+          semantic_section = """- **Vendor-neutral command surface:** Codex CLI and Claude Code CLI have built-in delegated execution today; Gemini CLI-style workflows and other command-capable agents can use the same `rightmemory` CLI or JSON-over-stdio daemon surface.
+
+## The RightMemory Semantic Model
+
+RightMemory is not only a place to store and retrieve context. Its semantic model defines what deserves preservation, where it belongs, how each kind of state evolves, and which roles may change it.
+
+| Module | What it preserves | What it is not |
+| --- | --- | --- |
+| **Memory** | Durable context that should remain useful beyond the current task or session. | A transcript, task log, or record of everything that happened. |
+| **Pursuit** | Live or deliberately parked intent, its hierarchy, and the context needed to understand its current direction. | A backlog, work log, or detailed execution record. |
+| **Agent Corrections** | Bounded, reusable cases in which the user redirected prior agent work. | A collection of every correction or a substitute for general behavior guidance. |
+
+Memory and Pursuit form one addressable graph organized as two Markdown document trees. Agent Corrections remains a bounded, non-graph case library.
+
+### What Belongs Where?
+
+- Use **Memory** when durable context can materially improve future action, judgment, interpretation, or retrieval.
+- Use **Pursuit** when the intent itself should remain active or deliberately parked after the current update.
+- Use **Agent Corrections** when a concrete user redirection forms a reusable case whose contrast would lose value if generalized away.
+- Store nothing when the evidence is transient, duplicated, insufficiently settled, or better preserved in project artifacts.
+
+The updater may change any combination of the three modules—or decide that the submitted evidence should not be stored at all.
+
+Canonical definitions and rules: [Memory Rules](rightmemory/reference/MEMORY_RULES.md), [Pursuit Rules](rightmemory/reference/PURSUIT_RULES.md), [Agent Corrections Rules](rightmemory/reference/AGENT_CORRECTION_MEMORY_RULES.md), and the [RightMemory Schema](rightmemory/reference/rightmemory-schema.md).
+
+## Who It Is For
+"""
+
+          old_model = """## RightMemory Model
+
+RightMemory has three semantic modules. Two of them form one graph organized into ordinary Markdown document trees:
+
+- `MEMORY.md` and `MEMORY_<id>.md` hold durable knowledge, context, preferences, decisions, constraints, and reusable guidance.
+- `PURSUITS.md` and `PURSUIT_<id>.md` hold live intent, Focus, current state, and next movements that should still shape future action.
+
+The third module, Agent Corrections, is a bounded non-graph library of reusable cases in which a user redirected prior agent work. Its two fixed files keep concrete Expression and Substance contrasts that would lose value if reduced to a generic rule.
+
+All addressable headings and nodes share one globally unique id namespace, and typed edges may cross between Memory and Pursuit. The trees differ by lifecycle, not graph membership. The package-owned [Memory rules](rightmemory/reference/MEMORY_RULES.md), [Pursuit rules](rightmemory/reference/PURSUIT_RULES.md), and [Agent Corrections rules](rightmemory/reference/AGENT_CORRECTION_MEMORY_RULES.md) define admission and maintenance judgment for the three modules.
+
+"""
+
+          new_model = """## Document Model And Reference
+
+Memory and Pursuit are represented as ordinary Markdown document trees in one graph:
+
+- `MEMORY.md` and `MEMORY_<id>.md` hold durable knowledge, context, preferences, decisions, constraints, and reusable guidance.
+- `PURSUITS.md` and `PURSUIT_<id>.md` hold live intent, Focus, current state, and next movements that should still shape future action.
+
+Agent Corrections uses two fixed, non-graph files for concrete Expression and Substance cases.
+
+All addressable headings and nodes share one globally unique id namespace, and typed edges may cross between Memory and Pursuit. For canonical semantics and validity, use the rules linked in [The RightMemory Semantic Model](#the-rightmemory-semantic-model); this section focuses on the Markdown representation.
+
+"""
+
+          if text.count(insertion_marker) != 1:
+              raise SystemExit("README insertion marker did not match exactly once")
+          if text.count(old_model) != 1:
+              raise SystemExit("README model block did not match exactly once")
+
+          text = text.replace(insertion_marker, semantic_section, 1)
+          text = text.replace(old_model, new_model, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          rm .github/workflows/readme-semantic-model-edit.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md .github/workflows/readme-semantic-model-edit.yml
+          git diff --cached --check
+          git commit -m "docs: surface RightMemory semantic model"
+          git push origin HEAD:agent/expose-semantic-model
