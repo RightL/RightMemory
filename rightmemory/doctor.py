@@ -61,13 +61,13 @@ def run_agent_cli_doctor(memory_root: Path | None = None) -> list[DoctorCheck]:
 
         doctor_configs = {role: _doctor_config(config, memory_root) for role, config in configs.items()}
         _check_first_provider_calls(checks, doctor_configs, run_nonce)
-        _check_codex_thread_cleanup(checks, doctor_configs)
         _check_resume_history(checks, doctor_configs["retrieve"], run_nonce)
         _check_retrieve_reads_memory(checks, doctor_configs["retrieve"], retrieve_token, run_nonce)
         write_config = _write_config(doctor_configs)
         _check_write_edits_memory(checks, write_config, memory_root, run_nonce)
         _check_write_commits_memory(checks, write_config, memory_root, run_nonce)
         _check_write_boundary(checks, write_config, temp_root, run_nonce)
+        _check_codex_thread_cleanup(checks, doctor_configs)
     return checks
 
 
