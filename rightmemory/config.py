@@ -50,6 +50,7 @@ DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS = 3000
 DEFAULT_INSIGHT_TRIGGER_POINTS = 150.0
 DEFAULT_INSIGHT_UPDATE_CANDIDATE_POINTS = 1.0
 DEFAULT_INSIGHT_CHECK_INTERVAL_SECONDS = 3000
+CODEX_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
 
 
 def default_memory_root() -> Path:
@@ -122,6 +123,7 @@ class PrunerConfig:
 class AgentCliConfig:
     provider: str
     model: str | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -553,7 +555,11 @@ def _agent_cli_runtime_config(
         role_cli = {}
     if not isinstance(role_cli, dict):
         raise ValueError(f"[{executor_role}.agent_cli] must be a TOML table")
-    _reject_unknown_keys(role_cli, {"provider", "model"}, f"[{executor_role}.agent_cli]")
+    _reject_unknown_keys(
+        role_cli,
+        {"provider", "model", "reasoning_effort"},
+        f"[{executor_role}.agent_cli]",
+    )
 
     provider = role_cli.get("provider", global_section.get("provider"))
     if not isinstance(provider, str) or not provider.strip():
@@ -563,11 +569,21 @@ def _agent_cli_runtime_config(
         raise ValueError("agent_cli provider must be one of: claude, codex")
 
     model = _optional_agent_cli_model(executor_role, role_cli.get("model"))
+    reasoning_effort = _optional_agent_cli_reasoning_effort(
+        executor_role,
+        role_cli.get("reasoning_effort"),
+    )
+    if reasoning_effort is not None and provider != "codex":
+        raise ValueError(f"[{executor_role}.agent_cli].reasoning_effort requires provider = \"codex\"")
     return RuntimeConfig(
         role=role,
         model_id=None,
         runtime_mode="cli-agent",
-        agent_cli=AgentCliConfig(provider=provider, model=model),
+        agent_cli=AgentCliConfig(
+            provider=provider,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ),
         memory_root=memory_root,
         state_root=memory_root,
         max_tool_retries=DEFAULT_MAX_TOOL_RETRIES,
@@ -582,6 +598,15 @@ def _optional_agent_cli_model(role: str, value: object) -> str | None:
         return None
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"[{role}.agent_cli].model must be a non-empty string when set")
+    return value.strip()
+
+
+def _optional_agent_cli_reasoning_effort(role: str, value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.strip() not in CODEX_REASONING_EFFORTS:
+        joined = ", ".join(sorted(CODEX_REASONING_EFFORTS))
+        raise ValueError(f"[{role}.agent_cli].reasoning_effort must be one of: {joined}")
     return value.strip()
 
 

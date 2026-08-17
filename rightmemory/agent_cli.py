@@ -150,9 +150,9 @@ class CliAgentExecutor:
         )
         created_at = _now()
         if self.config.provider == "codex":
-            command = build_codex_command(self.memory_root, self.role, self.config, prompt, provider_session_id)
+            command = build_codex_command(self.memory_root, self.role, self.config, provider_session_id)
             try:
-                stdout = _run_cli(command, self.memory_root, "Codex")
+                stdout = _run_cli(command, self.memory_root, "Codex", stdin=prompt)
             except AgentCliCommandError as exc:
                 if provider_session_id is None:
                     partial_id = parse_codex_thread_id(exc.stdout)
@@ -250,7 +250,6 @@ def build_codex_command(
     memory_root: Path,
     role: str,
     config: AgentCliConfig,
-    prompt: str,
     provider_session_id: str | None,
 ) -> list[str]:
     _validate_role(role)
@@ -265,10 +264,9 @@ def build_codex_command(
         _codex_sandbox(role),
     ]
     _append_model(command, config)
+    _append_codex_reasoning_effort(command, config)
     if provider_session_id:
-        command.extend(["resume", provider_session_id, prompt])
-        return command
-    command.append(prompt)
+        command.extend(["resume", provider_session_id])
     return command
 
 
@@ -281,6 +279,8 @@ def build_claude_command(
 ) -> list[str]:
     _validate_role(role)
     _validate_uuid(provider_session_id)
+    if config.reasoning_effort is not None:
+        raise ValueError("agent_cli reasoning_effort is only supported for Codex")
     command = ["claude", "-p", "--output-format", "json"]
     _append_model(command, config)
     command.extend(["--permission-mode", _claude_permission_mode(role)])
@@ -350,13 +350,17 @@ def _turn_prompt(
     return f"{instructions}\n\n{caller}"
 
 
-def _run_cli(command: list[str], memory_root: Path, label: str) -> str:
+def _run_cli(command: list[str], memory_root: Path, label: str, *, stdin: str | None = None) -> str:
+    run_kwargs: dict[str, Any] = {}
+    if stdin is not None:
+        run_kwargs["input"] = stdin.encode("utf-8")
     completed = subprocess.run(
         prepare_command(command),
         cwd=str(memory_root),
         capture_output=True,
         text=False,
         check=False,
+        **run_kwargs,
     )
     stdout = _decode_cli_output(completed.stdout)
     stderr = _decode_cli_output(completed.stderr)
@@ -406,6 +410,11 @@ def _now() -> str:
 def _append_model(command: list[str], config: AgentCliConfig) -> None:
     if config.model:
         command.extend(["--model", config.model])
+
+
+def _append_codex_reasoning_effort(command: list[str], config: AgentCliConfig) -> None:
+    if config.reasoning_effort:
+        command.extend(["--config", f"model_reasoning_effort={config.reasoning_effort}"])
 
 
 def _codex_sandbox(role: str) -> str:

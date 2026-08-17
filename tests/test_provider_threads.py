@@ -1,12 +1,77 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rightmemory.provider_threads import ProviderThreadStore
 
 
 class ProviderThreadStoreTests(unittest.TestCase):
+    def test_atomic_temp_name_does_not_repeat_hashed_destination_name(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = ProviderThreadStore(Path(tempdir))
+            replacements = []
+            real_replace = os.replace
+
+            def capture_replace(source, destination):
+                replacements.append((Path(source), Path(destination)))
+                real_replace(source, destination)
+
+            with patch("rightmemory.provider_threads.os.replace", side_effect=capture_replace):
+                store.record_created(
+                    provider="codex",
+                    provider_session_id="thread-1",
+                    role="retrieve",
+                    rightmemory_session_id="session-1",
+                    policy="persistent",
+                    created_at="2026-07-17T00:00:00+00:00",
+                )
+
+            source, destination = replacements[-1]
+            expected = store.path("codex", "thread-1")
+
+        self.assertEqual(destination, expected)
+        self.assertEqual(source.parent, destination.parent)
+        self.assertNotIn(destination.name, source.name)
+        self.assertRegex(source.name, r"^\.\d+\.[0-9a-f]{32}\.tmp$")
+
+    @unittest.skipUnless(os.name == "nt", "Windows path-length regression")
+    def test_records_thread_under_long_isolated_operation_state_path(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            base = Path(tempdir)
+            operation_key = "a" * 64
+            provider_session_id = "thread-1"
+            unpadded_root = base / "memory" / ".runtime" / "operations" / "state" / operation_key
+            unpadded_path = ProviderThreadStore(unpadded_root).path("codex", provider_session_id)
+            padding_length = 240 - len(str(unpadded_path)) - 1
+            self.assertGreater(padding_length, 0)
+            state_root = (
+                base
+                / ("p" * padding_length)
+                / "memory"
+                / ".runtime"
+                / "operations"
+                / "state"
+                / operation_key
+            )
+            store = ProviderThreadStore(state_root)
+
+            store.record_created(
+                provider="codex",
+                provider_session_id=provider_session_id,
+                role="update",
+                rightmemory_session_id="session-1",
+                policy="persistent",
+                created_at="2026-07-17T00:00:00+00:00",
+            )
+            path = store.path("codex", provider_session_id)
+
+            self.assertTrue(path.exists())
+            self.assertEqual(len(str(path)), 240)
+            self.assertGreaterEqual(len(str(path)) + 32, 260)
+
     def test_records_owned_thread_under_hashed_provider_path(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -29,7 +94,7 @@ class ProviderThreadStoreTests(unittest.TestCase):
             path = store.path("codex", created.provider_session_id)
 
         self.assertEqual(path.parent.name, "codex")
-        self.assertRegex(path.name, r"^[0-9a-f]{64}\.json$")
+        self.assertRegex(path.name, r"^[0-9a-f]{32}\.json$")
         self.assertNotIn("thread", path.name)
         self.assertEqual(loaded.last_successful_activity_at, "2026-07-17T00:01:00+00:00")
         self.assertEqual(loaded.status, "active")

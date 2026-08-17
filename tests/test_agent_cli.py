@@ -5,7 +5,13 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID
 
-from rightmemory.doctor import DoctorCheck, format_doctor_report, run_agent_cli_doctor
+from rightmemory.doctor import (
+    DoctorCheck,
+    _check_first_provider_calls,
+    _check_resume_provider_thread,
+    format_doctor_report,
+    run_agent_cli_doctor,
+)
 from rightmemory.agent_cli import (
     CliAgentExecutor,
     NO_SESSION_RIGHTMEMORY_SESSION_ID,
@@ -13,6 +19,7 @@ from rightmemory.agent_cli import (
     build_codex_command,
     parse_claude_output,
     parse_codex_output,
+    _run_cli,
     _stable_claude_session_id,
 )
 from rightmemory.config import AgentCliConfig, RuntimeConfig, SyncConfig
@@ -58,11 +65,27 @@ class ProviderSessionStoreTests(unittest.TestCase):
 
 
 class AgentCliCommandTests(unittest.TestCase):
+    def test_run_cli_uses_binary_stdin_when_supplied(self):
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured.update(kwargs)
+            return subprocess.CompletedProcess(command, 0, stdout=b"done", stderr=b"")
+
+        with (
+            patch("rightmemory.agent_cli.prepare_command", side_effect=lambda command: list(command)),
+            patch("rightmemory.agent_cli.subprocess.run", side_effect=fake_run),
+        ):
+            output = _run_cli(["codex", "exec"], Path("/memory/root"), "Codex", stdin="input")
+
+        self.assertEqual(output, "done")
+        self.assertIsInstance(captured.get("input"), bytes)
+
     def test_build_codex_first_command_uses_memory_root_and_read_only_sandbox(self):
         config = AgentCliConfig(provider="codex", model="gpt-5")
         memory_root = Path("/memory/root")
 
-        command = build_codex_command(memory_root, "retrieve", config, "prompt", None)
+        command = build_codex_command(memory_root, "retrieve", config, None)
 
         self.assertEqual(
             command,
@@ -77,7 +100,6 @@ class AgentCliCommandTests(unittest.TestCase):
                 "read-only",
                 "--model",
                 "gpt-5",
-                "prompt",
             ],
         )
 
@@ -87,7 +109,6 @@ class AgentCliCommandTests(unittest.TestCase):
             memory_root,
             "update",
             AgentCliConfig(provider="codex"),
-            "prompt",
             None,
         )
 
@@ -102,7 +123,24 @@ class AgentCliCommandTests(unittest.TestCase):
                 "--skip-git-repo-check",
                 "--sandbox",
                 "workspace-write",
-                "prompt",
+            ],
+        )
+
+    def test_build_codex_command_applies_role_reasoning_effort(self):
+        command = build_codex_command(
+            Path("/memory/root"),
+            "update",
+            AgentCliConfig(provider="codex", model="gpt-5.6-sol", reasoning_effort="xhigh"),
+            None,
+        )
+
+        self.assertEqual(
+            command[command.index("--model") :],
+            [
+                "--model",
+                "gpt-5.6-sol",
+                "--config",
+                "model_reasoning_effort=xhigh",
             ],
         )
 
@@ -111,7 +149,6 @@ class AgentCliCommandTests(unittest.TestCase):
             Path("/memory/root"),
             "pruner",
             AgentCliConfig(provider="codex"),
-            "prompt",
             None,
         )
 
@@ -123,7 +160,6 @@ class AgentCliCommandTests(unittest.TestCase):
             Path("/memory/root"),
             "insight",
             AgentCliConfig(provider="codex"),
-            "prompt",
             None,
         )
 
@@ -134,7 +170,6 @@ class AgentCliCommandTests(unittest.TestCase):
             Path("/memory/root"),
             "shared-view-builder",
             AgentCliConfig(provider="codex"),
-            "prompt",
             None,
         )
 
@@ -146,7 +181,6 @@ class AgentCliCommandTests(unittest.TestCase):
             Path("/memory/root"),
             "historian",
             AgentCliConfig(provider="codex"),
-            "prompt",
             None,
         )
 
@@ -158,7 +192,6 @@ class AgentCliCommandTests(unittest.TestCase):
             Path("/memory/root"),
             "reviewer",
             AgentCliConfig(provider="codex"),
-            "prompt",
             None,
         )
 
@@ -169,7 +202,7 @@ class AgentCliCommandTests(unittest.TestCase):
         config = AgentCliConfig(provider="codex", model="gpt-5")
         memory_root = Path("/memory/root")
 
-        command = build_codex_command(memory_root, "retrieve", config, "prompt", "thread-1")
+        command = build_codex_command(memory_root, "retrieve", config, "thread-1")
 
         self.assertEqual(
             command,
@@ -186,7 +219,6 @@ class AgentCliCommandTests(unittest.TestCase):
                 "gpt-5",
                 "resume",
                 "thread-1",
-                "prompt",
             ],
         )
 
@@ -196,7 +228,6 @@ class AgentCliCommandTests(unittest.TestCase):
             memory_root,
             "update",
             AgentCliConfig(provider="codex"),
-            "prompt",
             "thread-1",
         )
 
@@ -213,7 +244,6 @@ class AgentCliCommandTests(unittest.TestCase):
                 "workspace-write",
                 "resume",
                 "thread-1",
-                "prompt",
             ],
         )
 
@@ -300,6 +330,18 @@ class AgentCliCommandTests(unittest.TestCase):
 
         self.assertIn("UUID", str(caught.exception))
 
+    def test_build_claude_command_rejects_reasoning_effort(self):
+        with self.assertRaises(ValueError) as caught:
+            build_claude_command(
+                "retrieve",
+                AgentCliConfig(provider="claude", reasoning_effort="high"),
+                "prompt",
+                "123e4567-e89b-12d3-a456-426614174000",
+                False,
+            )
+
+        self.assertIn("only supported for Codex", str(caught.exception))
+
 
 class AgentCliParserTests(unittest.TestCase):
     def test_parse_codex_jsonl_output(self):
@@ -371,7 +413,7 @@ class CliAgentExecutorTests(unittest.TestCase):
         cleanup.return_value.run.assert_called_once_with()
 
     def test_run_turn_is_one_shot_and_records_thread_ownership(self):
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -402,7 +444,7 @@ class CliAgentExecutorTests(unittest.TestCase):
     def test_run_turn_records_provider_session_under_state_root(self):
         calls = []
 
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
             calls.append((command, cwd))
             return subprocess.CompletedProcess(
                 command,
@@ -462,7 +504,7 @@ class CliAgentExecutorTests(unittest.TestCase):
     def test_run_turn_starts_fresh_thread_in_second_executor(self):
         calls = []
 
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
             calls.append(command)
             number = len(calls)
             text_out = "first" if number == 1 else "second"
@@ -491,7 +533,7 @@ class CliAgentExecutorTests(unittest.TestCase):
     def test_codex_session_turn_saves_and_resumes_provider_session(self):
         calls = []
 
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
             calls.append(command)
             text_out = "first" if len(calls) == 1 else "second"
             return subprocess.CompletedProcess(
@@ -519,13 +561,13 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertIsNotNone(record)
         self.assertEqual(record.provider_session_id, "thread-1")
         self.assertNotIn("resume", calls[0])
-        self.assertEqual(calls[1][-3:], ["resume", "thread-1", calls[1][-1]])
+        self.assertEqual(calls[1][-2:], ["resume", "thread-1"])
 
     def test_claude_first_turn_uses_stable_uuid_then_resumes(self):
         calls = []
         expected_session_id = _stable_claude_session_id("retrieve", "agent-1")
 
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
             calls.append(command)
             return subprocess.CompletedProcess(
                 command,
@@ -553,7 +595,7 @@ class CliAgentExecutorTests(unittest.TestCase):
         stable_session_id = _stable_claude_session_id("update", "agent-1")
         fresh_session_id = "123e4567-e89b-12d3-a456-426614174999"
 
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
             calls.append(command)
             return subprocess.CompletedProcess(
                 command,
@@ -588,7 +630,7 @@ class CliAgentExecutorTests(unittest.TestCase):
             "123e4567-e89b-12d3-a456-426614174002",
         ]
 
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
             calls.append(command)
             session_id = command[command.index("--session-id") + 1]
             return subprocess.CompletedProcess(
@@ -618,7 +660,7 @@ class CliAgentExecutorTests(unittest.TestCase):
     def test_process_local_turn_resumes_only_within_executor(self):
         calls = []
 
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
             calls.append(command)
             if "resume" in command:
                 thread_id = command[command.index("resume") + 1]
@@ -645,7 +687,7 @@ class CliAgentExecutorTests(unittest.TestCase):
             records = ProviderThreadStore(root).scan("codex").records
 
         self.assertNotIn("resume", calls[0])
-        self.assertEqual(calls[1][-3:-1], ["resume", "thread-1"])
+        self.assertEqual(calls[1][-2:], ["resume", "thread-1"])
         self.assertNotIn("resume", calls[2])
         self.assertEqual(len(records), 2)
         self.assertTrue(all(record.policy == "process-local" for record in records))
@@ -715,7 +757,7 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertNotIn("resume", run.call_args.args[0])
 
     def test_failed_codex_command_registers_partial_thread_started_event(self):
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
             return subprocess.CompletedProcess(
                 command,
                 7,
@@ -736,7 +778,7 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertIsNone(ownership.last_successful_activity_at)
 
     def test_cli_failure_includes_stdout_and_stderr(self):
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
             return subprocess.CompletedProcess(command, 7, stdout="partial output", stderr="bad credentials")
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -776,13 +818,49 @@ class AgentCliDoctorTests(unittest.TestCase):
         self.assertFalse(checks[0].ok)
         self.assertIn("retrieve", checks[0].detail)
 
+    def test_first_provider_call_accepts_retrieve_no_match_result(self):
+        checks = []
+
+        with patch("rightmemory.doctor._runtime_turn", return_value="No strong match."):
+            _check_first_provider_calls(checks, {"retrieve": _doctor_config("retrieve")}, "nonce")
+
+        self.assertEqual(len(checks), 1)
+        self.assertTrue(checks[0].ok)
+
+    def test_resume_check_verifies_provider_thread_identity(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            config = _doctor_config("retrieve", root)
+            checks = []
+
+            def fake_runtime_turn(runtime_config, session_id, message):
+                ProviderSessionStore(root, "retrieve").save(
+                    ProviderSessionRecord(
+                        provider="codex",
+                        provider_session_id="thread-1",
+                        role="retrieve",
+                        rightmemory_session_id=session_id,
+                        created_at="2026-08-17T00:00:00+00:00",
+                        updated_at="2026-08-17T00:01:00+00:00",
+                    )
+                )
+                return "No strong match."
+
+            with patch("rightmemory.doctor._runtime_turn", side_effect=fake_runtime_turn):
+                _check_resume_provider_thread(checks, config, "nonce")
+
+        self.assertEqual(len(checks), 1)
+        self.assertTrue(checks[0].ok)
+
+
 def _doctor_config(role: str, memory_root=None) -> RuntimeConfig:
+    root = Path(memory_root) if memory_root is not None else Path(f"/real/{role}")
     return RuntimeConfig(
         role=role,
         runtime_mode="cli-agent",
         agent_cli=AgentCliConfig(provider="codex", model=f"model-{role}"),
-        memory_root=Path(f"/real/{role}"),
-        sync=SyncConfig(memory_root=Path(f"/real/{role}"), enabled=True),
+        memory_root=root,
+        sync=SyncConfig(memory_root=root, enabled=True),
     )
 
 
