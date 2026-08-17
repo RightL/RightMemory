@@ -3,12 +3,15 @@ from __future__ import annotations
 import subprocess
 import tempfile
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 from .agent_cli import WRITE_ROLES
+from .agent_cli_cleanup import AgentCliThreadCleanup, CODEX_THREAD_RETENTION
 from .config import ROLES, RuntimeConfig, SyncConfig, load_config
 from .platform import prepare_command
+from .provider_threads import ProviderThreadStore
 from .runtime import RightMemoryRuntime
 
 
@@ -64,6 +67,7 @@ def run_agent_cli_doctor(memory_root: Path | None = None) -> list[DoctorCheck]:
         _check_write_edits_memory(checks, write_config, memory_root, run_nonce)
         _check_write_commits_memory(checks, write_config, memory_root, run_nonce)
         _check_write_boundary(checks, write_config, temp_root, run_nonce)
+        _check_codex_thread_cleanup(checks, doctor_configs)
     return checks
 
 
@@ -93,6 +97,44 @@ def _load_agent_cli_configs(checks: list[DoctorCheck], *, memory_root: Path | No
 def _doctor_config(config: RuntimeConfig, memory_root: Path) -> RuntimeConfig:
     sync = SyncConfig(memory_root=memory_root, enabled=False, stale_pull_after_hours=config.sync.stale_pull_after_hours)
     return replace(config, memory_root=memory_root, state_root=memory_root, sync=sync)
+
+
+def _check_codex_thread_cleanup(
+    checks: list[DoctorCheck],
+    configs: dict[str, RuntimeConfig],
+) -> None:
+    config = next(
+        (
+            configs[role]
+            for role in sorted(configs)
+            if configs[role].agent_cli is not None and configs[role].agent_cli.provider == "codex"
+        ),
+        None,
+    )
+    if config is None:
+        return
+
+    store = ProviderThreadStore(config.memory_root)
+    owned = store.scan("codex").records
+    if not owned:
+        checks.append(DoctorCheck("codex thread cleanup", False, "no owned Codex thread was created"))
+        return
+
+    thread_ids = {record.provider_session_id for record in owned}
+    cleanup_at = datetime.now(UTC) + CODEX_THREAD_RETENTION + timedelta(seconds=1)
+    try:
+        result = AgentCliThreadCleanup(config.memory_root, now=lambda: cleanup_at).run()
+        remaining = [thread_id for thread_id in thread_ids if store.load("codex", thread_id) is not None]
+        if result.deleted != len(thread_ids) or remaining:
+            raise RuntimeError(
+                "owned Codex threads were not fully deleted "
+                f"(expected={len(thread_ids)}, deleted={result.deleted}, "
+                f"remaining={len(remaining)}, pending={result.pending}, errors={len(result.errors)})"
+            )
+    except Exception as exc:
+        checks.append(DoctorCheck("codex thread cleanup", False, _exception_detail(exc)))
+        return
+    checks.append(DoctorCheck("codex thread cleanup", True, f"deleted {len(thread_ids)} owned thread(s)"))
 
 
 def _check_first_provider_calls(
