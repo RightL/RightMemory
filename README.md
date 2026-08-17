@@ -693,11 +693,15 @@ A minimal Codex setup:
 provider = "codex"
 
 [retrieve.agent_cli]
-model = "gpt-5"
+model = "gpt-5.6-luna"
+reasoning_effort = "high"
 
 [update.agent_cli]
-model = "gpt-5"
+model = "gpt-5.6-sol"
+reasoning_effort = "xhigh"
 ```
+
+`reasoning_effort` is an optional Codex-only role setting. RightMemory passes it as an invocation-specific `model_reasoning_effort` override, so roles can use different effort levels without changing the user's global Codex config. Accepted values are `minimal`, `low`, `medium`, `high`, and `xhigh`.
 
 Add a role-specific table only when a role should use a different model or provider:
 

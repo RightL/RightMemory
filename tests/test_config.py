@@ -1,6 +1,7 @@
 import tempfile
 import types
 import json
+import os
 import subprocess
 import tomllib
 import unittest
@@ -163,6 +164,7 @@ class ConfigTests(unittest.TestCase):
 
             [retrieve.agent_cli]
             model = "gpt-5"
+            reasoning_effort = "high"
             """
         )
 
@@ -172,7 +174,48 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.role, "retrieve")
         self.assertIsNone(config.model_id)
         self.assertEqual(config.runtime_mode, "cli-agent")
-        self.assertEqual(config.agent_cli, AgentCliConfig(provider="codex", model="gpt-5"))
+        self.assertEqual(
+            config.agent_cli,
+            AgentCliConfig(provider="codex", model="gpt-5", reasoning_effort="high"),
+        )
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_agent_cli_rejects_invalid_reasoning_effort(self):
+        config_path = self._write_config(
+            """
+            [agent_cli]
+            provider = "codex"
+
+            [retrieve.agent_cli]
+            model = "gpt-5"
+            reasoning_effort = "extreme"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_config("retrieve")
+
+        self.assertIn("[retrieve.agent_cli].reasoning_effort must be one of", str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_agent_cli_rejects_reasoning_effort_for_claude(self):
+        config_path = self._write_config(
+            """
+            [agent_cli]
+            provider = "claude"
+
+            [retrieve.agent_cli]
+            model = "sonnet"
+            reasoning_effort = "high"
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
+            with self.assertRaises(ValueError) as caught:
+                load_config("retrieve")
+
+        self.assertIn("requires provider = \"codex\"", str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_agent_cli_role_provider_override(self):
@@ -1300,6 +1343,48 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result, "reply 1")
         history_path = main_root / ".runtime" / "sessions" / "update" / "agent-session.json"
         self.assertEqual(json.loads(history_path.read_text(encoding="utf-8")), ["message 1"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows path-length regression")
+    def test_cli_agent_update_turn_supports_doctor_length_memory_root(self):
+        base = Path(self.tempdir.name)
+        padding_length = 66 - len(str(base)) - 1
+        self.assertGreater(padding_length, 0)
+        root = base / ("p" * padding_length)
+        root.mkdir()
+        self._git(root, "init")
+        self._git(root, "config", "user.email", "test@example.com")
+        self._git(root, "config", "user.name", "Test User")
+        (root / "MEMORY.md").write_text(
+            "# Domain {#domain}\n\n- `one` initial -> []\n",
+            encoding="utf-8",
+        )
+        (root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+        self._git(root, "add", "MEMORY.md", "PURSUITS.md")
+        self._git(root, "commit", "-m", "initial memory")
+        config = RuntimeConfig(
+            role="update",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=root,
+            debug_trace=True,
+        )
+        provider_output = (
+            '{"type":"thread.started","thread_id":"thread-1"}\n'
+            '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n'
+        )
+
+        with (
+            patch("rightmemory.agent_cli.prepare_command", side_effect=lambda command: list(command)),
+            patch("rightmemory.agent_cli._run_cli", return_value=provider_output),
+        ):
+            runtime = RightMemoryRuntime(config)
+            try:
+                result = runtime.run_session_turn("doctor-12345678-first-update", "connectivity check")
+            finally:
+                runtime.cleanup()
+
+        self.assertEqual(result, "done")
+        self.assertEqual(len(str(root)), 66)
 
     def test_isolated_write_turn_does_not_hold_main_lock_around_model(self):
         events = []

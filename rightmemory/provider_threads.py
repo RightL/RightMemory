@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .config import RUNTIME_ROLES
 from .session import (
@@ -64,7 +65,7 @@ class ProviderThreadStore:
     def path(self, provider: str, provider_session_id: str) -> Path:
         provider = _provider_name(provider)
         thread_id = _required_string(provider_session_id, "provider_session_id")
-        key = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()
+        key = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:32]
         return self.provider_root(provider) / f"{key}.json"
 
     def load(self, provider: str, provider_session_id: str) -> ProviderThreadRecord | None:
@@ -81,7 +82,7 @@ class ProviderThreadStore:
         _ensure_runtime_gitignore(self.runtime_root)
         path = self.path(record.provider, record.provider_session_id)
         _ensure_durable_directory(path.parent)
-        tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp_path = path.parent / f".{os.getpid()}.{uuid4().hex}.tmp"
         content = json.dumps(asdict(record), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         try:
             with tmp_path.open("w", encoding="utf-8") as handle:

@@ -433,6 +433,7 @@ def _role_settings(role: str, memory_root: Path) -> dict[str, Any]:
             "mode": "cli-agent",
             "provider": config.agent_cli.provider if config.agent_cli else None,
             "model": config.agent_cli.model if config.agent_cli else None,
+            "reasoning_effort": config.agent_cli.reasoning_effort if config.agent_cli else None,
         }
     return {
         "role": role,

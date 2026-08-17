@@ -94,7 +94,11 @@ class WebStudioReadApiTests(unittest.TestCase):
 
     def test_settings_summary_reports_runtime_without_secrets(self):
         (self.root / "rightmemory.toml").write_text(
-            "[agent_cli]\nprovider = \"codex\"\n\n[sync]\nenabled = true\n",
+            (
+                "[agent_cli]\nprovider = \"codex\"\n\n"
+                "[retrieve.agent_cli]\nmodel = \"gpt-5.6-luna\"\nreasoning_effort = \"high\"\n\n"
+                "[sync]\nenabled = true\n"
+            ),
             encoding="utf-8",
         )
 
@@ -109,6 +113,8 @@ class WebStudioReadApiTests(unittest.TestCase):
         retrieve = next(role for role in data["roles"] if role["role"] == "retrieve")
         self.assertTrue(retrieve["ok"])
         self.assertEqual(retrieve["executor"]["mode"], "cli-agent")
+        self.assertEqual(retrieve["executor"]["model"], "gpt-5.6-luna")
+        self.assertEqual(retrieve["executor"]["reasoning_effort"], "high")
         self.assertNotIn("secret-token", response.text)
 
 
