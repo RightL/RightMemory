@@ -18,6 +18,29 @@ Modern coding agents are strong inside a single conversation, then strangely for
 - **Clear ownership:** retrieval, unified updates, transcript-review extraction, sync repair, consolidation, and reflection run through explicit role boundaries instead of letting the main agent half-edit RightMemory while doing unrelated work.
 - **Vendor-neutral command surface:** Codex CLI and Claude Code CLI have built-in delegated execution today; Gemini CLI-style workflows and other command-capable agents can use the same `rightmemory` CLI or JSON-over-stdio daemon surface.
 
+## The RightMemory Semantic Model
+
+RightMemory is not only a place to store and retrieve context. Its semantic model defines what deserves preservation, where it belongs, how each kind of state evolves, and which roles may change it.
+
+| Module | What it preserves | What it is not |
+| --- | --- | --- |
+| **Memory** | Durable context that should remain useful beyond the current task or session. | A transcript, task log, or record of everything that happened. |
+| **Pursuit** | Live or deliberately parked intent, its hierarchy, and the context needed to understand its current direction. | A backlog, work log, or detailed execution record. |
+| **Agent Corrections** | Bounded, reusable cases in which the user redirected prior agent work. | A collection of every correction or a substitute for general behavior guidance. |
+
+Memory and Pursuit form one addressable graph organized as two Markdown document trees. Agent Corrections remains a bounded, non-graph case library.
+
+### What Belongs Where?
+
+- Use **Memory** when durable context can materially improve future action, judgment, interpretation, or retrieval.
+- Use **Pursuit** when the intent itself should remain active or deliberately parked after the current update.
+- Use **Agent Corrections** when a concrete user redirection forms a reusable case whose contrast would lose value if generalized away.
+- Store nothing when the evidence is transient, duplicated, insufficiently settled, or better preserved in project artifacts.
+
+The updater may change any combination of the three modules—or decide that the submitted evidence should not be stored at all.
+
+Canonical definitions and rules: [Memory Rules](rightmemory/reference/MEMORY_RULES.md), [Pursuit Rules](rightmemory/reference/PURSUIT_RULES.md), [Agent Corrections Rules](rightmemory/reference/AGENT_CORRECTION_MEMORY_RULES.md), and the [RightMemory Schema](rightmemory/reference/rightmemory-schema.md).
+
 ## Who It Is For
 
 RightMemory is aimed at developers who spend serious time with coding agents and want durable context plus live continuity across new sessions, devices, and agent clients. It is especially useful when agents need to remember decisions and preferences, resume active commitments, or inspect the evidence behind past updates.
@@ -216,16 +239,16 @@ RightMemory is not trying to replace notes, search, or embeddings. It focuses on
 | Agent chat history | Recent session continuity | Durable project memory that survives new sessions, devices, and agent clients |
 | MCP memory adapters | Tool integration | A file schema and command runtime that can be wrapped by adapters later |
 
-## RightMemory Model
+## Document Model And Reference
 
-RightMemory has three semantic modules. Two of them form one graph organized into ordinary Markdown document trees:
+Memory and Pursuit are represented as ordinary Markdown document trees in one graph:
 
 - `MEMORY.md` and `MEMORY_<id>.md` hold durable knowledge, context, preferences, decisions, constraints, and reusable guidance.
 - `PURSUITS.md` and `PURSUIT_<id>.md` hold live intent, Focus, current state, and next movements that should still shape future action.
 
-The third module, Agent Corrections, is a bounded non-graph library of reusable cases in which a user redirected prior agent work. Its two fixed files keep concrete Expression and Substance contrasts that would lose value if reduced to a generic rule.
+Agent Corrections uses two fixed, non-graph files for concrete Expression and Substance cases.
 
-All addressable headings and nodes share one globally unique id namespace, and typed edges may cross between Memory and Pursuit. The trees differ by lifecycle, not graph membership. The package-owned [Memory rules](rightmemory/reference/MEMORY_RULES.md), [Pursuit rules](rightmemory/reference/PURSUIT_RULES.md), and [Agent Corrections rules](rightmemory/reference/AGENT_CORRECTION_MEMORY_RULES.md) define admission and maintenance judgment for the three modules.
+All addressable headings and nodes share one globally unique id namespace, and typed edges may cross between Memory and Pursuit. For canonical semantics and validity, use the rules linked in [The RightMemory Semantic Model](#the-rightmemory-semantic-model); this section focuses on the Markdown representation.
 
 RightMemory parses this syntax once per operation into one canonical in-memory document index. Validation, structured retrieval, graph-aware tools, sync validation, and shared-view extraction all use that index for ids, hierarchy, F# expansion, backing references, source spans, and diagnostics. The index is rebuilt from the authoritative Markdown rather than persisted as a second database.
 
