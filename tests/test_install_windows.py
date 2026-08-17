@@ -75,7 +75,7 @@ class WindowsInstallScriptTests(unittest.TestCase):
         self.assertIn('set "PYTHONUTF8=1"', wrapper_text)
         self.assertIn('set "RIGHTMEMORY_ROOT=', wrapper_text)
         self.assertIn(str(memory_root), wrapper_text)
-        self.assertIn(' -m rightmemory.cli %*', wrapper_text)
+        self.assertIn(' -m rightmemory.entrypoint %*', wrapper_text)
         self.assertFalse(leaked_requirement_file)
 
     def test_windows_installer_bootstraps_both_modes_with_tracked_gitignore(self):
