@@ -39,7 +39,8 @@ DEFAULT_RETRIEVE_MAX_OUTPUT_CHARS = 100_000
 DEFAULT_REVIEW_IDLE_SECONDS = 6 * 60 * 60
 DEFAULT_REVIEW_SINCE_DAYS = 3
 DEFAULT_REVIEW_BATCH_SIZE = 3
-DEFAULT_UPDATE_TARGET_BATCH_CANDIDATES = 15
+DEFAULT_UPDATE_TRIGGER_CANDIDATES = 15
+DEFAULT_UPDATE_TARGET_BATCH_CANDIDATES = 30
 DEFAULT_UPDATE_MAX_WAIT_SECONDS = 24 * 60 * 60
 DEFAULT_SYNC_STALE_PULL_HOURS = 24
 DEFAULT_PRUNER_GENERATION_COMMITS = 70
@@ -92,6 +93,7 @@ class ReviewConfig:
 @dataclass(frozen=True)
 class AsyncUpdateConfig:
     memory_root: Path = MEMORY_ROOT
+    trigger_candidates: int = DEFAULT_UPDATE_TRIGGER_CANDIDATES
     target_batch_candidates: int = DEFAULT_UPDATE_TARGET_BATCH_CANDIDATES
     max_wait_seconds: int = DEFAULT_UPDATE_MAX_WAIT_SECONDS
 
@@ -275,22 +277,40 @@ def load_async_update_config(memory_root: Path | None = None) -> AsyncUpdateConf
         async_section = {}
     if not isinstance(async_section, dict):
         raise ValueError("[update.async] must be a TOML table")
-    _reject_unknown_keys(async_section, {"target_batch_candidates", "max_wait_seconds"}, "[update.async]")
+    _reject_unknown_keys(
+        async_section,
+        {"trigger_candidates", "target_batch_candidates", "max_wait_seconds"},
+        "[update.async]",
+    )
 
+    trigger_candidates = _positive_integer(
+        async_section,
+        "trigger_candidates",
+        DEFAULT_UPDATE_TRIGGER_CANDIDATES,
+        "[update.async]",
+    )
+    target_batch_candidates = _positive_integer(
+        async_section,
+        "target_batch_candidates",
+        DEFAULT_UPDATE_TARGET_BATCH_CANDIDATES,
+        "[update.async]",
+    )
+    if target_batch_candidates < trigger_candidates:
+        raise ValueError(
+            "[update.async].target_batch_candidates must be greater than or equal to "
+            "[update.async].trigger_candidates"
+        )
+    max_wait_seconds = _positive_integer(
+        async_section,
+        "max_wait_seconds",
+        DEFAULT_UPDATE_MAX_WAIT_SECONDS,
+        "[update.async]",
+    )
     return AsyncUpdateConfig(
         memory_root=root,
-        target_batch_candidates=_positive_integer(
-            async_section,
-            "target_batch_candidates",
-            DEFAULT_UPDATE_TARGET_BATCH_CANDIDATES,
-            "[update.async]",
-        ),
-        max_wait_seconds=_positive_integer(
-            async_section,
-            "max_wait_seconds",
-            DEFAULT_UPDATE_MAX_WAIT_SECONDS,
-            "[update.async]",
-        ),
+        trigger_candidates=trigger_candidates,
+        target_batch_candidates=target_batch_candidates,
+        max_wait_seconds=max_wait_seconds,
     )
 
 
