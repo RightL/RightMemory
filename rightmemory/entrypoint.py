@@ -13,6 +13,19 @@ from .profiles import ProfileError, resolve_memory_root
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     profile_name, remaining = _parse_global_args(args)
+    if remaining[:1] == ["mcp"]:
+        try:
+            active = resolve_memory_root(
+                profile_name=profile_name,
+                cwd=Path.cwd(),
+                default_root=default_memory_root(),
+            )
+            from .mcp import mcp_main
+
+            return mcp_main(active.memory_root, remaining[1:])
+        except (ValueError, ProfileError, FileNotFoundError, RuntimeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     if remaining[:1] == ["guidance"]:
         try:
             active = resolve_memory_root(
