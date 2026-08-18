@@ -169,6 +169,7 @@ class GitUpdateQueueCoordinator:
     def claim_next(
         self,
         *,
+        trigger_candidates: int,
         target_batch_candidates: int,
         max_wait_seconds: int,
         now: datetime | None = None,
@@ -215,6 +216,7 @@ class GitUpdateQueueCoordinator:
                     )
                 candidates, deadline = _select_candidates(
                     snapshot,
+                    trigger_candidates=trigger_candidates,
                     target_batch_candidates=target_batch_candidates,
                     max_wait_seconds=max_wait_seconds,
                     now=now,
@@ -1107,6 +1109,7 @@ class GitUpdateQueueCoordinator:
 def _select_candidates(
     snapshot: UpdateQueueSnapshot,
     *,
+    trigger_candidates: int,
     target_batch_candidates: int,
     max_wait_seconds: int,
     now: datetime,
@@ -1140,23 +1143,26 @@ def _select_candidates(
         if candidate.session_id not in recovered_sessions:
             sessions.setdefault(candidate.session_id, []).append(candidate)
 
-    eligible: list[tuple[datetime, str, tuple[UpdateCandidate, ...]]] = []
+    waiting: list[tuple[datetime, str, tuple[UpdateCandidate, ...]]] = []
     for session_id, raw_candidates in sessions.items():
         candidates = tuple(sorted(raw_candidates, key=lambda item: (item.submitted_at, item.uid)))
         ready_at = max(_parse_time(item.submitted_at) for item in candidates) + timedelta(
             seconds=UPDATE_DEBOUNCE_SECONDS
         )
-        if ready_at <= now or len(candidates) >= target_batch_candidates:
-            eligible.append((ready_at, session_id, candidates))
-        else:
+        waiting.append((ready_at, session_id, candidates))
+        if ready_at > now:
             deadlines.append(ready_at)
 
+    trigger_ready = sum(len(item[2]) for item in waiting) >= trigger_candidates
+    eligible = waiting if trigger_ready else [item for item in waiting if item[0] <= now]
     eligible.sort(key=lambda item: (item[0], item[1]))
     selected: list[UpdateCandidate] = []
     for _ready_at, _session_id, candidates in eligible:
         selected.extend(candidates)
         if len(selected) >= target_batch_candidates:
             return tuple(selected), None
+    if trigger_ready:
+        return tuple(selected), None
     if not eligible:
         return (), min(deadlines) if deadlines else None
     fallback = eligible[0][0] + timedelta(seconds=max_wait_seconds)

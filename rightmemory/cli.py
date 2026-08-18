@@ -2285,6 +2285,7 @@ def _async_worker(memory_root, role: str) -> int:
             if should_stop():
                 return True
             local_ready, local_deadline = store.local_work_schedule(
+                trigger_candidates=async_update_config.trigger_candidates,
                 target_batch_candidates=async_update_config.target_batch_candidates,
                 max_wait_seconds=async_update_config.max_wait_seconds,
             )
@@ -2314,6 +2315,7 @@ def _async_worker(memory_root, role: str) -> int:
                     store.acknowledge_synchronized(settled)
                     coordinator.clear_local_candidates(publication.settled_uids)
                 claim_result = coordinator.claim_next(
+                    trigger_candidates=async_update_config.trigger_candidates,
                     target_batch_candidates=async_update_config.target_batch_candidates,
                     max_wait_seconds=async_update_config.max_wait_seconds,
                 )
@@ -2339,6 +2341,7 @@ def _async_worker(memory_root, role: str) -> int:
                         if yield_to_local_or_wait():
                             return True
                     elif store.local_work_schedule(
+                        trigger_candidates=async_update_config.trigger_candidates,
                         target_batch_candidates=async_update_config.target_batch_candidates,
                         max_wait_seconds=async_update_config.max_wait_seconds,
                     )[0]:
@@ -2375,6 +2378,7 @@ def _async_worker(memory_root, role: str) -> int:
 
     result = store.run_pending_batches(
         run_batch,
+        trigger_candidates=async_update_config.trigger_candidates,
         target_batch_candidates=async_update_config.target_batch_candidates,
         max_wait_seconds=async_update_config.max_wait_seconds,
         before_batches=run_synchronized,

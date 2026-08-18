@@ -577,7 +577,8 @@ class ConfigTests(unittest.TestCase):
             config = load_async_update_config()
 
         self.assertEqual(config.memory_root, Path("/home/example/.rightmemory"))
-        self.assertEqual(config.target_batch_candidates, 15)
+        self.assertEqual(config.trigger_candidates, 15)
+        self.assertEqual(config.target_batch_candidates, 30)
         self.assertEqual(config.max_wait_seconds, 24 * 60 * 60)
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
@@ -588,6 +589,7 @@ class ConfigTests(unittest.TestCase):
             model_id = "openai/update"
 
             [update.async]
+            trigger_candidates = 18
             target_batch_candidates = 22
             max_wait_seconds = 7200
             """
@@ -597,6 +599,7 @@ class ConfigTests(unittest.TestCase):
             async_config = load_async_update_config()
             runtime_config = load_config("update")
 
+        self.assertEqual(async_config.trigger_candidates, 18)
         self.assertEqual(async_config.target_batch_candidates, 22)
         self.assertEqual(async_config.max_wait_seconds, 7200)
         self.assertEqual(runtime_config.model_id, "openai/update")
@@ -604,6 +607,8 @@ class ConfigTests(unittest.TestCase):
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_async_update_config_rejects_invalid_values(self):
         cases = [
+            ("trigger_candidates = 0", "[update.async].trigger_candidates must be a positive integer"),
+            ("trigger_candidates = true", "[update.async].trigger_candidates must be a positive integer"),
             ("target_batch_candidates = 0", "[update.async].target_batch_candidates must be a positive integer"),
             ("target_batch_candidates = true", "[update.async].target_batch_candidates must be a positive integer"),
             ("max_wait_seconds = -1", "[update.async].max_wait_seconds must be a positive integer"),
@@ -623,6 +628,26 @@ class ConfigTests(unittest.TestCase):
                         load_async_update_config()
 
                 self.assertIn(message, str(caught.exception))
+
+    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
+    def test_async_update_config_rejects_target_below_trigger(self):
+        config_path = self._write_config(
+            """
+            [update.async]
+            trigger_candidates = 15
+            target_batch_candidates = 14
+            """
+        )
+
+        with patch("rightmemory.config.CONFIG_PATH", config_path), patch(
+            "pathlib.Path.exists",
+            return_value=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "target_batch_candidates must be greater than or equal to",
+            ):
+                load_async_update_config()
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_async_update_config_rejects_unknown_key(self):

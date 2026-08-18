@@ -86,6 +86,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
             result = store.run_pending_batches(
                 Mock(side_effect=AssertionError("no batch should run")),
+                trigger_candidates=15,
                 target_batch_candidates=15,
                 max_wait_seconds=86400,
                 before_batches=before_batches,
@@ -321,6 +322,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
                 store.submit("agent-1", "first", candidate_uid=candidate_uid)
             store.run_pending_batches(
                 lambda _session_id, _message: "updated",
+                trigger_candidates=1,
                 target_batch_candidates=1,
                 max_wait_seconds=0,
             )
@@ -653,6 +655,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
             result = store.run_pending_batches(
                 run_message,
+                trigger_candidates=15,
                 target_batch_candidates=15,
                 max_wait_seconds=0,
                 sleep_until=finish_wait,
@@ -678,7 +681,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             self.assertIsNone(UpdateQueueStore(root).read_outbox(job.candidate_uid))
             recovered = store.read("agent-1")
             restored = UpdateQueueStore(root).read_outbox(job.candidate_uid)
-            batch, _deadline = store._next_batch(1, 0)
+            batch, _deadline = store._next_batch(1, 1, 0)
 
         self.assertEqual(recovered.pending, [job])
         self.assertEqual(restored, _candidate_from_job("agent-1", job))
@@ -777,6 +780,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
                 result = store.run_pending_batches(
                     callback,
+                    trigger_candidates=1,
                     target_batch_candidates=1,
                     max_wait_seconds=0,
                 )
@@ -827,6 +831,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with patch.object(store, "_start_cross_session_batch", side_effect=start_and_complete):
                 result = store.run_pending_batches(
                     callback,
+                    trigger_candidates=1,
                     target_batch_candidates=1,
                     max_wait_seconds=0,
                 )
@@ -928,6 +933,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
             result = store.run_pending_batches(
                 lambda batch_id, message: calls.append((batch_id, message)) or "retried output",
+                trigger_candidates=15,
                 target_batch_candidates=15,
                 max_wait_seconds=86400,
             )
@@ -968,7 +974,11 @@ class AsyncUpdateStateTests(unittest.TestCase):
                 )
             store._reserve_cross_session_batch(batch, operation_id)
 
-            selected, deadline = store._next_batch(target_batch_candidates=15, max_wait_seconds=86400)
+            selected, deadline = store._next_batch(
+                trigger_candidates=15,
+                target_batch_candidates=15,
+                max_wait_seconds=86400,
+            )
 
         self.assertIsNone(selected)
         self.assertEqual(deadline, _dt("2099-01-01T00:00:00+00:00"))
@@ -1013,6 +1023,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "simulated crash"):
                     store.run_pending_batches(
                         lambda _batch_id, _message: "must not run",
+                        trigger_candidates=2,
                         target_batch_candidates=2,
                         max_wait_seconds=0,
                     )
@@ -1045,6 +1056,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with self.assertRaises(StopAfterRecovery):
                 store.run_pending_batches(
                     run_message,
+                    trigger_candidates=2,
                     target_batch_candidates=2,
                     max_wait_seconds=0,
                     sleep_until=stop_after_recovery,
@@ -1106,6 +1118,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
             result = store.run_pending_batches(
                 run_message,
+                trigger_candidates=2,
                 target_batch_candidates=2,
                 max_wait_seconds=0,
             )
@@ -1532,6 +1545,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             ):
                 result = store.run_pending_batches(
                     lambda operation_id, message: calls.append((operation_id, message)) or "processed",
+                    trigger_candidates=2,
                     target_batch_candidates=2,
                     max_wait_seconds=0,
                 )
@@ -1570,7 +1584,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "candidate id must be a positive integer"):
                 store.cancel_pending("agent-1", "1")
 
-    def test_global_worker_batches_multiple_eligible_sessions_by_candidate_count(self):
+    def test_global_worker_uses_aggregate_trigger_before_quiet_period(self):
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
@@ -1582,7 +1596,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
                     role="update",
                     phase="waiting",
                     started_at="2026-05-15T00:00:00+00:00",
-                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    next_flush_at="2026-05-15T01:00:00+00:00",
                     pending=[_job(1, "a1"), _job(2, "a2")],
                     next_id=3,
                 ),
@@ -1595,18 +1609,27 @@ class AsyncUpdateStateTests(unittest.TestCase):
                     role="update",
                     phase="waiting",
                     started_at="2026-05-15T00:00:00+00:00",
-                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    next_flush_at="2026-05-15T01:00:00+00:00",
                     pending=[_job(1, "b1")],
                     next_id=2,
                 ),
             )
 
-            result = store.run_pending_batches(
-                lambda batch_session_id, message: calls.append((batch_session_id, message)) or "ok",
-                target_batch_candidates=3,
-                max_wait_seconds=86400,
-                on_batch_success=calls.append,
-            )
+            def fail_sleep(deadline):
+                raise AssertionError(f"aggregate trigger should not sleep until {deadline}")
+
+            with patch(
+                "rightmemory.async_update._now_dt",
+                return_value=_dt("2026-05-15T00:00:00+00:00"),
+            ):
+                result = store.run_pending_batches(
+                    lambda batch_session_id, message: calls.append((batch_session_id, message)) or "ok",
+                    trigger_candidates=3,
+                    target_batch_candidates=5,
+                    max_wait_seconds=86400,
+                    sleep_until=fail_sleep,
+                    on_batch_success=calls.append,
+                )
             first = store.read("agent-1")
             second = store.read("agent-2")
 
@@ -1649,16 +1672,30 @@ class AsyncUpdateStateTests(unittest.TestCase):
                 ),
             )
 
+            store._write(
+                "agent-3",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-3",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at="2000-01-01T00:00:00+00:00",
+                    pending=[_job(1, "c1"), _job(2, "c2")],
+                    next_id=3,
+                ),
+            )
+
             result = store.run_pending_batches(
                 lambda batch_session_id, message: calls.append(message) or "ok",
-                target_batch_candidates=3,
+                trigger_candidates=3,
+                target_batch_candidates=5,
                 max_wait_seconds=86400,
             )
 
-        self.assertEqual(result.processed, 4)
+        self.assertEqual(result.processed, 6)
         self.assertEqual(len(calls), 1)
 
-    def test_single_session_reaching_target_runs_before_quiet_period(self):
+    def test_single_session_reaching_trigger_runs_before_quiet_period(self):
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
@@ -1681,7 +1718,8 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T00:00:00+00:00")):
                 result = store.run_pending_batches(
                     lambda batch_session_id, message: calls.append(message) or "ok",
-                    target_batch_candidates=3,
+                    trigger_candidates=3,
+                    target_batch_candidates=5,
                     max_wait_seconds=86400,
                     sleep_until=fail_sleep,
                 )
@@ -1690,7 +1728,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
         self.assertEqual(result.processed, 3)
         self.assertEqual(len(calls), 1)
 
-    def test_single_session_below_target_is_not_eligible_before_quiet_period(self):
+    def test_single_session_below_trigger_is_not_eligible_before_quiet_period(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
             store._write(
@@ -1708,14 +1746,15 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
             with patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T00:00:00+00:00")):
                 batch, deadline = store._next_batch(
-                    target_batch_candidates=3,
+                    trigger_candidates=3,
+                    target_batch_candidates=5,
                     max_wait_seconds=86400,
                 )
 
         self.assertIsNone(batch)
         self.assertEqual(deadline, _dt("2026-05-15T01:00:00+00:00"))
 
-    def test_global_worker_waits_below_target_until_max_wait_fallback(self):
+    def test_global_worker_waits_below_trigger_until_max_wait_fallback(self):
         slept = []
         calls = []
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1741,7 +1780,8 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with patch("rightmemory.async_update._now_dt", side_effect=fake_now):
                 result = store.run_pending_batches(
                     lambda batch_session_id, message: calls.append(message) or "ok",
-                    target_batch_candidates=15,
+                    trigger_candidates=15,
+                    target_batch_candidates=30,
                     max_wait_seconds=86400,
                     sleep_until=slept.append,
                 )
@@ -1756,7 +1796,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             store = AsyncUpdateStore(Path(tempdir), "update")
 
-            def fake_next_batch(target_batch_candidates, max_wait_seconds):
+            def fake_next_batch(trigger_candidates, target_batch_candidates, max_wait_seconds):
                 nonlocal calls
                 calls += 1
                 if calls == 1:
@@ -1767,6 +1807,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with patch.object(store, "_next_batch", side_effect=fake_next_batch):
                 result = store.run_pending_batches(
                     Mock(side_effect=AssertionError("no batch should run")),
+                    trigger_candidates=15,
                     target_batch_candidates=15,
                     max_wait_seconds=86400,
                 )
@@ -1798,6 +1839,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
                 try:
                     result = store.run_pending_batches(
                         lambda batch_session_id, message: calls.append((batch_session_id, message)) or "processed",
+                        trigger_candidates=15,
                         target_batch_candidates=15,
                         max_wait_seconds=86400,
                     )
@@ -1837,6 +1879,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
             result = store.run_pending_batches(
                 lambda batch_session_id, message: calls.append((batch_session_id, message)) or "ok",
+                trigger_candidates=15,
                 target_batch_candidates=15,
                 max_wait_seconds=86400,
                 sleep_until=slept.append,
@@ -1876,6 +1919,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with patch("rightmemory.async_update._now_dt", side_effect=fake_now):
                 result = store.run_pending_batches(
                     lambda batch_session_id, message: calls.append(message) or "ok",
+                    trigger_candidates=15,
                     target_batch_candidates=15,
                     max_wait_seconds=86400,
                     sleep_until=slept.append,
@@ -1922,6 +1966,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T00:00:00+00:00")):
                 result = store.run_pending_batches(
                     lambda batch_session_id, message: calls.append(message) or "ok",
+                    trigger_candidates=2,
                     target_batch_candidates=2,
                     max_wait_seconds=86400,
                     sleep_until=fail_sleep,
@@ -1963,6 +2008,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with patch("rightmemory.async_update._now_dt", side_effect=fake_now):
                 result = store.run_pending_batches(
                     run_message,
+                    trigger_candidates=2,
                     target_batch_candidates=2,
                     max_wait_seconds=86400,
                     sleep_until=fake_sleep,
@@ -2007,6 +2053,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
             with patch("rightmemory.async_update._now_dt", return_value=_dt("2026-05-15T02:00:00+00:00")):
                 result = store.run_pending_batches(
                     Mock(side_effect=RuntimeError("second failure")),
+                    trigger_candidates=15,
                     target_batch_candidates=15,
                     max_wait_seconds=86400,
                 )
@@ -2042,6 +2089,7 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
             result = store.run_pending_batches(
                 lambda batch_session_id, message: calls.append(message) or "ok",
+                trigger_candidates=15,
                 target_batch_candidates=15,
                 max_wait_seconds=86400,
             )

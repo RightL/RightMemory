@@ -326,6 +326,7 @@ class ProfileTests(unittest.TestCase):
                 model = "gpt-5"
 
                 [update.async]
+                trigger_candidates = 5
                 target_batch_candidates = 7
 
                 [dreamer.watch]
@@ -347,6 +348,8 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("[agent_cli]", config_text)
         self.assertIn("[retrieve.agent_cli]", config_text)
         self.assertIn("[update.async]", config_text)
+        self.assertIn("trigger_candidates = 5", config_text)
+        self.assertIn("target_batch_candidates = 7", config_text)
         self.assertIn("[dreamer.watch]", config_text)
         self.assertIn("sources = []", config_text)
         self.assertNotIn("[sync]", config_text)

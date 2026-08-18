@@ -558,11 +558,13 @@ class AsyncUpdateStore:
     def local_work_schedule(
         self,
         *,
+        trigger_candidates: int,
         target_batch_candidates: int,
         max_wait_seconds: int,
     ) -> tuple[bool, datetime | None]:
         """Peek at local-only readiness without reserving or starting a batch."""
         batch, deadline = self._next_batch(
+            trigger_candidates,
             target_batch_candidates,
             max_wait_seconds,
         )
@@ -580,6 +582,7 @@ class AsyncUpdateStore:
         self,
         run_message: Callable[[str, str], str],
         *,
+        trigger_candidates: int,
         target_batch_candidates: int,
         max_wait_seconds: int,
         sleep_until: Callable[[datetime], None] | None = None,
@@ -612,7 +615,11 @@ class AsyncUpdateStore:
                 if should_stop is not None and should_stop():
                     return AsyncUpdateWorkerResult(status="succeeded" if processed else "idle", processed=processed)
                 wake_counter = self._read_wake_counter()
-                batch, deadline = self._next_batch(target_batch_candidates, max_wait_seconds)
+                batch, deadline = self._next_batch(
+                    trigger_candidates,
+                    target_batch_candidates,
+                    max_wait_seconds,
+                )
                 if batch is None:
                     if deadline is None:
                         with self._worker_locked():
@@ -730,6 +737,7 @@ class AsyncUpdateStore:
 
     def _next_batch(
         self,
+        trigger_candidates: int,
         target_batch_candidates: int,
         max_wait_seconds: int,
     ) -> tuple[list[AsyncUpdateSessionBatch] | None, datetime | None]:
@@ -741,7 +749,7 @@ class AsyncUpdateStore:
         recovery: list[AsyncUpdateSessionBatch] = []
         operation_recovery: dict[str, list[AsyncUpdateSessionBatch]] = {}
         blocked_operation_ids: set[str] = set()
-        eligible: list[AsyncUpdateSessionBatch] = []
+        waiting: list[AsyncUpdateSessionBatch] = []
         future_deadlines = list(reservation_deadlines)
         queue_store = UpdateQueueStore(self.memory_root)
 
@@ -791,10 +799,10 @@ class AsyncUpdateStore:
                 if state.status != "running" or state.phase != "waiting":
                     continue
                 ready_at = _required_time(state.next_flush_at, "next_flush_at")
-                pressure_ready = len(state.pending) >= target_batch_candidates
-                if ready_at <= now or pressure_ready:
-                    eligible.append(AsyncUpdateSessionBatch(state.session_id, ready_at, list(state.pending)))
-                else:
+                waiting.append(
+                    AsyncUpdateSessionBatch(state.session_id, ready_at, list(state.pending))
+                )
+                if ready_at > now:
                     future_deadlines.append(ready_at)
 
         ready_operation_groups = [
@@ -811,6 +819,8 @@ class AsyncUpdateStore:
             operation_id = recovery[0].operation_id
             return [item for item in recovery if item.operation_id == operation_id], None
 
+        trigger_ready = sum(len(item.jobs) for item in waiting) >= trigger_candidates
+        eligible = waiting if trigger_ready else [item for item in waiting if item.ready_at <= now]
         eligible.sort(key=lambda item: (item.ready_at, item.session_id))
         if not eligible:
             return None, min(future_deadlines) if future_deadlines else None
@@ -822,6 +832,8 @@ class AsyncUpdateStore:
             total += len(item.jobs)
             if total >= target_batch_candidates:
                 return selected, None
+        if trigger_ready:
+            return selected, None
 
         fallback_at = eligible[0].ready_at + timedelta(seconds=max_wait_seconds)
         if now >= fallback_at:

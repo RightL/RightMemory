@@ -122,7 +122,7 @@ class GitUpdateQueuePublicationTests(GitUpdateQueueTestBase):
         first = self._coordinator(self.first, "1" * 32)
         second = self._coordinator(self.second, "2" * 32)
         first.publish_outbox()
-        claim = first.claim_next(target_batch_candidates=1, max_wait_seconds=0).claim
+        claim = first.claim_next(trigger_candidates=1, target_batch_candidates=1, max_wait_seconds=0).claim
         self.assertIsNotNone(claim)
         later_candidate = self._outbox_candidate(self.second, "b" * 32)
         second.publish_outbox()
@@ -139,6 +139,7 @@ class GitUpdateQueuePublicationTests(GitUpdateQueueTestBase):
         coordinator = self._coordinator(self.first, "1" * 32)
         coordinator.publish_outbox()
         claim = coordinator.claim_next(
+            trigger_candidates=1,
             target_batch_candidates=1,
             max_wait_seconds=0,
         ).claim
@@ -163,6 +164,7 @@ class GitUpdateQueuePublicationTests(GitUpdateQueueTestBase):
         coordinator = self._coordinator(self.first, "1" * 32)
         coordinator.publish_outbox()
         claim = coordinator.claim_next(
+            trigger_candidates=1,
             target_batch_candidates=1,
             max_wait_seconds=0,
         ).claim
@@ -188,6 +190,7 @@ class GitUpdateQueuePublicationTests(GitUpdateQueueTestBase):
         coordinator = self._coordinator(self.first, "1" * 32)
         coordinator.publish_outbox()
         claim = coordinator.claim_next(
+            trigger_candidates=1,
             target_batch_candidates=1,
             max_wait_seconds=0,
         ).claim
