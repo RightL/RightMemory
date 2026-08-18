@@ -7,16 +7,17 @@ import re
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 
-from .async_update import AsyncUpdateStore, _state_from_json
+from .async_update import STATUS_MANUAL_RECOVERY, AsyncUpdateStore, _state_from_json
 from .platform import prepare_command
 from .review import ReviewDeliveryStore
-from .update_queue import validate_update_queue
+from .update_queue import UpdateQueueStore, validate_update_queue
 from .update_record import validate_update_records
 
 
@@ -122,17 +123,19 @@ class Installer:
         self._print_layout()
         self._require_complete_existing_target(target)
 
-        if target.kind == "new":
-            self._bootstrap_state()
-        else:
-            self._preserve_existing_state()
-        (self.memory_root / "insight_logs").mkdir(parents=True, exist_ok=True)
-        self._ensure_memory_git()
-        self._install_runtime()
-        self._run_semantic_upgrades(target)
-        self._install_skills()
-        self._warn_if_command_not_on_path()
-        self._write_install_stamp()
+        with self._async_update_install_boundary() as worker_was_running:
+            if target.kind == "new":
+                self._bootstrap_state()
+            else:
+                self._preserve_existing_state()
+            (self.memory_root / "insight_logs").mkdir(parents=True, exist_ok=True)
+            self._ensure_memory_git()
+            self._install_runtime()
+            self._run_semantic_upgrades(target)
+            self._install_skills()
+            self._warn_if_command_not_on_path()
+            self._write_install_stamp()
+        self._restart_async_update_worker(worker_was_running)
         self._print_next_steps()
 
     def _require_valid_update_queue(self) -> None:
@@ -248,6 +251,47 @@ class Installer:
                 + "\ninstallation made no changes; use the currently installed RightMemory review watcher "
                 "to finish these deliveries, then rerun the installer"
             )
+
+    @contextmanager
+    def _async_update_install_boundary(self):
+        try:
+            with AsyncUpdateStore(self.memory_root, "update").runtime_install_locked() as stopped:
+                if stopped:
+                    print("  [stop]    live Update worker stopped at a safe batch boundary")
+                yield stopped
+        except TimeoutError as exc:
+            raise InstallError(
+                "the live RightMemory Update worker did not reach a safe stop boundary; "
+                "installation made no runtime changes. Wait for its current batch to finish, "
+                "then rerun the installer"
+            ) from exc
+
+    def _restart_async_update_worker(self, worker_was_running: bool) -> None:
+        if not worker_was_running and not self._async_update_work_remains():
+            return
+        if self.runtime_python is None:
+            raise InstallError("installed RightMemory runtime is unavailable for the Update worker")
+        AsyncUpdateStore(self.memory_root, "update").wake_worker(
+            python_executable=self.runtime_python,
+        )
+        print("  [start]   Update worker on the installed runtime")
+
+    def _async_update_work_remains(self) -> bool:
+        async_root = self.memory_root / ".runtime" / "async" / "update"
+        for path in sorted(async_root.glob("*.json")):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            state = _state_from_json(data)
+            if state.current_batch:
+                return True
+            if state.pending and state.status != STATUS_MANUAL_RECOVERY:
+                return True
+        outbox = async_root / "outbox"
+        if outbox.is_dir() and any(path.is_file() for path in outbox.glob("*.json")):
+            return True
+        snapshot = UpdateQueueStore(self.memory_root).snapshot()
+        if snapshot.candidates or snapshot.lease:
+            return True
+        return any(not recovery.manual_recovery for recovery in snapshot.recoveries)
 
     def _print_layout(self) -> None:
         print("Installing RightMemory")

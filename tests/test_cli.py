@@ -259,6 +259,7 @@ class CliEntrypointTests(unittest.TestCase):
     def test_synchronized_batch_releases_lease_when_local_runtime_cannot_load(self):
         coordinator = Mock()
         claim = SimpleNamespace(lease=SimpleNamespace(token="a" * 32))
+        errors = []
 
         with patch("rightmemory.cli.load_config", side_effect=ValueError("missing model")):
             completed = _run_synchronized_update_batch(
@@ -266,10 +267,12 @@ class CliEntrypointTests(unittest.TestCase):
                 "update",
                 coordinator,
                 claim,
+                on_local_error=errors.append,
             )
 
         self.assertFalse(completed)
         coordinator.release.assert_called_once_with(claim)
+        self.assertEqual(errors, ["ValueError: missing model"])
 
     def test_synchronized_batch_passes_exact_candidates_to_runtime(self):
         candidate = UpdateCandidate(
