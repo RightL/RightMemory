@@ -522,6 +522,11 @@ one implementation. On Windows, CLI-agent mode supports native provider
 executables and standard npm `.cmd` shims that include their matching `.ps1`
 shim.
 
+On reinstall, the shared installer asks a live asynchronous Update worker to
+stop at a batch boundary before replacing runtime files. If the worker cannot
+stop safely, installation refuses before runtime replacement. After a successful
+install, pending work is resumed with the newly installed runtime.
+
 RightMemory can keep the same memory root available across laptops, desktops,
 and agent clients. The current managed sync implementation uses a private Git
 remote underneath; the user-facing feature is multi-device memory continuity.
@@ -634,6 +639,8 @@ measured from the oldest eligible queue's quiet-period deadline.
 `rightmemory status` includes aggregate async update worker and queue state
 without requiring a session id. For one session's detailed pending, running,
 result, or error state, continue to use `rightmemory update pull --session <id>`.
+Local worker startup and configuration errors are retained in the aggregate
+status instead of being hidden behind a synchronized lease release.
 The queue view is labeled current when the checkout matches the last-fetched
 upstream. When Git is behind or diverged, the dashboard warns that local queue
 counts may be incomplete; when Git is ahead, it identifies local queue state

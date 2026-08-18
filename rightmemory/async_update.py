@@ -120,6 +120,7 @@ class AsyncUpdateCancelResult:
 @dataclass(frozen=True)
 class _WorkerSnapshot:
     pid: int | None = None
+    identity: str | None = None
     batch_id: str | None = None
     session_ids: frozenset[str] = frozenset()
     dead_pid: int | None = None
@@ -431,9 +432,128 @@ class AsyncUpdateStore:
                     attempted_at=attempted_at,
                 )
 
-    def wake_worker(self) -> None:
+    def wake_worker(self, *, python_executable: str | Path | None = None) -> None:
         """Wake the shared worker even when this device has no local session state."""
-        self._start_worker_if_needed(None)
+        self._start_worker_if_needed(None, python_executable=python_executable)
+
+    @contextmanager
+    def runtime_install_locked(self, timeout_seconds: float = 45):
+        """Stop the worker and prevent a replacement while runtime files change."""
+        if timeout_seconds < 0:
+            raise ValueError("timeout must not be negative")
+        deadline = time.monotonic() + timeout_seconds
+        stopped = False
+        while True:
+            remaining = max(0.0, deadline - time.monotonic())
+            stopped = self.stop_worker(timeout_seconds=remaining) or stopped
+            with self._worker_locked():
+                if self._worker_snapshot_locked().pid is not None:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"rightmemory {self.role} worker did not stay stopped within "
+                            f"{timeout_seconds:g} seconds"
+                        )
+                    continue
+                yield stopped
+                return
+
+    def stop_worker(self, timeout_seconds: float = 45) -> bool:
+        """Cooperatively stop the shared worker at its next safe batch boundary."""
+        if timeout_seconds < 0:
+            raise ValueError("timeout must not be negative")
+        with self._worker_locked():
+            worker = self._worker_snapshot_locked()
+            if worker.pid is None:
+                self._remove_worker_stop_locked()
+                return False
+            self._write_worker_stop_locked(worker.pid, worker.identity)
+            self._increment_wake_counter_locked()
+
+        deadline = time.monotonic() + timeout_seconds
+        while _is_async_worker_process(worker.pid, self.role, identity=worker.identity):
+            if time.monotonic() >= deadline:
+                with self._worker_locked():
+                    self._remove_worker_stop_locked(worker.pid, worker.identity)
+                raise TimeoutError(
+                    f"rightmemory {self.role} worker pid {worker.pid} did not stop within "
+                    f"{timeout_seconds:g} seconds"
+                )
+            time.sleep(0.1)
+
+        with self._worker_locked():
+            self._remove_worker_stop_locked(worker.pid, worker.identity)
+            state = self._read_worker_locked()
+            if state.get("pid") == worker.pid:
+                self._clear_worker_locked()
+        return True
+
+    def consume_worker_stop_request(self) -> bool:
+        """Consume a stop request addressed to the current worker process."""
+        current_pid = os.getpid()
+        current_identity = process_identity(current_pid)
+        with self._worker_locked():
+            request = self._read_worker_stop_locked()
+            if request is None:
+                return False
+            requested_pid, requested_identity = request
+            if requested_pid == current_pid and (
+                requested_identity is None or requested_identity == current_identity
+            ):
+                self._remove_worker_stop_locked(requested_pid, requested_identity)
+                return True
+            if not _is_async_worker_process(
+                requested_pid,
+                self.role,
+                identity=requested_identity,
+            ):
+                self._remove_worker_stop_locked(requested_pid, requested_identity)
+            return False
+
+    def begin_worker_batch(self, batch_id: str, session_ids: Iterable[str]) -> None:
+        with self._worker_locked():
+            state = self._read_worker_locked()
+            if state.get("pid") != os.getpid():
+                return
+            self._write_worker_locked(
+                status="running",
+                pid=os.getpid(),
+                batch_id=batch_id,
+                session_ids=sorted(set(session_ids)),
+                error=None,
+            )
+
+    def finish_worker_batch(self) -> None:
+        with self._worker_locked():
+            state = self._read_worker_locked()
+            if state.get("pid") != os.getpid():
+                return
+            error = state.get("error")
+            self._write_worker_locked(
+                status="running",
+                pid=os.getpid(),
+                batch_id=None,
+                session_ids=[],
+                error=error if isinstance(error, str) else None,
+            )
+
+    def record_worker_error(self, error: str) -> None:
+        with self._worker_locked():
+            state = self._read_worker_locked()
+            if state.get("pid") != os.getpid():
+                return
+            batch_id = state.get("batch_id")
+            session_ids = state.get("session_ids")
+            self._write_worker_locked(
+                status="running",
+                pid=os.getpid(),
+                batch_id=batch_id if isinstance(batch_id, str) else None,
+                session_ids=(
+                    [item for item in session_ids if isinstance(item, str)]
+                    if isinstance(session_ids, list)
+                    else []
+                ),
+                error=error,
+            )
 
     def local_work_schedule(
         self,
@@ -465,6 +585,7 @@ class AsyncUpdateStore:
         sleep_until: Callable[[datetime], None] | None = None,
         on_batch_success: Callable[[int], None] | None = None,
         before_batches: Callable[[], bool] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> AsyncUpdateWorkerResult:
         leader_handle = self._try_acquire_worker_leader()
         if leader_handle is None:
@@ -484,8 +605,12 @@ class AsyncUpdateStore:
         worker_state_cleared = False
         try:
             while True:
+                if should_stop is not None and should_stop():
+                    return AsyncUpdateWorkerResult(status="succeeded" if processed else "idle", processed=processed)
                 if before_batches is not None and not before_batches():
                     return AsyncUpdateWorkerResult(status="failed", failed=True)
+                if should_stop is not None and should_stop():
+                    return AsyncUpdateWorkerResult(status="succeeded" if processed else "idle", processed=processed)
                 wake_counter = self._read_wake_counter()
                 batch, deadline = self._next_batch(target_batch_candidates, max_wait_seconds)
                 if batch is None:
@@ -1141,9 +1266,9 @@ class AsyncUpdateStore:
                 failed_states.append(self._fail_locked(item.session_id, error))
         return failed_states
 
-    def _worker_command(self) -> list[str]:
+    def _worker_command(self, python_executable: str | Path | None = None) -> list[str]:
         return [
-            sys.executable,
+            str(python_executable or sys.executable),
             "-m",
             "rightmemory.cli",
             self.role,
@@ -1158,6 +1283,9 @@ class AsyncUpdateStore:
 
     def _worker_wake_path(self) -> Path:
         return self.worker_root / "wake.json"
+
+    def _worker_stop_path(self) -> Path:
+        return self.worker_root / "stop.json"
 
     def _worker_leader_lock_path(self) -> Path:
         return self.worker_root / "leader.lock"
@@ -1222,6 +1350,52 @@ class AsyncUpdateStore:
         os.replace(tmp_path, path)
         _fsync_directory(path.parent)
         return counter
+
+    def _read_worker_stop_locked(self) -> tuple[int, str | None] | None:
+        path = self._worker_stop_path()
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or set(data) != {"identity", "pid"}:
+            raise ValueError("async update worker stop state must contain identity and pid")
+        pid = data.get("pid")
+        identity = data.get("identity")
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
+            raise ValueError("async update worker stop state must contain a positive integer pid")
+        if identity is not None and not isinstance(identity, str):
+            raise ValueError("async update worker stop identity must be a string or null")
+        return pid, identity
+
+    def _write_worker_stop_locked(self, pid: int, identity: str | None) -> None:
+        path = self._worker_stop_path()
+        tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        content = json.dumps(
+            {"identity": identity, "pid": pid},
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        _fsync_directory(path.parent)
+
+    def _remove_worker_stop_locked(
+        self,
+        pid: int | None = None,
+        identity: str | None = None,
+    ) -> None:
+        path = self._worker_stop_path()
+        if not path.exists():
+            return
+        if pid is not None:
+            request = self._read_worker_stop_locked()
+            if request != (pid, identity):
+                return
+        path.unlink(missing_ok=True)
+        _fsync_directory(path.parent)
 
     def _write_worker_locked(
         self,
@@ -1289,11 +1463,17 @@ class AsyncUpdateStore:
             session_ids = frozenset(item for item in raw_session_ids if isinstance(item, str))
         return _WorkerSnapshot(
             pid=pid,
+            identity=identity if isinstance(identity, str) else None,
             batch_id=batch_id if isinstance(batch_id, str) else None,
             session_ids=session_ids,
         )
 
-    def _start_worker_if_needed(self, session_id: str | None) -> None:
+    def _start_worker_if_needed(
+        self,
+        session_id: str | None,
+        *,
+        python_executable: str | Path | None = None,
+    ) -> None:
         with self._worker_locked():
             self._increment_wake_counter_locked()
             state = self._read_worker_locked()
@@ -1307,14 +1487,17 @@ class AsyncUpdateStore:
                 return
             if isinstance(pid, int):
                 self._clear_worker_locked()
+            self._remove_worker_stop_locked()
+            env = os.environ.copy()
+            env["RIGHTMEMORY_ROOT"] = str(self.memory_root)
             try:
                 process = subprocess.Popen(
-                    self._worker_command(),
+                    self._worker_command(python_executable),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     cwd=self.memory_root,
-                    env=os.environ.copy(),
+                    env=env,
                     **detached_process_kwargs(),
                 )
             except Exception as exc:

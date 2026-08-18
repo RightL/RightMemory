@@ -2264,6 +2264,13 @@ def _retry(memory_root, role: str) -> int:
 def _async_worker(memory_root, role: str) -> int:
     async_update_config = load_async_update_config(memory_root=memory_root)
     store = AsyncUpdateStore(memory_root, role)
+    stop_requested = False
+
+    def should_stop() -> bool:
+        nonlocal stop_requested
+        if not stop_requested:
+            stop_requested = store.consume_worker_stop_request()
+        return stop_requested
 
     sync_config = load_sync_config(memory_root=memory_root)
     coordinator = GitUpdateQueueCoordinator(sync_config) if sync_config.enabled else None
@@ -2275,6 +2282,8 @@ def _async_worker(memory_root, role: str) -> int:
         if next_attempt_at is not None:
             sync_deadline = min(sync_deadline, next_attempt_at)
         while True:
+            if should_stop():
+                return True
             local_ready, local_deadline = store.local_work_schedule(
                 target_batch_candidates=async_update_config.target_batch_candidates,
                 max_wait_seconds=async_update_config.max_wait_seconds,
@@ -2293,6 +2302,8 @@ def _async_worker(memory_root, role: str) -> int:
         if coordinator is None:
             return True
         while True:
+            if should_stop():
+                return True
             try:
                 _recover_synchronized_update_operations(memory_root, sync_config)
                 publication = coordinator.publish_outbox(
@@ -2307,12 +2318,23 @@ def _async_worker(memory_root, role: str) -> int:
                     max_wait_seconds=async_update_config.max_wait_seconds,
                 )
                 if claim_result.claim is not None:
-                    completed = _run_synchronized_update_batch(
-                        memory_root,
-                        role,
-                        coordinator,
-                        claim_result.claim,
+                    claim = claim_result.claim
+                    store.begin_worker_batch(
+                        claim.batch_id,
+                        (candidate.session_id for candidate in claim.candidates),
                     )
+                    try:
+                        completed = _run_synchronized_update_batch(
+                            memory_root,
+                            role,
+                            coordinator,
+                            claim,
+                            on_local_error=store.record_worker_error,
+                        )
+                    finally:
+                        store.finish_worker_batch()
+                    if should_stop():
+                        return True
                     if not completed:
                         if yield_to_local_or_wait():
                             return True
@@ -2356,6 +2378,7 @@ def _async_worker(memory_root, role: str) -> int:
         target_batch_candidates=async_update_config.target_batch_candidates,
         max_wait_seconds=async_update_config.max_wait_seconds,
         before_batches=run_synchronized,
+        should_stop=should_stop,
     )
     if result.status == "failed":
         return 1
@@ -2367,6 +2390,8 @@ def _run_synchronized_update_batch(
     role: str,
     coordinator: GitUpdateQueueCoordinator,
     claim: ClaimedUpdateBatch,
+    *,
+    on_local_error: Callable[[str], None] | None = None,
 ) -> bool:
     external_finalizer = _queue_external_finalizer(claim.lease.token)
     runtime: RightMemoryRuntime | None = None
@@ -2374,9 +2399,10 @@ def _run_synchronized_update_batch(
         try:
             config = load_config(role, memory_root=memory_root)
             runtime = RightMemoryRuntime(config)
-        except Exception:
+        except Exception as exc:
             # Local configuration must not strand a global lease that another
             # online device may be able to process.
+            _report_synchronized_worker_error(on_local_error, exc)
             coordinator.release(claim)
             return False
         try:
@@ -2403,7 +2429,8 @@ def _run_synchronized_update_batch(
                 external_finalizer=external_finalizer,
                 update_candidates=claim.candidates,
             )
-        except Exception:
+        except Exception as exc:
+            _report_synchronized_worker_error(on_local_error, exc)
             coordinator.fail(claim, reason_code="processing_failed")
             return False
         try:
@@ -2438,6 +2465,19 @@ def _run_synchronized_update_batch(
     finally:
         if runtime is not None:
             runtime.cleanup()
+
+
+def _report_synchronized_worker_error(
+    callback: Callable[[str], None] | None,
+    error: Exception,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(f"{type(error).__name__}: {error}")
+    except Exception:
+        # Diagnostic persistence must never change queue settlement behavior.
+        return
 
 
 def _recover_synchronized_update_operations(memory_root: Path, sync_config: Any) -> int:
