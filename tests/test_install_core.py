@@ -2,11 +2,13 @@ import os
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory import install_core
 from rightmemory.install_core import InstallError, InstallTarget, Installer, _posix_data_home
+from rightmemory.update_queue import UpdateCandidate, UpdateQueueStore
 
 
 REPO_ROOT = Path(install_core.__file__).resolve().parents[1]
@@ -320,6 +322,92 @@ class InstallCoreTests(unittest.TestCase):
             install_skills.assert_not_called()
             write_install_stamp.assert_not_called()
             self.assertFalse((memory_root / ".runtime" / "install.stamp").exists())
+
+    def test_install_quiesces_worker_before_runtime_and_restarts_after_stamp(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            installer = Installer(REPO_ROOT, "cli-agent", root / "memory", [root / "skills"])
+            target = InstallTarget("new", False, (), ())
+            events = []
+
+            @contextmanager
+            def install_boundary():
+                events.append("quiesce")
+                yield True
+
+            with (
+                patch.object(installer, "_inspect_target", return_value=target),
+                patch.object(installer, "_print_layout"),
+                patch.object(
+                    installer,
+                    "_async_update_install_boundary",
+                    side_effect=install_boundary,
+                ),
+                patch.object(installer, "_bootstrap_state"),
+                patch.object(installer, "_ensure_memory_git"),
+                patch.object(
+                    installer,
+                    "_install_runtime",
+                    side_effect=lambda: events.append("install-runtime"),
+                ),
+                patch.object(installer, "_run_semantic_upgrades"),
+                patch.object(installer, "_install_skills"),
+                patch.object(installer, "_warn_if_command_not_on_path"),
+                patch.object(
+                    installer,
+                    "_write_install_stamp",
+                    side_effect=lambda: events.append("stamp"),
+                ),
+                patch.object(
+                    installer,
+                    "_restart_async_update_worker",
+                    side_effect=lambda was_running: events.append(f"restart:{was_running}"),
+                ),
+                patch.object(installer, "_print_next_steps"),
+            ):
+                installer.run()
+
+        self.assertEqual(
+            events,
+            ["quiesce", "install-runtime", "stamp", "restart:True"],
+        )
+
+    def test_install_refuses_before_runtime_change_when_worker_cannot_stop(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            installer = Installer(
+                REPO_ROOT,
+                "cli-agent",
+                Path(tempdir) / "memory",
+                [Path(tempdir) / "skills"],
+            )
+
+            with patch(
+                "rightmemory.install_core.AsyncUpdateStore.runtime_install_locked",
+                side_effect=TimeoutError("busy"),
+            ):
+                with self.assertRaisesRegex(InstallError, "did not reach a safe stop boundary"):
+                    with installer._async_update_install_boundary():
+                        pass
+
+    def test_pending_synchronized_queue_starts_newly_installed_worker(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            candidate = UpdateCandidate(
+                uid="a" * 32,
+                session_id="agent-session",
+                display_id=1,
+                message="pending synchronized evidence",
+                submitted_at="2026-08-18T09:00:00+00:00",
+            )
+            UpdateQueueStore(memory_root).write_candidate(candidate)
+            installer = Installer(REPO_ROOT, "cli-agent", memory_root, [root / "skills"])
+            installer.runtime_python = root / "runtime" / "python"
+
+            with patch("rightmemory.install_core.AsyncUpdateStore.wake_worker") as wake_worker:
+                installer._restart_async_update_worker(False)
+
+        wake_worker.assert_called_once_with(python_executable=installer.runtime_python)
 
 
 if __name__ == "__main__":
