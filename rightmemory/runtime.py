@@ -1967,14 +1967,15 @@ class _IsolatedStateOverlay:
         shutil.rmtree(self.overlay_root, ignore_errors=True)
 
     def promote_if_current(self, operation_id: str, sequence: int) -> bool:
-        history = MessageSessionStore(self.state_root, self.role).paths(self.session_id).history
+        session_store = MessageSessionStore(self.state_root, self.role)
+        history = session_store.paths(self.session_id).history
         watermark = (
             self.state_root
             / ".runtime"
             / "operations"
             / "session-state"
             / self.role
-            / f"{history.stem}.json"
+            / history.relative_to(session_store.root)
         )
         current_key: tuple[int, str] | None = None
         if watermark.exists():
