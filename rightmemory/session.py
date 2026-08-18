@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .platform import lock_file, unlock_file
+
+
+# UUIDs and bounded operation aliases keep their readable legacy names. Longer
+# identities are hashed before semantic-operation state adds another deep prefix.
+_PLAIN_SESSION_ID_LIMIT = 48
+_HASHED_SESSION_DIRECTORY = "hashed"
 
 
 @dataclass(frozen=True)
@@ -21,11 +29,21 @@ class MessageSessionStore:
 
     def paths(self, session_id: str) -> SessionPaths:
         safe_id = _safe_session_id(session_id)
+        session_root = self.root
+        legacy_history = self.root / f"{safe_id}.json"
+        legacy_lock = self.root / f"{safe_id}.lock"
+        if (
+            len(safe_id) > _PLAIN_SESSION_ID_LIMIT
+            and not legacy_history.exists()
+            and not legacy_lock.exists()
+        ):
+            session_root /= _HASHED_SESSION_DIRECTORY
+            safe_id = hashlib.sha256(safe_id.encode("utf-8")).hexdigest()[:32]
         runtime_root = self.root.parent.parent
         return SessionPaths(
             runtime_root=runtime_root,
-            history=self.root / f"{safe_id}.json",
-            lock=self.root / f"{safe_id}.lock",
+            history=session_root / f"{safe_id}.json",
+            lock=session_root / f"{safe_id}.lock",
         )
 
     def locked(self, session_id: str) -> LockedMessageSession:
@@ -112,12 +130,16 @@ class LockedMessageSession:
         if not data:
             raise ValueError("session history must not be empty")
         _ensure_durable_directory(self.paths.history.parent)
-        tmp_path = self.paths.history.with_name(f".{self.paths.history.name}.{os.getpid()}.tmp")
-        with tmp_path.open("wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, self.paths.history)
+        tmp_path = self.paths.history.parent / f".{os.getpid()}.{uuid4().hex}.tmp"
+        try:
+            with tmp_path.open("wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, self.paths.history)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            raise
         _fsync_directory(self.paths.history.parent)
 
 

@@ -1345,9 +1345,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(json.loads(history_path.read_text(encoding="utf-8")), ["message 1"])
 
     @unittest.skipUnless(os.name == "nt", "Windows path-length regression")
-    def test_cli_agent_update_turn_supports_doctor_length_memory_root(self):
+    def test_cli_agent_update_batch_supports_long_isolated_session_path(self):
         base = Path(self.tempdir.name)
-        padding_length = 66 - len(str(base)) - 1
+        padding_length = 70 - len(str(base)) - 1
         self.assertGreater(padding_length, 0)
         root = base / ("p" * padding_length)
         root.mkdir()
@@ -1372,6 +1372,10 @@ class RuntimeTests(unittest.TestCase):
             '{"type":"thread.started","thread_id":"thread-1"}\n'
             '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n'
         )
+        batch_id = f"update-batch-{'a' * 64}"
+        state_root = SemanticOperationStore(root).state_root(batch_id)
+        legacy_lock = state_root / ".runtime" / "sessions" / "update" / f"{batch_id}.lock"
+        bounded_paths = MessageSessionStore(state_root, "update").paths(batch_id)
 
         with (
             patch("rightmemory.agent_cli.prepare_command", side_effect=lambda command: list(command)),
@@ -1379,12 +1383,19 @@ class RuntimeTests(unittest.TestCase):
         ):
             runtime = RightMemoryRuntime(config)
             try:
-                result = runtime.run_session_turn("doctor-12345678-first-update", "connectivity check")
+                result = runtime.run_session_turn(
+                    batch_id,
+                    "connectivity check",
+                    operation_id=batch_id,
+                )
             finally:
                 runtime.cleanup()
 
         self.assertEqual(result, "done")
-        self.assertEqual(len(str(root)), 66)
+        self.assertEqual(len(str(root)), 70)
+        self.assertEqual(len(str(legacy_lock)), 269)
+        self.assertLess(len(str(bounded_paths.lock)), 260)
+        self.assertEqual(bounded_paths.lock.parent.name, "hashed")
 
     def test_isolated_write_turn_does_not_hold_main_lock_around_model(self):
         events = []
@@ -1547,6 +1558,44 @@ class RuntimeTests(unittest.TestCase):
 
         main_history = MessageSessionStore(root, "update").paths("agent-session").history
         self.assertEqual(main_history.read_text(encoding="utf-8"), "new")
+
+    def test_long_session_state_promotes_with_namespaced_watermark(self):
+        root = Path(self.tempdir.name)
+        operation_id = "update-state-long-session"
+        session_id = f"update-batch-{'a' * 64}"
+        store = SemanticOperationStore(root)
+        store.begin(operation_id, {"role": "update", "session_id": session_id})
+        store.prepare_outcome(
+            operation_id,
+            output="saved",
+            start_commit="base123",
+            changed_paths=(),
+            effects=(OperationEffect("session-state", metadata={"session_id": session_id}),),
+        )
+        store.complete_no_change(operation_id)
+        state = _IsolatedStateOverlay(root, "update", session_id, operation_id=operation_id)
+        isolated_history = MessageSessionStore(state.overlay_root, "update").paths(session_id).history
+        isolated_history.parent.mkdir(parents=True, exist_ok=True)
+        isolated_history.write_text("long-session-history", encoding="utf-8")
+
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+        runtime._run_operation_effects(operation_id, state)
+
+        main_store = MessageSessionStore(root, "update")
+        main_history = main_store.paths(session_id).history
+        watermark = (
+            root
+            / ".runtime"
+            / "operations"
+            / "session-state"
+            / "update"
+            / main_history.relative_to(main_store.root)
+        )
+        self.assertEqual(main_history.read_text(encoding="utf-8"), "long-session-history")
+        self.assertTrue(watermark.is_file())
+        self.assertEqual(watermark.parent.name, "hashed")
 
     def test_effect_order_follows_preparation_not_initial_failed_attempt(self):
         root = Path(self.tempdir.name)
@@ -3287,7 +3336,7 @@ class RuntimeTests(unittest.TestCase):
         provider_path.write_text(provider, encoding="utf-8")
 
     def _runtime_history_path(self, root: Path, role: str, session_id: str) -> Path:
-        return root / ".runtime" / "sessions" / role / f"{session_id}.json"
+        return MessageSessionStore(root, role).paths(session_id).history
 
     def _provider_session_path(self, root: Path, role: str, session_id: str) -> Path:
         return root / ".runtime" / "agent_cli_sessions" / role / f"{session_id}.json"
