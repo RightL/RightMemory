@@ -119,6 +119,7 @@ class CliEntrypointTests(unittest.TestCase):
                 patch(
                     "rightmemory.cli.load_async_update_config",
                     return_value=SimpleNamespace(
+                        trigger_candidates=1,
                         target_batch_candidates=1,
                         max_wait_seconds=0,
                     ),
@@ -172,6 +173,7 @@ class CliEntrypointTests(unittest.TestCase):
                 patch(
                     "rightmemory.cli.load_async_update_config",
                     return_value=SimpleNamespace(
+                        trigger_candidates=1,
                         target_batch_candidates=1,
                         max_wait_seconds=0,
                     ),
@@ -230,6 +232,7 @@ class CliEntrypointTests(unittest.TestCase):
                 patch(
                     "rightmemory.cli.load_async_update_config",
                     return_value=SimpleNamespace(
+                        trigger_candidates=1,
                         target_batch_candidates=1,
                         max_wait_seconds=0,
                     ),
@@ -782,12 +785,20 @@ def _insight_watch_config(
     )
 
 
-def _async_update_config(memory_root: Path, *, target: int = 15, max_wait: int = 86400):
+def _async_update_config(
+    memory_root: Path,
+    *,
+    trigger: int | None = None,
+    target: int = 15,
+    max_wait: int = 86400,
+):
+    trigger = target if trigger is None else trigger
     return type(
         "AsyncUpdateConfig",
         (),
         {
             "memory_root": memory_root,
+            "trigger_candidates": trigger,
             "target_batch_candidates": target,
             "max_wait_seconds": max_wait,
         },

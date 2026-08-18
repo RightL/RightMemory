@@ -628,13 +628,19 @@ worker groups eligible session queues by candidate count:
 
 ```toml
 [update.async]
-target_batch_candidates = 15
+trigger_candidates = 15
+target_batch_candidates = 30
 max_wait_seconds = 86400
 ```
 
-`target_batch_candidates` is a fill threshold, not a hard cap. The worker keeps
-session queues whole, so a batch may overshoot it. `max_wait_seconds` is
-measured from the oldest eligible queue's quiet-period deadline.
+`trigger_candidates` starts a batch when ordinary pending work reaches that
+aggregate count. Once triggered, `target_batch_candidates` is the preferred
+fill size, not a hard cap: the worker keeps session queues whole, so a batch may
+overshoot it. The worker does not wait for the target after the trigger fires;
+it takes the available whole session queues until it reaches the target or runs
+out of pending work. When pending work remains below the trigger,
+`max_wait_seconds` is measured from the oldest eligible queue's quiet-period
+deadline.
 
 `rightmemory status` includes aggregate async update worker and queue state
 without requiring a session id. For one session's detailed pending, running,

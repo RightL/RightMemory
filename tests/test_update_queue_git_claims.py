@@ -4,24 +4,82 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from unittest import mock
 
-from rightmemory.update_queue import UpdateQueueStore
+from rightmemory.update_queue import UpdateCandidate, UpdateQueueSnapshot, UpdateQueueStore
 from rightmemory.update_queue_git import (
     UpdateQueueLeaseLost,
     UpdateQueueUnavailable,
     _load_device_id,
+    _select_candidates,
 )
 from tests.update_queue_git_base import GitUpdateQueueTestBase
 
 
 class GitUpdateQueueClaimTests(GitUpdateQueueTestBase):
+    def test_selection_uses_aggregate_trigger_before_session_quiet_period(self):
+        candidates = tuple(
+            UpdateCandidate(
+                uid=f"{index:032x}",
+                session_id=session_id,
+                display_id=display_id,
+                message=f"candidate {index}",
+                submitted_at="2026-07-21T00:00:00+00:00",
+            )
+            for index, session_id, display_id in (
+                (1, "session-a", 1),
+                (2, "session-a", 2),
+                (3, "session-b", 1),
+            )
+        )
+
+        selected, deadline = _select_candidates(
+            UpdateQueueSnapshot(candidates=candidates),
+            trigger_candidates=3,
+            target_batch_candidates=5,
+            max_wait_seconds=86400,
+            now=datetime(2026, 7, 21, tzinfo=UTC),
+        )
+
+        self.assertEqual(selected, candidates)
+        self.assertIsNone(deadline)
+
+    def test_selection_fills_to_target_without_splitting_sessions(self):
+        candidates = tuple(
+            UpdateCandidate(
+                uid=f"{index:032x}",
+                session_id=session_id,
+                display_id=display_id,
+                message=f"candidate {index}",
+                submitted_at="2026-07-20T00:00:00+00:00",
+            )
+            for index, session_id, display_id in (
+                (1, "session-a", 1),
+                (2, "session-a", 2),
+                (3, "session-b", 1),
+                (4, "session-b", 2),
+                (5, "session-c", 1),
+                (6, "session-c", 2),
+            )
+        )
+
+        selected, deadline = _select_candidates(
+            UpdateQueueSnapshot(candidates=candidates),
+            trigger_candidates=3,
+            target_batch_candidates=5,
+            max_wait_seconds=86400,
+            now=datetime(2026, 7, 21, tzinfo=UTC),
+        )
+
+        self.assertEqual(selected, candidates)
+        self.assertIsNone(deadline)
+
     def test_git_lease_allows_only_one_device_to_claim(self):
         self._outbox_candidate(self.first, "a" * 32)
         first = self._coordinator(self.first, "1" * 32)
         second = self._coordinator(self.second, "2" * 32)
         first.publish_outbox()
 
-        winner = first.claim_next(target_batch_candidates=1, max_wait_seconds=0)
-        loser = second.claim_next(target_batch_candidates=1, max_wait_seconds=0)
+        winner = first.claim_next(trigger_candidates=1, target_batch_candidates=1, max_wait_seconds=0)
+        loser = second.claim_next(trigger_candidates=1, target_batch_candidates=1, max_wait_seconds=0)
 
         self.assertIsNotNone(winner.claim)
         self.assertIsNone(loser.claim)
@@ -34,6 +92,7 @@ class GitUpdateQueueClaimTests(GitUpdateQueueTestBase):
         first.publish_outbox()
         claimed_at = datetime(2026, 7, 21, tzinfo=UTC)
         old_claim = first.claim_next(
+            trigger_candidates=1,
             target_batch_candidates=1,
             max_wait_seconds=0,
             now=claimed_at,
@@ -41,6 +100,7 @@ class GitUpdateQueueClaimTests(GitUpdateQueueTestBase):
         self.assertIsNotNone(old_claim)
 
         new_claim = second.claim_next(
+            trigger_candidates=1,
             target_batch_candidates=1,
             max_wait_seconds=0,
             now=datetime(2026, 7, 22, tzinfo=UTC),
@@ -58,6 +118,7 @@ class GitUpdateQueueClaimTests(GitUpdateQueueTestBase):
         coordinator = self._coordinator(self.first, "1" * 32)
         coordinator.publish_outbox()
         claim = coordinator.claim_next(
+            trigger_candidates=1,
             target_batch_candidates=1,
             max_wait_seconds=0,
         ).claim
@@ -117,7 +178,7 @@ class GitUpdateQueueClaimTests(GitUpdateQueueTestBase):
         self._git(self.first, "add", "MEMORY.md")
         self._git(self.first, "commit", "-m", "memory: local ahead")
 
-        result = coordinator.claim_next(target_batch_candidates=1, max_wait_seconds=0)
+        result = coordinator.claim_next(trigger_candidates=1, target_batch_candidates=1, max_wait_seconds=0)
 
         self.assertIsNotNone(result.claim)
         self._reset_to_remote(self.second)
@@ -141,7 +202,7 @@ class GitUpdateQueueClaimTests(GitUpdateQueueTestBase):
         second = self._coordinator(self.second, "2" * 32)
         first.publish_outbox()
 
-        result = second.claim_next(target_batch_candidates=1, max_wait_seconds=0)
+        result = second.claim_next(trigger_candidates=1, target_batch_candidates=1, max_wait_seconds=0)
 
         self.assertIsNotNone(result.claim)
         self.assertIn(
@@ -170,7 +231,7 @@ class GitUpdateQueueClaimTests(GitUpdateQueueTestBase):
             side_effect=fail_second_advance,
         ):
             with self.assertRaises(UpdateQueueUnavailable):
-                coordinator.claim_next(target_batch_candidates=1, max_wait_seconds=0)
+                coordinator.claim_next(trigger_candidates=1, target_batch_candidates=1, max_wait_seconds=0)
 
         self._reset_to_remote(self.second)
         self.assertIsNone(UpdateQueueStore(self.second).snapshot().lease)
@@ -180,6 +241,7 @@ class GitUpdateQueueClaimTests(GitUpdateQueueTestBase):
         coordinator = self._coordinator(self.first, "1" * 32)
         coordinator.publish_outbox()
         claim = coordinator.claim_next(
+            trigger_candidates=1,
             target_batch_candidates=1,
             max_wait_seconds=0,
         ).claim
@@ -214,7 +276,7 @@ class GitUpdateQueueClaimTests(GitUpdateQueueTestBase):
         first = self._coordinator(self.first, "1" * 32)
         second = self._coordinator(self.second, "2" * 32)
         first.publish_outbox()
-        claim = first.claim_next(target_batch_candidates=1, max_wait_seconds=0).claim
+        claim = first.claim_next(trigger_candidates=1, target_batch_candidates=1, max_wait_seconds=0).claim
         self.assertIsNotNone(claim)
         landed = first.finalize(claim, None)
 

@@ -144,6 +144,7 @@ class ReviewScannerTests(unittest.TestCase):
                 )
             scanner.update_store.run_pending_batches(
                 lambda _session_id, _message: "updated",
+                trigger_candidates=1,
                 target_batch_candidates=1,
                 max_wait_seconds=0,
             )
@@ -386,6 +387,7 @@ class ReviewScannerTests(unittest.TestCase):
 
             worker = scanner.update_store.run_pending_batches(
                 lambda session_id, message: "updated",
+                trigger_candidates=1,
                 target_batch_candidates=1,
                 max_wait_seconds=0,
             )

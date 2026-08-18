@@ -965,7 +965,11 @@ function runtimeTile(title, wrapper) {
     return settingTile(title, `${value.batch_size} sessions`, `${value.since_days} day review window`);
   }
   if (typeof value.target_batch_candidates !== "undefined") {
-    return settingTile(title, `${value.target_batch_candidates} candidates`, `${value.max_wait_seconds}s max wait`);
+    return settingTile(
+      title,
+      `${value.trigger_candidates} trigger / ${value.target_batch_candidates} target`,
+      `${value.max_wait_seconds}s max wait`,
+    );
   }
   return settingTile(title, "Configured");
 }

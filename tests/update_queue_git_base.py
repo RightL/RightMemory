@@ -72,12 +72,14 @@ class GitUpdateQueueTestBase(unittest.TestCase):
         coordinator = self._coordinator(self.first, "1" * 32)
         coordinator.publish_outbox()
         first_claim = coordinator.claim_next(
+            trigger_candidates=1,
             target_batch_candidates=1,
             max_wait_seconds=0,
         ).claim
         self.assertIsNotNone(first_claim)
         coordinator.fail(first_claim, reason_code="processing_failed")
         second_claim = coordinator.claim_next(
+            trigger_candidates=1,
             target_batch_candidates=1,
             max_wait_seconds=0,
             now=datetime(2030, 1, 1, tzinfo=UTC),
