@@ -1102,6 +1102,31 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("sessions: agent-1", section.detail)
         self.assertEqual(issues, [])
 
+    def test_collect_async_update_section_reports_worker_runtime_error(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            worker_root = root / ".runtime" / "async" / "update" / "_worker"
+            worker_root.mkdir(parents=True)
+            (worker_root / "state.json").write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "pid": 999,
+                        "started_at": "2026-05-29T08:00:00+00:00",
+                        "batch_id": None,
+                        "session_ids": [],
+                        "error": "ValueError: unsupported reasoning_effort",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            section, issues = collect_async_update_section(root, process_exists=lambda pid: True)
+
+        self.assertEqual(section.state, "worker: running pid 999")
+        self.assertIn("error: ValueError: unsupported reasoning_effort", section.detail)
+        self.assertIn("update worker: ValueError: unsupported reasoning_effort", issues)
+
     def test_collect_async_update_section_reports_invalid_worker_state_shape_locally(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

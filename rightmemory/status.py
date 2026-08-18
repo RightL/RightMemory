@@ -964,6 +964,7 @@ def _read_worker_state(async_root: Path, process_exists: Callable[[int], bool]) 
         identity = _optional_worker_str(data, "identity")
         batch_id = _optional_worker_str(data, "batch_id")
         session_ids = _required_worker_str_list(data, "session_ids")
+        error = _optional_worker_str(data, "error")
     except Exception as exc:
         issue = f"update worker: state error: {type(exc).__name__}: {exc}"
         return _WorkerSummary(state=f"worker: state error: {type(exc).__name__}: {exc}"), issue
@@ -985,8 +986,13 @@ def _read_worker_state(async_root: Path, process_exists: Callable[[int], bool]) 
     visible = ", ".join(session_ids)
     if visible:
         detail_parts.append(f"sessions: {visible}")
+    issue = None
+    if error:
+        error_preview = _cap_preview(error).splitlines()[0]
+        detail_parts.append(f"error: {error_preview}")
+        issue = f"update worker: {error_preview}"
     state = f"worker: {status} pid {pid}"
-    return _WorkerSummary(state=state, detail="\n".join(detail_parts) if detail_parts else None), None
+    return _WorkerSummary(state=state, detail="\n".join(detail_parts) if detail_parts else None), issue
 
 
 def _read_json(path: Path) -> dict[str, Any]:

@@ -1,9 +1,13 @@
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -55,6 +59,183 @@ class AsyncUpdateStateTests(unittest.TestCase):
 
         self.assertEqual(command[-2:], ["update", "_async-worker"])
         self.assertNotIn("--session", command)
+
+    def test_wake_worker_uses_requested_runtime_and_explicit_memory_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            store = AsyncUpdateStore(memory_root, "update")
+            process = Mock(pid=4242)
+
+            with (
+                patch("rightmemory.async_update.subprocess.Popen", return_value=process) as popen,
+                patch("rightmemory.async_update.process_identity", return_value="proc:worker"),
+            ):
+                store.wake_worker(python_executable=Path("installed-python"))
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[0], "installed-python")
+        self.assertEqual(command[-2:], ["update", "_async-worker"])
+        self.assertEqual(popen.call_args.kwargs["env"]["RIGHTMEMORY_ROOT"], str(memory_root))
+
+    def test_worker_consumes_stop_request_before_running_callbacks(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            with store._worker_locked():
+                store._write_worker_stop_locked(os.getpid(), None)
+            before_batches = Mock(return_value=True)
+
+            result = store.run_pending_batches(
+                Mock(side_effect=AssertionError("no batch should run")),
+                target_batch_candidates=15,
+                max_wait_seconds=86400,
+                before_batches=before_batches,
+                should_stop=store.consume_worker_stop_request,
+            )
+            worker_state = json.loads(store._worker_state_path().read_text(encoding="utf-8"))
+            stop_exists = store._worker_stop_path().exists()
+
+        self.assertEqual(result.status, "idle")
+        before_batches.assert_not_called()
+        self.assertFalse(stop_exists)
+        self.assertEqual(worker_state["status"], "idle")
+
+    def test_stop_worker_waits_for_matching_process_and_clears_request(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            with patch("rightmemory.async_update.process_identity", return_value="proc:worker"):
+                with store._worker_locked():
+                    store._write_worker_locked(
+                        status="running",
+                        pid=4242,
+                        batch_id=None,
+                        session_ids=[],
+                        error=None,
+                    )
+
+            with patch(
+                "rightmemory.async_update._is_async_worker_process",
+                side_effect=[True, False],
+            ):
+                stopped = store.stop_worker(timeout_seconds=1)
+            worker_state = json.loads(store._worker_state_path().read_text(encoding="utf-8"))
+            stop_exists = store._worker_stop_path().exists()
+            wake_counter = store._read_wake_counter()
+
+        self.assertTrue(stopped)
+        self.assertFalse(stop_exists)
+        self.assertEqual(worker_state["status"], "idle")
+        self.assertEqual(wake_counter, 1)
+
+    def test_stop_worker_timeout_cancels_request(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            with patch("rightmemory.async_update.process_identity", return_value="proc:worker"):
+                with store._worker_locked():
+                    store._write_worker_locked(
+                        status="running",
+                        pid=4242,
+                        batch_id="update-batch-live",
+                        session_ids=["agent-1"],
+                        error=None,
+                    )
+
+            with (
+                patch("rightmemory.async_update._is_async_worker_process", return_value=True),
+                patch("rightmemory.async_update.time.monotonic", side_effect=[0.0, 0.0]),
+            ):
+                with self.assertRaisesRegex(TimeoutError, "did not stop"):
+                    store.stop_worker(timeout_seconds=0)
+            stop_exists = store._worker_stop_path().exists()
+
+        self.assertFalse(stop_exists)
+
+    def test_synchronized_worker_error_survives_batch_activity_cleanup(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = AsyncUpdateStore(Path(tempdir), "update")
+            with store._worker_locked():
+                store._write_worker_locked(
+                    status="running",
+                    pid=os.getpid(),
+                    batch_id=None,
+                    session_ids=[],
+                    error=None,
+                )
+
+            store.begin_worker_batch("update-batch-test", ["agent-2", "agent-1"])
+            store.record_worker_error("ValueError: unsupported reasoning_effort")
+            store.finish_worker_batch()
+            state = json.loads(store._worker_state_path().read_text(encoding="utf-8"))
+
+        self.assertIsNone(state["batch_id"])
+        self.assertEqual(state["session_ids"], [])
+        self.assertEqual(state["error"], "ValueError: unsupported reasoning_effort")
+
+    def test_live_detached_worker_stops_cooperatively_at_wait_boundary(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            (memory_root / "rightmemory.toml").write_text(
+                '[agent_cli]\nprovider = "codex"\n',
+                encoding="utf-8",
+            )
+            store = AsyncUpdateStore(memory_root, "update")
+            store._write(
+                "agent-1",
+                AsyncUpdateState(
+                    status="running",
+                    session_id="agent-1",
+                    role="update",
+                    phase="waiting",
+                    next_flush_at=(datetime.now(UTC) + timedelta(seconds=2)).isoformat(),
+                    pending=[_job(1, "queued")],
+                    next_id=2,
+                ),
+            )
+            env = os.environ.copy()
+            source_root = str(Path(__file__).resolve().parents[1])
+            env["PYTHONPATH"] = os.pathsep.join(
+                [source_root, *filter(None, env.get("PYTHONPATH", "").split(os.pathsep))]
+            )
+            env["RIGHTMEMORY_ROOT"] = str(memory_root)
+            process = subprocess.Popen(
+                [sys.executable, "-m", "rightmemory.cli", "update", "_async-worker"],
+                cwd=memory_root,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+            try:
+                deadline = time.monotonic() + 10
+                worker_pid = None
+                while time.monotonic() < deadline:
+                    state_path = store._worker_state_path()
+                    if state_path.is_file():
+                        data = json.loads(state_path.read_text(encoding="utf-8"))
+                        if data.get("status") == "running" and isinstance(data.get("pid"), int):
+                            worker_pid = data["pid"]
+                            break
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                error = "" if process.poll() is None else process.communicate(timeout=1)[1]
+                self.assertIsNotNone(worker_pid, error)
+
+                # The full suite runs several process-heavy Git integration modules in
+                # parallel, so leave enough room for this detached child to be scheduled.
+                stopped = store.stop_worker(timeout_seconds=30)
+                _, stderr_text = process.communicate(timeout=10)
+                return_code = process.returncode
+                worker_state = json.loads(store._worker_state_path().read_text(encoding="utf-8"))
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=10)
+
+        self.assertTrue(stopped)
+        self.assertEqual(return_code, 0, stderr_text)
+        self.assertEqual(worker_state["status"], "idle")
 
     def test_worker_state_round_trips_and_detects_live_pid(self):
         with tempfile.TemporaryDirectory() as tempdir:
