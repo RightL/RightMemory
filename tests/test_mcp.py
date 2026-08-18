@@ -19,7 +19,12 @@ from rightmemory.async_update import (
 )
 from rightmemory.mcp import DefaultMcpBackend, create_mcp_server
 from rightmemory.update_alerts import collect_update_recovery_summary
-from rightmemory.update_queue import UpdateQueueRecovery, UpdateQueueStore
+from rightmemory.update_queue import (
+    UpdateCandidate,
+    UpdateQueueRecovery,
+    UpdateQueueStore,
+    update_candidate_batch_id,
+)
 
 
 class FakeBackend:
@@ -209,10 +214,29 @@ class UpdateRecoveryAlertTests(unittest.TestCase):
         self.assertEqual(path.read_text(encoding="utf-8"), content)
 
     def test_counts_synchronized_manual_recovery(self):
-        UpdateQueueStore(self.root).write_recovery(
+        candidates = (
+            UpdateCandidate(
+                uid="4" * 32,
+                session_id="session-four",
+                display_id=1,
+                message="four",
+                submitted_at="2026-08-18T00:00:00+00:00",
+            ),
+            UpdateCandidate(
+                uid="5" * 32,
+                session_id="session-five",
+                display_id=1,
+                message="five",
+                submitted_at="2026-08-18T00:01:00+00:00",
+            ),
+        )
+        store = UpdateQueueStore(self.root)
+        for candidate in candidates:
+            store.write_candidate(candidate)
+        store.write_recovery(
             UpdateQueueRecovery(
-                batch_id="update-batch-" + "3" * 64,
-                candidate_uids=("4" * 32, "5" * 32),
+                batch_id=update_candidate_batch_id(candidates),
+                candidate_uids=tuple(candidate.uid for candidate in candidates),
                 attempts=2,
                 reason_code="processing_failed",
                 retry_at=None,
