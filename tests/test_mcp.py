@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from mcp import Client
 from mcp.types import CallToolResult
 
 from rightmemory import entrypoint
@@ -48,11 +49,21 @@ class FakeBackend:
         return self.warning
 
 
+async def _call_tool(server, name: str, arguments: dict[str, str]) -> CallToolResult:
+    async with Client(server, raise_exceptions=True) as client:
+        return await client.call_tool(name, arguments)
+
+
 def call_tool(server, name: str, arguments: dict[str, str]) -> CallToolResult:
-    result = asyncio.run(server.call_tool(name, arguments))
+    result = asyncio.run(_call_tool(server, name, arguments))
     if not isinstance(result, CallToolResult):
         raise AssertionError(f"expected CallToolResult, got {type(result).__name__}")
     return result
+
+
+async def _list_tools(server):
+    async with Client(server, raise_exceptions=True) as client:
+        return (await client.list_tools()).tools
 
 
 class McpToolTests(unittest.TestCase):
@@ -61,7 +72,7 @@ class McpToolTests(unittest.TestCase):
         self.server = create_mcp_server(Path("/unused"), backend=self.backend)
 
     def test_server_exposes_only_the_three_ordinary_agent_tools(self):
-        tools = asyncio.run(self.server.list_tools())
+        tools = asyncio.run(_list_tools(self.server))
         self.assertEqual(
             {tool.name for tool in tools},
             {

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Protocol
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field
 
@@ -176,11 +176,11 @@ def create_mcp_server(
     memory_root: Path,
     *,
     backend: McpBackend | None = None,
-) -> FastMCP:
+) -> MCPServer:
     selected_backend = backend or DefaultMcpBackend(
         Path(memory_root).expanduser().resolve()
     )
-    server = FastMCP(name="RightMemory", log_level="WARNING")
+    server = MCPServer("RightMemory", log_level="WARNING")
 
     @server.tool(
         name="rightmemory_retrieve",
