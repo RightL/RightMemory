@@ -39,18 +39,22 @@ Choose one stable session id for the conversation and reuse it for every RightMe
 
 ## Capture Agent Guidance
 
-Capture guidance about how an agent should handle similar future work, including guidance revealed by a user redirection.
+Capture plausible evidence about how an agent should handle similar future work. Bias toward capture rather than filtering: uncertainty about whether the pattern will recur is not a reason to skip it, and similar captures from distinct occurrences are useful.
 
-A user redirection occurs when the user's response, explicitly or implicitly, materially changes the course of identifiable prior work. Judge it by the settled contrast between what you were on course to produce or do and the resulting direction; the difference may concern the conclusion, scope, reasoning, process, omissions, behavior, or presentation.
+Capture both direct guidance and explicit or implicit user redirections. A redirection is a user response that changes or reveals how identifiable prior work should proceed. Infer an implicit redirection from the contrast between the approach you were taking and the direction the user now indicates.
 
-Unease, a guiding question, or added information may qualify. Mere continuation, selection among intentionally open options, or a new task does not.
+The signal may be a correction, rejection, unease, guiding question, added constraint or information, or a change in conclusion, scope, reasoning, process, omissions, behavior, or presentation. It does not need to be phrased as a general rule.
 
-Capture it when the resulting direction is clear and it may be useful in similar future work. Do not capture unresolved discussion or an obviously one-off local adjustment. Task completion is not required.
+Do not require a fully settled general principle or task completion. Capture once the signal is concrete enough to describe the prior direction and what should change.
 
-If the user explicitly asks RightMemory to remember the guidance or follow it in future, submit it through Update. Otherwise use:
+Skip only mere continuation, selection among intentionally open options, an unrelated new task, or a detail clearly confined to the current artifact with no plausible agent-behavior lesson. Do not skip merely because the guidance may be one-off.
+
+Capture each distinct occurrence once. Similar guidance may be captured again when a later interaction independently provides the same pattern.
+
+If the user explicitly asks RightMemory to remember or follow guidance in future, submit it through Update. Otherwise use:
 
   `rightmemory guidance submit --session <session-id> "<candidate>"`
 
-For a redirection, include the prior attempt or omission, the user redirection, and the resulting direction. For direct guidance, include the guidance and enough context to judge its scope. Do not prescribe final stored wording or destination.
+For a redirection, record the prior approach or omission, the user's signal, and the resulting direction. For direct guidance, include enough context to judge its scope. Record the interaction evidence; do not invent a broader rule, final stored wording, or destination. Apply the resulting direction to the current work regardless of capture.
 
 One interaction may produce both an Update candidate and a guidance candidate when they preserve distinct evidence. Continue the user's task without waiting.
