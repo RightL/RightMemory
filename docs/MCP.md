@@ -1,6 +1,6 @@
 # RightMemory MCP
 
-RightMemory exposes a local MCP stdio server for ordinary agent work:
+RightMemory exposes a local MCP stdio server for ordinary agent work using the current stable v2 line of the official MCP Python SDK:
 
 ```bash
 rightmemory mcp
