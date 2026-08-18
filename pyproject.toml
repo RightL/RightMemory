@@ -29,8 +29,8 @@ classifiers = [
 ]
 dependencies = [
   "fastapi>=0.115.0",
-  "mcp>=1.28,<2",
-  "pydantic-ai>=1.0.0",
+  "mcp>=2,<3",
+  "pydantic-ai-slim[anthropic,openai]>=1.0.0",
   "uvicorn>=0.30.0",
 ]
 
