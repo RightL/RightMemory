@@ -555,7 +555,10 @@ class Installer:
         else:
             print(f"  [keep]    {self.runtime_venv} already exists")
         self.runtime_python = self._venv_python()
-        result = _run(["uv", "pip", "install", "--python", str(self.runtime_python), str(self.repo_root)])
+        package = str(self.repo_root)
+        if self.mode == "cli-agent":
+            package += "[codex-sdk]"
+        result = _run(["uv", "pip", "install", "--python", str(self.runtime_python), package])
         if result.returncode != 0:
             raise InstallError(
                 f"could not install RightMemory into the uv-managed runtime: {self.runtime_venv}"

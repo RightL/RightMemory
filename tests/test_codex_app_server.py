@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import subprocess
 import tempfile
 import threading
@@ -68,9 +69,17 @@ class TimeoutProcess:
 
 class CodexAppServerClientTests(unittest.TestCase):
     def setUp(self):
-        patcher = patch("rightmemory.codex_app_server.prepare_command", side_effect=lambda command: list(command))
+        self.codex_bin = Path("C:/bundled/codex.exe")
+        self.codex_path_dir = Path("bundled/codex-path")
+        patcher = patch("codex_cli_bin.bundled_codex_path", return_value=self.codex_bin)
         patcher.start()
         self.addCleanup(patcher.stop)
+        path_patcher = patch(
+            "codex_cli_bin.bundled_path_dir",
+            return_value=self.codex_path_dir,
+        )
+        path_patcher.start()
+        self.addCleanup(path_patcher.stop)
 
     def test_deletes_batch_through_one_initialized_jsonl_process(self):
         process = FakeProcess(
@@ -88,7 +97,13 @@ class CodexAppServerClientTests(unittest.TestCase):
 
         self.assertTrue(all(result.deleted for result in results))
         popen.assert_called_once()
-        self.assertEqual(popen.call_args.args[0], ["codex", "app-server", "--stdio"])
+        self.assertEqual(
+            popen.call_args.args[0],
+            [str(self.codex_bin), "app-server", "--listen", "stdio://"],
+        )
+        process_env = popen.call_args.kwargs["env"]
+        path_key = next(key for key in process_env if key.upper() == "PATH")
+        self.assertEqual(process_env[path_key].split(os.pathsep)[0], str(self.codex_path_dir))
         messages = [json.loads(line) for line in process.stdin.recorded.splitlines()]
         self.assertEqual(messages[0]["method"], "initialize")
         self.assertEqual(messages[1]["method"], "initialized")

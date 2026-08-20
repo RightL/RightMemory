@@ -1082,6 +1082,7 @@ class RuntimeTests(unittest.TestCase):
         )
 
     def test_cli_agent_runtime_uses_executor_without_pydantic_agent(self):
+        codex_runner = object()
         config = RuntimeConfig(
             role="retrieve",
             runtime_mode="cli-agent",
@@ -1092,7 +1093,7 @@ class RuntimeTests(unittest.TestCase):
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
             executor_class.return_value.has_saved_session.return_value = False
             executor_class.return_value.run_session_turn.return_value = EMPTY_RETRIEVE_SELECTION_JSON
-            runtime = RightMemoryRuntime(config)
+            runtime = RightMemoryRuntime(config, codex_runner=codex_runner)
             result = runtime.run_session_turn("agent-session", "remember one")
 
         self.assertEqual(result, "no strong match")
@@ -1100,8 +1101,10 @@ class RuntimeTests(unittest.TestCase):
             Path(self.tempdir.name),
             "retrieve",
             AgentCliConfig(provider="codex"),
+            codex_runner=codex_runner,
             state_root=Path(self.tempdir.name),
             fresh_provider_session=False,
+            trace_event=runtime._trace,
         )
 
     def test_update_turn_publishes_approved_file_views_after_success(self):
@@ -1246,7 +1249,7 @@ class RuntimeTests(unittest.TestCase):
         trace = object()
 
         class FakeNestedRuntime:
-            def __init__(self, config):
+            def __init__(self, config, *, codex_runner=None):
                 self.config = config
                 self._active_trace = None
                 nested_configs.append(config)
@@ -1298,12 +1301,15 @@ class RuntimeTests(unittest.TestCase):
         worktree = main_root / ".runtime" / "worktrees" / "reviewer-123"
         state_root = main_root / ".runtime" / "isolated-state" / "reviewer-123"
         nested_configs = []
+        nested_runners = []
         calls = []
+        codex_runner = object()
 
         class FakeNestedRuntime:
-            def __init__(self, config):
+            def __init__(self, config, *, codex_runner=None):
                 self.config = config
                 nested_configs.append(config)
+                nested_runners.append(codex_runner)
 
             def _run_locked_turn(self, callback, *, isolate_write=False):
                 calls.append(("locked", isolate_write))
@@ -1325,7 +1331,7 @@ class RuntimeTests(unittest.TestCase):
         )
 
         with patch("rightmemory.runtime.CliAgentExecutor"):
-            runtime = RightMemoryRuntime(config)
+            runtime = RightMemoryRuntime(config, codex_runner=codex_runner)
 
         with patch("rightmemory.runtime.RightMemoryRuntime", FakeNestedRuntime):
             result = runtime._run_session_turn_in_worktree(worktree, state_root, "agent-session", "review one")
@@ -1335,6 +1341,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(nested_configs[0].state_root, state_root)
         self.assertTrue(nested_configs[0].fresh_provider_session)
         self.assertFalse(nested_configs[0].sync.enabled)
+        self.assertEqual(nested_runners, [codex_runner])
         self.assertEqual(
             calls,
             [
@@ -1393,34 +1400,48 @@ class RuntimeTests(unittest.TestCase):
             memory_root=root,
             debug_trace=True,
         )
-        provider_output = (
-            '{"type":"thread.started","thread_id":"thread-1"}\n'
-            '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n'
-        )
+        codex_runner = unittest.mock.Mock()
+        codex_runner.claim_opportunistic_cleanup.return_value = False
+
+        def run_codex_turn(**kwargs):
+            kwargs["on_thread_started"]("thread-1")
+            timing = types.SimpleNamespace(
+                client_start_ms=0.0,
+                thread_open_ms=0.0,
+                turn_ms=0.0,
+                server_duration_ms=0,
+                total_ms=0.0,
+                usage=None,
+            )
+            kwargs["on_timing"](timing)
+            return types.SimpleNamespace(
+                provider_session_id="thread-1",
+                text="done",
+                timing=timing,
+            )
+
+        codex_runner.run_turn.side_effect = run_codex_turn
         batch_id = f"update-batch-{'a' * 64}"
         state_root = SemanticOperationStore(root).state_root(batch_id)
         legacy_lock = state_root / ".runtime" / "sessions" / "update" / f"{batch_id}.lock"
         bounded_paths = MessageSessionStore(state_root, "update").paths(batch_id)
 
-        with (
-            patch("rightmemory.agent_cli.prepare_command", side_effect=lambda command: list(command)),
-            patch("rightmemory.agent_cli._run_cli", return_value=provider_output),
-        ):
-            runtime = RightMemoryRuntime(config)
-            try:
-                result = runtime.run_session_turn(
-                    batch_id,
-                    "connectivity check",
-                    operation_id=batch_id,
-                )
-            finally:
-                runtime.cleanup()
+        runtime = RightMemoryRuntime(config, codex_runner=codex_runner)
+        try:
+            result = runtime.run_session_turn(
+                batch_id,
+                "connectivity check",
+                operation_id=batch_id,
+            )
+        finally:
+            runtime.cleanup()
 
         self.assertEqual(result, "done")
         self.assertEqual(len(str(root)), 70)
         self.assertEqual(len(str(legacy_lock)), 269)
         self.assertLess(len(str(bounded_paths.lock)), 260)
         self.assertEqual(bounded_paths.lock.parent.name, "hashed")
+        codex_runner.close.assert_not_called()
 
     def test_isolated_write_turn_does_not_hold_main_lock_around_model(self):
         events = []
@@ -2748,6 +2769,8 @@ class RuntimeTests(unittest.TestCase):
         memory_root.mkdir()
         loaded_roots = []
         nested_calls = []
+        nested_runners = []
+        codex_runner = object()
         config = RuntimeConfig(
             role="update",
             model_id="openai/test",
@@ -2765,8 +2788,9 @@ class RuntimeTests(unittest.TestCase):
             )
 
         class FakeNestedRuntime:
-            def __init__(self, runtime_config):
+            def __init__(self, runtime_config, *, codex_runner=None):
                 nested_calls.append(("init", runtime_config.memory_root))
+                nested_runners.append(codex_runner)
 
             def run_session_turn(self, session_id, message):
                 nested_calls.append(("turn", session_id, message))
@@ -2775,7 +2799,7 @@ class RuntimeTests(unittest.TestCase):
                 nested_calls.append(("cleanup",))
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
+            runtime = RightMemoryRuntime(config, codex_runner=codex_runner)
 
         with (
             patch("rightmemory.runtime.load_config", side_effect=fake_load_config),
@@ -2785,6 +2809,7 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(loaded_roots, [("sync-reconciler", memory_root)])
         self.assertEqual(nested_calls[0], ("init", memory_root))
+        self.assertEqual(nested_runners, [codex_runner])
         self.assertEqual(nested_calls[-1], ("cleanup",))
 
     def test_prune_turn_checks_generation_after_sync_pull(self):
