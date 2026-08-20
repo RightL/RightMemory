@@ -2,13 +2,18 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 from uuid import UUID
+
+from openai_codex import ApprovalMode, Sandbox, TransportClosedError
+from openai_codex.types import ReasoningEffort
 
 from rightmemory.doctor import (
     DoctorCheck,
     _check_first_provider_calls,
     _check_resume_provider_thread,
+    _provider_runtime,
     format_doctor_report,
     run_agent_cli_doctor,
 )
@@ -16,12 +21,10 @@ from rightmemory.agent_cli import (
     CliAgentExecutor,
     NO_SESSION_RIGHTMEMORY_SESSION_ID,
     build_claude_command,
-    build_codex_command,
     parse_claude_output,
-    parse_codex_output,
-    _run_cli,
     _stable_claude_session_id,
 )
+from rightmemory.codex_sdk import CodexSdkRunResult, CodexSdkRunner, CodexSdkTiming
 from rightmemory.config import AgentCliConfig, RuntimeConfig, SyncConfig
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
 from rightmemory.provider_threads import ProviderThreadStore
@@ -65,188 +68,6 @@ class ProviderSessionStoreTests(unittest.TestCase):
 
 
 class AgentCliCommandTests(unittest.TestCase):
-    def test_run_cli_uses_binary_stdin_when_supplied(self):
-        captured = {}
-
-        def fake_run(command, **kwargs):
-            captured.update(kwargs)
-            return subprocess.CompletedProcess(command, 0, stdout=b"done", stderr=b"")
-
-        with (
-            patch("rightmemory.agent_cli.prepare_command", side_effect=lambda command: list(command)),
-            patch("rightmemory.agent_cli.subprocess.run", side_effect=fake_run),
-        ):
-            output = _run_cli(["codex", "exec"], Path("/memory/root"), "Codex", stdin="input")
-
-        self.assertEqual(output, "done")
-        self.assertIsInstance(captured.get("input"), bytes)
-
-    def test_build_codex_first_command_uses_memory_root_and_read_only_sandbox(self):
-        config = AgentCliConfig(provider="codex", model="gpt-5")
-        memory_root = Path("/memory/root")
-
-        command = build_codex_command(memory_root, "retrieve", config, None)
-
-        self.assertEqual(
-            command,
-            [
-                "codex",
-                "exec",
-                "--json",
-                "--cd",
-                str(memory_root),
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "--model",
-                "gpt-5",
-            ],
-        )
-
-    def test_build_codex_first_command_uses_workspace_write_for_write_role(self):
-        memory_root = Path("/memory/root")
-        command = build_codex_command(
-            memory_root,
-            "update",
-            AgentCliConfig(provider="codex"),
-            None,
-        )
-
-        self.assertEqual(
-            command,
-            [
-                "codex",
-                "exec",
-                "--json",
-                "--cd",
-                str(memory_root),
-                "--skip-git-repo-check",
-                "--sandbox",
-                "workspace-write",
-            ],
-        )
-
-    def test_build_codex_command_applies_role_reasoning_effort(self):
-        command = build_codex_command(
-            Path("/memory/root"),
-            "update",
-            AgentCliConfig(provider="codex", model="gpt-5.6-sol", reasoning_effort="xhigh"),
-            None,
-        )
-
-        self.assertEqual(
-            command[command.index("--model") :],
-            [
-                "--model",
-                "gpt-5.6-sol",
-                "--config",
-                "model_reasoning_effort=xhigh",
-            ],
-        )
-
-    def test_build_codex_uses_workspace_write_for_pruner(self):
-        command = build_codex_command(
-            Path("/memory/root"),
-            "pruner",
-            AgentCliConfig(provider="codex"),
-            None,
-        )
-
-        self.assertIn("--sandbox", command)
-        self.assertIn("workspace-write", command)
-
-    def test_build_codex_uses_workspace_write_for_insight(self):
-        command = build_codex_command(
-            Path("/memory/root"),
-            "insight",
-            AgentCliConfig(provider="codex"),
-            None,
-        )
-
-        self.assertIn("workspace-write", command)
-
-    def test_build_codex_uses_workspace_write_for_shared_view_builder(self):
-        command = build_codex_command(
-            Path("/memory/root"),
-            "shared-view-builder",
-            AgentCliConfig(provider="codex"),
-            None,
-        )
-
-        self.assertIn("--sandbox", command)
-        self.assertIn("workspace-write", command)
-
-    def test_build_codex_uses_read_only_for_historian(self):
-        command = build_codex_command(
-            Path("/memory/root"),
-            "historian",
-            AgentCliConfig(provider="codex"),
-            None,
-        )
-
-        self.assertIn("--sandbox", command)
-        self.assertIn("read-only", command)
-
-    def test_build_codex_uses_read_only_for_reviewer(self):
-        command = build_codex_command(
-            Path("/memory/root"),
-            "reviewer",
-            AgentCliConfig(provider="codex"),
-            None,
-        )
-
-        self.assertIn("--sandbox", command)
-        self.assertIn("read-only", command)
-
-    def test_build_codex_resume_command_uses_provider_session_id(self):
-        config = AgentCliConfig(provider="codex", model="gpt-5")
-        memory_root = Path("/memory/root")
-
-        command = build_codex_command(memory_root, "retrieve", config, "thread-1")
-
-        self.assertEqual(
-            command,
-            [
-                "codex",
-                "exec",
-                "--json",
-                "--cd",
-                str(memory_root),
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "--model",
-                "gpt-5",
-                "resume",
-                "thread-1",
-            ],
-        )
-
-    def test_build_codex_resume_command_uses_workspace_write_for_write_role(self):
-        memory_root = Path("/memory/root")
-        command = build_codex_command(
-            memory_root,
-            "update",
-            AgentCliConfig(provider="codex"),
-            "thread-1",
-        )
-
-        self.assertEqual(
-            command,
-            [
-                "codex",
-                "exec",
-                "--json",
-                "--cd",
-                str(memory_root),
-                "--skip-git-repo-check",
-                "--sandbox",
-                "workspace-write",
-                "resume",
-                "thread-1",
-            ],
-        )
-
     def test_build_claude_first_command_uses_session_id(self):
         config = AgentCliConfig(provider="claude", model="sonnet")
         session_id = "123e4567-e89b-12d3-a456-426614174000"
@@ -344,29 +165,6 @@ class AgentCliCommandTests(unittest.TestCase):
 
 
 class AgentCliParserTests(unittest.TestCase):
-    def test_parse_codex_jsonl_output(self):
-        output = (
-            '{"type":"thread.started","thread_id":"thread-1"}\n'
-            '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n'
-        )
-
-        parsed = parse_codex_output(output)
-
-        self.assertEqual(parsed.provider_session_id, "thread-1")
-        self.assertEqual(parsed.text, "done")
-
-    def test_parse_codex_requires_thread_id(self):
-        with self.assertRaises(RuntimeError) as caught:
-            parse_codex_output('{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n')
-
-        self.assertIn("thread_id", str(caught.exception))
-
-    def test_parse_codex_requires_final_agent_message(self):
-        with self.assertRaises(RuntimeError) as caught:
-            parse_codex_output('{"type":"thread.started","thread_id":"thread-1"}\n')
-
-        self.assertIn("final agent message", str(caught.exception))
-
     def test_parse_claude_json_output(self):
         parsed = parse_claude_output(
             '{"type":"result","session_id":"123e4567-e89b-12d3-a456-426614174000","result":"done"}'
@@ -386,6 +184,236 @@ class AgentCliParserTests(unittest.TestCase):
             parse_claude_output('{"type":"result","session_id":"123e4567-e89b-12d3-a456-426614174000"}')
 
         self.assertIn("result", str(caught.exception))
+
+
+class FakeCodexRunner:
+    def __init__(self, *, outputs=None, turn_error: Exception | None = None):
+        self.outputs = list(outputs or ["done"])
+        self.turn_error = turn_error
+        self.calls = []
+        self.close_calls = 0
+        self._new_threads = 0
+        self._cleanup_claims = set()
+
+    def claim_opportunistic_cleanup(self, memory_root: Path) -> bool:
+        key = str(memory_root.resolve())
+        if key in self._cleanup_claims:
+            return False
+        self._cleanup_claims.add(key)
+        return True
+
+    def run_turn(self, **kwargs):
+        self.calls.append(kwargs)
+        thread_id = kwargs["provider_session_id"]
+        if thread_id is None:
+            self._new_threads += 1
+            thread_id = f"thread-{self._new_threads}"
+            callback = kwargs.get("on_thread_started")
+            if callback is not None:
+                callback(thread_id)
+        timing = CodexSdkTiming(
+            client_start_ms=200.0,
+            thread_open_ms=25.0,
+            turn_ms=500.0,
+            server_duration_ms=450,
+            total_ms=725.0,
+            usage={"total": {"inputTokens": 10, "outputTokens": 2}},
+        )
+        timing_callback = kwargs.get("on_timing")
+        if timing_callback is not None:
+            timing_callback(timing)
+        if self.turn_error is not None:
+            raise self.turn_error
+        output_index = min(len(self.calls) - 1, len(self.outputs) - 1)
+        return CodexSdkRunResult(thread_id, self.outputs[output_index], timing)
+
+    def close(self):
+        self.close_calls += 1
+
+
+class FakeSdkThread:
+    def __init__(self, thread_id, *, result=None, error=None):
+        self.id = thread_id
+        self.result = result or SimpleNamespace(
+            final_response="done",
+            duration_ms=450,
+            usage={"total": {"inputTokens": 10}},
+        )
+        self.error = error
+        self.run_calls = []
+
+    def run(self, prompt, **kwargs):
+        self.run_calls.append((prompt, kwargs))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+class FakeSdkCodex:
+    def __init__(self, threads):
+        self.threads = list(threads)
+        self.start_calls = []
+        self.resume_calls = []
+        self.close_calls = 0
+
+    def thread_start(self, **kwargs):
+        self.start_calls.append(kwargs)
+        return self.threads.pop(0)
+
+    def thread_resume(self, thread_id, **kwargs):
+        self.resume_calls.append((thread_id, kwargs))
+        return self.threads.pop(0)
+
+    def close(self):
+        self.close_calls += 1
+
+
+class CodexSdkRunnerTests(unittest.TestCase):
+    def test_lazily_starts_sdk_and_runs_with_explicit_safety_and_model_settings(self):
+        thread = FakeSdkThread("thread-1")
+        codex = FakeSdkCodex([thread])
+        configs = []
+        clock = iter([0.0, 0.1, 0.3, 0.4, 0.5, 0.6, 1.6, 1.7]).__next__
+        runner = CodexSdkRunner(
+            codex_factory=lambda config: configs.append(config) or codex,
+            clock=clock,
+        )
+        started = []
+
+        self.assertEqual(configs, [])
+        result = runner.run_turn(
+            prompt="hello",
+            provider_session_id=None,
+            cwd=Path("/memory/root"),
+            model="gpt-5.6-luna",
+            reasoning_effort="high",
+            sandbox="read-only",
+            on_thread_started=started.append,
+        )
+
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(started, ["thread-1"])
+        self.assertEqual(result.provider_session_id, "thread-1")
+        self.assertEqual(result.text, "done")
+        self.assertEqual(result.timing.client_start_ms, 200.0)
+        self.assertEqual(result.timing.thread_open_ms, 100.0)
+        self.assertEqual(result.timing.turn_ms, 1000.0)
+        self.assertEqual(result.timing.server_duration_ms, 450)
+        self.assertEqual(result.timing.usage, {"total": {"inputTokens": 10}})
+        self.assertEqual(
+            codex.start_calls,
+            [
+                {
+                    "approval_mode": ApprovalMode.deny_all,
+                    "cwd": str(Path("/memory/root")),
+                    "model": "gpt-5.6-luna",
+                    "sandbox": Sandbox.read_only,
+                }
+            ],
+        )
+        prompt, run_options = thread.run_calls[0]
+        self.assertEqual(prompt, "hello")
+        self.assertEqual(run_options["approval_mode"], ApprovalMode.deny_all)
+        self.assertEqual(run_options["effort"], ReasoningEffort.high)
+        self.assertEqual(run_options["sandbox"], Sandbox.read_only)
+
+    def test_resumes_exact_thread_with_workspace_write(self):
+        thread = FakeSdkThread("thread-1")
+        codex = FakeSdkCodex([thread])
+        runner = CodexSdkRunner(codex_factory=lambda _config: codex)
+
+        result = runner.run_turn(
+            prompt="again",
+            provider_session_id="thread-1",
+            cwd=Path("/memory/root"),
+            model=None,
+            reasoning_effort=None,
+            sandbox="workspace-write",
+        )
+
+        self.assertEqual(result.provider_session_id, "thread-1")
+        self.assertEqual(codex.resume_calls[0][0], "thread-1")
+        self.assertEqual(codex.resume_calls[0][1]["approval_mode"], ApprovalMode.deny_all)
+        self.assertEqual(codex.resume_calls[0][1]["sandbox"], Sandbox.workspace_write)
+        self.assertEqual(thread.run_calls[0][1]["sandbox"], Sandbox.workspace_write)
+
+    def test_transport_failure_invalidates_client_without_retrying_ambiguous_turn(self):
+        first_thread = FakeSdkThread("thread-1", error=TransportClosedError("closed"))
+        second_thread = FakeSdkThread("thread-2")
+        clients = [FakeSdkCodex([first_thread]), FakeSdkCodex([second_thread])]
+        factory_calls = []
+
+        def factory(_config):
+            client = clients[len(factory_calls)]
+            factory_calls.append(client)
+            return client
+
+        runner = CodexSdkRunner(codex_factory=factory)
+        arguments = {
+            "prompt": "hello",
+            "provider_session_id": None,
+            "cwd": Path("/memory/root"),
+            "model": None,
+            "reasoning_effort": None,
+            "sandbox": "read-only",
+        }
+
+        with self.assertRaises(TransportClosedError):
+            runner.run_turn(**arguments)
+        result = runner.run_turn(**arguments)
+
+        self.assertEqual(len(factory_calls), 2)
+        self.assertEqual(len(first_thread.run_calls), 1)
+        self.assertEqual(factory_calls[0].close_calls, 1)
+        self.assertEqual(result.provider_session_id, "thread-2")
+
+    def test_rejects_invalid_effort_before_starting_sdk(self):
+        factory = Mock()
+        runner = CodexSdkRunner(codex_factory=factory)
+
+        with self.assertRaises(ValueError):
+            runner.run_turn(
+                prompt="hello",
+                provider_session_id=None,
+                cwd=Path("/memory/root"),
+                model=None,
+                reasoning_effort="extreme",
+                sandbox="read-only",
+            )
+
+        factory.assert_not_called()
+
+    def test_close_is_idempotent_and_cleanup_claim_is_once_per_root(self):
+        codex = FakeSdkCodex([FakeSdkThread("thread-1")])
+        runner = CodexSdkRunner(codex_factory=lambda _config: codex)
+        root = Path("/memory/root")
+        runner.run_turn(
+            prompt="hello",
+            provider_session_id=None,
+            cwd=root,
+            model=None,
+            reasoning_effort=None,
+            sandbox="read-only",
+        )
+
+        self.assertTrue(runner.claim_opportunistic_cleanup(root))
+        self.assertFalse(runner.claim_opportunistic_cleanup(root))
+        runner.close()
+        runner.close()
+
+        self.assertEqual(codex.close_calls, 1)
+
+    def test_cleanup_claim_renews_after_five_minutes(self):
+        now = [100.0]
+        runner = CodexSdkRunner(clock=lambda: now[0])
+        root = Path("/memory/root")
+
+        self.assertTrue(runner.claim_opportunistic_cleanup(root))
+        self.assertFalse(runner.claim_opportunistic_cleanup(root))
+        now[0] += 299.0
+        self.assertFalse(runner.claim_opportunistic_cleanup(root))
+        now[0] += 1.0
+        self.assertTrue(runner.claim_opportunistic_cleanup(root))
 
 
 class CliAgentExecutorTests(unittest.TestCase):
@@ -412,28 +440,103 @@ class CliAgentExecutorTests(unittest.TestCase):
         cleanup.assert_called_once_with(root)
         cleanup.return_value.run.assert_called_once_with()
 
-    def test_run_turn_is_one_shot_and_records_thread_ownership(self):
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=(
-                    '{"type":"thread.started","thread_id":"thread-chat"}\n'
-                    '{"type":"item.completed","item":{"type":"agent_message","text":"done 中文"}}\n'
-                ).encode("utf-8"),
-                stderr=b"",
-            )
-
+    def test_shared_codex_runner_claims_opportunistic_cleanup_once_per_root(self):
+        runner = FakeCodexRunner()
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            executor = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex"))
+            with patch("rightmemory.agent_cli.AgentCliThreadCleanup") as cleanup:
+                cleanup.return_value.has_expired_codex_threads.return_value = False
+                CliAgentExecutor(
+                    root,
+                    "retrieve",
+                    AgentCliConfig(provider="codex"),
+                    codex_runner=runner,
+                )
+                CliAgentExecutor(
+                    root,
+                    "update",
+                    AgentCliConfig(provider="codex"),
+                    codex_runner=runner,
+                )
 
-            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
-                result = executor.run_turn("hello")
+        cleanup.assert_called_once_with(root)
+
+    def test_executor_closes_owned_runner_once_but_never_closes_borrowed_runner(self):
+        owned = FakeCodexRunner()
+        borrowed = FakeCodexRunner()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with patch("rightmemory.agent_cli.CodexSdkRunner", return_value=owned):
+                owner = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex"))
+            borrower = CliAgentExecutor(
+                root,
+                "retrieve",
+                AgentCliConfig(provider="codex"),
+                codex_runner=borrowed,
+            )
+
+            owner.cleanup()
+            owner.cleanup()
+            borrower.cleanup()
+
+        self.assertEqual(owned.close_calls, 1)
+        self.assertEqual(borrowed.close_calls, 0)
+
+    def test_sdk_turn_emits_one_provider_timing_summary(self):
+        runner = FakeCodexRunner()
+        events = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            executor = CliAgentExecutor(
+                Path(tempdir),
+                "retrieve",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+                trace_event=lambda event, **fields: events.append((event, fields)),
+            )
+            executor.run_session_turn("agent-1", "hello")
+
+        self.assertEqual(len(events), 1)
+        event, fields = events[0]
+        self.assertEqual(event, "provider_timing")
+        self.assertEqual(fields["transport"], "codex-sdk")
+        self.assertFalse(fields["resumed"])
+        self.assertEqual(fields["server_duration_ms"], 450)
+        self.assertEqual(fields["outcome"], "success")
+        self.assertIn("usage", fields)
+
+    def test_failed_sdk_turn_emits_one_error_timing_summary(self):
+        runner = FakeCodexRunner(turn_error=RuntimeError("failed"))
+        events = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            executor = CliAgentExecutor(
+                Path(tempdir),
+                "update",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+                trace_event=lambda event, **fields: events.append((event, fields)),
+            )
+            with self.assertRaises(RuntimeError):
+                executor.run_session_turn("agent-1", "hello")
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][1]["outcome"], "error")
+        self.assertEqual(events[0][1]["error_type"], "RuntimeError")
+
+    def test_run_turn_is_one_shot_and_records_thread_ownership(self):
+        runner = FakeCodexRunner(outputs=["done 中文"])
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(
+                root,
+                "retrieve",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+            )
+            result = executor.run_turn("hello")
 
             record = ProviderSessionStore(root, "retrieve").load(NO_SESSION_RIGHTMEMORY_SESSION_ID)
-            ownership = ProviderThreadStore(root).load("codex", "thread-chat")
-            is_internal = ProviderSessionStore.is_internal_provider_session(root, "codex", "thread-chat")
+            ownership = ProviderThreadStore(root).load("codex", "thread-1")
+            is_internal = ProviderSessionStore.is_internal_provider_session(root, "codex", "thread-1")
 
         self.assertEqual(result, "done 中文")
         self.assertIsNone(record)
@@ -442,20 +545,7 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertTrue(is_internal)
 
     def test_run_turn_records_provider_session_under_state_root(self):
-        calls = []
-
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
-            calls.append((command, cwd))
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=(
-                    '{"type":"thread.started","thread_id":"thread-state"}\n'
-                    '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n'
-                ),
-                stderr="",
-            )
-
+        runner = FakeCodexRunner()
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
@@ -466,93 +556,68 @@ class CliAgentExecutorTests(unittest.TestCase):
                 "retrieve",
                 AgentCliConfig(provider="codex"),
                 state_root=state_root,
+                codex_runner=runner,
             )
-
-            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
-                result = executor.run_session_turn("agent-1", "hello")
+            result = executor.run_session_turn("agent-1", "hello")
 
             state_record = ProviderSessionStore(state_root, "retrieve").load("agent-1")
             memory_record = ProviderSessionStore(memory_root, "retrieve").load("agent-1")
 
         self.assertEqual(result, "done")
-        self.assertEqual(calls[0][1], str(memory_root))
+        self.assertEqual(runner.calls[0]["cwd"], memory_root)
         self.assertIsNotNone(state_record)
-        self.assertEqual(state_record.provider_session_id, "thread-state")
+        self.assertEqual(state_record.provider_session_id, "thread-1")
         self.assertIsNone(memory_record)
 
     def test_retrieve_stateless_turn_does_not_save_provider_session(self):
+        runner = FakeCodexRunner(outputs=["reply"])
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             executor = CliAgentExecutor(
                 root,
                 "retrieve",
                 AgentCliConfig(provider="codex"),
+                codex_runner=runner,
             )
-
-            with patch(
-                "rightmemory.agent_cli._run_cli",
-                return_value=(
-                    '{"type":"thread.started","thread_id":"thread-1"}\n'
-                    '{"item":{"type":"agent_message","text":"reply"}}\n'
-                ),
-            ):
-                result = executor.run_stateless_turn("snapshot\n\n# Query\n\nfind root")
+            result = executor.run_stateless_turn("snapshot\n\n# Query\n\nfind root")
 
             self.assertEqual(result, "reply")
             self.assertFalse((root / ".runtime" / "agent_cli_sessions" / "retrieve").exists())
 
     def test_run_turn_starts_fresh_thread_in_second_executor(self):
-        calls = []
-
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
-            calls.append(command)
-            number = len(calls)
-            text_out = "first" if number == 1 else "second"
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=(
-                    f'{{"type":"thread.started","thread_id":"thread-chat-{number}"}}\n'
-                    f'{{"type":"item.completed","item":{{"type":"agent_message","text":"{text_out}"}}}}\n'
-                ),
-                stderr="",
-            )
-
+        runner = FakeCodexRunner(outputs=["first", "second"])
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-
-            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
-                first = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex")).run_turn("hello")
-                second = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex")).run_turn("again")
+            first = CliAgentExecutor(
+                root,
+                "retrieve",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+            ).run_turn("hello")
+            second = CliAgentExecutor(
+                root,
+                "retrieve",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+            ).run_turn("again")
 
         self.assertEqual(first, "first")
         self.assertEqual(second, "second")
-        self.assertNotIn("resume", calls[0])
-        self.assertNotIn("resume", calls[1])
+        self.assertIsNone(runner.calls[0]["provider_session_id"])
+        self.assertIsNone(runner.calls[1]["provider_session_id"])
 
     def test_codex_session_turn_saves_and_resumes_provider_session(self):
-        calls = []
-
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
-            calls.append(command)
-            text_out = "first" if len(calls) == 1 else "second"
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=(
-                    '{"type":"thread.started","thread_id":"thread-1"}\n'
-                    f'{{"type":"item.completed","item":{{"type":"agent_message","text":"{text_out}"}}}}\n'
-                ),
-                stderr="",
-            )
-
+        runner = FakeCodexRunner(outputs=["first", "second"])
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            executor = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex", model="gpt-5"))
-
-            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
-                first = executor.run_session_turn("agent-1", "hello")
-                second = executor.run_session_turn("agent-1", "again")
+            executor = CliAgentExecutor(
+                root,
+                "retrieve",
+                AgentCliConfig(provider="codex", model="gpt-5"),
+                codex_runner=runner,
+            )
+            first = executor.run_session_turn("agent-1", "hello")
+            second = executor.run_session_turn("agent-1", "again")
 
             record = ProviderSessionStore(root, "retrieve").load("agent-1")
 
@@ -560,8 +625,10 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertEqual(second, "second")
         self.assertIsNotNone(record)
         self.assertEqual(record.provider_session_id, "thread-1")
-        self.assertNotIn("resume", calls[0])
-        self.assertEqual(calls[1][-2:], ["resume", "thread-1"])
+        self.assertIsNone(runner.calls[0]["provider_session_id"])
+        self.assertEqual(runner.calls[1]["provider_session_id"], "thread-1")
+        self.assertEqual(runner.calls[0]["model"], "gpt-5")
+        self.assertEqual(runner.calls[0]["sandbox"], "read-only")
 
     def test_claude_first_turn_uses_stable_uuid_then_resumes(self):
         calls = []
@@ -658,41 +725,34 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertTrue(all("--resume" not in command for command in calls))
 
     def test_process_local_turn_resumes_only_within_executor(self):
-        calls = []
-
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
-            calls.append(command)
-            if "resume" in command:
-                thread_id = command[command.index("resume") + 1]
-            else:
-                thread_id = f"thread-{len([call for call in calls if 'resume' not in call])}"
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=(
-                    f'{{"type":"thread.started","thread_id":"{thread_id}"}}\n'
-                    '{"item":{"type":"agent_message","text":"done"}}\n'
-                ),
-                stderr="",
-            )
-
+        runner = FakeCodexRunner(outputs=["done", "done", "done"])
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
-                first = CliAgentExecutor(root, "reviewer", AgentCliConfig(provider="codex"))
-                first.run_process_turn("one")
-                first.run_process_turn("two")
-                CliAgentExecutor(root, "reviewer", AgentCliConfig(provider="codex")).run_process_turn("three")
+            first = CliAgentExecutor(
+                root,
+                "reviewer",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+            )
+            first.run_process_turn("one")
+            first.run_process_turn("two")
+            CliAgentExecutor(
+                root,
+                "reviewer",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+            ).run_process_turn("three")
 
             records = ProviderThreadStore(root).scan("codex").records
 
-        self.assertNotIn("resume", calls[0])
-        self.assertEqual(calls[1][-2:], ["resume", "thread-1"])
-        self.assertNotIn("resume", calls[2])
+        self.assertIsNone(runner.calls[0]["provider_session_id"])
+        self.assertEqual(runner.calls[1]["provider_session_id"], "thread-1")
+        self.assertIsNone(runner.calls[2]["provider_session_id"])
         self.assertEqual(len(records), 2)
         self.assertTrue(all(record.policy == "process-local" for record in records))
 
     def test_unregistered_legacy_retrieve_mapping_is_not_resumed(self):
+        runner = FakeCodexRunner()
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             ProviderSessionStore(root, "retrieve").save(
@@ -705,22 +765,21 @@ class CliAgentExecutorTests(unittest.TestCase):
                     updated_at="2026-07-17T00:00:00+00:00",
                 )
             )
-            executor = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex"))
-            with patch(
-                "rightmemory.agent_cli._run_cli",
-                return_value=(
-                    '{"type":"thread.started","thread_id":"new-thread"}\n'
-                    '{"item":{"type":"agent_message","text":"done"}}\n'
-                ),
-            ) as run:
-                executor.run_session_turn("agent-1", "hello")
+            executor = CliAgentExecutor(
+                root,
+                "retrieve",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+            )
+            executor.run_session_turn("agent-1", "hello")
 
             mapping = ProviderSessionStore(root, "retrieve").load("agent-1")
 
-        self.assertNotIn("resume", run.call_args.args[0])
-        self.assertEqual(mapping.provider_session_id, "new-thread")
+        self.assertIsNone(runner.calls[0]["provider_session_id"])
+        self.assertEqual(mapping.provider_session_id, "thread-1")
 
     def test_expired_retrieve_mapping_is_not_resumed_when_cleanup_itself_fails(self):
+        runner = FakeCodexRunner()
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             ProviderThreadStore(root).record_created(
@@ -744,56 +803,69 @@ class CliAgentExecutorTests(unittest.TestCase):
             with patch("rightmemory.agent_cli.AgentCliThreadCleanup") as cleanup:
                 cleanup.return_value.has_expired_codex_threads.return_value = True
                 cleanup.return_value.run.side_effect = OSError("cleanup unavailable")
-                executor = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="codex"))
-            with patch(
-                "rightmemory.agent_cli._run_cli",
-                return_value=(
-                    '{"type":"thread.started","thread_id":"new-thread"}\n'
-                    '{"item":{"type":"agent_message","text":"done"}}\n'
-                ),
-            ) as run:
-                executor.run_session_turn("agent-1", "hello")
+                executor = CliAgentExecutor(
+                    root,
+                    "retrieve",
+                    AgentCliConfig(provider="codex"),
+                    codex_runner=runner,
+                )
+            executor.run_session_turn("agent-1", "hello")
 
-        self.assertNotIn("resume", run.call_args.args[0])
+        self.assertIsNone(runner.calls[0]["provider_session_id"])
 
-    def test_failed_codex_command_registers_partial_thread_started_event(self):
-        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
-            return subprocess.CompletedProcess(
-                command,
-                7,
-                stdout='{"type":"thread.started","thread_id":"failed-thread"}\n',
-                stderr="failed later",
-            )
-
+    def test_failed_codex_turn_registers_ownership_before_turn_failure(self):
+        runner = FakeCodexRunner(turn_error=RuntimeError("failed later"))
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            executor = CliAgentExecutor(root, "update", AgentCliConfig(provider="codex"))
-            with patch("rightmemory.agent_cli.subprocess.run", fake_run):
-                with self.assertRaises(RuntimeError):
-                    executor.run_session_turn("agent-1", "hello")
+            executor = CliAgentExecutor(
+                root,
+                "update",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+            )
+            with self.assertRaises(RuntimeError):
+                executor.run_session_turn("agent-1", "hello")
 
-            ownership = ProviderThreadStore(root).load("codex", "failed-thread")
+            ownership = ProviderThreadStore(root).load("codex", "thread-1")
 
         self.assertEqual(ownership.policy, "one-shot")
         self.assertIsNone(ownership.last_successful_activity_at)
 
-    def test_cli_failure_includes_stdout_and_stderr(self):
+    def test_claude_cli_failure_includes_stdout_and_stderr(self):
         def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
             return subprocess.CompletedProcess(command, 7, stdout="partial output", stderr="bad credentials")
 
         with tempfile.TemporaryDirectory() as tempdir:
-            executor = CliAgentExecutor(Path(tempdir), "retrieve", AgentCliConfig(provider="codex"))
+            executor = CliAgentExecutor(Path(tempdir), "retrieve", AgentCliConfig(provider="claude"))
             with patch("rightmemory.agent_cli.subprocess.run", fake_run):
                 with self.assertRaises(RuntimeError) as caught:
                     executor.run_session_turn("agent-1", "hello")
 
         message = str(caught.exception)
-        self.assertIn("Codex CLI exited with status 7", message)
+        self.assertIn("Claude CLI exited with status 7", message)
         self.assertIn("stderr: bad credentials", message)
         self.assertIn("stdout: partial output", message)
 
 
 class AgentCliDoctorTests(unittest.TestCase):
+    def test_doctor_resolves_codex_sdk_and_its_bundled_runtime(self):
+        binary = Path("C:/bundled/codex.exe")
+        with (
+            patch("codex_cli_bin.bundled_codex_path", return_value=binary),
+            patch("openai_codex.__version__", "0.147.0"),
+        ):
+            resolved = _provider_runtime("codex")
+
+        self.assertEqual(resolved, f"codex-sdk-0.147.0:{binary}")
+
+    def test_doctor_does_not_fall_back_to_global_codex_when_bundled_runtime_is_missing(self):
+        with patch(
+            "codex_cli_bin.bundled_codex_path",
+            side_effect=FileNotFoundError("bundled runtime missing"),
+        ):
+            with self.assertRaises(FileNotFoundError):
+                _provider_runtime("codex")
+
     def test_format_doctor_report(self):
         report = format_doctor_report(
             [

@@ -16,7 +16,7 @@ Modern coding agents are strong inside a single conversation, then strangely for
 - **Three focused modules:** Memory and Pursuit use separate lifecycles inside one graph, while Agent Corrections preserves reusable concrete contrasts without turning them into graph content.
 - **Multi-device continuity:** the same memory can follow agents across laptops, desktops, clients, and project-specific roots.
 - **Clear ownership:** retrieval, unified updates, transcript-review extraction, sync repair, consolidation, and reflection run through explicit role boundaries instead of letting the main agent half-edit RightMemory while doing unrelated work.
-- **Vendor-neutral command surface:** Codex CLI and Claude Code CLI have built-in delegated execution today; Gemini CLI-style workflows and other command-capable agents can use the same `rightmemory` CLI or JSON-over-stdio daemon surface.
+- **Vendor-neutral command surface:** the Codex SDK and Claude Code CLI have built-in delegated execution today; Gemini CLI-style workflows and other command-capable agents can use the same `rightmemory` CLI or JSON-over-stdio daemon surface.
 
 ## The RightMemory Semantic Model
 
@@ -84,7 +84,7 @@ cd RightMemory
 
 The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs five user-facing skills into both `~/.codex/skills` and `~/.claude/skills`: `memory-retriever` for read-only use, approval-gated `rightmemory-orchestrator`, automatic `rightmemory-auto-orchestrator`, `maintain-rightmemory` for explicitly requested direct maintenance by the current agent, and `review-agent-guidance-inbox` for explicitly reviewing pending agent guidance before formal admission. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
 
-If you already use Codex CLI or Claude Code CLI and want RightMemory roles to run through those tools:
+If you want RightMemory roles to run through the Codex SDK or Claude Code CLI:
 
 ```bash
 ./install.sh --mode cli-agent ~/.rightmemory ~/.codex/skills
@@ -159,7 +159,7 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 - One global id namespace and typed graph edges such as `dep:`, `cfg:`, `ver:`, `doc:`, and `todo:` across both trees.
 - Multi-device memory continuity across laptops, desktops, agent clients, and project-specific roots.
 - Five installed skills: read-only retrieval, approval-gated orchestration, automatic orchestration, explicit direct maintenance, and pending agent-guidance review.
-- Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex/Claude CLI role execution.
+- Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex SDK/Claude Code CLI role execution.
 - Model-selected, runtime-rendered retrieval output without model-authored summaries or commentary.
 - One updater for all three semantic modules, automatic transcript-review candidate extraction, and immutable candidate records for input-to-edit provenance.
 
@@ -175,7 +175,7 @@ For a custom memory root or skill target:
 .\install.ps1 ~\.rightmemory ~\.codex\skills
 ```
 
-CLI-agent mode delegates role execution to Codex CLI or Claude Code CLI while preserving the same `rightmemory` command surface:
+CLI-agent mode delegates role execution to the Codex Python SDK or Claude Code CLI while preserving the same `rightmemory` command surface. The Codex SDK includes a pinned local Codex runtime and talks to it through App Server:
 
 ```bash
 ./install.sh --mode cli-agent ~/.rightmemory ~/.codex/skills
@@ -459,7 +459,7 @@ unified updater
 - Candidate submission is evidence, not final stored wording, classification, placement, or an instruction to edit a particular module. Session ids provide provenance and batching boundaries, not task identity.
 - The unified updater reconciles related candidates and may change Memory, Pursuit, Agent Corrections, any combination of them, or nothing in one isolated transaction.
 - Dreamer, Insight, Historian, and Pruner remain Memory-oriented maintenance roles. They must preserve ids and edges referenced from Pursuit. Sync repair transports the wider synchronized surface without taking over semantic updater judgment.
-- Standalone mode uses RightMemory's bounded tools, while CLI-agent mode delegates roles to Codex or Claude CLI with role-specific sandbox or permission defaults.
+- Standalone mode uses RightMemory's bounded tools, while CLI-agent mode delegates roles to the Codex SDK or Claude Code CLI with role-specific sandbox or permission defaults.
 
 The host agent should avoid reading or editing RightMemory state directly unless the user explicitly selects `maintain-rightmemory`. Other access goes through the command-backed skills and runtime roles, which keeps ownership clear and reduces partial or competing edits.
 
@@ -478,7 +478,7 @@ rightmemory/prompts/pruner.md
 rightmemory/prompts/sync-reconciler.md
 ```
 
-Both install modes use these files through the `rightmemory` runtime. Standalone mode loads them into the local Pydantic AI agent and tool loop. CLI-agent mode wraps the same role instructions into prompts sent to Codex CLI or Claude Code CLI. Other command-capable agents can call the same CLI or daemon surface without changing the schema. The retriever and orchestrator skills own the host agent's retrieval decision, approval behavior, evidence threshold, and natural-boundary timing; the canonical prompts own the Retrieve and Update roles invoked behind their commands. `maintain-rightmemory` instead applies the schema and focused rules directly when the user explicitly requests direct maintenance.
+Both install modes use these files through the `rightmemory` runtime. Standalone mode loads them into the local Pydantic AI agent and tool loop. CLI-agent mode wraps the same role instructions into prompts sent through the Codex SDK or Claude Code CLI. Other command-capable agents can call the same CLI or daemon surface without changing the schema. The retriever and orchestrator skills own the host agent's retrieval decision, approval behavior, evidence threshold, and natural-boundary timing; the canonical prompts own the Retrieve and Update roles invoked behind their commands. `maintain-rightmemory` instead applies the schema and focused rules directly when the user explicitly requests direct maintenance.
 
 Package-owned references complement the prompts: the schema defines representation; Memory, Pursuit, Agent Corrections, RightMemory Edit Feedback, and Shared View rules define focused semantics; and the [Retrieve runtime contract](rightmemory/reference/RETRIEVE_CONTRACT.md) owns Retrieve's input snapshot and terminal-selection mechanics. `reviewer.md` extracts candidate evidence from supported transcripts for unified Update. Explicit session review independently forms tentative proposals, then consults relevant RightMemory Edit Feedback before finalizing them.
 
@@ -489,7 +489,7 @@ RightMemory has two install modes. The default is `standalone`.
 | Mode | Use When | What Gets Installed |
 | --- | --- | --- |
 | `standalone` | You want RightMemory to run its own local Pydantic AI role agents and tools. | `memory-retriever`, both orchestrator modes, explicit-only `maintain-rightmemory`, their shared definitions, and the `rightmemory` CLI. |
-| `cli-agent` | You want RightMemory to delegate each runtime role turn to Codex CLI or Claude Code CLI. | The same four skills and shared definitions plus the `rightmemory` CLI. |
+| `cli-agent` | You want RightMemory to delegate each runtime role turn to the Codex SDK or Claude Code CLI. | The same four skills and shared definitions plus the `rightmemory` CLI. |
 
 The installer arguments are:
 
@@ -518,9 +518,9 @@ remains an explicit user choice.
 The Bash and PowerShell entrypoints are small platform bootstraps; both delegate
 the install transaction to the same stdlib-only Python core, so state
 preservation, Git setup, runtime installation, skills, and semantic upgrades have
-one implementation. On Windows, CLI-agent mode supports native provider
-executables and standard npm `.cmd` shims that include their matching `.ps1`
-shim.
+one implementation. On its supported platforms, the Codex SDK supplies its
+matching native Codex runtime. Claude CLI discovery continues to support native executables and,
+on Windows, standard npm `.cmd` shims with matching `.ps1` shims.
 
 On reinstall, the shared installer asks a live asynchronous Update worker to
 stop at a batch boundary before replacing runtime files. If the worker cannot
@@ -604,7 +604,7 @@ The daemon reads JSON lines from stdin and writes JSON lines to stdout:
 The runtime is intentionally small:
 
 - Standalone mode uses `pydantic_ai.Agent` as a chat-like agent loop.
-- CLI-agent mode delegates the same role turn to Codex CLI or Claude Code CLI. Retrieve may keep one active provider mapping under `<memory-root>/.runtime/agent_cli_sessions/`; other independent role commands are one-shot.
+- CLI-agent mode delegates the same role turn to the Codex SDK or Claude Code CLI. Retrieve may keep one active provider mapping under `<memory-root>/.runtime/agent_cli_sessions/`; other independent role commands are one-shot. The default MCP backend keeps one Codex SDK/App Server connection for its process lifetime, while command-scoped runtimes close their owned connection at exit.
 - Standalone retrieve uses complete typed reads for local F# details and S# skills, line-numbered reads for local M# evidence, typed progressive reads for validated MF# graphs and their F#/M#/S# resources, and fixed `AC#writing` / `AC#design` sources for complete Agent Correction entries. CLI-agent emits the same selector as strict JSON. The shared runtime uses the canonical index and Retrieve contract to resolve ids, permitted ranges, hierarchy, source positions, and source-authored Markdown.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different no-profile root, or use `--profile <name>` / `.rightmemory-profile` for project-specific roots.
 - Retrieve, unified Update, transcript-review extraction, history, dreamer, insight, pruner, and sync repair have separate runtime boundaries selected by command line, queue, scanner, or watcher.
@@ -714,7 +714,7 @@ model = "gpt-5.6-sol"
 reasoning_effort = "xhigh"
 ```
 
-`reasoning_effort` is an optional Codex-only role setting. RightMemory passes it as an invocation-specific `model_reasoning_effort` override, so roles can use different effort levels without changing the user's global Codex config. Accepted values are `minimal`, `low`, `medium`, `high`, and `xhigh`.
+`reasoning_effort` is an optional Codex-only role setting. RightMemory passes it on each SDK turn, so roles can use different effort levels without changing the user's global Codex config. Accepted values are `minimal`, `low`, `medium`, `high`, and `xhigh`.
 
 Add a role-specific table only when a role should use a different model or provider:
 
@@ -730,7 +730,7 @@ provider = "claude"
 model = "sonnet"
 ```
 
-Use `rightmemory doctor agent-cli` after configuring CLI-agent mode. It checks that role config resolves to CLI-agent execution, required provider commands are available, and read/write role probes can complete.
+Use `rightmemory doctor agent-cli` after configuring CLI-agent mode. It checks that role config resolves to CLI-agent execution, the Codex SDK runtime or configured Claude command is available, and read/write role probes can complete.
 
 `rightmemory retrieve --session <id>` resumes the same registered provider conversation while it remains active. Its first turn receives the canonical role instructions and a stable snapshot of Memory, Pursuit, and any present fixed Agent Correction collections; resumed turns receive changes to that snapshot, newly submitted candidates, and the current query. Local prior questions and answers are not replayed into an already resumed provider thread.
 
@@ -1011,6 +1011,9 @@ uv --cache-dir .uv-cache venv .venv
 uv --cache-dir .uv-cache pip install -e . --python .venv\Scripts\python.exe
 rightmemory retrieve chat
 ```
+
+For Codex-backed CLI-agent development, install the optional SDK extra with
+`uv --cache-dir .uv-cache pip install -e ".[codex-sdk]" --python <venv-python>`.
 
 The standalone runtime exposes sandboxed tools rooted at the configured memory root. It does not provide an OS-level jail.
 

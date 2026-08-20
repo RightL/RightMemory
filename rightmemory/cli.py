@@ -1495,7 +1495,7 @@ def _sync_main(argv: list[str], memory_root: Path) -> int:
 def _doctor_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory doctor")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("agent-cli", help="check Codex/Claude CLI-agent mode setup")
+    subparsers.add_parser("agent-cli", help="check Codex SDK/Claude CLI-agent mode setup")
     args = parser.parse_args(argv)
 
     if args.command == "agent-cli":

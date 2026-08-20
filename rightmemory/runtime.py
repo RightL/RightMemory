@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_cli import CliAgentExecutor, NO_SESSION_RIGHTMEMORY_SESSION_ID
+from .codex_sdk import CodexSdkRunner
 from .async_update import AsyncUpdateStore
 from .automatic_effects import (
     forget_memory_change_pressure_operation,
@@ -143,7 +144,12 @@ def _complete_retrieve_sync(method: Callable[..., Any]):
 
 
 class RightMemoryRuntime:
-    def __init__(self, config: RuntimeConfig):
+    def __init__(
+        self,
+        config: RuntimeConfig,
+        *,
+        codex_runner: CodexSdkRunner | None = None,
+    ):
         if config.runtime_mode not in {"standalone", "cli-agent"}:
             raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
         self.config = config
@@ -155,6 +161,13 @@ class RightMemoryRuntime:
         self._sync_manager: SyncManager | None = None
         self._retrieve_sync_result: SyncResult | None = None
         self._last_write_result: IsolatedWriteResult | None = None
+        uses_codex_sdk = (
+            config.runtime_mode == "cli-agent"
+            and config.agent_cli is not None
+            and config.agent_cli.provider == "codex"
+        )
+        self._codex_runner = codex_runner or (CodexSdkRunner() if uses_codex_sdk else None)
+        self._owns_codex_runner = codex_runner is None and self._codex_runner is not None
         self.semantic_upgrades = self._semantic_upgrade_context()
         self._semantic_upgrade_ids = self.semantic_upgrades.ids if self.semantic_upgrades is not None else []
         self.agent = self._build_cli_agent() if config.runtime_mode == "cli-agent" else self._build_agent()
@@ -1214,7 +1227,7 @@ class RightMemoryRuntime:
             fresh_provider_session=self.config.runtime_mode == "cli-agent",
             sync=replace(self.config.sync, memory_root=worktree, enabled=False),
         )
-        nested = RightMemoryRuntime(nested_config)
+        nested = RightMemoryRuntime(nested_config, codex_runner=self._codex_runner)
         nested._active_trace = self._active_trace
         try:
             if nested.config.runtime_mode == "cli-agent":
@@ -1330,7 +1343,7 @@ class RightMemoryRuntime:
                 f"current runtime uses {self.config.memory_root}, "
                 f"sync-reconciler uses {reconciler_config.memory_root}"
             )
-        runtime = RightMemoryRuntime(reconciler_config)
+        runtime = RightMemoryRuntime(reconciler_config, codex_runner=self._codex_runner)
         state = _IsolatedStateOverlay(
             reconciler_config.state_root,
             "sync-reconciler",
@@ -1450,7 +1463,7 @@ class RightMemoryRuntime:
                 "sync-reconciler memory root mismatch: "
                 f"current runtime uses {self.config.memory_root}, sync-reconciler uses {reconciler_config.memory_root}"
             )
-        runtime = RightMemoryRuntime(reconciler_config)
+        runtime = RightMemoryRuntime(reconciler_config, codex_runner=self._codex_runner)
         try:
             runtime.run_session_turn(SYNC_REPAIR_SESSION_ID, self._sync().repair_message(result))
         finally:
@@ -1748,6 +1761,7 @@ class RightMemoryRuntime:
         kwargs: dict[str, Any] = {
             "state_root": self.config.state_root,
             "fresh_provider_session": self.config.fresh_provider_session,
+            "trace_event": self._trace,
         }
         if self.semantic_upgrades is not None:
             kwargs["semantic_upgrades"] = self.semantic_upgrades
@@ -1755,6 +1769,7 @@ class RightMemoryRuntime:
             self.config.memory_root,
             self.config.role,
             self.config.agent_cli,
+            codex_runner=self._codex_runner,
             **kwargs,
         )
 
@@ -1871,9 +1886,14 @@ class RightMemoryRuntime:
         return self._last_write_result
 
     def cleanup(self) -> None:
-        cleanup = getattr(self.agent, "cleanup", None)
-        if callable(cleanup):
-            cleanup()
+        try:
+            cleanup = getattr(self.agent, "cleanup", None)
+            if callable(cleanup):
+                cleanup()
+        finally:
+            if self._owns_codex_runner and self._codex_runner is not None:
+                self._codex_runner.close()
+                self._owns_codex_runner = False
 
     def _trace_model_id(self) -> str | None:
         if self.config.model_id is not None:

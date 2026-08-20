@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -26,6 +27,88 @@ def _snapshot(root: Path) -> tuple[tuple[str, str, bytes], ...]:
 
 
 class InstallCoreTests(unittest.TestCase):
+    def test_source_import_and_clear_error_without_codex_sdk(self):
+        script = """
+import importlib.abc
+import sys
+
+class BlockCodexSdk(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "openai_codex" or fullname.startswith("openai_codex."):
+            raise ModuleNotFoundError("masked optional dependency", name=fullname)
+        return None
+
+for name in tuple(sys.modules):
+    if name == "openai_codex" or name.startswith("openai_codex."):
+        sys.modules.pop(name)
+sys.meta_path.insert(0, BlockCodexSdk())
+
+from pathlib import Path
+from rightmemory.runtime import RightMemoryRuntime
+from rightmemory.codex_sdk import CodexSdkRunner
+
+runner = CodexSdkRunner()
+try:
+    runner.run_turn(
+        prompt="test",
+        provider_session_id=None,
+        cwd=Path.cwd(),
+        model=None,
+        reasoning_effort=None,
+        sandbox="read-only",
+    )
+except RuntimeError as exc:
+    assert "rightmemory[codex-sdk]" in str(exc), str(exc)
+else:
+    raise AssertionError("Codex mode unexpectedly ran without its optional SDK")
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=REPO_ROOT,
+            text=True,
+            encoding="utf-8",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_runtime_install_adds_codex_extra_only_for_cli_agent_mode(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            for mode, suffix in (("standalone", ""), ("cli-agent", "[codex-sdk]")):
+                with self.subTest(mode=mode):
+                    installer = Installer(REPO_ROOT, mode, root / "memory", [root / "skills"])
+                    installer.runtime_home = root / f"runtime-{mode}"
+                    installer.runtime_venv = installer.runtime_home / "venv"
+                    installer.runtime_bin_dir = installer.runtime_home / "bin"
+                    installer.runtime_command = installer.runtime_bin_dir / "rightmemory"
+                    python = (
+                        installer.runtime_venv / "Scripts" / "python.exe"
+                        if os.name == "nt"
+                        else installer.runtime_venv / "bin" / "python"
+                    )
+                    python.parent.mkdir(parents=True)
+                    python.touch()
+
+                    with (
+                        patch.object(install_core, "_run", return_value=subprocess.CompletedProcess([], 0)) as run,
+                        patch.object(installer, "_write_runtime_wrapper"),
+                        patch("builtins.print"),
+                    ):
+                        installer._install_runtime()
+
+                    run.assert_called_once_with(
+                        [
+                            "uv",
+                            "pip",
+                            "install",
+                            "--python",
+                            str(python),
+                            f"{REPO_ROOT}{suffix}",
+                        ]
+                    )
+
     def test_empty_xdg_data_home_uses_standard_default(self):
         home = Path("test-home")
 

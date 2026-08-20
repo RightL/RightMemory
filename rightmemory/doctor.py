@@ -40,15 +40,13 @@ def run_agent_cli_doctor(memory_root: Path | None = None) -> list[DoctorCheck]:
     resolved = []
     for provider in providers:
         try:
-            command = prepare_command([provider])
-        except (FileNotFoundError, RuntimeError) as exc:
+            resolved.append(_provider_runtime(provider))
+        except (FileNotFoundError, ImportError, RuntimeError) as exc:
             unavailable.append(f"{provider}: {exc}")
-        else:
-            resolved.append(f"{provider}:{command[0]}")
     if unavailable:
-        checks.append(DoctorCheck("provider CLI binaries", False, "; ".join(unavailable)))
+        checks.append(DoctorCheck("provider runtimes", False, "; ".join(unavailable)))
         return checks
-    checks.append(DoctorCheck("provider CLI binaries", True, f"found: {', '.join(resolved)}"))
+    checks.append(DoctorCheck("provider runtimes", True, f"found: {', '.join(resolved)}"))
 
     with tempfile.TemporaryDirectory(prefix="rightmemory-doctor-") as tempdir:
         temp_root = Path(tempdir)
@@ -71,6 +69,17 @@ def run_agent_cli_doctor(memory_root: Path | None = None) -> list[DoctorCheck]:
         _check_write_boundary(checks, write_config, boundary_parent, run_nonce)
         _check_codex_thread_cleanup(checks, doctor_configs)
     return checks
+
+
+def _provider_runtime(provider: str) -> str:
+    if provider == "codex":
+        from codex_cli_bin import bundled_codex_path
+        from openai_codex import __version__
+
+        binary = bundled_codex_path()
+        return f"codex-sdk-{__version__}:{binary}"
+    command = prepare_command([provider])
+    return f"{provider}:{command[0]}"
 
 
 def _load_agent_cli_configs(checks: list[DoctorCheck], *, memory_root: Path | None = None) -> dict[str, RuntimeConfig]:
