@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import time
 import uuid
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Protocol
 
@@ -12,6 +15,8 @@ from pydantic import Field
 
 from .async_update import AsyncUpdateStore
 from .config import load_config
+from .codex_sdk import CodexSdkRunner
+from .debug import DebugTrace
 from .guidance import submit_guidance
 from .runtime import RightMemoryRuntime
 from .update_alerts import collect_update_recovery_summary
@@ -121,13 +126,47 @@ class McpBackend(Protocol):
 @dataclass(frozen=True)
 class DefaultMcpBackend:
     memory_root: Path
+    codex_runner: CodexSdkRunner = field(default_factory=CodexSdkRunner)
 
     def retrieve(self, session_id: str, need: str) -> str:
-        runtime = RightMemoryRuntime(load_config("retrieve", memory_root=self.memory_root))
+        return self._retrieve(session_id, need)
+
+    def _retrieve(
+        self,
+        session_id: str,
+        need: str,
+        *,
+        timing: _McpRetrieveTiming | None = None,
+    ) -> str:
+        config_started = time.perf_counter()
         try:
-            return runtime.run_session_turn(session_id, need)
+            config = load_config("retrieve", memory_root=self.memory_root)
         finally:
-            runtime.cleanup()
+            if timing is not None:
+                timing.config_load_ms = _elapsed_ms(config_started)
+        if timing is not None and config.debug_trace:
+            timing.trace = DebugTrace(config.state_root, config.role, session_id)
+
+        runtime_started = time.perf_counter()
+        try:
+            runtime = RightMemoryRuntime(config, codex_runner=self.codex_runner)
+        finally:
+            if timing is not None:
+                timing.runtime_construction_ms = _elapsed_ms(runtime_started)
+        try:
+            turn_started = time.perf_counter()
+            try:
+                return runtime.run_session_turn(session_id, need)
+            finally:
+                if timing is not None:
+                    timing.run_session_turn_ms = _elapsed_ms(turn_started)
+        finally:
+            cleanup_started = time.perf_counter()
+            try:
+                runtime.cleanup()
+            finally:
+                if timing is not None:
+                    timing.runtime_cleanup_ms = _elapsed_ms(cleanup_started)
 
     def submit_update(self, session_id: str, evidence: str) -> str | None:
         store = AsyncUpdateStore(self.memory_root, "update")
@@ -171,16 +210,65 @@ class DefaultMcpBackend:
     def actionable_warning(self) -> str | None:
         return _actionable_update_warning(self.memory_root)
 
+    def close(self) -> None:
+        self.codex_runner.close()
+
+
+@dataclass
+class _McpRetrieveTiming:
+    backend_entry_wall_timestamp: str
+    total_started: float
+    trace: DebugTrace | None = None
+    config_load_ms: float = 0.0
+    runtime_construction_ms: float = 0.0
+    run_session_turn_ms: float = 0.0
+    runtime_cleanup_ms: float = 0.0
+    actionable_warning_ms: float = 0.0
+    result_construction_ms: float = 0.0
+
+    def emit(self, *, outcome: str, error_type: str | None) -> None:
+        if self.trace is None:
+            return
+        self.trace.append(
+            "mcp_timing",
+            backend_entry_wall_timestamp=self.backend_entry_wall_timestamp,
+            config_load_ms=self.config_load_ms,
+            runtime_construction_ms=self.runtime_construction_ms,
+            run_session_turn_ms=self.run_session_turn_ms,
+            runtime_cleanup_ms=self.runtime_cleanup_ms,
+            actionable_warning_ms=self.actionable_warning_ms,
+            result_construction_ms=self.result_construction_ms,
+            total_ms=_elapsed_ms(self.total_started),
+            outcome=outcome,
+            error_type=error_type,
+        )
+
 
 def create_mcp_server(
     memory_root: Path,
     *,
     backend: McpBackend | None = None,
 ) -> MCPServer:
-    selected_backend = backend or DefaultMcpBackend(
-        Path(memory_root).expanduser().resolve()
-    )
-    server = MCPServer("RightMemory", log_level="WARNING")
+    if backend is None:
+        selected_backend = DefaultMcpBackend(
+            Path(memory_root).expanduser().resolve()
+        )
+
+        @asynccontextmanager
+        async def lifespan(_server: MCPServer):
+            try:
+                yield {}
+            finally:
+                selected_backend.close()
+
+        server = MCPServer(
+            "RightMemory",
+            log_level="WARNING",
+            lifespan=lifespan,
+        )
+    else:
+        selected_backend = backend
+        server = MCPServer("RightMemory", log_level="WARNING")
 
     @server.tool(
         name="rightmemory_retrieve",
@@ -193,6 +281,12 @@ def create_mcp_server(
     ) -> CallToolResult:
         clean_session = _clean_session_id(session_id)
         clean_need = _clean_text(need, "retrieval need")
+        if isinstance(selected_backend, DefaultMcpBackend):
+            return _timed_default_retrieve_result(
+                selected_backend,
+                clean_session,
+                clean_need,
+            )
         output = selected_backend.retrieve(clean_session, clean_need)
         return _result(output, selected_backend.actionable_warning())
 
@@ -235,7 +329,11 @@ def mcp_main(memory_root: Path, argv: list[str] | None = None) -> int:
         description="Serve RightMemory ordinary-agent tools over local MCP stdio.",
     )
     parser.parse_args([] if argv is None else argv)
-    create_mcp_server(memory_root).run(transport="stdio")
+    backend = DefaultMcpBackend(Path(memory_root).expanduser().resolve())
+    try:
+        create_mcp_server(memory_root, backend=backend).run(transport="stdio")
+    finally:
+        backend.close()
     return 0
 
 
@@ -247,6 +345,40 @@ def _actionable_update_warning(memory_root: Path) -> str | None:
             "RightMemory could not inspect update recovery state: "
             f"{_error_detail(exc)}. Tell the user to run `rightmemory status`."
         )
+
+
+def _timed_default_retrieve_result(
+    backend: DefaultMcpBackend,
+    session_id: str,
+    need: str,
+) -> CallToolResult:
+    timing = _McpRetrieveTiming(
+        backend_entry_wall_timestamp=datetime.now(UTC).isoformat(),
+        total_started=time.perf_counter(),
+    )
+    outcome = "failure"
+    error_type: str | None = None
+    try:
+        output = backend._retrieve(session_id, need, timing=timing)
+
+        warning_started = time.perf_counter()
+        try:
+            warning = backend.actionable_warning()
+        finally:
+            timing.actionable_warning_ms = _elapsed_ms(warning_started)
+
+        result_started = time.perf_counter()
+        try:
+            result = _result(output, warning)
+        finally:
+            timing.result_construction_ms = _elapsed_ms(result_started)
+        outcome = "success"
+        return result
+    except BaseException as exc:
+        error_type = type(exc).__name__
+        raise
+    finally:
+        timing.emit(outcome=outcome, error_type=error_type)
 
 
 def _result(*texts: str | None) -> CallToolResult:
@@ -279,3 +411,7 @@ def _error_detail(exc: Exception) -> str:
     if len(detail) > _MAX_ERROR_DETAIL_CHARS:
         detail = detail[:_MAX_ERROR_DETAIL_CHARS] + "...[truncated]"
     return f"{type(exc).__name__}: {detail}"
+
+
+def _elapsed_ms(started: float) -> float:
+    return max(0.0, (time.perf_counter() - started) * 1000.0)
