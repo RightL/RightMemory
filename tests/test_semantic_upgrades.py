@@ -209,8 +209,10 @@ class RuntimeStateRootTests(unittest.TestCase):
             memory_root,
             "retrieve",
             AgentCliConfig(provider="codex"),
+            codex_runner=runtime._codex_runner,
             state_root=state_root,
             fresh_provider_session=False,
+            trace_event=runtime._trace,
         )
 
 
@@ -227,8 +229,13 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
                 semantic_upgrades=None,
                 state_root=None,
                 fresh_provider_session=False,
+                *,
+                codex_runner,
+                trace_event,
             ):
                 self.semantic_upgrades = semantic_upgrades
+                self.codex_runner = codex_runner
+                self.trace_event = trace_event
 
             def run_one_shot_turn(self, session_id: str, message: str) -> str:
                 calls.append((session_id, message, self.semantic_upgrades.ids))
@@ -259,6 +266,8 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
             state = json.loads((root / ".runtime" / "semantic-upgrades.json").read_text(encoding="utf-8"))
 
         self.assertEqual(result, "dreamed")
+        self.assertIs(runtime.agent.codex_runner, runtime._codex_runner)
+        self.assertTrue(callable(runtime.agent.trace_event))
         self.assertEqual(
             calls,
             [
@@ -295,8 +304,13 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
                 semantic_upgrades=None,
                 state_root=None,
                 fresh_provider_session=False,
+                *,
+                codex_runner,
+                trace_event,
             ):
                 self.semantic_upgrades = semantic_upgrades
+                self.codex_runner = codex_runner
+                self.trace_event = trace_event
 
             def run_one_shot_turn(self, session_id: str, message: str) -> str:
                 return "dreamed"
@@ -327,6 +341,8 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
             state = json.loads((state_root / ".runtime" / "semantic-upgrades.json").read_text(encoding="utf-8"))
 
         self.assertEqual(result, "dreamed")
+        self.assertIs(runtime.agent.codex_runner, runtime._codex_runner)
+        self.assertTrue(callable(runtime.agent.trace_event))
         self.assertIn("user-context-agent-behavior-split", state["absorbed"])
         self.assertIn("open-context-questions", state["absorbed"])
         self.assertIn("uncertain-memory-marker", state["absorbed"])
@@ -344,8 +360,15 @@ class SemanticUpgradeRuntimeAbsorptionTests(unittest.TestCase):
                 semantic_upgrades=None,
                 state_root=None,
                 fresh_provider_session=False,
+                *,
+                codex_runner,
+                trace_event,
             ):
                 self.semantic_upgrades = semantic_upgrades
+                if codex_runner is None:
+                    raise AssertionError("Codex runner was not provided")
+                if not callable(trace_event):
+                    raise AssertionError("Trace callback was not provided")
 
             def run_one_shot_turn(self, session_id: str, message: str) -> str:
                 raise RuntimeError("dreamer failed")

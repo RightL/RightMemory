@@ -3,16 +3,12 @@ from __future__ import annotations
 import json
 import os
 import queue
-import shutil
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
-
-from .platform import prepare_command
-
 
 DEFAULT_CODEX_APP_SERVER_TIMEOUT_SECONDS = 30
 
@@ -73,6 +69,7 @@ class CodexAppServerClient:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                env=_app_server_environment(),
             )
         except OSError as exc:
             error = _bounded_error(f"Codex App Server failed: {type(exc).__name__}: {exc}")
@@ -283,23 +280,41 @@ def _delete_response_error(response: dict[str, Any] | None) -> str | None:
 
 
 def _app_server_command() -> list[str]:
-    command = ["codex", "app-server", "--stdio"]
-    prepared = prepare_command(command)
+    from codex_cli_bin import bundled_codex_path
+
+    return [str(bundled_codex_path()), "app-server", "--listen", "stdio://"]
+
+
+def _app_server_environment() -> dict[str, str]:
+    from codex_cli_bin import bundled_path_dir
+
+    env = os.environ.copy()
+    path_dir = bundled_path_dir()
+    if path_dir is None:
+        return env
+
+    path_key = _path_env_key(env)
+    if os.name == "nt":
+        for key in list(env):
+            if key.upper() == "PATH" and key != path_key:
+                env.pop(key)
+    path_value = str(path_dir)
+    existing = [
+        entry
+        for entry in env.get(path_key, "").split(os.pathsep)
+        if entry and entry != path_value
+    ]
+    env[path_key] = os.pathsep.join([path_value, *existing])
+    return env
+
+
+def _path_env_key(env: dict[str, str]) -> str:
     if os.name != "nt":
-        return prepared
-    try:
-        file_index = prepared.index("-File") + 1
-        shim = Path(prepared[file_index])
-    except (ValueError, IndexError):
-        return prepared
-    script = shim.parent / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
-    if shim.stem.lower() != "codex" or not script.is_file():
-        return prepared
-    bundled_node = shim.parent / "node.exe"
-    node = str(bundled_node) if bundled_node.is_file() else shutil.which("node.exe") or shutil.which("node")
-    if node is None:
-        return prepared
-    return [node, str(script), *command[1:]]
+        return "PATH"
+    matching = [key for key in env if key.upper() == "PATH"]
+    if "Path" in matching:
+        return "Path"
+    return matching[-1] if matching else "PATH"
 
 
 def _thread_id(value: object) -> str:

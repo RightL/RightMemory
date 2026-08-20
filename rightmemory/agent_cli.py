@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from .agent_cli_cleanup import AgentCliThreadCleanup, provider_thread_is_expired
+from .codex_sdk import CodexSdkRunner, CodexSdkTiming
 from .config import RUNTIME_ROLES, AgentCliConfig
 from .platform import prepare_command
 from .prompt import build_cli_agent_instructions
@@ -55,6 +57,8 @@ class CliAgentExecutor:
         semantic_upgrades: SemanticUpgradeContext | None = None,
         state_root: Path | None = None,
         fresh_provider_session: bool = False,
+        codex_runner: CodexSdkRunner | None = None,
+        trace_event: Callable[..., None] | None = None,
     ):
         _validate_role(role)
         self.memory_root = memory_root
@@ -63,10 +67,19 @@ class CliAgentExecutor:
         self.config = config
         self.semantic_upgrades = semantic_upgrades
         self.fresh_provider_session = fresh_provider_session
+        self._codex_runner = codex_runner
+        self._owns_codex_runner = False
+        if self.config.provider == "codex" and self._codex_runner is None:
+            self._codex_runner = CodexSdkRunner()
+            self._owns_codex_runner = True
+        self._trace_event = trace_event
         self.store = ProviderSessionStore(self.state_root, role)
         self.thread_store = ProviderThreadStore(self.state_root)
         self._process_provider_session_id: str | None = None
-        if self.state_root == self.memory_root:
+        if self.state_root == self.memory_root and (
+            self._codex_runner is None
+            or self._codex_runner.claim_opportunistic_cleanup(self.memory_root)
+        ):
             self._run_opportunistic_cleanup()
 
     def run_turn(self, message: str) -> str:
@@ -131,7 +144,9 @@ class CliAgentExecutor:
         return self._process_provider_session_id is not None
 
     def cleanup(self) -> None:
-        return None
+        if self._owns_codex_runner and self._codex_runner is not None:
+            self._codex_runner.close()
+            self._owns_codex_runner = False
 
     def _run_provider(
         self,
@@ -150,29 +165,49 @@ class CliAgentExecutor:
         )
         created_at = _now()
         if self.config.provider == "codex":
-            command = build_codex_command(self.memory_root, self.role, self.config, provider_session_id)
+            if self._codex_runner is None:
+                raise RuntimeError("Codex SDK runner is unavailable")
+            timing: CodexSdkTiming | None = None
+            sdk_started_at = time.perf_counter()
+
+            def record_timing(value: CodexSdkTiming) -> None:
+                nonlocal timing
+                timing = value
+
+            def record_started(thread_id: str) -> None:
+                self._record_created(thread_id, rightmemory_session_id, policy, created_at)
+
             try:
-                stdout = _run_cli(command, self.memory_root, "Codex", stdin=prompt)
-            except AgentCliCommandError as exc:
-                if provider_session_id is None:
-                    partial_id = parse_codex_thread_id(exc.stdout)
-                    if partial_id:
-                        self._record_created(partial_id, rightmemory_session_id, policy, created_at)
+                sdk_result = self._codex_runner.run_turn(
+                    prompt=prompt,
+                    provider_session_id=provider_session_id,
+                    cwd=self.memory_root,
+                    model=self.config.model,
+                    reasoning_effort=self.config.reasoning_effort,
+                    sandbox=_codex_sandbox(self.role),
+                    on_thread_started=record_started if provider_session_id is None else None,
+                    on_timing=record_timing,
+                )
+            except Exception as exc:
+                self._trace_provider_timing(
+                    timing or CodexSdkTiming(total_ms=_elapsed_ms(sdk_started_at)),
+                    resumed=provider_session_id is not None,
+                    outcome="error",
+                    error_type=type(exc).__name__,
+                )
                 raise
-            try:
-                result = parse_codex_output(stdout)
-            except Exception:
-                if provider_session_id is None:
-                    partial_id = parse_codex_thread_id(stdout)
-                    if partial_id:
-                        self._record_created(partial_id, rightmemory_session_id, policy, created_at)
-                raise
-            if provider_session_id is not None and result.provider_session_id != provider_session_id:
-                raise RuntimeError("Codex resumed a different provider thread")
-            if provider_session_id is None:
-                self._record_created(result.provider_session_id, rightmemory_session_id, policy, created_at)
-            self.thread_store.record_success("codex", result.provider_session_id, activity_at=_now())
-            return result
+            self._trace_provider_timing(
+                timing or sdk_result.timing,
+                resumed=provider_session_id is not None,
+                outcome="success",
+            )
+            self.thread_store.record_success(
+                "codex", sdk_result.provider_session_id, activity_at=_now()
+            )
+            return AgentCliResult(
+                provider_session_id=sdk_result.provider_session_id,
+                text=sdk_result.text,
+            )
         if self.config.provider == "claude":
             if provider_session_id is not None:
                 claude_session_id = provider_session_id
@@ -190,6 +225,32 @@ class CliAgentExecutor:
             self.thread_store.record_success("claude", result.provider_session_id, activity_at=_now())
             return result
         raise ValueError("agent_cli provider must be one of: claude, codex")
+
+    def _trace_provider_timing(
+        self,
+        timing: CodexSdkTiming,
+        *,
+        resumed: bool,
+        outcome: str,
+        error_type: str | None = None,
+    ) -> None:
+        if self._trace_event is None:
+            return
+        fields: dict[str, Any] = {
+            "transport": "codex-sdk",
+            "resumed": resumed,
+            "client_start_ms": timing.client_start_ms,
+            "thread_open_ms": timing.thread_open_ms,
+            "turn_ms": timing.turn_ms,
+            "server_duration_ms": timing.server_duration_ms,
+            "total_ms": timing.total_ms,
+            "outcome": outcome,
+        }
+        if timing.usage is not None:
+            fields["usage"] = timing.usage
+        if error_type is not None:
+            fields["error_type"] = error_type
+        self._trace_event("provider_timing", **fields)
 
     def _record_created(
         self,
@@ -246,30 +307,6 @@ class CliAgentExecutor:
             )
 
 
-def build_codex_command(
-    memory_root: Path,
-    role: str,
-    config: AgentCliConfig,
-    provider_session_id: str | None,
-) -> list[str]:
-    _validate_role(role)
-    command = [
-        "codex",
-        "exec",
-        "--json",
-        "--cd",
-        str(memory_root),
-        "--skip-git-repo-check",
-        "--sandbox",
-        _codex_sandbox(role),
-    ]
-    _append_model(command, config)
-    _append_codex_reasoning_effort(command, config)
-    if provider_session_id:
-        command.extend(["resume", provider_session_id])
-    return command
-
-
 def build_claude_command(
     role: str,
     config: AgentCliConfig,
@@ -287,41 +324,6 @@ def build_claude_command(
     session_flag = "--resume" if resume else "--session-id"
     command.extend([session_flag, provider_session_id, prompt])
     return command
-
-
-def parse_codex_output(stdout: str) -> AgentCliResult:
-    thread_id = ""
-    final_text = ""
-    for line_number, line in enumerate(stdout.splitlines(), start=1):
-        if not line.strip():
-            continue
-        obj = _json_object(line, f"Codex output line {line_number}")
-        if obj.get("type") == "thread.started":
-            thread_id = _non_empty_string(obj.get("thread_id")) or thread_id
-
-        item = obj.get("item")
-        if isinstance(item, dict) and item.get("type") == "agent_message":
-            final_text = _non_empty_string(item.get("text")) or final_text
-
-    if not thread_id:
-        raise RuntimeError("Codex output did not include thread_id")
-    if not final_text:
-        raise RuntimeError("Codex output did not include final agent message")
-    return AgentCliResult(provider_session_id=thread_id, text=final_text)
-
-
-def parse_codex_thread_id(stdout: str) -> str:
-    thread_id = ""
-    for line in stdout.splitlines():
-        if not line.strip():
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict) and obj.get("type") == "thread.started":
-            thread_id = _non_empty_string(obj.get("thread_id")) or thread_id
-    return thread_id
 
 
 def parse_claude_output(stdout: str) -> AgentCliResult:
@@ -412,11 +414,6 @@ def _append_model(command: list[str], config: AgentCliConfig) -> None:
         command.extend(["--model", config.model])
 
 
-def _append_codex_reasoning_effort(command: list[str], config: AgentCliConfig) -> None:
-    if config.reasoning_effort:
-        command.extend(["--config", f"model_reasoning_effort={config.reasoning_effort}"])
-
-
 def _codex_sandbox(role: str) -> str:
     if role in READ_ROLES:
         return "read-only"
@@ -459,3 +456,7 @@ def _non_empty_string(value: object) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip()
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return round(max(0.0, time.perf_counter() - started_at) * 1000, 3)
