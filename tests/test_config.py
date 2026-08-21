@@ -1097,6 +1097,9 @@ class RuntimeTests(unittest.TestCase):
             result = runtime.run_session_turn("agent-session", "remember one")
 
         self.assertEqual(result, "no strong match")
+        call = executor_class.return_value.run_session_turn.call_args
+        self.assertEqual(call.args[0], "agent-session")
+        self.assertIsNotNone(call.kwargs["prefix_context"])
         executor_class.assert_called_once_with(
             Path(self.tempdir.name),
             "retrieve",
@@ -1106,6 +1109,24 @@ class RuntimeTests(unittest.TestCase):
             fresh_provider_session=False,
             trace_event=runtime._trace,
         )
+
+    def test_cli_agent_resumed_retrieve_does_not_reseed_prefix(self):
+        config = RuntimeConfig(
+            role="retrieve",
+            runtime_mode="cli-agent",
+            agent_cli=AgentCliConfig(provider="codex"),
+            memory_root=Path(self.tempdir.name),
+        )
+
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            executor_class.return_value.has_saved_session.return_value = True
+            executor_class.return_value.run_session_turn.return_value = EMPTY_RETRIEVE_SELECTION_JSON
+            runtime = RightMemoryRuntime(config)
+            result = runtime.run_session_turn("agent-session", "follow-up")
+
+        self.assertEqual(result, "no strong match")
+        call = executor_class.return_value.run_session_turn.call_args
+        self.assertIsNone(call.kwargs["prefix_context"])
 
     def test_update_turn_publishes_approved_file_views_after_success(self):
         root = Path(self.tempdir.name)
@@ -2258,8 +2279,9 @@ class RuntimeTests(unittest.TestCase):
             events.append(("locked", session_id))
             return FakeLockedSession()
 
-        def run_one_shot_turn(session_id, message):
+        def run_one_shot_turn(session_id, message, *, prefix_context=None):
             self.assertEqual(session_id, NO_SESSION_RIGHTMEMORY_SESSION_ID)
+            self.assertIsNotNone(prefix_context)
             events.append("agent")
             return EMPTY_RETRIEVE_SELECTION_JSON
 

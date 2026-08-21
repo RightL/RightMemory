@@ -114,6 +114,7 @@ class PreparedRetrieveTurn:
     message: str
     query: str
     context_parts: tuple[str, ...]
+    prefix_context: str | None
     recent_submitted_entries: list[RecentSubmittedMemoryEntry]
     visible_recent_candidates: dict[str, str]
     memory_commit: str | None
@@ -644,13 +645,24 @@ class RightMemoryRuntime:
             self._trace("model_started")
             if self.config.role == "retrieve":
                 if process_local:
-                    run_agent = self.agent.run_process_turn
+                    run_agent = lambda request: self.agent.run_process_turn(
+                        request,
+                        prefix_context=prepared.prefix_context,
+                    )
                     retry_has_context = True
                 elif session_id == NO_SESSION_RIGHTMEMORY_SESSION_ID:
-                    run_agent = lambda request: self.agent.run_one_shot_turn(session_id, request)
+                    run_agent = lambda request: self.agent.run_one_shot_turn(
+                        session_id,
+                        request,
+                        prefix_context=prepared.prefix_context,
+                    )
                     retry_has_context = False
                 else:
-                    run_agent = lambda request: self.agent.run_session_turn(session_id, request)
+                    run_agent = lambda request: self.agent.run_session_turn(
+                        session_id,
+                        request,
+                        prefix_context=prepared.prefix_context,
+                    )
                     retry_has_context = True
                 completed = self._run_retrieve_cli_agent(
                     prepared,
@@ -1495,6 +1507,7 @@ class RightMemoryRuntime:
                 message=message,
                 query=message,
                 context_parts=(),
+                prefix_context=None,
                 recent_submitted_entries=[],
                 visible_recent_candidates={},
                 memory_commit=None,
@@ -1582,10 +1595,11 @@ class RightMemoryRuntime:
                 current_material_block = format_current_material_block(
                     current_material.text
                 )
+        prefix_context = snapshot.text if cli_agent_phase == "new" else None
         context_parts = tuple(
             part
             for part in (
-                snapshot.text if new_conversation else "",
+                snapshot.text if new_conversation and prefix_context is None else "",
                 diff_block,
                 recent_block,
                 updated_block,
@@ -1601,6 +1615,7 @@ class RightMemoryRuntime:
             message=request,
             query=message,
             context_parts=context_parts,
+            prefix_context=prefix_context,
             recent_submitted_entries=entries,
             visible_recent_candidates=current_visible,
             memory_commit=current_commit,

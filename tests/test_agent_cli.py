@@ -1,3 +1,4 @@
+import json
 import subprocess
 import tempfile
 import unittest
@@ -28,6 +29,9 @@ from rightmemory.codex_sdk import CodexSdkRunResult, CodexSdkRunner, CodexSdkTim
 from rightmemory.config import AgentCliConfig, RuntimeConfig, SyncConfig
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
 from rightmemory.provider_threads import ProviderThreadStore
+
+
+EMPTY_RETRIEVE_SELECTION_JSON = '{"ids": [], "sources": [], "recent_candidates": []}'
 
 
 class ProviderSessionStoreTests(unittest.TestCase):
@@ -131,6 +135,57 @@ class AgentCliCommandTests(unittest.TestCase):
             ],
         )
 
+    def test_build_claude_fork_resumes_source_and_requests_new_session(self):
+        session_id = "123e4567-e89b-12d3-a456-426614174000"
+        child_session_id = "123e4567-e89b-12d3-a456-426614174001"
+
+        command = build_claude_command(
+            "retrieve",
+            AgentCliConfig(provider="claude"),
+            "prompt",
+            session_id,
+            True,
+            fork=True,
+            fork_provider_session_id=child_session_id,
+        )
+
+        self.assertEqual(
+            command[-6:-1],
+            [
+                "--resume",
+                session_id,
+                "--fork-session",
+                "--session-id",
+                child_session_id,
+            ],
+        )
+
+    def test_build_claude_fork_requires_resume(self):
+        with self.assertRaises(ValueError) as caught:
+            build_claude_command(
+                "retrieve",
+                AgentCliConfig(provider="claude"),
+                "prompt",
+                "123e4567-e89b-12d3-a456-426614174000",
+                False,
+                fork=True,
+            )
+
+        self.assertIn("requires resume", str(caught.exception))
+
+    def test_build_claude_fork_requires_child_session_id(self):
+        with self.assertRaises(ValueError) as caught:
+            build_claude_command(
+                "retrieve",
+                AgentCliConfig(provider="claude"),
+                "prompt",
+                "123e4567-e89b-12d3-a456-426614174000",
+                True,
+                fork=True,
+            )
+
+        self.assertIn("child provider session id", str(caught.exception))
+
     def test_build_claude_uses_auto_permission_for_shared_view_builder(self):
         session_id = "123e4567-e89b-12d3-a456-426614174000"
 
@@ -187,10 +242,18 @@ class AgentCliParserTests(unittest.TestCase):
 
 
 class FakeCodexRunner:
-    def __init__(self, *, outputs=None, turn_error: Exception | None = None):
+    def __init__(
+        self,
+        *,
+        outputs=None,
+        turn_error: Exception | None = None,
+        fork_error: Exception | None = None,
+    ):
         self.outputs = list(outputs or ["done"])
         self.turn_error = turn_error
+        self.fork_error = fork_error
         self.calls = []
+        self.fork_calls = []
         self.close_calls = 0
         self._new_threads = 0
         self._cleanup_claims = set()
@@ -224,7 +287,30 @@ class FakeCodexRunner:
             timing_callback(timing)
         if self.turn_error is not None:
             raise self.turn_error
-        output_index = min(len(self.calls) - 1, len(self.outputs) - 1)
+        output_index = min(len(self.calls) + len(self.fork_calls) - 1, len(self.outputs) - 1)
+        return CodexSdkRunResult(thread_id, self.outputs[output_index], timing)
+
+    def run_forked_turn(self, **kwargs):
+        self.fork_calls.append(kwargs)
+        self._new_threads += 1
+        thread_id = f"thread-{self._new_threads}"
+        callback = kwargs.get("on_thread_started")
+        if callback is not None:
+            callback(thread_id)
+        timing = CodexSdkTiming(
+            client_start_ms=0.0,
+            thread_open_ms=25.0,
+            turn_ms=500.0,
+            server_duration_ms=450,
+            total_ms=525.0,
+            usage={"total": {"inputTokens": 4, "outputTokens": 2}},
+        )
+        timing_callback = kwargs.get("on_timing")
+        if timing_callback is not None:
+            timing_callback(timing)
+        if self.fork_error is not None:
+            raise self.fork_error
+        output_index = min(len(self.calls) + len(self.fork_calls) - 1, len(self.outputs) - 1)
         return CodexSdkRunResult(thread_id, self.outputs[output_index], timing)
 
     def close(self):
@@ -630,6 +716,160 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertEqual(runner.calls[0]["model"], "gpt-5")
         self.assertEqual(runner.calls[0]["sandbox"], "read-only")
 
+    def test_codex_new_retrieve_forks_reusable_prefix_then_resumes_child(self):
+        runner = FakeCodexRunner(outputs=[EMPTY_RETRIEVE_SELECTION_JSON, "first", "second"])
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(
+                root,
+                "retrieve",
+                AgentCliConfig(provider="codex", model="gpt-5"),
+                codex_runner=runner,
+            )
+
+            first = executor.run_session_turn(
+                "agent-1",
+                "first query",
+                prefix_context="stable snapshot",
+            )
+            second = executor.run_session_turn("agent-1", "follow-up")
+
+            mapping = ProviderSessionStore(root, "retrieve").load("agent-1")
+            base = ProviderThreadStore(root).load("codex", "thread-1")
+            child = ProviderThreadStore(root).load("codex", "thread-2")
+            prefix_records = list(
+                (root / ".runtime" / "agent_cli_prefixes" / "codex").glob("*.json")
+            )
+
+        self.assertEqual(first, "first")
+        self.assertEqual(second, "second")
+        self.assertEqual(len(runner.fork_calls), 1)
+        self.assertEqual(runner.fork_calls[0]["source_provider_session_id"], "thread-1")
+        self.assertEqual(runner.calls[1]["provider_session_id"], "thread-2")
+        self.assertEqual(mapping.provider_session_id, "thread-2")
+        self.assertEqual(base.policy, "fork-base")
+        self.assertEqual(child.forked_from_provider_session_id, "thread-1")
+        self.assertEqual(len(prefix_records), 1)
+
+    def test_codex_distinct_retrieve_sessions_reuse_one_prefix_base(self):
+        runner = FakeCodexRunner(outputs=[EMPTY_RETRIEVE_SELECTION_JSON, "first", "second"])
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(
+                root,
+                "retrieve",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+            )
+
+            first = executor.run_session_turn(
+                "agent-1",
+                "first query",
+                prefix_context="stable snapshot",
+            )
+            second = executor.run_session_turn(
+                "agent-2",
+                "second query",
+                prefix_context="stable snapshot",
+            )
+
+            first_mapping = ProviderSessionStore(root, "retrieve").load("agent-1")
+            second_mapping = ProviderSessionStore(root, "retrieve").load("agent-2")
+
+        self.assertEqual(first, "first")
+        self.assertEqual(second, "second")
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(len(runner.fork_calls), 2)
+        self.assertTrue(
+            all(
+                call["source_provider_session_id"] == "thread-1"
+                for call in runner.fork_calls
+            )
+        )
+        self.assertEqual(first_mapping.provider_session_id, "thread-2")
+        self.assertEqual(second_mapping.provider_session_id, "thread-3")
+
+    def test_invalid_prefix_bootstrap_falls_back_to_complete_new_thread(self):
+        runner = FakeCodexRunner(outputs=["invalid bootstrap", "direct"])
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(
+                root,
+                "retrieve",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+            )
+
+            with patch("rightmemory.agent_cli.print") as warning:
+                result = executor.run_session_turn(
+                    "agent-1",
+                    "query",
+                    prefix_context="stable snapshot",
+                )
+
+            mapping = ProviderSessionStore(root, "retrieve").load("agent-1")
+            prefix_records = list(
+                (root / ".runtime" / "agent_cli_prefixes" / "codex").glob("*.json")
+            )
+
+        self.assertEqual(result, "direct")
+        self.assertEqual(len(runner.calls), 2)
+        self.assertEqual(runner.fork_calls, [])
+        self.assertEqual(mapping.provider_session_id, "thread-2")
+        self.assertEqual(prefix_records, [])
+        warning.assert_called_once()
+
+    def test_codex_fork_failure_retires_base_and_rebuilds_before_next_fork(self):
+        runner = FakeCodexRunner(
+            outputs=[
+                EMPTY_RETRIEVE_SELECTION_JSON,
+                "unused fork output",
+                "direct",
+                EMPTY_RETRIEVE_SELECTION_JSON,
+                "second",
+            ],
+            fork_error=RuntimeError("fork unavailable"),
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(
+                root,
+                "retrieve",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+            )
+
+            with patch("rightmemory.agent_cli.print") as warning:
+                first = executor.run_session_turn(
+                    "agent-1",
+                    "first query",
+                    prefix_context="stable snapshot",
+                )
+
+            retired_base = ProviderThreadStore(root).load("codex", "thread-1")
+            failed_child = ProviderThreadStore(root).load("codex", "thread-2")
+            prefix_records_after_failure = list(
+                (root / ".runtime" / "agent_cli_prefixes" / "codex").glob("*.json")
+            )
+
+            runner.fork_error = None
+            second = executor.run_session_turn(
+                "agent-2",
+                "second query",
+                prefix_context="stable snapshot",
+            )
+
+        self.assertEqual(first, "direct")
+        self.assertEqual(second, "second")
+        self.assertEqual(retired_base.status, "delete-pending")
+        self.assertEqual(failed_child.forked_from_provider_session_id, "thread-1")
+        self.assertIsNone(failed_child.last_successful_activity_at)
+        self.assertEqual(prefix_records_after_failure, [])
+        self.assertEqual(len(runner.fork_calls), 2)
+        self.assertEqual(runner.fork_calls[0]["source_provider_session_id"], "thread-1")
+        self.assertEqual(runner.fork_calls[1]["source_provider_session_id"], "thread-4")
+        warning.assert_called_once()
+
     def test_claude_first_turn_uses_stable_uuid_then_resumes(self):
         calls = []
         expected_session_id = _stable_claude_session_id("retrieve", "agent-1")
@@ -656,6 +896,190 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertEqual(calls[0][calls[0].index("--session-id") + 1], expected_session_id)
         self.assertIn("--resume", calls[1])
         self.assertEqual(calls[1][calls[1].index("--resume") + 1], expected_session_id)
+
+    def test_claude_new_retrieve_forks_reusable_prefix_then_resumes_child(self):
+        calls = []
+        base_session_id = "123e4567-e89b-12d3-a456-426614174100"
+        child_session_id = "123e4567-e89b-12d3-a456-426614174200"
+        replies = [
+            (base_session_id, EMPTY_RETRIEVE_SELECTION_JSON),
+            (child_session_id, "first"),
+            (child_session_id, "second"),
+        ]
+
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
+            calls.append(command)
+            session_id, result = replies[len(calls) - 1]
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    {"type": "result", "session_id": session_id, "result": result}
+                ),
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="claude"))
+            with (
+                patch(
+                    "rightmemory.agent_cli.uuid4",
+                    side_effect=[UUID(base_session_id), UUID(child_session_id)],
+                ),
+                patch("rightmemory.agent_cli.subprocess.run", fake_run),
+            ):
+                first = executor.run_session_turn(
+                    "agent-1",
+                    "first query",
+                    prefix_context="stable snapshot",
+                )
+                second = executor.run_session_turn("agent-1", "follow-up")
+
+            mapping = ProviderSessionStore(root, "retrieve").load("agent-1")
+            child = ProviderThreadStore(root).load("claude", child_session_id)
+
+        self.assertEqual(first, "first")
+        self.assertEqual(second, "second")
+        self.assertIn("--session-id", calls[0])
+        self.assertIn("--fork-session", calls[1])
+        self.assertEqual(calls[1][calls[1].index("--resume") + 1], base_session_id)
+        self.assertEqual(calls[1][calls[1].index("--session-id") + 1], child_session_id)
+        self.assertNotIn("--fork-session", calls[2])
+        self.assertEqual(calls[2][calls[2].index("--resume") + 1], child_session_id)
+        self.assertEqual(mapping.provider_session_id, child_session_id)
+        self.assertEqual(child.forked_from_provider_session_id, base_session_id)
+
+    def test_claude_fork_failure_falls_back_with_preowned_child(self):
+        calls = []
+        base_session_id = "123e4567-e89b-12d3-a456-426614174100"
+        child_session_id = "123e4567-e89b-12d3-a456-426614174200"
+        direct_session_id = _stable_claude_session_id("retrieve", "agent-1")
+
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
+            calls.append(command)
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": base_session_id,
+                            "result": EMPTY_RETRIEVE_SELECTION_JSON,
+                        }
+                    ),
+                    stderr="",
+                )
+            if len(calls) == 2:
+                return subprocess.CompletedProcess(
+                    command,
+                    7,
+                    stdout="",
+                    stderr="connection lost after fork",
+                )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    {
+                        "type": "result",
+                        "session_id": direct_session_id,
+                        "result": "direct",
+                    }
+                ),
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="claude"))
+            with (
+                patch(
+                    "rightmemory.agent_cli.uuid4",
+                    side_effect=[UUID(base_session_id), UUID(child_session_id)],
+                ),
+                patch("rightmemory.agent_cli.subprocess.run", fake_run),
+                patch("rightmemory.agent_cli.print") as warning,
+            ):
+                result = executor.run_session_turn(
+                    "agent-1",
+                    "query",
+                    prefix_context="stable snapshot",
+                )
+
+            child = ProviderThreadStore(root).load("claude", child_session_id)
+            base = ProviderThreadStore(root).load("claude", base_session_id)
+            mapping = ProviderSessionStore(root, "retrieve").load("agent-1")
+            prefix_records = list(
+                (root / ".runtime" / "agent_cli_prefixes" / "claude").glob("*.json")
+            )
+
+        self.assertEqual(result, "direct")
+        self.assertEqual(calls[1][calls[1].index("--session-id") + 1], child_session_id)
+        self.assertEqual(child.forked_from_provider_session_id, base_session_id)
+        self.assertIsNone(child.last_successful_activity_at)
+        self.assertEqual(base.status, "delete-pending")
+        self.assertEqual(mapping.provider_session_id, direct_session_id)
+        self.assertEqual(prefix_records, [])
+        warning.assert_called_once()
+
+    def test_claude_fork_accepts_and_owns_returned_child_id_mismatch(self):
+        calls = []
+        base_session_id = "123e4567-e89b-12d3-a456-426614174100"
+        requested_child_session_id = "123e4567-e89b-12d3-a456-426614174200"
+        returned_child_session_id = "123e4567-e89b-12d3-a456-426614174300"
+        replies = [
+            (base_session_id, EMPTY_RETRIEVE_SELECTION_JSON),
+            (returned_child_session_id, "result"),
+        ]
+
+        def fake_run(command, cwd=None, capture_output=None, text=None, check=None, input=None):
+            calls.append(command)
+            session_id, result = replies[len(calls) - 1]
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    {"type": "result", "session_id": session_id, "result": result}
+                ),
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(root, "retrieve", AgentCliConfig(provider="claude"))
+            with (
+                patch(
+                    "rightmemory.agent_cli.uuid4",
+                    side_effect=[
+                        UUID(base_session_id),
+                        UUID(requested_child_session_id),
+                    ],
+                ),
+                patch("rightmemory.agent_cli.subprocess.run", fake_run),
+            ):
+                result = executor.run_session_turn(
+                    "agent-1",
+                    "query",
+                    prefix_context="stable snapshot",
+                )
+
+            requested = ProviderThreadStore(root).load(
+                "claude",
+                requested_child_session_id,
+            )
+            returned = ProviderThreadStore(root).load(
+                "claude",
+                returned_child_session_id,
+            )
+            mapping = ProviderSessionStore(root, "retrieve").load("agent-1")
+
+        self.assertEqual(result, "result")
+        self.assertEqual(requested.status, "delete-pending")
+        self.assertEqual(returned.forked_from_provider_session_id, base_session_id)
+        self.assertIsNotNone(returned.last_successful_activity_at)
+        self.assertEqual(mapping.provider_session_id, returned_child_session_id)
 
     def test_fresh_provider_session_uses_new_claude_uuid(self):
         calls = []
