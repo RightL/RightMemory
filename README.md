@@ -604,13 +604,13 @@ The daemon reads JSON lines from stdin and writes JSON lines to stdout:
 The runtime is intentionally small:
 
 - Standalone mode uses `pydantic_ai.Agent` as a chat-like agent loop.
-- CLI-agent mode delegates the same role turn to the Codex SDK or Claude Code CLI. Retrieve may keep one active provider mapping under `<memory-root>/.runtime/agent_cli_sessions/`; other independent role commands are one-shot. The default MCP backend keeps one Codex SDK/App Server connection for its process lifetime, while command-scoped runtimes close their owned connection at exit.
+- CLI-agent mode delegates the same role turn to the Codex SDK or Claude Code CLI. Retrieve keeps one active provider fork mapping per logical session under `<memory-root>/.runtime/agent_cli_sessions/` and uses a reusable internal provider conversation that holds its stable prefix; other independent role commands are one-shot. The default MCP backend keeps one Codex SDK/App Server connection for its process lifetime, while command-scoped runtimes close their owned connection at exit.
 - Standalone retrieve uses complete typed reads for local F# details and S# skills, line-numbered reads for local M# evidence, typed progressive reads for validated MF# graphs and their F#/M#/S# resources, and fixed `AC#writing` / `AC#design` sources for complete Agent Correction entries. CLI-agent emits the same selector as strict JSON. The shared runtime uses the canonical index and Retrieve contract to resolve ids, permitted ranges, hierarchy, source positions, and source-authored Markdown.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different no-profile root, or use `--profile <name>` / `.rightmemory-profile` for project-specific roots.
 - Retrieve, unified Update, transcript-review extraction, history, dreamer, insight, pruner, and sync repair have separate runtime boundaries selected by command line, queue, scanner, or watcher.
 - Role-specific executor settings are read from `<memory-root>/rightmemory.toml`.
-- Standalone calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`. In CLI-agent mode, only retrieve persists a provider mapping across commands. Explicit `chat` may reuse one process-local provider thread, while daemon requests and other independent role turns start fresh threads.
-- Every new CLI-agent provider thread receives an ownership record under `<memory-root>/.runtime/agent_cli_threads/`, including one-shot and failed isolated work, so transcript review can exclude internal conversations without relying on an active mapping.
+- Standalone calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`. In CLI-agent mode, only retrieve persists a provider mapping across commands. A new logical Retrieve session forks a reusable stable-prefix base, while explicit `chat` may reuse one process-local provider thread and other independent role turns start fresh threads.
+- Every new CLI-agent provider conversation receives an ownership record under `<memory-root>/.runtime/agent_cli_threads/`, including Retrieve prefix bases and their forks, one-shot turns, and failed isolated work. This lets transcript review exclude internal conversations without relying on an active session mapping.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
 - Use `rightmemory status` for a read-only operational dashboard across the configured memory root. Its `Sync` section reports whether sync is configured, the upstream tracking reference, ahead/behind counts relative to the last-fetched upstream, and the latest recorded sync outcome. Sync watcher process state remains under `Managed Watches`. The dashboard also summarizes Git state, Dreamer and Insight trigger progress, async update queues, bounded last-message previews, and file paths for full logs or state. Status never fetches, pulls, pushes, starts watchers, invokes a model, or writes runtime state. Use `rightmemory watch status` when you need the lower-level managed-watch process view.
 - Use `rightmemory validate` for a read-only check of the configured root, or `rightmemory validate --root <path>` for an explicit root such as a maintenance worktree. It requires the canonical root documents, validates the complete Memory/Pursuit graph, any present Agent Correction collections, and `corrections.md`, and exits nonzero on failure.
@@ -732,17 +732,21 @@ model = "sonnet"
 
 Use `rightmemory doctor agent-cli` after configuring CLI-agent mode. It checks that role config resolves to CLI-agent execution, the Codex SDK runtime or configured Claude command is available, and read/write role probes can complete.
 
-`rightmemory retrieve --session <id>` resumes the same registered provider conversation while it remains active. Its first turn receives the canonical role instructions and a stable snapshot of Memory, Pursuit, and any present fixed Agent Correction collections; resumed turns receive changes to that snapshot, newly submitted candidates, and the current query. Local prior questions and answers are not replayed into an already resumed provider thread.
+CLI-agent Retrieve keeps one reusable internal prefix-base provider conversation for each exact combination of canonical role instructions, stable Memory/Pursuit/Agent Correction snapshot, and effective provider configuration. RightMemory initializes the base once with an empty-selection turn, then Codex or Claude forks it for each new `rightmemory retrieve --session <id>` session. The bootstrap result is internal and does not enter that session's delivery coverage.
+
+If prefix initialization or forking fails, RightMemory retires that base and starts the request in a fresh conversation containing the complete prefix.
+
+Each logical Retrieve session owns its provider fork, conversation history, and delivery coverage. Later calls resume that fork and append snapshot diffs, newly submitted candidates, and the current query after the inherited snapshot; RightMemory does not replay local prior questions and answers. A different exact prefix is assigned a different base, while existing sessions continue on their own forks.
 
 Every other independent CLI-agent role turn starts a fresh provider conversation. An explicit `chat` process may keep one in-memory conversation until that process exits, but it does not create a mapping for another process to resume. This policy is the same for Codex and Claude.
 
-Registered Codex threads expire after 24 hours without a successful turn. Cleanup first detaches an expired retrieve mapping and resets its local delivery state, then deletes the exact owned thread through Codex App Server. It runs opportunistically before top-level CLI-agent work and hourly through the managed `agent-cli-cleanup` watcher. Run a bounded diagnostic pass directly with:
+RightMemory records prefix-base and fork ownership. Session forks and bases expire after 24 hours without successful activity; successful child activity refreshes its base. Codex cleanup removes due children before their bases and retains a base while an active child references it. It runs opportunistically before top-level CLI-agent work and hourly through the managed `agent-cli-cleanup` watcher. Run a bounded diagnostic pass directly with:
 
 ```bash
 rightmemory agent-cli cleanup --once
 ```
 
-Cleanup failures do not fail the role command; pending records are retried. RightMemory never edits Codex history files or SQLite state directly, never imports old unregistered threads, and never deletes Claude sessions automatically.
+Cleanup first detaches an expired Retrieve mapping and resets its local delivery state, then deletes the exact owned Codex thread through App Server. Failures do not fail the role command and pending records are retried. RightMemory never edits Codex history files or SQLite state directly, never imports old unregistered threads, and never deletes Claude sessions automatically.
 
 ### Standalone Config
 

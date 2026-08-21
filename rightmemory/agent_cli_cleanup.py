@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from .codex_app_server import CodexAppServerClient, CodexThreadDeleteResult
 from .platform import lock_file, unlock_file
+from .provider_prefixes import ProviderPrefixStore
 from .provider_sessions import ProviderSessionStore
 from .provider_threads import ProviderThreadRecord, ProviderThreadStore
 from .recent_submitted import RecentSubmittedMemoryDeliveryStore
@@ -69,10 +70,16 @@ class AgentCliThreadCleanup:
             cutoff = now - CODEX_THREAD_RETENTION
             scan = self.store.scan("codex")
             errors = [f"{item.path}: {item.error}" for item in scan.malformed]
-            due: list[ProviderThreadRecord] = []
             skipped = 0
+            deleted = 0
+            pending = 0
 
+            non_base_due: list[ProviderThreadRecord] = []
+            fork_bases: list[ProviderThreadRecord] = []
             for scanned in scan.records:
+                if scanned.policy == "fork-base":
+                    fork_bases.append(scanned)
+                    continue
                 if not _is_due(scanned, cutoff):
                     skipped += 1
                     continue
@@ -80,35 +87,34 @@ class AgentCliThreadCleanup:
                 if prepared is None:
                     skipped += 1
                     continue
-                due.append(prepared)
+                non_base_due.append(prepared)
 
-            if not due:
-                return AgentCliCleanupResult(
-                    skipped=skipped,
-                    malformed=len(scan.malformed),
-                    errors=tuple(errors),
-                )
+            stage_deleted, stage_pending, stage_errors = self._delete_records(
+                non_base_due,
+                attempted_at=now_text,
+            )
+            deleted += stage_deleted
+            pending += stage_pending
+            errors.extend(stage_errors)
 
-            try:
-                delete_results = self.client.delete_threads([record.provider_session_id for record in due])
-            except Exception as exc:
-                detail = f"Codex thread cleanup failed: {type(exc).__name__}: {exc}"
-                delete_results = [
-                    CodexThreadDeleteResult(record.provider_session_id, False, detail) for record in due
-                ]
-            by_id = {result.thread_id: result for result in delete_results}
-            deleted = 0
-            pending = 0
-            for record in due:
-                result = by_id.get(record.provider_session_id)
-                if result is not None and result.deleted:
-                    self.store.delete(record.provider, record.provider_session_id)
-                    deleted += 1
+            base_due: list[ProviderThreadRecord] = []
+            for scanned in fork_bases:
+                if not _is_due(scanned, cutoff):
+                    skipped += 1
                     continue
-                detail = result.error if result is not None else "missing Codex thread/delete result"
-                self.store.mark_delete_pending(record, attempted_at=now_text, error=detail)
-                errors.append(f"{record.provider_session_id}: {detail}")
-                pending += 1
+                prepared = self._prepare_for_deletion(scanned, cutoff=cutoff, attempted_at=now_text)
+                if prepared is None:
+                    skipped += 1
+                    continue
+                base_due.append(prepared)
+
+            stage_deleted, stage_pending, stage_errors = self._delete_records(
+                base_due,
+                attempted_at=now_text,
+            )
+            deleted += stage_deleted
+            pending += stage_pending
+            errors.extend(stage_errors)
 
             return AgentCliCleanupResult(
                 deleted=deleted,
@@ -118,6 +124,40 @@ class AgentCliThreadCleanup:
                 errors=tuple(errors),
             )
 
+    def _delete_records(
+        self,
+        records: list[ProviderThreadRecord],
+        *,
+        attempted_at: str,
+    ) -> tuple[int, int, list[str]]:
+        if not records:
+            return 0, 0, []
+        try:
+            delete_results = self.client.delete_threads(
+                [record.provider_session_id for record in records]
+            )
+        except Exception as exc:
+            detail = f"Codex thread cleanup failed: {type(exc).__name__}: {exc}"
+            delete_results = [
+                CodexThreadDeleteResult(record.provider_session_id, False, detail)
+                for record in records
+            ]
+        by_id = {result.thread_id: result for result in delete_results}
+        deleted = 0
+        pending = 0
+        errors: list[str] = []
+        for record in records:
+            result = by_id.get(record.provider_session_id)
+            if result is not None and result.deleted:
+                self.store.delete(record.provider, record.provider_session_id)
+                deleted += 1
+                continue
+            detail = result.error if result is not None else "missing Codex thread/delete result"
+            self.store.mark_delete_pending(record, attempted_at=attempted_at, error=detail)
+            errors.append(f"{record.provider_session_id}: {detail}")
+            pending += 1
+        return deleted, pending, errors
+
     def _prepare_for_deletion(
         self,
         scanned: ProviderThreadRecord,
@@ -125,6 +165,21 @@ class AgentCliThreadCleanup:
         cutoff: datetime,
         attempted_at: str,
     ) -> ProviderThreadRecord | None:
+        if scanned.policy == "fork-base":
+            prefixes = ProviderPrefixStore(self.memory_root)
+            with prefixes.locked(scanned.provider, scanned.rightmemory_session_id):
+                current = self.store.load(scanned.provider, scanned.provider_session_id)
+                if current is None or not _is_due(current, cutoff):
+                    return None
+                if self._has_fork_child(current):
+                    return None
+                prefixes.delete_if_matches(
+                    current.provider,
+                    current.rightmemory_session_id,
+                    current.provider_session_id,
+                )
+                return self.store.mark_delete_pending(current, attempted_at=attempted_at)
+
         if scanned.policy != "persistent":
             current = self.store.load(scanned.provider, scanned.provider_session_id)
             if current is None or not _is_due(current, cutoff):
@@ -145,6 +200,12 @@ class AgentCliThreadCleanup:
                 RetrieveContextStore(self.memory_root).reset(current.rightmemory_session_id)
                 RecentSubmittedMemoryDeliveryStore(self.memory_root).reset(current.rightmemory_session_id)
             return self.store.mark_delete_pending(current, attempted_at=attempted_at)
+
+    def _has_fork_child(self, base: ProviderThreadRecord) -> bool:
+        return any(
+            child.forked_from_provider_session_id == base.provider_session_id
+            for child in self.store.scan(base.provider).records
+        )
 
 
 class _CleanupLock:

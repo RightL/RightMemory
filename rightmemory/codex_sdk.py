@@ -73,6 +73,56 @@ class CodexSdkRunner:
         on_thread_started: Callable[[str], None] | None = None,
         on_timing: Callable[[CodexSdkTiming], None] | None = None,
     ) -> CodexSdkRunResult:
+        return self._run_turn(
+            prompt=prompt,
+            provider_session_id=provider_session_id,
+            source_provider_session_id=None,
+            cwd=cwd,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            sandbox=sandbox,
+            on_thread_started=on_thread_started,
+            on_timing=on_timing,
+        )
+
+    def run_forked_turn(
+        self,
+        *,
+        prompt: str,
+        source_provider_session_id: str,
+        cwd: Path,
+        model: str | None,
+        reasoning_effort: str | None,
+        sandbox: str,
+        on_thread_started: Callable[[str], None] | None = None,
+        on_timing: Callable[[CodexSdkTiming], None] | None = None,
+    ) -> CodexSdkRunResult:
+        """Fork an existing provider thread and run the first turn on its child."""
+        return self._run_turn(
+            prompt=prompt,
+            provider_session_id=None,
+            source_provider_session_id=source_provider_session_id,
+            cwd=cwd,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            sandbox=sandbox,
+            on_thread_started=on_thread_started,
+            on_timing=on_timing,
+        )
+
+    def _run_turn(
+        self,
+        *,
+        prompt: str,
+        provider_session_id: str | None,
+        source_provider_session_id: str | None,
+        cwd: Path,
+        model: str | None,
+        reasoning_effort: str | None,
+        sandbox: str,
+        on_thread_started: Callable[[str], None] | None,
+        on_timing: Callable[[CodexSdkTiming], None] | None,
+    ) -> CodexSdkRunResult:
         sdk = _load_codex_sdk()
         started_at = self._clock()
         client_start_ms = 0.0
@@ -90,7 +140,15 @@ class CodexSdkRunner:
 
             thread_opened_at = self._clock()
             try:
-                if provider_session_id is None:
+                if source_provider_session_id is not None:
+                    thread = codex.thread_fork(
+                        source_provider_session_id,
+                        approval_mode=sdk.approval_mode.deny_all,
+                        cwd=str(cwd),
+                        model=model,
+                        sandbox=sdk_sandbox,
+                    )
+                elif provider_session_id is None:
                     thread = codex.thread_start(
                         approval_mode=sdk.approval_mode.deny_all,
                         cwd=str(cwd),
@@ -111,9 +169,20 @@ class CodexSdkRunner:
             thread_id = _non_empty_string(getattr(thread, "id", None))
             if not thread_id:
                 raise RuntimeError("Codex SDK did not return a thread id")
-            if provider_session_id is not None and thread_id != provider_session_id:
+            if (
+                source_provider_session_id is not None
+                and thread_id == source_provider_session_id
+            ):
+                raise RuntimeError("Codex fork did not create a new provider thread")
+            if (
+                source_provider_session_id is None
+                and provider_session_id is not None
+                and thread_id != provider_session_id
+            ):
                 raise RuntimeError("Codex resumed a different provider thread")
-            if provider_session_id is None and on_thread_started is not None:
+            if (
+                source_provider_session_id is not None or provider_session_id is None
+            ) and on_thread_started is not None:
                 on_thread_started(thread_id)
 
             turn_started_at = self._clock()

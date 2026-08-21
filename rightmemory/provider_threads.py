@@ -19,7 +19,7 @@ from .session import (
 
 
 PROVIDER_THREAD_SCHEMA_VERSION = 1
-THREAD_POLICIES = {"persistent", "one-shot", "process-local"}
+THREAD_POLICIES = {"fork-base", "persistent", "one-shot", "process-local"}
 THREAD_STATUSES = {"active", "delete-pending"}
 
 
@@ -31,6 +31,7 @@ class ProviderThreadRecord:
     rightmemory_session_id: str
     policy: str
     created_at: str
+    forked_from_provider_session_id: str | None = None
     last_successful_activity_at: str | None = None
     status: str = "active"
     last_delete_attempt_at: str | None = None
@@ -104,6 +105,7 @@ class ProviderThreadStore:
         rightmemory_session_id: str,
         policy: str,
         created_at: str,
+        forked_from_provider_session_id: str | None = None,
     ) -> ProviderThreadRecord:
         existing = self.load(provider, provider_session_id)
         if existing is not None:
@@ -111,6 +113,7 @@ class ProviderThreadStore:
                 existing.role != role
                 or existing.rightmemory_session_id != rightmemory_session_id
                 or existing.policy != policy
+                or existing.forked_from_provider_session_id != forked_from_provider_session_id
             ):
                 raise ValueError("provider thread id is already owned by a different RightMemory session")
             return existing
@@ -121,6 +124,10 @@ class ProviderThreadStore:
             rightmemory_session_id=_rightmemory_session_id(rightmemory_session_id),
             policy=_thread_policy(policy),
             created_at=_required_string(created_at, "created_at"),
+            forked_from_provider_session_id=_optional_string(
+                forked_from_provider_session_id,
+                "forked_from_provider_session_id",
+            ),
         )
         self.save(record)
         return record
@@ -210,6 +217,10 @@ def _record_from_dict(data: dict[str, Any]) -> ProviderThreadRecord:
         rightmemory_session_id=_rightmemory_session_id(data.get("rightmemory_session_id")),
         policy=_required_string(data.get("policy"), "policy"),
         created_at=_required_string(data.get("created_at"), "created_at"),
+        forked_from_provider_session_id=_optional_string(
+            data.get("forked_from_provider_session_id"),
+            "forked_from_provider_session_id",
+        ),
         last_successful_activity_at=_optional_string(
             data.get("last_successful_activity_at"), "last_successful_activity_at"
         ),
@@ -228,7 +239,19 @@ def _validate_record(record: ProviderThreadRecord) -> None:
     _role(record.role)
     _rightmemory_session_id(record.rightmemory_session_id)
     _thread_policy(record.policy)
+    if record.policy == "fork-base" and (
+        len(record.rightmemory_session_id) != 64
+        or any(character not in "0123456789abcdef" for character in record.rightmemory_session_id)
+    ):
+        raise ValueError(
+            "fork-base rightmemory_session_id must be a 64-character lowercase hexadecimal prefix key"
+        )
     _timestamp(record.created_at, "created_at")
+    if record.forked_from_provider_session_id is not None:
+        _required_string(
+            record.forked_from_provider_session_id,
+            "forked_from_provider_session_id",
+        )
     if record.last_successful_activity_at is not None:
         _timestamp(record.last_successful_activity_at, "last_successful_activity_at")
     if record.last_delete_attempt_at is not None:
