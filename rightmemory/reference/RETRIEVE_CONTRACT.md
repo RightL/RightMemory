@@ -12,6 +12,10 @@ The conversation begins with a stable snapshot of:
 
 Root `corrections.md` is excluded from ordinary retrieval context.
 
+In CLI-agent mode, RightMemory keeps one internal prefix-base provider conversation for each exact combination of the canonical Retrieve instructions, this snapshot, and the effective provider configuration. It bootstraps that base once with an empty terminal selection. Each new logical Retrieve session forks the base through Codex or Claude and owns independent provider history and delivery coverage; later calls resume that fork.
+
+If base initialization or forking fails, retire that base and start the request in a fresh provider conversation with the complete prefix.
+
 Later context may contain:
 
 - diffs that update those snapshot files;
@@ -19,7 +23,7 @@ Later context may contain:
 - pending updater candidates;
 - the current retrieval query, placed last.
 
-Apply each diff to the earlier snapshot. Added lines are current; removed lines are obsolete.
+This volatile context follows the inherited snapshot in each CLI-agent session fork. Apply each diff to the earlier snapshot. Added lines are current; removed lines are obsolete. Standalone mode builds the same logical context without a provider prefix base or fork.
 
 ## Terminal Selection
 
