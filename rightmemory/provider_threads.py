@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from .config import RUNTIME_ROLES
+from .platform import lock_file_nonblocking, unlock_file
 from .session import (
     _ensure_durable_directory,
     _ensure_runtime_gitignore,
@@ -55,6 +56,28 @@ class ProviderThreadScan:
     malformed: tuple[MalformedProviderThreadRecord, ...]
 
 
+class ProviderThreadLease:
+    def __init__(self, path: Path, handle: Any):
+        self.path = path
+        self._handle = handle
+
+    def release(self) -> None:
+        if self._handle is None:
+            return
+        handle = self._handle
+        self._handle = None
+        try:
+            unlock_file(handle)
+        finally:
+            handle.close()
+
+    def __enter__(self) -> ProviderThreadLease:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.release()
+
+
 class ProviderThreadStore:
     def __init__(self, memory_root: Path):
         self.runtime_root = Path(memory_root) / ".runtime"
@@ -68,6 +91,43 @@ class ProviderThreadStore:
         thread_id = _required_string(provider_session_id, "provider_session_id")
         key = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:32]
         return self.provider_root(provider) / f"{key}.json"
+
+    def lease_path(self, provider: str, provider_session_id: str) -> Path:
+        return self.path(provider, provider_session_id).with_suffix(".lease")
+
+    def acquire_lease(self, provider: str, provider_session_id: str) -> ProviderThreadLease:
+        lease = self.try_acquire_lease(provider, provider_session_id)
+        if lease is None:
+            raise BlockingIOError("provider thread lease is already held")
+        return lease
+
+    def try_acquire_lease(
+        self,
+        provider: str,
+        provider_session_id: str,
+    ) -> ProviderThreadLease | None:
+        _ensure_runtime_gitignore(self.runtime_root)
+        path = self.lease_path(provider, provider_session_id)
+        _ensure_durable_directory(path.parent)
+        handle = path.open("a+", encoding="utf-8")
+        try:
+            lock_file_nonblocking(handle)
+        except BlockingIOError:
+            handle.close()
+            return None
+        except BaseException:
+            handle.close()
+            raise
+        return ProviderThreadLease(path, handle)
+
+    def delete_lease(self, provider: str, provider_session_id: str) -> bool:
+        path = self.lease_path(provider, provider_session_id)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        _fsync_directory(path.parent)
+        return True
 
     def load(self, provider: str, provider_session_id: str) -> ProviderThreadRecord | None:
         path = self.path(provider, provider_session_id)

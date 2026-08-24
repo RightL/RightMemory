@@ -8,7 +8,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from .agent_cli import WRITE_ROLES
-from .agent_cli_cleanup import AgentCliThreadCleanup, CODEX_THREAD_RETENTION
+from .agent_cli_cleanup import (
+    AgentCliThreadCleanup,
+    CODEX_FORK_BASE_RETENTION,
+    CODEX_THREAD_RETENTION,
+)
 from .config import ROLES, RuntimeConfig, SyncConfig, load_config
 from .platform import prepare_command
 from .provider_sessions import ProviderSessionStore
@@ -132,7 +136,11 @@ def _check_codex_thread_cleanup(
         return
 
     thread_ids = {record.provider_session_id for record in owned}
-    cleanup_at = datetime.now(UTC) + CODEX_THREAD_RETENTION + timedelta(seconds=1)
+    cleanup_at = (
+        datetime.now(UTC)
+        + max(CODEX_THREAD_RETENTION, CODEX_FORK_BASE_RETENTION)
+        + timedelta(seconds=1)
+    )
     try:
         result = AgentCliThreadCleanup(config.memory_root, now=lambda: cleanup_at).run()
         remaining = [thread_id for thread_id in thread_ids if store.load("codex", thread_id) is not None]

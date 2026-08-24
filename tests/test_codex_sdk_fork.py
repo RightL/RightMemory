@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from rightmemory.codex_sdk import CodexSdkRunner
+from rightmemory.codex_sdk import CodexSdkRunner, _unsubscribe_thread
 
 
 class FakeTransportClosedError(RuntimeError):
@@ -34,10 +34,12 @@ class FakeThread:
 
 
 class FakeCodex:
-    def __init__(self, threads, *, events=None):
+    def __init__(self, threads, *, events=None, unsubscribe_error=None):
         self.threads = list(threads)
         self.events = events
+        self.unsubscribe_error = unsubscribe_error
         self.fork_calls = []
+        self.unsubscribe_calls = []
         self.close_calls = 0
 
     def thread_fork(self, source_thread_id, **kwargs):
@@ -45,6 +47,14 @@ class FakeCodex:
         if self.events is not None:
             self.events.append("fork")
         return self.threads.pop(0)
+
+    def thread_unsubscribe(self, thread_id):
+        self.unsubscribe_calls.append(thread_id)
+        if self.events is not None:
+            self.events.append("unsubscribe")
+        if self.unsubscribe_error is not None:
+            raise self.unsubscribe_error
+        return "unsubscribed"
 
     def close(self):
         self.close_calls += 1
@@ -58,6 +68,7 @@ def fake_sdk():
         sandbox=SimpleNamespace(read_only="read-only", workspace_write="workspace-write"),
         transport_closed_error=FakeTransportClosedError,
         reasoning_effort=lambda value: f"effort:{value}",
+        thread_unsubscribe_response=object,
     )
 
 
@@ -70,12 +81,29 @@ class CodexSdkForkTests(unittest.TestCase):
         self.sdk_patcher.start()
         self.addCleanup(self.sdk_patcher.stop)
 
+    def test_unsubscribe_uses_current_sdk_raw_request_fallback(self):
+        request = Mock(
+            return_value=SimpleNamespace(
+                status=SimpleNamespace(value="unsubscribed"),
+            )
+        )
+        codex = SimpleNamespace(_client=SimpleNamespace(request=request))
+        sdk = fake_sdk()
+
+        _unsubscribe_thread(codex, "thread-1", sdk)
+
+        request.assert_called_once_with(
+            "thread/unsubscribe",
+            {"threadId": "thread-1"},
+            response_model=sdk.thread_unsubscribe_response,
+        )
+
     def test_forks_source_and_returns_first_turn_output_and_timing(self):
         events = []
         thread = FakeThread("child-thread", events=events)
         codex = FakeCodex([thread], events=events)
         configs = []
-        clock = iter([0.0, 0.1, 0.3, 0.4, 0.5, 0.6, 1.6, 1.7]).__next__
+        clock = iter([0.0, 0.1, 0.3, 0.4, 0.5, 0.6, 1.6, 1.7, 1.9, 2.0]).__next__
         runner = CodexSdkRunner(
             codex_factory=lambda config: configs.append(config) or codex,
             clock=clock,
@@ -98,13 +126,15 @@ class CodexSdkForkTests(unittest.TestCase):
         )
 
         self.assertEqual(len(configs), 1)
-        self.assertEqual(events, ["fork", "callback", "run"])
+        self.assertEqual(events, ["fork", "callback", "run", "unsubscribe"])
         self.assertEqual(callbacks, ["child-thread"])
+        self.assertEqual(codex.unsubscribe_calls, ["child-thread"])
         self.assertEqual(result.provider_session_id, "child-thread")
         self.assertEqual(result.text, "forked response")
         self.assertEqual(result.timing.client_start_ms, 200.0)
         self.assertEqual(result.timing.thread_open_ms, 100.0)
         self.assertEqual(result.timing.turn_ms, 1000.0)
+        self.assertEqual(result.timing.thread_release_ms, 200.0)
         self.assertEqual(result.timing.server_duration_ms, 321)
         self.assertEqual(
             result.timing.usage,
@@ -229,7 +259,38 @@ class CodexSdkForkTests(unittest.TestCase):
 
         self.assertEqual(started, ["child-thread"])
         self.assertEqual(thread.run_calls, [])
+        self.assertEqual(codex.unsubscribe_calls, ["child-thread"])
         self.assertEqual(codex.close_calls, 0)
+
+    def test_turn_and_release_failures_preserve_turn_error_after_unsubscribing(self):
+        thread = FakeThread("child-thread", error=ValueError("turn failed"))
+        codex = FakeCodex(
+            [thread],
+            unsubscribe_error=RuntimeError("release failed"),
+        )
+        runner = CodexSdkRunner(codex_factory=lambda _config: codex)
+        timings = []
+
+        with (
+            patch("rightmemory.codex_sdk.print") as warning,
+            self.assertRaisesRegex(ValueError, "turn failed"),
+        ):
+            runner.run_forked_turn(
+                prompt="current request",
+                source_provider_session_id="seed-thread",
+                cwd=Path("/memory/root"),
+                model=None,
+                reasoning_effort=None,
+                sandbox="read-only",
+                on_timing=timings.append,
+            )
+
+        self.assertEqual(codex.unsubscribe_calls, ["child-thread"])
+        self.assertEqual(len(timings), 1)
+        self.assertEqual(timings[0].thread_release_error_type, "RuntimeError")
+        self.assertGreaterEqual(timings[0].thread_release_ms, 0.0)
+        self.assertEqual(codex.close_calls, 1)
+        warning.assert_called_once()
 
     def test_transport_failure_invalidates_connection_without_retrying_turn(self):
         failed = FakeThread(
@@ -255,7 +316,9 @@ class CodexSdkForkTests(unittest.TestCase):
 
         self.assertEqual(len(failed.run_calls), 1)
         self.assertEqual(clients[0].close_calls, 1)
+        self.assertEqual(clients[0].unsubscribe_calls, [])
         self.assertEqual(result.provider_session_id, "child-succeeded")
+        self.assertEqual(clients[1].unsubscribe_calls, ["child-succeeded"])
         self.assertEqual(factory.call_count, 2)
 
 

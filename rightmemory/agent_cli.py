@@ -18,7 +18,7 @@ from .platform import prepare_command
 from .prompt import build_cli_agent_instructions
 from .provider_prefixes import ProviderPrefixRecord, ProviderPrefixStore
 from .provider_sessions import ProviderSessionRecord, ProviderSessionStore
-from .provider_threads import ProviderThreadStore
+from .provider_threads import ProviderThreadLease, ProviderThreadStore
 from .semantic_upgrades import SemanticUpgradeContext
 
 
@@ -85,6 +85,7 @@ class CliAgentExecutor:
         self.prefix_store = ProviderPrefixStore(self.state_root)
         self.thread_store = ProviderThreadStore(self.state_root)
         self._process_provider_session_id: str | None = None
+        self._process_thread_lease: ProviderThreadLease | None = None
         if self.state_root == self.memory_root and (
             self._codex_runner is None
             or self._codex_runner.claim_opportunistic_cleanup(self.memory_root)
@@ -97,12 +98,16 @@ class CliAgentExecutor:
     def run_process_turn(self, message: str, *, prefix_context: str | None = None) -> str:
         provider_session_id = self._process_provider_session_id
         if provider_session_id is None:
-            result = self._run_starting_turn(
-                message,
-                prefix_context=prefix_context,
-                rightmemory_session_id=NO_SESSION_RIGHTMEMORY_SESSION_ID,
-                policy=PROCESS_LOCAL_POLICY,
-            )
+            try:
+                result = self._run_starting_turn(
+                    message,
+                    prefix_context=prefix_context,
+                    rightmemory_session_id=NO_SESSION_RIGHTMEMORY_SESSION_ID,
+                    policy=PROCESS_LOCAL_POLICY,
+                )
+            except Exception:
+                self._release_process_thread_lease()
+                raise
         else:
             result = self._run_provider(
                 message,
@@ -338,9 +343,12 @@ class CliAgentExecutor:
         return self._process_provider_session_id is not None
 
     def cleanup(self) -> None:
-        if self._owns_codex_runner and self._codex_runner is not None:
-            self._codex_runner.close()
-            self._owns_codex_runner = False
+        try:
+            if self._owns_codex_runner and self._codex_runner is not None:
+                self._codex_runner.close()
+                self._owns_codex_runner = False
+        finally:
+            self._release_process_thread_lease()
 
     def _run_provider(
         self,
@@ -370,6 +378,8 @@ class CliAgentExecutor:
 
             def record_started(thread_id: str) -> None:
                 self._record_created(thread_id, rightmemory_session_id, policy, created_at)
+                if policy == PROCESS_LOCAL_POLICY:
+                    self._acquire_process_thread_lease(thread_id)
 
             try:
                 sdk_result = self._codex_runner.run_turn(
@@ -383,6 +393,8 @@ class CliAgentExecutor:
                     on_timing=record_timing,
                 )
             except Exception as exc:
+                if provider_session_id is None and policy == PROCESS_LOCAL_POLICY:
+                    self._release_process_thread_lease()
                 self._trace_provider_timing(
                     timing or CodexSdkTiming(total_ms=_elapsed_ms(sdk_started_at)),
                     resumed=provider_session_id is not None,
@@ -456,6 +468,8 @@ class CliAgentExecutor:
                     created_at,
                     forked_from_provider_session_id=source_provider_session_id,
                 )
+                if policy == PROCESS_LOCAL_POLICY:
+                    self._acquire_process_thread_lease(thread_id)
 
             try:
                 sdk_result = self._codex_runner.run_forked_turn(
@@ -469,6 +483,8 @@ class CliAgentExecutor:
                     on_timing=record_timing,
                 )
             except Exception as exc:
+                if policy == PROCESS_LOCAL_POLICY:
+                    self._release_process_thread_lease()
                 self._trace_provider_timing(
                     timing or CodexSdkTiming(total_ms=_elapsed_ms(sdk_started_at)),
                     resumed=False,
@@ -551,12 +567,15 @@ class CliAgentExecutor:
             "client_start_ms": timing.client_start_ms,
             "thread_open_ms": timing.thread_open_ms,
             "turn_ms": timing.turn_ms,
+            "thread_release_ms": timing.thread_release_ms,
             "server_duration_ms": timing.server_duration_ms,
             "total_ms": timing.total_ms,
             "outcome": outcome,
         }
         if timing.usage is not None:
             fields["usage"] = timing.usage
+        if timing.thread_release_error_type is not None:
+            fields["thread_release_error_type"] = timing.thread_release_error_type
         if error_type is not None:
             fields["error_type"] = error_type
         self._trace_event("provider_timing", **fields)
@@ -603,6 +622,21 @@ class CliAgentExecutor:
                     parent.provider_session_id,
                     activity_at=activity_at,
                 )
+
+    def _acquire_process_thread_lease(self, provider_session_id: str) -> None:
+        if self._process_thread_lease is not None:
+            raise RuntimeError("process-local provider thread lease is already held")
+        self._process_thread_lease = self.thread_store.acquire_lease(
+            "codex",
+            provider_session_id,
+        )
+
+    def _release_process_thread_lease(self) -> None:
+        if self._process_thread_lease is None:
+            return
+        lease = self._process_thread_lease
+        self._process_thread_lease = None
+        lease.release()
 
     def _active_persistent_session(self, rightmemory_session_id: str) -> ProviderSessionRecord | None:
         mapping = self.store.load(rightmemory_session_id)

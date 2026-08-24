@@ -1430,6 +1430,8 @@ class RuntimeTests(unittest.TestCase):
                 client_start_ms=0.0,
                 thread_open_ms=0.0,
                 turn_ms=0.0,
+                thread_release_ms=0.0,
+                thread_release_error_type=None,
                 server_duration_ms=0,
                 total_ms=0.0,
                 usage=None,

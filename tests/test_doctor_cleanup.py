@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -43,13 +44,23 @@ class AgentCliDoctorCleanupTests(unittest.TestCase):
                 memory_root=root,
             )
             store = ProviderThreadStore(root)
+            created_at = datetime.now(UTC).isoformat()
+            store.record_created(
+                provider="codex",
+                provider_session_id="doctor-base-thread",
+                role="retrieve",
+                rightmemory_session_id="a" * 64,
+                policy="fork-base",
+                created_at=created_at,
+            )
             store.record_created(
                 provider="codex",
                 provider_session_id="doctor-thread",
                 role="retrieve",
                 rightmemory_session_id="doctor-session",
                 policy="persistent",
-                created_at="2026-08-17T00:00:00+00:00",
+                created_at=created_at,
+                forked_from_provider_session_id="doctor-base-thread",
             )
             checks = []
 
@@ -57,8 +68,10 @@ class AgentCliDoctorCleanupTests(unittest.TestCase):
                 _check_codex_thread_cleanup(checks, {"retrieve": config})
 
             remaining = store.load("codex", "doctor-thread")
+            remaining_base = store.load("codex", "doctor-base-thread")
 
         self.assertIsNone(remaining)
+        self.assertIsNone(remaining_base)
         self.assertEqual(len(checks), 1)
         self.assertTrue(checks[0].ok)
 
