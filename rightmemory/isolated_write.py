@@ -566,6 +566,7 @@ class IsolatedWriteSupervisor:
         runtime_worktrees = self.memory_root / ".runtime" / "worktrees"
         for worktree, identifier in self._stale_worktrees(runtime_worktrees, role_slug):
             self._run_git(self.memory_root, "worktree", "remove", "--force", str(worktree), check=False)
+            _remove_empty_directory(worktree)
             self._lease_path(role_slug, identifier).unlink(missing_ok=True)
 
         self._run_git(self.memory_root, "worktree", "prune", check=False)
@@ -577,6 +578,7 @@ class IsolatedWriteSupervisor:
             self._run_git(self.memory_root, "branch", "-D", branch, check=False)
             self._lease_path(role_slug, identifier).unlink(missing_ok=True)
 
+        self._cleanup_orphaned_worktree_directories(runtime_worktrees, role_slug)
         self._cleanup_orphaned_leases(role_slug)
 
     def _ensure_repo_root(self) -> None:
@@ -913,7 +915,23 @@ class IsolatedWriteSupervisor:
 
     def _cleanup(self, worktree: Path, branch: str) -> None:
         self._run_git(self.memory_root, "worktree", "remove", "--force", str(worktree), check=False)
+        _remove_empty_directory(worktree)
         self._run_git(self.memory_root, "branch", "-D", branch, check=False)
+
+    def _cleanup_orphaned_worktree_directories(
+        self,
+        runtime_worktrees: Path,
+        role_slug: str,
+    ) -> None:
+        try:
+            entries = list(runtime_worktrees.iterdir())
+        except FileNotFoundError:
+            return
+        for path in entries:
+            identifier = _worktree_identifier(path.name, role_slug)
+            if identifier is None or self._lease_is_live(role_slug, identifier):
+                continue
+            _remove_empty_directory(path)
 
     def _stale_worktrees(self, runtime_worktrees: Path, role_slug: str) -> list[tuple[Path, str]]:
         result = self._run_git(self.memory_root, "worktree", "list", "--porcelain", check=False)
@@ -1096,6 +1114,18 @@ def _temp_identifier_for_role(branch: str, role_slug: str) -> str | None:
 def _lease_identifier(filename: str, role_slug: str) -> str | None:
     match = re.fullmatch(rf"{re.escape(role_slug)}-([0-9a-f]{{32}})\.json", filename)
     return match.group(1) if match is not None else None
+
+
+def _worktree_identifier(dirname: str, role_slug: str) -> str | None:
+    match = re.fullmatch(rf"{re.escape(role_slug)}-([0-9a-f]{{32}})", dirname)
+    return match.group(1) if match is not None else None
+
+
+def _remove_empty_directory(path: Path) -> None:
+    try:
+        path.rmdir()
+    except OSError:
+        pass
 
 
 def _name_status_paths(output: str) -> list[str]:
