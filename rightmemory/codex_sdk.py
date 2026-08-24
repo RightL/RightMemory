@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ class _CodexSdkBindings:
     sandbox: Any
     transport_closed_error: type[Exception]
     reasoning_effort: Any
+    thread_unsubscribe_response: Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +34,8 @@ class CodexSdkTiming:
     client_start_ms: float = 0.0
     thread_open_ms: float = 0.0
     turn_ms: float = 0.0
+    thread_release_ms: float = 0.0
+    thread_release_error_type: str | None = None
     server_duration_ms: int | None = None
     total_ms: float = 0.0
     usage: dict[str, Any] | None = None
@@ -42,6 +46,14 @@ class CodexSdkRunResult:
     provider_session_id: str
     text: str
     timing: CodexSdkTiming
+
+
+@dataclass(slots=True)
+class _CodexClientLease:
+    codex: Any
+    active_calls: int = 0
+    retired: bool = False
+    closing: bool = False
 
 
 class CodexSdkRunner:
@@ -57,8 +69,11 @@ class CodexSdkRunner:
         self._clock = clock
         self._condition = threading.Condition(threading.RLock())
         self._codex: Any | None = None
+        self._client_leases: dict[int, _CodexClientLease] = {}
         self._active_calls = 0
+        self._closing_clients = 0
         self._closed = False
+        self._shutdown_complete = False
         self._cleanup_claims: dict[str, float] = {}
 
     def run_turn(
@@ -128,10 +143,15 @@ class CodexSdkRunner:
         client_start_ms = 0.0
         thread_open_ms = 0.0
         turn_ms = 0.0
+        thread_release_ms = 0.0
+        thread_release_error_type: str | None = None
         server_duration_ms: int | None = None
         usage: dict[str, Any] | None = None
         codex: Any | None = None
+        thread_id = ""
+        connection_usable = True
         timing: CodexSdkTiming | None = None
+        final_response = ""
 
         try:
             effort = _reasoning_effort(reasoning_effort, sdk)
@@ -202,38 +222,49 @@ class CodexSdkRunner:
             final_response = _non_empty_string(getattr(result, "final_response", None))
             if not final_response:
                 raise RuntimeError("Codex SDK did not include a final response")
-
+        except sdk.transport_closed_error:
+            if codex is not None:
+                self._retire_codex(codex)
+                connection_usable = False
+            raise
+        finally:
+            if codex is not None and thread_id and connection_usable:
+                release_started_at = self._clock()
+                try:
+                    _unsubscribe_thread(codex, thread_id, sdk)
+                except sdk.transport_closed_error:
+                    thread_release_error_type = sdk.transport_closed_error.__name__
+                    self._retire_codex(codex)
+                except Exception as exc:
+                    thread_release_error_type = type(exc).__name__
+                    self._retire_codex(codex)
+                    print(
+                        "Warning: RightMemory could not release Codex thread "
+                        f"{thread_id}: {type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+                finally:
+                    thread_release_ms = _milliseconds(self._clock() - release_started_at)
+            if codex is not None:
+                self._release_codex(codex)
             timing = CodexSdkTiming(
                 client_start_ms=client_start_ms,
                 thread_open_ms=thread_open_ms,
                 turn_ms=turn_ms,
+                thread_release_ms=thread_release_ms,
+                thread_release_error_type=thread_release_error_type,
                 server_duration_ms=server_duration_ms,
                 total_ms=_milliseconds(self._clock() - started_at),
                 usage=usage,
             )
-            return CodexSdkRunResult(
-                provider_session_id=thread_id,
-                text=final_response,
-                timing=timing,
-            )
-        except sdk.transport_closed_error:
-            if codex is not None:
-                self._invalidate(codex)
-            raise
-        finally:
-            if codex is not None:
-                self._release_codex()
-            if timing is None:
-                timing = CodexSdkTiming(
-                    client_start_ms=client_start_ms,
-                    thread_open_ms=thread_open_ms,
-                    turn_ms=turn_ms,
-                    server_duration_ms=server_duration_ms,
-                    total_ms=_milliseconds(self._clock() - started_at),
-                    usage=usage,
-                )
             if on_timing is not None:
                 on_timing(timing)
+
+        return CodexSdkRunResult(
+            provider_session_id=thread_id,
+            text=final_response,
+            timing=timing,
+        )
 
     def claim_opportunistic_cleanup(self, memory_root: Path) -> bool:
         key = os.path.normcase(str(Path(memory_root).resolve(strict=False)))
@@ -249,16 +280,28 @@ class CodexSdkRunner:
             return True
 
     def close(self) -> None:
+        close_now: _CodexClientLease | None = None
         with self._condition:
             if self._closed:
+                while not self._shutdown_complete:
+                    self._condition.wait()
                 return
             self._closed = True
-            while self._active_calls:
-                self._condition.wait()
             codex = self._codex
             self._codex = None
-        if codex is not None:
-            codex.close()
+            if codex is not None:
+                lease = self._client_leases[id(codex)]
+                lease.retired = True
+                close_now = self._schedule_retired_close_locked(lease)
+
+        if close_now is not None:
+            self._close_retired_codex(close_now)
+
+        with self._condition:
+            while self._active_calls or self._closing_clients:
+                self._condition.wait()
+            self._shutdown_complete = True
+            self._condition.notify_all()
 
     def _acquire_codex(self, sdk: _CodexSdkBindings) -> tuple[Any, float]:
         with self._condition:
@@ -276,31 +319,62 @@ class CodexSdkRunner:
                     )
                 )
                 client_start_ms = _milliseconds(self._clock() - client_started_at)
+                self._client_leases[id(self._codex)] = _CodexClientLease(self._codex)
+            lease = self._client_leases[id(self._codex)]
+            lease.active_calls += 1
             self._active_calls += 1
             return self._codex, client_start_ms
 
-    def _release_codex(self) -> None:
+    def _release_codex(self, codex: Any) -> None:
+        close_now: _CodexClientLease | None = None
         with self._condition:
+            lease = self._client_leases[id(codex)]
+            lease.active_calls -= 1
             self._active_calls -= 1
+            close_now = self._schedule_retired_close_locked(lease)
             if self._active_calls == 0:
                 self._condition.notify_all()
+        if close_now is not None:
+            self._close_retired_codex(close_now)
 
-    def _invalidate(self, codex: Any) -> None:
+    def _retire_codex(self, codex: Any) -> None:
         with self._condition:
+            lease = self._client_leases[id(codex)]
             if self._codex is codex:
                 self._codex = None
+            lease.retired = True
+
+    def _schedule_retired_close_locked(
+        self,
+        lease: _CodexClientLease,
+    ) -> _CodexClientLease | None:
+        if not lease.retired or lease.active_calls or lease.closing:
+            return None
+        lease.closing = True
+        self._closing_clients += 1
+        return lease
+
+    def _close_retired_codex(self, lease: _CodexClientLease) -> None:
         try:
-            codex.close()
+            lease.codex.close()
         except Exception:
-            # The transport is already unusable. Preserve its original error;
-            # a best-effort close failure must not make retry safety ambiguous.
+            # Retirement follows another completed result or failure. A
+            # best-effort close failure must not replace that outcome.
             pass
+        finally:
+            with self._condition:
+                current = self._client_leases.get(id(lease.codex))
+                if current is lease:
+                    del self._client_leases[id(lease.codex)]
+                self._closing_clients -= 1
+                self._condition.notify_all()
 
 
 @cache
 def _load_codex_sdk() -> _CodexSdkBindings:
     try:
         from openai_codex import ApprovalMode, Codex, CodexConfig, Sandbox, TransportClosedError
+        from openai_codex.generated.v2_all import ThreadUnsubscribeResponse
         from openai_codex.types import ReasoningEffort
     except ImportError as exc:
         raise RuntimeError(_CODEX_SDK_INSTALL_ERROR) from exc
@@ -311,7 +385,29 @@ def _load_codex_sdk() -> _CodexSdkBindings:
         sandbox=Sandbox,
         transport_closed_error=TransportClosedError,
         reasoning_effort=ReasoningEffort,
+        thread_unsubscribe_response=ThreadUnsubscribeResponse,
     )
+
+
+def _unsubscribe_thread(codex: Any, thread_id: str, sdk: _CodexSdkBindings) -> None:
+    unsubscribe = getattr(codex, "thread_unsubscribe", None)
+    if callable(unsubscribe):
+        response = unsubscribe(thread_id)
+    else:
+        client = getattr(codex, "_client", None)
+        request = getattr(client, "request", None)
+        if not callable(request):
+            raise RuntimeError("Codex SDK does not expose thread/unsubscribe")
+        response = request(
+            "thread/unsubscribe",
+            {"threadId": thread_id},
+            response_model=sdk.thread_unsubscribe_response,
+        )
+
+    status = getattr(response, "status", response)
+    value = getattr(status, "value", status)
+    if value not in {"unsubscribed", "notSubscribed", "notLoaded"}:
+        raise RuntimeError(f"unexpected Codex thread/unsubscribe status: {value!r}")
 
 
 def _reasoning_effort(value: str | None, sdk: _CodexSdkBindings) -> Any | None:

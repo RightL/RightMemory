@@ -106,25 +106,109 @@ class AgentCliThreadCleanupTests(unittest.TestCase):
                     session_id="not-a-prefix-key",
                 )
 
-    def test_uses_last_successful_activity_and_creation_fallback_at_boundary(self):
+    def test_ordinary_and_fork_base_retention_boundaries_use_latest_activity(self):
         client = FakeDeleteClient()
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            self._create_thread(root, "never-succeeded", created_at="2026-07-17T00:00:00+00:00")
             self._create_thread(
                 root,
-                "recent-success",
+                "ordinary-at-one-hour",
+                created_at="2026-07-17T23:00:00+00:00",
+            )
+            self._create_thread(
+                root,
+                "ordinary-after-boundary",
                 created_at=CREATED,
-                successful_at="2026-07-17T00:00:01+00:00",
+                successful_at="2026-07-17T23:00:01+00:00",
+            )
+            self._create_thread(
+                root,
+                "base-at-one-hour",
+                policy="fork-base",
+                session_id="b" * 64,
+                created_at="2026-07-17T23:00:00+00:00",
+            )
+            self._create_thread(
+                root,
+                "base-at-twenty-four-hours",
+                policy="fork-base",
+                session_id="c" * 64,
+                created_at="2026-07-17T00:00:00+00:00",
             )
 
             result = AgentCliThreadCleanup(root, now=lambda: NOW, client=client).run()
 
-            self.assertEqual(client.calls, [["never-succeeded"]])
-            self.assertEqual(result.deleted, 1)
-            self.assertEqual(result.skipped, 1)
-            self.assertIsNone(ProviderThreadStore(root).load("codex", "never-succeeded"))
-            self.assertIsNotNone(ProviderThreadStore(root).load("codex", "recent-success"))
+            self.assertEqual(
+                client.calls,
+                [["ordinary-at-one-hour"], ["base-at-twenty-four-hours"]],
+            )
+            self.assertEqual(result.deleted, 2)
+            self.assertEqual(result.skipped, 2)
+            store = ProviderThreadStore(root)
+            self.assertIsNone(store.load("codex", "ordinary-at-one-hour"))
+            self.assertIsNotNone(store.load("codex", "ordinary-after-boundary"))
+            self.assertIsNotNone(store.load("codex", "base-at-one-hour"))
+            self.assertIsNone(store.load("codex", "base-at-twenty-four-hours"))
+
+    def test_expired_process_local_thread_is_skipped_while_executor_lease_is_held(self):
+        client = FakeDeleteClient()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            self._create_thread(root, "process-thread", policy="process-local")
+            store = ProviderThreadStore(root)
+            lease = store.acquire_lease("codex", "process-thread")
+            cleanup = AgentCliThreadCleanup(root, now=lambda: NOW, client=client)
+            try:
+                self.assertFalse(cleanup.has_expired_codex_threads())
+                held = cleanup.run()
+            finally:
+                lease.release()
+
+            self.assertEqual(held.deleted, 0)
+            self.assertEqual(held.skipped, 1)
+            self.assertEqual(client.calls, [])
+            self.assertIsNotNone(store.load("codex", "process-thread"))
+            self.assertTrue(store.lease_path("codex", "process-thread").exists())
+
+            self.assertTrue(cleanup.has_expired_codex_threads())
+            released = cleanup.run()
+
+            self.assertEqual(released.deleted, 1)
+            self.assertEqual(client.calls, [["process-thread"]])
+            self.assertIsNone(store.load("codex", "process-thread"))
+            self.assertFalse(store.lease_path("codex", "process-thread").exists())
+
+    def test_prepare_failure_releases_earlier_thread_leases(self):
+        client = FakeDeleteClient()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            self._create_thread(root, "thread-1")
+            self._create_thread(root, "thread-2")
+            cleanup = AgentCliThreadCleanup(root, now=lambda: NOW, client=client)
+            original = cleanup._prepare_for_deletion
+            prepared_ids = []
+
+            def fail_after_first(record, **kwargs):
+                if prepared_ids:
+                    raise OSError("prepare failed")
+                prepared_ids.append(record.provider_session_id)
+                return original(record, **kwargs)
+
+            with (
+                patch.object(
+                    cleanup,
+                    "_prepare_for_deletion",
+                    side_effect=fail_after_first,
+                ),
+                self.assertRaisesRegex(OSError, "prepare failed"),
+            ):
+                cleanup.run()
+
+            store = ProviderThreadStore(root)
+            reacquired = store.try_acquire_lease("codex", prepared_ids[0])
+            self.assertIsNotNone(reacquired)
+            reacquired.release()
+            self.assertEqual(client.calls, [])
 
     def test_expired_retrieve_detaches_exact_mapping_and_resets_local_delivery_state(self):
         client = FakeDeleteClient()
@@ -274,7 +358,7 @@ class AgentCliThreadCleanupTests(unittest.TestCase):
                 root,
                 "child-thread",
                 policy="persistent",
-                successful_at="2026-07-17T12:00:00+00:00",
+                successful_at="2026-07-17T23:00:01+00:00",
                 forked_from_provider_session_id="base-thread",
             )
             self._save_prefix(root, "base-thread")
@@ -402,15 +486,48 @@ class AgentCliThreadCleanupTests(unittest.TestCase):
                 now=lambda: NOW,
                 client=FakeDeleteClient({"thread-1"}),
             ).run()
-            pending = ProviderThreadStore(root).load("codex", "thread-1")
-
-            retried = AgentCliThreadCleanup(root, now=lambda: NOW, client=FakeDeleteClient()).run()
+            store = ProviderThreadStore(root)
+            pending = store.load("codex", "thread-1")
+            lease_path = store.lease_path("codex", "thread-1")
 
             self.assertEqual(failed.pending, 1)
             self.assertIn("busy", failed.errors[0])
             self.assertEqual(pending.status, "delete-pending")
+            self.assertTrue(lease_path.exists())
+
+            retried = AgentCliThreadCleanup(root, now=lambda: NOW, client=FakeDeleteClient()).run()
+
             self.assertEqual(retried.deleted, 1)
-            self.assertIsNone(ProviderThreadStore(root).load("codex", "thread-1"))
+            self.assertIsNone(store.load("codex", "thread-1"))
+            self.assertFalse(lease_path.exists())
+
+    def test_busy_lease_marker_is_nonfatal_after_provider_delete(self):
+        client = FakeDeleteClient()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            self._create_thread(root, "thread-1")
+            cleanup = AgentCliThreadCleanup(root, now=lambda: NOW, client=client)
+            original_delete_lease = cleanup.store.delete_lease
+
+            def delete_while_contended(provider, provider_session_id):
+                contender = cleanup.store.acquire_lease(provider, provider_session_id)
+                try:
+                    return original_delete_lease(provider, provider_session_id)
+                finally:
+                    contender.release()
+
+            with patch.object(
+                cleanup.store,
+                "delete_lease",
+                side_effect=delete_while_contended,
+            ):
+                result = cleanup.run()
+
+            self.assertEqual(result.deleted, 1)
+            self.assertEqual(result.errors, ())
+            self.assertEqual(client.calls, [["thread-1"]])
+            self.assertIsNone(cleanup.store.load("codex", "thread-1"))
+            cleanup.store.lease_path("codex", "thread-1").unlink(missing_ok=True)
 
     def test_new_activity_wins_after_stale_scan(self):
         client = FakeDeleteClient()
@@ -424,7 +541,7 @@ class AgentCliThreadCleanupTests(unittest.TestCase):
                 ProviderThreadStore(root).record_success(
                     "codex",
                     "thread-1",
-                    activity_at="2026-07-17T12:00:00+00:00",
+                    activity_at="2026-07-17T23:00:01+00:00",
                 )
                 return original(record, **kwargs)
 
@@ -436,7 +553,7 @@ class AgentCliThreadCleanupTests(unittest.TestCase):
             self.assertEqual(client.calls, [])
             self.assertEqual(
                 ProviderThreadStore(root).load("codex", "thread-1").last_successful_activity_at,
-                "2026-07-17T12:00:00+00:00",
+                "2026-07-17T23:00:01+00:00",
             )
 
     def test_moved_mapping_and_unregistered_history_are_not_detached(self):

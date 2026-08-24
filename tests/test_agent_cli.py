@@ -1,6 +1,7 @@
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -278,8 +279,9 @@ class FakeCodexRunner:
             client_start_ms=200.0,
             thread_open_ms=25.0,
             turn_ms=500.0,
+            thread_release_ms=12.5,
             server_duration_ms=450,
-            total_ms=725.0,
+            total_ms=737.5,
             usage={"total": {"inputTokens": 10, "outputTokens": 2}},
         )
         timing_callback = kwargs.get("on_timing")
@@ -301,8 +303,9 @@ class FakeCodexRunner:
             client_start_ms=0.0,
             thread_open_ms=25.0,
             turn_ms=500.0,
+            thread_release_ms=12.5,
             server_duration_ms=450,
-            total_ms=525.0,
+            total_ms=537.5,
             usage={"total": {"inputTokens": 4, "outputTokens": 2}},
         )
         timing_callback = kwargs.get("on_timing")
@@ -318,7 +321,15 @@ class FakeCodexRunner:
 
 
 class FakeSdkThread:
-    def __init__(self, thread_id, *, result=None, error=None):
+    def __init__(
+        self,
+        thread_id,
+        *,
+        result=None,
+        error=None,
+        run_started=None,
+        run_release=None,
+    ):
         self.id = thread_id
         self.result = result or SimpleNamespace(
             final_response="done",
@@ -326,20 +337,28 @@ class FakeSdkThread:
             usage={"total": {"inputTokens": 10}},
         )
         self.error = error
+        self.run_started = run_started
+        self.run_release = run_release
         self.run_calls = []
 
     def run(self, prompt, **kwargs):
         self.run_calls.append((prompt, kwargs))
+        if self.run_started is not None:
+            self.run_started.set()
+        if self.run_release is not None and not self.run_release.wait(timeout=5):
+            raise TimeoutError("test did not release blocked Codex turn")
         if self.error is not None:
             raise self.error
         return self.result
 
 
 class FakeSdkCodex:
-    def __init__(self, threads):
+    def __init__(self, threads, *, unsubscribe_error=None):
         self.threads = list(threads)
+        self.unsubscribe_error = unsubscribe_error
         self.start_calls = []
         self.resume_calls = []
+        self.unsubscribe_calls = []
         self.close_calls = 0
 
     def thread_start(self, **kwargs):
@@ -350,6 +369,12 @@ class FakeSdkCodex:
         self.resume_calls.append((thread_id, kwargs))
         return self.threads.pop(0)
 
+    def thread_unsubscribe(self, thread_id):
+        self.unsubscribe_calls.append(thread_id)
+        if self.unsubscribe_error is not None:
+            raise self.unsubscribe_error
+        return "unsubscribed"
+
     def close(self):
         self.close_calls += 1
 
@@ -359,7 +384,7 @@ class CodexSdkRunnerTests(unittest.TestCase):
         thread = FakeSdkThread("thread-1")
         codex = FakeSdkCodex([thread])
         configs = []
-        clock = iter([0.0, 0.1, 0.3, 0.4, 0.5, 0.6, 1.6, 1.7]).__next__
+        clock = iter([0.0, 0.1, 0.3, 0.4, 0.5, 0.6, 1.6, 1.7, 1.9, 2.0]).__next__
         runner = CodexSdkRunner(
             codex_factory=lambda config: configs.append(config) or codex,
             clock=clock,
@@ -384,8 +409,10 @@ class CodexSdkRunnerTests(unittest.TestCase):
         self.assertEqual(result.timing.client_start_ms, 200.0)
         self.assertEqual(result.timing.thread_open_ms, 100.0)
         self.assertEqual(result.timing.turn_ms, 1000.0)
+        self.assertEqual(result.timing.thread_release_ms, 200.0)
         self.assertEqual(result.timing.server_duration_ms, 450)
         self.assertEqual(result.timing.usage, {"total": {"inputTokens": 10}})
+        self.assertEqual(codex.unsubscribe_calls, ["thread-1"])
         self.assertEqual(
             codex.start_calls,
             [
@@ -422,6 +449,130 @@ class CodexSdkRunnerTests(unittest.TestCase):
         self.assertEqual(codex.resume_calls[0][1]["approval_mode"], ApprovalMode.deny_all)
         self.assertEqual(codex.resume_calls[0][1]["sandbox"], Sandbox.workspace_write)
         self.assertEqual(thread.run_calls[0][1]["sandbox"], Sandbox.workspace_write)
+        self.assertEqual(codex.unsubscribe_calls, ["thread-1"])
+
+    def test_turn_and_release_failures_preserve_turn_error_after_unsubscribing(self):
+        thread = FakeSdkThread("thread-1", error=ValueError("turn failed"))
+        codex = FakeSdkCodex(
+            [thread],
+            unsubscribe_error=RuntimeError("release failed"),
+        )
+        runner = CodexSdkRunner(codex_factory=lambda _config: codex)
+        timings = []
+
+        with (
+            patch("rightmemory.codex_sdk.print") as warning,
+            self.assertRaisesRegex(ValueError, "turn failed"),
+        ):
+            runner.run_turn(
+                prompt="hello",
+                provider_session_id=None,
+                cwd=Path("/memory/root"),
+                model=None,
+                reasoning_effort=None,
+                sandbox="read-only",
+                on_timing=timings.append,
+            )
+
+        self.assertEqual(codex.unsubscribe_calls, ["thread-1"])
+        self.assertEqual(len(timings), 1)
+        self.assertEqual(timings[0].thread_release_error_type, "RuntimeError")
+        self.assertGreaterEqual(timings[0].thread_release_ms, 0.0)
+        self.assertEqual(codex.close_calls, 1)
+        warning.assert_called_once()
+
+    def test_successful_turn_retires_client_after_release_failure_and_uses_fresh_client(self):
+        first = FakeSdkCodex(
+            [FakeSdkThread("thread-1")],
+            unsubscribe_error=RuntimeError("release failed"),
+        )
+        second = FakeSdkCodex([FakeSdkThread("thread-2")])
+        factory = Mock(side_effect=[first, second])
+        runner = CodexSdkRunner(codex_factory=factory)
+        arguments = {
+            "prompt": "hello",
+            "provider_session_id": None,
+            "cwd": Path("/memory/root"),
+            "model": None,
+            "reasoning_effort": None,
+            "sandbox": "read-only",
+        }
+
+        with patch("rightmemory.codex_sdk.print") as warning:
+            first_result = runner.run_turn(**arguments)
+            second_result = runner.run_turn(**arguments)
+
+        self.assertEqual(first_result.text, "done")
+        self.assertEqual(first_result.timing.thread_release_error_type, "RuntimeError")
+        self.assertEqual(second_result.text, "done")
+        self.assertIsNone(second_result.timing.thread_release_error_type)
+        self.assertEqual(factory.call_count, 2)
+        self.assertEqual(first.close_calls, 1)
+        self.assertEqual(second.close_calls, 0)
+        warning.assert_called_once()
+
+    def test_release_failure_retires_client_only_after_concurrent_calls_drain(self):
+        blocked_started = threading.Event()
+        release_blocked = threading.Event()
+        blocked_thread = FakeSdkThread(
+            "thread-blocked",
+            run_started=blocked_started,
+            run_release=release_blocked,
+        )
+        retiring_client = FakeSdkCodex(
+            [blocked_thread, FakeSdkThread("thread-retiring")],
+            unsubscribe_error=RuntimeError("release failed"),
+        )
+        fresh_client = FakeSdkCodex([FakeSdkThread("thread-fresh")])
+        factory = Mock(side_effect=[retiring_client, fresh_client])
+        runner = CodexSdkRunner(codex_factory=factory)
+        arguments = {
+            "prompt": "hello",
+            "provider_session_id": None,
+            "cwd": Path("/memory/root"),
+            "model": None,
+            "reasoning_effort": None,
+            "sandbox": "read-only",
+        }
+        blocked_results = []
+        blocked_errors = []
+
+        def run_blocked_turn():
+            try:
+                blocked_results.append(runner.run_turn(**arguments))
+            except Exception as exc:  # pragma: no cover - asserted below
+                blocked_errors.append(exc)
+
+        worker = threading.Thread(target=run_blocked_turn)
+        with patch("rightmemory.codex_sdk.print") as warning:
+            worker.start()
+            self.assertTrue(blocked_started.wait(timeout=5))
+            try:
+                retiring_result = runner.run_turn(**arguments)
+                self.assertEqual(retiring_result.text, "done")
+                self.assertEqual(retiring_client.close_calls, 0)
+
+                fresh_result = runner.run_turn(**arguments)
+                self.assertEqual(fresh_result.provider_session_id, "thread-fresh")
+                self.assertEqual(factory.call_count, 2)
+                self.assertEqual(retiring_client.close_calls, 0)
+            finally:
+                release_blocked.set()
+                worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(blocked_errors, [])
+        self.assertEqual(
+            [result.provider_session_id for result in blocked_results],
+            ["thread-blocked"],
+        )
+        self.assertEqual(retiring_client.close_calls, 1)
+        self.assertEqual(
+            retiring_client.unsubscribe_calls,
+            ["thread-retiring", "thread-blocked"],
+        )
+        self.assertEqual(fresh_client.close_calls, 0)
+        self.assertEqual(warning.call_count, 2)
 
     def test_transport_failure_invalidates_client_without_retrying_ambiguous_turn(self):
         first_thread = FakeSdkThread("thread-1", error=TransportClosedError("closed"))
@@ -451,7 +602,9 @@ class CodexSdkRunnerTests(unittest.TestCase):
         self.assertEqual(len(factory_calls), 2)
         self.assertEqual(len(first_thread.run_calls), 1)
         self.assertEqual(factory_calls[0].close_calls, 1)
+        self.assertEqual(factory_calls[0].unsubscribe_calls, [])
         self.assertEqual(result.provider_session_id, "thread-2")
+        self.assertEqual(factory_calls[1].unsubscribe_calls, ["thread-2"])
 
     def test_rejects_invalid_effort_before_starting_sdk(self):
         factory = Mock()
@@ -587,6 +740,7 @@ class CliAgentExecutorTests(unittest.TestCase):
         self.assertEqual(fields["transport"], "codex-sdk")
         self.assertFalse(fields["resumed"])
         self.assertEqual(fields["server_duration_ms"], 450)
+        self.assertEqual(fields["thread_release_ms"], 12.5)
         self.assertEqual(fields["outcome"], "success")
         self.assertIn("usage", fields)
 
@@ -1158,22 +1312,84 @@ class CliAgentExecutorTests(unittest.TestCase):
                 AgentCliConfig(provider="codex"),
                 codex_runner=runner,
             )
-            first.run_process_turn("one")
-            first.run_process_turn("two")
-            CliAgentExecutor(
+            second = CliAgentExecutor(
                 root,
                 "reviewer",
                 AgentCliConfig(provider="codex"),
                 codex_runner=runner,
-            ).run_process_turn("three")
+            )
+            try:
+                first.run_process_turn("one")
+                first.run_process_turn("two")
+                second.run_process_turn("three")
 
-            records = ProviderThreadStore(root).scan("codex").records
+                store = ProviderThreadStore(root)
+                records = store.scan("codex").records
+                self.assertIsNone(store.try_acquire_lease("codex", "thread-1"))
+                self.assertIsNone(store.try_acquire_lease("codex", "thread-2"))
+            finally:
+                first.cleanup()
+                second.cleanup()
+
+            first_probe = store.try_acquire_lease("codex", "thread-1")
+            second_probe = store.try_acquire_lease("codex", "thread-2")
+            self.assertIsNotNone(first_probe)
+            self.assertIsNotNone(second_probe)
+            first_probe.release()
+            second_probe.release()
 
         self.assertIsNone(runner.calls[0]["provider_session_id"])
         self.assertEqual(runner.calls[1]["provider_session_id"], "thread-1")
         self.assertIsNone(runner.calls[2]["provider_session_id"])
         self.assertEqual(len(records), 2)
         self.assertTrue(all(record.policy == "process-local" for record in records))
+
+    def test_failed_initial_process_turn_releases_thread_lease(self):
+        runner = FakeCodexRunner(turn_error=RuntimeError("initial turn failed"))
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(
+                root,
+                "reviewer",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+            )
+            try:
+                with self.assertRaisesRegex(RuntimeError, "initial turn failed"):
+                    executor.run_process_turn("one")
+
+                store = ProviderThreadStore(root)
+                probe = store.try_acquire_lease("codex", "thread-1")
+                self.assertIsNotNone(probe)
+                probe.release()
+            finally:
+                executor.cleanup()
+
+    def test_failed_resumed_process_turn_keeps_thread_lease_until_cleanup(self):
+        runner = FakeCodexRunner()
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            executor = CliAgentExecutor(
+                root,
+                "reviewer",
+                AgentCliConfig(provider="codex"),
+                codex_runner=runner,
+            )
+            try:
+                executor.run_process_turn("one")
+                runner.turn_error = RuntimeError("resumed turn failed")
+
+                with self.assertRaisesRegex(RuntimeError, "resumed turn failed"):
+                    executor.run_process_turn("two")
+
+                store = ProviderThreadStore(root)
+                self.assertIsNone(store.try_acquire_lease("codex", "thread-1"))
+            finally:
+                executor.cleanup()
+
+            probe = store.try_acquire_lease("codex", "thread-1")
+            self.assertIsNotNone(probe)
+            probe.release()
 
     def test_unregistered_legacy_retrieve_mapping_is_not_resumed(self):
         runner = FakeCodexRunner()
