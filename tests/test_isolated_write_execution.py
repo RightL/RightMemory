@@ -287,6 +287,53 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
         self.assertEqual(self._git("branch", "--list", branch), "")
         self._assert_isolated_cleanup()
 
+    def test_cleanup_removes_empty_directory_left_by_git(self):
+        branch, worktree = self._add_isolated_worktree(
+            "dreamer", "0123456789abcdef0123456789abcdef"
+        )
+        supervisor = IsolatedWriteSupervisor(self.root, "dreamer")
+        run_git = supervisor._run_git
+
+        def leave_empty_directory(cwd: Path, *args: str, **kwargs):
+            result = run_git(cwd, *args, **kwargs)
+            if args[:3] == ("worktree", "remove", "--force"):
+                worktree.mkdir(parents=True, exist_ok=True)
+            return result
+
+        with patch.object(supervisor, "_run_git", side_effect=leave_empty_directory):
+            supervisor._cleanup(worktree, branch)
+
+        self.assertFalse(worktree.exists())
+        self._assert_isolated_cleanup()
+
+    def test_cleanup_stale_removes_empty_orphaned_worktree_directory(self):
+        worktree = (
+            self.root
+            / ".runtime"
+            / "worktrees"
+            / "dreamer-0123456789abcdef0123456789abcdef"
+        )
+        worktree.mkdir(parents=True)
+
+        IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+
+        self.assertFalse(worktree.exists())
+
+    def test_cleanup_stale_preserves_nonempty_orphaned_worktree_directory(self):
+        worktree = (
+            self.root
+            / ".runtime"
+            / "worktrees"
+            / "dreamer-0123456789abcdef0123456789abcdef"
+        )
+        worktree.mkdir(parents=True)
+        (worktree / "preserve.txt").write_text("preserve\n", encoding="utf-8")
+
+        IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+
+        self.assertTrue(worktree.exists())
+        self.assertTrue((worktree / "preserve.txt").is_file())
+
     def test_cleanup_stale_preserves_live_same_role_run(self):
         observed_lease = None
 
