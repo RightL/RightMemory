@@ -2204,6 +2204,18 @@ class JsonRequestTests(unittest.TestCase):
             "deleted: 2\npending: 1\nskipped: 3\nmalformed: 0",
         )
 
+    def test_agent_cli_cleanup_watch_scans_every_ten_minutes_by_default(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.cli._agent_cli_cleanup_watch", return_value=0) as watch,
+            ):
+                result = main(["agent-cli", "cleanup", "--watch"])
+
+        self.assertEqual(result, 0)
+        watch.assert_called_once_with(10 * 60, root)
+
     def test_watch_start_starts_review_dreamer_pruner_and_insight_managed_processes(self):
         stdout = io.StringIO()
 
