@@ -740,7 +740,7 @@ Each logical Retrieve session owns its provider fork, conversation history, and 
 
 Every other independent CLI-agent role turn starts a fresh provider conversation. An explicit `chat` process may keep one in-memory conversation until that process exits, but it does not create a mapping for another process to resume. This policy is the same for Codex and Claude.
 
-RightMemory records prefix-base and fork ownership. Session forks and bases expire after 24 hours without successful activity; successful child activity refreshes its base. Codex cleanup removes due children before their bases and retains a base while an active child references it. It runs opportunistically before top-level CLI-agent work and hourly through the managed `agent-cli-cleanup` watcher. Run a bounded diagnostic pass directly with:
+RightMemory records prefix-base and fork ownership. Ordinary role threads expire after one hour without successful activity, while reusable prefix bases expire after 24 hours; successful child activity refreshes its base. An explicit `chat` process leases its current thread until that process exits. After each role turn, RightMemory unsubscribes its shared Codex App Server connection from that thread so Codex can unload the idle writer before cleanup. Codex cleanup removes due children before their bases and retains a base while an active child references it. It runs opportunistically before top-level CLI-agent work and every ten minutes through the managed `agent-cli-cleanup` watcher. Run a bounded diagnostic pass directly with:
 
 ```bash
 rightmemory agent-cli cleanup --once

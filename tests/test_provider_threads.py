@@ -9,6 +9,24 @@ from rightmemory.provider_threads import ProviderThreadStore
 
 
 class ProviderThreadStoreTests(unittest.TestCase):
+    def test_thread_lease_is_exclusive_and_release_keeps_lock_file(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = ProviderThreadStore(Path(tempdir))
+            lease = store.acquire_lease("codex", "thread-1")
+            path = store.lease_path("codex", "thread-1")
+            try:
+                self.assertTrue(path.exists())
+                self.assertIsNone(store.try_acquire_lease("codex", "thread-1"))
+            finally:
+                lease.release()
+
+            self.assertTrue(path.exists())
+            reacquired = store.try_acquire_lease("codex", "thread-1")
+            self.assertIsNotNone(reacquired)
+            reacquired.release()
+            self.assertTrue(store.delete_lease("codex", "thread-1"))
+            self.assertFalse(path.exists())
+
     def test_atomic_temp_name_does_not_repeat_hashed_destination_name(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = ProviderThreadStore(Path(tempdir))
