@@ -421,8 +421,10 @@ class PursuitEditor:
         parent_key = self._resolve_parent_key(operation.get("parent_id"))
         parent = self.nodes[parent_key]
         depth = parent.depth + 1
-        if depth > 4:
-            raise PursuitWorkspaceError("Pursuit headings cannot be deeper than ####")
+        if depth > 3:
+            raise PursuitWorkspaceError(
+                "ordinary Pursuit headings cannot be deeper than ###"
+            )
         document = _child_document(parent)
         body = _body_from_operation(operation, base=PursuitBody())
         edges = _edges_from_value(operation.get("edges", []))
@@ -468,8 +470,18 @@ class PursuitEditor:
         new_parent = self.nodes[new_parent_key]
         new_depth = new_parent.depth + 1
         delta = new_depth - node.depth
-        if max(self.nodes[key].depth for key in self._subtree_keys(node.key)) + delta > 4:
-            raise PursuitWorkspaceError("move would make a Pursuit heading deeper than ####")
+        for target_key in self._subtree_keys(node.key):
+            target = self.nodes[target_key]
+            candidate_depth = target.depth + delta
+            if candidate_depth > 4:
+                raise PursuitWorkspaceError("move would make a Pursuit heading deeper than ####")
+            if candidate_depth == 4 and (
+                target.anchor_kind != "F#"
+                or any(not self.nodes[child].removed for child in target.children)
+            ):
+                raise PursuitWorkspaceError(
+                    "#### is reserved for a terminal F# Pursuit reference"
+                )
         self._remove_from_parent(node)
         node.parent_key = new_parent_key
         index = _optional_index(operation.get("index"), len(new_parent.children))
@@ -547,6 +559,10 @@ class PursuitEditor:
         node = self.get_node(_required_str(operation, "id"))
         if node.anchor_kind != "F#":
             return
+        if node.depth == 4:
+            raise PursuitWorkspaceError(
+                "a terminal #### F# Pursuit cannot be inlined as an ordinary heading"
+            )
         assert node.item_id is not None
         backing = f"PURSUIT_{node.item_id}.md"
         if self.document_preambles.get(backing, "").strip():
@@ -628,6 +644,13 @@ class PursuitEditor:
                 continue
             if node.depth < 1 or node.depth > 4:
                 raise PursuitWorkspaceError(f"invalid heading depth for {node.key}: {node.depth}")
+            if node.depth == 4 and (
+                node.anchor_kind != "F#"
+                or any(not self.nodes[child].removed for child in node.children)
+            ):
+                raise PursuitWorkspaceError(
+                    f"#### is reserved for a terminal F# Pursuit reference: {node.key}"
+                )
             if node.editable:
                 if not node.title.strip():
                     raise PursuitWorkspaceError(f"Pursuit title must not be empty: {node.item_id}")

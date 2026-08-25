@@ -22,6 +22,8 @@ The Studio provides:
 
 Visual layout is not semantic state. Moving a card changes nothing until an explicit structured move is staged and applied.
 
+Ordinary Pursuit hierarchy uses the schema's `##` and `###` layers. `####` remains reserved for a terminal typed reference, so create and move operations reject ordinary nodes that would enter that depth.
+
 ## Command Surface
 
 The same mutation layer is available to local agents and scripts:

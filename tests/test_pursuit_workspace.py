@@ -17,6 +17,7 @@ from rightmemory.pursuit_tasks import (
 from rightmemory.pursuit_workspace import (
     PursuitEditor,
     PursuitRevisionConflict,
+    PursuitWorkspaceError,
     apply_operations,
     preview_operations,
     redo,
@@ -82,7 +83,7 @@ class PursuitWorkspaceTests(_PursuitFixture, unittest.TestCase):
                 "op": "create",
                 "id": "pursuit-map",
                 "title": "可编辑 Pursuit Map",
-                "parent_id": "rightmemory",
+                "parent_id": None,
                 "objective": "用树状思维导图管理长期意图。",
                 "next": ["do: 完成结构化编辑器"],
             },
@@ -104,6 +105,35 @@ class PursuitWorkspaceTests(_PursuitFixture, unittest.TestCase):
         by_id = {node["id"]: node for node in result.snapshot["nodes"]}
         self.assertEqual(by_id["retrieval-speed"]["parent_id"], "pursuit-map")
         self.assertIn("基准已经准备好", (self.root / "PURSUITS.md").read_text(encoding="utf-8"))
+
+
+    def test_ordinary_pursuits_cannot_enter_terminal_depth(self):
+        with self.assertRaisesRegex(PursuitWorkspaceError, "deeper than ###"):
+            preview_operations(
+                self.root,
+                [{
+                    "op": "create",
+                    "id": "too-deep",
+                    "title": "Too Deep",
+                    "parent_id": "retrieval-speed",
+                    "objective": "This would be an ordinary #### heading.",
+                }],
+            )
+
+        with self.assertRaisesRegex(PursuitWorkspaceError, "terminal F#"):
+            preview_operations(
+                self.root,
+                [
+                    {
+                        "op": "create",
+                        "id": "child",
+                        "title": "Child",
+                        "parent_id": "rightmemory",
+                        "objective": "A valid ### child.",
+                    },
+                    {"op": "move", "id": "retrieval-speed", "parent_id": "child"},
+                ],
+            )
 
     def test_split_and_inline_f_backing(self):
         apply_operations(self.root, [{"op": "split_file", "id": "rightmemory"}])
