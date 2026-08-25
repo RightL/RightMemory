@@ -355,11 +355,12 @@ class GuidanceInstallTests(unittest.TestCase):
 
         self.assertIn(GUIDANCE_INBOX_PATH, self.installer._initial_memory_files())
 
-    def test_installer_installs_guidance_review_skill(self):
+    def test_installer_does_not_activate_guidance_review_skill_by_default(self):
         self.installer._install_skills()
 
+        self.assertFalse((self.skills_root / "review-agent-guidance-inbox").exists())
         self.assertTrue(
-            (self.skills_root / "review-agent-guidance-inbox" / "SKILL.md").is_file()
+            (self.skills_root / "rightmemory-auto-orchestrator" / "SKILL.md").is_file()
         )
 
     def test_runtime_wrapper_dispatches_through_entrypoint(self):

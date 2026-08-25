@@ -66,10 +66,10 @@ class WindowsInstallScriptTests(unittest.TestCase):
         self.assertEqual(git_status, "")
         self.assertFalse(schema_exists)
         self.assertFalse(edit_correction_rules_exist)
-        self.assertTrue(retriever_exists)
-        self.assertTrue(orchestrator_exists)
+        self.assertFalse(retriever_exists)
+        self.assertFalse(orchestrator_exists)
         self.assertTrue(auto_orchestrator_exists)
-        self.assertTrue(maintainer_exists)
+        self.assertFalse(maintainer_exists)
         self.assertIn("rightmemory-auto-orchestrator", result.stdout)
         self.assertFalse(legacy_orchestrator_exists)
         self.assertIn('set "PYTHONUTF8=1"', wrapper_text)
@@ -109,13 +109,16 @@ class WindowsInstallScriptTests(unittest.TestCase):
                         encoding="utf-8"
                     ),
                 )
+                self.assertTrue(
+                    (skills_target / "rightmemory-auto-orchestrator" / "SKILL.md").is_file()
+                )
                 for skill_name in (
                     "memory-retriever",
                     "rightmemory-orchestrator",
-                    "rightmemory-auto-orchestrator",
                     "maintain-rightmemory",
+                    "review-agent-guidance-inbox",
                 ):
-                    self.assertTrue((skills_target / skill_name / "SKILL.md").is_file())
+                    self.assertFalse((skills_target / skill_name).exists())
 
     def test_windows_installer_reports_missing_uv_before_writes(self):
         with tempfile.TemporaryDirectory() as tempdir:

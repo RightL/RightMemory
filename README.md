@@ -82,7 +82,7 @@ cd RightMemory
 .\install.ps1
 ```
 
-The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs five user-facing skills into both `~/.codex/skills` and `~/.claude/skills`: `memory-retriever` for read-only use, approval-gated `rightmemory-orchestrator`, automatic `rightmemory-auto-orchestrator`, `maintain-rightmemory` for explicitly requested direct maintenance by the current agent, and `review-agent-guidance-inbox` for explicitly reviewing pending agent guidance before formal admission. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
+The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs the automatic `rightmemory-auto-orchestrator` skill into both `~/.codex/skills` and `~/.claude/skills`. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
 
 If you want RightMemory roles to run through the Codex SDK or Claude Code CLI:
 
@@ -100,14 +100,10 @@ After install, add a short instruction to your agent guidance file, such as
 `AGENTS.md` for Codex or `CLAUDE.md` for Claude Code:
 
 ```markdown
-Use memory-retriever when I choose read-only RightMemory retrieval.
-Use rightmemory-orchestrator when I choose approval-gated RightMemory orchestration.
-Use rightmemory-auto-orchestrator when I choose automatic RightMemory orchestration.
-Use maintain-rightmemory only when I explicitly ask the current agent to edit RightMemory directly.
-Use review-agent-guidance-inbox when I explicitly ask to review pending agent guidance.
+Read the RightMemory MCP tool instructions, then automatically use the RightMemory MCP tools according to those instructions.
 ```
 
-The five skills are user-selected. When using orchestration, the user chooses one of the two orchestrator skills for the conversation; the agent does not invoke both. Both are installed, and the choice is not an installer option, CLI flag, profile value, or persisted RightMemory setting. The shared schema and focused rule documents define valid state, while each skill defines how the host agent accesses it.
+The repository retains optional source skills for read-only retrieval, approval-gated orchestration, direct maintenance, and pending-guidance review, but the installer does not put them into an agent's active skill directory by default. The shared schema and focused rule documents define valid state, while the installed automatic skill defines how the host agent accesses it.
 
 Then start the background manager. It reviews idle agent sessions, evaluates prune generations, runs Dreamer consolidation, and produces Insight reflections when enough work has accumulated:
 
@@ -158,7 +154,7 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 - Three semantic modules: durable Memory, live Pursuit, and reusable Agent Corrections.
 - One global id namespace and typed graph edges such as `dep:`, `cfg:`, `ver:`, `doc:`, and `todo:` across both trees.
 - Multi-device memory continuity across laptops, desktops, agent clients, and project-specific roots.
-- Five installed skills: read-only retrieval, approval-gated orchestration, automatic orchestration, explicit direct maintenance, and pending agent-guidance review.
+- Automatic orchestration installed by default, with other explicit workflows retained as optional source skills.
 - Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex SDK/Claude Code CLI role execution.
 - Model-selected, runtime-rendered retrieval output without model-authored summaries or commentary.
 - One updater for all three semantic modules, automatic transcript-review candidate extraction, and immutable candidate records for input-to-edit provenance.
@@ -417,7 +413,7 @@ Root `corrections.md` is synchronized RightMemory Edit Feedback, not semantic Ri
 
 ## Agent Roles
 
-RightMemory separates ordinary work from state ownership. It installs four user-selected skills:
+RightMemory separates ordinary work from state ownership. The default installer activates automatic orchestration. The repository also keeps optional source skills for explicitly selected workflows:
 
 ```text
 memory-retriever
@@ -452,7 +448,7 @@ unified updater
 - `rightmemory-orchestrator` is approval-gated. Once qualifying evidence is clear and the conversation reaches a natural boundary, it names the apparent module and reason, then submits only after approval. Stale, wrong, misleading, or overbroad retrieved state is submitted immediately so the agent does not continue from known-bad context.
 - `rightmemory-auto-orchestrator` applies the same admission bar but submits qualifying evidence automatically at a natural boundary. Completion is not required, and the beginning or end of work alone does not trigger either mode.
 - `maintain-rightmemory` is explicit-only. The current agent edits Memory, Pursuit, linked content, and either correction surface directly under the schema and focused rules; it does not call Update, submit candidates, or invoke another RightMemory model role.
-- When the user chooses orchestration, use the selected approval-gated or automatic skill for that conversation rather than invoking both. RightMemory does not persist the choice.
+- If an optional orchestration skill is installed manually, use the selected approval-gated or automatic skill for that conversation rather than invoking both. RightMemory does not persist the choice.
 - Once selected, `memory-retriever` calls Retrieve for the stated memory need. The two orchestrators retrieve conditionally when stored context could materially affect how the agent understands or approaches the work and skip clearly self-contained requests. Every ordinary Retrieve call may select relevant Agent Corrections through `AC#writing` and `AC#design`.
 - `memory-retriever` discloses active or deferred preferences, workflow or behavior guidance, reusable instructions, and Agent Corrections in a fixed `[RightMemory] Retrieved guidance` block; ordinary facts, knowledge, and descriptive context are not disclosed this way.
 - Evidence clears the orchestration bar only when omitting it would likely cause poorer future decisions or substantial rediscovery, lose meaningful Pursuit context, or allow a settled reusable failure pattern to recur. Transient progress, routine results, incompleteness by itself, and detail already preserved in project artifacts do not qualify.
@@ -461,7 +457,7 @@ unified updater
 - Dreamer, Insight, Historian, and Pruner remain Memory-oriented maintenance roles. They must preserve ids and edges referenced from Pursuit. Sync repair transports the wider synchronized surface without taking over semantic updater judgment.
 - Standalone mode uses RightMemory's bounded tools, while CLI-agent mode delegates roles to the Codex SDK or Claude Code CLI with role-specific sandbox or permission defaults.
 
-The host agent should avoid reading or editing RightMemory state directly unless the user explicitly selects `maintain-rightmemory`. Other access goes through the command-backed skills and runtime roles, which keeps ownership clear and reduces partial or competing edits.
+The host agent should avoid reading or editing RightMemory state directly unless the user explicitly installs and selects `maintain-rightmemory`. Other access goes through the command-backed skill and runtime roles, which keeps ownership clear and reduces partial or competing edits.
 
 ## Prompt Sources
 
@@ -478,7 +474,7 @@ rightmemory/prompts/pruner.md
 rightmemory/prompts/sync-reconciler.md
 ```
 
-Both install modes use these files through the `rightmemory` runtime. Standalone mode loads them into the local Pydantic AI agent and tool loop. CLI-agent mode wraps the same role instructions into prompts sent through the Codex SDK or Claude Code CLI. Other command-capable agents can call the same CLI or daemon surface without changing the schema. The retriever and orchestrator skills own the host agent's retrieval decision, approval behavior, evidence threshold, and natural-boundary timing; the canonical prompts own the Retrieve and Update roles invoked behind their commands. `maintain-rightmemory` instead applies the schema and focused rules directly when the user explicitly requests direct maintenance.
+Both install modes use these files through the `rightmemory` runtime. Standalone mode loads them into the local Pydantic AI agent and tool loop. CLI-agent mode wraps the same role instructions into prompts sent through the Codex SDK or Claude Code CLI. Other command-capable agents can call the same CLI or daemon surface without changing the schema. The automatic orchestrator skill owns the host agent's retrieval decision, evidence threshold, and natural-boundary timing; the canonical prompts own the Retrieve and Update roles invoked behind its commands. Optional source skills define their narrower workflows when installed manually.
 
 Package-owned references complement the prompts: the schema defines representation; Memory, Pursuit, Agent Corrections, RightMemory Edit Feedback, and Shared View rules define focused semantics; and the [Retrieve runtime contract](rightmemory/reference/RETRIEVE_CONTRACT.md) owns Retrieve's input snapshot and terminal-selection mechanics. `reviewer.md` extracts candidate evidence from supported transcripts for unified Update. Explicit session review independently forms tentative proposals, then consults relevant RightMemory Edit Feedback before finalizing them.
 
@@ -488,8 +484,8 @@ RightMemory has two install modes. The default is `standalone`.
 
 | Mode | Use When | What Gets Installed |
 | --- | --- | --- |
-| `standalone` | You want RightMemory to run its own local Pydantic AI role agents and tools. | `memory-retriever`, both orchestrator modes, explicit-only `maintain-rightmemory`, their shared definitions, and the `rightmemory` CLI. |
-| `cli-agent` | You want RightMemory to delegate each runtime role turn to the Codex SDK or Claude Code CLI. | The same four skills and shared definitions plus the `rightmemory` CLI. |
+| `standalone` | You want RightMemory to run its own local Pydantic AI role agents and tools. | Automatic `rightmemory-auto-orchestrator`, its shared definitions, and the `rightmemory` CLI. |
+| `cli-agent` | You want RightMemory to delegate each runtime role turn to the Codex SDK or Claude Code CLI. | The same automatic skill and shared definitions plus the `rightmemory` CLI. |
 
 The installer arguments are:
 
@@ -503,7 +499,7 @@ The installer arguments are:
 
 - `<memory-root>` is where Memory, Pursuit, optional Agent Correction collections, optional RightMemory Edit Feedback, sharing state, and `insight_logs/` live.
 - `<skills-target>` is where your agent loads skills from, such as `~/.claude/skills` or `~/.codex/skills`.
-- With no path arguments, the installer uses `~/.rightmemory` and installs all four skills into `~/.codex/skills` and `~/.claude/skills`.
+- With no path arguments, the installer uses `~/.rightmemory` and installs `rightmemory-auto-orchestrator` into `~/.codex/skills` and `~/.claude/skills`.
 
 Both modes require `git` and `uv`. On macOS, Linux, and WSL, the runtime is
 installed under `${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`, and the
@@ -535,16 +531,16 @@ semantic work and push successful memory changes after they land.
 
 ## Everyday Use
 
-1. Tell the agent to use `memory-retriever` for read-only access, `rightmemory-orchestrator` for approval-gated orchestration, `rightmemory-auto-orchestrator` for automatic orchestration, or `maintain-rightmemory` when you explicitly want that agent to edit RightMemory directly. When orchestrating, select one of the two modes for the conversation.
+1. Let the installed `rightmemory-auto-orchestrator` retrieve and submit automatically according to its instructions. Install one of the optional source skills manually only when you intentionally want its narrower workflow.
 2. Run `rightmemory watch start` for transcript extraction, pruning, consolidation, Insight cycles, and optional sync.
-3. Let `memory-retriever` stop after retrieval, let the approval-gated orchestrator submit only after approval, let the automatic orchestrator submit qualifying evidence itself, or let the direct maintainer apply the schema and focused rules.
+3. Let the automatic orchestrator submit qualifying evidence itself at a natural boundary.
 4. Use `rightmemory status` when you need to inspect watcher, queue, and sync state.
 
 Dreamer consolidates durable Memory when it needs structural cleanup. Insight commits timestamped reflections under `insight_logs/` when broader patterns, risks, or next-step ideas are worth preserving.
 
 ## Command Runtime
 
-Both install modes expose the same command surface. The command-backed skills call roles such as `rightmemory retrieve` and `rightmemory update`; the install mode determines who executes the role prompt after the command starts. This executor choice is separate from the user choosing approval-gated or automatic orchestration. `maintain-rightmemory` does not invoke those maintenance roles.
+Both install modes expose the same command surface. The command-backed automatic skill calls roles such as `rightmemory retrieve` and `rightmemory update`; the install mode determines who executes the role prompt after the command starts. Optional source skills can call the same surface when installed manually.
 
 ```bash
 rightmemory retrieve --session <agent-session-id> "find memory about the standalone mode"
@@ -1077,9 +1073,6 @@ After install:
 └── .runtime/                   # machine-local runtime state
 
 ~/.codex/skills/
-├── maintain-rightmemory/SKILL.md
-├── memory-retriever/SKILL.md
-├── rightmemory-orchestrator/SKILL.md
 └── rightmemory-auto-orchestrator/SKILL.md
 ```
 
