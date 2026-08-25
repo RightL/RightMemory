@@ -183,11 +183,45 @@ else:
             for target in targets:
                 self.assertFalse((target / "rightmemory-schema.md").exists())
                 self.assertFalse((target / "rightmemory-edit-correction-rules.md").exists())
-                self.assertTrue((target / "memory-retriever" / "SKILL.md").is_file())
-                self.assertTrue((target / "rightmemory-orchestrator" / "SKILL.md").is_file())
                 self.assertTrue((target / "rightmemory-auto-orchestrator" / "SKILL.md").is_file())
-                maintainer = (target / "maintain-rightmemory" / "SKILL.md")
-                self.assertTrue(maintainer.is_file())
+                self.assertFalse((target / "memory-retriever").exists())
+                self.assertFalse((target / "rightmemory-orchestrator").exists())
+                self.assertFalse((target / "maintain-rightmemory").exists())
+                self.assertFalse((target / "review-agent-guidance-inbox").exists())
+
+    def test_install_skills_removes_only_exact_managed_previous_defaults(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            target = root / "skills"
+            target.mkdir()
+            installer = Installer(REPO_ROOT, "standalone", root / "memory", [target])
+            previous_defaults = (
+                ("memory-retriever-cli", "memory-retriever"),
+                ("rightmemory-orchestrator-cli", "rightmemory-orchestrator"),
+                ("maintain-rightmemory", "maintain-rightmemory"),
+                ("review-agent-guidance-inbox", "review-agent-guidance-inbox"),
+            )
+            with patch("builtins.print"):
+                for source_directory, skill_name in previous_defaults:
+                    installer._install_skill(
+                        REPO_ROOT / "skills" / source_directory / "SKILL.md",
+                        skill_name,
+                        target,
+                    )
+            modified = target / "memory-retriever" / "SKILL.md"
+            modified.write_text(
+                modified.read_text(encoding="utf-8") + "\nUser-owned change.\n",
+                encoding="utf-8",
+            )
+
+            with patch("builtins.print"):
+                installer._install_skills()
+
+            self.assertTrue(modified.is_file())
+            self.assertFalse((target / "rightmemory-orchestrator").exists())
+            self.assertFalse((target / "maintain-rightmemory").exists())
+            self.assertFalse((target / "review-agent-guidance-inbox").exists())
+            self.assertTrue((target / "rightmemory-auto-orchestrator" / "SKILL.md").is_file())
 
     def test_install_skills_preserves_modified_loose_reference(self):
         with tempfile.TemporaryDirectory() as tempdir:

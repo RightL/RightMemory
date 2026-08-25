@@ -1026,7 +1026,7 @@ class InstallScriptTests(unittest.TestCase):
             "!update_records/*.json\n",
         )
 
-    def test_cli_agent_installs_all_user_facing_skills(self):
+    def test_cli_agent_installs_only_automatic_orchestration_skill_by_default(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
@@ -1050,13 +1050,13 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("Write [agent_cli], [retrieve.agent_cli], and a default writer [update.agent_cli] config", result.stdout)
         self.assertNotIn("Write [retrieve.model] and a default writer [update.model] config", result.stdout)
         self.assertIn("mode=cli-agent", install_stamp)
-        self.assertTrue(retriever_exists)
-        self.assertTrue(orchestrator_exists)
+        self.assertFalse(retriever_exists)
+        self.assertFalse(orchestrator_exists)
         self.assertTrue(auto_orchestrator_exists)
-        self.assertTrue(maintainer_exists)
-        self.assertTrue(guidance_reviewer_exists)
+        self.assertFalse(maintainer_exists)
+        self.assertFalse(guidance_reviewer_exists)
         self.assertIn("rightmemory-auto-orchestrator", result.stdout)
-        self.assertIn("review-agent-guidance-inbox", result.stdout)
+        self.assertNotIn("review-agent-guidance-inbox", result.stdout)
         self.assertIn("export PYTHONUTF8=1", wrapper)
         self.assertIn('export RIGHTMEMORY_ROOT="', wrapper)
         self.assertIn('exec "', wrapper)
@@ -1064,13 +1064,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertFalse((skills_target / "rightmemory-edit-correction-rules.md").exists())
         self.assertEqual(
             installed_skill_directories,
-            [
-                "maintain-rightmemory",
-                "memory-retriever",
-                "review-agent-guidance-inbox",
-                "rightmemory-auto-orchestrator",
-                "rightmemory-orchestrator",
-            ],
+            ["rightmemory-auto-orchestrator"],
         )
 
     def test_rerun_preserves_managed_examples_and_user_state_byte_for_byte(self):
@@ -1194,10 +1188,11 @@ class InstallScriptTests(unittest.TestCase):
             self.assertTrue((home / ".rightmemory" / ".runtime" / "install.stamp").exists())
             for target in (home / ".codex" / "skills", home / ".claude" / "skills"):
                 self.assertFalse((target / "rightmemory-edit-correction-rules.md").exists())
-                self.assertTrue((target / "maintain-rightmemory" / "SKILL.md").exists())
-                self.assertTrue((target / "memory-retriever" / "SKILL.md").exists())
                 self.assertTrue((target / "rightmemory-auto-orchestrator" / "SKILL.md").exists())
-                self.assertTrue((target / "rightmemory-orchestrator" / "SKILL.md").exists())
+                self.assertFalse((target / "maintain-rightmemory").exists())
+                self.assertFalse((target / "memory-retriever").exists())
+                self.assertFalse((target / "rightmemory-orchestrator").exists())
+                self.assertFalse((target / "review-agent-guidance-inbox").exists())
                 self.assertFalse((target / "memory-orchestrator").exists())
             self.assertFalse((home / ".codex" / "skills" / "memory-curator").exists())
             self.assertFalse((home / ".claude" / "skills" / "memory-dreamer").exists())
