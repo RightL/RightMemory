@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RightMemory Pursuit Studio</title>
+    <link rel="stylesheet" href="/static/pursuit.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <strong>RightMemory</strong>
+        <span>Pursuit Studio</span>
+      </div>
+      <div class="toolbar">
+        <input id="search" type="search" placeholder="Search Pursuits">
+        <button id="undo" type="button">Undo</button>
+        <button id="redo" type="button">Redo</button>
+        <button id="discard" type="button">Discard Draft</button>
+        <button id="preview" type="button">Preview Diff</button>
+        <label class="commit-choice"><input id="commit" type="checkbox"> Commit</label>
+        <button id="apply" class="primary" type="button">Apply Changes</button>
+      </div>
+    </header>
+
+    <div id="message" class="message" role="status"></div>
+
+    <main class="layout">
+      <section class="map-panel">
+        <div class="map-heading">
+          <div>
+            <h1>Pursuit Map</h1>
+            <p id="root-label"></p>
+          </div>
+          <button id="add-root" type="button">Add Top-Level Pursuit</button>
+        </div>
+        <div id="map" class="mind-map"></div>
+      </section>
+
+      <aside class="details-panel">
+        <section id="empty-selection" class="empty-selection">
+          <h2>Select a Pursuit</h2>
+          <p>Edit its objective, current direction, hierarchy, relations, and linked tasks.</p>
+        </section>
+
+        <section id="editor-section" hidden>
+          <div class="details-heading">
+            <div>
+              <h2 id="editor-heading">Pursuit</h2>
+              <code id="editor-id"></code>
+            </div>
+            <span id="editor-badges"></span>
+          </div>
+          <form id="editor-form" class="stack-form">
+            <label>Title<input name="title" required></label>
+            <label>Objective<textarea name="objective" rows="4"></textarea></label>
+            <label>State<textarea name="state" rows="3"></textarea></label>
+            <label>Next <span class="hint">one <code>do:</code>, <code>ask:</code>, or <code>wait:</code> entry per line</span>
+              <textarea name="next" rows="4"></textarea>
+            </label>
+            <label>Done when<textarea name="done_when" rows="2"></textarea></label>
+            <label>Status
+              <select name="status"><option value="active">active</option><option value="parked">parked</option></select>
+            </label>
+            <label>Typed relations <span class="hint">one <code>type:target</code> per line</span>
+              <textarea name="edges" rows="3"></textarea>
+            </label>
+            <div class="button-row">
+              <button class="primary" type="submit">Stage Edit</button>
+              <button id="toggle-focus" type="button">Toggle Focus</button>
+              <button id="toggle-backing" type="button">Split to F# File</button>
+            </div>
+          </form>
+
+          <section class="action-section">
+            <h3>Structure</h3>
+            <div class="stack-form compact">
+              <label>Move under
+                <select id="move-parent"></select>
+              </label>
+              <label>Sibling index<input id="move-index" type="number" min="0" placeholder="end"></label>
+              <div class="button-row">
+                <button id="move-node" type="button">Stage Move</button>
+                <button id="add-child" type="button">Add Child</button>
+                <button id="add-sibling" type="button">Add Sibling</button>
+                <button id="delete-node" class="danger" type="button">Delete</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="action-section">
+            <h3>Linked Tasks</h3>
+            <div id="task-list" class="card-list"></div>
+            <details>
+              <summary>Link an existing Codex thread</summary>
+              <form id="link-task-form" class="stack-form compact">
+                <label>Thread ID<input name="thread_id" required></label>
+                <label>Title<input name="title" required></label>
+                <label>Project path<input name="project"></label>
+                <button type="submit">Link Thread</button>
+              </form>
+            </details>
+            <details>
+              <summary>Create a task from this Pursuit</summary>
+              <form id="plan-task-form" class="stack-form compact">
+                <label>Exact action<textarea name="action" rows="3"></textarea></label>
+                <label>Title<input name="title"></label>
+                <label>Project path<input name="project"></label>
+                <div class="button-row">
+                  <button name="mode" value="plan" type="submit">Plan</button>
+                  <button class="primary" name="mode" value="run" type="submit">Plan and Run</button>
+                </div>
+              </form>
+            </details>
+          </section>
+        </section>
+
+        <section class="action-section">
+          <h3>Pending Reconciliation</h3>
+          <div id="reconciliation-list" class="card-list"></div>
+        </section>
+      </aside>
+    </main>
+
+    <dialog id="node-dialog">
+      <form id="node-form" method="dialog" class="stack-form">
+        <h2 id="node-dialog-title">New Pursuit</h2>
+        <input name="parent_id" type="hidden">
+        <label>ID<input name="id" pattern="[A-Za-z0-9_.-]+" required></label>
+        <label>Title<input name="title" required></label>
+        <label>Objective<textarea name="objective" rows="4"></textarea></label>
+        <label>First Next<input name="next" placeholder="do: Implement the first step"></label>
+        <div class="button-row">
+          <button value="cancel" type="button" id="cancel-node">Cancel</button>
+          <button value="create" class="primary" type="submit">Stage Pursuit</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="diff-dialog" class="diff-dialog">
+      <div class="dialog-heading">
+        <h2>Markdown Diff</h2>
+        <button id="close-diff" type="button">Close</button>
+      </div>
+      <pre id="diff-output"></pre>
+    </dialog>
+
+    <script src="/static/pursuit.js"></script>
+  </body>
+</html>

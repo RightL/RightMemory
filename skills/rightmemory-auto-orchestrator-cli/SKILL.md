@@ -37,6 +37,26 @@ Choose one stable session id for the conversation and reuse it for every RightMe
 
   Continue the user's task without waiting for Update.
 
+## Pursuit Tasks
+
+When current work clearly advances an existing Pursuit, link the current Codex thread rather than copying task history into Pursuit prose:
+
+`rightmemory pursuit task link --pursuit <id> --current --title "<task title>" --project <project-path>`
+
+Before creating another task, inspect active links with `rightmemory pursuit task list --pursuit <id>`. Create a planned task when the work should move to a separate execution context:
+
+`rightmemory pursuit task plan --pursuit <id> --action "<exact next action>" --project <project-path>`
+
+Run it only when the current user instruction authorizes that execution:
+
+`rightmemory pursuit task run <task-id>`
+
+A completed task does not complete its Pursuit. Record the result, then propose the smallest justified structured update to State, Next, hierarchy, Focus, or status:
+
+`rightmemory pursuit reconcile propose <task-id> --summary "<why the Pursuit should change>" --operations-json '<operations>'`
+
+Apply an unambiguous reconciliation when direct Pursuit editing is authorized; otherwise leave it pending for review. Do not create duplicate planned or active tasks for the same Pursuit and action. Task prompts should preserve the objective, necessary ancestors, current State and Next, directly related Memory, project location, and the exact action without inventing detailed implementation instructions.
+
 ## Capture Agent Guidance
 
 Capture plausible evidence about how an agent should handle similar future work. Bias toward capture rather than filtering: uncertainty about whether the pattern will recur is not a reason to skip it, and similar captures from distinct occurrences are useful.
