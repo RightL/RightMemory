@@ -633,29 +633,20 @@ class Installer:
                 "rightmemory-edit-correction-rules.md",
                 self.repo_root / "rightmemory" / "reference" / "RIGHTMEMORY_EDIT_CORRECTION_RULES.md",
             )
-            self._install_skill(
-                self.repo_root / "skills" / "memory-retriever-cli" / "SKILL.md",
-                "memory-retriever",
-                target,
-            )
-            self._install_skill(
-                self.repo_root / "skills" / "rightmemory-orchestrator-cli" / "SKILL.md",
-                "rightmemory-orchestrator",
-                target,
-            )
+            for source_directory, skill_name in (
+                ("memory-retriever-cli", "memory-retriever"),
+                ("rightmemory-orchestrator-cli", "rightmemory-orchestrator"),
+                ("maintain-rightmemory", "maintain-rightmemory"),
+                ("review-agent-guidance-inbox", "review-agent-guidance-inbox"),
+            ):
+                self._remove_managed_skill(
+                    self.repo_root / "skills" / source_directory / "SKILL.md",
+                    skill_name,
+                    target,
+                )
             self._install_skill(
                 self.repo_root / "skills" / "rightmemory-auto-orchestrator-cli" / "SKILL.md",
                 "rightmemory-auto-orchestrator",
-                target,
-            )
-            self._install_skill(
-                self.repo_root / "skills" / "maintain-rightmemory" / "SKILL.md",
-                "maintain-rightmemory",
-                target,
-            )
-            self._install_skill(
-                self.repo_root / "skills" / "review-agent-guidance-inbox" / "SKILL.md",
-                "review-agent-guidance-inbox",
                 target,
             )
             self._remove_old_skill("memory-orchestrator", target)
@@ -685,6 +676,10 @@ class Installer:
     def _install_skill(self, source: Path, skill_name: str, target: Path) -> None:
         destination = target / skill_name / "SKILL.md"
         destination.parent.mkdir(parents=True, exist_ok=True)
+        _write_utf8_lines(destination, self._render_skill(source, target))
+        print(f"  [install] {destination}")
+
+    def _render_skill(self, source: Path, target: Path) -> list[str]:
         output: list[str] = []
         for line in _read_utf8_lines(source):
             prompt_name = ROLE_PROMPTS.get(line)
@@ -694,8 +689,27 @@ class Installer:
                 output.append(
                     line.replace("{{MEMORY_ROOT}}", str(self.memory_root)).replace("{{SKILLS_ROOT}}", str(target))
                 )
-        _write_utf8_lines(destination, output)
-        print(f"  [install] {destination}")
+        return output
+
+    def _remove_managed_skill(self, source: Path, skill_name: str, target: Path) -> None:
+        directory = target / skill_name
+        skill_file = directory / "SKILL.md"
+        if not os.path.lexists(directory):
+            return
+        if directory.is_symlink() or not directory.is_dir():
+            print(f"  [skip]    {directory} is not a managed skill directory; left untouched")
+            return
+        managed_layout = sorted(path.name for path in directory.iterdir()) == ["SKILL.md"]
+        expected_lines = self._render_skill(source, target)
+        expected = (("\n".join(expected_lines) + "\n") if expected_lines else "").encode("utf-8")
+        if skill_file.is_symlink() or not skill_file.is_file() or not managed_layout:
+            print(f"  [skip]    {directory} is not an installer-managed RightMemory skill; left untouched")
+            return
+        if skill_file.read_bytes() != expected:
+            print(f"  [skip]    {directory} differs from the installer-managed skill; left untouched")
+            return
+        shutil.rmtree(directory)
+        print(f"  [remove]  {directory}  (no longer installed by default)")
 
     def _remove_old_skill(self, skill_name: str, target: Path) -> None:
         directory = target / skill_name
@@ -797,10 +811,8 @@ class Installer:
                 f"{self.memory_root}{separator}rightmemory.toml."
             )
         print(
-            "  3. Choose memory-retriever for read-only context, rightmemory-orchestrator "
-            "for approval-gated orchestration, rightmemory-auto-orchestrator for automatic "
-            "orchestration, maintain-rightmemory when you explicitly want the current agent "
-            "to edit RightMemory directly, or review-agent-guidance-inbox to review pending guidance."
+            "  3. The default rightmemory-auto-orchestrator skill retrieves and submits "
+            "qualifying evidence automatically according to its instructions."
         )
         print(
             "  4. Optional background transcript review, dreamer, pruning, insight, and sync: "
