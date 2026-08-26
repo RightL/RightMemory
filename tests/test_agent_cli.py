@@ -358,6 +358,7 @@ class FakeSdkCodex:
         self.unsubscribe_error = unsubscribe_error
         self.start_calls = []
         self.resume_calls = []
+        self.unarchive_calls = []
         self.unsubscribe_calls = []
         self.close_calls = 0
 
@@ -369,6 +370,9 @@ class FakeSdkCodex:
         self.resume_calls.append((thread_id, kwargs))
         return self.threads.pop(0)
 
+    def thread_unarchive(self, thread_id):
+        self.unarchive_calls.append(thread_id)
+
     def thread_unsubscribe(self, thread_id):
         self.unsubscribe_calls.append(thread_id)
         if self.unsubscribe_error is not None:
@@ -379,6 +383,22 @@ class FakeSdkCodex:
         self.close_calls += 1
 
 
+class FakeArchiveClient:
+    def __init__(self, root, calls=None):
+        self.root = Path(root)
+        self.calls = calls
+
+    def archive_threads(self, thread_ids):
+        ids = list(dict.fromkeys(thread_ids))
+        if self.calls is not None:
+            self.calls.append((self.root, ids))
+        return [SimpleNamespace(thread_id=thread_id, archived=True, error=None) for thread_id in ids]
+
+
+def fake_archive_client_factory(root):
+    return FakeArchiveClient(root)
+
+
 class CodexSdkRunnerTests(unittest.TestCase):
     def test_lazily_starts_sdk_and_runs_with_explicit_safety_and_model_settings(self):
         thread = FakeSdkThread("thread-1")
@@ -387,6 +407,7 @@ class CodexSdkRunnerTests(unittest.TestCase):
         clock = iter([0.0, 0.1, 0.3, 0.4, 0.5, 0.6, 1.6, 1.7, 1.9, 2.0]).__next__
         runner = CodexSdkRunner(
             codex_factory=lambda config: configs.append(config) or codex,
+            archive_client_factory=fake_archive_client_factory,
             clock=clock,
         )
         started = []
@@ -413,6 +434,11 @@ class CodexSdkRunnerTests(unittest.TestCase):
         self.assertEqual(result.timing.server_duration_ms, 450)
         self.assertEqual(result.timing.usage, {"total": {"inputTokens": 10}})
         self.assertEqual(codex.unsubscribe_calls, ["thread-1"])
+        self.assertEqual(codex.close_calls, 1)
+        self.assertEqual(
+            configs[0].config_overrides,
+            ("mcp_servers={}",),
+        )
         self.assertEqual(
             codex.start_calls,
             [
@@ -433,7 +459,10 @@ class CodexSdkRunnerTests(unittest.TestCase):
     def test_resumes_exact_thread_with_workspace_write(self):
         thread = FakeSdkThread("thread-1")
         codex = FakeSdkCodex([thread])
-        runner = CodexSdkRunner(codex_factory=lambda _config: codex)
+        runner = CodexSdkRunner(
+            codex_factory=lambda _config: codex,
+            archive_client_factory=fake_archive_client_factory,
+        )
 
         result = runner.run_turn(
             prompt="again",
@@ -449,7 +478,9 @@ class CodexSdkRunnerTests(unittest.TestCase):
         self.assertEqual(codex.resume_calls[0][1]["approval_mode"], ApprovalMode.deny_all)
         self.assertEqual(codex.resume_calls[0][1]["sandbox"], Sandbox.workspace_write)
         self.assertEqual(thread.run_calls[0][1]["sandbox"], Sandbox.workspace_write)
+        self.assertEqual(codex.unarchive_calls, ["thread-1"])
         self.assertEqual(codex.unsubscribe_calls, ["thread-1"])
+        self.assertEqual(codex.close_calls, 1)
 
     def test_turn_and_release_failures_preserve_turn_error_after_unsubscribing(self):
         thread = FakeSdkThread("thread-1", error=ValueError("turn failed"))
@@ -457,7 +488,10 @@ class CodexSdkRunnerTests(unittest.TestCase):
             [thread],
             unsubscribe_error=RuntimeError("release failed"),
         )
-        runner = CodexSdkRunner(codex_factory=lambda _config: codex)
+        runner = CodexSdkRunner(
+            codex_factory=lambda _config: codex,
+            archive_client_factory=fake_archive_client_factory,
+        )
         timings = []
 
         with (
@@ -481,14 +515,17 @@ class CodexSdkRunnerTests(unittest.TestCase):
         self.assertEqual(codex.close_calls, 1)
         warning.assert_called_once()
 
-    def test_successful_turn_retires_client_after_release_failure_and_uses_fresh_client(self):
+    def test_each_turn_uses_and_closes_a_fresh_client(self):
         first = FakeSdkCodex(
             [FakeSdkThread("thread-1")],
             unsubscribe_error=RuntimeError("release failed"),
         )
         second = FakeSdkCodex([FakeSdkThread("thread-2")])
         factory = Mock(side_effect=[first, second])
-        runner = CodexSdkRunner(codex_factory=factory)
+        runner = CodexSdkRunner(
+            codex_factory=factory,
+            archive_client_factory=fake_archive_client_factory,
+        )
         arguments = {
             "prompt": "hello",
             "provider_session_id": None,
@@ -508,10 +545,10 @@ class CodexSdkRunnerTests(unittest.TestCase):
         self.assertIsNone(second_result.timing.thread_release_error_type)
         self.assertEqual(factory.call_count, 2)
         self.assertEqual(first.close_calls, 1)
-        self.assertEqual(second.close_calls, 0)
+        self.assertEqual(second.close_calls, 1)
         warning.assert_called_once()
 
-    def test_release_failure_retires_client_only_after_concurrent_calls_drain(self):
+    def test_concurrent_turns_use_independent_clients_and_close_individually(self):
         blocked_started = threading.Event()
         release_blocked = threading.Event()
         blocked_thread = FakeSdkThread(
@@ -519,13 +556,16 @@ class CodexSdkRunnerTests(unittest.TestCase):
             run_started=blocked_started,
             run_release=release_blocked,
         )
-        retiring_client = FakeSdkCodex(
-            [blocked_thread, FakeSdkThread("thread-retiring")],
+        blocked_client = FakeSdkCodex(
+            [blocked_thread],
             unsubscribe_error=RuntimeError("release failed"),
         )
-        fresh_client = FakeSdkCodex([FakeSdkThread("thread-fresh")])
-        factory = Mock(side_effect=[retiring_client, fresh_client])
-        runner = CodexSdkRunner(codex_factory=factory)
+        concurrent_client = FakeSdkCodex([FakeSdkThread("thread-concurrent")])
+        factory = Mock(side_effect=[blocked_client, concurrent_client])
+        runner = CodexSdkRunner(
+            codex_factory=factory,
+            archive_client_factory=fake_archive_client_factory,
+        )
         arguments = {
             "prompt": "hello",
             "provider_session_id": None,
@@ -548,14 +588,11 @@ class CodexSdkRunnerTests(unittest.TestCase):
             worker.start()
             self.assertTrue(blocked_started.wait(timeout=5))
             try:
-                retiring_result = runner.run_turn(**arguments)
-                self.assertEqual(retiring_result.text, "done")
-                self.assertEqual(retiring_client.close_calls, 0)
-
-                fresh_result = runner.run_turn(**arguments)
-                self.assertEqual(fresh_result.provider_session_id, "thread-fresh")
+                concurrent_result = runner.run_turn(**arguments)
+                self.assertEqual(concurrent_result.provider_session_id, "thread-concurrent")
                 self.assertEqual(factory.call_count, 2)
-                self.assertEqual(retiring_client.close_calls, 0)
+                self.assertEqual(blocked_client.close_calls, 0)
+                self.assertEqual(concurrent_client.close_calls, 1)
             finally:
                 release_blocked.set()
                 worker.join(timeout=5)
@@ -566,13 +603,10 @@ class CodexSdkRunnerTests(unittest.TestCase):
             [result.provider_session_id for result in blocked_results],
             ["thread-blocked"],
         )
-        self.assertEqual(retiring_client.close_calls, 1)
-        self.assertEqual(
-            retiring_client.unsubscribe_calls,
-            ["thread-retiring", "thread-blocked"],
-        )
-        self.assertEqual(fresh_client.close_calls, 0)
-        self.assertEqual(warning.call_count, 2)
+        self.assertEqual(blocked_client.close_calls, 1)
+        self.assertEqual(blocked_client.unsubscribe_calls, ["thread-blocked"])
+        self.assertEqual(concurrent_client.unsubscribe_calls, ["thread-concurrent"])
+        warning.assert_called_once()
 
     def test_transport_failure_invalidates_client_without_retrying_ambiguous_turn(self):
         first_thread = FakeSdkThread("thread-1", error=TransportClosedError("closed"))
@@ -585,7 +619,10 @@ class CodexSdkRunnerTests(unittest.TestCase):
             factory_calls.append(client)
             return client
 
-        runner = CodexSdkRunner(codex_factory=factory)
+        runner = CodexSdkRunner(
+            codex_factory=factory,
+            archive_client_factory=fake_archive_client_factory,
+        )
         arguments = {
             "prompt": "hello",
             "provider_session_id": None,
@@ -605,10 +642,14 @@ class CodexSdkRunnerTests(unittest.TestCase):
         self.assertEqual(factory_calls[0].unsubscribe_calls, [])
         self.assertEqual(result.provider_session_id, "thread-2")
         self.assertEqual(factory_calls[1].unsubscribe_calls, ["thread-2"])
+        self.assertEqual(factory_calls[1].close_calls, 1)
 
     def test_rejects_invalid_effort_before_starting_sdk(self):
         factory = Mock()
-        runner = CodexSdkRunner(codex_factory=factory)
+        runner = CodexSdkRunner(
+            codex_factory=factory,
+            archive_client_factory=fake_archive_client_factory,
+        )
 
         with self.assertRaises(ValueError):
             runner.run_turn(
@@ -624,7 +665,10 @@ class CodexSdkRunnerTests(unittest.TestCase):
 
     def test_close_is_idempotent_and_cleanup_claim_is_once_per_root(self):
         codex = FakeSdkCodex([FakeSdkThread("thread-1")])
-        runner = CodexSdkRunner(codex_factory=lambda _config: codex)
+        runner = CodexSdkRunner(
+            codex_factory=lambda _config: codex,
+            archive_client_factory=fake_archive_client_factory,
+        )
         root = Path("/memory/root")
         runner.run_turn(
             prompt="hello",

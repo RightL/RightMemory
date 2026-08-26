@@ -99,7 +99,14 @@ class CodexAppServerClientTests(unittest.TestCase):
         popen.assert_called_once()
         self.assertEqual(
             popen.call_args.args[0],
-            [str(self.codex_bin), "app-server", "--listen", "stdio://"],
+            [
+                str(self.codex_bin),
+                "-c",
+                "mcp_servers={}",
+                "app-server",
+                "--listen",
+                "stdio://",
+            ],
         )
         process_env = popen.call_args.kwargs["env"]
         path_key = next(key for key in process_env if key.upper() == "PATH")
@@ -111,6 +118,29 @@ class CodexAppServerClientTests(unittest.TestCase):
             [(message["id"], message["params"]["threadId"]) for message in messages[2:]],
             [(1, "thread-1"), (2, "thread-2")],
         )
+
+    def test_archives_batch_through_one_initialized_jsonl_process(self):
+        process = FakeProcess(
+            (
+                '{"id":0,"result":{}}\n'
+                '{"id":1,"result":{}}\n'
+                '{"id":2,"error":{"code":-32000,"message":"busy"}}\n'
+            )
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            with patch("rightmemory.codex_app_server.subprocess.Popen", return_value=process):
+                results = CodexAppServerClient(Path(tempdir)).archive_threads(
+                    ["thread-1", "thread-2"]
+                )
+
+        self.assertTrue(results[0].archived)
+        self.assertFalse(results[1].archived)
+        self.assertIn("busy", results[1].error)
+        messages = [json.loads(line) for line in process.stdin.recorded.splitlines()]
+        self.assertEqual([message["method"] for message in messages[2:]], [
+            "thread/archive",
+            "thread/archive",
+        ])
 
     def test_per_thread_error_is_retryable_without_hiding_successes(self):
         process = FakeProcess(
