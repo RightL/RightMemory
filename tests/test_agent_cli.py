@@ -22,8 +22,11 @@ from rightmemory.doctor import (
 from rightmemory.agent_cli import (
     CliAgentExecutor,
     NO_SESSION_RIGHTMEMORY_SESSION_ID,
+    READ_ROLES,
+    WRITE_ROLES,
     build_claude_command,
     parse_claude_output,
+    _codex_sandbox,
     _stable_claude_session_id,
 )
 from rightmemory.codex_sdk import CodexSdkRunResult, CodexSdkRunner, CodexSdkTiming
@@ -456,7 +459,7 @@ class CodexSdkRunnerTests(unittest.TestCase):
         self.assertEqual(run_options["effort"], ReasoningEffort.high)
         self.assertEqual(run_options["sandbox"], Sandbox.read_only)
 
-    def test_resumes_exact_thread_with_workspace_write(self):
+    def test_resumes_exact_thread_with_full_access(self):
         thread = FakeSdkThread("thread-1")
         codex = FakeSdkCodex([thread])
         runner = CodexSdkRunner(
@@ -470,17 +473,27 @@ class CodexSdkRunnerTests(unittest.TestCase):
             cwd=Path("/memory/root"),
             model=None,
             reasoning_effort=None,
-            sandbox="workspace-write",
+            sandbox="full-access",
         )
 
         self.assertEqual(result.provider_session_id, "thread-1")
         self.assertEqual(codex.resume_calls[0][0], "thread-1")
         self.assertEqual(codex.resume_calls[0][1]["approval_mode"], ApprovalMode.deny_all)
-        self.assertEqual(codex.resume_calls[0][1]["sandbox"], Sandbox.workspace_write)
-        self.assertEqual(thread.run_calls[0][1]["sandbox"], Sandbox.workspace_write)
+        self.assertEqual(codex.resume_calls[0][1]["sandbox"], Sandbox.full_access)
+        self.assertEqual(thread.run_calls[0][1]["sandbox"], Sandbox.full_access)
         self.assertEqual(codex.unarchive_calls, ["thread-1"])
         self.assertEqual(codex.unsubscribe_calls, ["thread-1"])
         self.assertEqual(codex.close_calls, 1)
+
+    def test_codex_roles_use_read_only_or_full_access(self):
+        self.assertEqual(
+            {role: _codex_sandbox(role) for role in READ_ROLES},
+            {role: "read-only" for role in READ_ROLES},
+        )
+        self.assertEqual(
+            {role: _codex_sandbox(role) for role in WRITE_ROLES},
+            {role: "full-access" for role in WRITE_ROLES},
+        )
 
     def test_turn_and_release_failures_preserve_turn_error_after_unsubscribing(self):
         thread = FakeSdkThread("thread-1", error=ValueError("turn failed"))
