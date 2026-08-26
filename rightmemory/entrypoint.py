@@ -21,6 +21,19 @@ def main(argv: list[str] | None = None) -> int:
         except (ValueError, FileNotFoundError, OSError, RuntimeError, UnicodeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+    if remaining[:1] == ["pursuit"]:
+        try:
+            active = resolve_memory_root(
+                profile_name=profile_name,
+                cwd=Path.cwd(),
+                default_root=default_memory_root(),
+            )
+            from .pursuit_cli import pursuit_main
+
+            return pursuit_main(active.memory_root, remaining[1:])
+        except (ValueError, ProfileError, FileNotFoundError, OSError, RuntimeError, UnicodeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     if remaining[:1] == ["mcp"]:
         try:
             active = resolve_memory_root(
@@ -57,6 +70,12 @@ def main(argv: list[str] | None = None) -> int:
     if errors:
         print("guidance validation failed:", file=sys.stderr)
         for error in errors:
+            print(f"- {error}", file=sys.stderr)
+        return 1
+    task_errors = _pursuit_task_validation_errors(root)
+    if task_errors:
+        print("pursuit task validation failed:", file=sys.stderr)
+        for error in task_errors:
             print(f"- {error}", file=sys.stderr)
         return 1
     return 0
@@ -107,6 +126,21 @@ def _guidance_validation_errors(memory_root: Path) -> list[str]:
     if path.is_symlink() or not path.is_file():
         return [f"{GUIDANCE_INBOX_PATH} must be a regular file"]
     return validate_guidance_inbox(path.read_text(encoding="utf-8"))
+
+
+def _pursuit_task_validation_errors(memory_root: Path) -> list[str]:
+    path = memory_root / "pursuit_tasks.toml"
+    if not path.exists() and not path.is_symlink():
+        return []
+    if path.is_symlink() or not path.is_file():
+        return ["pursuit_tasks.toml must be a regular file"]
+    try:
+        from .pursuit_tasks import load_registry
+
+        load_registry(memory_root)
+    except (ValueError, OSError, UnicodeError) as exc:
+        return [str(exc)]
+    return []
 
 
 if __name__ == "__main__":
