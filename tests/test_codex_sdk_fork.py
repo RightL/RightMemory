@@ -12,6 +12,10 @@ class FakeTransportClosedError(RuntimeError):
     pass
 
 
+class FakeInvalidRequestError(RuntimeError):
+    pass
+
+
 class FakeThread:
     def __init__(self, thread_id, *, result=None, error=None, events=None):
         self.id = thread_id
@@ -34,11 +38,20 @@ class FakeThread:
 
 
 class FakeCodex:
-    def __init__(self, threads, *, events=None, unsubscribe_error=None):
+    def __init__(
+        self,
+        threads,
+        *,
+        events=None,
+        unsubscribe_error=None,
+        unarchive_error=None,
+    ):
         self.threads = list(threads)
         self.events = events
         self.unsubscribe_error = unsubscribe_error
+        self.unarchive_error = unarchive_error
         self.fork_calls = []
+        self.unarchive_calls = []
         self.unsubscribe_calls = []
         self.close_calls = 0
 
@@ -47,6 +60,13 @@ class FakeCodex:
         if self.events is not None:
             self.events.append("fork")
         return self.threads.pop(0)
+
+    def thread_unarchive(self, thread_id):
+        self.unarchive_calls.append(thread_id)
+        if self.events is not None:
+            self.events.append("unarchive")
+        if self.unarchive_error is not None:
+            raise self.unarchive_error
 
     def thread_unsubscribe(self, thread_id):
         self.unsubscribe_calls.append(thread_id)
@@ -58,6 +78,27 @@ class FakeCodex:
 
     def close(self):
         self.close_calls += 1
+        if self.events is not None:
+            self.events.append("close")
+
+
+class FakeArchiveClient:
+    def __init__(self, root, *, calls=None, events=None):
+        self.root = Path(root)
+        self.calls = calls
+        self.events = events
+
+    def archive_threads(self, thread_ids):
+        ids = list(dict.fromkeys(thread_ids))
+        if self.calls is not None:
+            self.calls.append((self.root, ids))
+        if self.events is not None:
+            self.events.append("archive")
+        return [SimpleNamespace(thread_id=thread_id, archived=True, error=None) for thread_id in ids]
+
+
+def fake_archive_client_factory(root):
+    return FakeArchiveClient(root)
 
 
 def fake_sdk():
@@ -67,6 +108,7 @@ def fake_sdk():
         config=lambda **kwargs: kwargs,
         sandbox=SimpleNamespace(read_only="read-only", workspace_write="workspace-write"),
         transport_closed_error=FakeTransportClosedError,
+        invalid_request_error=FakeInvalidRequestError,
         reasoning_effort=lambda value: f"effort:{value}",
         thread_unsubscribe_response=object,
     )
@@ -100,12 +142,18 @@ class CodexSdkForkTests(unittest.TestCase):
 
     def test_forks_source_and_returns_first_turn_output_and_timing(self):
         events = []
+        archive_calls = []
         thread = FakeThread("child-thread", events=events)
         codex = FakeCodex([thread], events=events)
         configs = []
         clock = iter([0.0, 0.1, 0.3, 0.4, 0.5, 0.6, 1.6, 1.7, 1.9, 2.0]).__next__
         runner = CodexSdkRunner(
             codex_factory=lambda config: configs.append(config) or codex,
+            archive_client_factory=lambda root: FakeArchiveClient(
+                root,
+                calls=archive_calls,
+                events=events,
+            ),
             clock=clock,
         )
         callbacks = []
@@ -126,9 +174,18 @@ class CodexSdkForkTests(unittest.TestCase):
         )
 
         self.assertEqual(len(configs), 1)
-        self.assertEqual(events, ["fork", "callback", "run", "unsubscribe"])
+        self.assertEqual(
+            events,
+            ["unarchive", "fork", "callback", "run", "unsubscribe", "close", "archive"],
+        )
         self.assertEqual(callbacks, ["child-thread"])
+        self.assertEqual(codex.unarchive_calls, ["seed-thread"])
         self.assertEqual(codex.unsubscribe_calls, ["child-thread"])
+        self.assertEqual(codex.close_calls, 1)
+        self.assertEqual(
+            archive_calls,
+            [(Path("/memory/root"), ["seed-thread", "child-thread"])],
+        )
         self.assertEqual(result.provider_session_id, "child-thread")
         self.assertEqual(result.text, "forked response")
         self.assertEqual(result.timing.client_start_ms, 200.0)
@@ -176,7 +233,10 @@ class CodexSdkForkTests(unittest.TestCase):
             with self.subTest(returned_id=returned_id):
                 thread = FakeThread(returned_id)
                 codex = FakeCodex([thread])
-                runner = CodexSdkRunner(codex_factory=lambda _config: codex)
+                runner = CodexSdkRunner(
+                    codex_factory=lambda _config: codex,
+                    archive_client_factory=fake_archive_client_factory,
+                )
                 callback = Mock()
 
                 with self.assertRaises(RuntimeError):
@@ -193,13 +253,17 @@ class CodexSdkForkTests(unittest.TestCase):
                 callback.assert_not_called()
                 self.assertEqual(thread.run_calls, [])
 
-    def test_records_child_before_failed_turn_and_reuses_connection(self):
+    def test_records_child_before_failed_turn_and_uses_fresh_connection_next_time(self):
         events = []
         failed = FakeThread("child-failed", error=ValueError("turn failed"), events=events)
         succeeded = FakeThread("child-succeeded")
-        codex = FakeCodex([failed, succeeded], events=events)
-        factory = Mock(return_value=codex)
-        runner = CodexSdkRunner(codex_factory=factory)
+        failed_codex = FakeCodex([failed], events=events)
+        succeeded_codex = FakeCodex([succeeded])
+        factory = Mock(side_effect=[failed_codex, succeeded_codex])
+        runner = CodexSdkRunner(
+            codex_factory=factory,
+            archive_client_factory=fake_archive_client_factory,
+        )
         started = []
         timings = []
 
@@ -228,18 +292,67 @@ class CodexSdkForkTests(unittest.TestCase):
             on_thread_started=started.append,
         )
 
-        self.assertEqual(events[:3], ["fork", "callback", "run"])
+        self.assertEqual(events[:4], ["unarchive", "fork", "callback", "run"])
         self.assertEqual(started, ["child-failed", "child-succeeded"])
         self.assertEqual(len(timings), 1)
         self.assertGreaterEqual(timings[0].turn_ms, 0.0)
         self.assertEqual(result.provider_session_id, "child-succeeded")
-        factory.assert_called_once()
-        self.assertEqual(codex.close_calls, 0)
+        self.assertEqual(factory.call_count, 2)
+        self.assertEqual(failed_codex.close_calls, 1)
+        self.assertEqual(succeeded_codex.close_calls, 1)
+
+    def test_fork_accepts_source_that_is_already_unarchived(self):
+        error = FakeInvalidRequestError(
+            "JSON-RPC error -32600: no archived rollout found for thread id seed-thread"
+        )
+        codex = FakeCodex([FakeThread("child-thread")], unarchive_error=error)
+        runner = CodexSdkRunner(
+            codex_factory=lambda _config: codex,
+            archive_client_factory=fake_archive_client_factory,
+        )
+
+        result = runner.run_forked_turn(
+            prompt="current request",
+            source_provider_session_id="seed-thread",
+            cwd=Path("/memory/root"),
+            model=None,
+            reasoning_effort=None,
+            sandbox="read-only",
+        )
+
+        self.assertEqual(result.provider_session_id, "child-thread")
+        self.assertEqual(codex.close_calls, 1)
+
+    def test_fork_propagates_other_unarchive_failures(self):
+        codex = FakeCodex(
+            [FakeThread("unused")],
+            unarchive_error=FakeInvalidRequestError("permission denied"),
+        )
+        runner = CodexSdkRunner(
+            codex_factory=lambda _config: codex,
+            archive_client_factory=fake_archive_client_factory,
+        )
+
+        with self.assertRaisesRegex(FakeInvalidRequestError, "permission denied"):
+            runner.run_forked_turn(
+                prompt="current request",
+                source_provider_session_id="seed-thread",
+                cwd=Path("/memory/root"),
+                model=None,
+                reasoning_effort=None,
+                sandbox="read-only",
+            )
+
+        self.assertEqual(codex.fork_calls, [])
+        self.assertEqual(codex.close_calls, 1)
 
     def test_callback_failure_prevents_turn_but_leaves_recorded_child_owned(self):
         thread = FakeThread("child-thread")
         codex = FakeCodex([thread])
-        runner = CodexSdkRunner(codex_factory=lambda _config: codex)
+        runner = CodexSdkRunner(
+            codex_factory=lambda _config: codex,
+            archive_client_factory=fake_archive_client_factory,
+        )
         started = []
 
         def record_then_fail(thread_id):
@@ -260,7 +373,7 @@ class CodexSdkForkTests(unittest.TestCase):
         self.assertEqual(started, ["child-thread"])
         self.assertEqual(thread.run_calls, [])
         self.assertEqual(codex.unsubscribe_calls, ["child-thread"])
-        self.assertEqual(codex.close_calls, 0)
+        self.assertEqual(codex.close_calls, 1)
 
     def test_turn_and_release_failures_preserve_turn_error_after_unsubscribing(self):
         thread = FakeThread("child-thread", error=ValueError("turn failed"))
@@ -268,7 +381,10 @@ class CodexSdkForkTests(unittest.TestCase):
             [thread],
             unsubscribe_error=RuntimeError("release failed"),
         )
-        runner = CodexSdkRunner(codex_factory=lambda _config: codex)
+        runner = CodexSdkRunner(
+            codex_factory=lambda _config: codex,
+            archive_client_factory=fake_archive_client_factory,
+        )
         timings = []
 
         with (
@@ -300,7 +416,10 @@ class CodexSdkForkTests(unittest.TestCase):
         succeeded = FakeThread("child-succeeded")
         clients = [FakeCodex([failed]), FakeCodex([succeeded])]
         factory = Mock(side_effect=clients)
-        runner = CodexSdkRunner(codex_factory=factory)
+        runner = CodexSdkRunner(
+            codex_factory=factory,
+            archive_client_factory=fake_archive_client_factory,
+        )
         arguments = {
             "prompt": "current request",
             "source_provider_session_id": "seed-thread",
@@ -319,6 +438,7 @@ class CodexSdkForkTests(unittest.TestCase):
         self.assertEqual(clients[0].unsubscribe_calls, [])
         self.assertEqual(result.provider_session_id, "child-succeeded")
         self.assertEqual(clients[1].unsubscribe_calls, ["child-succeeded"])
+        self.assertEqual(clients[1].close_calls, 1)
         self.assertEqual(factory.call_count, 2)
 
 

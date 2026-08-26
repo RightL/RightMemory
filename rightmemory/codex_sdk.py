@@ -9,6 +9,8 @@ from functools import cache
 from pathlib import Path
 from typing import Any, Callable
 
+from .codex_app_server import CodexAppServerClient
+
 _CODEX_SANDBOXES = {"read-only": "read_only", "workspace-write": "workspace_write"}
 _CODEX_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 _OPPORTUNISTIC_CLEANUP_INTERVAL_SECONDS = 5 * 60
@@ -25,6 +27,7 @@ class _CodexSdkBindings:
     config: Any
     sandbox: Any
     transport_closed_error: type[Exception]
+    invalid_request_error: type[Exception]
     reasoning_effort: Any
     thread_unsubscribe_response: Any
 
@@ -57,18 +60,19 @@ class _CodexClientLease:
 
 
 class CodexSdkRunner:
-    """Lazily owns one Codex SDK/App Server connection for many turns."""
+    """Runs each role turn in a short-lived Codex SDK/App Server connection."""
 
     def __init__(
         self,
         *,
         codex_factory: Callable[[Any], Any] | None = None,
+        archive_client_factory: Callable[[Path], Any] = CodexAppServerClient,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._codex_factory = codex_factory
+        self._archive_client_factory = archive_client_factory
         self._clock = clock
         self._condition = threading.Condition(threading.RLock())
-        self._codex: Any | None = None
         self._client_leases: dict[int, _CodexClientLease] = {}
         self._active_calls = 0
         self._closing_clients = 0
@@ -150,6 +154,7 @@ class CodexSdkRunner:
         codex: Any | None = None
         thread_id = ""
         connection_usable = True
+        archive_thread_ids: list[str] = []
         timing: CodexSdkTiming | None = None
         final_response = ""
 
@@ -161,6 +166,8 @@ class CodexSdkRunner:
             thread_opened_at = self._clock()
             try:
                 if source_provider_session_id is not None:
+                    _unarchive_thread_if_needed(codex, source_provider_session_id, sdk)
+                    archive_thread_ids.append(source_provider_session_id)
                     thread = codex.thread_fork(
                         source_provider_session_id,
                         approval_mode=sdk.approval_mode.deny_all,
@@ -176,6 +183,8 @@ class CodexSdkRunner:
                         sandbox=sdk_sandbox,
                     )
                 else:
+                    _unarchive_thread_if_needed(codex, provider_session_id, sdk)
+                    archive_thread_ids.append(provider_session_id)
                     thread = codex.thread_resume(
                         provider_session_id,
                         approval_mode=sdk.approval_mode.deny_all,
@@ -189,6 +198,7 @@ class CodexSdkRunner:
             thread_id = _non_empty_string(getattr(thread, "id", None))
             if not thread_id:
                 raise RuntimeError("Codex SDK did not return a thread id")
+            archive_thread_ids.append(thread_id)
             if (
                 source_provider_session_id is not None
                 and thread_id == source_provider_session_id
@@ -224,29 +234,45 @@ class CodexSdkRunner:
                 raise RuntimeError("Codex SDK did not include a final response")
         except sdk.transport_closed_error:
             if codex is not None:
-                self._retire_codex(codex)
                 connection_usable = False
             raise
         finally:
-            if codex is not None and thread_id and connection_usable:
-                release_started_at = self._clock()
-                try:
-                    _unsubscribe_thread(codex, thread_id, sdk)
-                except sdk.transport_closed_error:
-                    thread_release_error_type = sdk.transport_closed_error.__name__
-                    self._retire_codex(codex)
-                except Exception as exc:
-                    thread_release_error_type = type(exc).__name__
-                    self._retire_codex(codex)
-                    print(
-                        "Warning: RightMemory could not release Codex thread "
-                        f"{thread_id}: {type(exc).__name__}: {exc}",
-                        file=sys.stderr,
-                    )
-                finally:
-                    thread_release_ms = _milliseconds(self._clock() - release_started_at)
             if codex is not None:
-                self._release_codex(codex)
+                release_started_at = self._clock()
+                if thread_id and connection_usable:
+                    try:
+                        _unsubscribe_thread(codex, thread_id, sdk)
+                    except sdk.transport_closed_error:
+                        thread_release_error_type = sdk.transport_closed_error.__name__
+                    except Exception as exc:
+                        thread_release_error_type = type(exc).__name__
+                        _warn_release(thread_id, exc)
+
+                close_error = self._release_codex(codex)
+                if close_error is not None:
+                    if thread_release_error_type is None:
+                        thread_release_error_type = type(close_error).__name__
+                    _warn_release(thread_id or "unknown", close_error)
+
+                if archive_thread_ids:
+                    try:
+                        archive_results = self._archive_client_factory(Path(cwd)).archive_threads(
+                            archive_thread_ids
+                        )
+                        failed = [result for result in archive_results if not result.archived]
+                        if failed:
+                            if thread_release_error_type is None:
+                                thread_release_error_type = "CodexThreadArchiveError"
+                            detail = "; ".join(
+                                f"{result.thread_id}: {result.error or 'unknown error'}"
+                                for result in failed
+                            )
+                            _warn_release(thread_id or "unknown", RuntimeError(detail))
+                    except Exception as exc:
+                        if thread_release_error_type is None:
+                            thread_release_error_type = type(exc).__name__
+                        _warn_release(thread_id or "unknown", exc)
+                thread_release_ms = _milliseconds(self._clock() - release_started_at)
             timing = CodexSdkTiming(
                 client_start_ms=client_start_ms,
                 thread_open_ms=thread_open_ms,
@@ -280,24 +306,12 @@ class CodexSdkRunner:
             return True
 
     def close(self) -> None:
-        close_now: _CodexClientLease | None = None
         with self._condition:
             if self._closed:
                 while not self._shutdown_complete:
                     self._condition.wait()
                 return
             self._closed = True
-            codex = self._codex
-            self._codex = None
-            if codex is not None:
-                lease = self._client_leases[id(codex)]
-                lease.retired = True
-                close_now = self._schedule_retired_close_locked(lease)
-
-        if close_now is not None:
-            self._close_retired_codex(close_now)
-
-        with self._condition:
             while self._active_calls or self._closing_clients:
                 self._condition.wait()
             self._shutdown_complete = True
@@ -307,25 +321,23 @@ class CodexSdkRunner:
         with self._condition:
             if self._closed:
                 raise RuntimeError("Codex SDK runner is closed")
-            client_start_ms = 0.0
-            if self._codex is None:
-                client_started_at = self._clock()
-                codex_factory = self._codex_factory or sdk.codex
-                self._codex = codex_factory(
-                    sdk.config(
-                        client_name="rightmemory",
-                        client_title="RightMemory",
-                        client_version="0.1.0",
-                    )
+            client_started_at = self._clock()
+            codex_factory = self._codex_factory or sdk.codex
+            codex = codex_factory(
+                sdk.config(
+                    client_name="rightmemory",
+                    client_title="RightMemory",
+                    client_version="0.1.0",
+                    config_overrides=("mcp_servers={}",),
                 )
-                client_start_ms = _milliseconds(self._clock() - client_started_at)
-                self._client_leases[id(self._codex)] = _CodexClientLease(self._codex)
-            lease = self._client_leases[id(self._codex)]
-            lease.active_calls += 1
+            )
+            client_start_ms = _milliseconds(self._clock() - client_started_at)
+            lease = _CodexClientLease(codex, active_calls=1, retired=True)
+            self._client_leases[id(codex)] = lease
             self._active_calls += 1
-            return self._codex, client_start_ms
+            return codex, client_start_ms
 
-    def _release_codex(self, codex: Any) -> None:
+    def _release_codex(self, codex: Any) -> Exception | None:
         close_now: _CodexClientLease | None = None
         with self._condition:
             lease = self._client_leases[id(codex)]
@@ -335,14 +347,8 @@ class CodexSdkRunner:
             if self._active_calls == 0:
                 self._condition.notify_all()
         if close_now is not None:
-            self._close_retired_codex(close_now)
-
-    def _retire_codex(self, codex: Any) -> None:
-        with self._condition:
-            lease = self._client_leases[id(codex)]
-            if self._codex is codex:
-                self._codex = None
-            lease.retired = True
+            return self._close_retired_codex(close_now)
+        return None
 
     def _schedule_retired_close_locked(
         self,
@@ -354,13 +360,12 @@ class CodexSdkRunner:
         self._closing_clients += 1
         return lease
 
-    def _close_retired_codex(self, lease: _CodexClientLease) -> None:
+    def _close_retired_codex(self, lease: _CodexClientLease) -> Exception | None:
+        close_error: Exception | None = None
         try:
             lease.codex.close()
-        except Exception:
-            # Retirement follows another completed result or failure. A
-            # best-effort close failure must not replace that outcome.
-            pass
+        except Exception as exc:
+            close_error = exc
         finally:
             with self._condition:
                 current = self._client_leases.get(id(lease.codex))
@@ -368,12 +373,14 @@ class CodexSdkRunner:
                     del self._client_leases[id(lease.codex)]
                 self._closing_clients -= 1
                 self._condition.notify_all()
+        return close_error
 
 
 @cache
 def _load_codex_sdk() -> _CodexSdkBindings:
     try:
         from openai_codex import ApprovalMode, Codex, CodexConfig, Sandbox, TransportClosedError
+        from openai_codex.errors import InvalidRequestError
         from openai_codex.generated.v2_all import ThreadUnsubscribeResponse
         from openai_codex.types import ReasoningEffort
     except ImportError as exc:
@@ -384,6 +391,7 @@ def _load_codex_sdk() -> _CodexSdkBindings:
         config=CodexConfig,
         sandbox=Sandbox,
         transport_closed_error=TransportClosedError,
+        invalid_request_error=InvalidRequestError,
         reasoning_effort=ReasoningEffort,
         thread_unsubscribe_response=ThreadUnsubscribeResponse,
     )
@@ -408,6 +416,27 @@ def _unsubscribe_thread(codex: Any, thread_id: str, sdk: _CodexSdkBindings) -> N
     value = getattr(status, "value", status)
     if value not in {"unsubscribed", "notSubscribed", "notLoaded"}:
         raise RuntimeError(f"unexpected Codex thread/unsubscribe status: {value!r}")
+
+
+def _unarchive_thread_if_needed(codex: Any, thread_id: str, sdk: _CodexSdkBindings) -> None:
+    unarchive = getattr(codex, "thread_unarchive", None)
+    if not callable(unarchive):
+        raise RuntimeError("Codex SDK does not expose thread/unarchive")
+    try:
+        unarchive(thread_id)
+    except sdk.invalid_request_error as exc:
+        message = str(exc).lower()
+        expected = f"no archived rollout found for thread id {thread_id}".lower()
+        if expected not in message:
+            raise
+
+
+def _warn_release(thread_id: str, exc: Exception) -> None:
+    print(
+        "Warning: RightMemory could not fully release and archive Codex thread "
+        f"{thread_id}: {type(exc).__name__}: {exc}",
+        file=sys.stderr,
+    )
 
 
 def _reasoning_effort(value: str | None, sdk: _CodexSdkBindings) -> Any | None:
