@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from .codex_app_server import CodexAppServerClient
 
-_CODEX_SANDBOXES = {"read-only": "read_only", "workspace-write": "workspace_write"}
+_CODEX_SANDBOXES = {"read-only": "read_only", "full-access": "full_access"}
 _CODEX_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 _OPPORTUNISTIC_CLEANUP_INTERVAL_SECONDS = 5 * 60
 _CODEX_SDK_INSTALL_ERROR = (

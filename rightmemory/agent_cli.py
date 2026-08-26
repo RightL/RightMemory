@@ -823,7 +823,7 @@ def _codex_sandbox(role: str) -> str:
     if role in READ_ROLES:
         return "read-only"
     if role in WRITE_ROLES:
-        return "workspace-write"
+        return "full-access"
     raise ValueError(f"RightMemory role has no Codex sandbox mapping: {role}")
 
 
