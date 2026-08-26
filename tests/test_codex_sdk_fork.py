@@ -106,7 +106,7 @@ def fake_sdk():
         approval_mode=SimpleNamespace(deny_all="deny-all"),
         codex=None,
         config=lambda **kwargs: kwargs,
-        sandbox=SimpleNamespace(read_only="read-only", workspace_write="workspace-write"),
+        sandbox=SimpleNamespace(read_only="read-only", full_access="full-access"),
         transport_closed_error=FakeTransportClosedError,
         invalid_request_error=FakeInvalidRequestError,
         reasoning_effort=lambda value: f"effort:{value}",
