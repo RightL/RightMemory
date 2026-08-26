@@ -455,7 +455,7 @@ unified updater
 - Candidate submission is evidence, not final stored wording, classification, placement, or an instruction to edit a particular module. Session ids provide provenance and batching boundaries, not task identity.
 - The unified updater reconciles related candidates and may change Memory, Pursuit, Agent Corrections, any combination of them, or nothing in one isolated transaction.
 - Dreamer, Insight, Historian, and Pruner remain Memory-oriented maintenance roles. They must preserve ids and edges referenced from Pursuit. Sync repair transports the wider synchronized surface without taking over semantic updater judgment.
-- Standalone mode uses RightMemory's bounded tools, while CLI-agent mode delegates roles to the Codex SDK or Claude Code CLI with role-specific sandbox or permission defaults.
+- Standalone mode uses RightMemory's bounded tools, while CLI-agent mode delegates roles to the Codex SDK or Claude Code CLI with role-specific permission defaults. Codex read roles run read-only. Codex write roles run with full filesystem access and no approval prompts so they can complete Git operations in their isolated task worktrees.
 
 The host agent should avoid reading or editing RightMemory state directly unless the user explicitly installs and selects `maintain-rightmemory`. Other access goes through the command-backed skill and runtime roles, which keeps ownership clear and reduces partial or competing edits.
 
