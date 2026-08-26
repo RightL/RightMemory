@@ -20,6 +20,13 @@ class CodexThreadDeleteResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class CodexThreadArchiveResult:
+    thread_id: str
+    archived: bool
+    error: str | None = None
+
+
 class CodexAppServerClient:
     def __init__(
         self,
@@ -33,6 +40,42 @@ class CodexAppServerClient:
         self.timeout_seconds = timeout_seconds
 
     def delete_threads(self, thread_ids: list[str]) -> list[CodexThreadDeleteResult]:
+        action_results = self._run_thread_action(
+            thread_ids,
+            method="thread/delete",
+            response_error=_delete_response_error,
+        )
+        return [
+            CodexThreadDeleteResult(
+                thread_id=thread_id,
+                deleted=error is None,
+                error=error,
+            )
+            for thread_id, error in action_results
+        ]
+
+    def archive_threads(self, thread_ids: list[str]) -> list[CodexThreadArchiveResult]:
+        action_results = self._run_thread_action(
+            thread_ids,
+            method="thread/archive",
+            response_error=_response_error,
+        )
+        return [
+            CodexThreadArchiveResult(
+                thread_id=thread_id,
+                archived=error is None,
+                error=error,
+            )
+            for thread_id, error in action_results
+        ]
+
+    def _run_thread_action(
+        self,
+        thread_ids: list[str],
+        *,
+        method: str,
+        response_error: Any,
+    ) -> list[tuple[str, str | None]]:
         unique_ids = list(dict.fromkeys(_thread_id(thread_id) for thread_id in thread_ids))
         if not unique_ids:
             return []
@@ -49,9 +92,9 @@ class CodexAppServerClient:
                 }
             },
         }
-        delete_messages = [
+        action_messages = [
             {
-                "method": "thread/delete",
+                "method": method,
                 "id": request_id,
                 "params": {"threadId": thread_id},
             }
@@ -73,12 +116,12 @@ class CodexAppServerClient:
             )
         except OSError as exc:
             error = _bounded_error(f"Codex App Server failed: {type(exc).__name__}: {exc}")
-            return [CodexThreadDeleteResult(thread_id=thread_id, deleted=False, error=error) for thread_id in unique_ids]
+            return [(thread_id, error) for thread_id in unique_ids]
 
         if process.stdin is None or process.stdout is None or process.stderr is None:
             _terminate_process(process)
             error = "Codex App Server did not expose stdio pipes"
-            return [CodexThreadDeleteResult(thread_id=thread_id, deleted=False, error=error) for thread_id in unique_ids]
+            return [(thread_id, error) for thread_id in unique_ids]
 
         deadline = time.monotonic() + self.timeout_seconds
         output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
@@ -105,7 +148,7 @@ class CodexAppServerClient:
             if startup_error is None:
                 _send_messages(
                     process.stdin,
-                    [{"method": "initialized", "params": {}}, *delete_messages],
+                    [{"method": "initialized", "params": {}}, *action_messages],
                 )
                 _wait_for_responses(
                     output_queue,
@@ -127,19 +170,13 @@ class CodexAppServerClient:
         if parse_errors and startup_error is None:
             startup_error = parse_errors[0]
 
-        results: list[CodexThreadDeleteResult] = []
+        results: list[tuple[str, str | None]] = []
         for request_id, thread_id in request_ids.items():
             response = responses.get(request_id)
-            error = startup_error or _delete_response_error(response)
+            error = startup_error or response_error(response)
             if response is None and error is None:
-                error = "missing thread/delete response"
-            results.append(
-                CodexThreadDeleteResult(
-                    thread_id=thread_id,
-                    deleted=error is None,
-                    error=_bounded_error(error) if error is not None else None,
-                )
-            )
+                error = f"missing {method} response"
+            results.append((thread_id, _bounded_error(error) if error is not None else None))
         return results
 
 
@@ -282,7 +319,14 @@ def _delete_response_error(response: dict[str, Any] | None) -> str | None:
 def _app_server_command() -> list[str]:
     from codex_cli_bin import bundled_codex_path
 
-    return [str(bundled_codex_path()), "app-server", "--listen", "stdio://"]
+    return [
+        str(bundled_codex_path()),
+        "-c",
+        "mcp_servers={}",
+        "app-server",
+        "--listen",
+        "stdio://",
+    ]
 
 
 def _app_server_environment() -> dict[str, str]:
