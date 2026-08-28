@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyOperation, assertMove, deletionSelection, descendants, dropOperation, indexTree, promoteOperation } from '../src/tree.ts';
+import { applyOperation, assertMove, createSiblingBeforeOperation, deletionSelection, descendants, dropOperation, indexTree, moveSiblingOperation, promoteOperation } from '../src/tree.ts';
 import { forestData, titleMarkup, titleText } from '../src/canvas-data.ts';
 import { fixture, forestFixture } from './fixtures.ts';
 
@@ -103,4 +103,44 @@ test('500-item edits preserve every unrelated item', () => {
   const next = applyOperation(original, { type: 'rename', id: 'generated-499', title: '五百 / Five hundred' });
   assert.equal(next.items.length, 500);
   assert.deepEqual(next.items.slice(0, 499), original.items.slice(0, 499));
+});
+
+test('sibling-before creates immediately before the selection, including first children and roots', () => {
+  for (const [id, parent, expected] of [
+    ['design', 'directions', ['research', 'new', 'design', 'writing']],
+    ['research', 'directions', ['new', 'research', 'design', 'writing']],
+    ['directions', null, ['new', 'directions', 'practice']],
+    ['practice', null, ['directions', 'new', 'practice']],
+  ] as const) {
+    const next = applyOperation(forestFixture(), createSiblingBeforeOperation(forestFixture(), id, 'New'), 'new');
+    assert.deepEqual(parent ? indexTree(next).get(parent)!.child_ids : next.root_ids, expected);
+  }
+});
+
+test('sibling moves work in both directions at every depth and are no-ops at boundaries', () => {
+  const original = forestFixture();
+  for (const [id, delta, parent, expected] of [
+    ['design', -1, 'directions', ['design', 'research', 'writing']],
+    ['design', 1, 'directions', ['research', 'writing', 'design']],
+    ['practice', -1, null, ['practice', 'directions']],
+    ['directions', 1, null, ['practice', 'directions']],
+    ['visual', -1, 'design', ['visual', 'interaction']],
+  ] as const) {
+    const next = applyOperation(original, moveSiblingOperation(original, id, delta)!);
+    assert.deepEqual(parent ? indexTree(next).get(parent)!.child_ids : next.root_ids, expected);
+    assert.deepEqual(descendants(next, id), descendants(original, id));
+  }
+  for (const [id, delta] of [['research', -1], ['writing', 1], ['directions', -1], ['practice', 1]] as const) {
+    assert.equal(moveSiblingOperation(original, id, delta), null);
+  }
+});
+
+test('visible-empty create and rename are refused without changing the snapshot', () => {
+  const original = fixture();
+  const before = structuredClone(original);
+  for (const title of ['****', '~~~~', '<u></u>', '**<u>~~ ~~</u>**']) {
+    assert.throws(() => applyOperation(original, { type: 'rename', id: 'design', title }), /visible title/);
+    assert.throws(() => applyOperation(original, { type: 'create', title, parent_id: null, after_id: null }, 'new'), /visible title/);
+  }
+  assert.deepEqual(original, before);
 });

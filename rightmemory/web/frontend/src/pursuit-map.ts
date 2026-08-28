@@ -1,8 +1,9 @@
 import { ApiError, MutationQueue, type QueueChange, type Transport } from './queue.ts';
-import { applyOperation, childrenOf, deletionSelection, DRAFT_PREFIX, indexTree, promoteOperation,
+import { applyOperation, childrenOf, createSiblingBeforeOperation, deletionSelection, DRAFT_PREFIX, indexTree, moveSiblingOperation, promoteOperation,
   type MutationResult, type Operation, type Snapshot } from './tree.ts';
 import { DraftBook, type TitleDraft } from './drafts.ts';
 import { MapRenderer } from './renderer.ts';
+import { parseWholeTitleFormat, titleText, toggleWholeTitleMark, type TopicMark } from './title-format.ts';
 import { keyboardCommand, navigate, readView, reconcileView, reveal, writeView, type ViewState } from './view-state.ts';
 import './pursuit-map.css';
 
@@ -52,7 +53,8 @@ const markup = `
       <button type="button" data-command="fit" title="Fit map (Ctrl/⌘ 0)">Fit</button>
       <details class="pm-help"><summary aria-label="Keyboard shortcuts" title="Keyboard shortcuts">?</summary><div>
         <strong>On the canvas</strong>
-        <p>Double-click or F2 to rename. Enter adds a sibling; Tab adds a child. Shift+Tab promotes.</p>
+        <p>Double-click or F2 to rename. Enter adds a sibling after; Shift+Enter adds one before. Tab adds a child. Shift+Tab promotes. Alt+Up/Down reorders siblings.</p>
+        <p>Ctrl/⌘ B toggles bold, Ctrl/⌘ U underline, Ctrl/⌘ Shift X strikethrough. Finish title editing before applying these whole-topic marks.</p>
         <p>Arrows move between directions. Space folds a branch. Delete removes a subtree. N opens its note; F toggles Focus.</p>
         <p>Ctrl/⌘ F finds, Ctrl/⌘ 0 fits, Ctrl/⌘ Z undoes, Ctrl/⌘ Shift Z redoes.</p>
         <p>Drag a label onto a direction to nest it; drag above or below a label to reorder. Drop on empty space to make an independent top-level direction.</p>
@@ -63,6 +65,16 @@ const markup = `
   <div class="pm-diagnostics" role="status" hidden></div>
   <div class="pm-stage">
     <div class="pm-canvas"></div>
+    <div class="pm-topic-toolbar" role="toolbar" aria-label="Selected direction tools" hidden>
+      <button type="button" data-command="bold" aria-label="Bold topic" title="Bold (Ctrl/⌘ B)" aria-pressed="false"><strong>B</strong></button>
+      <button type="button" data-command="underline" aria-label="Underline topic" title="Underline (Ctrl/⌘ U)" aria-pressed="false"><u>U</u></button>
+      <button type="button" data-command="strike" aria-label="Strikethrough topic" title="Strikethrough (Ctrl/⌘ Shift X)" aria-pressed="false"><s>S</s></button>
+      <span class="pm-divider"></span>
+      <button type="button" data-command="note">Note</button>
+      <button type="button" data-command="focus" aria-pressed="false">Focus</button>
+      <button type="button" data-command="context-menu" aria-label="More topic actions" aria-haspopup="menu" aria-expanded="false">More</button>
+    </div>
+    <div class="pm-context-menu" role="menu" aria-label="Map actions" hidden></div>
     <div class="pm-empty" hidden><h2>No directions yet</h2><p>Start with a direction you want to keep visible.</p><button type="button" data-command="root">＋ Add a direction</button></div>
     <div class="pm-search" role="search" hidden>
       <input type="search" aria-label="Find a direction" placeholder="Find a direction…" autocomplete="off">
@@ -120,8 +132,8 @@ class PursuitMap implements PursuitMapController {
     this.queue = new MutationQueue(snapshot, transport);
     this.view = reconcileView(snapshot, readView(localStorage, snapshot.root_key));
     this.renderer = new MapRenderer(this.$('.pm-canvas'), snapshot, this.view, {
-      select: (id) => { this.view.selected = id; this.saveView(); this.updateTools(); },
-      collapse: (id, collapsed) => this.setCollapsed(id, collapsed),
+      select: (id) => { this.closeContextMenu(); this.view.selected = id; this.saveView(); this.updateTools(); },
+      collapse: (id, collapsed, preserveDrag) => this.setCollapsed(id, collapsed, preserveDrag),
       move: (operation) => { void this.mutate(operation); },
       editStart: (id, title) => this.editStarted(id, title),
       editInput: (text) => { if (this.drafts.title) this.drafts.title.text = text; },
@@ -129,6 +141,9 @@ class PursuitMap implements PursuitMapController {
       marker: (id, kind) => { this.select(id); void this.command(kind); },
       viewport: (viewport) => { this.view.viewport = viewport; this.$('.pm-zoom span').textContent = `${Math.round(viewport.scale * 100)}%`; this.saveView(); },
       error: (message) => this.toast(message),
+      geometry: (rect) => this.positionTopicToolbar(rect),
+      dismissOverlays: () => this.closeContextMenu(),
+      contextMenu: (id, x, y) => this.openContextMenu(id, x, y),
     });
     this.unsubscribe = this.queue.subscribe((change) => this.changed(change));
     host.addEventListener('click', (event) => {
@@ -136,6 +151,18 @@ class PursuitMap implements PursuitMapController {
       if (button?.disabled) return;
       if (button) { this.$<HTMLDetailsElement>('.pm-more').open = false; void this.command(button.dataset.command!); }
     }, { signal: this.abort.signal });
+    this.$('.pm-topic-toolbar').addEventListener('pointerdown', (event) => {
+      if (event.button === 0) event.preventDefault(); // Retain canvas keyboard focus after formatting.
+    }, { signal: this.abort.signal });
+    document.addEventListener('pointerdown', (event) => {
+      if (!(event.target as HTMLElement).closest('.pm-context-menu, [data-command="context-menu"]')) this.closeContextMenu();
+    }, { signal: this.abort.signal });
+    host.addEventListener('contextmenu', (event) => {
+      if (!(event.target as HTMLElement).closest('input, textarea, [contenteditable]')) event.preventDefault();
+    }, { signal: this.abort.signal });
+    document.addEventListener('scroll', (event) => {
+      if (!(event.target instanceof Element) || !event.target.closest('.pm-context-menu')) this.closeContextMenu();
+    }, { capture: true, signal: this.abort.signal });
     this.$<HTMLInputElement>('.pm-search input').addEventListener('input', () => this.search(), { signal: this.abort.signal });
     this.$<HTMLInputElement>('.pm-search input').addEventListener('keydown', (event) => {
       if (event.key === 'Enter') { event.preventDefault(); this.nextMatch(event.shiftKey ? -1 : 1); }
@@ -172,16 +199,17 @@ class PursuitMap implements PursuitMapController {
     return this.snapshot;
   }
 
-  private render(): void {
+  private render(preserveDrag = false): void {
     const display = this.displaySnapshot();
     this.view = reconcileView(display, this.view);
-    this.renderer.render(display, this.view);
+    this.renderer.render(display, this.view, preserveDrag);
     this.renderer.highlight(new Set(this.matches));
     this.updateTools();
     this.saveView();
   }
 
   private changed(change: QueueChange): void {
+    this.closeContextMenu();
     if (change.remapped) {
       const { from, to } = change.remapped;
       if (this.view.selected === from) this.view.selected = to;
@@ -200,17 +228,88 @@ class PursuitMap implements PursuitMapController {
     const writable = this.snapshot.writable;
     this.$<HTMLButtonElement>('[data-command="undo"]').disabled = !this.queue.canUndo;
     this.$<HTMLButtonElement>('[data-command="redo"]').disabled = !this.queue.canRedo;
-    for (const command of ['rename', 'delete', 'promote', 'focus']) this.$<HTMLButtonElement>(`[data-command="${command}"]`).disabled = !writable || !item?.editable;
-    this.$<HTMLButtonElement>('[data-command="note"]').disabled = !item;
-    this.$<HTMLButtonElement>('[data-command="child"]').disabled = !writable || !!item && !item.editable;
-    this.$<HTMLButtonElement>('[data-command="sibling"]').disabled = !writable;
-    this.host.querySelectorAll<HTMLButtonElement>('[data-command="root"]').forEach((button) => { button.disabled = !writable; });
+    const marks = parseWholeTitleFormat(item?.title ?? '').marks;
+    for (const button of this.host.querySelectorAll<HTMLButtonElement>('button[data-command]')) {
+      const command = button.dataset.command!;
+      if (['rename', 'delete', 'focus', 'bold', 'underline', 'strike'].includes(command)) button.disabled = !writable || !item?.editable;
+      if (command === 'promote') button.disabled = !writable || !item?.editable || !item.parent_id;
+      if (command === 'note' || command === 'context-menu') button.disabled = !item;
+      if (command === 'child') button.disabled = !writable || !!item && !item.editable;
+      if (['root', 'sibling', 'sibling-before'].includes(command)) button.disabled = !writable || command !== 'root' && !!item?.parent_id && !indexTree(this.snapshot).get(item.parent_id)?.editable;
+      if (command === 'collapse') button.disabled = !item?.child_ids.length;
+      if (['bold', 'underline', 'strike', 'focus'].includes(command)) {
+        const pressed = command === 'focus' ? !!item?.focused : marks.has(command as TopicMark);
+        button.setAttribute(button.getAttribute('role') === 'menuitemcheckbox' ? 'aria-checked' : 'aria-pressed', String(pressed));
+      }
+    }
     this.$('.pm-empty').hidden = this.displaySnapshot().root_ids.length > 0;
-    this.$<HTMLButtonElement>('[data-command="collapse"]').disabled = !item?.child_ids.length;
-    this.$<HTMLButtonElement>('[data-command="focus"]').setAttribute('aria-pressed', String(!!item?.focused));
     const status = this.$('.pm-save-status');
     status.textContent = this.queue.pendingCount ? `Saving${this.queue.pendingCount > 1 ? ` (${this.queue.pendingCount})` : '…'}` : writable ? 'Saved' : 'Read-only';
     status.classList.toggle('pm-saving', !!this.queue.pendingCount);
+    this.positionTopicToolbar(this.renderer?.selectedTopicRect() ?? null);
+  }
+
+  private positionTopicToolbar(rect: DOMRect | null): void {
+    const toolbar = this.$('.pm-topic-toolbar');
+    toolbar.hidden = !rect || !this.view.selected || this.view.selected.startsWith(DRAFT_PREFIX) || !this.active || !this.$('.pm-context-menu').hidden;
+    if (toolbar.hidden || !rect) return;
+    const stage = this.$('.pm-stage').getBoundingClientRect();
+    const width = toolbar.offsetWidth;
+    const height = toolbar.offsetHeight;
+    const top = rect.top - stage.top - height - 10;
+    toolbar.style.left = `${Math.max(6, Math.min(stage.width - width - 6, rect.left - stage.left + (rect.width - width) / 2))}px`;
+    toolbar.style.top = `${Math.max(6, Math.min(stage.height - height - 6, top >= 6 ? top : rect.bottom - stage.top + 10))}px`;
+  }
+
+  private closeContextMenu(focus = false): void {
+    this.$('.pm-context-menu').hidden = true;
+    this.$('[data-command="context-menu"]').setAttribute('aria-expanded', 'false');
+    if (focus) this.renderer.focus();
+    this.positionTopicToolbar(this.renderer?.selectedTopicRect() ?? null);
+  }
+
+  private openContextMenu(id: string | null, x: number, y: number): void {
+    const menu = this.$('.pm-context-menu');
+    menu.replaceChildren();
+    const item = id ? indexTree(this.snapshot).get(id) : undefined;
+    const entries: Array<[string, string] | null> = item ? [
+      ['child', 'Add child'], ['sibling', 'Add sibling after'], ['sibling-before', 'Add sibling before'], ['rename', 'Rename'], null,
+      ['bold', 'Bold'], ['underline', 'Underline'], ['strike', 'Strikethrough'], null,
+      ['note', 'Note'], ['focus', 'Toggle Focus'],
+      ...(item.child_ids.length ? [['collapse', this.view.collapsed.includes(item.id) ? 'Expand' : 'Collapse'] as [string, string]] : []),
+      ...(item.parent_id ? [['promote', 'Promote'] as [string, string]] : []), null, ['delete', 'Delete subtree'],
+    ] : [['root', 'Add top-level direction'], ['fit', 'Fit map']];
+    for (const entry of entries) {
+      if (!entry) { const line = document.createElement('hr'); line.setAttribute('role', 'separator'); menu.append(line); continue; }
+      const [command, label] = entry;
+      const button = document.createElement('button');
+      button.type = 'button'; button.textContent = label; button.dataset.command = command; button.tabIndex = -1;
+      button.setAttribute('role', ['bold', 'underline', 'strike', 'focus'].includes(command) ? 'menuitemcheckbox' : 'menuitem');
+      if (command === 'delete') button.className = 'pm-danger';
+      menu.append(button);
+    }
+    menu.hidden = false;
+    this.updateTools();
+    const stage = this.$('.pm-stage').getBoundingClientRect();
+    menu.style.maxHeight = `${Math.max(0, stage.height - 12)}px`;
+    menu.style.left = `${Math.max(6, Math.min(stage.width - menu.offsetWidth - 6, x - stage.left))}px`;
+    menu.style.top = `${Math.max(6, Math.min(stage.height - menu.offsetHeight - 6, y - stage.top))}px`;
+    this.$('[data-command="context-menu"]').setAttribute('aria-expanded', 'true');
+    menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+  }
+
+  private menuKeydown(event: KeyboardEvent): void {
+    const menu = this.$('.pm-context-menu');
+    const buttons = [...menu.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault(); event.stopPropagation();
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+        : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+    } else if (event.key === 'Escape' || event.key === 'Tab') {
+      event.preventDefault(); event.stopPropagation(); this.closeContextMenu(true);
+    }
   }
 
   private renderDiagnostics(snapshot: Snapshot): void {
@@ -234,22 +333,47 @@ class PursuitMap implements PursuitMapController {
   }
 
   private select(id: string, center = false): void {
-    this.view = reveal(this.displaySnapshot(), this.view, id);
-    this.render();
+    this.closeContextMenu();
+    const next = reveal(this.displaySnapshot(), this.view, id);
+    const unfolded = next.collapsed.length !== this.view.collapsed.length;
+    this.view = next;
+    if (unfolded) this.render();
     this.renderer.select(id, center);
+    this.updateTools();
+    this.saveView();
   }
 
-  private setCollapsed(id: string, collapsed: boolean): void {
+  private setCollapsed(id: string, collapsed: boolean, preserveDrag = false): void {
     this.view.collapsed = this.view.collapsed.filter((entry) => entry !== id);
     if (collapsed) this.view.collapsed.push(id);
-    this.render();
+    this.render(preserveDrag);
   }
 
   private async command(command: string): Promise<void> {
+    if (command !== 'context-menu') this.closeContextMenu(!this.$('.pm-context-menu').hidden);
     try {
       switch (command) {
         case 'child': this.create('child'); break;
         case 'sibling': this.create('sibling'); break;
+        case 'sibling-before': this.create('sibling-before'); break;
+        case 'sibling-up': case 'sibling-down': {
+          if (!this.snapshot.writable || !this.selected?.editable) break;
+          const operation = moveSiblingOperation(this.snapshot, this.selected.id, command === 'sibling-up' ? -1 : 1);
+          if (operation) {
+            const result = await this.mutate(operation);
+            if (result?.selected_id) this.renderer.ensureVisible(result.selected_id);
+          }
+          this.renderer.focus();
+          break;
+        }
+        case 'bold': case 'underline': case 'strike': await this.format(command); break;
+        case 'context-menu': {
+          const menu = this.$('.pm-context-menu');
+          if (!menu.hidden) { this.closeContextMenu(true); break; }
+          const rect = this.renderer.selectedTopicRect();
+          if (rect) this.openContextMenu(this.view.selected, rect.left, rect.bottom + 8);
+          break;
+        }
         case 'root': this.create('root'); break;
         case 'rename': if (this.selected?.editable) await this.renderer.beginEdit(this.selected.id); break;
         case 'promote': {
@@ -286,7 +410,13 @@ class PursuitMap implements PursuitMapController {
     if (!this.active) return;
     const target = event.target as HTMLElement;
     const isInput = target.matches('input,textarea,[contenteditable]');
-    if (target.id === 'input-box') return; // The library owns IME, Enter and Escape while renaming.
+    if (target.closest('.pm-context-menu')) { this.menuKeydown(event); return; }
+    if (target.id === 'input-box') {
+      // Raw title editing must never enable the browser's contenteditable rich-text commands.
+      const command = keyboardCommand(event);
+      if (command && ['bold', 'underline', 'strike'].includes(command)) { event.preventDefault(); event.stopImmediatePropagation(); }
+      return; // The library owns IME, Enter and Escape while renaming.
+    }
     const command = keyboardCommand(event, isInput);
     if (!command) return;
     if (isInput && command === 'save' && target.closest('.pm-note')) { event.preventDefault(); void this.command('save-note'); return; }
@@ -296,11 +426,15 @@ class PursuitMap implements PursuitMapController {
     event.preventDefault();
     event.stopPropagation();
     if (command === 'navigate') {
-      this.view = navigate(this.snapshot, this.view, event.key);
-      this.render();
+      const next = navigate(this.snapshot, this.view, event.key);
+      const folded = next.collapsed.join('\n') !== this.view.collapsed.join('\n');
+      this.view = next;
+      if (folded) this.render();
       this.renderer.select(this.view.selected, true);
+      this.updateTools(); this.saveView();
     } else if (command === 'escape') {
       this.renderer.cancelGesture();
+      this.closeContextMenu();
       this.closeSearch();
       this.$('.pm-relations').hidden = true;
       this.$<HTMLDetailsElement>('.pm-more').open = false;
@@ -308,14 +442,15 @@ class PursuitMap implements PursuitMapController {
     } else void this.command(command);
   }
 
-  private create(kind: 'child' | 'sibling' | 'root', previous?: TitleDraft): void {
+  private create(kind: 'child' | 'sibling' | 'sibling-before' | 'root', previous?: TitleDraft): void {
     if (!this.snapshot.writable || this.renderer.editing) return;
     const selected = this.selected;
     const parent = kind === 'root' ? null : kind === 'child' ? selected?.id ?? null : selected?.parent_id ?? null;
     const siblings = childrenOf(this.snapshot, parent);
     const after = kind === 'sibling' && selected ? selected.id : siblings.at(-1) ?? null;
     const id = previous?.id ?? `${DRAFT_PREFIX}${crypto.randomUUID()}`;
-    const operation = previous?.operation.type === 'create' ? previous.operation : { type: 'create' as const, parent_id: parent, after_id: after, title: '' };
+    const operation = previous?.operation.type === 'create' ? previous.operation : kind === 'sibling-before' && selected
+      ? createSiblingBeforeOperation(this.snapshot, selected.id, '') : { type: 'create' as const, parent_id: parent, after_id: after, title: '' };
     this.drafts.title = previous ?? { id, temporaryId: id, text: '', operation };
     if (operation.parent_id) this.view = reveal(this.snapshot, this.view, operation.parent_id);
     this.view.collapsed = this.view.collapsed.filter((entry) => entry !== operation.parent_id);
@@ -358,7 +493,7 @@ class PursuitMap implements PursuitMapController {
     for (const draft of this.drafts.failedTitles) {
       const row = document.createElement('div');
       const text = document.createElement('span');
-      text.textContent = draft.text;
+      text.textContent = titleText(draft.text);
       text.title = draft.error ?? '';
       const retry = document.createElement('button');
       retry.type = 'button'; retry.textContent = 'Edit again';
@@ -381,7 +516,16 @@ class PursuitMap implements PursuitMapController {
     }
   }
 
+  private async format(mark: TopicMark): Promise<void> {
+    const item = this.selected;
+    if (!item?.editable || !this.snapshot.writable || this.renderer.editing) return;
+    const title = toggleWholeTitleMark(item.title, mark);
+    this.renderer.focus();
+    if (title !== item.title) await this.mutate({ type: 'rename', id: item.id, title });
+  }
+
   private async mutate(operation: Operation): Promise<MutationResult | null> {
+    this.closeContextMenu();
     try { return await this.queue.enqueue(operation); }
     catch (error) { this.toast((error as Error).message, undefined, 0); return null; }
   }
@@ -398,10 +542,10 @@ class PursuitMap implements PursuitMapController {
         else this.toast('Newer edits exist. Use the toolbar Undo to undo them in order.');
       } catch { /* Failure already restored the deleted direction. */ }
     };
-    this.toast(`“${item.title}” removed.`, { label: 'Undo', action: () => { void undo(); } }, 0);
+    this.toast(`“${titleText(item.title)}” removed.`, { label: 'Undo', action: () => { void undo(); } }, 0);
     try {
       const result = await promise;
-      if (result.repaired_references.length) this.toast(`“${item.title}” removed; broken references repaired.`, { label: 'Undo', action: () => { void undo(); } }, 0);
+      if (result.repaired_references.length) this.toast(`“${titleText(item.title)}” removed; broken references repaired.`, { label: 'Undo', action: () => { void undo(); } }, 0);
     } catch { /* The queue reports failure and restores the authoritative snapshot. */ }
   }
 
@@ -422,7 +566,7 @@ class PursuitMap implements PursuitMapController {
     const note = this.drafts.note;
     if (!note) return;
     const item = indexTree(this.snapshot).get(note.id);
-    this.$('.pm-note h2').textContent = item?.title ?? 'Direction removed elsewhere';
+    this.$('.pm-note h2').textContent = item ? titleText(item.title) : 'Direction removed elsewhere';
     const textarea = this.$<HTMLTextAreaElement>('.pm-note textarea');
     if (updateText && textarea.value !== note.text) textarea.value = note.text;
     textarea.readOnly = !item?.editable || !this.snapshot.writable;
@@ -464,7 +608,7 @@ class PursuitMap implements PursuitMapController {
     for (const [kind, target] of item.edges) {
       const linked = items.get(target);
       const line = document.createElement(linked ? 'button' : 'p');
-      line.textContent = `${labels[kind] ?? 'Related'} · ${linked?.title ?? 'Memory reference'}`;
+      line.textContent = `${labels[kind] ?? 'Related'} · ${linked ? titleText(linked.title) : 'Memory reference'}`;
       if (linked) line.addEventListener('click', () => this.select(linked.id, true));
       content.append(line);
     }
@@ -474,7 +618,7 @@ class PursuitMap implements PursuitMapController {
 
   private search(): void {
     const query = this.$<HTMLInputElement>('.pm-search input').value.trim().toLocaleLowerCase();
-    this.matches = query ? this.snapshot.items.filter((item) => `${item.title}\n${item.body}`.toLocaleLowerCase().includes(query)).map((item) => item.id) : [];
+    this.matches = query ? this.snapshot.items.filter((item) => `${titleText(item.title)}\n${item.body}`.toLocaleLowerCase().includes(query)).map((item) => item.id) : [];
     this.matchIndex = -1;
     this.nextMatch(1);
   }
@@ -512,7 +656,7 @@ class PursuitMap implements PursuitMapController {
   setActive(active: boolean): void {
     this.active = active;
     if (active) { this.render(); this.renderer.focus(); }
-    else this.saveView();
+    else { this.closeContextMenu(); this.renderer.cancelGesture(); this.saveView(); }
   }
   destroy(): void {
     this.unsubscribe();

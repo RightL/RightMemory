@@ -2,6 +2,7 @@ import { mountMap } from '../src/pursuit-map.ts';
 import { ApiError, type Transport } from '../src/queue.ts';
 import { applyOperation, type MutationResult, type Snapshot } from '../src/tree.ts';
 import { fixture, forestFixture } from './fixtures.ts';
+import { runBrowserChecks } from './browser-checks.ts';
 
 // Disposable browser fixture. It never contacts a Memory root or persists semantic data.
 const parameters = new URL(location.href).searchParams;
@@ -43,10 +44,27 @@ const transport: Transport = {
 };
 const host = document.querySelector<HTMLElement>('#fixture')!;
 host.style.height = 'calc(100vh - 40px)';
-await mountMap(host, transport);
+let controller = await mountMap(host, transport);
 const tools = document.createElement('div');
 tools.style.cssText = 'height:40px;padding:6px 12px;box-sizing:border-box;display:flex;gap:14px;align-items:center;background:#edf0e9;font:12px system-ui;';
 tools.innerHTML = '<strong>Disposable fixture</strong><label><input type="checkbox"> Slow saves</label><button type="button">Conflict next save</button><a href="/?layout=forest">Independent maps</a><a href="/?layout=single">Single map</a><a href="/?layout=empty">Empty map</a><a href="/?nodes=500">500 directions</a><span>No real Memory data is used.</span>';
 tools.querySelector('input')!.addEventListener('change', (event) => { slow = (event.target as HTMLInputElement).checked; });
 tools.querySelector('button')!.addEventListener('click', () => { failNext = true; });
 document.body.append(tools);
+const run = document.createElement('button');
+run.type = 'button'; run.textContent = 'Run interaction checks';
+tools.append(run);
+const results = document.createElement('pre');
+results.setAttribute('aria-label', 'Interaction check results');
+results.style.cssText = 'white-space:pre-wrap;padding:12px;font:12px/1.6 system-ui;';
+results.hidden = true;
+document.body.append(results);
+run.addEventListener('click', async () => {
+  run.disabled = true;
+  tools.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input,button').forEach((control) => { control.disabled = true; });
+  results.hidden = false; results.textContent = 'Running disposable browser checks…\n';
+  controller.destroy();
+  const checked = await runBrowserChecks(host, (line) => { results.textContent += line + '\n'; });
+  if (checked) controller = checked;
+  run.disabled = false;
+});

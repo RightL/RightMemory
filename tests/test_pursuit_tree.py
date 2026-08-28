@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from rightmemory.graph import build_graph_manifest
-from rightmemory.pursuit_tree import PursuitOperationError, apply_operation, load_pursuit_tree
+from rightmemory.pursuit_tree import PursuitOperationError, apply_operation, load_pursuit_tree, plain_title
 from rightmemory.tools import MemoryTools
 
 
@@ -77,6 +77,50 @@ class PursuitTreeTests(unittest.TestCase):
         self.apply(type="rename", id=second.selected_id, title="English now")
         self.assertIn(second.selected_id, load_pursuit_tree(self.root).items)
         self.assertEqual(load_pursuit_tree(self.root).root_ids, (first.selected_id, second.selected_id, third.selected_id))
+
+    def test_formatted_titles_create_ids_from_visible_text(self):
+        for title, expected in (
+            ("**Important Direction**", "important-direction"),
+            ("<u>AI</u>", "ai"),
+            ("~~Earlier Approach~~", "earlier-approach"),
+            ("**<u>~~AI direction~~</u>**", "ai-direction"),
+            ("A ~~deprecated~~ branch", "a-deprecated-branch"),
+        ):
+            with self.subTest(title=title):
+                edit = self.apply(type="create", title=title)
+                self.assertEqual(edit.selected_id, expected)
+                self.assertEqual(load_pursuit_tree(self.root).items[expected].title, title)
+
+    def test_formatting_preserves_ids_focus_edges_backings_and_unrelated_bytes(self):
+        source = "# Pursuits\r\n\r\n## Focus\r\n\r\n- `parent`\r\n\r\n##   Parent  {F#parent} -> [doc:entry]\r\n\r\nBody  spaces.  \r\n\r\n## Other {#other}\r\n"
+        self.write("PURSUITS.md", source)
+        self.write("PURSUIT_parent.md", "# Child {#child}\n\nUnchanged body.\n")
+        before = self.files()
+        for title in ("**<u>~~Parent~~</u>**", "Parent"):
+            edit = self.apply(type="rename", id="parent", title=title)
+            self.assertEqual(edit.selected_id, "parent")
+            expected = dict(before)
+            expected["PURSUITS.md"] = source.replace("Parent  {F#", title + "  {F#").encode()
+            self.assertEqual(self.files(), expected)
+        self.assertEqual(self.apply(type="rename", id="parent", title="Parent").changed_paths, ())
+
+    def test_visible_empty_titles_fail_without_changes_but_old_roots_remain_readable(self):
+        self.write("PURSUITS.md", "# Pursuits\n\n## **** {#old}\n")
+        self.assertEqual(load_pursuit_tree(self.root).items["old"].title, "****")
+        before = self.files()
+        for title in ("****", "~~~~", "<u></u>", "**<u>~~ ~~</u>**"):
+            for kind in ("create", "rename"):
+                with self.subTest(title=title, kind=kind), self.assertRaisesRegex(PursuitOperationError, "visible text"):
+                    apply_operation(self.root, {"type": kind, "id": "old", "title": title})
+                self.assertEqual(self.files(), before)
+
+    def test_plain_title_preserves_unmatched_markup_and_unsupported_html(self):
+        for title in ("**A ~~B** C~~", "~~unfinished", "<u>unfinished", "</u>",
+                      '<u onclick=alert(1)>text</u>', '<img src=x onerror=alert(1)>'):
+            self.assertEqual(plain_title(title), title)
+        self.assertEqual(plain_title("~~A ~~old~~ branch~~"), "A old branch")
+        self.assertEqual(plain_title("~~one~~ and ~~two~~"), "one and two")
+        self.assertEqual(plain_title("<u>" * 3000 + "Text" + "</u>" * 3000), "Text")
 
     def test_new_id_avoids_orphan_backing_and_reserved_filename(self):
         self.write("PURSUIT_orphan.md", "Unrelated existing file.\n")
