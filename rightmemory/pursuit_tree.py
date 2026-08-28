@@ -578,6 +578,10 @@ def _apply(editor: _Editor, operation: Mapping[str, object]) -> tuple[str | None
                                f"- `{entry.id}`" + document.newline, [], document, focus)
             last = max((i for i, part in enumerate(focus.parts) if isinstance(part, _Entry) and part.kind == "focus"), default=-1)
             if last < 0:
+                # Older starters used this sentence for an empty Focus block.
+                # Remove only that entire placeholder, never user-authored notes.
+                if all(isinstance(part, str) for part in focus.parts) and "".join(focus.parts).strip() == "No Pursuit is focused yet.":
+                    focus.parts = [document.newline]
                 if not _render(focus).endswith(document.newline):
                     focus.parts.append(document.newline)
                 focus.parts.append(reference)

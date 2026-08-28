@@ -32,6 +32,31 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      - name: Set up Node on Linux
+        if: runner.os == 'Linux'
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: rightmemory/web/frontend/package-lock.json
+
+      - name: Check frontend
+        if: runner.os == 'Linux'
+        working-directory: rightmemory/web/frontend
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+
+      - name: Verify committed frontend bundles
+        if: runner.os == 'Linux'
+        run: |
+          git diff --exit-code -- \
+            rightmemory/web/static/pursuit-map.js \
+            rightmemory/web/static/pursuit-map.css \
+            rightmemory/web/static/pursuit-map.LICENSE.txt
+
       - name: Install ripgrep on Linux
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ripgrep

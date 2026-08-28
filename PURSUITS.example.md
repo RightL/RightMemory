@@ -6,8 +6,6 @@
 
 ## Focus
 
-No Pursuit is focused yet.
-
 ## Example Application {#sample-pursuit-application}
 
 Work starts from the application's repository and its current design document.
