@@ -23,7 +23,10 @@ Long titles wrap within their nodes. Titles support bold (`**Important**`), unde
 | Select a node | Click its title. |
 | Rename | Double-click the title or press `F2`; edit in place. |
 | Create a sibling | Press `Enter` and type the title. |
+| Insert a sibling before | Press `Shift+Enter` and type the title. |
+| Reorder siblings | Press `Alt+ArrowUp` or `Alt+ArrowDown`; this also works for top-level directions. |
 | Create a child | Press `Tab` and type the title. |
+| Bold, underline, or strike a topic | Use **B**, **U**, or **S** beside the selected node, or `Ctrl/Cmd+B`, `Ctrl/Cmd+U`, or `Ctrl/Cmd+Shift+X`. |
 | Promote a branch | Press `Shift+Tab`. |
 | Move or reorder a branch | Drag it to the indicated insertion position, including across independent maps. |
 | Make a branch top-level | Drop it on empty canvas space. |
@@ -33,12 +36,16 @@ Long titles wrap within their nodes. Titles support bold (`**Important**`), unde
 | Search titles and notes | Press `Ctrl/Cmd+F`; `Enter` and `Shift+Enter` move through results. |
 | Fit the map | Use Fit or `Ctrl/Cmd+0`. |
 | Undo or redo | Use `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z`, or `Ctrl/Cmd+Y` for redo. |
-| Edit a note | Open its note control, press `N`, or press `Shift+Enter`. |
+| Edit a note | Open its note control or press `N`. |
 | Mark current attention | Toggle its Focus marker or press `F`. |
 
 New nodes receive stable ids automatically. Renaming or moving a node preserves its id. Physical files, heading depth, and graph syntax stay out of the normal editing controls.
 
-Toolbar controls provide the same editing actions. **More** includes top-level creation and the read-only relation summary. An empty map offers an **Add a direction** button. Drag empty canvas space or use the wheel/trackpad to pan; use the zoom buttons or `Ctrl/Cmd` with the wheel to zoom. Touch pans even when it starts on a label; two fingers pinch to zoom. Touch gestures do not move directions; structural dragging uses a mouse or pen. Fit includes every independent map.
+The selected node has a nearby toolbar for whole-topic formatting, Note, Focus, and **More**. Formatting buttons show the marks that wrap the entire title; a mark on part of a manually authored title does not activate the whole-topic button. Applying a mark preserves partial formatting inside the title. Finish raw title editing before using formatting shortcuts: they are suppressed while the title editor is open so the browser cannot insert rich-text HTML into it.
+
+Right-click a node or choose its **More** button for structural actions, formatting, notes, Focus, folding, promotion, and deletion. Right-click empty canvas space for top-level creation or Fit. Menus support arrow keys and close with Escape or an outside click. The fixed toolbar retains broad map operations; its **More** also includes the read-only relation summary. An empty map offers an **Add a direction** button.
+
+Drag empty canvas space or use the wheel/trackpad to pan; use the zoom buttons or `Ctrl/Cmd` with the wheel to zoom. Dragging a branch near a canvas edge pans the view; hovering over the middle of a collapsed destination for about two-thirds of a second expands it. Hover expansion changes only the browser view and creates no Git commit. Escape cancels a drag. Touch pans even when it starts on a label; two fingers pinch to zoom. Touch gestures do not move directions; structural dragging uses a mouse or pen. Fit includes every independent map.
 
 The note editor holds raw Markdown, not a set of generated task fields. Save with its button or `Ctrl/Cmd+S`. Closing the panel also saves; a failed save leaves it open with the text intact. Keep stable context near the direction it explains, or in a shared ancestor when it applies to a whole branch. Detailed progress, commands, test output, and experiment history belong in project artifacts.
 
@@ -125,3 +132,5 @@ python -m compileall -q rightmemory tests
 ```
 
 Use disposable roots for browser and destructive transaction checks. Agent-facing rules, prompts, and skill wording are reviewed directly rather than asserted by tests. `.xmind` interchange, typed-edge editing controls, task registries, task execution, and task reconciliation are outside this map's scope.
+
+For visible browser checks, run `npm run dev` from the frontend directory and open the printed loopback address. **Run interaction checks** exercises the bundled UI with disposable in-memory data, including formatting payloads and history, menus, keyboard operations, hover expansion, auto-pan cancellation, HTML escaping, read-only controls, and a 500-direction fixture. The synthetic pointer checks replace only pointer-capture ownership; check a real mouse/pen drag as well. No real Memory root is used.
