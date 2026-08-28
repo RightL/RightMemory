@@ -2,12 +2,12 @@ import MindElixir, { type MindElixirData, type Topic } from 'mind-elixir';
 import 'mind-elixir/style.css';
 import { assertMove, dropOperation, indexTree, type Operation, type Snapshot } from './tree.ts';
 import { forestData, palette, stackMaps, titleMarkup, titleText } from './canvas-data.ts';
-import { CanvasGestures, type PointerSample } from './gestures.ts';
+import { CanvasGestures, edgePanVelocity, type PointerSample } from './gestures.ts';
 import { type ViewState } from './view-state.ts';
 
 interface Callbacks {
   select(id: string): void;
-  collapse(id: string, collapsed: boolean): void;
+  collapse(id: string, collapsed: boolean, preserveDrag?: boolean): void;
   move(operation: Operation): void;
   editStart(id: string, title: string): void;
   editInput(text: string): void;
@@ -15,6 +15,9 @@ interface Callbacks {
   marker(id: string, kind: 'note' | 'focus' | 'relations'): void;
   viewport(viewport: NonNullable<ViewState['viewport']>): void;
   error(message: string): void;
+  geometry(rect: DOMRect | null): void;
+  dismissOverlays(): void;
+  contextMenu(id: string | null, x: number, y: number): void;
 }
 
 interface RootMap { id: string; host: HTMLDivElement; mind: MindElixir; x: number; y: number; width: number; height: number; rootX: number }
@@ -39,6 +42,13 @@ export class MapRenderer {
   private drop: Operation | null = null;
   private dropError: string | null = null;
   private ghost: HTMLDivElement | null = null;
+  private moving = false;
+  private wheelTimer: ReturnType<typeof setTimeout> | undefined;
+  private dragPointer: { id: string; x: number; y: number } | null = null;
+  private panFrame: number | null = null;
+  private panTime: number | null = null;
+  private hoverId: string | null = null;
+  private hoverTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private host: HTMLElement, snapshot: Snapshot, view: ViewState, private callbacks: Callbacks) {
     this.snapshot = snapshot;
@@ -74,16 +84,29 @@ export class MapRenderer {
     host.addEventListener('pointerup', (event) => this.pointerUp(event), events);
     host.addEventListener('pointercancel', () => this.cancelGesture(), events);
     host.addEventListener('lostpointercapture', (event) => {
-      if (this.captures.has(event.pointerId)) this.cancelGesture();
+      if (this.captures.get(event.pointerId) === event.target) this.cancelGesture();
     }, events);
     window.addEventListener('blur', () => this.cancelGesture(), events);
     document.addEventListener('visibilitychange', () => { if (document.hidden) this.cancelGesture(); }, events);
     host.addEventListener('contextmenu', (event) => {
-      if (!(event.target as HTMLElement).closest('#input-box')) event.preventDefault();
+      const target = event.target as HTMLElement;
+      if (target.closest('input, textarea, [contenteditable]')) return;
+      event.preventDefault();
+      this.cancelGesture();
+      const id = target.closest<Topic>('me-tpc')?.nodeObj.id ?? null;
+      if (id) { this.select(id); this.callbacks.select(id); }
+      this.callbacks.contextMenu(id, event.clientX, event.clientY);
     }, events);
     host.addEventListener('wheel', (event) => {
       if ((event.target as HTMLElement).closest('#input-box')) return;
       event.preventDefault();
+      this.beginViewMotion();
+      clearTimeout(this.wheelTimer);
+      this.wheelTimer = setTimeout(() => {
+        this.wheelTimer = undefined;
+        if (!this.gestures.active) this.moving = false;
+        this.notifyGeometry();
+      }, 160);
       const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? host.clientHeight : 1;
       if (event.ctrlKey || event.metaKey) this.setScale(this.viewport.scale * Math.exp(-event.deltaY * factor * 0.002), event.clientX, event.clientY);
       else {
@@ -92,12 +115,25 @@ export class MapRenderer {
         this.applyViewport();
       }
     }, { ...events, passive: false });
-    this.resize = new ResizeObserver(() => { if (this.needsFit) this.fit(); });
+    this.resize = new ResizeObserver(() => { if (this.needsFit) this.fit(); else this.notifyGeometry(); });
     this.resize.observe(host);
     this.render(snapshot, view);
   }
 
   get editing(): boolean { return this.editingId !== null; }
+
+  selectedTopicRect(): DOMRect | null {
+    if (this.editing || this.moving) return null;
+    return this.topic(this.view.selected)?.getBoundingClientRect() ?? null;
+  }
+
+  private notifyGeometry(): void { this.callbacks.geometry(this.selectedTopicRect()); }
+
+  private beginViewMotion(): void {
+    this.moving = true;
+    this.callbacks.dismissOverlays();
+    this.notifyGeometry();
+  }
 
   private createMap(data: MindElixirData): RootMap {
     const host = document.createElement('div');
@@ -147,11 +183,11 @@ export class MapRenderer {
     for (const topic of this.host.querySelectorAll<Topic>('me-tpc')) if (topic.nodeObj.id === id) return topic;
   }
 
-  render(snapshot: Snapshot, view: ViewState): void {
+  render(snapshot: Snapshot, view: ViewState, preserveDrag = false): void {
     this.snapshot = snapshot;
     this.view = view;
     if (this.editing) { this.renderDeferred = true; return; }
-    this.cancelGesture();
+    if (!preserveDrag) this.cancelGesture();
     const anchor = this.topic(view.selected)?.getBoundingClientRect();
     const roots = new Set(snapshot.root_ids);
     for (const [id, map] of this.maps) {
@@ -245,16 +281,27 @@ export class MapRenderer {
   }
 
   select(id: string | null, center = false): void {
+    this.view.selected = id;
     this.host.querySelectorAll('[aria-selected="true"], me-tpc.selected').forEach((entry) => {
       entry.setAttribute('aria-selected', 'false'); entry.classList.remove('selected');
     });
     const topic = this.topic(id);
-    if (!topic) { this.host.removeAttribute('aria-activedescendant'); return; }
-    this.view.selected = id;
+    if (!topic) { this.host.removeAttribute('aria-activedescendant'); this.notifyGeometry(); return; }
     topic.classList.add('selected');
     topic.setAttribute('aria-selected', 'true');
     this.host.setAttribute('aria-activedescendant', topic.id);
     if (center) this.centerReadableNode(topic);
+    this.notifyGeometry();
+  }
+
+  ensureVisible(id: string): void {
+    const topic = this.topic(id);
+    if (!topic) return;
+    const node = topic.getBoundingClientRect();
+    const canvas = this.host.getBoundingClientRect();
+    if (node.left < canvas.left + 12 || node.right > canvas.right - 12 || node.top < canvas.top + 12 || node.bottom > canvas.bottom - 12) {
+      this.centerReadableNode(topic);
+    }
   }
 
   private centerReadableNode(topic: Topic): void {
@@ -280,6 +327,8 @@ export class MapRenderer {
     const editor = this.host.querySelector<HTMLElement>('#input-box');
     if (!editor) return;
     this.editingId = id;
+    this.callbacks.dismissOverlays();
+    this.notifyGeometry();
     // Mind Elixir edits nodeObj.topic, which retains the original Markdown.
     if (this.editText !== undefined) editor.textContent = this.editText;
     this.editText = undefined;
@@ -300,6 +349,7 @@ export class MapRenderer {
         this.editingId = null;
         this.callbacks.editEnd(id, text, canceled);
         if (this.renderDeferred) { this.renderDeferred = false; this.render(this.snapshot, this.view); }
+        this.notifyGeometry();
       });
     }, { once: true });
     queueMicrotask(() => {
@@ -323,6 +373,7 @@ export class MapRenderer {
     this.focus();
     if (event.pointerType !== 'touch' && id && !this.canEdit(id)) return;
     if (!this.gestures.start(this.pointerSample(event), id, this.viewport)) return;
+    if (event.pointerType === 'touch') this.beginViewMotion();
     // Capturing the original topic retains click/double-click targeting while
     // still receiving a release outside the label or canvas.
     const capture = topic ?? this.host;
@@ -336,6 +387,7 @@ export class MapRenderer {
     if (motion.kind === 'idle') return;
     if (motion.kind === 'cancel') { this.cancelGesture(); return; }
     event.preventDefault();
+    this.beginViewMotion();
     if (motion.kind === 'view') {
       this.host.classList.add('pm-panning');
       this.viewport = motion.viewport;
@@ -343,34 +395,92 @@ export class MapRenderer {
       return;
     }
     const id = motion.id;
+    this.dragPointer = { id, x: event.clientX, y: event.clientY };
+    this.updateDrop();
+    this.updateAutoPan();
+  }
+
+  private updateDrop(): void {
+    if (!this.dragPointer) return;
+    const { id, x, y } = this.dragPointer;
     if (!this.ghost) { this.ghost = document.createElement('div'); this.ghost.className = 'pm-drag-ghost'; this.host.append(this.ghost); }
     const canvas = this.host.getBoundingClientRect();
-    this.ghost.style.left = `${event.clientX - canvas.left + 16}px`;
-    this.ghost.style.top = `${event.clientY - canvas.top + 16}px`;
-    this.ghost.textContent = titleText(indexTree(this.snapshot).get(id)?.title ?? 'Direction');
+    this.ghost.style.left = `${x - canvas.left + 16}px`;
+    this.ghost.style.top = `${y - canvas.top + 16}px`;
+    let label = titleText(indexTree(this.snapshot).get(id)?.title ?? 'Direction');
     this.clearDrop();
-    if (event.clientX < canvas.left || event.clientX > canvas.right || event.clientY < canvas.top || event.clientY > canvas.bottom) return;
-    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<Topic>('me-tpc');
+    if (x < canvas.left || x > canvas.right || y < canvas.top || y > canvas.bottom) {
+      this.updateHover(null); this.ghost.textContent = label; return;
+    }
+    const target = document.elementFromPoint(x, y)?.closest<Topic>('me-tpc');
+    let hover: string | null = null;
     try {
       if (target && this.host.contains(target)) {
         const rect = target.getBoundingClientRect();
-        const fraction = (event.clientY - rect.top) / rect.height;
+        const fraction = (y - rect.top) / rect.height;
         const position = fraction < 0.25 ? 'before' : fraction > 0.75 ? 'after' : 'in';
         this.drop = dropOperation(this.snapshot, id, target.nodeObj.id, position);
         target.classList.add(`pm-drop-${position}`);
+        if (position === 'in' && this.view.collapsed.includes(target.nodeObj.id)) hover = target.nodeObj.id;
       } else {
-        const worldY = (event.clientY - canvas.top - this.viewport.y) / this.viewport.scale;
+        const worldY = (y - canvas.top - this.viewport.y) / this.viewport.scale;
         const roots = this.snapshot.root_ids.filter((root) => root !== id);
         const after = roots.filter((id) => { const map = this.maps.get(id)!; return map.y + map.height / 2 < worldY; }).at(-1) ?? null;
         assertMove(this.snapshot, id, null, after);
         this.drop = { type: 'move', id, parent_id: null, after_id: after };
-        this.ghost.textContent += ' · Top level';
+        label += ' · Top level';
       }
-    } catch (error) { this.dropError = (error as Error).message; this.ghost.textContent += ' · Cannot move here'; }
+    } catch (error) { this.dropError = (error as Error).message; label += ' · Cannot move here'; }
+    if (this.ghost.textContent !== label) this.ghost.textContent = label;
+    this.updateHover(hover);
+  }
+
+  private updateAutoPan(): void {
+    const canvas = this.host.getBoundingClientRect();
+    const pointer = this.dragPointer;
+    const velocity = pointer ? edgePanVelocity(pointer.x - canvas.left, pointer.y - canvas.top, canvas.width, canvas.height) : { x: 0, y: 0 };
+    if (!velocity.x && !velocity.y) {
+      if (this.panFrame !== null) cancelAnimationFrame(this.panFrame);
+      this.panFrame = null; this.panTime = null; return;
+    }
+    if (this.panFrame !== null) return;
+    this.panFrame = requestAnimationFrame((time) => {
+      this.panFrame = null;
+      if (!this.dragPointer) return;
+      const elapsed = this.panTime === null ? 1 : Math.min(2, (time - this.panTime) / (1000 / 60));
+      this.panTime = time;
+      this.viewport.x += velocity.x * elapsed;
+      this.viewport.y += velocity.y * elapsed;
+      this.applyViewport();
+      this.updateDrop();
+      this.updateAutoPan();
+    });
+  }
+
+  private updateHover(id: string | null): void {
+    if (this.hoverId === id) return;
+    clearTimeout(this.hoverTimer);
+    this.hoverId = id;
+    if (!id) return;
+    this.hoverTimer = setTimeout(() => {
+      if (!this.dragPointer || this.hoverId !== id) return;
+      this.hoverId = null;
+      // Layout replaces topics; transfer capture to the stable shared canvas first.
+      for (const [pointer, capture] of this.captures) {
+        if (capture === this.host) continue;
+        this.captures.delete(pointer);
+        if (capture.hasPointerCapture(pointer)) capture.releasePointerCapture(pointer);
+        this.host.setPointerCapture(pointer);
+        this.captures.set(pointer, this.host);
+      }
+      this.callbacks.collapse(id, false, true);
+      this.updateDrop();
+    }, 625);
   }
 
   private pointerUp(event: PointerEvent): void {
     if (!this.gestures.has(event.pointerId)) return;
+    if (this.dragPointer) { this.dragPointer.x = event.clientX; this.dragPointer.y = event.clientY; this.updateDrop(); }
     const moved = this.gestures.end(event.pointerId, this.viewport);
     const operation = moved ? this.drop : null;
     const error = moved ? this.dropError : null;
@@ -398,11 +508,16 @@ export class MapRenderer {
   }
 
   cancelGesture(): void {
+    if (this.panFrame !== null) cancelAnimationFrame(this.panFrame);
+    this.panFrame = null; this.panTime = null; this.dragPointer = null;
+    this.updateHover(null);
     this.gestures.cancel();
     for (const pointer of this.captures.keys()) this.releasePointer(pointer);
     this.clearDrop();
     this.ghost?.remove(); this.ghost = null;
     this.host.classList.remove('pm-panning');
+    this.moving = !!this.wheelTimer;
+    this.notifyGeometry();
   }
 
   highlight(ids: Set<string>): void {
@@ -436,12 +551,14 @@ export class MapRenderer {
   private applyViewport(): void {
     const { x, y, scale } = this.viewport;
     this.forest.style.transform = `translate3d(${x}px, ${y}px, 0) scale(${scale})`;
+    this.notifyGeometry();
     clearTimeout(this.viewportTimer);
     this.viewportTimer = setTimeout(() => this.callbacks.viewport({ ...this.viewport }), 150);
   }
 
   destroy(): void {
     clearTimeout(this.viewportTimer);
+    clearTimeout(this.wheelTimer);
     this.cancelGesture();
     this.abort.abort();
     this.resize.disconnect();

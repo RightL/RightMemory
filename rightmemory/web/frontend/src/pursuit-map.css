@@ -74,6 +74,26 @@
 .pm-help strong { display: block; margin-bottom: 7px; }
 .pm-help p { margin: 8px 0; color: var(--pm-muted); font-size: 12px; line-height: 1.6; }
 .pm-stage { flex: 1; position: relative; min-height: 0; overflow: hidden; }
+.pm-topic-toolbar, .pm-context-menu {
+  position: absolute;
+  box-sizing: border-box;
+  max-width: calc(100% - 12px);
+  padding: 5px;
+  border: 1px solid var(--pm-border);
+  border-radius: 8px;
+  background: #fffffff5;
+  box-shadow: 0 4px 18px #223d241c;
+  z-index: 30;
+}
+.pm-topic-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+.pm-topic-toolbar [aria-pressed='true'], .pm-context-menu [aria-checked='true'] { color: var(--pm-accent); background: #e6f1ed; }
+.pm-topic-toolbar u { text-underline-offset: .14em; }
+.pm-context-menu { display: grid; min-width: 215px; overflow-y: auto; z-index: 45; }
+.pm-context-menu button { text-align: left; }
+.pm-context-menu hr { width: calc(100% - 12px); border: 0; border-top: 1px solid var(--pm-border); margin: 4px 6px; }
+.pm-context-menu .pm-danger { color: #a64f3e; }
+.pm-context-menu button[role='menuitemcheckbox']::after { content: ''; float: right; width: 20px; text-align: center; }
+.pm-context-menu button[aria-checked='true']::after { content: '✓'; }
 .pm-canvas { position: relative; width: 100%; height: 100%; overflow: hidden; touch-action: none; user-select: none; outline: none; }
 .pm-forest { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
 .pm-root-map { position: absolute !important; }
