@@ -12,6 +12,8 @@ from rightmemory.config import MEMORY_ROOT_ENV
 from rightmemory.web.process import (
     MANAGED_WEB_ENV,
     WebServiceStatus,
+    _terminate_owned_web_process,
+    _wait_for_exit,
     _wait_for_web_registration,
     _wait_for_web_ready,
     register_web_process,
@@ -269,6 +271,33 @@ class PursuitCliTests(unittest.TestCase):
 
 
 class WebStartupTests(unittest.TestCase):
+    def test_exited_process_identity_does_not_keep_shutdown_waiting(self):
+        with (
+            patch("rightmemory.web.process.process_exists", return_value=False),
+            patch("rightmemory.web.process.process_identity", return_value="retained-identity"),
+            patch("rightmemory.web.process.os.kill") as kill,
+        ):
+            self.assertTrue(_wait_for_exit(12345, 0, identity="retained-identity"))
+            _terminate_owned_web_process(12345, "retained-identity")
+        kill.assert_not_called()
+
+    def test_owned_process_exit_during_signal_is_not_a_shutdown_failure(self):
+        with (
+            patch("rightmemory.web.process.process_exists", side_effect=[True, False]),
+            patch("rightmemory.web.process.process_identity", return_value="owned-identity"),
+            patch("rightmemory.web.process.os.kill", side_effect=PermissionError("process exited")),
+        ):
+            _terminate_owned_web_process(12345, "owned-identity")
+
+    def test_owned_live_process_permission_error_is_not_hidden(self):
+        with (
+            patch("rightmemory.web.process.process_exists", return_value=True),
+            patch("rightmemory.web.process.process_identity", return_value="owned-identity"),
+            patch("rightmemory.web.process.os.kill", side_effect=PermissionError("still running")),
+            self.assertRaises(PermissionError),
+        ):
+            _terminate_owned_web_process(12345, "owned-identity")
+
     def test_registration_accepts_a_launch_bound_redirector_child(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
