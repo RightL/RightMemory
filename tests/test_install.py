@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from rightmemory.update_queue import (
     UpdateCandidate,
@@ -79,6 +80,21 @@ description: "Use when the user's request may depend on long-term context from e
 
 @unittest.skipIf(os.name == "nt", "install.sh tests exercise the POSIX installer")
 class InstallScriptTests(unittest.TestCase):
+    def setUp(self):
+        # Fixture commits must not leave detached maintenance changing .git
+        # while preservation tests take complete byte-for-byte snapshots.
+        config_count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+        self.enterContext(
+            patch.dict(
+                os.environ,
+                {
+                    "GIT_CONFIG_COUNT": str(config_count + 1),
+                    f"GIT_CONFIG_KEY_{config_count}": "maintenance.auto",
+                    f"GIT_CONFIG_VALUE_{config_count}": "false",
+                },
+            )
+        )
+
     def _env_with_fake_uv(self, root: Path) -> dict[str, str]:
         fake_bin = root / "bin"
         fake_bin.mkdir(exist_ok=True)
