@@ -14,7 +14,9 @@ Sign in with the Web Studio operator token and check the active root before edit
 
 ## Edit On The Canvas
 
-Branches extend from left to right. A single top-level direction is the visual root; several top-level directions appear under a virtual “Pursuits” root that is not stored as a new map item.
+Each top-level direction is the root of its own map on a shared canvas. Independent maps appear in stored order, with space between them and no shared parent node. A map with several first-level branches alternates them left and right, starting on the left; a single branch extends right. Descendants continue on their branch's side.
+
+Long titles wrap within their nodes. Markdown strikethrough such as `~~Earlier approach~~` is shown as crossed-out text; renaming opens the original Markdown. This is title formatting, not a task status, and HTML in titles remains literal text.
 
 | Action | Interaction |
 | --- | --- |
@@ -23,10 +25,11 @@ Branches extend from left to right. A single top-level direction is the visual r
 | Create a sibling | Press `Enter` and type the title. |
 | Create a child | Press `Tab` and type the title. |
 | Promote a branch | Press `Shift+Tab`. |
-| Move or reorder a branch | Drag it to the indicated insertion position. |
+| Move or reorder a branch | Drag it to the indicated insertion position, including across independent maps. |
+| Make a branch top-level | Drop it on empty canvas space. |
 | Delete a branch | Press `Delete` or `Backspace`; undo is available after deletion. |
 | Fold a branch | Use its small branch control or press `Space`. |
-| Navigate the tree | Use arrow keys; `Home` and `End` jump through visible nodes. |
+| Navigate the tree | Left/right follow the branch's side; up/down traverse visible nodes across maps. `Home` selects the first root; `End` selects the last visible node. |
 | Search titles and notes | Press `Ctrl/Cmd+F`; `Enter` and `Shift+Enter` move through results. |
 | Fit the map | Use Fit or `Ctrl/Cmd+0`. |
 | Undo or redo | Use `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z`, or `Ctrl/Cmd+Y` for redo. |
@@ -35,7 +38,7 @@ Branches extend from left to right. A single top-level direction is the visual r
 
 New nodes receive stable ids automatically. Renaming or moving a node preserves its id. Physical files, heading depth, and graph syntax stay out of the normal editing controls.
 
-Toolbar controls provide the same editing actions. **More** includes top-level creation and the read-only relation summary. Right-drag empty canvas space or use the wheel/trackpad to pan; use the zoom buttons or `Ctrl/Cmd` with the wheel to zoom.
+Toolbar controls provide the same editing actions. **More** includes top-level creation and the read-only relation summary. An empty map offers an **Add a direction** button. Drag empty canvas space or use the wheel/trackpad to pan; use the zoom buttons or `Ctrl/Cmd` with the wheel to zoom. Touch pans even when it starts on a label; two fingers pinch to zoom. Touch gestures do not move directions; structural dragging uses a mouse or pen. Fit includes every independent map.
 
 The note editor holds raw Markdown, not a set of generated task fields. Save with its button or `Ctrl/Cmd+S`. Closing the panel also saves; a failed save leaves it open with the text intact. Keep stable context near the direction it explains, or in a shared ancestor when it applies to a whole branch. Detailed progress, commands, test output, and experiment history belong in project artifacts.
 

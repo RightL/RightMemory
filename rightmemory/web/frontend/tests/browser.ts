@@ -1,11 +1,14 @@
 import { mountMap } from '../src/pursuit-map.ts';
 import { ApiError, type Transport } from '../src/queue.ts';
 import { applyOperation, type MutationResult, type Snapshot } from '../src/tree.ts';
-import { fixture } from './fixtures.ts';
+import { fixture, forestFixture } from './fixtures.ts';
 
 // Disposable browser fixture. It never contacts a Memory root or persists semantic data.
-const requested = Number(new URL(location.href).searchParams.get('nodes') ?? 22);
-let current = fixture(Math.min(1000, Math.max(22, requested)));
+const parameters = new URL(location.href).searchParams;
+const requested = Number(parameters.get('nodes') ?? 22);
+const layout = parameters.get('layout') ?? 'forest';
+let current = (layout === 'single' ? fixture : forestFixture)(Math.min(1000, Math.max(22, requested)));
+if (layout === 'empty') current = { ...current, root_key: 'browser-empty-fixture', items: [], root_ids: [], focus_ids: [] };
 let serial = 0;
 let failNext = false;
 let slow = false;
@@ -43,7 +46,7 @@ host.style.height = 'calc(100vh - 40px)';
 await mountMap(host, transport);
 const tools = document.createElement('div');
 tools.style.cssText = 'height:40px;padding:6px 12px;box-sizing:border-box;display:flex;gap:14px;align-items:center;background:#edf0e9;font:12px system-ui;';
-tools.innerHTML = '<strong>Disposable fixture</strong><label><input type="checkbox"> Slow saves</label><button type="button">Conflict next save</button><a href="/?nodes=500">500 directions</a><span>No real Memory data is used.</span>';
+tools.innerHTML = '<strong>Disposable fixture</strong><label><input type="checkbox"> Slow saves</label><button type="button">Conflict next save</button><a href="/?layout=forest">Independent maps</a><a href="/?layout=single">Single map</a><a href="/?layout=empty">Empty map</a><a href="/?nodes=500">500 directions</a><span>No real Memory data is used.</span>';
 tools.querySelector('input')!.addEventListener('change', (event) => { slow = (event.target as HTMLInputElement).checked; });
 tools.querySelector('button')!.addEventListener('click', () => { failNext = true; });
 document.body.append(tools);

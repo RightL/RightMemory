@@ -1,33 +1,9 @@
-import MindElixir, { type MindElixirData, type NodeObj, type Topic } from 'mind-elixir';
+import MindElixir, { type MindElixirData, type Topic } from 'mind-elixir';
 import 'mind-elixir/style.css';
-import { assertMove, childrenOf, indexTree, VIRTUAL_ROOT, visualRoot, type Operation, type Snapshot } from './tree.ts';
+import { assertMove, dropOperation, indexTree, type Operation, type Snapshot } from './tree.ts';
+import { forestData, palette, stackMaps, titleMarkup, titleText } from './canvas-data.ts';
+import { CanvasGestures, type PointerSample } from './gestures.ts';
 import { type ViewState } from './view-state.ts';
-
-const palette = ['#d58375', '#c79561', '#79a494', '#9694b9', '#80a7b8', '#b895ae'];
-
-export function canvasData(snapshot: Snapshot, view: ViewState): MindElixirData {
-  const items = indexTree(snapshot);
-  const folded = new Set(view.collapsed);
-  const build = (id: string, depth: number, color: string): NodeObj => {
-    const item = items.get(id)!;
-    return {
-      id, topic: item.title, expanded: !folded.has(id), branchColor: color,
-      style: depth === 0
-        ? { color: '#243633', fontSize: '25px', background: '#ffffff', border: 'none', fontWeight: '650' }
-        : depth === 1
-          ? { color: '#293c37', background: `${color}26`, border: 'none', fontSize: '16px', fontWeight: '550' }
-          : { color: '#35453f', background: depth === 2 ? `${color}14` : 'transparent', border: 'none', fontSize: '14px' },
-      children: depth === 0 && folded.has(id) ? [] : item.child_ids.map((child, childIndex) => build(child, depth + 1, depth === 0 ? palette[childIndex % palette.length] : color)),
-    };
-  };
-  const root = visualRoot(snapshot);
-  return {
-    nodeData: root === VIRTUAL_ROOT
-      ? { id: root, topic: 'Pursuits', children: snapshot.root_ids.map((id, index) => build(id, 1, palette[index % palette.length])) }
-      : build(root, 0, palette[0]),
-    direction: MindElixir.RIGHT,
-  };
-}
 
 interface Callbacks {
   select(id: string): void;
@@ -41,27 +17,98 @@ interface Callbacks {
   error(message: string): void;
 }
 
-/** All library-specific DOM, layout, drag and viewport behavior stays here. */
+interface RootMap { id: string; host: HTMLDivElement; mind: MindElixir; x: number; y: number; width: number; height: number; rootX: number }
+
+/** Mind Elixir lays out each real tree; this adapter owns the shared surface. */
 export class MapRenderer {
-  private mind: MindElixir;
+  private maps = new Map<string, RootMap>();
+  private forest = document.createElement('div');
   private snapshot: Snapshot;
   private view: ViewState;
-  private rendering = false;
+  private viewport: NonNullable<ViewState['viewport']>;
+  private bounds = { width: 0, height: 0 };
+  private needsFit: boolean;
   private editingId: string | null = null;
   private editText: string | undefined;
   private abort = new AbortController();
+  private resize: ResizeObserver;
   private viewportTimer: ReturnType<typeof setTimeout> | undefined;
   private renderDeferred = false;
+  private gestures = new CanvasGestures();
+  private captures = new Map<number, HTMLElement>();
+  private drop: Operation | null = null;
+  private dropError: string | null = null;
+  private ghost: HTMLDivElement | null = null;
 
   constructor(private host: HTMLElement, snapshot: Snapshot, view: ViewState, private callbacks: Callbacks) {
     this.snapshot = snapshot;
     this.view = view;
-    this.mind = new MindElixir({
-      el: host, direction: MindElixir.RIGHT, contextMenu: false, toolBar: false,
-      keypress: false, allowUndo: false, alignment: 'nodes', scaleMin: 0.1, scaleMax: 2,
-      // In Mind Elixir this option also gates pointer handlers; clip the stage with CSS instead.
-      overflowHidden: false,
-      mouseSelectionButton: 0,
+    this.viewport = { ...(view.viewport ?? { x: 0, y: 0, scale: 1 }) };
+    this.needsFit = !view.viewport;
+    this.forest.className = 'pm-forest';
+    host.append(this.forest);
+    host.tabIndex = 0;
+    host.setAttribute('role', 'tree');
+    host.setAttribute('aria-label', 'Pursuit directions. Enter adds a sibling; Tab adds a child.');
+    host.setAttribute('aria-describedby', 'pm-keyboard-hint');
+    const events = { signal: this.abort.signal };
+    host.addEventListener('click', (event) => {
+      const target = (event.target as HTMLElement).closest<HTMLElement>('[data-map-marker], me-epd');
+      if (!target) return;
+      const topic = target.closest('me-tpc') as Topic | null ?? target.parentElement?.querySelector<Topic>('me-tpc');
+      if (!topic) return;
+      event.stopPropagation();
+      const id = topic.nodeObj.id;
+      if (target.dataset.mapMarker === 'collapse' || target.tagName === 'ME-EPD') {
+        this.callbacks.collapse(id, !this.view.collapsed.includes(id));
+        this.focus();
+      } else this.callbacks.marker(id, target.dataset.mapMarker as 'note' | 'focus' | 'relations');
+    }, events);
+    host.addEventListener('dblclick', (event) => {
+      if ((event.target as HTMLElement).closest('[data-map-marker], me-epd, #input-box')) return;
+      const topic = (event.target as HTMLElement).closest<Topic>('me-tpc');
+      if (topic) { event.preventDefault(); void this.beginEdit(topic.nodeObj.id); }
+    }, events);
+    host.addEventListener('pointerdown', (event) => this.pointerDown(event), events);
+    host.addEventListener('pointermove', (event) => this.pointerMove(event), events);
+    host.addEventListener('pointerup', (event) => this.pointerUp(event), events);
+    host.addEventListener('pointercancel', () => this.cancelGesture(), events);
+    host.addEventListener('lostpointercapture', (event) => {
+      if (this.captures.has(event.pointerId)) this.cancelGesture();
+    }, events);
+    window.addEventListener('blur', () => this.cancelGesture(), events);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) this.cancelGesture(); }, events);
+    host.addEventListener('contextmenu', (event) => {
+      if (!(event.target as HTMLElement).closest('#input-box')) event.preventDefault();
+    }, events);
+    host.addEventListener('wheel', (event) => {
+      if ((event.target as HTMLElement).closest('#input-box')) return;
+      event.preventDefault();
+      const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? host.clientHeight : 1;
+      if (event.ctrlKey || event.metaKey) this.setScale(this.viewport.scale * Math.exp(-event.deltaY * factor * 0.002), event.clientX, event.clientY);
+      else {
+        this.viewport.x -= (event.shiftKey ? event.deltaY : event.deltaX) * factor;
+        this.viewport.y -= (event.shiftKey ? 0 : event.deltaY) * factor;
+        this.applyViewport();
+      }
+    }, { ...events, passive: false });
+    this.resize = new ResizeObserver(() => { if (this.needsFit) this.fit(); });
+    this.resize.observe(host);
+    this.render(snapshot, view);
+  }
+
+  get editing(): boolean { return this.editingId !== null; }
+
+  private createMap(data: MindElixirData): RootMap {
+    const host = document.createElement('div');
+    host.className = 'pm-root-map';
+    host.dataset.rootId = data.nodeData.id;
+    this.forest.append(host);
+    const mind = new MindElixir({
+      el: host, direction: data.direction, contextMenu: false, toolBar: false,
+      keypress: false, allowUndo: false, alignment: 'nodes',
+      // Disable per-tree pointer handlers: pan, zoom, and cross-tree drops share one surface.
+      overflowHidden: true, markdown: titleMarkup,
       theme: {
         name: 'Pursuit', type: 'light', palette,
         cssVar: {
@@ -69,187 +116,171 @@ export class MapRenderer {
           '--main-gap-x': '25px', '--main-gap-y': '13px', '--node-gap-x': '18px', '--node-gap-y': '2px',
           '--main-bgcolor': '#f5f6f1', '--main-color': '#35453f', '--main-border': 'none',
           '--root-bgcolor': '#ffffff', '--root-color': '#243633', '--root-border-color': 'transparent',
-          '--root-radius': '7px', '--main-radius': '6px', '--topic-padding': '5px 8px', '--map-padding': '60px',
+          '--root-radius': '7px', '--main-radius': '6px', '--topic-padding': '5px 8px', '--map-padding': '32px',
         },
       },
       before: {
         beginEdit: (topic) => !!topic && this.canEdit(topic.nodeObj.id),
-        moveNodeIn: (from, to) => this.allowDrop(from, to, 'in'),
-        moveNodeBefore: (from, to) => this.allowDrop(from, to, 'before'),
-        moveNodeAfter: (from, to) => this.allowDrop(from, to, 'after'),
-        // Creation and deletion go through the independent reducer, including a real visual root.
+        // The independent reducer and save queue own every structural operation.
+        moveNodeIn: () => false, moveNodeBefore: () => false, moveNodeAfter: () => false,
         addChild: () => false, insertSibling: () => false, insertParent: () => false,
         removeNodes: () => false, copyNode: () => false, copyNodes: () => false,
       },
     });
-    this.mind.bus.addListener('selectNodes', (nodes) => {
-      if (this.rendering || !nodes.length) return;
-      const selected = nodes.at(-1)!;
-      if (nodes.length > 1) this.mind.selectNode(this.mind.findEle(selected.id));
-      this.callbacks.select(selected.id);
-      this.decorate();
-    });
-    this.mind.bus.addListener('expandNode', (node) => {
-      this.callbacks.collapse(node.id, node.expanded === false);
-      this.decorate();
-    });
-    this.mind.bus.addListener('operation', (operation) => {
+    mind.bus.addListener('operation', (operation) => {
       if (operation.name === 'beginEdit') this.attachInlineEditor(operation.obj.id);
-      else if (['moveNodeIn', 'moveNodeBefore', 'moveNodeAfter'].includes(operation.name) && 'objs' in operation) {
-        for (const node of operation.objs) {
-          const parent = node.parent?.id === VIRTUAL_ROOT ? null : node.parent?.id ?? null;
-          const siblings = node.parent?.children ?? [];
-          const after = siblings[siblings.indexOf(node) - 1]?.id ?? null;
-          this.callbacks.move({ type: 'move', id: node.id, parent_id: parent, after_id: after });
-        }
-      }
     });
-    this.mind.bus.addListener('scale', () => this.saveViewport());
-    this.mind.bus.addListener('move', () => this.saveViewport());
-    this.mind.init(canvasData(snapshot, view));
-    this.mind.container.setAttribute('role', 'tree');
-    this.mind.container.setAttribute('aria-label', 'Pursuit directions. Enter adds a sibling; Tab adds a child.');
-    this.mind.container.setAttribute('aria-describedby', 'pm-keyboard-hint');
-    host.addEventListener('click', (event) => {
-      const target = (event.target as HTMLElement).closest<HTMLElement>('[data-map-marker]');
-      if (!target) return;
-      event.stopPropagation();
-      const topic = target.closest('me-tpc') as Topic;
-      if (target.dataset.mapMarker === 'collapse') {
-        this.callbacks.collapse(topic.nodeObj.id, !this.view.collapsed.includes(topic.nodeObj.id));
-        return;
-      }
-      this.callbacks.marker(topic.nodeObj.id, target.dataset.mapMarker as 'note' | 'focus' | 'relations');
-    }, { capture: true, signal: this.abort.signal });
-    host.addEventListener('pointerdown', (event) => {
-      if ((event.target as HTMLElement).closest('[data-map-marker]')) event.stopPropagation();
-    }, { capture: true, signal: this.abort.signal });
-    this.restoreViewport(view.viewport);
-    this.decorate();
-    this.select(view.selected);
+    mind.init(data);
+    mind.container.tabIndex = -1;
+    mind.container.setAttribute('role', 'group');
+    mind.container.setAttribute('aria-labelledby', `pm-node-${data.nodeData.id}`);
+    mind.map.style.transform = 'none';
+    return { id: data.nodeData.id, host, mind, x: 0, y: 0, width: 0, height: 0, rootX: 0 };
   }
-
-  get editing(): boolean { return this.editingId !== null; }
 
   private canEdit(id: string): boolean {
-    return this.snapshot.writable && id !== VIRTUAL_ROOT && !!indexTree(this.snapshot).get(id)?.editable;
+    return this.snapshot.writable && !!indexTree(this.snapshot).get(id)?.editable;
   }
 
-  private allowDrop(from: Topic[], to: Topic, position: 'in' | 'before' | 'after'): boolean {
-    if (from.length !== 1 || !this.snapshot.writable || this.editing) return false;
-    const id = from[0].nodeObj.id;
-    const target = to.nodeObj.id;
-    const items = indexTree(this.snapshot);
-    const parent = position === 'in' ? (target === VIRTUAL_ROOT ? null : target) : items.get(target)?.parent_id ?? null;
-    const siblings = childrenOf(this.snapshot, parent).filter((entry) => entry !== id);
-    const after = position === 'in' ? siblings.at(-1) ?? null : position === 'after' ? target : siblings[siblings.indexOf(target) - 1] ?? null;
-    try { assertMove(this.snapshot, id, parent, after); return true; }
-    catch (error) { this.callbacks.error((error as Error).message); return false; }
+  private topic(id: string | null): Topic | undefined {
+    if (!id) return;
+    for (const topic of this.host.querySelectorAll<Topic>('me-tpc')) if (topic.nodeObj.id === id) return topic;
   }
 
   render(snapshot: Snapshot, view: ViewState): void {
     this.snapshot = snapshot;
     this.view = view;
     if (this.editing) { this.renderDeferred = true; return; }
-    this.rendering = true;
-    const viewport = this.getViewport();
-    this.mind.refresh(canvasData(snapshot, view));
-    this.mind.editable = snapshot.writable;
-    this.restoreViewport(viewport);
+    this.cancelGesture();
+    const anchor = this.topic(view.selected)?.getBoundingClientRect();
+    const roots = new Set(snapshot.root_ids);
+    for (const [id, map] of this.maps) {
+      if (!roots.has(id)) { map.mind.destroy(); map.host.remove(); this.maps.delete(id); }
+    }
+    for (const data of forestData(snapshot, view)) {
+      let map = this.maps.get(data.nodeData.id);
+      if (!map) { map = this.createMap(data); this.maps.set(map.id, map); }
+      else { map.mind.direction = data.direction!; map.mind.refresh(data); }
+      map.mind.editable = snapshot.writable;
+      this.forest.append(map.host);
+    }
     this.decorate();
+    this.layoutMaps();
+    const placed = this.topic(view.selected)?.getBoundingClientRect();
+    if (anchor && placed) {
+      this.viewport.x += anchor.left + anchor.width / 2 - placed.left - placed.width / 2;
+      this.viewport.y += anchor.top + anchor.height / 2 - placed.top - placed.height / 2;
+    }
+    if (this.needsFit) this.fit();
+    else this.applyViewport();
     this.select(view.selected);
-    this.rendering = false;
+  }
+
+  private layoutMaps(): void {
+    const sizes = this.snapshot.root_ids.map((id) => {
+      const map = this.maps.get(id)!;
+      map.mind.linkDiv();
+      const root = map.mind.nodes.querySelector<HTMLElement>('me-root')!;
+      return { id, width: map.mind.nodes.offsetWidth, height: map.mind.nodes.offsetHeight, rootX: root.offsetLeft + root.offsetWidth / 2 };
+    });
+    const layout = stackMaps(sizes);
+    for (const placement of layout.maps) {
+      const map = this.maps.get(placement.id)!;
+      Object.assign(map, placement);
+      map.host.style.left = `${map.x}px`;
+      map.host.style.top = `${map.y}px`;
+      map.host.style.width = `${map.width}px`;
+      map.host.style.height = `${map.height}px`;
+    }
+    this.bounds = { width: layout.width, height: layout.height };
+    this.forest.style.width = `${layout.width}px`;
+    this.forest.style.height = `${layout.height}px`;
+    this.forest.hidden = !layout.maps.length;
   }
 
   private decorate(): void {
     const items = indexTree(this.snapshot);
     for (const topic of this.host.querySelectorAll<Topic>('me-tpc')) {
       const id = topic.nodeObj.id;
-      const item = items.get(id);
+      const item = items.get(id)!;
       topic.setAttribute('role', 'treeitem');
-      topic.setAttribute('aria-label', item?.title ?? 'Pursuits');
+      topic.setAttribute('aria-label', titleText(item.title));
       topic.setAttribute('aria-selected', String(this.view.selected === id));
       topic.id = `pm-node-${id}`;
       topic.tabIndex = -1;
-      topic.classList.toggle('pm-readonly', item?.editable === false);
-      const level = (node: NodeObj): number => node.parent ? 1 + level(node.parent) : 1;
-      topic.setAttribute('aria-level', String(level(topic.nodeObj)));
-      if (item?.child_ids.length) topic.setAttribute('aria-expanded', String(!this.view.collapsed.includes(id)));
+      topic.classList.toggle('pm-readonly', !item.editable);
+      let level = 1;
+      let parent = item.parent_id;
+      while (parent) { level++; parent = items.get(parent)?.parent_id ?? null; }
+      topic.setAttribute('aria-level', String(level));
+      if (item.child_ids.length) topic.setAttribute('aria-expanded', String(!this.view.collapsed.includes(id)));
       topic.querySelectorAll('[data-map-marker]').forEach((marker) => marker.remove());
       const markers: Array<['note' | 'focus' | 'relations', string, string]> = [];
-      if (item?.body) markers.push(['note', '▤', 'Open note']);
-      if (item?.focused) markers.push(['focus', '✦', 'Remove Focus']);
-      if (item?.edges.length) markers.push(['relations', '↗', 'Show related directions']);
+      if (item.body) markers.push(['note', '▤', 'Open note']);
+      if (item.focused) markers.push(['focus', '✦', 'Remove Focus']);
+      if (item.edges.length) markers.push(['relations', '↗', 'Show related directions']);
       for (const [kind, icon, label] of markers) {
         const marker = document.createElement('button');
-        marker.type = 'button';
-        marker.tabIndex = -1;
-        marker.dataset.mapMarker = kind;
-        marker.className = 'pm-node-marker';
-        marker.textContent = icon;
-        marker.title = label;
-        marker.setAttribute('aria-label', `${label}: ${item!.title}`);
+        marker.type = 'button'; marker.tabIndex = -1;
+        marker.dataset.mapMarker = kind; marker.className = 'pm-node-marker';
+        marker.textContent = icon; marker.title = label;
+        marker.setAttribute('aria-label', `${label}: ${titleText(item.title)}`);
         topic.append(marker);
       }
-      if (topic.parentElement?.tagName === 'ME-ROOT' && item?.child_ids.length) {
+      if (!item.parent_id && item.child_ids.length) {
         const fold = document.createElement('button');
         fold.type = 'button'; fold.tabIndex = -1;
         fold.dataset.mapMarker = 'collapse'; fold.className = 'pm-node-marker';
         fold.textContent = this.view.collapsed.includes(id) ? '⊕' : '⊖';
-        fold.setAttribute('aria-label', `${this.view.collapsed.includes(id) ? 'Expand' : 'Collapse'} ${item.title}`);
+        fold.setAttribute('aria-label', `${this.view.collapsed.includes(id) ? 'Expand' : 'Collapse'} ${titleText(item.title)}`);
         topic.append(fold);
       }
       const control = topic.parentElement?.querySelector<HTMLElement>('me-epd');
       if (control) {
         control.setAttribute('role', 'button');
-        control.setAttribute('aria-label', `${this.view.collapsed.includes(id) ? 'Expand' : 'Collapse'} ${item?.title ?? 'branch'}`);
+        control.setAttribute('aria-label', `${this.view.collapsed.includes(id) ? 'Expand' : 'Collapse'} ${titleText(item.title)}`);
         control.setAttribute('aria-expanded', String(!this.view.collapsed.includes(id)));
       }
     }
   }
 
   select(id: string | null, center = false): void {
-    if (!id) return;
-    try {
-      const topic = this.mind.findEle(id);
-      const wasRendering = this.rendering;
-      this.rendering = true;
-      this.mind.selectNode(topic);
-      this.rendering = wasRendering;
-      this.view.selected = id;
-      this.mind.container.setAttribute('aria-activedescendant', topic.id);
-      this.host.querySelectorAll('[aria-selected="true"]').forEach((entry) => entry.setAttribute('aria-selected', 'false'));
-      topic.setAttribute('aria-selected', 'true');
-      if (center) this.centerReadableNode(topic);
-    } catch { /* A collapsed ancestor can hide a previously selected node. */ }
+    this.host.querySelectorAll('[aria-selected="true"], me-tpc.selected').forEach((entry) => {
+      entry.setAttribute('aria-selected', 'false'); entry.classList.remove('selected');
+    });
+    const topic = this.topic(id);
+    if (!topic) { this.host.removeAttribute('aria-activedescendant'); return; }
+    this.view.selected = id;
+    topic.classList.add('selected');
+    topic.setAttribute('aria-selected', 'true');
+    this.host.setAttribute('aria-activedescendant', topic.id);
+    if (center) this.centerReadableNode(topic);
   }
 
   private centerReadableNode(topic: Topic): void {
-    // Fit may use a tiny scale for a large map. A revealed label must be readable,
-    // and repeated search/navigation must not be skipped by the library's smooth-pan guard.
-    this.mind.map.style.transition = 'none';
-    if (this.mind.scaleVal < 1) this.mind.scale(1);
-    const canvas = this.mind.container.getBoundingClientRect();
+    if (this.viewport.scale < 1) this.setScale(1);
+    const canvas = this.host.getBoundingClientRect();
     const node = topic.getBoundingClientRect();
-    this.mind.move(
-      canvas.left + canvas.width / 2 - node.left - node.width / 2,
-      canvas.top + canvas.height / 2 - node.top - node.height / 2,
-      false,
-    );
-    this.saveViewport();
+    this.viewport.x += canvas.left + canvas.width / 2 - node.left - node.width / 2;
+    this.viewport.y += canvas.top + canvas.height / 2 - node.top - node.height / 2;
+    this.applyViewport();
   }
 
   async beginEdit(id: string, text?: string): Promise<void> {
     if (this.editing || !this.canEdit(id)) return;
+    const topic = this.topic(id);
+    const root = topic?.closest<HTMLElement>('.pm-root-map')?.dataset.rootId;
+    if (!topic || !root) return;
     this.editText = text;
     this.select(id, true);
-    await this.mind.beginEdit(this.mind.findEle(id));
+    await this.maps.get(root)!.mind.beginEdit(topic);
   }
 
   private attachInlineEditor(id: string): void {
     const editor = this.host.querySelector<HTMLElement>('#input-box');
     if (!editor) return;
     this.editingId = id;
+    // Mind Elixir edits nodeObj.topic, which retains the original Markdown.
     if (this.editText !== undefined) editor.textContent = this.editText;
     this.editText = undefined;
     editor.setAttribute('role', 'textbox');
@@ -261,7 +292,6 @@ export class MapRenderer {
     editor.addEventListener('keydown', (event) => {
       if (event.isComposing) return;
       if (event.key === 'Escape') canceled = true;
-      // Node titles are single lines. Native Enter/Tab ends editing; IME Enter is untouched.
       if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); event.stopImmediatePropagation(); editor.blur(); }
     }, { capture: true });
     editor.addEventListener('blur', () => {
@@ -281,31 +311,142 @@ export class MapRenderer {
     });
   }
 
+  private pointerDown(event: PointerEvent): void {
+    const target = event.target as HTMLElement;
+    if (this.editing || target.closest('[data-map-marker], me-epd, #input-box')) return;
+    const topic = target.closest<Topic>('me-tpc');
+    const id = event.button === 0 ? topic?.nodeObj.id ?? null : null;
+    if (this.gestures.has(event.pointerId)) this.cancelGesture();
+    if (event.pointerType === 'touch' && !this.gestures.touching) this.cancelGesture();
+    if (event.pointerType !== 'touch' && this.gestures.active) return;
+    if (id) { this.select(id); this.callbacks.select(id); }
+    this.focus();
+    if (event.pointerType !== 'touch' && id && !this.canEdit(id)) return;
+    if (!this.gestures.start(this.pointerSample(event), id, this.viewport)) return;
+    // Capturing the original topic retains click/double-click targeting while
+    // still receiving a release outside the label or canvas.
+    const capture = topic ?? this.host;
+    capture.setPointerCapture(event.pointerId);
+    this.captures.set(event.pointerId, capture);
+    if (!topic) event.preventDefault();
+  }
+
+  private pointerMove(event: PointerEvent): void {
+    const motion = this.gestures.move(this.pointerSample(event));
+    if (motion.kind === 'idle') return;
+    if (motion.kind === 'cancel') { this.cancelGesture(); return; }
+    event.preventDefault();
+    if (motion.kind === 'view') {
+      this.host.classList.add('pm-panning');
+      this.viewport = motion.viewport;
+      this.applyViewport();
+      return;
+    }
+    const id = motion.id;
+    if (!this.ghost) { this.ghost = document.createElement('div'); this.ghost.className = 'pm-drag-ghost'; this.host.append(this.ghost); }
+    const canvas = this.host.getBoundingClientRect();
+    this.ghost.style.left = `${event.clientX - canvas.left + 16}px`;
+    this.ghost.style.top = `${event.clientY - canvas.top + 16}px`;
+    this.ghost.textContent = titleText(indexTree(this.snapshot).get(id)?.title ?? 'Direction');
+    this.clearDrop();
+    if (event.clientX < canvas.left || event.clientX > canvas.right || event.clientY < canvas.top || event.clientY > canvas.bottom) return;
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<Topic>('me-tpc');
+    try {
+      if (target && this.host.contains(target)) {
+        const rect = target.getBoundingClientRect();
+        const fraction = (event.clientY - rect.top) / rect.height;
+        const position = fraction < 0.25 ? 'before' : fraction > 0.75 ? 'after' : 'in';
+        this.drop = dropOperation(this.snapshot, id, target.nodeObj.id, position);
+        target.classList.add(`pm-drop-${position}`);
+      } else {
+        const worldY = (event.clientY - canvas.top - this.viewport.y) / this.viewport.scale;
+        const roots = this.snapshot.root_ids.filter((root) => root !== id);
+        const after = roots.filter((id) => { const map = this.maps.get(id)!; return map.y + map.height / 2 < worldY; }).at(-1) ?? null;
+        assertMove(this.snapshot, id, null, after);
+        this.drop = { type: 'move', id, parent_id: null, after_id: after };
+        this.ghost.textContent += ' · Top level';
+      }
+    } catch (error) { this.dropError = (error as Error).message; this.ghost.textContent += ' · Cannot move here'; }
+  }
+
+  private pointerUp(event: PointerEvent): void {
+    if (!this.gestures.has(event.pointerId)) return;
+    const moved = this.gestures.end(event.pointerId, this.viewport);
+    const operation = moved ? this.drop : null;
+    const error = moved ? this.dropError : null;
+    this.releasePointer(event.pointerId);
+    if (!this.gestures.active) this.cancelGesture();
+    if (operation) this.callbacks.move(operation);
+    else if (error) this.callbacks.error(error);
+  }
+
+  private pointerSample(event: PointerEvent): PointerSample {
+    const canvas = this.host.getBoundingClientRect();
+    return { pointerId: event.pointerId, pointerType: event.pointerType, button: event.button, buttons: event.buttons, x: event.clientX - canvas.left, y: event.clientY - canvas.top };
+  }
+
+  private releasePointer(pointer: number): void {
+    const capture = this.captures.get(pointer);
+    // Remove ownership before release can dispatch lostpointercapture.
+    this.captures.delete(pointer);
+    if (capture?.hasPointerCapture(pointer)) capture.releasePointerCapture(pointer);
+  }
+
+  private clearDrop(): void {
+    this.drop = null; this.dropError = null;
+    this.host.querySelectorAll('.pm-drop-in, .pm-drop-before, .pm-drop-after').forEach((topic) => topic.classList.remove('pm-drop-in', 'pm-drop-before', 'pm-drop-after'));
+  }
+
+  cancelGesture(): void {
+    this.gestures.cancel();
+    for (const pointer of this.captures.keys()) this.releasePointer(pointer);
+    this.clearDrop();
+    this.ghost?.remove(); this.ghost = null;
+    this.host.classList.remove('pm-panning');
+  }
+
   highlight(ids: Set<string>): void {
     this.host.querySelectorAll<Topic>('me-tpc').forEach((topic) => topic.classList.toggle('pm-search-hit', ids.has(topic.nodeObj.id)));
   }
 
-  focus(): void { this.mind.container.focus({ preventScroll: true }); }
-  fit(): void { this.mind.scaleFit(); this.saveViewport(); }
-  zoom(delta: number): void { this.mind.scale(Math.max(0.1, Math.min(2, this.mind.scaleVal + delta))); }
+  focus(): void { this.host.focus({ preventScroll: true }); }
 
-  private getViewport(): NonNullable<ViewState['viewport']> {
-    const transform = new DOMMatrixReadOnly(getComputedStyle(this.mind.map).transform);
-    return { x: transform.m41, y: transform.m42, scale: this.mind.scaleVal };
+  fit(): void {
+    const width = this.host.clientWidth;
+    const height = this.host.clientHeight;
+    if (!width || !height) { this.needsFit = true; return; }
+    this.needsFit = false;
+    const scale = Math.max(0.1, Math.min(1, (width - 48) / Math.max(1, this.bounds.width), (height - 72) / Math.max(1, this.bounds.height)));
+    this.viewport = { x: (width - this.bounds.width * scale) / 2, y: (height - this.bounds.height * scale) / 2, scale };
+    this.applyViewport();
   }
-  private restoreViewport(viewport?: ViewState['viewport']): void {
-    if (!viewport) { this.mind.scaleFit(); return; }
-    this.mind.scaleVal = viewport.scale;
-    this.mind.map.style.transformOrigin = '50% 50%';
-    this.mind.map.style.transform = `translate3d(${viewport.x}px, ${viewport.y}px, 0) scale(${viewport.scale})`;
+
+  zoom(delta: number): void { this.setScale(this.viewport.scale + delta); }
+
+  private setScale(scale: number, clientX?: number, clientY?: number): void {
+    const canvas = this.host.getBoundingClientRect();
+    const x = clientX === undefined ? canvas.width / 2 : clientX - canvas.left;
+    const y = clientY === undefined ? canvas.height / 2 : clientY - canvas.top;
+    const next = Math.max(0.1, Math.min(2, scale));
+    const ratio = next / this.viewport.scale;
+    this.viewport = { x: x - (x - this.viewport.x) * ratio, y: y - (y - this.viewport.y) * ratio, scale: next };
+    this.applyViewport();
   }
-  private saveViewport(): void {
+
+  private applyViewport(): void {
+    const { x, y, scale } = this.viewport;
+    this.forest.style.transform = `translate3d(${x}px, ${y}px, 0) scale(${scale})`;
     clearTimeout(this.viewportTimer);
-    this.viewportTimer = setTimeout(() => this.callbacks.viewport(this.getViewport()), 150);
+    this.viewportTimer = setTimeout(() => this.callbacks.viewport({ ...this.viewport }), 150);
   }
+
   destroy(): void {
     clearTimeout(this.viewportTimer);
+    this.cancelGesture();
     this.abort.abort();
-    this.mind.destroy();
+    this.resize.disconnect();
+    this.maps.forEach((map) => map.mind.destroy());
+    this.maps.clear();
+    this.forest.remove();
   }
 }
