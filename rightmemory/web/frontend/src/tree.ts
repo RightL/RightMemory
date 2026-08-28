@@ -42,19 +42,14 @@ export interface MutationResult {
   selected_id: string | null;
 }
 
-export const VIRTUAL_ROOT = '__pursuit_virtual_root__';
 export const DRAFT_PREFIX = '__pursuit_draft_';
 
 export function indexTree(snapshot: Snapshot): Map<string, PursuitItem> {
   return new Map(snapshot.items.map((item) => [item.id, item]));
 }
 
-export function visualRoot(snapshot: Snapshot): string {
-  return snapshot.root_ids.length === 1 ? snapshot.root_ids[0] : VIRTUAL_ROOT;
-}
-
 export function childrenOf(snapshot: Snapshot, parent: string | null): string[] {
-  return parent === null || parent === VIRTUAL_ROOT
+  return parent === null
     ? snapshot.root_ids
     : indexTree(snapshot).get(parent)?.child_ids ?? [];
 }
@@ -79,6 +74,18 @@ export function assertMove(snapshot: Snapshot, id: string, parent: string | null
   if (parent && descendants(snapshot, id).has(parent)) throw new Error('A direction cannot be moved inside itself.');
   if (after === id) throw new Error('Choose a different insertion position.');
   if (after && !childrenOf(snapshot, parent).includes(after)) throw new Error('The insertion point has changed.');
+}
+
+export function dropOperation(snapshot: Snapshot, id: string, target: string, position: 'in' | 'before' | 'after'): Operation {
+  if (id === target) throw new Error('Choose a different destination.');
+  const destination = indexTree(snapshot).get(target);
+  if (!destination) throw new Error('The destination has changed.');
+  const parent = position === 'in' ? target : destination.parent_id;
+  const siblings = childrenOf(snapshot, parent).filter((entry) => entry !== id);
+  const after = position === 'in' ? siblings.at(-1) ?? null
+    : position === 'after' ? target : siblings[siblings.indexOf(target) - 1] ?? null;
+  assertMove(snapshot, id, parent, after);
+  return { type: 'move', id, parent_id: parent, after_id: after };
 }
 
 /** Null after_id means the first position; callers pass the last sibling to append. */
@@ -160,5 +167,5 @@ export function deletionSelection(snapshot: Snapshot, id: string): string | null
   if (!item) return null;
   const siblings = childrenOf(snapshot, item.parent_id);
   const position = siblings.indexOf(id);
-  return siblings[position + 1] ?? siblings[position - 1] ?? item.parent_id ?? VIRTUAL_ROOT;
+  return siblings[position + 1] ?? siblings[position - 1] ?? item.parent_id ?? null;
 }

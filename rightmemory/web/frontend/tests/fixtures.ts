@@ -29,3 +29,15 @@ export function fixture(count = 22): Snapshot {
   }
   return { items, root_ids: ['directions'], focus_ids: ['essays'], revision: 'r0', git_head: 'c0', root_key: 'browser-fixture', valid: true, writable: true, diagnostics: [] };
 }
+
+export function forestFixture(count = 22): Snapshot {
+  const snapshot = fixture(count);
+  snapshot.root_key = 'browser-forest-fixture';
+  snapshot.root_ids.push('practice');
+  snapshot.items.push(
+    { id: 'practice', title: 'Practice 练习', parent_id: null, child_ids: ['sessions'], body: '', edges: [], focused: false, editable: true },
+    { id: 'sessions', title: '~~Earlier approach~~ and a new idea', parent_id: 'practice', child_ids: ['caption'], body: 'A separate direction with its own note.', edges: [], focused: false, editable: true },
+    { id: 'caption', title: '为这张示例地图写一段比较长的说明，确认中文文字可以自然换行，并且不会与旁边的节点或连接线重叠。', parent_id: 'sessions', child_ids: [], body: '', edges: [], focused: false, editable: true },
+  );
+  return snapshot;
+}

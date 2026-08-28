@@ -1,5 +1,5 @@
 import { ApiError, MutationQueue, type QueueChange, type Transport } from './queue.ts';
-import { applyOperation, childrenOf, deletionSelection, DRAFT_PREFIX, indexTree, promoteOperation, VIRTUAL_ROOT,
+import { applyOperation, childrenOf, deletionSelection, DRAFT_PREFIX, indexTree, promoteOperation,
   type MutationResult, type Operation, type Snapshot } from './tree.ts';
 import { DraftBook, type TitleDraft } from './drafts.ts';
 import { MapRenderer } from './renderer.ts';
@@ -55,13 +55,15 @@ const markup = `
         <p>Double-click or F2 to rename. Enter adds a sibling; Tab adds a child. Shift+Tab promotes.</p>
         <p>Arrows move between directions. Space folds a branch. Delete removes a subtree. N opens its note; F toggles Focus.</p>
         <p>Ctrl/⌘ F finds, Ctrl/⌘ 0 fits, Ctrl/⌘ Z undoes, Ctrl/⌘ Shift Z redoes.</p>
-        <p>Drag a label onto a direction to nest it; drag above or below a label to reorder. Right-drag empty space to pan. Ctrl/⌘ + wheel zooms.</p>
+        <p>Drag a label onto a direction to nest it; drag above or below a label to reorder. Drop on empty space to make an independent top-level direction.</p>
+        <p>Drag empty space to pan. Ctrl/⌘ + wheel zooms. Touch pans from any label; pinch zooms without moving directions. Fit shows every independent map.</p>
       </div></details>
     </div>
   </div>
   <div class="pm-diagnostics" role="status" hidden></div>
   <div class="pm-stage">
     <div class="pm-canvas"></div>
+    <div class="pm-empty" hidden><h2>No directions yet</h2><p>Start with a direction you want to keep visible.</p><button type="button" data-command="root">＋ Add a direction</button></div>
     <div class="pm-search" role="search" hidden>
       <input type="search" aria-label="Find a direction" placeholder="Find a direction…" autocomplete="off">
       <span class="pm-search-count" aria-live="polite"></span>
@@ -202,7 +204,8 @@ class PursuitMap implements PursuitMapController {
     this.$<HTMLButtonElement>('[data-command="note"]').disabled = !item;
     this.$<HTMLButtonElement>('[data-command="child"]').disabled = !writable || !!item && !item.editable;
     this.$<HTMLButtonElement>('[data-command="sibling"]').disabled = !writable;
-    this.$<HTMLButtonElement>('[data-command="root"]').disabled = !writable;
+    this.host.querySelectorAll<HTMLButtonElement>('[data-command="root"]').forEach((button) => { button.disabled = !writable; });
+    this.$('.pm-empty').hidden = this.displaySnapshot().root_ids.length > 0;
     this.$<HTMLButtonElement>('[data-command="collapse"]').disabled = !item?.child_ids.length;
     this.$<HTMLButtonElement>('[data-command="focus"]').setAttribute('aria-pressed', String(!!item?.focused));
     const status = this.$('.pm-save-status');
@@ -297,6 +300,7 @@ class PursuitMap implements PursuitMapController {
       this.render();
       this.renderer.select(this.view.selected, true);
     } else if (command === 'escape') {
+      this.renderer.cancelGesture();
       this.closeSearch();
       this.$('.pm-relations').hidden = true;
       this.$<HTMLDetailsElement>('.pm-more').open = false;
