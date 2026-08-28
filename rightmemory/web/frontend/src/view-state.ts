@@ -23,7 +23,7 @@ export function reconcileView(snapshot: Snapshot, view: ViewState): ViewState {
   const items = indexTree(snapshot);
   const collapsed = view.collapsed.filter((id) => items.get(id)?.child_ids.length);
   let selected = view.selected;
-  if (!selected || !items.has(selected)) selected = snapshot.root_ids[0] ?? null;
+  if (selected !== null && !items.has(selected)) selected = snapshot.root_ids[0] ?? null;
   let parent = selected ? items.get(selected)?.parent_id : null;
   while (parent) {
     if (collapsed.includes(parent)) selected = parent;
@@ -39,7 +39,10 @@ export function rootBranchSide(index: number, count: number): 'left' | 'right' {
 export function navigate(snapshot: Snapshot, view: ViewState, key: string): ViewState {
   const state = reconcileView(snapshot, view);
   const selected = state.selected;
-  if (!selected) return state;
+  if (!selected) {
+    state.selected = key === 'End' ? visibleNodes(snapshot, state.collapsed).at(-1) ?? null : snapshot.root_ids[0] ?? null;
+    return state;
+  }
   const items = indexTree(snapshot);
   const item = items.get(selected)!;
   const collapsed = new Set(state.collapsed);

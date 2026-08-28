@@ -155,6 +155,8 @@ class PursuitMap implements PursuitMapController {
       if (event.button === 0) event.preventDefault(); // Retain canvas keyboard focus after formatting.
     }, { signal: this.abort.signal });
     document.addEventListener('pointerdown', (event) => {
+      if (!this.active) return;
+      if (!this.host.contains(event.target as Node)) this.select(null);
       if (!(event.target as HTMLElement).closest('.pm-context-menu, [data-command="context-menu"]')) this.closeContextMenu();
     }, { signal: this.abort.signal });
     host.addEventListener('contextmenu', (event) => {
@@ -332,9 +334,9 @@ class PursuitMap implements PursuitMapController {
     banner.append(details);
   }
 
-  private select(id: string, center = false): void {
+  private select(id: string | null, center = false): void {
     this.closeContextMenu();
-    const next = reveal(this.displaySnapshot(), this.view, id);
+    const next = id === null ? { ...this.view, selected: null } : reveal(this.displaySnapshot(), this.view, id);
     const unfolded = next.collapsed.length !== this.view.collapsed.length;
     this.view = next;
     if (unfolded) this.render();
