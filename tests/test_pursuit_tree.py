@@ -206,6 +206,36 @@ class PursuitTreeTests(unittest.TestCase):
         self.apply(type="set_focus", id="b", focused=False)
         self.assertEqual(load_pursuit_tree(self.root).focus_ids, ("a",))
 
+    def test_first_focus_removes_exact_old_starter_placeholder(self):
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=newline):
+                source = (
+                    "# Pursuits\n\n## Focus\n\n  No Pursuit is focused yet. \n\n"
+                    "## Example Application {#sample-pursuit-application}\n\nKeep this body.\n"
+                ).replace("\n", newline)
+                self.write("PURSUITS.md", source)
+                self.apply(type="set_focus", id="sample-pursuit-application", focused=True)
+                expected = source.replace(
+                    "  No Pursuit is focused yet. ", "- `sample-pursuit-application`"
+                )
+                self.assertEqual((self.root / "PURSUITS.md").read_bytes(), expected.encode("utf-8"))
+                self.assertEqual(load_pursuit_tree(self.root).focus_ids, ("sample-pursuit-application",))
+
+    def test_first_focus_preserves_user_body(self):
+        for body in (
+            "Keep this attention note.",
+            "No Pursuit is focused yet.\n\nKeep this user note too.",
+            "No Pursuit is focused yet!",
+        ):
+            with self.subTest(body=body):
+                source = f"# Pursuits\n\n## Focus\n\n{body}\n\n## A {{#a}}\n"
+                self.write("PURSUITS.md", source)
+                self.apply(type="set_focus", id="a", focused=True)
+                self.assertEqual(
+                    (self.root / "PURSUITS.md").read_bytes(),
+                    source.replace("## A {#a}", "- `a`\n\n## A {#a}").encode("utf-8"),
+                )
+
     def test_plain_group_is_visible_and_receives_id_when_edited(self):
         self.write("PURSUITS.md", "# Pursuits\n\n## Plain Group\n\nPlain body.\n\n### Child {#child}\n")
         tree = load_pursuit_tree(self.root)

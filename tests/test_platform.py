@@ -2,7 +2,9 @@ import errno
 import json
 import os
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -84,6 +86,55 @@ class PlatformHelperTests(unittest.TestCase):
 
         self.assertEqual(command, "python -m rightmemory.cli review watch")
         self.assertEqual(run.call_args.args[0], ["ps", "-p", "123", "-o", "command="])
+
+    def test_posix_process_liveness_excludes_exited_proc_states(self):
+        for state in ("R", "S", "Z", "X"):
+            with self.subTest(state=state):
+                stat = "123 (worker (name)) " + " ".join([state, *("0" for _ in range(18)), "456"])
+                with (
+                    patch.object(rm_platform, "IS_WINDOWS", False),
+                    patch.object(rm_platform.os, "kill"),
+                    patch.object(rm_platform.Path, "read_text", return_value=stat),
+                ):
+                    self.assertEqual(rm_platform.process_exists(123), state in {"R", "S"})
+                    self.assertEqual(rm_platform.process_identity(123), "proc:456")
+
+    def test_posix_process_liveness_falls_back_without_proc(self):
+        with (
+            patch.object(rm_platform, "IS_WINDOWS", False),
+            patch.object(rm_platform.os, "kill") as kill,
+            patch.object(rm_platform.Path, "read_text", side_effect=FileNotFoundError),
+        ):
+            self.assertTrue(rm_platform.process_exists(123))
+            kill.assert_called_once_with(123, 0)
+
+    def test_posix_process_liveness_preserves_pid_lookup_errors(self):
+        for error, expected in ((ProcessLookupError(), False), (PermissionError(), True)):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(rm_platform, "IS_WINDOWS", False),
+                patch.object(rm_platform.os, "kill", side_effect=error),
+            ):
+                self.assertEqual(rm_platform.process_exists(123), expected)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux procfs process lifecycle")
+    def test_linux_exited_child_is_not_live_before_parent_reaps_it(self):
+        process = subprocess.Popen([sys.executable, "-c", "pass"])
+        try:
+            deadline = time.monotonic() + 5
+            state = None
+            while time.monotonic() < deadline:
+                state = Path(f"/proc/{process.pid}/stat").read_text().rpartition(")")[2].split()[0]
+                if state == "Z":
+                    break
+                time.sleep(0.01)
+            self.assertEqual(state, "Z")
+            os.kill(process.pid, 0)
+            self.assertFalse(rm_platform.process_exists(process.pid))
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
 
     def test_windows_process_command_reads_cim_command_line(self):
         result = subprocess.CompletedProcess(

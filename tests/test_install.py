@@ -1091,7 +1091,7 @@ class InstallScriptTests(unittest.TestCase):
             pursuits = pursuits_path.read_text(encoding="utf-8")
             pursuits_path.write_text(
                 "# User Pursuits\n\n## Continue Release {#continue-release}\n\nKeep this live intent.\n\n"
-                + pursuits.replace("Example Release Readiness", "Stale Release Readiness"),
+                + pursuits.replace("Example Application", "Stale Example Application"),
                 encoding="utf-8",
             )
             expected_memory = memory_path.read_bytes()
@@ -1112,7 +1112,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(refreshed_memory.count(EXAMPLE_END), 1)
         self.assertIn("## Continue Release {#continue-release}", refreshed_pursuits)
         self.assertIn("Keep this live intent.", refreshed_pursuits)
-        self.assertIn("Stale Release Readiness", refreshed_pursuits)
+        self.assertIn("Stale Example Application", refreshed_pursuits)
         self.assertEqual(refreshed_pursuits.count(PURSUIT_EXAMPLE_START), 1)
         self.assertEqual(refreshed_pursuits.count(PURSUIT_EXAMPLE_END), 1)
 
