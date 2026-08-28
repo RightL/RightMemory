@@ -16,7 +16,7 @@ Sign in with the Web Studio operator token and check the active root before edit
 
 Each top-level direction is the root of its own map on a shared canvas. Independent maps appear in stored order, with space between them and no shared parent node. A map with several first-level branches alternates them left and right, starting on the left; a single branch extends right. Descendants continue on their branch's side.
 
-Long titles wrap within their nodes. Markdown strikethrough such as `~~Earlier approach~~` is shown as crossed-out text; renaming opens the original Markdown. This is title formatting, not a task status, and HTML in titles remains literal text.
+Long titles wrap within their nodes. Titles support bold (`**Important**`), underline (`<u>Important</u>`), and strikethrough (`~~Earlier approach~~`), including nested marks and manually authored partial formatting. Renaming opens the original title syntax. Only these balanced forms are rendered; unmatched delimiters and all other HTML, including tags with attributes, remain literal text. Strikethrough is presentation, not a task status or an instruction to an agent.
 
 | Action | Interaction |
 | --- | --- |
@@ -79,6 +79,8 @@ Start from the repository's current design document.
 `PURSUITS.md` and reachable `PURSUIT_<id>.md` files are the source of truth. The editor reads the canonical graph index instead of maintaining a separate database. Deep logical branches continue through `F#` detail files so each physical file can obey the shared heading rules. The renderer creates required boundaries automatically and preserves existing boundaries where possible.
 
 Pan, zoom, folding, and selection are browser-local view state. They are not stored in Markdown and do not affect retrieval.
+
+Whole-topic formatting stays in the title string, with no style fields or separate metadata. Combined marks use a fixed order: bold outside underline outside strikethrough, such as `**<u>~~Important direction~~</u>**`. Formatting uses the existing rename transaction and preserves the node's id, body, edges, Focus, backing files, and sibling order. New ids use the visible title text; creating or renaming a title with no visible text is rejected. Existing unusual titles remain readable.
 
 Existing old field blocks remain readable as body text until the user explicitly requests cleanup. Their former `do`, `ask`, and `wait` labels do not control agent actions. Existing plain structural headings and graph-node bullets are preserved; content that cannot be safely edited through the normal map controls is surfaced as a read-only item or diagnostic. Opening the map is not a migration.
 
