@@ -29,13 +29,7 @@ export function forestData(snapshot: Snapshot, view: ViewState): MindElixirData[
   }));
 }
 
-/** Only strikethrough is interpreted; all user text remains escaped. */
-export function titleMarkup(title: string): string {
-  return title.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!)
-    .replace(/~~(.+?)~~/g, '<s>$1</s>');
-}
-
-export function titleText(title: string): string { return title.replace(/~~(.+?)~~/g, '$1'); }
+export { titleMarkup, titleText } from './title-format.ts';
 
 export interface MapSize { id: string; width: number; height: number; rootX: number }
 

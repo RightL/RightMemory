@@ -92,6 +92,8 @@
 .pm-canvas .map-container me-main > me-wrapper > me-parent > me-tpc { padding: 8px 14px; }
 .pm-canvas .map-container me-tpc { position: relative; max-width: 23em; line-height: 1.5; border-radius: 5px; overflow-wrap: anywhere; }
 .pm-canvas .map-container me-tpc > .text { max-width: 100%; overflow-wrap: anywhere; }
+.pm-canvas .map-container me-tpc strong { font-weight: 700; }
+.pm-canvas .map-container me-tpc u { text-underline-offset: .14em; text-decoration-thickness: 1px; }
 .pm-canvas .map-container me-tpc s { text-decoration-thickness: 1px; }
 .pm-canvas .map-container me-tpc.selected { outline: 2px solid #4d8d7b; outline-offset: 2px; }
 .pm-canvas .map-container me-tpc.pm-readonly { color: #7d847e !important; border-bottom: 1px dashed #c3cac1 !important; }
