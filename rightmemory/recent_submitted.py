@@ -14,7 +14,7 @@ from .update_queue import UpdateQueueStore
 
 RECENT_SUBMITTED_HEADER = "Recent submitted RightMemory candidates"
 RECENT_SUBMITTED_INTRO = (
-    "These are pending updater submissions, not settled Memory or Pursuit. "
+    "These are pending updater submissions, not settled Memory or Agent Corrections. "
     "Use relevant entries as short-term continuity while preserving their candidate status."
 )
 

@@ -1,5 +1,7 @@
+import subprocess
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rightmemory.isolated_write import (
     IsolatedWriteSupervisor,
@@ -188,6 +190,134 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
         with self.assertRaisesRegex(RuntimeError, "non-memory paths: corrections\\.md"):
             IsolatedWriteSupervisor(self.root, "update").run(callback)
 
+    def test_update_rejects_pursuit_root_and_backing_commits_from_git(self):
+        originals = {
+            "PURSUITS.md": "# Pursuits\n\n## Branch {F#branch}\n",
+            "PURSUIT_branch.md": "# Existing direction {#direction}\n",
+        }
+        for path, content in originals.items():
+            (self.root / path).write_text(content, encoding="utf-8")
+        self._git("add", *originals)
+        self._git("commit", "-m", "pursuit: existing human map")
+        start_head = self._git("rev-parse", "HEAD")
+        start_memory = (self.root / "MEMORY.md").read_bytes()
+
+        for path in originals:
+            with self.subTest(path=path):
+                def callback(worktree: Path) -> None:
+                    content = originals[path].replace("Branch", "Changed branch").replace("Existing", "Changed")
+                    (worktree / path).write_text(content, encoding="utf-8")
+                    self._append_memory(worktree, "- `two` otherwise valid memory → []\n")
+                    self._git("add", path, "MEMORY.md", cwd=worktree)
+                    self._git("commit", "-m", "update: forbidden pursuit edit", cwd=worktree)
+
+                with self.assertRaisesRegex(RuntimeError, "non-memory paths: PURSUIT"):
+                    IsolatedWriteSupervisor(self.root, "update").run(callback)
+                self.assertEqual(self._git("rev-parse", "HEAD"), start_head)
+                self.assertEqual(self._git("status", "--short"), "")
+                self.assertEqual((self.root / "MEMORY.md").read_bytes(), start_memory)
+                self.assertEqual((self.root / path).read_text(encoding="utf-8"), originals[path])
+                self._assert_isolated_cleanup()
+
+    def test_update_rejects_pursuit_rename_into_memory(self):
+        (self.root / "PURSUIT_branch.md").write_text("# Direction {#direction}\n", encoding="utf-8")
+        self._git("add", "PURSUIT_branch.md")
+        self._git("commit", "-m", "pursuit: existing detail")
+        start_head = self._git("rev-parse", "HEAD")
+
+        def callback(worktree: Path) -> None:
+            self._git("mv", "PURSUIT_branch.md", "MEMORY_branch.md", cwd=worktree)
+            self._git("commit", "-m", "update: rename pursuit into memory", cwd=worktree)
+
+        with self.assertRaisesRegex(RuntimeError, r"non-memory paths: PURSUIT_branch\.md"):
+            IsolatedWriteSupervisor(self.root, "update").run(callback)
+        self.assertEqual(self._git("rev-parse", "HEAD"), start_head)
+        self.assertTrue((self.root / "PURSUIT_branch.md").is_file())
+        self.assertFalse((self.root / "MEMORY_branch.md").exists())
+        self._assert_isolated_cleanup()
+
+    def test_update_cannot_hide_pursuit_write_before_operation_squash(self):
+        original_pursuits = (self.root / "PURSUITS.md").read_bytes()
+
+        def callback(worktree: Path) -> None:
+            (worktree / "PURSUITS.md").write_text("# Pursuits\n\n## Changed {#changed}\n", encoding="utf-8")
+            self._git("add", "PURSUITS.md", cwd=worktree)
+            self._git("commit", "-m", "update: forbidden intermediate pursuit", cwd=worktree)
+            (worktree / "PURSUITS.md").write_bytes(original_pursuits)
+            self._append_memory(worktree, "- `two` otherwise valid final memory → []\n")
+            self._git("add", "MEMORY.md", "PURSUITS.md", cwd=worktree)
+            self._git("commit", "-m", "update: restore pursuit", cwd=worktree)
+
+        with self.assertRaisesRegex(RuntimeError, r"non-memory paths: PURSUITS\.md"):
+            IsolatedWriteSupervisor(self.root, "update").run(
+                callback,
+                operation_id="update-hidden-pursuit-write",
+                operation_input={"message": "change memory"},
+            )
+        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
+        self.assertEqual((self.root / "PURSUITS.md").read_bytes(), original_pursuits)
+        self.assertEqual(self._git("status", "--short"), "")
+        self._assert_isolated_cleanup()
+
+    def test_update_rechecks_old_prepared_pursuit_candidate_before_publication(self):
+        def callback(worktree: Path) -> None:
+            (worktree / "PURSUITS.md").write_text("# Pursuits\n\n## Changed {#changed}\n", encoding="utf-8")
+            self._git("add", "PURSUITS.md", cwd=worktree)
+            self._git("commit", "-m", "update: candidate prepared under old policy", cwd=worktree)
+
+        with (
+            patch.object(IsolatedWriteSupervisor, "_is_role_write_path", return_value=True),
+            patch.object(IsolatedWriteSupervisor, "_land_operation_commit", side_effect=RuntimeError("interrupted before publish")),
+            self.assertRaisesRegex(RuntimeError, "interrupted before publish"),
+        ):
+            IsolatedWriteSupervisor(self.root, "update").run(
+                callback,
+                operation_id="update-prepared-under-old-policy",
+                operation_input={"message": "candidate from old runtime"},
+            )
+
+        with self.assertRaisesRegex(RuntimeError, r"non-memory paths: PURSUITS\.md"):
+            IsolatedWriteSupervisor(self.root, "update").recover_prepared()
+        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
+        self.assertEqual(self._git("status", "--short"), "")
+        self.assertEqual((self.root / "PURSUITS.md").read_text(encoding="utf-8"), "# Pursuits\n")
+
+    def test_update_lands_memory_graph_and_evidence_changes(self):
+        def callback(worktree: Path) -> None:
+            self._append_memory(
+                worktree,
+                "\n## Detail {F#detail}\n\n## Notes {M#notes}\n\n## Review {S#review}\n",
+            )
+            (worktree / "MEMORY_detail.md").write_text("# Detail fact {#detail-fact}\n", encoding="utf-8")
+            (worktree / "MEMORY_notes.md").write_text("Free-form evidence.\n", encoding="utf-8")
+            (worktree / "MEMORY_SKILL_review.md").write_text("Review the evidence.\n", encoding="utf-8")
+            self._git("add", "MEMORY.md", "MEMORY_detail.md", "MEMORY_notes.md", "MEMORY_SKILL_review.md", cwd=worktree)
+            self._git("commit", "-m", "update: add durable memory", cwd=worktree)
+
+        result = IsolatedWriteSupervisor(self.root, "update").run(callback)
+
+        self.assertEqual(result.commits_landed, 1)
+        self.assertEqual(
+            set(result.changed_paths),
+            {"MEMORY.md", "MEMORY_detail.md", "MEMORY_notes.md", "MEMORY_SKILL_review.md"},
+        )
+        self.assertEqual(self._git("status", "--short"), "")
+        self._assert_isolated_cleanup()
+
+    def test_sync_reconciler_lands_pursuit_root_and_backing_changes(self):
+        def callback(worktree: Path) -> None:
+            (worktree / "PURSUITS.md").write_text("# Pursuits\n\n## Shared direction {F#shared}\n", encoding="utf-8")
+            (worktree / "PURSUIT_shared.md").write_text("# Shared child {#shared-child}\n", encoding="utf-8")
+            self._git("add", "PURSUITS.md", "PURSUIT_shared.md", cwd=worktree)
+            self._git("commit", "-m", "sync: reconcile human pursuit map", cwd=worktree)
+
+        result = IsolatedWriteSupervisor(self.root, "sync-reconciler").run(callback)
+
+        self.assertEqual(result.commits_landed, 1)
+        self.assertEqual(set(result.changed_paths), {"PURSUITS.md", "PURSUIT_shared.md"})
+        self.assertEqual(self._git("status", "--short"), "")
+        self._assert_isolated_cleanup()
+
     def test_dreamer_rejects_pursuit_write(self):
         def callback(worktree: Path) -> None:
             (worktree / "PURSUITS.md").write_text(
@@ -272,10 +402,10 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
             self._git("add", "MEMORY.md", cwd=worktree)
             self._git("commit", "-m", "dreamer: break pursuit edge", cwd=worktree)
 
-        with self.assertRaisesRegex(RuntimeError, "dangling edge `dep:one`"):
-            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
-
-        self.assertEqual(self._git("rev-parse", "HEAD"), current_head)
+        for role in ("dreamer", "update"):
+            with self.subTest(role=role), self.assertRaisesRegex(RuntimeError, "dangling edge `dep:one`"):
+                IsolatedWriteSupervisor(self.root, role).run(callback)
+            self.assertEqual(self._git("rev-parse", "HEAD"), current_head)
 
     def test_dirty_pursuit_rules_or_corrections_blocks_narrow_writer(self):
         for name in (
@@ -319,6 +449,191 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
 
         with self.assertRaisesRegex(RuntimeError, "missing `### Proposed edit`"):
             IsolatedWriteSupervisor(self.root, "sync-reconciler").run(callback)
+
+    def test_pursuit_map_lands_only_exact_memory_edge_repairs(self):
+        _original, repaired = self._add_pursuit_repair_graph()
+
+        result = IsolatedWriteSupervisor(self.root, "pursuit-map").run(
+            lambda worktree: self._commit_pursuit_graph(worktree, repaired, "pursuit: remove direction")
+        )
+
+        self.assertEqual(result.commits_landed, 1)
+        self.assertEqual(set(result.changed_paths), set(repaired))
+        self.assertEqual(self._git("status", "--short"), "")
+        for path, content in repaired.items():
+            if content is None:
+                self.assertFalse((self.root / path).exists())
+            else:
+                self.assertEqual((self.root / path).read_bytes(), content)
+        self._assert_isolated_cleanup()
+
+    def test_pursuit_map_rejects_semantic_or_extra_memory_changes_during_delete(self):
+        originals, repaired = self._add_pursuit_repair_graph()
+        start_head = self._git("rev-parse", "HEAD")
+        variants = {
+            "prose": repaired["MEMORY.md"].replace(b"Keep prose mentioning removed.", b"Curated prose."),
+            "surviving edge": repaired["MEMORY.md"].replace(b"[ doc:kept]", b"[]"),
+            "line endings": repaired["MEMORY.md"].replace(b"\r\n", b"\n"),
+        }
+        for label, memory in variants.items():
+            with self.subTest(change=label):
+                candidate = {**repaired, "MEMORY.md": memory}
+                with self.assertRaisesRegex(RuntimeError, "only to repair references"):
+                    IsolatedWriteSupervisor(self.root, "pursuit-map").run(
+                        lambda worktree: self._commit_pursuit_graph(worktree, candidate, "pursuit: invalid memory change")
+                    )
+                self.assertEqual(self._git("rev-parse", "HEAD"), start_head)
+                self.assertEqual(self._git("status", "--short"), "")
+                for path, content in originals.items():
+                    self.assertEqual((self.root / path).read_bytes(), content)
+                self._assert_isolated_cleanup()
+
+    def test_pursuit_map_rejects_memory_changes_without_deleted_pursuit_ids(self):
+        def callback(worktree: Path) -> None:
+            self._append_memory(worktree, "- `two` unauthorized durable fact → []\n")
+            self._git("add", "MEMORY.md", cwd=worktree)
+            self._git("commit", "-m", "pursuit: unauthorized memory curation", cwd=worktree)
+
+        with self.assertRaisesRegex(RuntimeError, "only to repair references"):
+            IsolatedWriteSupervisor(self.root, "pursuit-map").run(callback)
+        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
+        self._assert_isolated_cleanup()
+
+    def test_pursuit_map_cannot_modify_fixed_correction_collections(self):
+        def callback(worktree: Path) -> None:
+            path = worktree / "MEMORY_agent-corrections-writing.md"
+            path.write_text("# Curated writing corrections\n", encoding="utf-8")
+            self._git("add", path.name, cwd=worktree)
+            self._git("commit", "-m", "pursuit: unauthorized corrections", cwd=worktree)
+
+        with self.assertRaisesRegex(RuntimeError, r"non-memory paths: MEMORY_agent-corrections-writing\.md"):
+            IsolatedWriteSupervisor(self.root, "pursuit-map").run(callback)
+        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
+        self._assert_isolated_cleanup()
+
+    def test_pursuit_map_restores_exact_verified_deletion_and_can_delete_again(self):
+        originals, repaired = self._add_pursuit_repair_graph()
+        deletion = IsolatedWriteSupervisor(self.root, "pursuit-map").run(
+            lambda worktree: self._commit_pursuit_graph(worktree, repaired, "pursuit: remove direction")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "only to repair references"):
+            IsolatedWriteSupervisor(self.root, "pursuit-map").run(
+                lambda worktree: self._commit_pursuit_graph(worktree, originals, "pursuit: unverified restoration")
+            )
+        self.assertEqual(self._git("rev-parse", "HEAD"), deletion.landed_commit)
+
+        restoration = IsolatedWriteSupervisor(
+            self.root, "pursuit-map", pursuit_restore_commit=deletion.landed_commit
+        ).run(lambda worktree: self._commit_pursuit_graph(worktree, originals, "pursuit: undo deletion"))
+        self.assertEqual(restoration.commits_landed, 1)
+        for path, content in originals.items():
+            self.assertEqual((self.root / path).read_bytes(), content)
+
+        redo = IsolatedWriteSupervisor(
+            self.root, "pursuit-map", pursuit_restore_commit=restoration.landed_commit
+        ).run(lambda worktree: self._commit_pursuit_graph(worktree, repaired, "pursuit: redo deletion"))
+        self.assertEqual(redo.commits_landed, 1)
+        self.assertEqual(self._git("status", "--short"), "")
+        self._assert_isolated_cleanup()
+
+    def test_pursuit_map_restore_rejects_memory_curation_hidden_in_source(self):
+        originals, repaired = self._add_pursuit_repair_graph()
+        unsafe_source = {
+            **repaired,
+            "MEMORY.md": repaired["MEMORY.md"].replace(b"Keep prose mentioning removed.", b"Unrelated curation."),
+        }
+        source = self._commit_pursuit_graph(self.root, unsafe_source, "sync: unrelated memory and pursuit changes")
+
+        with self.assertRaisesRegex(RuntimeError, "only to repair references"):
+            IsolatedWriteSupervisor(self.root, "pursuit-map", pursuit_restore_commit=source).run(
+                lambda worktree: self._commit_pursuit_graph(worktree, originals, "pursuit: invalid reverse curation")
+            )
+        self.assertEqual(self._git("rev-parse", "HEAD"), source)
+        self.assertEqual(self._git("status", "--short"), "")
+        self._assert_isolated_cleanup()
+
+    def test_pursuit_map_restore_cannot_overwrite_later_memory_change(self):
+        originals, repaired = self._add_pursuit_repair_graph()
+        deletion = IsolatedWriteSupervisor(self.root, "pursuit-map").run(
+            lambda worktree: self._commit_pursuit_graph(worktree, repaired, "pursuit: remove direction")
+        )
+        later_memory = repaired["MEMORY.md"] + b"\r\nLater durable context.\r\n"
+        current_head = self._commit_pursuit_graph(
+            self.root, {"MEMORY.md": later_memory}, "update: preserve later context"
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "only to repair references"):
+            IsolatedWriteSupervisor(
+                self.root, "pursuit-map", pursuit_restore_commit=deletion.landed_commit
+            ).run(lambda worktree: self._commit_pursuit_graph(worktree, originals, "pursuit: invalid stale inverse"))
+        self.assertEqual(self._git("rev-parse", "HEAD"), current_head)
+        self.assertEqual((self.root / "MEMORY.md").read_bytes(), later_memory)
+        self.assertEqual(self._git("status", "--short"), "")
+        self._assert_isolated_cleanup()
+
+    def test_update_cannot_request_pursuit_reference_restoration(self):
+        with self.assertRaises(ValueError):
+            IsolatedWriteSupervisor(self.root, "update", pursuit_restore_commit=self.initial_head)
+
+    def test_pursuit_snapshot_batches_exact_immutable_blobs(self):
+        self._git("config", "core.autocrlf", "false")
+        repeated = "Notes with Chinese 中文.\r\n\r\nMore context.\r\n".encode("utf-8")
+        originals = {
+            "MEMORY.md": b"# Domain {#domain}\n\n## Notes {M#notes}\n\n## Copy {M#copy}\n\n## Empty {M#empty}\n",
+            "PURSUITS.md": b"# Pursuits\n",
+            "MEMORY_notes.md": repeated,
+            "MEMORY_copy.md": repeated,
+            "MEMORY_empty.md": b"",
+        }
+        commit = self._commit_pursuit_graph(self.root, originals, "memory: snapshot binary boundaries")
+        (self.root / "MEMORY_notes.md").write_bytes(b"Uncommitted replacement.\n")
+
+        with patch("rightmemory.isolated_write.subprocess.run", wraps=subprocess.run) as run_git:
+            snapshot = IsolatedWriteSupervisor(self.root, "pursuit-map")._commit_graph_snapshot(self.root, commit)
+
+        self.assertEqual(snapshot.files, originals)
+        self.assertEqual(snapshot.graph.errors, [])
+        blob_calls = [call for call in run_git.call_args_list if call.args[0][:2] == ["git", "cat-file"]]
+        self.assertEqual(len(blob_calls), 1)
+
+    def _add_pursuit_repair_graph(self):
+        self._git("config", "core.autocrlf", "false")
+        original = {
+            "MEMORY.md": (
+                b"# Domain {#domain} -> [dep:removed, doc:kept]\r\n\r\n"
+                b"Keep prose mentioning removed.\r\n\r\n"
+                b"```md\r\n- `example` unchanged example -> [dep:removed]\r\n```\r\n\r\n"
+                b"- `one` initial memory -> [dep:removed-child]\r\n\r\n"
+                b"## Detail {F#detail}\r\n"
+            ),
+            "MEMORY_detail.md": b"# Evidence {#evidence} -> [doc:removed-child, dep:kept]\n",
+            "PURSUITS.md": (
+                b"# Pursuits\n\n## Focus\n\n- `removed`\n\n"
+                b"## Removed {F#removed}\n\n## Kept {#kept}\n"
+            ),
+            "PURSUIT_removed.md": b"# Removed child {#removed-child}\n",
+        }
+        self._commit_pursuit_graph(self.root, original, "pursuit: seed cross-root references")
+        repaired = {
+            "MEMORY.md": original["MEMORY.md"].replace(b"[dep:removed, doc:kept]", b"[ doc:kept]").replace(
+                b"[dep:removed-child]", b"[]"
+            ),
+            "MEMORY_detail.md": b"# Evidence {#evidence} -> [ dep:kept]\n",
+            "PURSUITS.md": b"# Pursuits\n\n## Focus\n\n## Kept {#kept}\n",
+            "PURSUIT_removed.md": None,
+        }
+        return original, repaired
+
+    def _commit_pursuit_graph(self, worktree: Path, files: dict[str, bytes | None], subject: str) -> str:
+        for path, content in files.items():
+            if content is None:
+                (worktree / path).unlink(missing_ok=True)
+            else:
+                (worktree / path).write_bytes(content)
+        self._git("add", "-A", "--", *files, cwd=worktree)
+        self._git("commit", "-m", subject, cwd=worktree)
+        return self._git("rev-parse", "HEAD", cwd=worktree)
 
 
 if __name__ == "__main__":

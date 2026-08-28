@@ -1,0 +1,3 @@
+# Review the TypeScript/CSS sources; these bundles retain dependency string bytes.
+rightmemory/web/static/pursuit-map.js linguist-generated=true -whitespace
+rightmemory/web/static/pursuit-map.css linguist-generated=true

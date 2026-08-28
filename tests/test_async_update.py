@@ -223,9 +223,9 @@ class AsyncUpdateStateTests(unittest.TestCase):
                 error = "" if process.poll() is None else process.communicate(timeout=1)[1]
                 self.assertIsNotNone(worker_pid, error)
 
-                # The full suite runs several process-heavy Git integration modules in
-                # parallel, so leave enough room for this detached child to be scheduled.
-                stopped = store.stop_worker(timeout_seconds=30)
+                # A delayed startup can miss next_flush_at and enter a full 30-second
+                # idle poll. The default stop timeout leaves room for that poll and exit.
+                stopped = store.stop_worker()
                 _, stderr_text = process.communicate(timeout=10)
                 return_code = process.returncode
                 worker_state = json.loads(store._worker_state_path().read_text(encoding="utf-8"))

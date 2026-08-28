@@ -148,48 +148,28 @@ else:
         installer_type.return_value.run.assert_called_once_with()
 
     def test_install_skills_populates_every_selected_target(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            targets = [root / "codex-skills", root / "claude-skills"]
-            installer = Installer(REPO_ROOT, "standalone", root / "memory", targets)
-            for index, target in enumerate(targets):
-                target.mkdir()
-                current_schema = (
-                    REPO_ROOT / "rightmemory" / "reference" / "rightmemory-schema.md"
-                ).read_text(encoding="utf-8")
-                loose_schema = current_schema
-                if index == 1:
-                    loose_schema = loose_schema.replace("\n", "\r\n")
-                (target / "rightmemory-schema.md").write_bytes(loose_schema.encode("utf-8"))
-                (target / "rightmemory-edit-correction-rules.md").write_bytes(
-                    (
-                        REPO_ROOT
-                        / "rightmemory"
-                        / "reference"
-                        / "RIGHTMEMORY_EDIT_CORRECTION_RULES.md"
-                    ).read_bytes()
-                )
+        for mode in ("standalone", "cli-agent"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tempdir:
+                root = Path(tempdir)
+                targets = [root / "codex-skills", root / "claude-skills"]
+                installer = Installer(REPO_ROOT, mode, root / "memory", targets)
+                with patch("builtins.print"):
+                    installer._install_skills()
 
-            current_schema_hash = install_core.sha256(current_schema.encode("utf-8")).hexdigest()
-            with (
-                patch("builtins.print"),
-                patch.dict(
-                    install_core.LEGACY_LOOSE_REFERENCE_SHA256,
-                    {"rightmemory-schema.md": current_schema_hash},
-                ),
-            ):
-                installer._install_skills()
+                for target in targets:
+                    self.assertFalse((target / "rightmemory-schema.md").exists())
+                    self.assertFalse((target / "rightmemory-edit-correction-rules.md").exists())
+                    for skill_name in (
+                        "rightmemory-auto-orchestrator",
+                        "maintain-rightmemory",
+                        "review-agent-guidance-inbox",
+                        "maintain-pursuit-map",
+                    ):
+                        self.assertTrue((target / skill_name / "SKILL.md").is_file())
+                    self.assertFalse((target / "memory-retriever").exists())
+                    self.assertFalse((target / "rightmemory-orchestrator").exists())
 
-            for target in targets:
-                self.assertFalse((target / "rightmemory-schema.md").exists())
-                self.assertFalse((target / "rightmemory-edit-correction-rules.md").exists())
-                self.assertTrue((target / "rightmemory-auto-orchestrator" / "SKILL.md").is_file())
-                self.assertFalse((target / "memory-retriever").exists())
-                self.assertFalse((target / "rightmemory-orchestrator").exists())
-                self.assertFalse((target / "maintain-rightmemory").exists())
-                self.assertFalse((target / "review-agent-guidance-inbox").exists())
-
-    def test_install_skills_removes_only_exact_managed_previous_defaults(self):
+    def test_install_skills_replaces_managed_variants_and_keeps_independent_skills(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             target = root / "skills"
@@ -210,7 +190,7 @@ else:
                     )
             modified = target / "memory-retriever" / "SKILL.md"
             modified.write_text(
-                modified.read_text(encoding="utf-8") + "\nUser-owned change.\n",
+                "User-owned file.\n",
                 encoding="utf-8",
             )
 
@@ -219,9 +199,31 @@ else:
 
             self.assertTrue(modified.is_file())
             self.assertFalse((target / "rightmemory-orchestrator").exists())
-            self.assertFalse((target / "maintain-rightmemory").exists())
-            self.assertFalse((target / "review-agent-guidance-inbox").exists())
+            self.assertTrue((target / "maintain-rightmemory" / "SKILL.md").is_file())
+            self.assertTrue((target / "review-agent-guidance-inbox" / "SKILL.md").is_file())
+            self.assertTrue((target / "maintain-pursuit-map" / "SKILL.md").is_file())
             self.assertTrue((target / "rightmemory-auto-orchestrator" / "SKILL.md").is_file())
+
+    def test_remove_old_loose_reference_accepts_managed_bytes_and_known_line_endings(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            canonical = root / "canonical.bin"
+            canonical.write_bytes(b"managed-data\n")
+            installer = Installer(REPO_ROOT, "standalone", root / "memory", [root / "skills"])
+            for index, content in enumerate((b"managed-data\n", b"managed-data\r\n")):
+                target = root / f"target-{index}"
+                target.mkdir()
+                legacy = target / "rightmemory-schema.md"
+                legacy.write_bytes(content)
+                with (
+                    patch("builtins.print"),
+                    patch.dict(
+                        install_core.LEGACY_LOOSE_REFERENCE_SHA256,
+                        {"rightmemory-schema.md": install_core.sha256(b"managed-data\n").hexdigest()},
+                    ),
+                ):
+                    installer._remove_old_loose_reference(target, legacy.name, canonical)
+                self.assertFalse(legacy.exists())
 
     def test_install_skills_preserves_modified_loose_reference(self):
         with tempfile.TemporaryDirectory() as tempdir:

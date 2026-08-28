@@ -217,14 +217,18 @@ class IsolatedWriteUpdateFinalizationTests(IsolatedWriteTestBase):
         self.assertEqual(record.effects, ())
         self.assertTrue(record.outcome.metadata["superseded"])
 
-    def test_update_lands_memory_and_pursuit_as_one_transaction(self):
+    def test_update_lands_memory_and_agent_corrections_as_one_transaction(self):
+        self._add_fixed_agent_correction_collections()
+
         def callback(worktree: Path) -> str:
             self._append_memory(worktree, "- `durable` durable result → []\n")
-            (worktree / "PURSUITS.md").write_text(
-                "# Pursuits\n\n## Continue {#continue} \u2192 [dep:durable]\n",
+            correction = worktree / "MEMORY_agent-corrections-writing.md"
+            correction.write_text(
+                correction.read_text(encoding="utf-8")
+                + "\n### Keep the useful context\n\nPreserve the durable result.\n",
                 encoding="utf-8",
             )
-            self._git("add", "MEMORY.md", "PURSUITS.md", cwd=worktree)
+            self._git("add", "MEMORY.md", correction.name, cwd=worktree)
             self._git("commit", "-m", "rightmemory: unified update", cwd=worktree)
             return "updated"
 
@@ -232,8 +236,8 @@ class IsolatedWriteUpdateFinalizationTests(IsolatedWriteTestBase):
 
         self.assertEqual(result.commits_landed, 1)
         self.assertEqual(result.start_commit, self._git("rev-parse", f"{result.landed_commit}^"))
-        self.assertEqual(result.changed_paths, ("MEMORY.md", "PURSUITS.md"))
-        self.assertIn("continue", (self.root / "PURSUITS.md").read_text(encoding="utf-8"))
+        self.assertEqual(result.changed_paths, ("MEMORY.md", "MEMORY_agent-corrections-writing.md"))
+        self.assertIn("Preserve the durable result.", (self.root / "MEMORY_agent-corrections-writing.md").read_text(encoding="utf-8"))
 
     def test_sync_reconciler_preserves_structured_corrections_over_updater_ceiling(self):
         def callback(worktree: Path) -> str:

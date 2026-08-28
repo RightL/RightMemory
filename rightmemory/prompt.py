@@ -172,8 +172,8 @@ def _command_guidance(role: str) -> str:
             "- The `rightmemory update` command selected unified updating. Treat every caller message as a "
             "RightMemory candidate without requiring a dispatch prefix.\n"
             "- A caller message may contain one candidate or an ordered batch. Reconcile the evidence into "
-            "Memory, Pursuit, Agent Corrections, any meaningful combination of them, or nowhere instead of "
-            "treating candidate text as final stored content."
+            "Memory, Agent Corrections, both, or nowhere instead of treating candidate text as final stored "
+            "content. Pursuit is read-only context; skip proposed map changes."
         )
     if role == "pruner":
         return (
@@ -310,9 +310,8 @@ def _tool_guidance(role: str) -> str:
         )
     elif role == "update":
         guidance += (
-            "\n- Commit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`, `PURSUIT_*.md`, "
-            "and the fixed Agent Corrections collections. `corrections.md` is read-only; keep unrelated files "
-            "out of commits."
+            "\n- Commit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, and the fixed Agent Corrections "
+            "collections. Pursuit files and `corrections.md` are read-only; keep unrelated files out of commits."
         )
     else:
         guidance += (

@@ -1,6 +1,6 @@
 > This starter template is copied into a new RightMemory root during bootstrap.
-> Replace the example Pursuit with live intent that should shape later work, and do not
-> treat it as user state. <!-- rightmemory:pursuit-example:start -->
+> Replace the example through the map editor or an explicit map-maintenance request.
+> It is illustrative, not user state. <!-- rightmemory:pursuit-example:start -->
 
 # Pursuits
 
@@ -8,20 +8,16 @@
 
 No Pursuit is focused yet.
 
-## Example Release Readiness {#sample-pursuit-release-readiness}
+## Example Application {#sample-pursuit-application}
 
-Make the example application's current `staging` candidate ready for an intentional
-release to `production`. This sample keeps only the objective and current direction;
-detailed test output, commands, and execution history belong in project-local
-artifacts.
+Work starts from the application's repository and its current design document.
+The user decides which directions belong in this map. Detailed implementation,
+experiments, and test results stay in the repository.
 
-**State:** The candidate is deployed to `staging`; its release criteria still need
-verification. `production` has not been changed.
+### Release Confidence {#sample-pursuit-release-confidence}
 
-**Next:**
-- `ask` Decide which observable checks define release readiness for the `staging` candidate.
+Understand what makes a release safe and useful to the people using the application.
 
-**Done when:** Current evidence supports an explicit release or no-release decision
-for moving the candidate to `production`.
+### Simpler Onboarding {#sample-pursuit-onboarding}
 
 <!-- rightmemory:pursuit-example:end -->

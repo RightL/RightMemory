@@ -39,17 +39,19 @@ For a named profile, use `"args": ["--profile", "my-project", "mcp"]`.
 The server exposes exactly three tools:
 
 - `rightmemory_retrieve` retrieves cross-session context when it could materially affect the current work.
-- `rightmemory_submit_update` submits durable Memory or Pursuit evidence to the asynchronous unified Update queue.
+- `rightmemory_submit_update` submits durable Memory and explicitly requested agent-guidance evidence to the asynchronous Update queue. Pursuit is read-only context, not an Update destination.
 - `rightmemory_capture_guidance` captures plausible reusable agent-behavior evidence, including explicit and implicit user redirections.
 
 The tool and parameter descriptions contain the complete automatic ordinary-agent contract. An MCP client should not also load the RightMemory orchestrator skill; that skill remains the CLI transport for clients without MCP support.
 
-Successful writes return no model-visible content. A write result contains text only when the agent must act, such as when evidence was saved but the Update worker could not start, or when queued work requires manual recovery. Update submission never reports synchronous semantic acceptance: the updater reconciles submitted evidence later and may change any relevant module or none.
+Successful writes return no model-visible content. A write result contains text only when the agent must act, such as when evidence was saved but the Update worker could not start, or when queued work requires manual recovery. Update submission never reports synchronous semantic acceptance: the updater reconciles submitted evidence later and may change Memory, Agent Corrections, both, or neither.
 
 Guidance capture favors recall. A signal need not already be a fully settled general rule, and independent later occurrences of a similar pattern may be captured again. Capture does not replace applying the user's direction to the current work.
 
 ## Scope
 
 The MCP adapter calls the same runtime, async Update store, and guidance capture implementation as the CLI. The CLI remains available for human inspection, explicit maintenance, queue status, retry, undo, and clients that cannot use MCP.
+
+Ordinary MCP work does not create, rename, reorganize, focus, or remove Pursuits. Explicit map requests use the human editor or the independent `maintain-pursuit-map` skill; no additional MCP map-write tools are provided.
 
 This command currently serves stdio only. RightMemory does not expose a Streamable HTTP MCP endpoint.

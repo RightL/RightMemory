@@ -5,7 +5,7 @@
 RightMemory has three semantic modules:
 
 - **Memory** stores durable context that should remain useful beyond the current task or session.
-- **Pursuit** stores ongoing or deliberately parked pursuits and goals, their hierarchy, and the context needed to understand their current position and direction.
+- **Pursuit** is a user-owned hierarchical map of ongoing directions, with the context needed to understand or enter them.
 - **Agent Corrections** stores bounded, reusable cases in which the user redirected prior agent work.
 
 Memory and Pursuit form one addressable graph organized into two Markdown document trees. Their headings and nodes share one globally unique id namespace, and typed edges may cross between the trees.
@@ -42,7 +42,7 @@ Addressable headings use:
 ### Provider Question View {MQ#heading-id} → [edge1, edge2, ...]
 ```
 
-Plain tree headings without graph relationships may omit the anchor and edge list.
+Plain tree headings without graph relationships may omit the anchor and edge list. New Pursuit map items use addressable headings; their bodies are ordinary optional Markdown, with no dedicated task fields or node types.
 
 Addressable `#`, `##`, and `###` headings may have body paragraphs directly below them. The body describes the heading concept as a whole. Use child nodes only for independently useful items.
 
@@ -59,7 +59,6 @@ Rules:
 - Edges may connect any two addressable graph items.
 - Useful but unsettled Memory begins its description with `Uncertain:`.
 - Focus entries in `PURSUITS.md` reference Pursuit heading ids; they are not graph nodes.
-- Bullets under a Pursuit's `**Next:**` block are ordered control entries; they are not graph nodes.
 
 ## Backing Forms
 
@@ -70,7 +69,7 @@ Rules:
 - Memory: `MEMORY_<id>.md`
 - Pursuit: `PURSUIT_<id>.md`
 
-The logical ancestor chain continues across the detail-file boundary.
+The logical ancestor chain continues recursively across detail-file boundaries. The Pursuit editor presents this as one tree and hides the physical document split; each graph file still obeys the heading and terminal-reference rules below.
 
 ### M#: Markdown Evidence
 
