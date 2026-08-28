@@ -380,12 +380,16 @@ def _cleanup_failed_web_start(
 
 def _terminate_owned_web_process(pid: int, identity: str) -> None:
     for sig in dict.fromkeys((signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM))):
-        if process_identity(pid) != identity:
+        if not _web_process_matches(pid, identity):
             return
         try:
             os.kill(pid, sig)
         except ProcessLookupError:
             return
+        except OSError:
+            if not _web_process_matches(pid, identity):
+                return
+            raise
         if _wait_for_exit(pid, WEB_START_CLEANUP_TIMEOUT_SECONDS, identity=identity):
             return
     raise RuntimeError(f"could not stop owned Web startup process {pid}")
@@ -439,7 +443,9 @@ def _wait_for_exit(pid: int, timeout_seconds: int, *, identity: str | None = Non
 
 def _web_process_matches(pid: int, identity: str | None) -> bool:
     if identity is not None:
-        return process_identity(pid) == identity
+        # Windows retains creation-time identity while a parent holds the
+        # process handle, even after exit. Identity alone does not prove liveness.
+        return process_exists(pid) and process_identity(pid) == identity
     return _is_web_process(pid)
 
 
