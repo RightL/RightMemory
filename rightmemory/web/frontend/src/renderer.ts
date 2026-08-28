@@ -6,7 +6,7 @@ import { CanvasGestures, edgePanVelocity, type PointerSample } from './gestures.
 import { type ViewState } from './view-state.ts';
 
 interface Callbacks {
-  select(id: string): void;
+  select(id: string | null): void;
   collapse(id: string, collapsed: boolean, preserveDrag?: boolean): void;
   move(operation: Operation): void;
   editStart(id: string, title: string): void;
@@ -43,6 +43,7 @@ export class MapRenderer {
   private dropError: string | null = null;
   private ghost: HTMLDivElement | null = null;
   private moving = false;
+  private suppressCanvasClick = false;
   private wheelTimer: ReturnType<typeof setTimeout> | undefined;
   private dragPointer: { id: string; x: number; y: number } | null = null;
   private panFrame: number | null = null;
@@ -63,8 +64,15 @@ export class MapRenderer {
     host.setAttribute('aria-describedby', 'pm-keyboard-hint');
     const events = { signal: this.abort.signal };
     host.addEventListener('click', (event) => {
-      const target = (event.target as HTMLElement).closest<HTMLElement>('[data-map-marker], me-epd');
-      if (!target) return;
+      const clicked = event.target as HTMLElement;
+      const target = clicked.closest<HTMLElement>('[data-map-marker], me-epd');
+      if (!target) {
+        if (!this.suppressCanvasClick && !clicked.closest('me-tpc, #input-box')) {
+          this.select(null);
+          this.callbacks.select(null);
+        }
+        return;
+      }
       const topic = target.closest('me-tpc') as Topic | null ?? target.parentElement?.querySelector<Topic>('me-tpc');
       if (!topic) return;
       event.stopPropagation();
@@ -362,6 +370,7 @@ export class MapRenderer {
   }
 
   private pointerDown(event: PointerEvent): void {
+    this.suppressCanvasClick = this.gestures.active;
     const target = event.target as HTMLElement;
     if (this.editing || target.closest('[data-map-marker], me-epd, #input-box')) return;
     const topic = target.closest<Topic>('me-tpc');
@@ -385,6 +394,8 @@ export class MapRenderer {
   private pointerMove(event: PointerEvent): void {
     const motion = this.gestures.move(this.pointerSample(event));
     if (motion.kind === 'idle') return;
+    // A drag can end in a browser click event; it must not clear the selection.
+    this.suppressCanvasClick = true;
     if (motion.kind === 'cancel') { this.cancelGesture(); return; }
     event.preventDefault();
     this.beginViewMotion();

@@ -68,6 +68,12 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     pointer(node, 'pointerdown', rect.x + rect.width / 2, rect.y + rect.height / 2);
     pointer(node, 'pointerup', rect.x + rect.width / 2, rect.y + rect.height / 2, 0);
   };
+  const click = (target: HTMLElement) => {
+    const rect = target.getBoundingClientRect();
+    pointer(target, 'pointerdown', rect.right - 8, rect.bottom - 8);
+    pointer(target, 'pointerup', rect.right - 8, rect.bottom - 8, 0);
+    target.click();
+  };
   const settled = () => until(() => !controller!.hasUnsavedChanges, 'The save queue did not settle');
   const reset = async (count = 22) => {
     controller?.destroy();
@@ -79,8 +85,50 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
   try {
     await reset();
     select('design');
+    click($('.pm-canvas'));
+    check($('.pm-topic-toolbar').hidden && !host.querySelector('[aria-selected="true"]'), 'A blank click dismisses the toolbar and clears selection');
+    check(!$('.pm-canvas').hasAttribute('aria-activedescendant'), 'A cleared selection has no active tree item');
+    await controller!.refresh();
+    check($('.pm-topic-toolbar').hidden && !host.querySelector('[aria-selected="true"]'), 'Refreshing must not restore a dismissed selection');
+    controller!.destroy(); controller = await mountMap(host, transport); await pause();
+    check($('.pm-topic-toolbar').hidden, 'Reopening the same map preserves the cleared selection');
+    key('ArrowDown');
+    check(topic('directions').getAttribute('aria-selected') === 'true', 'Keyboard navigation can select again after dismissal');
+    select('design');
+    const panCanvas = $('.pm-canvas'); const panRect = panCanvas.getBoundingClientRect();
+    const panBefore = $('.pm-forest').style.transform;
+    pointer(panCanvas, 'pointerdown', panRect.right - 12, panRect.bottom - 12);
+    pointer(panCanvas, 'pointermove', panRect.right - 52, panRect.bottom - 52);
+    pointer(panCanvas, 'pointerup', panRect.right - 52, panRect.bottom - 52, 0);
+    panCanvas.click();
+    check($('.pm-forest').style.transform !== panBefore, 'Dragging blank space still pans');
+    check(topic('design').getAttribute('aria-selected') === 'true' && !$('.pm-topic-toolbar').hidden, 'A click emitted after panning must keep the selection');
+    click(document.body);
+    check($('.pm-topic-toolbar').hidden && !host.querySelector('[aria-selected="true"]'), 'Clicks outside the map dismiss the toolbar');
+    select('design');
+    click(button('note', '.pm-toolbar'));
+    check(!$('.pm-note').hidden && topic('design').getAttribute('aria-selected') === 'true', 'Fixed toolbar actions retain their selected target');
+    click(button('close-note', '.pm-note')); await pause();
+    check(operations.length === 0, 'Dismissal, navigation, and panning never write Pursuit data');
+    click(button('bold', '.pm-topic-toolbar'));
+    click($('.pm-canvas')); await settled();
+    check(indexTree(current!).get('design')!.title === '**Design 设计**' && $('.pm-topic-toolbar').hidden, 'A pending save keeps its target without restoring dismissed tools');
+    select('design'); key('F2');
+    await until(() => host.querySelector('#input-box'), 'The selected title should open for editing');
+    const editedTitle = $('#input-box');
+    editedTitle.textContent = 'Edited before dismissal'; editedTitle.dispatchEvent(new Event('input', { bubbles: true }));
+    const blank = $('.pm-canvas'); const blankRect = blank.getBoundingClientRect();
+    pointer(blank, 'pointerdown', blankRect.right - 8, blankRect.bottom - 8);
+    editedTitle.blur(); await pause(0);
+    pointer(blank, 'pointerup', blankRect.right - 8, blankRect.bottom - 8, 0); blank.click();
+    await settled();
+    check(indexTree(current!).get('design')!.title === 'Edited before dismissal' && $('.pm-topic-toolbar').hidden, 'Blank clicks finish title editing without losing text or reopening tools');
+    report('PASS outside-click dismissal, refresh/reopen persistence, keyboard recovery, toolbar actions, pan, and pending edits');
+
+    await reset();
+    select('design');
     check(!$('.pm-topic-toolbar').hidden, 'Selecting a real node shows its toolbar');
-    for (const command of ['bold', 'underline', 'strike']) { button(command, '.pm-topic-toolbar').click(); await settled(); }
+    for (const command of ['bold', 'underline', 'strike']) { click(button(command, '.pm-topic-toolbar')); await settled(); }
     check(indexTree(current!).get('design')!.title === '**<u>~~Design 设计~~</u>**', 'B/U/S must use canonical rename titles');
     check(topic('design').querySelector('strong > u > s'), 'All three marks must be rendered');
     check(operations.every((operation) => operation.type === 'rename' && operation.id === 'design'), 'Formatting reuses rename and keeps the selected id');

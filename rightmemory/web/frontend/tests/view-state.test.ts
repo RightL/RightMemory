@@ -173,6 +173,16 @@ test('selection reconciliation never leaves a hidden or deleted node selected', 
   assert.deepEqual(reveal(snapshot, view, 'level-7').collapsed, []);
 });
 
+test('a cleared selection survives refresh and keyboard navigation can select again', () => {
+  const snapshot = forestFixture();
+  const view: ViewState = { selected: null, collapsed: ['research'] };
+  assert.deepEqual(reconcileView(snapshot, view), view);
+  for (const key of ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home']) {
+    assert.deepEqual(navigate(snapshot, view, key), { ...view, selected: 'directions' });
+  }
+  assert.deepEqual(navigate(snapshot, view, 'End'), { ...view, selected: 'caption' });
+});
+
 test('browser view state is isolated by root', () => {
   const values = new Map<string, string>();
   const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
@@ -180,6 +190,8 @@ test('browser view state is isolated by root', () => {
   writeView(storage, 'root-a', view);
   assert.deepEqual(readView(storage, 'root-a'), view);
   assert.deepEqual(readView(storage, 'root-b'), { selected: null, collapsed: [] });
+  writeView(storage, 'root-a', { ...view, selected: null });
+  assert.deepEqual(reconcileView(fixture(), readView(storage, 'root-a')), { ...view, selected: null });
   storage.setItem('rightmemory:pursuit-map:broken', '{bad');
   assert.deepEqual(readView(storage, 'broken'), { selected: null, collapsed: [] });
   storage.setItem('rightmemory:pursuit-map:old-layout', JSON.stringify({ ...view, selected: '__pursuit_virtual_root__' }));
