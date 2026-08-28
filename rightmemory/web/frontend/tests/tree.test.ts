@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyOperation, assertMove, descendants, indexTree, promoteOperation, visualRoot, VIRTUAL_ROOT } from '../src/tree.ts';
-import { fixture } from './fixtures.ts';
+import { applyOperation, assertMove, deletionSelection, descendants, dropOperation, indexTree, promoteOperation } from '../src/tree.ts';
+import { forestData, titleMarkup, titleText } from '../src/canvas-data.ts';
+import { fixture, forestFixture } from './fixtures.ts';
 
 test('create inserts at the requested sibling position without mutating the source tree', () => {
   const original = fixture();
@@ -49,16 +50,52 @@ test('delete removes logical descendants, Focus, and inbound edges; a real visua
   assert.deepEqual(removed.focus_ids, []);
   assert.deepEqual(indexTree(removed).get('research')!.edges, [['ref', 'interaction']]);
   const empty = applyOperation(removed, { type: 'delete', id: 'directions' });
-  assert.equal(visualRoot(empty), VIRTUAL_ROOT);
+  assert.deepEqual(forestData(empty, { selected: null, collapsed: [] }), []);
+  assert.equal(deletionSelection(removed, 'directions'), null);
   assert.deepEqual(empty.items, []);
 });
 
-test('a second top-level item changes the visual root without inventing a semantic node', () => {
+test('each top-level direction remains its own canvas root', () => {
   const original = fixture();
   const plural = applyOperation(original, { type: 'create', parent_id: null, after_id: 'directions', title: 'Another direction' }, 'second');
-  assert.equal(visualRoot(original), 'directions');
-  assert.equal(visualRoot(plural), VIRTUAL_ROOT);
+  const data = forestData(plural, { selected: 'second', collapsed: [] });
+  assert.deepEqual(data.map((map) => map.nodeData.id), ['directions', 'second']);
+  assert.deepEqual(data[0].nodeData.children!.map((node) => node.direction), [0, 1, 0]);
+  assert.equal(data[1].nodeData.topic, 'Another direction');
+  assert.equal(deletionSelection(plural, 'directions'), 'second');
   assert.equal(plural.items.length, original.items.length + 1);
+});
+
+test('independent roots collapse separately and a single child extends right', () => {
+  const data = forestData(forestFixture(), { selected: 'directions', collapsed: ['directions'] });
+  assert.deepEqual(data[0].nodeData.children, []);
+  assert.equal(data[1].direction, 1);
+  assert.equal(data[1].nodeData.children![0].direction, 1);
+  assert.equal(data[1].nodeData.children![0].children![0].id, 'caption');
+});
+
+test('cross-map drops preserve subtrees and support top-level ordering', () => {
+  const original = forestFixture();
+  const moved = applyOperation(original, dropOperation(original, 'research', 'sessions', 'in'));
+  assert.equal(indexTree(moved).get('research')!.parent_id, 'sessions');
+  assert.deepEqual(descendants(moved, 'research'), descendants(original, 'research'));
+  assert.equal(indexTree(moved).get('sessions')!.child_ids.at(-1), 'research');
+  const root = applyOperation(moved, dropOperation(moved, 'research', 'practice', 'before'));
+  assert.deepEqual(root.root_ids, ['directions', 'research', 'practice']);
+  const reordered = applyOperation(root, dropOperation(root, 'practice', 'directions', 'before'));
+  assert.deepEqual(reordered.root_ids, ['practice', 'directions', 'research']);
+  assert.throws(() => dropOperation(original, 'practice', 'caption', 'in'), /inside itself/);
+  for (const position of ['in', 'before', 'after'] as const) assert.throws(() => dropOperation(original, 'practice', 'practice', position), /different destination/);
+});
+
+test('strikethrough display escapes HTML and preserves the raw title for editing', () => {
+  const raw = '~~Earlier <img src=x onerror="alert(1)">~~ & Current';
+  const snapshot = applyOperation(fixture(), { type: 'rename', id: 'research', title: raw });
+  const data = forestData(snapshot, { selected: 'research', collapsed: [] });
+  assert.equal(data[0].nodeData.children![0].topic, raw);
+  assert.equal(titleMarkup(raw), '<s>Earlier &lt;img src=x onerror=&quot;alert(1)&quot;&gt;</s> &amp; Current');
+  assert.equal(titleText(raw), 'Earlier <img src=x onerror="alert(1)"> & Current');
+  assert.equal(titleMarkup('Unpaired ~~marker'), 'Unpaired ~~marker');
 });
 
 test('500-item edits preserve every unrelated item', () => {

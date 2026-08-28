@@ -1,4 +1,4 @@
-import { indexTree, visualRoot, VIRTUAL_ROOT, type Snapshot } from './tree.ts';
+import { indexTree, type Snapshot } from './tree.ts';
 
 export interface ViewState {
   selected: string | null;
@@ -15,7 +15,6 @@ export function visibleNodes(snapshot: Snapshot, collapsed: Iterable<string>): s
     result.push(id);
     if (!folded.has(id)) items.get(id)!.child_ids.forEach(visit);
   };
-  if (visualRoot(snapshot) === VIRTUAL_ROOT) result.push(VIRTUAL_ROOT);
   snapshot.root_ids.forEach(visit);
   return result;
 }
@@ -24,9 +23,8 @@ export function reconcileView(snapshot: Snapshot, view: ViewState): ViewState {
   const items = indexTree(snapshot);
   const collapsed = view.collapsed.filter((id) => items.get(id)?.child_ids.length);
   let selected = view.selected;
-  if (!selected || (selected !== VIRTUAL_ROOT && !items.has(selected))) selected = visualRoot(snapshot);
-  if (selected === VIRTUAL_ROOT && snapshot.root_ids.length === 1) selected = snapshot.root_ids[0];
-  let parent = items.get(selected)?.parent_id;
+  if (!selected || !items.has(selected)) selected = snapshot.root_ids[0] ?? null;
+  let parent = selected ? items.get(selected)?.parent_id : null;
   while (parent) {
     if (collapsed.includes(parent)) selected = parent;
     parent = items.get(parent)?.parent_id;
@@ -34,23 +32,39 @@ export function reconcileView(snapshot: Snapshot, view: ViewState): ViewState {
   return { ...view, selected, collapsed };
 }
 
+export function rootBranchSide(index: number, count: number): 'left' | 'right' {
+  return count > 1 && index % 2 === 0 ? 'left' : 'right';
+}
+
 export function navigate(snapshot: Snapshot, view: ViewState, key: string): ViewState {
   const state = reconcileView(snapshot, view);
-  const selected = state.selected!;
-  const item = indexTree(snapshot).get(selected);
+  const selected = state.selected;
+  if (!selected) return state;
+  const items = indexTree(snapshot);
+  const item = items.get(selected)!;
   const collapsed = new Set(state.collapsed);
   const visible = visibleNodes(snapshot, collapsed);
   if (key === 'ArrowDown' || key === 'ArrowUp') {
     const offset = key === 'ArrowDown' ? 1 : -1;
     state.selected = visible[Math.max(0, Math.min(visible.length - 1, visible.indexOf(selected) + offset))] ?? selected;
-  } else if (key === 'ArrowRight') {
-    if (selected === VIRTUAL_ROOT) state.selected = snapshot.root_ids[0] ?? VIRTUAL_ROOT;
-    else if (collapsed.has(selected)) collapsed.delete(selected);
-    else state.selected = item?.child_ids[0] ?? selected;
-  } else if (key === 'ArrowLeft') {
-    if (item?.child_ids.length && !collapsed.has(selected)) collapsed.add(selected);
-    else state.selected = item?.parent_id ?? visualRoot(snapshot);
-  } else if (key === 'Home') state.selected = visualRoot(snapshot);
+  } else if (key === 'ArrowRight' || key === 'ArrowLeft') {
+    const side = key === 'ArrowLeft' ? 'left' : 'right';
+    if (!item.parent_id) {
+      const child = item.child_ids.find((_, index) => rootBranchSide(index, item.child_ids.length) === side);
+      if (child && collapsed.has(selected)) collapsed.delete(selected);
+      else if (child) state.selected = child;
+    } else {
+      let branch = item;
+      while (branch.parent_id && items.get(branch.parent_id)?.parent_id) branch = items.get(branch.parent_id)!;
+      const root = items.get(branch.parent_id!)!;
+      const outward = rootBranchSide(root.child_ids.indexOf(branch.id), root.child_ids.length);
+      if (side === outward) {
+        if (collapsed.has(selected)) collapsed.delete(selected);
+        else state.selected = item.child_ids[0] ?? selected;
+      } else if (item.child_ids.length && !collapsed.has(selected)) collapsed.add(selected);
+      else state.selected = item.parent_id;
+    }
+  } else if (key === 'Home') state.selected = snapshot.root_ids[0] ?? null;
   else if (key === 'End') state.selected = visible.at(-1) ?? selected;
   return { ...state, collapsed: [...collapsed] };
 }
@@ -105,12 +119,12 @@ export function readView(storage: Pick<Storage, 'getItem'>, rootKey: string): Vi
     return {
       selected: typeof saved?.selected === 'string' ? saved.selected : null,
       collapsed: Array.isArray(saved?.collapsed) ? saved.collapsed.filter((id: unknown) => typeof id === 'string') : [],
-      ...(viewport && [viewport.x, viewport.y, viewport.scale].every(Number.isFinite) && viewport.scale >= 0.1 && viewport.scale <= 2
+      ...(saved?.layout === 'independent-roots' && viewport && [viewport.x, viewport.y, viewport.scale].every(Number.isFinite) && viewport.scale >= 0.1 && viewport.scale <= 2
         ? { viewport } : {}),
     };
   } catch { return { selected: null, collapsed: [] }; }
 }
 
 export function writeView(storage: Pick<Storage, 'setItem'>, rootKey: string, view: ViewState): void {
-  try { storage.setItem(`rightmemory:pursuit-map:${rootKey}`, JSON.stringify(view)); } catch { /* Private browsing may disable storage. */ }
+  try { storage.setItem(`rightmemory:pursuit-map:${rootKey}`, JSON.stringify({ ...view, layout: 'independent-roots' })); } catch { /* Private browsing may disable storage. */ }
 }
