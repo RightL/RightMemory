@@ -9,7 +9,7 @@ RightMemory is curated cross-session context. It should preserve compact state t
 Its three semantic modules are:
 
 - **Memory**: durable context that improves future judgment, action, interpretation, or retrieval.
-- **Pursuit**: meaningful pursuits and goals, their hierarchy, and their current direction.
+- **Pursuit**: the user's hierarchical map of ongoing directions and useful entry context.
 - **Agent Corrections**: bounded, reusable cases in which user feedback redirected prior agent work.
 
 Project-local artifacts remain the primary home for implementation detail, experiment history, operational state, and detailed continuation instructions. Pursuit may support continuity, but it is not primarily a resume log.
@@ -32,6 +32,7 @@ The governing bias for semantic RightMemory is **high-signal retention rather th
 | `update-role.md` | Internal Update agent | Candidate reconciliation and edit procedure |
 | `rightmemory-orchestrator.SKILL.md`, `rightmemory-auto-orchestrator.SKILL.md` | Ordinary main agent | Approval-gated or automatic use of RightMemory |
 | `review-agent-guidance-inbox.SKILL.md` | Explicitly invoked general agent | User-reviewed admission or rejection of pending agent guidance |
+| `maintain-pursuit-map/SKILL.md` | Explicitly invoked general agent | Requested map edits, separate from Update and ordinary maintenance |
 | `rightmemory/guidance.py`, sync and tool boundaries | Runtime | Inbox format, atomic capture, deterministic merge, validation, and model-role isolation |
 
 The orchestrator files are **client skills read by the main working agent**, not internal orchestrator roles. Update is an internal RightMemory agent. The guidance-review skill is a separate direct-curation workflow used through agents such as Codex or Claude Code.
@@ -55,14 +56,14 @@ Other files may rely on a definition without restating it. A compact operational
 
 ### Pursuit
 
-Pursuit is a hierarchical system of meaningful pursuits, goals, and directions. It records what should become true, why it matters, where it sits in the hierarchy, and enough context to understand its current direction. Detailed execution continuity belongs mainly in project artifacts. Incompleteness alone does not justify a Pursuit.
+Pursuit is a human-owned map of ongoing directions. An item has a title, stable id, position in the tree, and optional Markdown body. Detailed execution continuity belongs in project artifacts. Incompleteness alone does not justify a Pursuit. The human editor and explicitly invoked `maintain-pursuit-map` are the normal semantic write entrances; Update and ordinary maintenance read the map without changing it. See [Pursuit Map](PURSUIT_MAP.md) for use and [design rationale](../DESIGN_NOTES.md) for the ownership boundary.
 
 ### Orchestration Modes
 
 Both orchestrator skills share the same retrieval policy and candidate discipline, but guidance capture now differs from formal semantic admission.
 
-- The approval-gated skill proposes qualifying Memory, Pursuit, or Agent Correction evidence and submits it to Update only after user approval. An explicit request to submit, save, remember, or follow the evidence in future counts as approval.
-- The automatic skill sends qualifying Memory and Pursuit evidence directly to Update at a natural boundary.
+- The approval-gated skill proposes qualifying Memory or Agent Correction evidence and submits it to Update only after user approval. An explicit request to submit, save, remember, or follow the evidence in future counts as approval.
+- The automatic skill sends qualifying Memory evidence directly to Update at a natural boundary. Neither mode submits or proposes Pursuit changes from ordinary task activity.
 - In automatic mode, settled agent guidance or user redirection goes to `AGENT_GUIDANCE_INBOX.md` when the resulting direction is clear and may be useful in similar future work. Unresolved discussion and obviously one-off local adjustments are excluded.
 - When the user explicitly asks RightMemory to remember guidance or follow it in future, automatic mode sends it through Update rather than the inbox.
 - One interaction may produce both an Update candidate and a guidance-inbox entry when they preserve distinct evidence.
@@ -99,7 +100,7 @@ Automatic Reviewer is deprecated for now. Do not modify or depend on it for the 
 
 RightMemory does not require a visible retrieved-guidance block or a fixed phrase such as `Correction noted.` Applicable guidance should affect the work itself; those mechanisms were compensations for weak agent behavior, not product semantics.
 
-Update may repair a clear schema or supplied-rule violation that becomes apparent while processing an update. It should not inspect unrelated content merely to turn the work into a general audit, and should report rather than guess when the correct repair is uncertain.
+Update may repair a clear schema or supplied-rule violation in its writable Memory or Agent Correction state when that violation becomes apparent while processing an update. Pursuit stays read-only even when a map repair seems useful. Update should not inspect unrelated content merely to turn the work into a general audit, and should report rather than guess when the correct repair is uncertain.
 
 ## How to Modify RightMemory
 

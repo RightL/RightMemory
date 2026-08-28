@@ -68,9 +68,10 @@ class ASGIResponse:
 
 
 class ASGITestClient:
-    def __init__(self, app) -> None:
+    def __init__(self, app, *, request_timeout_seconds: float = 5) -> None:
         self.app = app
         self.cookies = CookieJar()
+        self.request_timeout_seconds = request_timeout_seconds
 
     def get(self, path: str, *, headers: dict[str, str] | None = None) -> ASGIResponse:
         return self.request("GET", path, headers=headers)
@@ -166,7 +167,7 @@ class ASGITestClient:
 
         task = asyncio.create_task(self.app(scope, receive, send))
         try:
-            await asyncio.wait_for(response_complete.wait(), timeout=5)
+            await asyncio.wait_for(response_complete.wait(), timeout=self.request_timeout_seconds)
         except TimeoutError as exc:
             if task.done():
                 await task

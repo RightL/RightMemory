@@ -1026,7 +1026,7 @@ class InstallScriptTests(unittest.TestCase):
             "!update_records/*.json\n",
         )
 
-    def test_cli_agent_installs_only_automatic_orchestration_skill_by_default(self):
+    def test_cli_agent_installs_automatic_orchestration_and_independent_skills(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
@@ -1042,6 +1042,7 @@ class InstallScriptTests(unittest.TestCase):
             guidance_reviewer_exists = (
                 skills_target / "review-agent-guidance-inbox" / "SKILL.md"
             ).is_file()
+            map_maintainer_exists = (skills_target / "maintain-pursuit-map" / "SKILL.md").is_file()
             install_stamp = (memory_root / ".runtime" / "install.stamp").read_text(encoding="utf-8")
             wrapper = (root / "home" / ".local" / "bin" / "rightmemory").read_text(encoding="utf-8")
             installed_skill_directories = sorted(path.name for path in skills_target.iterdir() if path.is_dir())
@@ -1053,10 +1054,10 @@ class InstallScriptTests(unittest.TestCase):
         self.assertFalse(retriever_exists)
         self.assertFalse(orchestrator_exists)
         self.assertTrue(auto_orchestrator_exists)
-        self.assertFalse(maintainer_exists)
-        self.assertFalse(guidance_reviewer_exists)
+        self.assertTrue(maintainer_exists)
+        self.assertTrue(guidance_reviewer_exists)
+        self.assertTrue(map_maintainer_exists)
         self.assertIn("rightmemory-auto-orchestrator", result.stdout)
-        self.assertNotIn("review-agent-guidance-inbox", result.stdout)
         self.assertIn("export PYTHONUTF8=1", wrapper)
         self.assertIn('export RIGHTMEMORY_ROOT="', wrapper)
         self.assertIn('exec "', wrapper)
@@ -1064,7 +1065,12 @@ class InstallScriptTests(unittest.TestCase):
         self.assertFalse((skills_target / "rightmemory-edit-correction-rules.md").exists())
         self.assertEqual(
             installed_skill_directories,
-            ["rightmemory-auto-orchestrator"],
+            [
+                "maintain-pursuit-map",
+                "maintain-rightmemory",
+                "review-agent-guidance-inbox",
+                "rightmemory-auto-orchestrator",
+            ],
         )
 
     def test_rerun_preserves_managed_examples_and_user_state_byte_for_byte(self):
@@ -1085,7 +1091,7 @@ class InstallScriptTests(unittest.TestCase):
             pursuits = pursuits_path.read_text(encoding="utf-8")
             pursuits_path.write_text(
                 "# User Pursuits\n\n## Continue Release {#continue-release}\n\nKeep this live intent.\n\n"
-                + pursuits.replace("Example Release Readiness", "Stale Release Readiness"),
+                + pursuits.replace("Example Application", "Stale Example Application"),
                 encoding="utf-8",
             )
             expected_memory = memory_path.read_bytes()
@@ -1106,7 +1112,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(refreshed_memory.count(EXAMPLE_END), 1)
         self.assertIn("## Continue Release {#continue-release}", refreshed_pursuits)
         self.assertIn("Keep this live intent.", refreshed_pursuits)
-        self.assertIn("Stale Release Readiness", refreshed_pursuits)
+        self.assertIn("Stale Example Application", refreshed_pursuits)
         self.assertEqual(refreshed_pursuits.count(PURSUIT_EXAMPLE_START), 1)
         self.assertEqual(refreshed_pursuits.count(PURSUIT_EXAMPLE_END), 1)
 
@@ -1189,10 +1195,11 @@ class InstallScriptTests(unittest.TestCase):
             for target in (home / ".codex" / "skills", home / ".claude" / "skills"):
                 self.assertFalse((target / "rightmemory-edit-correction-rules.md").exists())
                 self.assertTrue((target / "rightmemory-auto-orchestrator" / "SKILL.md").exists())
-                self.assertFalse((target / "maintain-rightmemory").exists())
+                self.assertTrue((target / "maintain-rightmemory" / "SKILL.md").is_file())
+                self.assertTrue((target / "maintain-pursuit-map" / "SKILL.md").is_file())
                 self.assertFalse((target / "memory-retriever").exists())
                 self.assertFalse((target / "rightmemory-orchestrator").exists())
-                self.assertFalse((target / "review-agent-guidance-inbox").exists())
+                self.assertTrue((target / "review-agent-guidance-inbox" / "SKILL.md").is_file())
                 self.assertFalse((target / "memory-orchestrator").exists())
             self.assertFalse((home / ".codex" / "skills" / "memory-curator").exists())
             self.assertFalse((home / ".claude" / "skills" / "memory-dreamer").exists())

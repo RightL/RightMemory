@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>RightMemory Web Studio</title>
     <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/pursuit-map.css">
   </head>
   <body>
     <div class="app-shell">
@@ -12,6 +13,7 @@
         <div class="brand">RightMemory</div>
         <nav aria-label="Main">
           <button class="nav-item active" data-panel="overview">Overview</button>
+          <button class="nav-item" data-panel="pursuit-map">Pursuit Map</button>
           <button class="nav-item" data-panel="shared">Shared Views</button>
           <button class="nav-item" data-panel="memory">Memory</button>
           <button class="nav-item" data-panel="insights">Insights</button>
@@ -40,6 +42,7 @@
           </header>
           <div id="message" class="message" role="status"></div>
           <section id="content" class="content"></section>
+          <section id="pursuit-content" hidden></section>
         </section>
       </main>
     </div>

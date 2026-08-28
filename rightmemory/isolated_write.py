@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -20,7 +21,13 @@ from .semantic_operation import (
     SemanticOperationRecord,
     SemanticOperationStore,
 )
-from .graph import MEMORY_DETAIL_FILE_RE, PURSUIT_DETAIL_FILE_RE
+from .graph import (
+    MEMORY_DETAIL_FILE_RE,
+    PURSUIT_DETAIL_FILE_RE,
+    GraphManifest,
+    build_graph_manifest,
+    remove_edge_targets,
+)
 from .tools import (
     CORRECTIONS_PATH,
     FIXED_CORRECTION_COLLECTION_PATHS,
@@ -107,10 +114,29 @@ class IsolatedWriteResult:
     prepared: bool = False
 
 
+@dataclass(frozen=True)
+class _CommitGraphSnapshot:
+    graph: GraphManifest
+    files: dict[str, bytes]
+    modes: dict[str, str]
+
+
 class IsolatedWriteSupervisor:
-    def __init__(self, memory_root: Path, role: str):
+    def __init__(
+        self,
+        memory_root: Path,
+        role: str,
+        *,
+        pursuit_restore_commit: str | None = None,
+    ):
         self.memory_root = Path(memory_root).resolve()
         self.role = role
+        if pursuit_restore_commit is not None:
+            if role != "pursuit-map":
+                raise ValueError("Pursuit reference restoration requires the pursuit-map role")
+            if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", pursuit_restore_commit) is None:
+                raise ValueError("Pursuit reference restoration requires a full commit hash")
+        self.pursuit_restore_commit = pursuit_restore_commit
 
     def recover_prepared(self) -> None:
         """Finish durable outcomes before a caller starts another model turn."""
@@ -318,6 +344,9 @@ class IsolatedWriteSupervisor:
             commits = self._temp_commits(worktree, start_head)
             if commits:
                 if operation_id is not None:
+                    # Squashing must not conceal a forbidden intermediate write.
+                    for commit in commits:
+                        self._validate_commits(worktree, [commit])
                     commits = [self._collapse_operation_commits(worktree, start_head, commits, operation_id)]
                 self._validate_candidate(worktree, commits)
 
@@ -460,6 +489,13 @@ class IsolatedWriteSupervisor:
                         dirty = self._dirty_memory_files()
                         if dirty:
                             raise MainMemoryDirtyError(dirty)
+                        # Prepared outcomes can outlive a role-policy change.
+                        # Recheck the current fence before publishing their saved tree.
+                        managed_paths = frozenset(
+                            path for path in self._commit_paths(self.memory_root, candidate)
+                            if self.role == "update" and _is_managed_update_artifact_path(path)
+                        )
+                        self._validate_commits(self.memory_root, [candidate], managed_paths=managed_paths)
                         if current_head == outcome.start_commit:
                             self._land_operation_commit(candidate)
                         else:
@@ -627,7 +663,7 @@ class IsolatedWriteSupervisor:
         *,
         managed_paths: frozenset[str] = frozenset(),
     ) -> None:
-        if self.role == "update" and len(commits) > 1:
+        if self.role in {"update", "pursuit-map"} and len(commits) > 1:
             raise RuntimeError(f"one {self.role} turn must land at most one commit")
         for commit in commits:
             changed_paths = self._commit_paths(worktree, commit)
@@ -643,6 +679,8 @@ class IsolatedWriteSupervisor:
                 label = "non-insight paths" if self.role == "insight" else "non-memory paths"
                 raise RuntimeError(f"isolated commit touches {label}: {paths}")
             self._validate_commit_tree(worktree, commit, set(changed_paths))
+            if self.role == "pursuit-map":
+                self._validate_pursuit_memory_changes(worktree, commit, set(changed_paths))
 
     def _validate_candidate(
         self,
@@ -805,10 +843,11 @@ class IsolatedWriteSupervisor:
             return bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
         if self.role == "reviewer":
             return False
+        if self.role == "pursuit-map":
+            # Memory paths also require byte-exact mechanical repair proof below.
+            return self._is_graph_rightmemory_path(path)
         if path in FIXED_CORRECTION_COLLECTION_PATHS:
             return self.role in {"update", "sync-reconciler"}
-        if self.role == "update":
-            return self._is_graph_rightmemory_path(path)
         if self.role == "sync-reconciler":
             return (
                 self._is_graph_rightmemory_path(path)
@@ -828,6 +867,172 @@ class IsolatedWriteSupervisor:
             or path == "PURSUITS.md"
             or bool(PURSUIT_DETAIL_FILE_RE.fullmatch(path))
         )
+
+    def _validate_pursuit_memory_changes(
+        self, worktree: Path, commit: str, changed_paths: set[str]
+    ) -> None:
+        memory_paths = {
+            path for path in changed_paths
+            if path == "MEMORY.md" or MEMORY_DETAIL_FILE_RE.fullmatch(path)
+        }
+        if not memory_paths:
+            return
+        parent = self._single_commit_parent(worktree, commit)
+        before = self._commit_graph_snapshot(worktree, parent)
+        after = self._commit_graph_snapshot(worktree, commit)
+        if self._is_pursuit_edge_removal(before, after, memory_paths):
+            return
+        if self.pursuit_restore_commit is not None:
+            source = self.pursuit_restore_commit
+            if not self._is_ancestor(source, parent):
+                raise RuntimeError("Pursuit reference restoration source is not in the current history")
+            source_paths = set(self._commit_paths(worktree, source))
+            if any(not self._is_role_write_path(path) for path in source_paths):
+                raise RuntimeError("Pursuit reference restoration source changes unrelated files")
+            source_memory_paths = {
+                path for path in source_paths
+                if path == "MEMORY.md" or MEMORY_DETAIL_FILE_RE.fullmatch(path)
+            }
+            source_before = self._commit_graph_snapshot(
+                worktree, self._single_commit_parent(worktree, source)
+            )
+            source_after = self._commit_graph_snapshot(worktree, source)
+            if (
+                source_memory_paths
+                and self._is_pursuit_edge_removal(source_before, source_after, source_memory_paths)
+                and memory_paths == source_memory_paths
+                and all(
+                    before.files.get(path) == source_after.files.get(path)
+                    and after.files.get(path) == source_before.files.get(path)
+                    and before.modes.get(path) == after.modes.get(path)
+                    for path in memory_paths
+                )
+                and self._removed_pursuit_ids(source_before.graph, source_after.graph)
+                <= self._removed_pursuit_ids(after.graph, before.graph)
+            ):
+                return
+        paths = ", ".join(sorted(memory_paths))
+        raise RuntimeError(
+            "pursuit-map may change Memory only to repair references to deleted Pursuit ids "
+            f"or restore a verified deletion: {paths}"
+        )
+
+    def _is_pursuit_edge_removal(
+        self,
+        before: _CommitGraphSnapshot,
+        after: _CommitGraphSnapshot,
+        changed_memory_paths: set[str],
+    ) -> bool:
+        before_graph = before.graph
+        after_graph = after.graph
+        if before_graph.errors or after_graph.errors:
+            return False
+        deleted_ids = self._removed_pursuit_ids(before_graph, after_graph)
+        expected: dict[str, list[str]] = {}
+        for item in before_graph.items.values():
+            if item.family != "memory" or not any(target in deleted_ids for _, target in item.edges):
+                continue
+            relative_path = item.file.relative_to(before_graph.root).as_posix()
+            if relative_path not in expected:
+                expected[relative_path] = before.files[relative_path].decode("utf-8").splitlines(keepends=True)
+            lines = expected[relative_path]
+            lines[item.line_number - 1] = remove_edge_targets(lines[item.line_number - 1], deleted_ids)
+        return set(expected) == changed_memory_paths and all(
+            "".join(lines).encode("utf-8") == after.files.get(path)
+            and before.modes.get(path) == after.modes.get(path)
+            for path, lines in expected.items()
+        )
+
+    @staticmethod
+    def _removed_pursuit_ids(before: GraphManifest, after: GraphManifest) -> set[str]:
+        return {
+            item.id for item in before.items.values()
+            if item.family == "pursuit" and item.id not in after.items
+        }
+
+    def _single_commit_parent(self, worktree: Path, commit: str) -> str:
+        parents = self._git_stdout(worktree, "rev-list", "--parents", "-n", "1", commit).split()
+        if len(parents) != 2:
+            raise RuntimeError("Pursuit map edits require a commit with one parent")
+        return parents[1]
+
+    def _commit_graph_snapshot(
+        self, worktree: Path, commit: str
+    ) -> _CommitGraphSnapshot:
+        """Parse immutable Git blobs with the canonical graph index, never a second grammar."""
+        entries = self._git_stdout(worktree, "ls-tree", "-r", "-z", commit)
+        files: dict[str, bytes] = {}
+        modes: dict[str, str] = {}
+        objects: dict[str, str] = {}
+        for entry in entries.split("\0"):
+            if not entry:
+                continue
+            metadata, _, path = entry.partition("\t")
+            if not (
+                path in {"MEMORY.md", "PURSUITS.md"}
+                or MEMORY_DETAIL_FILE_RE.fullmatch(path)
+                or PURSUIT_DETAIL_FILE_RE.fullmatch(path)
+            ):
+                continue
+            mode, kind, object_id = metadata.split()
+            if kind != "blob" or mode not in {"100644", "100755"}:
+                raise RuntimeError(f"memory path is not a regular file: {path}")
+            objects[path] = object_id
+            modes[path] = mode
+        blobs = self._read_git_blobs(worktree, objects.values())
+        runtime = self.memory_root / ".runtime"
+        runtime.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="pursuit-fence-", dir=runtime) as temporary:
+            snapshot = Path(temporary)
+            for path, object_id in objects.items():
+                content = blobs[object_id]
+                files[path] = content
+                (snapshot / path).write_bytes(content)
+            graph = build_graph_manifest(snapshot)
+        return _CommitGraphSnapshot(graph=graph, files=files, modes=modes)
+
+    def _read_git_blobs(self, worktree: Path, object_ids: Iterable[str]) -> dict[str, bytes]:
+        # Text-mode subprocess output would normalize CRLF and invalidate byte proof.
+        requested = tuple(dict.fromkeys(object_ids))
+        if not requested:
+            return {}
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GIT_ASKPASS"] = "true"
+        try:
+            result = subprocess.run(
+                ["git", "cat-file", "--batch"],
+                cwd=worktree,
+                input="".join(f"{object_id}\n" for object_id in requested).encode("ascii"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                timeout=GIT_TIMEOUT_SECONDS,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError("could not read immutable Pursuit graph snapshot") from exc
+        if result.returncode:
+            raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip())
+        blobs: dict[str, bytes] = {}
+        offset = 0
+        for object_id in requested:
+            header_end = result.stdout.find(b"\n", offset)
+            header = result.stdout[offset:header_end].split() if header_end >= 0 else []
+            if len(header) != 3 or header[:2] != [object_id.encode("ascii"), b"blob"]:
+                raise RuntimeError("invalid immutable Pursuit graph blob response")
+            try:
+                size = int(header[2])
+            except ValueError as exc:
+                raise RuntimeError("invalid immutable Pursuit graph blob size") from exc
+            content_start = header_end + 1
+            content_end = content_start + size
+            if size < 0 or result.stdout[content_end:content_end + 1] != b"\n":
+                raise RuntimeError("incomplete immutable Pursuit graph blob response")
+            blobs[object_id] = result.stdout[content_start:content_end]
+            offset = content_end + 1
+        if offset != len(result.stdout):
+            raise RuntimeError("unexpected immutable Pursuit graph blob response")
+        return blobs
 
     def _validate_regular_memory_path(self, worktree: Path, commit: str, path: str, required: bool) -> None:
         tree_entry = self._tree_entry(worktree, commit, path)

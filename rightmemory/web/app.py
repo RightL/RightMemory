@@ -8,6 +8,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response, status
+from starlette.concurrency import run_in_threadpool
 
 from .auth import (
     clear_session_cookie,
@@ -23,6 +24,7 @@ from .auth import (
 from .models import error_detail, ok_response
 from .process import MANAGED_WEB_ENV, clear_web_process_files, consume_web_stop_request, register_web_process
 from .service import WebStudioService, resolve_allowed_memory_root
+from ..pursuit_store import PursuitStoreError
 from ..shared_view_questions import question_response_payload, verify_question_view_token
 
 
@@ -48,7 +50,10 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
 
     @app.get("/static/{asset_name}")
     async def static_asset(asset_name: str):
-        return _static_file_response(static_root, asset_name, allowed={"app.js", "styles.css"})
+        return _static_file_response(
+            static_root, asset_name,
+            allowed={"app.js", "styles.css", "pursuit-map.js", "pursuit-map.css", "pursuit-map.LICENSE.txt"},
+        )
 
     @app.get("/api/session")
     async def session(request: Request):
@@ -86,6 +91,65 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
     @app.get("/api/status")
     async def status_api(service=Depends(current_service)):
         return ok_response("status loaded", service.status())
+
+    async def pursuit_response(service, message, action, *args):
+        try:
+            data = await run_in_threadpool(action, *args)
+        except PursuitStoreError as exc:
+            detail = error_detail(str(exc))
+            detail.update(code=exc.code, diagnostics=list(exc.diagnostics))
+            if exc.status in {409, 422}:
+                try:
+                    detail["snapshot"] = await run_in_threadpool(service.pursuit_map)
+                except (OSError, ValueError, RuntimeError):
+                    # A concurrent filesystem failure must not hide the original conflict.
+                    pass
+            raise HTTPException(status_code=exc.status, detail=detail) from exc
+        except ValueError as exc:
+            detail = error_detail(str(exc))
+            detail.update(code="invalid_request", diagnostics=[])
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
+        return ok_response(message, data)
+
+    @app.get("/api/pursuit-map")
+    async def pursuit_map(service=Depends(current_service)):
+        return await pursuit_response(service, "pursuit map loaded", service.pursuit_map)
+
+    @app.post("/api/pursuit-map/operations")
+    async def apply_pursuit_operation(
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        return await pursuit_response(
+            service, "pursuit map updated", service.apply_pursuit_operation, payload, session.session_id,
+        )
+
+    @app.post("/api/pursuit-map/undo")
+    async def undo_pursuit_operation(
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        return await pursuit_response(
+            service, "pursuit map operation undone", service.undo_pursuit_operation, payload, session.session_id,
+        )
+
+    @app.post("/api/pursuit-map/redo")
+    async def redo_pursuit_operation(
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        return await pursuit_response(
+            service, "pursuit map operation redone", service.redo_pursuit_operation, payload, session.session_id,
+        )
 
     @app.get("/api/settings")
     async def settings_api(service=Depends(current_service)):
@@ -491,6 +555,7 @@ def _static_file_response(static_root: Path, asset_name: str, *, allowed: set[st
         ".css": "text/css; charset=utf-8",
         ".html": "text/html; charset=utf-8",
         ".js": "text/javascript; charset=utf-8",
+        ".txt": "text/plain; charset=utf-8",
     }
     return Response(content=path.read_bytes(), media_type=media_types.get(path.suffix, "application/octet-stream"))
 
@@ -506,14 +571,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--serve is required")
     root = args.memory_root.resolve()
     server = uvicorn.Server(uvicorn.Config(create_web_app(root), host=args.host, port=args.port))
-    if os.environ.get(MANAGED_WEB_ENV) == "1":
-        register_web_process(root, os.getpid(), ready=True)
+    managed = os.environ.get(MANAGED_WEB_ENV) == "1"
+    if managed:
+        register_web_process(root, os.getpid())
 
     def monitor_stop_request() -> None:
+        ready = False
         while not server.should_exit:
             if consume_web_stop_request(root, os.getpid()):
                 server.should_exit = True
                 return
+            if managed and server.started and not ready:
+                register_web_process(root, os.getpid(), ready=True)
+                ready = True
             time.sleep(0.1)
 
     monitor = threading.Thread(target=monitor_stop_request, name="rightmemory-web-stop", daemon=True)

@@ -5,7 +5,7 @@ description: "Use when the user explicitly chooses automatic RightMemory orchest
 
 # Use RightMemory Automatically
 
-RightMemory contains durable Memory, live Pursuit, and Agent Corrections. Use it as a client during ordinary work; do not curate its files directly unless the user explicitly requests maintenance.
+RightMemory contains durable Memory, the user's Pursuit map, and Agent Corrections. Use it as a client during ordinary work. Pursuit is read-only context here: do not submit map changes through Update. Explicit map requests belong to the dedicated `maintain-pursuit-map` workflow.
 
 ## Session
 
@@ -20,16 +20,14 @@ Choose one stable session id for the conversation and reuse it for every RightMe
 
 - Reconcile retrieved content with the current conversation and current evidence. Current user instructions take precedence over stale or conflicting stored state.
 - Apply relevant guidance in the work itself; do not merely quote or acknowledge it.
-- If retrieved content is stale, wrong, misleading, or overbroad, do not follow it. Submit the problem and current evidence immediately.
+- If retrieved Memory or Agent Corrections are stale, wrong, misleading, or overbroad, do not follow them. Submit the problem and current evidence immediately. Treat stale Pursuit as read-only context too; task activity does not authorize correcting the map.
 - Ordinary retrieval already considers relevant Agent Corrections. Use `rightmemory agent-corrections writing` or `rightmemory agent-corrections design` only when the user explicitly requests a whole-collection review. Use `writing` when changing expression or presentation alone could resolve the issue; use `design` when reasoning, decisions, actions, omissions, workflow, or behavior must change. Run both commands only when the requested review spans both collections.
 
 ## Submit Updates
 
-- Submit automatically only when omitting the evidence would likely:
-  - cause poorer future decisions or substantial rediscovery (**Memory**);
-  - lose track of a meaningful pursuit, its place in the hierarchy, or its current direction (**Pursuit**).
+- Submit automatic Memory evidence when omitting it would likely cause poorer future decisions or substantial rediscovery.
 - Do not submit transient progress, routine task results, unfinished work by itself, or implementation detail already adequately preserved in project-local artifacts.
-- Submit once the evidence is clear and the work reaches a natural boundary—for example, when a pursuit becomes established or materially changes, a durable outcome settles, or the conversation moves away from the work. Completion is not required. If nothing passes the bar, submit nothing.
+- Submit once the durable evidence is clear and the work reaches a natural boundary. Completion is not required. If nothing passes the bar, submit nothing; task progress and new ideas do not trigger a map-change suggestion.
 - Combine related evidence due at the same boundary into one candidate. State what happened, what is true now, and why it may matter; do not prescribe final stored wording, ids, classification, placement, or edits.
 - Submit with:
 

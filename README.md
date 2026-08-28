@@ -1,8 +1,8 @@
 # RightMemory
 
-**Durable Memory, live Pursuit, and reusable Agent Corrections for AI coding agents.**
+**Durable Memory, a human-owned Pursuit map, and reusable Agent Corrections for AI coding agents.**
 
-RightMemory gives people and coding agents three semantic modules: durable context lives in Memory, live intent lives in Pursuit, and reusable cases of user redirection live in Agent Corrections. Memory and Pursuit are Markdown document trees in one addressable graph; Agent Corrections is a fixed, non-graph case library. Shared views provide controlled collaboration between RightMemory roots. The same context can move across sessions, devices, users, agent clients, and collaborating agent teams instead of living inside one vendor UI.
+RightMemory gives people and coding agents three semantic modules: durable context lives in Memory, the user's directions form a Pursuit map, and reusable cases of user redirection live in Agent Corrections. Memory and Pursuit are Markdown document trees in one addressable graph; Agent Corrections is a fixed, non-graph case library. Shared views provide controlled collaboration between RightMemory roots. The same context can move across sessions, devices, users, agent clients, and collaborating agent teams instead of living inside one vendor UI.
 
 ![How one RightMemory root works](docs/assets/rightmemory-single-root.svg)
 
@@ -25,7 +25,7 @@ RightMemory is not only a place to store and retrieve context. Its semantic mode
 | Module | What it preserves | What it is not |
 | --- | --- | --- |
 | **Memory** | Durable context that should remain useful beyond the current task or session. | A transcript, task log, or record of everything that happened. |
-| **Pursuit** | Live or deliberately parked intent, its hierarchy, and the context needed to understand its current direction. | A backlog, work log, or detailed execution record. |
+| **Pursuit** | Directions the user wants visible in a hierarchical map, with optional context needed to understand or enter them. | A backlog, task manager, work log, or record of completed work. |
 | **Agent Corrections** | Bounded, reusable cases in which the user redirected prior agent work. | A collection of every correction or a substitute for general behavior guidance. |
 
 Memory and Pursuit form one addressable graph organized as two Markdown document trees. Agent Corrections remains a bounded, non-graph case library.
@@ -33,11 +33,11 @@ Memory and Pursuit form one addressable graph organized as two Markdown document
 ### What Belongs Where?
 
 - Use **Memory** when durable context can materially improve future action, judgment, interpretation, or retrieval.
-- Use **Pursuit** when the intent itself should remain active or deliberately parked after the current update.
+- Add to **Pursuit** when the user chooses to represent a direction in the map.
 - Use **Agent Corrections** when a concrete user redirection forms a reusable case whose contrast would lose value if generalized away.
 - Store nothing when the evidence is transient, duplicated, insufficiently settled, or better preserved in project artifacts.
 
-The updater may change any combination of the three modules—or decide that the submitted evidence should not be stored at all.
+Update reconciles Memory and Agent Correction evidence, or stores nothing. Pursuit changes come from the human editor or the explicitly requested `maintain-pursuit-map` workflow; ordinary agent activity does not change the map.
 
 Canonical definitions and rules: [Memory Rules](rightmemory/reference/MEMORY_RULES.md), [Pursuit Rules](rightmemory/reference/PURSUIT_RULES.md), [Agent Corrections Rules](rightmemory/reference/AGENT_CORRECTION_MEMORY_RULES.md), and the [RightMemory Schema](rightmemory/reference/rightmemory-schema.md).
 
@@ -82,7 +82,7 @@ cd RightMemory
 .\install.ps1
 ```
 
-The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs the automatic `rightmemory-auto-orchestrator` skill into both `~/.codex/skills` and `~/.claude/skills`. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
+The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs `rightmemory-auto-orchestrator` alongside the independent `maintain-pursuit-map`, `maintain-rightmemory`, and `review-agent-guidance-inbox` skills into both `~/.codex/skills` and `~/.claude/skills`. The three maintenance skills require explicit user requests. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
 
 If you want RightMemory roles to run through the Codex SDK or Claude Code CLI:
 
@@ -103,7 +103,9 @@ After install, add a short instruction to your agent guidance file, such as
 Read the RightMemory MCP tool instructions, then automatically use the RightMemory MCP tools according to those instructions.
 ```
 
-The repository retains optional source skills for read-only retrieval, approval-gated orchestration, direct maintenance, and pending-guidance review, but the installer does not put them into an agent's active skill directory by default. The shared schema and focused rule documents define valid state, while the installed automatic skill defines how the host agent accesses it.
+Read-only retrieval and approval-gated orchestration remain optional source skills. Choose one ordinary orchestration variant for a conversation; the independent maintenance skills are available alongside that choice. The shared schema and focused rule documents define valid state, while client skills define access and maintenance workflows.
+
+Open the visual map with `rightmemory pursuit`. It starts or reuses the existing Web Studio; sign in and select the intended root before editing. See [Pursuit Map](docs/PURSUIT_MAP.md) for the editor and its safety boundaries.
 
 Then start the background manager. It reviews idle agent sessions, evaluates prune generations, runs Dreamer consolidation, and produces Insight reflections when enough work has accumulated:
 
@@ -141,7 +143,8 @@ When automatic orchestration encounters settled, potentially reusable agent guid
 The guidance inbox is synchronized but excluded from ordinary retrieval until the user explicitly reviews and promotes selected entries.
 
 Later:
-  the unified updater may change any combination of the three modules, or none
+  the unified updater may change Memory, Agent Corrections, both, or neither
+  the user's Pursuit map remains unchanged
   each queued outcome keeps its exact candidate batch beside the corresponding Git change
   rightmemory dreamer consolidates stale, duplicated, or overgrown memory
   rightmemory insight writes durable reflection artifacts when useful
@@ -151,13 +154,13 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 
 ## What It Gives You
 
-- Three semantic modules: durable Memory, live Pursuit, and reusable Agent Corrections.
+- Three semantic modules: durable Memory, the user's Pursuit map, and reusable Agent Corrections.
 - One global id namespace and typed graph edges such as `dep:`, `cfg:`, `ver:`, `doc:`, and `todo:` across both trees.
 - Multi-device memory continuity across laptops, desktops, agent clients, and project-specific roots.
-- Automatic orchestration installed by default, with other explicit workflows retained as optional source skills.
+- Automatic orchestration plus independent explicit skills for map maintenance, Memory maintenance, and guidance review.
 - Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex SDK/Claude Code CLI role execution.
 - Model-selected, runtime-rendered retrieval output without model-authored summaries or commentary.
-- One updater for all three semantic modules, automatic transcript-review candidate extraction, and immutable candidate records for input-to-edit provenance.
+- One updater for Memory and Agent Corrections, transcript-review candidate extraction, and immutable candidate records for input-to-edit provenance.
 
 ## Install Options And Updates
 
@@ -193,7 +196,7 @@ candidate identities during package installation.
 
 The memory root must be a standalone, non-bare Git working tree. An existing target nested inside another working tree, a bare repository, or an unusable `.git` entry is refused before installation writes anything.
 
-Reinstall replaces the superseded managed Memory-only orchestrator with the current four-skill surface and removes exact managed copies of former loose skills-root references. Modified loose files are left untouched. It does not keep an alias or a second behavior path.
+Reinstall refreshes the automatic orchestration skill and the three independent maintenance skills. It removes exact managed copies of the other ordinary orchestration variants and former loose skills-root references; customized copies are left untouched. Independent skills are not part of the mutually exclusive orchestration choice.
 
 ### Profiles
 
@@ -240,7 +243,7 @@ RightMemory is not trying to replace notes, search, or embeddings. It focuses on
 Memory and Pursuit are represented as ordinary Markdown document trees in one graph:
 
 - `MEMORY.md` and `MEMORY_<id>.md` hold durable knowledge, context, preferences, decisions, constraints, and reusable guidance.
-- `PURSUITS.md` and `PURSUIT_<id>.md` hold live intent, Focus, current state, and next movements that should still shape future action.
+- `PURSUITS.md` and reachable `PURSUIT_<id>.md` files hold the user's direction map and ordered Focus references.
 
 Agent Corrections uses two fixed, non-graph files for concrete Expression and Substance cases.
 
@@ -265,7 +268,7 @@ Runtime facts that apply to the whole project.
 
 The tree tells agents where to read in local context. Anchors and node ids tell agents what can be referenced. Edges tell agents where to walk across otherwise separate branches or between durable context and live intent.
 
-A Pursuit is not a backlog or work log. It preserves an objective only while that intent remains part of the active or deliberately parked pursuit structure. Unfinished work alone does not qualify, and project-local artifacts remain the primary home for operational resume detail. Completed, abandoned, or superseded intent is removed, while only independently durable consequences move to Memory.
+A Pursuit item is an addressable heading with a title, position in the tree, and optional free-form Markdown body. The body can explain meaning or stable entry context; it has no required task fields. The user decides when to create, rename, move, focus, or remove directions. When a direction is completed, abandoned, or superseded, remove it through an authorized map edit after considering independently durable consequences for Memory. Git preserves earlier map states.
 
 Common top-level domains include project or work domains, `# User Context`, and `# Cross-Session Agent Behavior`. User context stores the user's durable context profile. Agent behavior stores guidance about how coding agents should collaborate with that user.
 
@@ -287,13 +290,15 @@ Nodes are addressable statements under a heading:
 - `<node-id>` <description> → [edge1, edge2, ...]
 ```
 
-Heading ids and node ids share one namespace across both trees. A node with no edges still writes `→ []`; a heading with no edges may omit the edge list. Pursuit `Next` control entries and `Focus` references are not graph nodes.
+Heading ids and node ids share one namespace across both trees. A node with no edges still writes `→ []`; a heading with no edges may omit the edge list. New Pursuit map items use headings; `Focus` entries are references, not graph nodes.
 
 ### Detail Files
 
 Any `#`, `##`, or `###` heading can use its id as a parsed detail-file target by writing `{F#slug}`. For example, Memory `{F#alpha-runtime}` maps to `MEMORY_alpha-runtime.md`; the same form in Pursuit maps to `PURSUIT_alpha-runtime.md`.
 
 Move child content into a detail file when a heading becomes too dense, especially past about 15 direct node lines. Count only direct node lines, not child headings or `####` pointers. After moving content out, keep the F# heading and optional summary in the parent file.
+
+The Pursuit editor creates `F#` boundaries automatically when a logical branch would exceed the physical heading limit. The canvas still shows one tree. Existing boundaries are retained rather than repeatedly splitting and inlining unchanged branches.
 
 Memory also supports linked resources that are not parsed as graph content: `{M#slug}` points to free-form `MEMORY_<slug>.md` evidence, while `{S#slug}` points to reusable `MEMORY_SKILL_<slug>.md` instructions. M#, S#, MF#, and MQ# are Memory-only. File globs never determine graph membership.
 
@@ -413,7 +418,7 @@ Root `corrections.md` is synchronized RightMemory Edit Feedback, not semantic Ri
 
 ## Agent Roles
 
-RightMemory separates ordinary work from state ownership. The default installer activates automatic orchestration. The repository also keeps optional source skills for explicitly selected workflows:
+RightMemory separates ordinary work from state ownership. Automatic orchestration and three independent maintenance skills are installed by default; read-only retrieval and approval-gated orchestration remain optional alternatives for ordinary work:
 
 ```text
 memory-retriever
@@ -430,8 +435,11 @@ rightmemory-auto-orchestrator
 
 maintain-rightmemory
   +--> MEMORY*.md                   direct coherent maintenance
-  +--> PURSUIT*.md                  direct coherent maintenance
   +--> correction surfaces          direct rule-governed curation
+
+maintain-pursuit-map / human map editor
+  +--> PURSUIT*.md                  user-requested direction map edits
+  +--> Memory edge repair           mechanical reference cleanup on deletion
 
 transcript review
   +--> candidate extraction         idle supported sessions
@@ -439,25 +447,26 @@ transcript review
 
 unified updater
   +--> MEMORY*.md                   durable context
-  +--> PURSUIT*.md                  live intent and continuity
   +--> Agent Correction files       reusable redirection cases
   +--> update_records/*.json        exact candidate batch provenance
 ```
 
 - `memory-retriever` retrieves relevant context and never submits updates.
-- `rightmemory-orchestrator` is approval-gated. Once qualifying evidence is clear and the conversation reaches a natural boundary, it names the apparent module and reason, then submits only after approval. Stale, wrong, misleading, or overbroad retrieved state is submitted immediately so the agent does not continue from known-bad context.
+- `rightmemory-orchestrator` is approval-gated. Once qualifying evidence is clear and the conversation reaches a natural boundary, it names the apparent module and reason, then submits only after approval. Stale, wrong, misleading, or overbroad retrieved Memory and Agent Corrections are submitted immediately. Pursuit remains read-only even when stale.
 - `rightmemory-auto-orchestrator` applies the same admission bar but submits qualifying evidence automatically at a natural boundary. Completion is not required, and the beginning or end of work alone does not trigger either mode.
-- `maintain-rightmemory` is explicit-only. The current agent edits Memory, Pursuit, linked content, and either correction surface directly under the schema and focused rules; it does not call Update, submit candidates, or invoke another RightMemory model role.
-- If an optional orchestration skill is installed manually, use the selected approval-gated or automatic skill for that conversation rather than invoking both. RightMemory does not persist the choice.
+- `maintain-rightmemory` handles explicitly approved maintenance of Memory, linked content, and correction surfaces. It reads Pursuit for context and preserves its references without editing the map.
+- `maintain-pursuit-map` handles explicit map requests. A precise edit is already authorized; broad cleanup or uncertain restructuring needs a concise proposed tree change and approval. Neither maintenance skill calls the other, submits map work to Update, or starts a model role.
+- `review-agent-guidance-inbox` separately proposes and applies user-approved admission of pending guidance. It does not edit Pursuit.
+- Use one of `memory-retriever`, `rightmemory-orchestrator`, and `rightmemory-auto-orchestrator` for ordinary access in a conversation. This choice does not exclude independent maintenance skills, and RightMemory does not persist the choice.
 - Once selected, `memory-retriever` calls Retrieve for the stated memory need. The two orchestrators retrieve conditionally when stored context could materially affect how the agent understands or approaches the work and skip clearly self-contained requests. Every ordinary Retrieve call may select relevant Agent Corrections through `AC#writing` and `AC#design`.
 - `memory-retriever` discloses active or deferred preferences, workflow or behavior guidance, reusable instructions, and Agent Corrections in a fixed `[RightMemory] Retrieved guidance` block; ordinary facts, knowledge, and descriptive context are not disclosed this way.
-- Evidence clears the orchestration bar only when omitting it would likely cause poorer future decisions or substantial rediscovery, lose meaningful Pursuit context, or allow a settled reusable failure pattern to recur. Transient progress, routine results, incompleteness by itself, and detail already preserved in project artifacts do not qualify.
+- Evidence clears the Update submission bar when omitting it would likely cause poorer future decisions or substantial rediscovery, or allow a settled reusable failure pattern to recur. Transient progress, routine results, incompleteness by itself, and detail already preserved in project artifacts do not qualify. Ordinary work does not trigger a map-change submission or suggestion.
 - Candidate submission is evidence, not final stored wording, classification, placement, or an instruction to edit a particular module. Session ids provide provenance and batching boundaries, not task identity.
-- The unified updater reconciles related candidates and may change Memory, Pursuit, Agent Corrections, any combination of them, or nothing in one isolated transaction.
+- The unified updater reconciles related candidates and may change Memory, Agent Corrections, both, or neither in one isolated transaction. If evidence also requests a map change, Update judges the durable portion and reports the Pursuit portion as skipped. Tool permissions and isolated-result validation reject Update writes to Pursuit files.
 - Dreamer, Insight, Historian, and Pruner remain Memory-oriented maintenance roles. They must preserve ids and edges referenced from Pursuit. Sync repair transports the wider synchronized surface without taking over semantic updater judgment.
 - Standalone mode uses RightMemory's bounded tools, while CLI-agent mode delegates roles to the Codex SDK or Claude Code CLI with role-specific permission defaults. Codex read roles run read-only. Codex write roles run with full filesystem access and no approval prompts so they can complete Git operations in their isolated task worktrees.
 
-The host agent should avoid reading or editing RightMemory state directly unless the user explicitly installs and selects `maintain-rightmemory`. Other access goes through the command-backed skill and runtime roles, which keeps ownership clear and reduces partial or competing edits.
+Ordinary host-agent access goes through the command-backed skills or MCP tools. Direct semantic edits belong to an explicitly requested maintenance workflow within its scope. Pursuit rules remain canonical in [PURSUIT_RULES.md](rightmemory/reference/PURSUIT_RULES.md).
 
 ## Prompt Sources
 
@@ -484,8 +493,8 @@ RightMemory has two install modes. The default is `standalone`.
 
 | Mode | Use When | What Gets Installed |
 | --- | --- | --- |
-| `standalone` | You want RightMemory to run its own local Pydantic AI role agents and tools. | Automatic `rightmemory-auto-orchestrator`, its shared definitions, and the `rightmemory` CLI. |
-| `cli-agent` | You want RightMemory to delegate each runtime role turn to the Codex SDK or Claude Code CLI. | The same automatic skill and shared definitions plus the `rightmemory` CLI. |
+| `standalone` | You want RightMemory to run its own local Pydantic AI role agents and tools. | The CLI, package definitions, automatic orchestration, and the three independent maintenance skills. |
+| `cli-agent` | You want RightMemory to delegate each runtime role turn to the Codex SDK or Claude Code CLI. | The same CLI, definitions, and skills, with delegated role execution. |
 
 The installer arguments are:
 
@@ -499,7 +508,7 @@ The installer arguments are:
 
 - `<memory-root>` is where Memory, Pursuit, optional Agent Correction collections, optional RightMemory Edit Feedback, sharing state, and `insight_logs/` live.
 - `<skills-target>` is where your agent loads skills from, such as `~/.claude/skills` or `~/.codex/skills`.
-- With no path arguments, the installer uses `~/.rightmemory` and installs `rightmemory-auto-orchestrator` into `~/.codex/skills` and `~/.claude/skills`.
+- With no path arguments, the installer uses `~/.rightmemory` and installs `rightmemory-auto-orchestrator`, `maintain-rightmemory`, `review-agent-guidance-inbox`, and `maintain-pursuit-map` into `~/.codex/skills` and `~/.claude/skills`.
 
 Both modes require `git` and `uv`. On macOS, Linux, and WSL, the runtime is
 installed under `${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`, and the
@@ -531,9 +540,9 @@ semantic work and push successful memory changes after they land.
 
 ## Everyday Use
 
-1. Let the installed `rightmemory-auto-orchestrator` retrieve and submit automatically according to its instructions. Install one of the optional source skills manually only when you intentionally want its narrower workflow.
+1. Let the installed `rightmemory-auto-orchestrator` retrieve context and submit qualifying Memory evidence according to its instructions. Use an optional ordinary orchestration variant when you want read-only or approval-gated access.
 2. Run `rightmemory watch start` for transcript extraction, pruning, consolidation, Insight cycles, and optional sync.
-3. Let the automatic orchestrator submit qualifying evidence itself at a natural boundary.
+3. Open `rightmemory pursuit` or explicitly request `maintain-pursuit-map` to change your direction map. Ordinary updates leave it unchanged.
 4. Use `rightmemory status` when you need to inspect watcher, queue, and sync state.
 
 Dreamer consolidates durable Memory when it needs structural cleanup. Insight commits timestamped reflections under `insight_logs/` when broader patterns, risks, or next-step ideas are worth preserving.
@@ -949,7 +958,7 @@ update_candidate_points = 1.0
 check_interval_seconds = 3000
 ```
 
-A landed Memory-changing transaction adds one configured unit to Dreamer and Insight regardless of how many candidates the updater reconciled. Pursuit-only, no-op, and failed updates add no pressure. Transcript review only submits evidence to the unified queue and adds no pressure by itself. A successful automatic cycle consumes that role's configured threshold after it lands or completes as a valid no-op; failed cycles preserve accumulated points. `rightmemory dreamer watch --interval <seconds>` and `rightmemory insight watch --interval <seconds>` override the trigger-check cadence.
+A landed Memory-changing Update transaction adds one configured unit to Dreamer and Insight regardless of how many candidates the updater reconciled. No-op and failed updates add no pressure. Transcript review only submits evidence to the unified queue and adds no pressure by itself. A successful automatic cycle consumes that role's configured threshold after it lands or completes as a valid no-op; failed cycles preserve accumulated points. `rightmemory dreamer watch --interval <seconds>` and `rightmemory insight watch --interval <seconds>` override the trigger-check cadence.
 
 Transcript-review scans share their lock with the corresponding watcher under `.runtime/watch/`; dreamer, insight, and pruner watchers hold their own locks there as well. A competing scan or watcher exits instead of duplicating work. Unified Update also uses one updater execution lock. Isolated roles may do model work in temporary checkouts, and landing uses the shared write lock before changing the main repository.
 
@@ -966,7 +975,7 @@ when Windows assigns it a new PID. Run `rightmemory watch start` or
 
 ### Isolated Automatic Writes
 
-Automatic unified-Update, dreamer, insight, and pruner turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. Update may commit any meaningful combination of Memory, Pursuit, and Agent Correction files, and runtime adds an immutable candidate record to the same commit for queued work. A queued no-change outcome still commits its candidate record; an explicit Update turn without queued candidates adds no managed artifact. Memory-oriented maintenance roles remain restricted to Memory, while Insight commits `insight_logs/*.md`. Runtime validates complete role-owned results and lands successful commits; empty `prune:` checkpoints are allowed.
+Automatic unified-Update, dreamer, insight, and pruner turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. Update may commit Memory and Agent Correction files, and runtime adds an immutable candidate record to the same commit for queued work. Pursuit paths are excluded from Update's writable tools and accepted result surface. A queued no-change outcome still commits its candidate record; an explicit Update turn without queued candidates adds no managed artifact. Memory-oriented maintenance roles remain restricted to Memory, while Insight commits `insight_logs/*.md`. Runtime validates complete role-owned results and lands successful commits; empty `prune:` checkpoints are allowed.
 
 Temporary session and provider state lives under `.runtime/isolated-state/` during an isolated turn and is promoted after successful landing or a valid no-op. Standalone turns seed local message history there. CLI-agent turns start speculative provider work in a fresh one-shot session. Successful ownership state is promoted; if later validation or landing fails, the ownership record alone is preserved so the abandoned internal thread remains excluded from transcript review and eligible for cleanup. Other temporary work is discarded, and the original candidate batch or maintenance trigger balance remains the retry source.
 
@@ -1024,8 +1033,10 @@ Repository:
 ```text
 RightMemory/
 ├── README.md
+├── DESIGN_NOTES.md
 ├── docs/
 │   ├── DEMO.md
+│   ├── PURSUIT_MAP.md
 │   └── assets/
 ├── install.sh
 ├── install.ps1
@@ -1045,10 +1056,12 @@ RightMemory/
 │       ├── SHARED_VIEW_RULES.md
 │       └── RETRIEVE_CONTRACT.md
 └── skills/
+    ├── maintain-pursuit-map/SKILL.md
     ├── maintain-rightmemory/SKILL.md
     ├── memory-retriever-cli/SKILL.md
     ├── rightmemory-orchestrator-cli/SKILL.md
     ├── rightmemory-auto-orchestrator-cli/SKILL.md
+    ├── review-agent-guidance-inbox/SKILL.md
     ├── review-rightmemory-session/SKILL.md
     └── provider-transcript-normalizer/SKILL.md
 ```
@@ -1073,7 +1086,10 @@ After install:
 └── .runtime/                   # machine-local runtime state
 
 ~/.codex/skills/
-└── rightmemory-auto-orchestrator/SKILL.md
+├── rightmemory-auto-orchestrator/SKILL.md
+├── maintain-rightmemory/SKILL.md
+├── review-agent-guidance-inbox/SKILL.md
+└── maintain-pursuit-map/SKILL.md
 ```
 
 On native Windows, the default memory root is `~\.rightmemory`, and the CLI shim
@@ -1082,12 +1098,14 @@ is `%LOCALAPPDATA%\RightMemory\bin\rightmemory.cmd`.
 ## Design Notes
 
 - Memory and Pursuit are separate document trees in one globally addressable graph; Agent Corrections is a third, non-graph semantic module.
-- Human readability is useful, but agent retrieval is the primary design center.
+- Memory supports agent retrieval; Pursuit also has a human-facing visual editor over the same canonical Markdown.
 - `MEMORY.md` and `PURSUITS.md` remain useful documents, not routing-only indexes.
-- Approval-gated and automatic orchestration share one evidence bar and submit at natural boundaries; the unified updater owns final admission, wording, placement, and lifecycle transitions.
-- Automatic state edits remain owned by dedicated RightMemory roles; direct host-agent edits require explicit selection of `maintain-rightmemory`.
+- Approval-gated and automatic orchestration submit durable evidence at natural boundaries; the updater owns Memory and Agent Correction admission, wording, and placement. The user owns Pursuit semantics.
+- Direct host-agent edits require an explicit maintenance request, using the workflow responsible for that content.
 - Dreamer consolidation and Insight reflection are explicit because structural cleanup and reflective artifacts have different authority boundaries.
 - `corrections.md` stays RightMemory Edit Feedback rather than becoming Memory, Pursuit, Agent Corrections, or graph content.
+
+See [DESIGN_NOTES.md](DESIGN_NOTES.md) for the Pursuit map's ownership and storage rationale.
 
 ## License
 

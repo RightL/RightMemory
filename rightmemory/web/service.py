@@ -16,6 +16,7 @@ from ..config import (
     load_review_config,
     load_sync_config,
 )
+from ..pursuit_store import PursuitStore
 from ..session import MemoryWriteLock
 from ..share_models import ShareRelationship, load_shares
 from ..share_results import capability_from_parts
@@ -91,6 +92,32 @@ class WebStudioService:
     def status(self) -> dict[str, Any]:
         status = collect_status(self.memory_root)
         return _json_safe(status)
+
+    def pursuit_map(self) -> dict[str, Any]:
+        return PursuitStore(self.memory_root).snapshot()
+
+    def apply_pursuit_operation(self, payload: dict[str, Any], session_id: str) -> dict[str, Any]:
+        expected_revision = _required_payload_str(payload, "expected_revision")
+        operation = payload.get("operation")
+        if not isinstance(operation, dict):
+            raise ValueError("operation must be an object")
+        return PursuitStore(self.memory_root).apply(
+            operation, expected_revision=expected_revision, session_id=session_id,
+        )
+
+    def undo_pursuit_operation(self, payload: dict[str, Any], session_id: str) -> dict[str, Any]:
+        return PursuitStore(self.memory_root).undo(
+            _required_payload_str(payload, "commit"),
+            expected_revision=_required_payload_str(payload, "expected_revision"),
+            session_id=session_id,
+        )
+
+    def redo_pursuit_operation(self, payload: dict[str, Any], session_id: str) -> dict[str, Any]:
+        return PursuitStore(self.memory_root).redo(
+            _required_payload_str(payload, "commit"),
+            expected_revision=_required_payload_str(payload, "expected_revision"),
+            session_id=session_id,
+        )
 
     def settings(self) -> dict[str, Any]:
         config_path = self.memory_root / "rightmemory.toml"

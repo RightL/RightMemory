@@ -140,7 +140,10 @@ def process_exists(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    return True
+    # Linux retains the PID and creation time of an exited child until its
+    # parent reaps it. kill(pid, 0) alone would keep shutdown waiting on a zombie.
+    fields = _proc_stat_fields(pid)
+    return not fields or fields[0] not in {"Z", "X"}
 
 
 def process_command(pid: int) -> str | None:
@@ -191,17 +194,19 @@ def _posix_process_command(pid: int) -> str | None:
 
 
 def _posix_process_identity(pid: int) -> str | None:
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    except OSError:
-        return None
-    _, separator, fields = stat.rpartition(")")
-    if not separator:
-        return None
-    parts = fields.split()
+    parts = _proc_stat_fields(pid)
     if len(parts) <= 19:
         return None
     return f"proc:{parts[19]}"
+
+
+def _proc_stat_fields(pid: int) -> list[str]:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    _, separator, fields = stat.rpartition(")")
+    return fields.split() if separator else []
 
 
 def _windows_process_exists(pid: int) -> bool:

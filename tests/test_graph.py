@@ -4,7 +4,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rightmemory.graph import KNOWN_EDGE_TYPES, build_graph_manifest, build_mf_manifest
+from rightmemory.graph import (
+    KNOWN_EDGE_TYPES,
+    block_body_text,
+    build_graph_manifest,
+    build_mf_manifest,
+    parse_addressable_heading,
+    remove_edge_targets,
+    render_heading_line,
+    replace_heading_title,
+)
 from rightmemory.tools import MemoryTools
 
 
@@ -127,6 +136,72 @@ class CanonicalGraphManifestTests(unittest.TestCase):
         manifest = build_graph_manifest(self.root)
 
         self.assertTrue(any("cyclic F# backing path" in error for error in manifest.errors))
+
+
+class PursuitGrammarTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        (self.root / "MEMORY.md").write_bytes(b"# Memory\n")
+
+    def test_title_only_and_free_markdown_body_validate_without_fields(self):
+        body = "\r\nA **note**, a [link](https://example.test), and a list.  \r\n\r\n- Ordinary list\r\n\r\n```md\r\n## An example, not a map group\r\n```\r\n"
+        (self.root / "PURSUITS.md").write_bytes(
+            ("# Pursuits\r\n\r\n## Title only {#first}\r\n\r\n## Notes {#notes}\r\n" + body).encode()
+        )
+        manifest = build_graph_manifest(self.root)
+        self.assertEqual(manifest.errors, [])
+        self.assertEqual(set(manifest.items), {"first", "notes"})
+        self.assertEqual(block_body_text(manifest, manifest.items["notes"]), body)
+
+    def test_legacy_next_keeps_all_actions_and_graph_looking_bullets_as_body(self):
+        body = (
+            "\n**State:** Old context.\n\n**Next:**\n"
+            "- `do` Continue.\n- `research` Unknown old action.\n"
+            "- `not a slug` No validation as a node. -> [rel:missing]\n"
+            "- `looks-like-node` Still a Next bullet. -> []\n"
+            "- An ordinary bullet.\n\n**Done when:** Older prose.\n"
+            "**Status:** Anything here is body.\n"
+        )
+        (self.root / "PURSUITS.md").write_bytes(("# Pursuits\n\n## Old {#old}\n" + body).encode())
+        manifest = build_graph_manifest(self.root)
+        self.assertEqual(manifest.errors, [])
+        self.assertEqual(set(manifest.items), {"old"})
+        self.assertEqual(block_body_text(manifest, manifest.items["old"]), body)
+
+    def test_legacy_next_stops_at_field_or_heading(self):
+        for boundary in ("**State:** Another field.", "## Other {#other}"):
+            with self.subTest(boundary=boundary):
+                (self.root / "PURSUITS.md").write_bytes((
+                    "# Pursuits\n\n## Old {#old}\n**Next:**\n"
+                    "- `research` Kept.\n" + boundary + "\n- `broken` Missing edge list.\n"
+                ).encode())
+                manifest = build_graph_manifest(self.root)
+                self.assertTrue(any("node `broken` must include an edge list" in error for error in manifest.errors))
+
+    def test_heading_helpers_share_edges_and_preserve_original_suffix(self):
+        line = "###   中文 and English  {F#stable}  -> [doc:target,  dep:other ]\r\n"
+        heading = parse_addressable_heading(line)
+        self.assertEqual((heading.depth, heading.title, heading.id, heading.anchor_kind),
+                         (3, "中文 and English", "stable", "F#"))
+        self.assertEqual(heading.edges, (("doc", "target"), ("dep", "other")))
+        self.assertEqual(replace_heading_title(line, "Changed"),
+                         "###   Changed  {F#stable}  -> [doc:target,  dep:other ]\r\n")
+        rendered = render_heading_line("中文 and English", "#", "stable", heading.edges, depth=2)
+        self.assertEqual(parse_addressable_heading(rendered).edges, heading.edges)
+        for invalid in ("", "  ", "two\nlines", "Anchor {#hidden}"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                render_heading_line(invalid, "#", "stable")
+
+    def test_edge_removal_keeps_other_tokens_and_prose_byte_stable(self):
+        heading = "## Target mention gone {#source}  -> [rel:gone, dep:keep , doc:gone]\r\n"
+        node = "  - `fact` Prose mentions gone. → [doc:gone]\n"
+        self.assertEqual(remove_edge_targets(heading, {"gone"}),
+                         "## Target mention gone {#source}  -> [ dep:keep ]\r\n")
+        self.assertEqual(remove_edge_targets(node, {"gone"}),
+                         "  - `fact` Prose mentions gone. → []\n")
+        self.assertEqual(remove_edge_targets(heading, {"unrelated"}), heading)
 
 
 class RelAncestorValidationTests(unittest.TestCase):
