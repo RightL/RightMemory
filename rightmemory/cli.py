@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+import webbrowser
 from base64 import urlsafe_b64encode
 from contextlib import contextmanager
 from dataclasses import replace
@@ -189,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
         return _agent_cli_main(argv[1:], memory_root)
     if argv and argv[0] == "web":
         return _web_main(argv[1:], memory_root)
+    if argv and argv[0] == "pursuit":
+        return _pursuit_main(argv[1:], memory_root)
     if argv and argv[0] == "review":
         return _review_main(argv[1:], memory_root)
     if argv and argv[0] == "sync":
@@ -307,7 +310,10 @@ def _parse_global_args(argv: list[str]) -> tuple[str | None, list[str]]:
 
 
 def _top_level_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rightmemory", description="RightMemory memory runtime")
+    parser = argparse.ArgumentParser(
+        prog="rightmemory", description="RightMemory memory runtime",
+        epilog="Open the visual Pursuit Map with: rightmemory pursuit [--no-open]",
+    )
     parser.add_argument("--profile", help="named memory profile for runtime commands")
     parser.add_argument("role", nargs="?", choices=tuple(sorted(ROLES)), help="RightMemory runtime role")
     return parser
@@ -899,6 +905,41 @@ def _shared_view_credential_token(args: argparse.Namespace) -> str:
 
 def _is_http_url(value: str) -> bool:
     return value.startswith("http://") or value.startswith("https://")
+
+
+def _pursuit_main(argv: list[str], memory_root: Path) -> int:
+    parser = argparse.ArgumentParser(prog="rightmemory pursuit", description="Open the Pursuit Map in Web Studio")
+    parser.add_argument("--no-open", action="store_true", help="print the map URL without opening a browser")
+    args = parser.parse_args(argv)
+    try:
+        existing = web_service_status(memory_root)
+        service = start_web_service(
+            memory_root, host=existing.host or "127.0.0.1", port=existing.port if existing.port is not None else 8766,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(format_web_status(service))
+    if not service.port:
+        print("error: Web Studio has no fixed port; use rightmemory web restart --port 8766.", file=sys.stderr)
+        return 1
+    host = service.host or "127.0.0.1"
+    if host == "0.0.0.0":
+        host = "127.0.0.1"
+    elif host == "::":
+        host = "::1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    url = f"http://{host}:{service.port}/#pursuit-map"
+    print(f"pursuit map: {url}")
+    if not args.no_open:
+        try:
+            opened = webbrowser.open(url)
+        except (webbrowser.Error, OSError):
+            opened = False
+        if not opened:
+            print("Could not open a browser; open the Pursuit Map URL above.", file=sys.stderr)
+    return 0
 
 
 def _web_main(argv: list[str], memory_root: Path) -> int:

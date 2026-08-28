@@ -1,11 +1,13 @@
 const state = {
   csrfToken: null,
   authenticated: false,
-  panel: "overview",
+  panel: location.hash === "#pursuit-map" ? "pursuit-map" : "overview",
+  pursuitMap: null,
 };
 
 const titleByPanel = {
   overview: "Overview",
+  "pursuit-map": "Pursuit Map",
   shared: "Shared Views",
   memory: "Memory",
   insights: "Insights",
@@ -26,7 +28,10 @@ async function fetchJson(path, options = {}) {
   const payload = await response.json();
   if (!response.ok) {
     const detail = payload.detail || {};
-    throw new Error(detail.message || payload.message || `Request failed: ${response.status}`);
+    const error = new Error(detail.message || payload.message || `Request failed: ${response.status}`);
+    error.status = response.status;
+    error.detail = detail;
+    throw error;
   }
   return payload;
 }
@@ -1043,6 +1048,22 @@ function renderArtifactButton(item, type, endpoint) {
 
 async function loadPanel() {
   document.querySelector("#panel-title").textContent = titleByPanel[state.panel] || "Overview";
+  const isPursuit = state.panel === "pursuit-map";
+  document.body.classList.toggle("pursuit-view", isPursuit);
+  document.querySelector("#content").hidden = isPursuit;
+  document.querySelector("#pursuit-content").hidden = !isPursuit;
+  document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.panel === state.panel));
+  if (isPursuit) {
+    if (!state.pursuitMap) {
+      const { mountPursuitMap } = await import("/static/pursuit-map.js");
+      state.pursuitMap = await mountPursuitMap(document.querySelector("#pursuit-content"), fetchJson);
+    } else {
+      state.pursuitMap.setActive(true);
+      await state.pursuitMap.refresh();
+    }
+    return;
+  }
+  state.pursuitMap?.setActive(false);
   let html = "";
   if (state.panel === "overview") {
     const payload = await fetchJson("/api/overview");
@@ -1116,12 +1137,21 @@ document.querySelectorAll(".nav-item").forEach((button) => {
     document.querySelectorAll(".nav-item").forEach((item) => item.classList.remove("active"));
     button.classList.add("active");
     state.panel = button.dataset.panel;
+    history.replaceState(null, "", state.panel === "pursuit-map" ? "#pursuit-map" : `#${state.panel}`);
     try {
       await loadPanel();
     } catch (error) {
       setMessage(error.message);
     }
   });
+});
+
+window.addEventListener("hashchange", () => {
+  const panel = location.hash.slice(1);
+  if (titleByPanel[panel] && panel !== state.panel) {
+    state.panel = panel;
+    if (state.authenticated) loadPanel().catch((error) => setMessage(error.message));
+  }
 });
 
 function attachPanelHandlers() {
@@ -1589,12 +1619,18 @@ function attachSettingsHandlers() {
       event.preventDefault();
       try {
         const root = new FormData(event.currentTarget).get("root");
+        if (state.pursuitMap?.hasUnsavedChanges) {
+          setMessage("Save or discard unsaved Pursuit Map edits before changing the active root.");
+          return;
+        }
         const payload = await fetchJson("/api/active-root", {
           method: "POST",
           body: JSON.stringify({ root }),
         });
         state.csrfToken = payload.data.csrf_token || state.csrfToken;
         document.querySelector("#active-root").textContent = payload.data.active_root || "";
+        state.pursuitMap?.destroy();
+        state.pursuitMap = null;
         setMessage(payload.message);
         await loadPanel();
       } catch (error) {

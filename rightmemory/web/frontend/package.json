@@ -1,0 +1,20 @@
+{
+  "name": "rightmemory-pursuit-map",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --serve",
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "mind-elixir": "5.15.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.0",
+    "esbuild": "0.25.9",
+    "tsx": "4.20.5",
+    "typescript": "5.9.2"
+  }
+}

@@ -37,8 +37,8 @@ ANCHOR_CANDIDATE_RE = re.compile(
 UNSUPPORTED_ANCHOR_RE = re.compile(r"^(#{1,})\s+.*?\{([A-Za-z]+#)([^}]*)\}")
 NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s(?:\u2192|->)\s*\[(.*?)\])\s*$")
 NODE_CANDIDATE_RE = re.compile(r"^\s*-\s+`([^`]+)`(?:\s|$)")
-PURSUIT_ACTION_RE = re.compile(r"^\s*-\s+`([^`]+)`(?:\s|$)")
-PURSUIT_FIELD_RE = re.compile(r"^\s*\*\*(State|Next|Done when|Status):\*\*", re.IGNORECASE)
+# Reading compatibility for existing user data, not the current Pursuit schema.
+LEGACY_PURSUIT_FIELD_RE = re.compile(r"^\s*\*\*(State|Next|Done when|Status):\*\*", re.IGNORECASE)
 EDGE_RE = re.compile(rf"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*({ITEM_ID_PATTERN})\s*$")
 FOCUS_HEADING_RE = re.compile(r"^##\s+Focus\s*$", re.IGNORECASE)
 FOCUS_REFERENCE_RE = re.compile(rf"^\s*-\s+`({ITEM_ID_PATTERN})`(?:\s|$)")
@@ -69,6 +69,118 @@ def validate_item_id(value: str) -> str:
     if not is_valid_item_id(value):
         raise ValueError("id must contain only letters, numbers, dot, underscore, or dash")
     return value
+
+
+@dataclass(frozen=True, slots=True)
+class AddressableHeading:
+    depth: int
+    title: str
+    anchor_kind: str
+    id: str
+    edges: tuple[tuple[str, str], ...]
+    malformed_edges: tuple[str, ...] = ()
+
+
+def parse_addressable_heading(line: str) -> AddressableHeading | None:
+    """Read a heading using the same grammar as the canonical document index."""
+    match = ANCHOR_RE.match(line.rstrip("\r\n"))
+    if match is None:
+        return None
+    heading = HEADING_RE.match(line)
+    assert heading is not None
+    edges, malformed = _parse_edges(match.group(4) or "")
+    return AddressableHeading(
+        depth=len(match.group(1)),
+        title=line[heading.end():match.start(2) - 1].strip(),
+        anchor_kind=match.group(2),
+        id=match.group(3),
+        edges=tuple(edges),
+        malformed_edges=tuple(malformed),
+    )
+
+
+def heading_title(line: str) -> str:
+    """Return the title of an addressed or plain heading, without its edges."""
+    addressed = parse_addressable_heading(line)
+    if addressed is not None:
+        return addressed.title
+    heading = HEADING_RE.match(line)
+    if heading is None:
+        raise ValueError("expected a Markdown heading")
+    return line[heading.end():].strip()
+
+
+def validate_heading_title(title: str) -> str:
+    """Reject titles that would change the structural meaning of a heading."""
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("title must be a nonempty string")
+    title = title.strip()
+    if len(title.splitlines()) != 1 or "\x00" in title:
+        raise ValueError("title must fit on one line")
+    probe = f"## {title}"
+    if ANCHOR_CANDIDATE_RE.match(probe) or UNSUPPORTED_ANCHOR_RE.match(probe):
+        raise ValueError("title must not contain a RightMemory heading anchor")
+    return title
+
+
+def render_heading_line(
+    title: str,
+    anchor_kind: str,
+    item_id: str,
+    edges: Iterable[tuple[str, str]] = (),
+    *,
+    depth: int = 2,
+) -> str:
+    """Render a new addressable heading; callers choose the document newline."""
+    title = validate_heading_title(title)
+    validate_item_id(item_id)
+    if anchor_kind not in {"#", *TERMINAL_HEADING_KINDS}:
+        raise ValueError("unsupported heading anchor kind")
+    if not 1 <= depth <= 4 or (depth == 4 and anchor_kind not in TERMINAL_HEADING_KINDS):
+        raise ValueError("ordinary headings must have depth one through three")
+    edge_list = tuple(edges)
+    for edge_type, target in edge_list:
+        if edge_type not in KNOWN_EDGE_TYPES:
+            raise ValueError(f"unknown edge type: {edge_type}")
+        validate_item_id(target)
+    result = f"{'#' * depth} {title} {{{anchor_kind}{item_id}}}"
+    if edge_list:
+        result += " \u2192 [" + ", ".join(f"{kind}:{target}" for kind, target in edge_list) + "]"
+    return result
+
+
+def replace_heading_title(line: str, title: str) -> str:
+    """Patch only an addressed heading's title, retaining its anchor and suffix."""
+    title = validate_heading_title(title)
+    anchor = ANCHOR_RE.match(line.rstrip("\r\n"))
+    heading = HEADING_RE.match(line)
+    if anchor is None or heading is None:
+        raise ValueError("expected an addressable heading")
+    title_end = anchor.start(2) - 1
+    old_title = line[heading.end():title_end]
+    spacing = old_title[len(old_title.rstrip()):]
+    return line[:heading.end()] + title + spacing + line[title_end:]
+
+
+def remove_edge_targets(line: str, deleted_ids: set[str] | frozenset[str]) -> str:
+    """Remove selected typed edges without changing prose, other edges, or newlines."""
+    source = line.rstrip("\r\n")
+    match = ANCHOR_RE.match(source)
+    group = 4
+    if match is None:
+        match = NODE_RE.match(source)
+        group = 2
+    if match is None or match.group(group) is None:
+        return line
+    tokens = match.group(group).split(",")
+    kept = []
+    for token in tokens:
+        edge = EDGE_RE.match(token)
+        if edge is None or edge.group(2) not in deleted_ids:
+            kept.append(token)
+    if len(kept) == len(tokens):
+        return line
+    return line[:match.start(group)] + ",".join(kept) + line[match.end(group):]
 
 
 @dataclass(frozen=True)
@@ -198,6 +310,18 @@ class GraphManifest:
                 child = self.blocks[part]
                 yield child
                 yield from self.walk_logical(part)
+
+
+def span_text(manifest: GraphManifest, span: SourceSpan | None) -> str:
+    """Return an indexed source span with its exact original line endings."""
+    if span is None:
+        return ""
+    document = manifest.documents[span.path]
+    return "".join(document.text.splitlines(keepends=True)[span.start_line - 1:span.end_line])
+
+
+def block_body_text(manifest: GraphManifest, block: DocumentBlock | GraphItem) -> str:
+    return span_text(manifest, block.body_span)
 
 
 @dataclass(frozen=True)
@@ -543,7 +667,7 @@ def _parse_document(
         parent_key = stack[-1] if stack else document.root_key
         parent = manifest.blocks[parent_key]
         if document.family == "pursuit":
-            field_match = PURSUIT_FIELD_RE.match(line)
+            field_match = LEGACY_PURSUIT_FIELD_RE.match(line)
             if field_match:
                 in_pursuit_next = field_match.group(1).casefold() == "next"
                 _append_text(parent, line)
@@ -581,18 +705,10 @@ def _parse_document(
                 continue
 
         if document.family == "pursuit" and in_pursuit_next:
-            action = PURSUIT_ACTION_RE.match(line)
-            if action is not None:
-                if action.group(1) not in {"do", "ask", "wait"}:
-                    _add_error(
-                        manifest,
-                        f"invalid Pursuit Next action `{action.group(1)}` at "
-                        f"{document.relative_path}:{line_number}; use `do`, `ask`, or `wait`",
-                        document.path,
-                        line_number,
-                    )
-                _append_text(parent, line)
-                continue
+            # Older roots used Next lists. Retain every line as unstructured body
+            # until another legacy field or heading, including unknown actions.
+            _append_text(parent, line)
+            continue
 
         node_candidate = NODE_CANDIDATE_RE.match(line)
         if node_candidate is not None:

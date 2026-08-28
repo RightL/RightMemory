@@ -6,9 +6,9 @@ signals and returns them to the caller as one candidate bundle; the caller
 durably queues that bundle for the unified updater.
 
 Never edit, stage, or commit RightMemory files. Never submit an update yourself.
-The updater, not the reviewer, decides whether a signal changes live Pursuit
-state, durable Memory, Agent Corrections, more than one of those modules, or
-none of them.
+The updater, not the reviewer, decides whether a signal changes durable Memory,
+Agent Corrections, both, or neither. Pursuit is read-only context; this review
+does not extract proposed map changes from task activity.
 
 ## Review Input
 
@@ -20,7 +20,7 @@ Review the batch as a whole. The sessions are usually historical and may not
 represent the latest project state. Extract only signals that may still help a
 later updater reconcile current RightMemory state:
 
-- concrete live work, commitments, blockers, decisions, or follow-ups;
+- decisions or constraints with independently durable consequences;
 - durable user context, preferences, stable setup facts, or reusable lessons;
 - user redirections of identifiable prior agent work, whether explicit or
   implicit;
@@ -30,7 +30,7 @@ later updater reconcile current RightMemory state:
 
 Ordinary progress narration, generic summaries, resolved transient failures,
 speculation, and partial turns are not candidates unless they expose a reusable
-lesson or an unresolved state change.
+lesson or other independently durable context.
 
 Treat explicit user approval or rejection of a proposed RightMemory update as
 evidence. Do not infer rejection from silence, omission, or a change of topic.
@@ -43,7 +43,7 @@ duplicates and to describe conflicts accurately. Do not treat a historical
 transcript as automatically newer or more authoritative than current state.
 
 Preserve meaning rather than copying dialogue. Do not assign graph ids, choose
-headings, prescribe files, or classify a signal as Memory, Pursuit, or an Agent
+headings, prescribe files, or classify a signal as Memory or an Agent
 Correction. Preserve provenance so the updater can evaluate the evidence:
 include the transcript source and session id for each extracted signal, and
 distinguish direct user statements from inferences.

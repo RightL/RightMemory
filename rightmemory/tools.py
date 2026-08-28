@@ -13,7 +13,6 @@ from .corrections import (
     validate_corrections_markdown,
 )
 from .graph import (
-    PURSUIT_ACTION_RE,
     PURSUIT_DETAIL_FILE_RE,
     build_graph_manifest,
     resolve_backing_reference,
@@ -58,7 +57,8 @@ RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX = ".runtime/shared_views/imports/"
 GIT_REVISION_RE = re.compile(r"^[A-Za-z0-9_.^~/-]+$")
 PRUNE_SUBJECT_PREFIX = "prune:"
 ACTIVE_MEMORY_ROLES = {"dreamer", "pruner", "reviewer", "sync-reconciler", "update"}
-FULL_RIGHTMEMORY_WRITE_ROLES = {"update"}
+UPDATE_WRITE_ROLES = {"update"}
+PURSUIT_MAP_WRITE_ROLES = {"pursuit-map"}
 CORRECTIONS_READ_ROLES = {"update", "sync-reconciler"}
 INSIGHT_ROLES = {"insight"}
 RETRIEVE_ROLES = {"retrieve"}
@@ -1414,16 +1414,17 @@ class MemoryTools:
             )
         if self.role in SHARED_VIEW_BUILDER_ROLES:
             return "shared_views/<id> source files"
-        if self.role in FULL_RIGHTMEMORY_WRITE_ROLES:
+        if self.role in PURSUIT_MAP_WRITE_ROLES:
+            return "PURSUITS.md or PURSUIT_*.md files"
+        if self.role in UPDATE_WRITE_ROLES:
             return (
-                "MEMORY.md, ordinary MEMORY_*.md, PURSUITS.md, PURSUIT_*.md, "
-                "or fixed Agent Correction collections"
+                "MEMORY.md, ordinary MEMORY_*.md, or fixed Agent Correction collections"
             )
         return "MEMORY.md or ordinary MEMORY_*.md files"
 
     def _is_allowed_write_path(self, relative_path: str) -> bool:
         if relative_path in FIXED_CORRECTION_COLLECTION_PATHS:
-            return self.role in FULL_RIGHTMEMORY_WRITE_ROLES | SYNC_RECONCILER_ROLES
+            return self.role in UPDATE_WRITE_ROLES | SYNC_RECONCILER_ROLES
         if self.role in INSIGHT_ROLES:
             return self._is_insight_log_path(relative_path)
         if self.role in SYNC_RECONCILER_ROLES:
@@ -1437,8 +1438,8 @@ class MemoryTools:
             )
         if self.role in SHARED_VIEW_BUILDER_ROLES:
             return self._is_shared_view_definition_path(relative_path)
-        if self.role in FULL_RIGHTMEMORY_WRITE_ROLES:
-            return self._is_active_rightmemory_path(relative_path)
+        if self.role in PURSUIT_MAP_WRITE_ROLES:
+            return self._is_active_pursuit_path(relative_path)
         return self._is_active_memory_path(relative_path)
 
     def _allowed_write_path(self, path: str) -> str:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
+import signal
 import subprocess
 import sys
 import time
@@ -21,7 +23,9 @@ from .auth import WEB_RUNTIME_DIR, ensure_web_auth_files
 
 
 MANAGED_WEB_ENV = "RIGHTMEMORY_MANAGED_WEB"
+WEB_LAUNCH_ID_ENV = "RIGHTMEMORY_WEB_LAUNCH_ID"
 WEB_START_TIMEOUT_SECONDS = 10
+WEB_START_CLEANUP_TIMEOUT_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,10 @@ def web_ready_path(memory_root: Path) -> Path:
     return Path(memory_root) / WEB_RUNTIME_DIR / "web.ready"
 
 
+def web_launch_path(memory_root: Path) -> Path:
+    return Path(memory_root) / WEB_RUNTIME_DIR / "web.launch-id"
+
+
 def web_settings_path(memory_root: Path) -> Path:
     return Path(memory_root) / WEB_RUNTIME_DIR / "settings.json"
 
@@ -89,12 +97,15 @@ def start_web_service(
         raise ValueError("port must be between 0 and 65535")
     status = web_service_status(root)
     if status.state == "running":
+        if status.pid is not None:
+            _wait_for_web_ready(root, status.pid)
         return status
     if status.state == "stale":
         _clear_web_registration(root, status.pid)
     web_pid_path(root).unlink(missing_ok=True)
     web_identity_path(root).unlink(missing_ok=True)
     web_ready_path(root).unlink(missing_ok=True)
+    web_launch_path(root).unlink(missing_ok=True)
     web_stop_path(root).unlink(missing_ok=True)
     generated_operator_token = ensure_web_auth_files(root)
     runtime_dir = root / WEB_RUNTIME_DIR
@@ -114,7 +125,8 @@ def start_web_service(
         "--port",
         str(port),
     ]
-    env = {**_web_child_env(root), MANAGED_WEB_ENV: "1"}
+    launch_id = secrets.token_hex(16)
+    env = {**_web_child_env(root), MANAGED_WEB_ENV: "1", WEB_LAUNCH_ID_ENV: launch_id}
     with log_path.open("ab") as log:
         process = subprocess.Popen(
             command,
@@ -125,7 +137,7 @@ def start_web_service(
             env=env,
             **detached_process_kwargs(),
         )
-    pid = _wait_for_web_registration(root, process)
+    pid = _wait_for_web_registration(root, process, launch_id=launch_id)
     return WebServiceStatus("running", pid, host, port, log_path, generated_operator_token)
 
 
@@ -256,13 +268,20 @@ def _read_identity(path: Path) -> str | None:
     return value or None
 
 
-def register_web_process(memory_root: Path, pid: int, *, ready: bool = False) -> None:
+def register_web_process(
+    memory_root: Path, pid: int, *, ready: bool = False, launch_id: str | None = None,
+) -> None:
     identity_path = web_identity_path(memory_root)
     identity = process_identity(pid)
     if identity is None:
         identity_path.unlink(missing_ok=True)
     else:
         _write_value(identity_path, identity)
+    launch_id = launch_id or os.environ.get(WEB_LAUNCH_ID_ENV)
+    if launch_id:
+        _write_value(web_launch_path(memory_root), launch_id)
+    else:
+        web_launch_path(memory_root).unlink(missing_ok=True)
     _write_pid(web_pid_path(memory_root), pid)
     if ready:
         _write_pid(web_ready_path(memory_root), pid)
@@ -273,29 +292,124 @@ def _clear_web_registration(memory_root: Path, pid: int | None) -> None:
         return
     web_pid_path(memory_root).unlink(missing_ok=True)
     web_identity_path(memory_root).unlink(missing_ok=True)
+    web_launch_path(memory_root).unlink(missing_ok=True)
 
 
 def _wait_for_web_registration(
     memory_root: Path,
     process: subprocess.Popen[bytes],
     timeout_seconds: float = WEB_START_TIMEOUT_SECONDS,
+    *,
+    launch_id: str | None = None,
 ) -> int:
     if not callable(getattr(process, "poll", None)):
-        register_web_process(memory_root, process.pid, ready=True)
+        register_web_process(memory_root, process.pid, ready=True, launch_id=launch_id)
         return process.pid
+    return _wait_for_web_ready(
+        memory_root, process.pid, timeout_seconds=timeout_seconds, process=process, launch_id=launch_id,
+    )
+
+
+def _wait_for_web_ready(
+    memory_root: Path,
+    expected_pid: int,
+    *,
+    timeout_seconds: float = WEB_START_TIMEOUT_SECONDS,
+    process: subprocess.Popen[bytes] | None = None,
+    launch_id: str | None = None,
+) -> int:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() <= deadline:
+        if process is not None:
+            return_code = process.poll()
+            if return_code is not None:
+                _cleanup_failed_web_start(memory_root, process, launch_id)
+                raise RuntimeError(
+                    f"rightmemory web service exited with code {return_code}; see {web_log_path(memory_root)}"
+                )
+        elif not _is_web_process(expected_pid, memory_root=memory_root):
+            clear_web_process_files(memory_root, expected_pid)
+            raise RuntimeError(f"rightmemory web service stopped before it was ready; see {web_log_path(memory_root)}")
         pid = _read_pid(web_ready_path(memory_root))
         identity = _read_identity(web_identity_path(memory_root))
-        if pid is not None:
+        registered_pid = _read_pid(web_pid_path(memory_root))
+        matches_launch = (
+            _read_identity(web_launch_path(memory_root)) == launch_id
+            if launch_id is not None else pid == expected_pid
+        )
+        if pid is not None and pid == registered_pid and matches_launch:
             if identity is not None and process_identity(pid) == identity:
                 return pid
             if identity is None and _is_web_process(pid):
                 return pid
         time.sleep(0.05)
+    if process is not None:
+        _cleanup_failed_web_start(memory_root, process, launch_id)
+    raise RuntimeError(f"rightmemory web service did not become ready within {timeout_seconds:g} seconds")
+
+
+def _owned_launch_process(memory_root: Path, launch_id: str | None) -> tuple[int, str] | None:
+    if launch_id is None or _read_identity(web_launch_path(memory_root)) != launch_id:
+        return None
+    pid = _read_pid(web_pid_path(memory_root))
+    identity = _read_identity(web_identity_path(memory_root))
+    if pid is None or identity is None or process_identity(pid) != identity:
+        return None
+    return pid, identity
+
+
+def _cleanup_failed_web_start(
+    memory_root: Path, process: subprocess.Popen[bytes], launch_id: str | None,
+) -> None:
+    owned = _owned_launch_process(memory_root, launch_id)
+    try:
+        if owned is not None:
+            pid, identity = owned
+            _write_pid(web_stop_path(memory_root), pid)
+            if not _wait_for_exit(pid, WEB_START_CLEANUP_TIMEOUT_SECONDS, identity=identity):
+                _terminate_owned_web_process(pid, identity)
+    finally:
+        # On Windows a venv python.exe may be a redirector, not the registered
+        # server. If registration never happened, stop its owned process tree.
+        _terminate_web_launcher(process, include_children=owned is None)
+    if launch_id is None or _read_identity(web_launch_path(memory_root)) == launch_id:
+        registered_pid = _read_pid(web_pid_path(memory_root)) if launch_id is not None else process.pid
+        if registered_pid is not None:
+            clear_web_process_files(memory_root, registered_pid)
+
+
+def _terminate_owned_web_process(pid: int, identity: str) -> None:
+    for sig in dict.fromkeys((signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM))):
+        if process_identity(pid) != identity:
+            return
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return
+        if _wait_for_exit(pid, WEB_START_CLEANUP_TIMEOUT_SECONDS, identity=identity):
+            return
+    raise RuntimeError(f"could not stop owned Web startup process {pid}")
+
+
+def _terminate_web_launcher(process: subprocess.Popen[bytes], *, include_children: bool) -> None:
     if process.poll() is None:
-        process.terminate()
-    raise RuntimeError(f"rightmemory web service did not register within {timeout_seconds:g} seconds")
+        if include_children and os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False, timeout=WEB_START_CLEANUP_TIMEOUT_SECONDS,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+    try:
+        process.wait(timeout=WEB_START_CLEANUP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=WEB_START_CLEANUP_TIMEOUT_SECONDS)
 
 
 def _unlink_if_pid(path: Path, pid: int) -> None:

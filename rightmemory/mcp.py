@@ -54,9 +54,11 @@ If returned context is stale, wrong, misleading, or overbroad, do not follow it;
 the correction and current evidence with rightmemory_submit_update."""
 
 SUBMIT_UPDATE_DESCRIPTION = """\
-Submit evidence for durable cross-session context or the current direction of meaningful
-ongoing work when omitting it would likely cause poorer future decisions, substantial
-rediscovery, or loss of continuity.
+Submit durable Memory or Agent Correction evidence when omitting it would likely cause
+poorer future decisions, substantial rediscovery, or loss of useful context.
+
+Pursuit is read-only to Update. Explicit map edits belong in the human editor or the
+maintain-pursuit-map workflow, not in an Update submission.
 
 Submit at a natural boundary once the evidence is clear; completion is not required. Do
 not submit transient progress, routine results, unresolved discussion by itself, or

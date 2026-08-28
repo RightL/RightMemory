@@ -31,8 +31,8 @@ class WindowsInstallScriptTests(unittest.TestCase):
 
             wrapper = root / "local" / "RightMemory" / "bin" / "rightmemory.cmd"
             wrapper_text = wrapper.read_text(encoding="utf-8")
-            memory = (memory_root / "MEMORY.md").read_text(encoding="utf-8")
-            pursuits = (memory_root / "PURSUITS.md").read_text(encoding="utf-8")
+            memory_exists = (memory_root / "MEMORY.md").is_file()
+            pursuits_exist = (memory_root / "PURSUITS.md").is_file()
             gitignore = (memory_root / ".gitignore").read_text(encoding="utf-8")
             tracked_gitignore = self._git(memory_root, "ls-files", "--", ".gitignore")
             install_stamp = (memory_root / ".runtime" / "install.stamp").read_text(encoding="utf-8")
@@ -48,6 +48,10 @@ class WindowsInstallScriptTests(unittest.TestCase):
             ).exists()
             maintainer = (skills_target / "maintain-rightmemory" / "SKILL.md")
             maintainer_exists = maintainer.exists()
+            map_maintainer_exists = (skills_target / "maintain-pursuit-map" / "SKILL.md").is_file()
+            guidance_reviewer_exists = (
+                skills_target / "review-agent-guidance-inbox" / "SKILL.md"
+            ).is_file()
             legacy_orchestrator_exists = (skills_target / "memory-orchestrator").exists()
             leaked_requirement_file = (root / "3.11").exists()
 
@@ -56,8 +60,8 @@ class WindowsInstallScriptTests(unittest.TestCase):
         self.assertIn("rightmemory package into", result.stdout)
         self.assertIn("rightmemory is available in this PowerShell session", result.stdout)
         self.assertIn("SetEnvironmentVariable", result.stdout)
-        self.assertIn("rightmemory:example:start", memory)
-        self.assertIn("rightmemory:pursuit-example:start", pursuits)
+        self.assertTrue(memory_exists)
+        self.assertTrue(pursuits_exist)
         self.assertFalse((memory_root / "PURSUIT_RULES.md").exists())
         self.assertFalse((memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").exists())
         self.assertTrue(gitignore.startswith("*\n!.gitignore\n"))
@@ -69,7 +73,9 @@ class WindowsInstallScriptTests(unittest.TestCase):
         self.assertFalse(retriever_exists)
         self.assertFalse(orchestrator_exists)
         self.assertTrue(auto_orchestrator_exists)
-        self.assertFalse(maintainer_exists)
+        self.assertTrue(maintainer_exists)
+        self.assertTrue(map_maintainer_exists)
+        self.assertTrue(guidance_reviewer_exists)
         self.assertIn("rightmemory-auto-orchestrator", result.stdout)
         self.assertFalse(legacy_orchestrator_exists)
         self.assertIn('set "PYTHONUTF8=1"', wrapper_text)
@@ -115,10 +121,14 @@ class WindowsInstallScriptTests(unittest.TestCase):
                 for skill_name in (
                     "memory-retriever",
                     "rightmemory-orchestrator",
-                    "maintain-rightmemory",
-                    "review-agent-guidance-inbox",
                 ):
                     self.assertFalse((skills_target / skill_name).exists())
+                for skill_name in (
+                    "maintain-rightmemory",
+                    "review-agent-guidance-inbox",
+                    "maintain-pursuit-map",
+                ):
+                    self.assertTrue((skills_target / skill_name / "SKILL.md").is_file())
 
     def test_windows_installer_reports_missing_uv_before_writes(self):
         with tempfile.TemporaryDirectory() as tempdir:
