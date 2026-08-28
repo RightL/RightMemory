@@ -2,6 +2,19 @@ import type { ViewState } from './view-state.ts';
 
 type Viewport = NonNullable<ViewState['viewport']>;
 interface Point { x: number; y: number }
+
+/** CSS pixels per nominal 60 Hz frame. Translation already lives in screen space. */
+export function edgePanVelocity(x: number, y: number, width: number, height: number): Point {
+  if (x < 0 || y < 0 || x > width || y > height) return { x: 0, y: 0 };
+  const speed = (coordinate: number, length: number) => {
+    const band = Math.min(56, length / 2);
+    if (band <= 0) return 0;
+    if (coordinate < band) return 18 * (1 - coordinate / band) ** 2;
+    if (coordinate > length - band) return -18 * (1 - (length - coordinate) / band) ** 2;
+    return 0;
+  };
+  return { x: speed(x, width), y: speed(y, height) };
+}
 export interface PointerSample extends Point { pointerId: number; pointerType: string; button: number; buttons: number }
 type Motion = { kind: 'idle' } | { kind: 'cancel' } | { kind: 'view'; viewport: Viewport } | { kind: 'drag'; id: string };
 

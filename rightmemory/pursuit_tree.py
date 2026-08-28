@@ -33,6 +33,54 @@ class PursuitOperationError(ValueError):
     pass
 
 
+def plain_title(title: str) -> str:
+    """Strip balanced title marks, matching frontend title-format.ts, not Markdown.
+
+    Other HTML and unmatched delimiters are visible literal text. This helper is
+    confined to editing; it does not change the canonical graph's grammar.
+    """
+    output: list[str] = []
+    stack: list[tuple[str, str, list[str], int]] = []
+
+    def parts() -> list[str]:
+        return stack[-1][2] if stack else output
+
+    offset = 0
+    for match in re.finditer(r"<[^>]*>|\*{2,}|~{2,}", title):
+        run = match.group()
+        token = "**" if run.startswith("**") else "~~" if run.startswith("~~") else run
+        paired = token in {"**", "~~"}
+        count = len(run) // 2 if paired else 1
+        start, end = match.span()
+        parts().append(title[offset:start])
+        mark = "u" if token in {"<u>", "</u>"} else token if token in {"**", "~~"} else None
+        previous = title[start - 1:start] if start else ""
+        following = title[end:end + 1]
+        closing_side = bool(previous and not previous.isspace()) or not following or following.isspace()
+        for index in range(count):
+            position = start + index * len(token)
+            inner_start = stack[-1][3] + len(stack[-1][1]) if stack else position
+            blank = position > inner_start and not title[inner_start:position].strip()
+            closes = (mark and stack and stack[-1][0] == mark and token != "<u>"
+                      and (token == "</u>" or closing_side or blank))
+            if closes:
+                _, _, children, _ = stack.pop()
+                parts().extend(children)
+            elif mark and token != "</u>":
+                stack.append((mark, token, [], position))
+            else:
+                parts().append(token)
+        if paired and len(run) % 2:
+            parts().append(run[-1])
+        offset = end
+    parts().append(title[offset:])
+    while stack:
+        _, opening, children, _ = stack.pop()
+        parts().append(opening)
+        parts().extend(children)
+    return "".join(output)
+
+
 @dataclass(frozen=True, slots=True)
 class PursuitItem:
     id: str
@@ -270,7 +318,7 @@ class _Editor:
         return entry
 
     def new_id(self, title: str) -> str:
-        ascii_text = "".join(char for char in title.lower() if ord(char) < 128)
+        ascii_text = "".join(char for char in plain_title(title).lower() if ord(char) < 128)
         slug = re.sub(r"[^a-z0-9]+", "-", ascii_text).strip("-")[:64].rstrip("-")
         if not slug or slug == "rules":
             slug = "p-" + uuid.uuid4().hex[:12]
@@ -494,7 +542,10 @@ def _string(operation: Mapping[str, object], name: str) -> str:
 
 def _title(operation: Mapping[str, object]) -> str:
     try:
-        return validate_heading_title(_string(operation, "title"))
+        title = validate_heading_title(_string(operation, "title"))
+        if not plain_title(title).strip():
+            raise ValueError("title must have nonempty visible text")
+        return title
     except ValueError as exc:
         raise PursuitOperationError(str(exc)) from exc
 

@@ -70,7 +70,8 @@ export function navigate(snapshot: Snapshot, view: ViewState, key: string): View
 }
 
 export type Command = 'rename' | 'sibling' | 'child' | 'promote' | 'delete' | 'collapse' | 'search' |
-  'fit' | 'undo' | 'redo' | 'note' | 'focus' | 'navigate' | 'escape' | 'save';
+  'fit' | 'undo' | 'redo' | 'note' | 'focus' | 'navigate' | 'escape' | 'save' |
+  'bold' | 'underline' | 'strike' | 'sibling-before' | 'sibling-up' | 'sibling-down';
 
 export function keyboardCommand(event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey' | 'isComposing'>, editing = false): Command | null {
   if (event.isComposing) return null;
@@ -82,16 +83,19 @@ export function keyboardCommand(event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | '
     return null;
   }
   if (modified) {
+    if (!event.altKey && key === 'b' && !event.shiftKey) return 'bold';
+    if (!event.altKey && key === 'u' && !event.shiftKey) return 'underline';
+    if (!event.altKey && key === 'x' && event.shiftKey) return 'strike';
     if (key === 'z') return event.shiftKey ? 'redo' : 'undo';
     if (key === 'y') return 'redo';
     if (key === 'f') return 'search';
     if (key === '0') return 'fit';
     return null;
   }
-  if (event.altKey) return null;
+  if (event.altKey) return !event.shiftKey && key === 'arrowup' ? 'sibling-up' : !event.shiftKey && key === 'arrowdown' ? 'sibling-down' : null;
   if (event.key.startsWith('Arrow') || key === 'home' || key === 'end') return 'navigate';
   if (key === 'f2') return 'rename';
-  if (key === 'enter') return event.shiftKey ? 'note' : 'sibling';
+  if (key === 'enter') return event.shiftKey ? 'sibling-before' : 'sibling';
   if (key === 'tab') return event.shiftKey ? 'promote' : 'child';
   if (key === 'delete' || key === 'backspace') return 'delete';
   if (key === ' ') return 'collapse';

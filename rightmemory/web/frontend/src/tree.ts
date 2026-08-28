@@ -1,3 +1,5 @@
+import { titleText } from './title-format.ts';
+
 /** The editor's tree is deliberately independent of the canvas library. */
 export interface PursuitItem {
   id: string;
@@ -90,6 +92,9 @@ export function dropOperation(snapshot: Snapshot, id: string, target: string, po
 
 /** Null after_id means the first position; callers pass the last sibling to append. */
 export function applyOperation(snapshot: Snapshot, operation: Operation, temporaryId?: string): Snapshot {
+  if ((operation.type === 'create' || operation.type === 'rename') && !titleText(operation.title).trim()) {
+    throw new Error('A direction needs a visible title.');
+  }
   const next: Snapshot = {
     ...snapshot,
     items: snapshot.items.map((item) => ({ ...item, child_ids: [...item.child_ids], edges: item.edges.map((edge) => [...edge]) })),
@@ -160,6 +165,24 @@ export function promoteOperation(snapshot: Snapshot, id: string): Operation | nu
   if (!item?.parent_id) return null;
   const parent = items.get(item.parent_id)!;
   return { type: 'move', id, parent_id: parent.parent_id, after_id: parent.id };
+}
+
+export function createSiblingBeforeOperation(snapshot: Snapshot, id: string, title: string): Extract<Operation, { type: 'create' }> {
+  const item = indexTree(snapshot).get(id);
+  if (!item) throw new Error('The selected direction has changed.');
+  const siblings = childrenOf(snapshot, item.parent_id);
+  return { type: 'create', parent_id: item.parent_id, after_id: siblings[siblings.indexOf(id) - 1] ?? null, title };
+}
+
+export function moveSiblingOperation(snapshot: Snapshot, id: string, delta: -1 | 1): Operation | null {
+  const item = indexTree(snapshot).get(id);
+  if (!item) return null;
+  const siblings = childrenOf(snapshot, item.parent_id);
+  const index = siblings.indexOf(id);
+  if (index + delta < 0 || index + delta >= siblings.length) return null;
+  const after = delta === -1 ? siblings[index - 2] ?? null : siblings[index + 1];
+  assertMove(snapshot, id, item.parent_id, after);
+  return { type: 'move', id, parent_id: item.parent_id, after_id: after };
 }
 
 export function deletionSelection(snapshot: Snapshot, id: string): string | null {

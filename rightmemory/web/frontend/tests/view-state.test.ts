@@ -4,11 +4,21 @@ import { navigate, keyboardCommand, readView, reconcileView, reveal, visibleNode
 import { applyOperation } from '../src/tree.ts';
 import { DraftBook, type TitleDraft } from '../src/drafts.ts';
 import { stackMaps } from '../src/canvas-data.ts';
-import { CanvasGestures, type PointerSample } from '../src/gestures.ts';
+import { CanvasGestures, edgePanVelocity, type PointerSample } from '../src/gestures.ts';
 import { fixture, forestFixture } from './fixtures.ts';
 
 const key = (key: string, changes: Partial<KeyboardEvent> = {}) => ({ key, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, isComposing: false, ...changes });
 const pointer = (pointerType: string, changes: Partial<PointerSample> = {}): PointerSample => ({ pointerId: 1, pointerType, button: 0, buttons: 1, x: 100, y: 100, ...changes });
+
+test('edge pan is smooth, bounded, supports corners, and stops outside the stage or edge band', () => {
+  assert.deepEqual(edgePanVelocity(0, 0, 800, 600), { x: 18, y: 18 });
+  assert.deepEqual(edgePanVelocity(800, 600, 800, 600), { x: -18, y: -18 });
+  assert.deepEqual(edgePanVelocity(28, 300, 800, 600), { x: 4.5, y: 0 });
+  assert.deepEqual(edgePanVelocity(56, 544, 800, 600), { x: 0, y: 0 });
+  assert.deepEqual(edgePanVelocity(-1, 300, 800, 600), { x: 0, y: 0 });
+  assert.deepEqual(edgePanVelocity(400, 601, 800, 600), { x: 0, y: 0 });
+  assert.deepEqual(edgePanVelocity(10, 10, 20, 20), { x: 0, y: 0 });
+});
 
 test('touch beginning on a node pans without producing a structural drop', () => {
   const gestures = new CanvasGestures();
@@ -81,6 +91,18 @@ test('canceled or lost gestures cannot leave a pending drop or a stale pinch', (
 
 test('keyboard mapping covers direct editing and respects input composition', () => {
   assert.equal(keyboardCommand(key('Enter')), 'sibling');
+  assert.equal(keyboardCommand(key('Enter', { shiftKey: true })), 'sibling-before');
+  for (const modifier of ['ctrlKey', 'metaKey']) {
+    for (const [name, shiftKey, command] of [['b', false, 'bold'], ['u', false, 'underline'], ['x', true, 'strike']] as const) {
+      const event = key(name, { [modifier]: true, shiftKey });
+      assert.equal(keyboardCommand(event), command);
+      assert.equal(keyboardCommand({ ...event, isComposing: true }), null);
+      assert.equal(keyboardCommand(event, true), null);
+    }
+    assert.equal(keyboardCommand(key('s', { [modifier]: true })), null);
+  }
+  assert.equal(keyboardCommand(key('ArrowUp', { altKey: true })), 'sibling-up');
+  assert.equal(keyboardCommand(key('ArrowDown', { altKey: true })), 'sibling-down');
   assert.equal(keyboardCommand(key('Tab')), 'child');
   assert.equal(keyboardCommand(key('Tab', { shiftKey: true })), 'promote');
   assert.equal(keyboardCommand(key('z', { ctrlKey: true, shiftKey: true })), 'redo');
