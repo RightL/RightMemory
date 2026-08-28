@@ -13,7 +13,7 @@ Store an item in Memory only when all of the following are true:
 1. It is expected to remain useful beyond the current task or session.
 2. It can materially affect future action, judgment, interpretation, or retrieval.
 3. Its scope and meaning can be stated clearly from stored context.
-4. It is not better represented only as live Pursuit state.
+4. Its value is more than recording a direction in the user's Pursuit map.
 5. It is not merely a duplicate of an existing Memory item, project artifact, instruction asset, or Agent Correction.
 
 Durability alone is insufficient. A stable but trivial fact is not good Memory.
@@ -68,7 +68,7 @@ Use `# User Context` for durable context about the user as a person with ongoing
 
 User Context is a compact context profile grounded in evidence. Do not infer personal characteristics beyond what the stored evidence supports.
 
-A commitment that still requires continuation belongs in Pursuit even when it also reflects a long-term direction.
+A direction's place in the Pursuit map is the user's decision. An unfinished commitment is not automatically Memory or Pursuit; preserve independently durable context here and leave execution continuity in project artifacts.
 
 ## Cross-Session Agent Behavior
 

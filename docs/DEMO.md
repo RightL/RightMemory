@@ -27,25 +27,21 @@ Choose the approval-gated `rightmemory-orchestrator` for this recording so the e
 - `sync-conflict-policy` Sync repair preserves non-identical updater-correction entries without ranking them. → [rel:sync-reconciler]
 ```
 
-Replace `/tmp/rightmemory-demo/PURSUITS.md` with the live continuation:
+Create this small direction map in the disposable demo root:
 
 ```md
 # Pursuits
 
 ## Focus
 
-- `sync-continuity` — finish the sync lifecycle demonstration.
+- `sync-continuity`
 
-## Finish Sync Continuity {#sync-continuity} → [dep:sync-design]
+## Sync Continuity {#sync-continuity} → [dep:sync-design]
 
-Make the demo show how durable sync context guides work that still needs continuation.
+Help the same context remain useful across devices and agent sessions.
+Start from the repository's sync documentation.
 
-**State:** The durable sync policy is recorded; the demo flow still needs verification.
-
-**Next:**
-- `do` Verify the retrieval and update sequence in a fresh agent session.
-
-**Done when:** The recording shows retrieval, a qualifying proposal and approval at a natural boundary, submission, and one coherent updater result.
+### Clear Conflict Recovery {#sync-conflict-recovery}
 ```
 
 Add one small Substance Correction so ordinary Retrieve can demonstrate the third module without a separate collection command:
@@ -63,15 +59,15 @@ When describing orchestration, the agent turned contextual evidence judgment int
 1. Open a fresh Codex or Claude Code session in the RightMemory repo.
 2. Ask: `Continue the sync design from last time without requiring me to paste prior context.`
 3. Show the user-selected `rightmemory-orchestrator` calling `rightmemory retrieve`.
-4. Show a small retrieved result containing the `Sync Design` Memory context, the linked `Finish Sync Continuity` Pursuit, and the complete Substance Correction selected through `AC#design`.
+4. Show a small retrieved result containing the `Sync Design` Memory context, the linked `Sync Continuity` Pursuit, and the complete Substance Correction selected through `AC#design`.
 5. Ask the agent to make a tiny doc edit or explain the next implementation step.
-6. Let a durable decision or meaningful Pursuit change become clear. At a natural boundary, show the agent proposing the apparent module and why the evidence qualifies, then obtain approval and call `rightmemory update submit`. A routine start or completion should not generate its own proposal.
-7. Explain that the unified updater may change any meaningful combination of Memory, Pursuit, and Agent Corrections, or none, after reconciling the evidence.
+6. Let an independently durable decision become clear. At a natural boundary, show the agent proposing why the evidence qualifies, then obtain approval and call `rightmemory update submit`. A routine start or completion should not generate its own proposal.
+7. Explain that Update may change Memory or Agent Corrections after reconciling evidence; the direction map stays unchanged. Open `rightmemory pursuit` to show that a human can edit the map directly.
 8. End on `git diff`, the relevant semantic files, or `rightmemory status` so viewers see ordinary Git-managed state rather than opaque vendor storage.
 
 ## Narration
 
-> RightMemory has three semantic modules: durable Memory, live Pursuit, and reusable Agent Corrections. Memory and Pursuit share one addressable graph, while ordinary retrieval can also select relevant Expression or Substance correction cases through their fixed writing and design identifiers. At a natural boundary, the selected orchestrator proposes qualifying evidence for approval or submits it automatically. One updater owns the final wording, classification, and placement, and Git sync keeps the state portable.
+> RightMemory has three semantic modules: durable Memory, the user's Pursuit map, and reusable Agent Corrections. Memory and Pursuit share one addressable graph, while retrieval can also select relevant correction cases. At a natural boundary, the selected orchestrator proposes qualifying durable evidence for approval or submits it automatically. Update maintains Memory and Agent Corrections. The user owns the map, and Git sync keeps the state portable.
 
 ## README GIF Placeholder
 

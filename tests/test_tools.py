@@ -507,10 +507,106 @@ class MemoryToolsTests(unittest.TestCase):
 
         normal = MemoryTools(self.root, role="update")
         normal.read("corrections.md")
-        with self.assertRaisesRegex(ValueError, "PURSUIT_\\*\\.md"):
+        with self.assertRaises(ValueError):
             normal.edit_file("corrections.md", "RightMemory", "WrongMemory")
-        with self.assertRaisesRegex(ValueError, "PURSUIT_\\*\\.md"):
+        with self.assertRaises(ValueError):
             normal.git_add(["corrections.md"])
+
+    def test_update_reads_pursuit_but_rejects_file_mutations(self):
+        contents = {
+            "MEMORY.md": "# Memory\n",
+            "PURSUITS.md": "# Pursuits\n\n## Branch {F#branch}\n",
+            "PURSUIT_branch.md": "# Direction {#direction}\n",
+        }
+        tools = MemoryTools(self.root, role="update")
+        (self.root / "MEMORY.md").write_text(contents["MEMORY.md"], encoding="utf-8", newline="")
+        for path in ("PURSUITS.md", "PURSUIT_branch.md"):
+            with self.subTest(new_path=path):
+                with self.assertRaises(ValueError):
+                    tools.create_file(path, "# Replacement\n")
+                with self.assertRaises(ValueError):
+                    tools.rename_file("MEMORY.md", path)
+                self.assertFalse((self.root / path).exists())
+                (self.root / path).write_text(contents[path], encoding="utf-8", newline="")
+
+        for path in ("PURSUITS.md", "PURSUIT_branch.md"):
+            with self.subTest(path=path):
+                self.assertIn(contents[path].splitlines()[0], tools.read_file(path))
+                for mutate in (
+                    lambda: tools.edit_file(path, contents[path], "# Replacement\n"),
+                    lambda: tools.delete_file(path),
+                    lambda: tools.rename_file(path, "MEMORY_moved.md"),
+                ):
+                    with self.assertRaises(ValueError):
+                        mutate()
+        for path, content in contents.items():
+            self.assertEqual((self.root / path).read_bytes(), content.encode("utf-8"))
+        self.assertFalse((self.root / "MEMORY_moved.md").exists())
+
+    def test_update_git_operations_reject_pursuit_paths(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        paths = ("MEMORY.md", "PURSUITS.md", "PURSUIT_branch.md")
+        for path in paths:
+            (self.root / path).write_text("# Original\n", encoding="utf-8")
+        self._git("add", *paths)
+        self._git("commit", "-m", "initial state")
+        initial_head = self._git("rev-parse", "HEAD")
+        tools = MemoryTools(self.root, role="update")
+
+        for path in paths[1:]:
+            with self.subTest(path=path):
+                (self.root / path).write_text("# Changed\n", encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    tools.git_add(["MEMORY.md", path])
+                self.assertEqual(self._git("diff", "--cached", "--name-only"), "")
+                with self.assertRaises(ValueError):
+                    tools.git_discard([path])
+                self.assertEqual((self.root / path).read_text(encoding="utf-8"), "# Changed\n")
+
+        self._git("add", *paths[1:])
+        with self.assertRaises(ValueError):
+            tools.git_commit("update: forbidden pursuit edit")
+        self.assertEqual(self._git("rev-parse", "HEAD"), initial_head)
+        self.assertEqual(set(self._git("diff", "--cached", "--name-only").splitlines()), set(paths[1:]))
+
+    def test_update_can_commit_memory_and_fixed_correction_changes(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        tools = MemoryTools(self.root, role="update")
+        paths = (
+            "MEMORY.md",
+            "MEMORY_detail.md",
+            "MEMORY_SKILL_review.md",
+            "MEMORY_agent-corrections-writing.md",
+            "MEMORY_agent-corrections-design.md",
+        )
+        for path in paths:
+            tools.create_file(path, "# Original\n")
+            tools.read_file(path)
+            tools.edit_file(path, "Original", "Changed")
+        tools.git_add(list(paths))
+        tools.git_commit("update: maintain allowed memory")
+
+        self.assertEqual(set(self._git("ls-tree", "--name-only", "HEAD").splitlines()), set(paths))
+        self.assertEqual(self._git("status", "--short"), "")
+        for path in paths:
+            self.assertEqual((self.root / path).read_text(encoding="utf-8"), "# Changed\n")
+
+    def test_pursuit_map_tools_allow_pursuit_but_not_memory_writes(self):
+        tools = MemoryTools(self.root, role="pursuit-map")
+        tools.create_file("PURSUITS.md", "# Pursuits\n")
+        tools.create_file("PURSUIT_branch.md", "# Direction {#direction}\n")
+        for path in (
+            "MEMORY.md",
+            "MEMORY_detail.md",
+            "MEMORY_agent-corrections-writing.md",
+            "corrections.md",
+        ):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                tools.create_file(path, "# Not an authorized edge repair\n")
 
     def test_non_updater_roles_cannot_read_updater_corrections(self):
         (self.root / "corrections.md").write_text("private updater feedback\n", encoding="utf-8")
@@ -603,6 +699,21 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertEqual(result, "staged: MEMORY.md, insight_logs/2026-05-30-143012.md")
         with self.assertRaises(ValueError):
             tools.git_add(["rightmemory.toml"])
+
+    def test_sync_reconciler_can_modify_and_commit_pursuit_files(self):
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test User")
+        tools = MemoryTools(self.root, role="sync-reconciler")
+        tools.create_file("PURSUITS.md", "# Pursuits\n\n## Branch {F#branch}\n")
+        tools.create_file("PURSUIT_branch.md", "# Direction {#direction}\n")
+        tools.read_file("PURSUIT_branch.md")
+        tools.edit_file("PURSUIT_branch.md", "Direction", "Shared direction")
+        tools.git_add(["PURSUITS.md", "PURSUIT_branch.md"])
+        tools.git_commit("sync: reconcile human pursuit changes")
+
+        self.assertEqual(self._git("status", "--short"), "")
+        self.assertIn("Shared direction", (self.root / "PURSUIT_branch.md").read_text(encoding="utf-8"))
 
     def test_sync_reconciler_can_repair_shared_view_registry(self):
         self._git("init")
@@ -1535,7 +1646,7 @@ class MemoryToolsTests(unittest.TestCase):
 
         self.assertIn("validation passed", result)
 
-    def test_validate_memory_rejects_unknown_pursuit_next_action(self):
+    def test_validate_memory_preserves_legacy_next_bullets_without_action_validation(self):
         (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")
         (self.root / "PURSUITS.md").write_text(
             "# Pursuits\n\n"
@@ -1547,7 +1658,7 @@ class MemoryToolsTests(unittest.TestCase):
 
         result = self._validate_complete_graph()
 
-        self.assertIn("invalid Pursuit Next action `research`", result)
+        self.assertIn("validation passed", result)
 
     def test_validate_memory_reserves_pursuit_rules_from_f_backing(self):
         (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")

@@ -636,19 +636,23 @@ class Installer:
             for source_directory, skill_name in (
                 ("memory-retriever-cli", "memory-retriever"),
                 ("rightmemory-orchestrator-cli", "rightmemory-orchestrator"),
-                ("maintain-rightmemory", "maintain-rightmemory"),
-                ("review-agent-guidance-inbox", "review-agent-guidance-inbox"),
             ):
                 self._remove_managed_skill(
                     self.repo_root / "skills" / source_directory / "SKILL.md",
                     skill_name,
                     target,
                 )
-            self._install_skill(
-                self.repo_root / "skills" / "rightmemory-auto-orchestrator-cli" / "SKILL.md",
-                "rightmemory-auto-orchestrator",
-                target,
-            )
+            for source_directory, skill_name in (
+                ("rightmemory-auto-orchestrator-cli", "rightmemory-auto-orchestrator"),
+                ("maintain-rightmemory", "maintain-rightmemory"),
+                ("review-agent-guidance-inbox", "review-agent-guidance-inbox"),
+                ("maintain-pursuit-map", "maintain-pursuit-map"),
+            ):
+                self._install_skill(
+                    self.repo_root / "skills" / source_directory / "SKILL.md",
+                    skill_name,
+                    target,
+                )
             self._remove_old_skill("memory-orchestrator", target)
             self._remove_old_skill("memory-curator", target)
             self._remove_old_skill("memory-dreamer", target)
@@ -815,7 +819,12 @@ class Installer:
             "qualifying evidence automatically according to its instructions."
         )
         print(
-            "  4. Optional background transcript review, dreamer, pruning, insight, and sync: "
+            "  4. Open the Pursuit map with rightmemory pursuit, or explicitly use "
+            "maintain-pursuit-map. Memory maintenance and pending-guidance review "
+            "are installed as separate explicit skills."
+        )
+        print(
+            "  5. Optional background transcript review, dreamer, pruning, insight, and sync: "
             "rightmemory watch start"
         )
         print()

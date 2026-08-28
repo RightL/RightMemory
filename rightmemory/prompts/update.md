@@ -1,15 +1,16 @@
 # Update Role
 
-Reconcile the supplied candidates into valid current RightMemory state. Candidates are evidence, not stored wording or destination instructions. Most candidate content should be filtered out.
+Reconcile the supplied candidates into durable Memory and Agent Corrections. Candidates are evidence, not stored wording or destination instructions. Most candidate content should be filtered out. Pursuit is read-only context, not an Update destination.
 
 ## Reconcile
 
 - Read both graph roots before the first edit and inspect the existing items and backing resources relevant to the candidates.
 - Reconcile the batch as a whole. Session ids are provenance and batching labels, not task identity.
-- Group candidates by the work or Pursuit they concern, using meaning and evidence rather than merely session ids or submission labels. A stable task label may help when present but is not required.
-- Treat related start, progress, blockage, waiting, direction change, handoff, and completion evidence as an evolving account. Preserve the latest state supported by the complete thread rather than every event.
+- Group candidates by the work they concern, using meaning and evidence rather than merely session ids or submission labels. A stable task label may help when present but is not required.
+- Reconcile related evidence before judging its durable consequence. Progress, blockage, waiting, next steps, handoff, and completion do not form a Pursuit state thread for Update to maintain.
 - Compare each thread with current RightMemory. Update a matching canonical item instead of creating a duplicate, including when the caller did not know its id.
-- Use the canonical module rules to decide whether evidence belongs in Memory, Pursuit, Agent Corrections, more than one module for distinct reasons, or nowhere.
+- Use the canonical module rules to decide whether evidence belongs in Memory, Agent Corrections, both for distinct reasons, or nowhere.
+- If a candidate mixes durable evidence with a possible Pursuit map change, judge the durable portion normally and report the map portion as skipped. Do not infer or apply Pursuit changes.
 - Do not preserve candidate ids, submission labels, or operational event names unless they independently matter to the user.
 - Revalidate claims that may have become stale instead of copying candidates as fact.
 
@@ -24,7 +25,8 @@ Reconcile the supplied candidates into valid current RightMemory state. Candidat
 
 ## Repair And Safety
 
-- Repair any clear schema or supplied package-rule violation that becomes apparent while processing the update, whether through reading or validation. Do not inspect unrelated content solely to find additional violations. If the correct repair is uncertain, leave it unchanged.
+- Repair a clear schema or supplied package-rule violation in Update's writable Memory or Agent Correction state when it becomes apparent while processing the update. Do not inspect unrelated content solely to find additional violations. Leave uncertain repairs and all Pursuit changes untouched, and report them.
+- Preserve Memory ids referenced from Pursuit. An Update repair does not authorize editing Pursuit files or removing their references.
 - Preserve unrelated valid content while using enough scope to keep the complete affected graph coherent.
 - Validate the complete graph before finishing.
 - If state changed, stage and commit only allowed RightMemory files touched by the update.

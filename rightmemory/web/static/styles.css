@@ -506,6 +506,13 @@ pre {
   margin-top: 8px;
 }
 
+.pursuit-view .workspace { padding: 16px 18px; }
+.pursuit-view .topbar { margin-bottom: 10px; align-items: center; }
+.pursuit-view h1 { font-size: 21px; }
+.pursuit-view #active-root { font-size: 11px; color: #929c96; }
+.pursuit-view .message:empty { min-height: 0; margin: 0; }
+.pursuit-view #refresh-button { min-height: 30px; padding: 4px 11px; font-size: 12px; }
+
 @media (max-width: 960px) {
   .summary-grid,
   .settings-grid,

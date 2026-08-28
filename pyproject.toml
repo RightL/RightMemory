@@ -44,6 +44,7 @@ rightmemory = "rightmemory.entrypoint:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rightmemory"]
+exclude = ["rightmemory/web/frontend/**"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "MEMORY.example.md" = "rightmemory/MEMORY.example.md"
