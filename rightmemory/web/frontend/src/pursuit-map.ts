@@ -5,9 +5,9 @@ import { DraftBook, type TitleDraft } from './drafts.ts';
 import { MapRenderer } from './renderer.ts';
 import { parseWholeTitleFormat, titleText, toggleWholeTitleMark, type TopicMark } from './title-format.ts';
 import { keyboardCommand, navigate, readView, reconcileView, reveal, writeView, type ViewState } from './view-state.ts';
+import { ConversationWorkspace } from './conversation-workspace.ts';
+import type { FetchJson } from './conversation-api.ts';
 import './pursuit-map.css';
-
-type FetchJson = (path: string, options?: RequestInit) => Promise<{ data: unknown }>;
 
 export function apiTransport(fetchJson: FetchJson): Transport {
   const request = async <T>(path: string, body?: unknown): Promise<T> => {
@@ -100,18 +100,50 @@ const markup = `
 export interface PursuitMapController {
   refresh(): Promise<void>;
   setActive(active: boolean): void;
+  getSelectedId(): string | null;
+  subscribeSelection(listener: (id: string | null) => void): () => void;
   readonly hasUnsavedChanges: boolean;
   destroy(): void;
 }
 
 export async function mountPursuitMap(host: HTMLElement, fetchJson: FetchJson): Promise<PursuitMapController> {
-  return mountMap(host, apiTransport(fetchJson));
+  host.className = 'pursuit-workspace';
+  host.replaceChildren();
+  const mapShell = document.createElement('div');
+  mapShell.className = 'pw-map-shell';
+  const mapHost = document.createElement('div');
+  const paneHost = document.createElement('aside');
+  mapShell.append(mapHost);
+  host.append(mapShell, paneHost);
+  const transport = apiTransport(fetchJson);
+  const snapshot = await transport.load();
+  const map = new PursuitMap(mapHost, snapshot, transport, { selectionBoundary: host });
+  const conversations = new ConversationWorkspace(host, paneHost, fetchJson, snapshot.root_key);
+  const unsubscribeSelection = map.subscribeSelection((id) => conversations.selectPursuit(id));
+  await conversations.start();
+  return new PursuitWorkspaceController(map, conversations, unsubscribeSelection);
 }
 
+export interface MountMapOptions { selectionBoundary?: Element; }
+
 /** Exported separately so the browser fixture exercises the complete UI with disposable state. */
-export async function mountMap(host: HTMLElement, transport: Transport): Promise<PursuitMapController> {
+export async function mountMap(host: HTMLElement, transport: Transport, options: MountMapOptions = {}): Promise<PursuitMapController> {
   const snapshot = await transport.load();
-  return new PursuitMap(host, snapshot, transport);
+  return new PursuitMap(host, snapshot, transport, options);
+}
+
+class PursuitWorkspaceController implements PursuitMapController {
+  constructor(private map: PursuitMap, private conversations: ConversationWorkspace, private unsubscribeSelection: () => void) {}
+  async refresh(): Promise<void> { await Promise.all([this.map.refresh(), this.conversations.refresh()]); }
+  setActive(active: boolean): void { this.map.setActive(active); this.conversations.setActive(active); }
+  getSelectedId(): string | null { return this.map.getSelectedId(); }
+  subscribeSelection(listener: (id: string | null) => void): () => void { return this.map.subscribeSelection(listener); }
+  get hasUnsavedChanges(): boolean { return this.map.hasUnsavedChanges; }
+  destroy(): void {
+    this.unsubscribeSelection();
+    this.conversations.destroy();
+    this.map.destroy();
+  }
 }
 
 class PursuitMap implements PursuitMapController {
@@ -125,14 +157,17 @@ class PursuitMap implements PursuitMapController {
   private matchIndex = -1;
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
   private unsubscribe: () => void;
+  private selectionListeners = new Set<(id: string | null) => void>();
+  private lastNotifiedSelection: string | null;
 
-  constructor(private host: HTMLElement, snapshot: Snapshot, transport: Transport) {
+  constructor(private host: HTMLElement, snapshot: Snapshot, transport: Transport, private options: MountMapOptions = {}) {
     host.className = 'pursuit-map';
     host.innerHTML = markup;
     this.queue = new MutationQueue(snapshot, transport);
     this.view = reconcileView(snapshot, readView(localStorage, snapshot.root_key));
+    this.lastNotifiedSelection = this.view.selected ?? null;
     this.renderer = new MapRenderer(this.$('.pm-canvas'), snapshot, this.view, {
-      select: (id) => { this.closeContextMenu(); this.view.selected = id; this.saveView(); this.updateTools(); },
+      select: (id) => { this.closeContextMenu(); this.view.selected = id; this.saveView(); this.updateTools(); this.notifySelection(); },
       collapse: (id, collapsed, preserveDrag) => this.setCollapsed(id, collapsed, preserveDrag),
       move: (operation) => { void this.mutate(operation); },
       editStart: (id, title) => this.editStarted(id, title),
@@ -156,7 +191,8 @@ class PursuitMap implements PursuitMapController {
     }, { signal: this.abort.signal });
     document.addEventListener('pointerdown', (event) => {
       if (!this.active) return;
-      if (!this.host.contains(event.target as Node)) this.select(null);
+      const target = event.target as Node;
+      if (!this.host.contains(target) && !this.options.selectionBoundary?.contains(target)) this.select(null);
       if (!(event.target as HTMLElement).closest('.pm-context-menu, [data-command="context-menu"]')) this.closeContextMenu();
     }, { signal: this.abort.signal });
     host.addEventListener('contextmenu', (event) => {
@@ -208,6 +244,14 @@ class PursuitMap implements PursuitMapController {
     this.renderer.highlight(new Set(this.matches));
     this.updateTools();
     this.saveView();
+    this.notifySelection();
+  }
+
+  private notifySelection(): void {
+    const selected = this.view.selected ?? null;
+    if (selected === this.lastNotifiedSelection) return;
+    this.lastNotifiedSelection = selected;
+    for (const listener of this.selectionListeners) listener(selected);
   }
 
   private changed(change: QueueChange): void {
@@ -343,6 +387,7 @@ class PursuitMap implements PursuitMapController {
     this.renderer.select(id, center);
     this.updateTools();
     this.saveView();
+    this.notifySelection();
   }
 
   private setCollapsed(id: string, collapsed: boolean, preserveDrag = false): void {
@@ -433,7 +478,7 @@ class PursuitMap implements PursuitMapController {
       this.view = next;
       if (folded) this.render();
       this.renderer.select(this.view.selected, true);
-      this.updateTools(); this.saveView();
+      this.updateTools(); this.saveView(); this.notifySelection();
     } else if (command === 'escape') {
       this.renderer.cancelGesture();
       this.closeContextMenu();
@@ -654,6 +699,12 @@ class PursuitMap implements PursuitMapController {
   }
 
   async refresh(): Promise<void> { await this.queue.reload(); }
+  getSelectedId(): string | null { return this.view.selected ?? null; }
+  subscribeSelection(listener: (id: string | null) => void): () => void {
+    this.selectionListeners.add(listener);
+    listener(this.getSelectedId());
+    return () => this.selectionListeners.delete(listener);
+  }
   get hasUnsavedChanges(): boolean { return this.queue.pendingCount > 0 || this.drafts.dirty; }
   setActive(active: boolean): void {
     this.active = active;
@@ -662,6 +713,7 @@ class PursuitMap implements PursuitMapController {
   }
   destroy(): void {
     this.unsubscribe();
+    this.selectionListeners.clear();
     clearTimeout(this.toastTimer);
     this.abort.abort();
     this.renderer.destroy();

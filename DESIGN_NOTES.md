@@ -26,6 +26,12 @@ Typing and pointer movement are local editing activity. Confirming a rename, str
 
 This allows immediate canvas editing while preserving an inspectable Git change. Undo and redo create compensating commits and reject stale history; they do not reset the shared branch. Deletion can repair incoming typed edges in Memory, but that mechanical repair is not authority to rewrite Memory meaning.
 
+### Conversation attachments are operational state
+
+A Codex conversation can be displayed beside one Pursuit without becoming part of the Pursuit graph. RightMemory stores the attachment, host, and working-directory project below the active root's `.runtime` directory. Codex App Server remains authoritative for the thread and turn protocol. Deleting a Pursuit does not delete its conversation, and conversation events do not infer completion, Focus, or map edits.
+
+RightMemory opens its own App Server process locally or through a named SSH host. It does not share live ownership with a task currently open in the Codex desktop app. Registered working directories form RightMemory's project layer because the stable protocol needed for conversation control is available across Codex versions while native desktop Project methods are experimental and version-specific.
+
 ### Existing data remains readable
 
 Old Pursuit field blocks are retained as body text so existing roots can open before a separate, explicitly approved cleanup. Their old action labels have no current control semantics. This is a narrow reading accommodation, not a second schema or an automatic migration. Installing or opening the editor does not rewrite a user's root.
