@@ -2083,7 +2083,8 @@ def _sleep_with_refresh_check(seconds: int, refresh: InstallStamp, stop: _WatchS
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return True
-        time.sleep(min(math.ceil(remaining), WATCH_REFRESH_POLL_SECONDS))
+        # A tiny backward clock adjustment must not extend the requested wait.
+        time.sleep(min(seconds, math.ceil(remaining), WATCH_REFRESH_POLL_SECONDS))
 
 
 def _reexec_if_install_changed(refresh: InstallStamp, stop: _WatchStopToken | None = None) -> None:

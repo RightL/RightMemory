@@ -22,6 +22,7 @@ from rightmemory.cli import (
     _run_active_sync_reconciler,
     _run_async_update_batch,
     _run_synchronized_update_batch,
+    _sleep_with_refresh_check,
     _turn_parser,
     cli_main,
     main,
@@ -79,6 +80,18 @@ def _fake_async_worker_process(pid: int = 123):
 
 
 class CliEntrypointTests(unittest.TestCase):
+    def test_refresh_sleep_never_exceeds_requested_duration_when_clock_moves_backward(self):
+        refresh = Mock()
+        refresh.changed.return_value = False
+        with (
+            patch("rightmemory.cli.time.monotonic", side_effect=[1000.0000001, 1000.0]),
+            patch("rightmemory.cli.time.sleep", side_effect=KeyboardInterrupt) as sleep,
+            patch("rightmemory.cli.WATCH_REFRESH_POLL_SECONDS", 999999),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            _sleep_with_refresh_check(60, refresh)
+        sleep.assert_called_once_with(60)
+
     def test_candidate_reference_preserves_all_digit_uid_prefix(self):
         self.assertEqual(_candidate_reference("12345678"), "12345678")
         self.assertEqual(_candidate_reference("1234567"), 1234567)
