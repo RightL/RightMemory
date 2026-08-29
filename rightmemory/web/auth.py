@@ -109,7 +109,12 @@ def clear_session_cookie(response: Response) -> None:
 
 
 def read_session(memory_root: Path, request: Request) -> WebSession | None:
-    cookie = request.cookies.get(SESSION_COOKIE)
+    return read_session_cookie(memory_root, request.cookies.get(SESSION_COOKIE))
+
+
+def read_session_cookie(memory_root: Path, cookie: str | None) -> WebSession | None:
+    """Validate one signed session cookie against current expiry and revocation state."""
+
     if not cookie:
         return None
     try:

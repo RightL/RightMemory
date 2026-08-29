@@ -12,6 +12,16 @@ This starts or reuses the existing Web Studio and opens its Pursuit Map view. Us
 
 Sign in with the Web Studio operator token and check the active root before editing. A newly generated token is printed by the launch command; an existing service keeps its existing token and sessions. The map uses that authenticated session's selected root. Starting the service or opening the map does not rewrite Pursuit files.
 
+## Work Beside A Direction
+
+Selecting a direction also opens its conversation workspace. You can create a Codex conversation for that Pursuit, send messages, follow streamed replies and tool activity, answer approval or input requests, interrupt the current turn, and resume the conversation after reopening the browser. This work stays beside the map: conversation activity never marks a Pursuit complete, changes Focus, or writes progress into its note.
+
+Each conversation has one primary Pursuit attachment and runs in one registered project on one host. A project is the working directory passed to Codex, not a second copy of the Pursuit tree. The built-in local project uses the active RightMemory root. Additional local or SSH projects can point at the repositories where the work actually happens.
+
+RightMemory starts its own Codex App Server connection and keeps the Pursuit, host, and project association in root-local operational storage. It does not take control of a task that is currently open in the Codex desktop app. The stable App Server protocol provides threads, turns, streaming events, interruption, and approvals; RightMemory's registered projects provide the stable cross-version project layer because native Codex Project methods are not available in every Codex release.
+
+SSH hosts are saved by their configured alias. The remote machine must already be reachable through non-interactive OpenSSH and provide `codex app-server` on the remote command path. The browser never opens a direct Codex or SSH connection; the authenticated Web Studio backend owns those processes.
+
 ## Edit On The Canvas
 
 Each top-level direction is the root of its own map on a shared canvas. Independent maps appear in stored order, with space between them and no shared parent node. A map with several first-level branches alternates them left and right, starting on the left; a single branch extends right. Descendants continue on their branch's side.
@@ -111,6 +121,8 @@ Both install modes include `maintain-pursuit-map` alongside `maintain-rightmemor
 | Transactions, revisions, and history | [pursuit_store.py](../rightmemory/pursuit_store.py) |
 | Existing Web service and map routes | [web/app.py](../rightmemory/web/app.py), [web/service.py](../rightmemory/web/service.py) |
 | Browser source and static build | [web/frontend](../rightmemory/web/frontend/), [web/static](../rightmemory/web/static/) |
+| Conversation runtime and operational store | [conversations](../rightmemory/conversations/) |
+| Authenticated conversation routes | [conversation_routes.py](../rightmemory/web/conversation_routes.py) |
 | Direct agent editing | [maintain-pursuit-map](../skills/maintain-pursuit-map/SKILL.md) |
 
 The internal API is `GET /api/pursuit-map`, `POST /api/pursuit-map/operations`, and the corresponding `/undo` and `/redo` endpoints. Mutations use the existing authenticated session, active-root selection, and CSRF protection. A revision conflict returns HTTP `409` with a fresh snapshot. These routes serve the editor; there is no public create/edit/move command family or task-execution API.
@@ -131,6 +143,6 @@ python -m tests
 python -m compileall -q rightmemory tests
 ```
 
-Use disposable roots for browser and destructive transaction checks. Agent-facing rules, prompts, and skill wording are reviewed directly rather than asserted by tests. `.xmind` interchange, typed-edge editing controls, task registries, task execution, and task reconciliation are outside this map's scope.
+Use disposable roots for browser and destructive transaction checks. Agent-facing rules, prompts, and skill wording are reviewed directly rather than asserted by tests. `.xmind` interchange, typed-edge editing controls, and task reconciliation remain outside the map. Conversation execution is operational workspace state and does not expand the Pursuit grammar or its Git transaction surface.
 
 For visible browser checks, run `npm run dev` from the frontend directory and open the printed loopback address. **Run interaction checks** exercises the bundled UI with disposable in-memory data, including formatting payloads and history, menus, keyboard operations, hover expansion, auto-pan cancellation, HTML escaping, read-only controls, and a 500-direction fixture. The synthetic pointer checks replace only pointer-capture ownership; check a real mouse/pen drag as well. No real Memory root is used.

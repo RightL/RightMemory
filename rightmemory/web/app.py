@@ -10,6 +10,8 @@ import uvicorn
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response, status
 from starlette.concurrency import run_in_threadpool
 
+from ..conversations.service import ConversationRuntimeRegistry
+from .conversation_routes import add_conversation_routes
 from .auth import (
     clear_session_cookie,
     create_session_cookie,
@@ -28,11 +30,21 @@ from ..pursuit_store import PursuitStoreError
 from ..shared_view_questions import question_response_payload, verify_question_view_token
 
 
-def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> FastAPI:
+def create_web_app(
+    memory_root: Path,
+    *,
+    operator_token: str | None = None,
+    conversation_registry: ConversationRuntimeRegistry | None = None,
+) -> FastAPI:
     root = Path(memory_root).expanduser().resolve()
     ensure_web_auth_files(root, operator_token=operator_token)
     app = FastAPI(title="RightMemory Web Studio")
     static_root = Path(__file__).parent / "static"
+    owns_conversation_registry = conversation_registry is None
+    conversation_registry = conversation_registry or ConversationRuntimeRegistry()
+    app.state.conversation_registry = conversation_registry
+    if owns_conversation_registry:
+        app.router.add_event_handler("shutdown", conversation_registry.close)
 
     async def current_session(request: Request):
         return require_session(root, request)
@@ -43,6 +55,12 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
 
     async def current_service(session=Depends(current_session)):
         return service_for_active_root(session.active_root)
+
+    conversation_stream_lifecycle = add_conversation_routes(
+        app,
+        configured_root=root,
+        registry=conversation_registry,
+    )
 
     @app.get("/")
     async def index():
@@ -81,6 +99,14 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
     async def logout(request: Request, response: Response, _session=Depends(current_session)):
         require_csrf(root, request, request.headers.get("x-csrf-token"))
         revoke_session(root, _session.session_id)
+        active_root = _best_effort_logout_root(root, _session.active_root)
+        if active_root is not None:
+            conversation_stream_lifecycle.invalidate(active_root)
+            try:
+                conversation_registry.invalidate_root_session(active_root)
+            except Exception:
+                # Stream cleanup must not undo a successful session revocation.
+                pass
         clear_session_cookie(response)
         return ok_response("logged out")
 
@@ -528,6 +554,8 @@ def create_web_app(memory_root: Path, *, operator_token: str | None = None) -> F
                 detail=error_detail("invalid active root", technical=str(exc)),
             ) from exc
         cookie, updated_session = create_session_cookie(root, active_root=data["active_root"], session_id=session.session_id)
+        conversation_stream_lifecycle.invalidate(service.memory_root)
+        conversation_registry.invalidate_root_session(service.memory_root)
         set_session_cookie(response, cookie)
         data["csrf_token"] = updated_session.csrf_token
         return ok_response("active root updated", data)
@@ -543,6 +571,16 @@ def _verify_question_bearer(root: Path, view_id: str, request: Request) -> bool:
         and scheme.lower() == "bearer"
         and verify_question_view_token(root, view_id, token.strip())
     )
+
+
+def _best_effort_logout_root(configured_root: Path, session_root: str) -> Path | None:
+    base = Path(configured_root).expanduser().resolve()
+    try:
+        candidate = Path(session_root).expanduser().resolve()
+        candidate.relative_to(base)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return candidate
 
 
 def _static_file_response(static_root: Path, asset_name: str, *, allowed: set[str]) -> Response:

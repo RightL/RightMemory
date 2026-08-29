@@ -1,0 +1,1515 @@
+"""Root-scoped orchestration for Pursuit-attached Codex conversations."""
+
+from __future__ import annotations
+
+import os
+import threading
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
+from typing import Any, Protocol
+
+from ..pursuit_store import PursuitStore
+from ..pursuit_tree import plain_title
+from .models import DEFAULT_LOCAL_PROJECT_ID, LOCAL_HOST_ID, ConversationError
+from .projection import (
+    bounded_json_object,
+    project_notification,
+    project_server_request,
+    server_request_result,
+    status_from_thread,
+)
+from .store import ConversationStore
+
+
+MAX_MESSAGE_LENGTH = 200_000
+EVENT_PAGE_SIZE = 500
+_BUSY_CONVERSATION_STATUSES = frozenset(
+    {"starting", "running", "waiting_approval", "waiting_input", "unknown"}
+)
+_STATE_EVENT_KINDS = frozenset(
+    {
+        "thread.status",
+        "thread.archived",
+        "turn.started",
+        "turn.completed",
+        "protocol.error",
+        "server_request",
+    }
+)
+
+
+class AppServerAdapter(Protocol):
+    @property
+    def epoch(self) -> str: ...
+
+    def connect(self) -> dict[str, Any]: ...
+
+    def close(self) -> None: ...
+
+    def start_thread(self, cwd: str, **optional: Any) -> dict[str, Any]: ...
+
+    def resume_thread(self, thread_id: str) -> dict[str, Any]: ...
+
+    def archive_thread(self, thread_id: str) -> dict[str, Any]: ...
+
+    def start_turn(self, thread_id: str, text: str, **optional: Any) -> dict[str, Any]: ...
+
+    def interrupt_turn(self, thread_id: str, turn_id: str) -> dict[str, Any]: ...
+
+    def respond_server_request(
+        self,
+        request_id: str | int,
+        *,
+        result: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+        epoch: str | None = None,
+    ) -> None: ...
+
+
+AdapterFactory = Callable[..., AppServerAdapter]
+StoreFactory = Callable[[Path], ConversationStore]
+PursuitStoreFactory = Callable[[Path], PursuitStore]
+
+
+class _EventBroker:
+    """Thread-based durable-cursor wakeups with root-session invalidation."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._version = 0
+        self._generation = 0
+        self._closed = False
+
+    def notify(self) -> None:
+        with self._condition:
+            self._version += 1
+            self._condition.notify_all()
+
+    def invalidate(self) -> None:
+        with self._condition:
+            self._generation += 1
+            self._condition.notify_all()
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            self._generation += 1
+            self._condition.notify_all()
+
+    def stream(
+        self,
+        store: ConversationStore,
+        *,
+        after_event_id: int,
+        cancel_event: threading.Event | None,
+        heartbeat_seconds: float,
+    ) -> Iterator[dict[str, Any] | None]:
+        if isinstance(after_event_id, bool) or not isinstance(after_event_id, int) or after_event_id < 0:
+            raise ConversationError("invalid_input", "The event cursor must be a non-negative integer.", 422)
+        if heartbeat_seconds <= 0:
+            raise ConversationError("invalid_input", "The heartbeat interval must be positive.", 422)
+        cursor = after_event_id
+        with self._condition:
+            generation = self._generation
+        while True:
+            with self._condition:
+                if self._closed or generation != self._generation:
+                    return
+                marker = self._version
+            if cancel_event is not None and cancel_event.is_set():
+                return
+
+            events = store.read_events(after_event_id=cursor, limit=EVENT_PAGE_SIZE)
+            if events:
+                for event in events:
+                    cursor = event["event_id"]
+                    yield event
+                continue
+
+            with self._condition:
+                if self._closed or generation != self._generation:
+                    return
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                if marker == self._version:
+                    self._condition.wait(timeout=heartbeat_seconds)
+                if self._closed or generation != self._generation:
+                    return
+                heartbeat = marker == self._version
+            if heartbeat:
+                yield None
+
+
+class ConversationService:
+    """Own one active root's operational store and provider connections."""
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        adapter_factory: AdapterFactory,
+        store_factory: StoreFactory = ConversationStore,
+        pursuit_store_factory: PursuitStoreFactory = PursuitStore,
+    ) -> None:
+        self.root = Path(root).expanduser().resolve()
+        self.store = store_factory(self.root)
+        self.store.initialize()
+        self._stale_orphaned_requests()
+        self._mark_orphaned_conversations_unknown()
+        self._pursuits = pursuit_store_factory(self.root)
+        self._adapter_factory = adapter_factory
+        self._adapters: dict[str, AppServerAdapter] = {}
+        self._adapter_lock = threading.RLock()
+        self._conversation_locks: dict[str, threading.RLock] = {}
+        self._conversation_locks_guard = threading.Lock()
+        self._broker = _EventBroker()
+        self._closed = False
+
+    # Browser-facing projections -------------------------------------------
+
+    def workspace(self) -> dict[str, Any]:
+        # Capture the durable cursor before reading the snapshot. Events that
+        # race with assembly may be reflected twice, but can never be skipped
+        # by a client that continues from this cursor.
+        cursor = self.store.latest_event_id()
+        items = self._pursuit_items()
+        conversations = [self._decorate_conversation(row, items) for row in self.store.list_conversations()]
+        defaults = {
+            pursuit_id: value
+            for pursuit_id in items
+            if (value := self.store.get_pursuit_default(pursuit_id)) is not None
+        }
+        return {
+            "root_key": self._pursuit_root_key(),
+            "hosts": self.store.list_hosts(),
+            "projects": self.store.list_projects(),
+            "conversations": conversations,
+            "pending_requests": self.store.list_pending_requests(),
+            "pursuit_defaults": defaults,
+            "cursor": cursor,
+        }
+
+    def list_for_pursuit(self, pursuit_id: str) -> dict[str, Any]:
+        item = self._require_pursuit(pursuit_id)
+        conversations = [
+            self._decorate_conversation(row, {item["id"]: item})
+            for row in self.store.list_conversations(pursuit_id=item["id"])
+        ]
+        return {
+            "conversations": conversations,
+            "default": self.store.get_pursuit_default(item["id"]),
+        }
+
+    def detail(
+        self, conversation_id: str, after_event_id: int | None = None
+    ) -> dict[str, Any]:
+        # As with workspace(), cursor-first makes a concurrent event replayable
+        # instead of allowing a later cursor to hide an older snapshot.
+        cursor = self.store.latest_event_id()
+        conversation = self._require_conversation(conversation_id)
+        events = (
+            self.store.latest_events(conversation["conversation_id"], limit=500)
+            if after_event_id is None
+            else self.store.read_events(
+                after_event_id=after_event_id,
+                limit=1000,
+                conversation_id=conversation["conversation_id"],
+            )
+        )
+        response_cursor = cursor
+        if events:
+            last_event_id = events[-1].get("event_id")
+            if isinstance(last_event_id, int):
+                # A full page may have an unread tail, so advance only through
+                # the last delivered record. A shorter page can safely retain
+                # the root-wide cursor captured before snapshot assembly.
+                response_cursor = (
+                    last_event_id
+                    if after_event_id is not None and len(events) >= 1000
+                    else max(response_cursor, last_event_id)
+                )
+        return {
+            "conversation": self._decorate_conversation(conversation, self._pursuit_items()),
+            "events": events,
+            "pending_requests": self.store.list_pending_requests(
+                conversation_id=conversation["conversation_id"]
+            ),
+            "cursor": response_cursor,
+        }
+
+    # Conversation lifecycle -----------------------------------------------
+
+    def create_conversation(
+        self,
+        pursuit_id: str,
+        host_id: str = LOCAL_HOST_ID,
+        project_id: str = DEFAULT_LOCAL_PROJECT_ID,
+    ) -> dict[str, Any]:
+        item = self._require_pursuit(pursuit_id)
+        host, project = self._require_host_project(host_id, project_id)
+        cwd = self._validated_project_cwd(host, project["cwd"])
+        adapter = self._adapter(host)
+        try:
+            result = adapter.start_thread(cwd=cwd)
+        except Exception as exc:
+            self._record_provider_failure(host, "starting a thread", exc)
+        thread = _result_object(result, "thread", "thread/start")
+        thread_id = _provider_id(thread.get("id"), "thread/start did not return a thread id")
+        title = _optional_provider_title(thread.get("name") or thread.get("title"))
+        status = status_from_thread(thread.get("status"))
+        if status == "unknown":
+            status = "idle"
+        try:
+            conversation = self.store.create_conversation(
+                pursuit_id=item["id"],
+                pursuit_title_snapshot=plain_title(str(item.get("title", ""))),
+                host_id=host["host_id"],
+                project_id=project["project_id"],
+                thread_id=thread_id,
+                thread_title=title,
+                status=status,
+            )
+        except Exception as exc:
+            raise ConversationError(
+                "attachment_failed",
+                f"Codex created thread {thread_id}, but RightMemory could not attach it: {exc}",
+                500,
+            ) from exc
+        self._append_event(
+            "thread.started",
+            {"thread": bounded_json_object(thread)},
+            conversation_id=conversation["conversation_id"],
+        )
+        return {"conversation": self._decorate_conversation(conversation, {item["id"]: item})}
+
+    def send_message(self, conversation_id: str, text: str) -> dict[str, Any]:
+        with self._conversation_operation(conversation_id):
+            conversation = self._require_active_conversation(conversation_id)
+            message = _message_text(text)
+            if (
+                conversation["active_turn_id"] is not None
+                or conversation["status"] in _BUSY_CONVERSATION_STATUSES
+            ):
+                raise ConversationError(
+                    "conversation_busy", "This conversation already has an active turn.", 409
+                )
+            host = self._require_host(conversation["host_id"])
+            adapter = self._adapter(host)
+            self.store.update_conversation(conversation_id, status="starting", touch_activity=True)
+            self._append_event(
+                "user.message",
+                {"text": message},
+                conversation_id=conversation_id,
+            )
+            try:
+                adapter.resume_thread(conversation["thread_id"])
+                state_cursor = self.store.latest_event_id()
+                result = adapter.start_turn(conversation["thread_id"], message)
+            except Exception as exc:
+                self.store.update_conversation(conversation_id, status="unknown", touch_activity=True)
+                self._append_event(
+                    "protocol.error",
+                    {"operation": "turn/start", "message": _exception_text(exc)},
+                    conversation_id=conversation_id,
+                )
+                self._record_provider_failure(host, "starting a turn", exc)
+            turn = _result_object(result, "turn", "turn/start")
+            turn_id = _provider_id(turn.get("id"), "turn/start did not return a turn id")
+            status = _status_from_returned_turn(turn)
+            terminal_status = self._terminal_turn_status(conversation_id, turn_id)
+            if terminal_status is not None:
+                updated, connection_current = self._update_after_rpc(
+                    host["host_id"],
+                    adapter,
+                    conversation_id,
+                    status=terminal_status,
+                    active_turn_id=None,
+                )
+            elif self._state_changed_after(
+                conversation_id, state_cursor, turn_id=turn_id
+            ):
+                # A synchronous provider callback is newer than the RPC result.
+                # Preserve its terminal/waiting state, filling only a missing
+                # accepted turn id when that state still represents live work.
+                current_state = self._require_conversation(conversation_id)
+                rpc_updates: dict[str, Any] = {}
+                if (
+                    current_state["lifecycle"] == "active"
+                    and current_state["active_turn_id"] is None
+                    and current_state["status"] in _BUSY_CONVERSATION_STATUSES
+                ):
+                    rpc_updates["active_turn_id"] = turn_id
+                updated, connection_current = self._update_after_rpc(
+                    host["host_id"], adapter, conversation_id, **rpc_updates
+                )
+            else:
+                updated, connection_current = self._update_after_rpc(
+                    host["host_id"],
+                    adapter,
+                    conversation_id,
+                    status=status,
+                    active_turn_id=turn_id if status == "running" else None,
+                )
+            # Production emits turn/started. This fallback makes the accepted turn
+            # durable even when an older provider omits that notification.
+            if connection_current and (
+                not self._has_turn_started_event(conversation_id, turn_id)
+                and not self._has_terminal_turn_event(conversation_id, turn_id)
+            ):
+                self._append_event(
+                    "turn.started",
+                    {"turn": bounded_json_object(turn)},
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                )
+            return {"conversation": updated, "turn": turn}
+
+    def reconcile(self, conversation_id: str) -> dict[str, Any]:
+        """Reconnect and replace uncertain local turn state with provider state."""
+        with self._conversation_operation(conversation_id):
+            conversation = self._require_active_conversation(conversation_id)
+            host = self._require_host(conversation["host_id"])
+            adapter = self._adapter(host)
+            try:
+                state_cursor = self.store.latest_event_id()
+                result = adapter.resume_thread(conversation["thread_id"])
+            except Exception as exc:
+                self.store.update_conversation(
+                    conversation_id, status="unknown", touch_activity=True
+                )
+                self._append_event(
+                    "protocol.error",
+                    {"operation": "thread/resume", "message": _exception_text(exc)},
+                    conversation_id=conversation_id,
+                )
+                self._record_provider_failure(host, "reconciling the thread", exc)
+
+            thread = _result_object(result, "thread", "thread/resume")
+            returned_thread_id = _provider_id(
+                thread.get("id"), "thread/resume did not return a thread id"
+            )
+            if returned_thread_id != conversation["thread_id"]:
+                raise ConversationError(
+                    "provider_protocol",
+                    "thread/resume returned a different thread.",
+                    502,
+                )
+
+            callback_state_changed = self._state_changed_after(
+                conversation_id, state_cursor
+            )
+            if callback_state_changed:
+                callback_state = self._require_conversation(conversation_id)
+                status = callback_state["status"]
+                active_turn_id = callback_state["active_turn_id"]
+            else:
+                status = status_from_thread(thread.get("status"))
+                active_turn_id = conversation["active_turn_id"]
+                if status in {"idle", "failed"}:
+                    # Provider-confirmed inactivity is enough to allow a new
+                    # turn, but is not relabeled as a completed previous turn.
+                    active_turn_id = None
+                elif status in {"running", "waiting_approval", "waiting_input"}:
+                    active_turn_id = _active_turn_id_from_thread(thread) or active_turn_id
+                else:
+                    # An unfamiliar response cannot safely prove that uncertain
+                    # work stopped, so preserve the existing turn fence.
+                    status = "unknown"
+
+            updates: dict[str, Any] = {
+                "status": status,
+                "active_turn_id": active_turn_id,
+            }
+            title = _optional_provider_title(thread.get("name") or thread.get("title"))
+            if title is not None:
+                updates["thread_title"] = title
+            updated, connection_current = self._update_after_rpc(
+                host["host_id"], adapter, conversation_id, **updates
+            )
+            if connection_current:
+                self._append_event(
+                    "thread.reconciled",
+                    {"thread": bounded_json_object(thread), "status": status},
+                    conversation_id=conversation_id,
+                    turn_id=active_turn_id,
+                )
+            return {
+                "conversation": self._decorate_conversation(updated, self._pursuit_items()),
+                "thread": thread,
+                "resolved": connection_current and updated["status"] != "unknown",
+            }
+
+    def interrupt(self, conversation_id: str) -> dict[str, Any]:
+        with self._conversation_operation(conversation_id):
+            conversation = self._require_active_conversation(conversation_id)
+            turn_id = conversation["active_turn_id"]
+            if turn_id is None:
+                raise ConversationError(
+                    "no_active_turn", "This conversation has no active turn to interrupt.", 409
+                )
+            host = self._require_host(conversation["host_id"])
+            adapter = self._adapter(host)
+            try:
+                adapter.resume_thread(conversation["thread_id"])
+                adapter.interrupt_turn(conversation["thread_id"], turn_id)
+            except Exception as exc:
+                self.store.update_conversation(conversation_id, status="unknown", touch_activity=True)
+                self._record_provider_failure(host, "interrupting the turn", exc)
+            updated, connection_current = self._update_after_rpc(
+                host["host_id"],
+                adapter,
+                conversation_id,
+                status="interrupted",
+                active_turn_id=None,
+            )
+            if connection_current:
+                self._stale_conversation_requests(conversation_id, turn_id=turn_id)
+                self._append_event(
+                    "turn.interrupted",
+                    {"thread_id": conversation["thread_id"], "turn_id": turn_id},
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                )
+            return {"conversation": updated}
+
+    def archive(self, conversation_id: str) -> dict[str, Any]:
+        with self._conversation_operation(conversation_id):
+            conversation = self._require_conversation(conversation_id)
+            if conversation["lifecycle"] == "archived":
+                return {"conversation": conversation}
+            host = self._require_host(conversation["host_id"])
+            adapter = self._adapter(host)
+            try:
+                adapter.archive_thread(conversation["thread_id"])
+            except Exception as exc:
+                self._record_provider_failure(host, "archiving the thread", exc)
+            updated, connection_current = self._update_after_rpc(
+                host["host_id"],
+                adapter,
+                conversation_id,
+                lifecycle="archived",
+                status="idle",
+                active_turn_id=None,
+            )
+            if connection_current:
+                self._stale_conversation_requests(conversation_id)
+                self._append_event(
+                    "thread.archived",
+                    {"thread_id": conversation["thread_id"]},
+                    conversation_id=conversation_id,
+                )
+            return {"conversation": updated}
+
+    def move(self, conversation_id: str, pursuit_id: str) -> dict[str, Any]:
+        with self._conversation_operation(conversation_id):
+            conversation = self._require_conversation(conversation_id)
+            item = self._require_pursuit(pursuit_id)
+            previous = conversation["pursuit_id"]
+            updated = self.store.update_conversation(
+                conversation_id,
+                pursuit_id=item["id"],
+                pursuit_title_snapshot=plain_title(str(item.get("title", ""))),
+                touch_activity=True,
+            )
+            self._append_event(
+                "conversation.moved",
+                {"from_pursuit_id": previous, "to_pursuit_id": item["id"]},
+                conversation_id=conversation_id,
+            )
+            return {"conversation": self._decorate_conversation(updated, {item["id"]: item})}
+
+    # Hosts, projects, and server requests ---------------------------------
+
+    def add_host(
+        self,
+        display_name: str,
+        ssh_alias: str,
+        command_override: str | None = None,
+    ) -> dict[str, Any]:
+        if command_override:
+            raise ConversationError(
+                "invalid_host",
+                "SSH hosts use the fixed safe remote Codex command; an override is not allowed.",
+                422,
+            )
+        try:
+            from .transport import validate_ssh_alias
+
+            safe_alias = validate_ssh_alias(ssh_alias)
+        except (TypeError, ValueError) as exc:
+            raise ConversationError("invalid_host", str(exc), 422) from exc
+        return {
+            "host": self.store.upsert_host(
+                kind="ssh",
+                display_name=display_name,
+                ssh_alias=safe_alias,
+                codex_command_override=command_override,
+            )
+        }
+
+    def probe_host(self, host_id: str) -> dict[str, Any]:
+        host = self._require_host(host_id)
+        self._adapter(host)
+        refreshed = self._require_host(host_id)
+        return {"host": refreshed, "connected": True}
+
+    def add_project(self, host_id: str, label: str, cwd: str) -> dict[str, Any]:
+        host = self._require_host(host_id)
+        normalized = self._validated_project_cwd(host, cwd)
+        return {"project": self.store.create_project(host_id=host_id, label=label, cwd=normalized)}
+
+    def respond_request(
+        self,
+        request_key: str,
+        decision: object = None,
+        response: object = None,
+        expected_conversation_id: str | None = None,
+    ) -> dict[str, Any]:
+        pending = self._pending_by_key(request_key)
+        if pending is None:
+            raise ConversationError("request_not_found", "The pending server request was not found.", 404)
+        conversation_id = pending["conversation_id"]
+        if conversation_id is None:
+            return self._respond_request(
+                request_key,
+                decision=decision,
+                response=response,
+                expected_conversation_id=expected_conversation_id,
+            )
+        with self._conversation_operation(conversation_id):
+            return self._respond_request(
+                request_key,
+                decision=decision,
+                response=response,
+                expected_conversation_id=expected_conversation_id,
+            )
+
+    def _respond_request(
+        self,
+        request_key: str,
+        *,
+        decision: object,
+        response: object,
+        expected_conversation_id: str | None,
+    ) -> dict[str, Any]:
+        pending = self._pending_by_key(request_key)
+        if pending is None:
+            raise ConversationError("request_not_found", "The pending server request was not found.", 404)
+        if pending["state"] != "pending":
+            code = "stale_request" if pending["state"] == "stale" else "duplicate_response"
+            raise ConversationError(code, "That server request can no longer be answered.", 409)
+        if expected_conversation_id is not None and pending["conversation_id"] != expected_conversation_id:
+            raise ConversationError(
+                "request_conversation_mismatch",
+                "The server request does not belong to that conversation.",
+                409,
+            )
+        if pending["conversation_id"] is not None:
+            conversation = self._require_conversation(pending["conversation_id"])
+            pending_turn_id = _optional_provider_id(pending["payload"].get("turnId"))
+            if conversation["lifecycle"] != "active":
+                self._stale_conversation_requests(conversation["conversation_id"])
+                raise ConversationError(
+                    "stale_request",
+                    "That server request belongs to an archived conversation.",
+                    409,
+                )
+            if (
+                pending_turn_id is not None
+                and conversation["active_turn_id"] != pending_turn_id
+            ):
+                self._stale_conversation_requests(
+                    conversation["conversation_id"], turn_id=pending_turn_id
+                )
+                raise ConversationError(
+                    "stale_request",
+                    "That server request belongs to a turn that is no longer active.",
+                    409,
+                )
+        try:
+            result = server_request_result(
+                pending["method"],
+                decision=decision,
+                response=response,
+                request_params=pending["payload"],
+            )
+        except ValueError as exc:
+            raise ConversationError("invalid_response", str(exc), 422) from exc
+        adapter = self._existing_adapter(pending["host_id"])
+        if adapter is None or str(adapter.epoch) != str(pending["connection_epoch"]):
+            self.store.mark_pending_requests_stale(
+                pending["host_id"], pending["connection_epoch"]
+            )
+            raise ConversationError(
+                "stale_request",
+                "That server request belongs to a disconnected Codex process.",
+                409,
+            )
+
+        # Resolve before writing the response. If the write outcome is unknown,
+        # this exact RPC id must never be replayed on the same or a new process.
+        resolved = self.store.resolve_pending_request_by_key(
+            request_key,
+            host_id=pending["host_id"],
+            connection_epoch=pending["connection_epoch"],
+        )
+        try:
+            adapter.respond_server_request(
+                pending["rpc_id"],
+                result=result,
+                epoch=str(pending["connection_epoch"]),
+            )
+        except Exception as exc:
+            # The write may or may not have reached Codex. Fence every other
+            # request from this process and expose the affected turn as unknown
+            # before removing the connection that could reconcile it.
+            with self._adapter_lock:
+                if self._adapters.get(pending["host_id"]) is adapter:
+                    try:
+                        self._mark_connection_lost(
+                            pending["host_id"], pending["connection_epoch"], exc
+                        )
+                    except Exception:
+                        # A simultaneous storage failure cannot restore
+                        # certainty, but it must not leave the failed provider
+                        # process reusable.
+                        pass
+                    finally:
+                        self._adapters.pop(pending["host_id"], None)
+            try:
+                adapter.close()
+            except Exception:
+                pass
+            try:
+                self._append_event(
+                    "server_response_failed",
+                    {"request_key": request_key, "message": _exception_text(exc)},
+                    conversation_id=pending["conversation_id"],
+                )
+            except Exception:
+                pass
+            raise ConversationError(
+                "provider_unavailable",
+                "The server response outcome is unknown; it will not be retried.",
+                502,
+            ) from exc
+
+        conversation: dict[str, Any] | None = None
+        if pending["conversation_id"] is not None:
+            conversation = self._require_conversation(pending["conversation_id"])
+            next_status = "running" if conversation["active_turn_id"] else "idle"
+            conversation, _connection_current = self._update_after_rpc(
+                pending["host_id"],
+                adapter,
+                conversation["conversation_id"],
+                status=next_status,
+            )
+        self._append_event(
+            "server_request_resolved",
+            {"request_key": request_key, "state": resolved["state"]},
+            conversation_id=pending["conversation_id"],
+            turn_id=_optional_provider_id(pending["payload"].get("turnId")),
+        )
+        return {"request": resolved, "conversation": conversation}
+
+    # Durable event stream --------------------------------------------------
+
+    def stream_events(
+        self,
+        after_event_id: int = 0,
+        cancel_event: threading.Event | None = None,
+        heartbeat_seconds: float = 15.0,
+    ) -> Iterator[dict[str, Any] | None]:
+        return self._broker.stream(
+            self.store,
+            after_event_id=after_event_id,
+            cancel_event=cancel_event,
+            heartbeat_seconds=heartbeat_seconds,
+        )
+
+    def invalidate_streams(self) -> None:
+        self._broker.invalidate()
+
+    def close(self) -> None:
+        with self._adapter_lock:
+            if self._closed:
+                return
+            self._closed = True
+            adapters = list(self._adapters.items())
+        # Wait for each host's current conversation operations to finish, then
+        # persist an uncertainty fence before terminating the owned process.
+        for host_id, adapter in adapters:
+            conversations = self.store.list_conversations(
+                host_id=host_id, lifecycle="active"
+            )
+            with ExitStack() as locks:
+                for conversation_id in sorted(
+                    conversation["conversation_id"] for conversation in conversations
+                ):
+                    locks.enter_context(self._conversation_lock_for(conversation_id))
+                with self._adapter_lock:
+                    if self._adapters.get(host_id) is not adapter:
+                        continue
+                    try:
+                        self._mark_connection_lost(host_id, adapter.epoch, None)
+                    except Exception:
+                        pass
+                    finally:
+                        self._adapters.pop(host_id, None)
+        with self._adapter_lock:
+            self._adapters.clear()
+        self._broker.close()
+        for _host_id, adapter in adapters:
+            try:
+                adapter.close()
+            except Exception:
+                pass
+
+    # Provider callback boundary -------------------------------------------
+
+    def _on_notification(self, host_id: str, message: object) -> None:
+        try:
+            with self._adapter_lock:
+                if not self._is_current_epoch_locked(host_id, _message_value(message, "epoch")):
+                    return
+            projected = project_notification(
+                _message_value(message, "method"),
+                _message_value(message, "params", {}),
+            )
+            if projected.thread_id is None:
+                return
+            conversation = self.store.find_conversation(host_id, projected.thread_id)
+            if conversation is None:
+                return
+            with self._conversation_lock_for(conversation["conversation_id"]):
+                # The adapter may have reconnected while this callback waited
+                # behind a user operation on the same conversation.
+                with self._adapter_lock:
+                    if not self._is_current_epoch_locked(
+                        host_id, _message_value(message, "epoch")
+                    ):
+                        return
+                    conversation = self.store.find_conversation(
+                        host_id, projected.thread_id
+                    )
+                    if conversation is None:
+                        return
+                    updates: dict[str, Any] = {}
+                    terminal_turn_matches = not (
+                        projected.clears_active_turn
+                        and projected.turn_id is not None
+                        and projected.turn_id != conversation["active_turn_id"]
+                    )
+                    if terminal_turn_matches:
+                        if projected.status is not None:
+                            updates["status"] = projected.status
+                        if projected.active_turn_id is not None:
+                            updates["active_turn_id"] = projected.active_turn_id
+                        elif projected.clears_active_turn:
+                            updates["active_turn_id"] = None
+                        elif projected.kind == "thread.status" and projected.status in {
+                            "idle",
+                            "failed",
+                        }:
+                            updates["active_turn_id"] = None
+                    if projected.thread_title is not None:
+                        updates["thread_title"] = projected.thread_title
+                    if projected.kind == "thread.archived":
+                        updates["lifecycle"] = "archived"
+                    if updates:
+                        self.store.update_conversation(
+                            conversation["conversation_id"], **updates, touch_activity=True
+                        )
+                    self._append_event(
+                        projected.kind,
+                        projected.payload,
+                        conversation_id=conversation["conversation_id"],
+                        turn_id=projected.turn_id,
+                    )
+                    if projected.kind == "thread.archived":
+                        self._stale_conversation_requests(
+                            conversation["conversation_id"]
+                        )
+                    elif projected.clears_active_turn and projected.turn_id is not None:
+                        self._stale_conversation_requests(
+                            conversation["conversation_id"], turn_id=projected.turn_id
+                        )
+        except Exception:
+            # Provider reader threads must remain alive when a future protocol
+            # message cannot be projected or local state changed concurrently.
+            return
+
+    def _on_server_request(self, host_id: str, message: object) -> None:
+        # Unlike notifications, a server request requires a response. Let a
+        # projection or persistence failure reach the JSON-RPC dispatcher so it
+        # can send an internal-error response instead of leaving Codex waiting.
+        epoch = _message_value(message, "epoch")
+        with self._adapter_lock:
+            if not self._is_current_epoch_locked(host_id, epoch):
+                return
+        method = _message_value(message, "method")
+        params = _message_value(message, "params", {})
+        rpc_id = _message_value(message, "request_id")
+        projected = project_server_request(method, params)
+        conversation = (
+            self.store.find_conversation(host_id, projected.thread_id)
+            if projected.thread_id is not None
+            else None
+        )
+
+        def persist() -> None:
+            with self._adapter_lock:
+                if not self._is_current_epoch_locked(host_id, epoch):
+                    return
+                current = (
+                    self._require_conversation(conversation["conversation_id"])
+                    if conversation is not None
+                    else None
+                )
+                if current is not None:
+                    if current["lifecycle"] != "active":
+                        raise ConversationError(
+                            "stale_request",
+                            "Codex sent a request for an archived conversation.",
+                            409,
+                        )
+                    if projected.turn_id is not None:
+                        active_turn_id = current["active_turn_id"]
+                        if active_turn_id is not None and active_turn_id != projected.turn_id:
+                            raise ConversationError(
+                                "stale_request",
+                                "Codex sent a request for a turn that is no longer active.",
+                                409,
+                            )
+                        if active_turn_id is None and current["status"] not in {
+                            "starting",
+                            "running",
+                        }:
+                            raise ConversationError(
+                                "stale_request",
+                                "Codex sent a request after its turn stopped being active.",
+                                409,
+                            )
+                pending: dict[str, Any] | None = None
+                try:
+                    pending = self.store.create_pending_request(
+                        host_id=host_id,
+                        connection_epoch=epoch,
+                        rpc_id=rpc_id,
+                        method=method,
+                        payload=projected.payload,
+                        conversation_id=current["conversation_id"] if current else None,
+                        thread_id=projected.thread_id,
+                        turn_id=projected.turn_id,
+                    )
+                    if current is not None:
+                        updates: dict[str, Any] = {"status": projected.status}
+                        if projected.turn_id is not None:
+                            updates["active_turn_id"] = projected.turn_id
+                        self.store.update_conversation(
+                            current["conversation_id"],
+                            **updates,
+                            touch_activity=True,
+                        )
+                    self._append_event(
+                        "server_request",
+                        {"request": pending},
+                        conversation_id=current["conversation_id"] if current else None,
+                        turn_id=projected.turn_id,
+                    )
+                except Exception:
+                    if pending is not None:
+                        # The JSON-RPC dispatcher will answer with an internal
+                        # error. Claim this locally first so the same RPC id can
+                        # never receive a later browser response as well.
+                        self.store.resolve_pending_request_by_key(
+                            pending["request_key"],
+                            host_id=host_id,
+                            connection_epoch=epoch,
+                        )
+                    if current is not None:
+                        try:
+                            self.store.update_conversation(
+                                current["conversation_id"],
+                                status=current["status"],
+                                active_turn_id=current["active_turn_id"],
+                                touch_activity=True,
+                            )
+                        except Exception:
+                            pass
+                    raise
+
+        if conversation is None:
+            persist()
+        else:
+            with self._conversation_lock_for(conversation["conversation_id"]):
+                persist()
+
+    def _on_disconnect(self, host_id: str, message: object) -> None:
+        epoch = _message_value(message, "epoch")
+        try:
+            error = _message_value(message, "error")
+            with self._adapter_lock:
+                current = self._adapters.get(host_id)
+                if current is not None and str(current.epoch) == str(epoch):
+                    # Remove the epoch before any RPC caller can commit its
+                    # returned state, then publish the uncertainty fence while
+                    # new connections remain excluded by this lock.
+                    self._adapters.pop(host_id, None)
+                    self._mark_connection_lost(host_id, epoch, error)
+                    return
+
+            # A late callback from an old process may still own pending request
+            # rows, but it must not alter conversations using a newer adapter.
+            pending_requests = self.store.list_pending_requests(host_id=host_id)
+            self.store.mark_pending_requests_stale(host_id, epoch)
+            for pending in pending_requests:
+                if str(pending["connection_epoch"]) != str(epoch):
+                    continue
+                self._append_event(
+                    "server_request_stale",
+                    {"request_key": pending["request_key"]},
+                    conversation_id=pending["conversation_id"],
+                    turn_id=_optional_provider_id(pending["payload"].get("turnId")),
+                )
+        except Exception:
+            pass
+
+    # Internal validation and connection helpers ---------------------------
+
+    def _adapter(self, host: dict[str, Any]) -> AppServerAdapter:
+        host_id = host["host_id"]
+        with self._adapter_lock:
+            if self._closed:
+                raise ConversationError("service_closed", "The conversation runtime is closed.", 503)
+            current = self._adapters.get(host_id)
+            if current is not None:
+                return current
+        # Do not hold the registry lock while initialize waits on the reader
+        # thread: initialization-time notifications use the same callback path.
+        try:
+            adapter = self._adapter_factory(
+                host,
+                local_cwd=self.root,
+                on_notification=lambda message: self._on_notification(host_id, message),
+                on_server_request=lambda message: self._on_server_request(host_id, message),
+                on_disconnect=lambda message: self._on_disconnect(host_id, message),
+            )
+            initialized = adapter.connect()
+        except Exception as exc:
+            try:
+                self.store.update_host_runtime(host_id, last_error=_exception_text(exc))
+            except Exception:
+                pass
+            raise ConversationError(
+                "host_unavailable",
+                f"Could not connect to Codex on {host['display_name']}: {_exception_text(exc)}",
+                503,
+            ) from exc
+        capabilities = {
+            key: initialized[key]
+            for key in ("userAgent", "codexHome", "platformFamily", "platformOs")
+            if key in initialized
+        }
+        self.store.update_host_runtime(
+            host_id,
+            capabilities=capabilities,
+            last_seen_at=_now_iso(),
+            last_error=None,
+        )
+        with self._adapter_lock:
+            if self._closed:
+                winner = None
+            else:
+                winner = self._adapters.get(host_id)
+                if winner is None:
+                    self._adapters[host_id] = adapter
+                    return adapter
+        # A concurrent request installed the canonical connection, or the
+        # root closed while this process initialized. Close the unused process
+        # outside the lock because its disconnect callback also takes the lock.
+        try:
+            adapter.close()
+        except Exception:
+            pass
+        if winner is not None:
+            return winner
+        raise ConversationError("service_closed", "The conversation runtime is closed.", 503)
+
+    def _existing_adapter(self, host_id: str) -> AppServerAdapter | None:
+        with self._adapter_lock:
+            return self._adapters.get(host_id)
+
+    def _is_current_epoch_locked(self, host_id: str, epoch: object) -> bool:
+        current = self._adapters.get(host_id)
+        return current is not None and str(current.epoch) == str(epoch)
+
+    def _discard_adapter(self, host_id: str, adapter: AppServerAdapter) -> None:
+        with self._adapter_lock:
+            if self._adapters.get(host_id) is adapter:
+                self._adapters.pop(host_id, None)
+
+    def _update_after_rpc(
+        self,
+        host_id: str,
+        adapter: AppServerAdapter,
+        conversation_id: str,
+        **updates: Any,
+    ) -> tuple[dict[str, Any], bool]:
+        """Commit an RPC-derived state only while its adapter epoch is current."""
+        with self._adapter_lock:
+            current = self._adapters.get(host_id)
+            if current is not adapter or str(current.epoch) != str(adapter.epoch):
+                return self._require_conversation(conversation_id), False
+            return (
+                self.store.update_conversation(
+                    conversation_id, **updates, touch_activity=True
+                ),
+                True,
+            )
+
+    def _mark_connection_lost(
+        self,
+        host_id: str,
+        connection_epoch: object,
+        error: BaseException | None,
+    ) -> None:
+        """Fence one failed process and expose its uncertain active work."""
+        epoch = str(connection_epoch)
+        pending_requests = self.store.list_pending_requests(host_id=host_id)
+        stale_count = self.store.mark_pending_requests_stale(host_id, epoch)
+        for pending in pending_requests:
+            if str(pending["connection_epoch"]) != epoch:
+                continue
+            self._append_event(
+                "server_request_stale",
+                {"request_key": pending["request_key"]},
+                conversation_id=pending["conversation_id"],
+                turn_id=_optional_provider_id(pending["payload"].get("turnId")),
+            )
+
+        affected: list[str] = []
+        for conversation in self.store.list_conversations(
+            host_id=host_id, lifecycle="active"
+        ):
+            if (
+                conversation["active_turn_id"] is None
+                and conversation["status"] not in _BUSY_CONVERSATION_STATUSES
+            ):
+                continue
+            self.store.update_conversation(
+                conversation["conversation_id"],
+                status="unknown",
+                touch_activity=True,
+            )
+            affected.append(conversation["conversation_id"])
+        error_text = _exception_text(error) if error is not None else None
+        self.store.update_host_runtime(host_id, last_error=error_text)
+        self._append_event(
+            "connection.disconnected",
+            {
+                "host_id": host_id,
+                "connection_epoch": epoch,
+                "error": error_text,
+                "stale_request_count": stale_count,
+                "conversation_ids": affected,
+            },
+        )
+
+    def _record_provider_failure(
+        self,
+        host: Mapping[str, Any],
+        operation: str,
+        exc: BaseException,
+    ) -> None:
+        try:
+            self.store.update_host_runtime(host["host_id"], last_error=_exception_text(exc))
+        except Exception:
+            pass
+        raise ConversationError(
+            "provider_unavailable",
+            f"Codex failed while {operation}: {_exception_text(exc)}",
+            502,
+        ) from exc
+
+    def _require_host(self, host_id: str) -> dict[str, Any]:
+        host = self.store.get_host(host_id)
+        if host is None:
+            raise ConversationError("host_not_found", "The conversation host was not found.", 404)
+        if not host["enabled"]:
+            raise ConversationError("host_disabled", "The conversation host is disabled.", 409)
+        return host
+
+    def _require_host_project(
+        self, host_id: str, project_id: str
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        host = self._require_host(host_id)
+        project = self.store.get_project(project_id)
+        if project is None:
+            raise ConversationError("project_not_found", "The conversation project was not found.", 404)
+        if project["host_id"] != host["host_id"]:
+            raise ConversationError(
+                "project_host_mismatch", "The project does not belong to that host.", 422
+            )
+        return host, project
+
+    def _validated_project_cwd(self, host: Mapping[str, Any], cwd: object) -> str:
+        if not isinstance(cwd, str):
+            raise ConversationError("invalid_project", "The project path must be a string.", 422)
+        clean = cwd.strip()
+        if not clean or len(clean) > 8192 or any(ord(character) < 32 for character in clean):
+            raise ConversationError("invalid_project", "The project path is not safe.", 422)
+        if host["kind"] == "local":
+            path = Path(clean).expanduser()
+            if not path.is_absolute() or not path.is_dir():
+                raise ConversationError(
+                    "invalid_project",
+                    "A local project path must be an existing absolute directory.",
+                    422,
+                )
+            return str(path.resolve())
+        if not PurePosixPath(clean).is_absolute() or "\\" in clean:
+            raise ConversationError(
+                "invalid_project",
+                "An SSH project path must be an absolute POSIX path.",
+                422,
+            )
+        return clean
+
+    def _require_conversation(self, conversation_id: str) -> dict[str, Any]:
+        conversation = self.store.get_conversation(conversation_id)
+        if conversation is None:
+            raise ConversationError("conversation_not_found", "The conversation was not found.", 404)
+        return conversation
+
+    def _require_active_conversation(self, conversation_id: str) -> dict[str, Any]:
+        conversation = self._require_conversation(conversation_id)
+        if conversation["lifecycle"] != "active":
+            raise ConversationError("conversation_archived", "The conversation is archived.", 409)
+        return conversation
+
+    @contextmanager
+    def _conversation_operation(self, conversation_id: str) -> Iterator[None]:
+        """Serialize one conversation's user operations and provider callbacks."""
+        # Validate before retaining a lock so arbitrary missing ids cannot grow
+        # this service-lifetime registry. Re-read state after acquiring the lock
+        # in each operation because another waiter may have changed it.
+        self._require_conversation(conversation_id)
+        with self._conversation_lock_for(conversation_id):
+            yield
+
+    @contextmanager
+    def _conversation_lock_for(self, conversation_id: str) -> Iterator[None]:
+        with self._conversation_locks_guard:
+            lock = self._conversation_locks.setdefault(conversation_id, threading.RLock())
+        # The production JSON-RPC reader resolves outbound RPC futures separately
+        # from its callback dispatcher. Same-thread test/provider callbacks are
+        # safe because this is reentrant.
+        with lock:
+            yield
+
+    def _pursuit_items(self) -> dict[str, dict[str, Any]]:
+        try:
+            snapshot = self._pursuits.snapshot()
+        except Exception as exc:
+            raise ConversationError("pursuit_unavailable", "The Pursuit map could not be read.", 503) from exc
+        items = snapshot.get("items", []) if isinstance(snapshot, Mapping) else []
+        return {
+            item["id"]: dict(item)
+            for item in items
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+        }
+
+    def _pursuit_root_key(self) -> str:
+        root_key = getattr(self._pursuits, "root_key", None)
+        if not isinstance(root_key, str) or not root_key:
+            raise ConversationError(
+                "pursuit_unavailable",
+                "The Pursuit store did not expose its canonical root key.",
+                503,
+            )
+        return root_key
+
+    def _require_pursuit(self, pursuit_id: str) -> dict[str, Any]:
+        if not isinstance(pursuit_id, str):
+            raise ConversationError("invalid_input", "A Pursuit id is required.", 422)
+        clean = pursuit_id.strip()
+        if not clean or len(clean) > 512 or any(character in clean for character in "\x00\r\n"):
+            raise ConversationError("invalid_input", "A bounded Pursuit id is required.", 422)
+        item = self._pursuit_items().get(clean)
+        if item is None:
+            raise ConversationError("pursuit_not_found", "The Pursuit was not found.", 404)
+        return item
+
+    def _decorate_conversation(
+        self,
+        conversation: dict[str, Any],
+        items: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        item = items.get(conversation["pursuit_id"])
+        return {
+            **conversation,
+            "pursuit_available": item is not None,
+            "pursuit_title": plain_title(str(item.get("title", ""))) if item else None,
+        }
+
+    def _append_event(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        *,
+        conversation_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> dict[str, Any]:
+        event = self.store.append_event(
+            kind=kind,
+            payload=payload,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+        )
+        self._broker.notify()
+        return event
+
+    def _has_turn_started_event(self, conversation_id: str, turn_id: str) -> bool:
+        events = self.store.latest_events(conversation_id, limit=20)
+        return any(event["kind"] == "turn.started" and event["turn_id"] == turn_id for event in events)
+
+    def _has_terminal_turn_event(self, conversation_id: str, turn_id: str) -> bool:
+        return self._terminal_turn_status(conversation_id, turn_id) is not None
+
+    def _terminal_turn_status(self, conversation_id: str, turn_id: str) -> str | None:
+        for event in reversed(self.store.latest_events(conversation_id, limit=50)):
+            if event["turn_id"] != turn_id:
+                continue
+            if event["kind"] == "turn.completed":
+                turn = event["payload"].get("turn")
+                status = turn.get("status") if isinstance(turn, Mapping) else None
+                if status == "completed":
+                    return "completed"
+                if status == "failed":
+                    return "failed"
+                if status == "interrupted":
+                    return "interrupted"
+            elif (
+                event["kind"] == "protocol.error"
+                and event["payload"].get("willRetry") is False
+            ):
+                return "failed"
+        return None
+
+    def _state_changed_after(
+        self,
+        conversation_id: str,
+        event_id: int,
+        *,
+        turn_id: str | None = None,
+    ) -> bool:
+        return any(
+            event["event_id"] > event_id
+            and event["kind"] in _STATE_EVENT_KINDS
+            and (
+                turn_id is None
+                or event["turn_id"] is None
+                or event["turn_id"] == turn_id
+            )
+            for event in self.store.latest_events(conversation_id, limit=1000)
+        )
+
+    def _stale_conversation_requests(
+        self,
+        conversation_id: str,
+        *,
+        turn_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        stale = self.store.mark_conversation_requests_stale(
+            conversation_id, turn_id=turn_id
+        )
+        for pending in stale:
+            self._append_event(
+                "server_request_stale",
+                {"request_key": pending["request_key"]},
+                conversation_id=conversation_id,
+                turn_id=_optional_provider_id(pending["payload"].get("turnId")),
+            )
+        return stale
+
+    def _pending_by_key(self, request_key: str) -> dict[str, Any] | None:
+        getter = getattr(self.store, "get_pending_request_by_key", None)
+        if getter is not None:
+            return getter(request_key)
+        # Transitional fallback for a store created before the key lookup was
+        # added. This remains root-local and disappears once that migration API
+        # is universally available.
+        return next(
+            (
+                value
+                for value in self.store.list_pending_requests(state=None)
+                if value["request_key"] == request_key
+            ),
+            None,
+        )
+
+    def _stale_orphaned_requests(self) -> None:
+        """A new Web runtime cannot answer RPC ids from a previous process."""
+        epochs = {
+            (pending["host_id"], str(pending["connection_epoch"]))
+            for pending in self.store.list_pending_requests()
+        }
+        for host_id, epoch in epochs:
+            self.store.mark_pending_requests_stale(host_id, epoch)
+
+    def _mark_orphaned_conversations_unknown(self) -> None:
+        """A fresh runtime cannot trust live-status caches from a dead process."""
+        self.store.mark_orphaned_conversations_unknown()
+
+
+class ConversationRuntimeRegistry:
+    """Application-owned service registry keyed by canonical active root."""
+
+    def __init__(
+        self,
+        adapter_factory: AdapterFactory | None = None,
+        *,
+        store_factory: StoreFactory = ConversationStore,
+        pursuit_store_factory: PursuitStoreFactory = PursuitStore,
+    ) -> None:
+        self._adapter_factory = adapter_factory or _production_adapter_factory
+        self._store_factory = store_factory
+        self._pursuit_store_factory = pursuit_store_factory
+        self._services: dict[str, ConversationService] = {}
+        self._lock = threading.RLock()
+
+    def service(self, root: Path) -> ConversationService:
+        canonical = Path(root).expanduser().resolve()
+        key = os.path.normcase(str(canonical))
+        with self._lock:
+            service = self._services.get(key)
+            if service is None:
+                service = ConversationService(
+                    canonical,
+                    adapter_factory=self._adapter_factory,
+                    store_factory=self._store_factory,
+                    pursuit_store_factory=self._pursuit_store_factory,
+                )
+                self._services[key] = service
+            return service
+
+    def invalidate_root_session(self, root: Path) -> None:
+        key = os.path.normcase(str(Path(root).expanduser().resolve()))
+        with self._lock:
+            service = self._services.get(key)
+        if service is not None:
+            service.invalidate_streams()
+
+    def close_root(self, root: Path) -> None:
+        key = os.path.normcase(str(Path(root).expanduser().resolve()))
+        with self._lock:
+            service = self._services.pop(key, None)
+        if service is not None:
+            service.close()
+
+    def close(self) -> None:
+        with self._lock:
+            services = list(self._services.values())
+            self._services.clear()
+        for service in services:
+            service.close()
+
+
+def _production_adapter_factory(host: Mapping[str, Any], **kwargs: Any) -> AppServerAdapter:
+    from .app_server import create_app_server
+
+    return create_app_server(host, **kwargs)
+
+
+def _result_object(result: object, key: str, operation: str) -> dict[str, Any]:
+    if not isinstance(result, Mapping) or not isinstance(result.get(key), Mapping):
+        raise ConversationError(
+            "provider_protocol", f"{operation} returned an invalid result.", 502
+        )
+    return dict(result[key])
+
+
+def _provider_id(value: object, problem: str) -> str:
+    if not isinstance(value, str):
+        raise ConversationError("provider_protocol", problem, 502)
+    clean = value.strip()
+    if not clean or len(clean) > 512 or any(character in clean for character in "\x00\r\n"):
+        raise ConversationError("provider_protocol", problem, 502)
+    return clean
+
+
+def _optional_provider_id(value: object) -> str | None:
+    try:
+        return _provider_id(value, "invalid provider id")
+    except ConversationError:
+        return None
+
+
+def _optional_provider_title(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    clean = value.strip()
+    return clean[:500] if clean else None
+
+
+def _message_text(value: object) -> str:
+    if not isinstance(value, str):
+        raise ConversationError("invalid_message", "The message must be text.", 422)
+    if not value.strip():
+        raise ConversationError("invalid_message", "The message cannot be empty.", 422)
+    if len(value) > MAX_MESSAGE_LENGTH or "\x00" in value:
+        raise ConversationError("invalid_message", "The message is too large or contains invalid text.", 413)
+    return value
+
+
+def _status_from_returned_turn(turn: Mapping[str, Any]) -> str:
+    status = turn.get("status")
+    if status == "completed":
+        return "completed"
+    if status == "failed":
+        return "failed"
+    if status == "interrupted":
+        return "interrupted"
+    return "running"
+
+
+def _active_turn_id_from_thread(thread: Mapping[str, Any]) -> str | None:
+    direct = _optional_provider_id(thread.get("activeTurnId"))
+    if direct is not None:
+        return direct
+    active_turn = thread.get("activeTurn")
+    if isinstance(active_turn, Mapping):
+        nested = _optional_provider_id(active_turn.get("id"))
+        if nested is not None:
+            return nested
+    turns = thread.get("turns")
+    if isinstance(turns, list):
+        for turn in reversed(turns):
+            if not isinstance(turn, Mapping) or turn.get("status") != "inProgress":
+                continue
+            candidate = _optional_provider_id(turn.get("id"))
+            if candidate is not None:
+                return candidate
+    return None
+
+
+def _message_value(message: object, name: str, default: Any = None) -> Any:
+    if isinstance(message, Mapping):
+        return message.get(name, default)
+    return getattr(message, name, default)
+
+
+def _exception_text(error: object) -> str:
+    if isinstance(error, BaseException):
+        text = str(error).strip()
+        return (text or type(error).__name__)[:2000]
+    if error is None:
+        return "Unknown provider error"
+    return str(error).strip()[:2000] or "Unknown provider error"
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
