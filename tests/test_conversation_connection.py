@@ -155,15 +155,31 @@ class CodexAppServerTests(unittest.TestCase):
         self.addCleanup(server.close)
         server.connect()
 
-        started = server.start_thread("/workspace")
+        started = server.start_thread("/workspace", model="gpt-example")
+        models = server.list_models(cursor="models-next", limit=10, include_hidden=False)
+        config = server.read_config(cwd="/workspace")
         resumed = server.resume_thread("thread-1")
         read = server.read_thread("thread-1")
         listed = server.list_threads(cursor="next", limit=20, cwd="/workspace", archived=False)
         archived = server.archive_thread("thread-1")
-        turn = server.start_turn("thread-1", "hello")
+        turn = server.start_turn(
+            "thread-1",
+            "hello",
+            model="gpt-example",
+            reasoning_effort="high",
+        )
         interrupted = server.interrupt_turn("thread-1", "turn-1")
 
-        self.assertEqual(started["received"], {"cwd": "/workspace"})
+        self.assertEqual(
+            started["received"], {"cwd": "/workspace", "model": "gpt-example"}
+        )
+        self.assertEqual(
+            models["received"],
+            {"cursor": "models-next", "limit": 10, "includeHidden": False},
+        )
+        self.assertEqual(
+            config["received"], {"cwd": "/workspace", "includeLayers": False}
+        )
         self.assertEqual(resumed["received"], {"threadId": "thread-1"})
         self.assertEqual(
             read["received"],
@@ -179,6 +195,8 @@ class CodexAppServerTests(unittest.TestCase):
             {
                 "threadId": "thread-1",
                 "input": [{"type": "text", "text": "hello"}],
+                "model": "gpt-example",
+                "effort": "high",
             },
         )
         self.assertEqual(

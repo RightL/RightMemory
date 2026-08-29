@@ -58,6 +58,14 @@ def add_conversation_routes(
         data = await service_response(service.list_for_pursuit, pursuit_id)
         return ok_response("Pursuit conversations loaded", data)
 
+    @app.get("/api/conversation-models")
+    async def conversation_models(
+        host_id: str = Query(...),
+        service=Depends(current_conversation_service),
+    ):
+        data = await service_response(service.model_catalog, host_id)
+        return ok_response("conversation models loaded", data)
+
     @app.post("/api/pursuit-conversations")
     async def create_pursuit_conversation(
         request: Request,
@@ -70,6 +78,8 @@ def add_conversation_routes(
             payload.get("pursuit_id"),
             payload.get("host_id"),
             payload.get("project_id"),
+            payload.get("model"),
+            payload.get("reasoning_effort"),
         )
         return ok_response("conversation created", data)
 
@@ -91,6 +101,22 @@ def add_conversation_routes(
     ):
         data = await mutation(request, service.send_message, conversation_id, payload.get("text"))
         return ok_response("message sent", data)
+
+    @app.post("/api/conversations/{conversation_id}/settings")
+    async def update_conversation_settings(
+        conversation_id: str,
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        service=Depends(current_conversation_service),
+    ):
+        data = await mutation(
+            request,
+            service.update_settings,
+            conversation_id,
+            payload.get("model"),
+            payload.get("reasoning_effort"),
+        )
+        return ok_response("conversation settings updated", data)
 
     @app.post("/api/conversations/{conversation_id}/interrupt")
     async def interrupt_conversation(

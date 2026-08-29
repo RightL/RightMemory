@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 LOCAL_HOST_ID = "local"
 DEFAULT_LOCAL_PROJECT_ID = "local-root"
 
@@ -80,6 +80,8 @@ class PursuitConversation:
     provider: str
     thread_id: str
     thread_title: str | None
+    model: str | None
+    reasoning_effort: str | None
     lifecycle: str
     status: str
     active_turn_id: str | None

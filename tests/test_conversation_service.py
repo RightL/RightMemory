@@ -21,6 +21,33 @@ class _FakePursuitStore:
         return {"items": [dict(item) for item in self.items], "root_key": self.root_key}
 
 
+def _catalog_model(
+    model_id: str,
+    *,
+    display_name: str,
+    efforts: tuple[str, ...],
+    default_effort: str,
+    is_default: bool = False,
+    hidden: bool = False,
+    provider_model: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": model_id,
+        "model": provider_model or model_id,
+        "displayName": display_name,
+        "hidden": hidden,
+        "supportedReasoningEfforts": [
+            {
+                "reasoningEffort": effort,
+                "description": f"{effort} description",
+            }
+            for effort in efforts
+        ],
+        "defaultReasoningEffort": default_effort,
+        "isDefault": is_default,
+    }
+
+
 class _FakeAdapter:
     def __init__(
         self,
@@ -43,6 +70,31 @@ class _FakeAdapter:
         self.turn_count = 0
         self.unmaterialized_threads: set[str] = set()
         self.closed = False
+        self.model_pages: dict[str | None, dict[str, Any]] = {
+            None: {
+                "data": [
+                    _catalog_model(
+                        "gpt-default",
+                        display_name="Default model",
+                        efforts=("low", "medium"),
+                        default_effort="low",
+                        is_default=True,
+                    ),
+                    _catalog_model(
+                        "gpt-deep",
+                        display_name="Deep model",
+                        efforts=("medium", "high"),
+                        default_effort="medium",
+                    ),
+                ],
+                "nextCursor": None,
+            }
+        }
+        self.config: dict[str, Any] = {
+            "model": None,
+            "model_reasoning_effort": None,
+        }
+        self.config_error: BaseException | None = None
 
     def connect(self) -> dict[str, Any]:
         self.calls.append(("connect",))
@@ -66,6 +118,27 @@ class _FakeAdapter:
         self.calls.append(("start_thread", cwd, optional))
         self.unmaterialized_threads.add(thread["id"])
         return {"thread": thread}
+
+    def list_models(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int | None = None,
+        include_hidden: bool | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(("list_models", cursor, limit, include_hidden))
+        return self.model_pages[cursor]
+
+    def read_config(
+        self,
+        *,
+        cwd: str | None = None,
+        include_layers: bool = False,
+    ) -> dict[str, Any]:
+        self.calls.append(("read_config", cwd, include_layers))
+        if self.config_error is not None:
+            raise self.config_error
+        return {"config": dict(self.config), "origins": {}}
 
     def resume_thread(self, thread_id: str) -> dict[str, Any]:
         self.calls.append(("resume_thread", thread_id))
@@ -198,6 +271,136 @@ class ConversationServiceTests(unittest.TestCase):
         self.assertEqual(kinds[:3], ["thread.started", "user.message", "turn.started"])
         self.assertEqual(events[1]["payload"]["text"], "Hello Codex")
 
+    def test_model_catalog_normalizes_pages_and_uses_effective_config_defaults(self):
+        self.service.probe_host("local")
+        hidden = _catalog_model(
+            "hidden-picker-id",
+            display_name="Hidden",
+            efforts=("low",),
+            default_effort="low",
+            hidden=True,
+            provider_model="hidden-wire-model",
+        )
+        default = _catalog_model(
+            "default-picker-id",
+            display_name="Default",
+            efforts=("low", "medium"),
+            default_effort="low",
+            is_default=True,
+            provider_model="default-wire-model",
+        )
+        configured = _catalog_model(
+            "configured-picker-id",
+            display_name="Configured",
+            efforts=("medium", "high"),
+            default_effort="medium",
+            provider_model="configured-wire-model",
+        )
+        self.adapter.model_pages = {
+            None: {
+                "data": [hidden, {"id": "picker-only"}, default],
+                "nextCursor": "next",
+            },
+            "next": {"data": [configured], "nextCursor": None},
+        }
+        self.adapter.config = {
+            "model": "configured-picker-id",
+            "model_reasoning_effort": "high",
+        }
+
+        catalog = self.service.model_catalog("local")
+
+        self.assertEqual(catalog["host_id"], "local")
+        self.assertEqual(
+            [model["id"] for model in catalog["models"]],
+            ["default-wire-model", "configured-wire-model"],
+        )
+        self.assertEqual(catalog["default_model"], "configured-wire-model")
+        self.assertEqual(catalog["default_reasoning_effort"], "high")
+        self.assertEqual(
+            catalog["models"][1]["supported_reasoning_efforts"],
+            [
+                {"reasoning_effort": "medium", "description": "medium description"},
+                {"reasoning_effort": "high", "description": "high description"},
+            ],
+        )
+        self.assertIn(("list_models", None, None, False), self.adapter.calls)
+        self.assertIn(("list_models", "next", None, False), self.adapter.calls)
+
+    def test_model_catalog_falls_back_when_config_read_is_unsupported(self):
+        self.service.probe_host("local")
+        self.adapter.config_error = JsonRpcRemoteError(-32601, "method not found")
+
+        catalog = self.service.model_catalog("local")
+
+        self.assertEqual(catalog["default_model"], "gpt-default")
+        self.assertEqual(catalog["default_reasoning_effort"], "low")
+
+    def test_model_settings_persist_and_override_the_immediately_following_turn(self):
+        created = self.service.create_conversation(
+            "alpha",
+            "local",
+            "local-root",
+            "gpt-deep",
+            "high",
+        )["conversation"]
+        self.assertEqual(created["model"], "gpt-deep")
+        self.assertEqual(created["reasoning_effort"], "high")
+        start_thread = next(
+            call for call in self.adapter.calls if call[0] == "start_thread"
+        )
+        self.assertEqual(start_thread[2], {"model": "gpt-deep"})
+
+        first = self.service.send_message(created["conversation_id"], "First")
+        first_start = [
+            call for call in self.adapter.calls if call[0] == "start_turn"
+        ][-1]
+        self.assertEqual(
+            first_start[3],
+            {"model": "gpt-deep", "reasoning_effort": "high"},
+        )
+
+        updated = self.service.update_settings(
+            created["conversation_id"], "gpt-default", "medium"
+        )["conversation"]
+        self.assertEqual(updated["model"], "gpt-default")
+        self.assertEqual(updated["reasoning_effort"], "medium")
+        self.adapter.emit_notification(
+            "turn/completed",
+            {
+                "threadId": created["thread_id"],
+                "turn": {"id": first["turn"]["id"], "status": "completed"},
+            },
+        )
+        self.service.send_message(created["conversation_id"], "Second")
+        second_start = [
+            call for call in self.adapter.calls if call[0] == "start_turn"
+        ][-1]
+        self.assertEqual(
+            second_start[3],
+            {"model": "gpt-default", "reasoning_effort": "medium"},
+        )
+
+    def test_model_settings_reject_unavailable_model_and_effort_pairs(self):
+        conversation = self._create()
+
+        with self.assertRaises(ConversationError) as invalid_model:
+            self.service.update_settings(
+                conversation["conversation_id"], "not-listed", "low"
+            )
+        with self.assertRaises(ConversationError) as invalid_effort:
+            self.service.update_settings(
+                conversation["conversation_id"], "gpt-default", "high"
+            )
+
+        self.assertEqual(invalid_model.exception.code, "invalid_model")
+        self.assertEqual(
+            invalid_effort.exception.code, "invalid_reasoning_effort"
+        )
+        stored = self.service.detail(conversation["conversation_id"])["conversation"]
+        self.assertIsNone(stored["model"])
+        self.assertIsNone(stored["reasoning_effort"])
+
     def test_new_adapter_epoch_resumes_persisted_thread_before_next_turn(self):
         conversation = self._create()
         self.service.send_message(conversation["conversation_id"], "First")
@@ -221,7 +424,9 @@ class ConversationServiceTests(unittest.TestCase):
         self.assertEqual(result["conversation"]["status"], "running")
 
     def test_new_epoch_replaces_an_unmaterialized_thread_before_first_send(self):
-        conversation = self._create()
+        conversation = self.service.create_conversation(
+            "alpha", "local", "local-root", "gpt-deep", "high"
+        )["conversation"]
         old_thread_id = conversation["thread_id"]
         old_adapter = self.adapter
         old_adapter.disconnect(RuntimeError("connection changed"))
@@ -238,9 +443,17 @@ class ConversationServiceTests(unittest.TestCase):
         self.assertIsNone(self.service.store.find_conversation("local", old_thread_id))
         calls = self.adapter.calls
         self.assertIn(("resume_thread", old_thread_id), calls)
+        replacement_start = next(
+            call for call in calls if call[0] == "start_thread"
+        )
+        self.assertEqual(replacement_start[2], {"model": "gpt-deep"})
         self.assertEqual(
             [call[:3] for call in calls if call[0] == "start_turn"],
             [("start_turn", replacement_thread_id, "First")],
+        )
+        self.assertEqual(
+            next(call for call in calls if call[0] == "start_turn")[3],
+            {"model": "gpt-deep", "reasoning_effort": "high"},
         )
         events = self.service.detail(conversation["conversation_id"])["events"]
         self.assertEqual(

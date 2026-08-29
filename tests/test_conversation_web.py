@@ -61,15 +61,63 @@ class _FakeConversationService:
         self.calls.append(("list", pursuit_id))
         return {"conversations": []}
 
+    def model_catalog(self, host_id):
+        self.calls.append(("models", host_id))
+        return {
+            "host_id": host_id,
+            "models": [
+                {
+                    "id": "gpt-example",
+                    "display_name": "Example",
+                    "default_reasoning_effort": "medium",
+                    "supported_reasoning_efforts": [
+                        {
+                            "reasoning_effort": "medium",
+                            "description": "Balanced",
+                        }
+                    ],
+                    "is_default": True,
+                }
+            ],
+            "default_model": "gpt-example",
+            "default_reasoning_effort": "medium",
+        }
+
     def detail(self, conversation_id, after_event_id=0):
         self.calls.append(("detail", conversation_id, after_event_id))
         if conversation_id == "missing":
             raise ConversationError("conversation_not_found", "Conversation not found.", 404)
         return {"conversation": {"conversation_id": conversation_id}, "events": [], "pending_requests": []}
 
-    def create_conversation(self, pursuit_id, host_id, project_id):
-        self.calls.append(("create", pursuit_id, host_id, project_id))
-        return {"conversation": {"conversation_id": "conversation-1", "pursuit_id": pursuit_id}}
+    def create_conversation(
+        self,
+        pursuit_id,
+        host_id,
+        project_id,
+        model=None,
+        reasoning_effort=None,
+    ):
+        self.calls.append(
+            ("create", pursuit_id, host_id, project_id, model, reasoning_effort)
+        )
+        return {
+            "conversation": {
+                "conversation_id": "conversation-1",
+                "pursuit_id": pursuit_id,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
+            }
+        }
+
+    def update_settings(self, conversation_id, model, reasoning_effort):
+        self.calls.append(("settings", conversation_id, model, reasoning_effort))
+        return {
+            "conversation": {
+                "conversation_id": conversation_id,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
+            }
+        }
 
     def send_message(self, conversation_id, text):
         self.calls.append(("message", conversation_id, text))
@@ -270,6 +318,51 @@ class ConversationWebTests(unittest.TestCase):
         self.assertTrue(reconciled.json()["data"]["resolved"])
         self.assertIn(("message", "conversation-1", "Continue."), self.service.calls)
         self.assertIn(("reconcile", "conversation-1"), self.service.calls)
+
+    def test_model_catalog_creation_and_settings_routes_preserve_exact_shapes(self):
+        catalog = self.client.get("/api/conversation-models?host_id=local")
+        created = self.post(
+            "/api/pursuit-conversations",
+            {
+                "pursuit_id": "build",
+                "host_id": "local",
+                "project_id": "local-root",
+                "model": "gpt-example",
+                "reasoning_effort": "medium",
+            },
+        )
+        settings = self.post(
+            "/api/conversations/conversation-1/settings",
+            {"model": "gpt-example", "reasoning_effort": "medium"},
+        )
+
+        self.assertEqual(catalog.status_code, 200)
+        self.assertEqual(
+            set(catalog.json()["data"]),
+            {"host_id", "models", "default_model", "default_reasoning_effort"},
+        )
+        self.assertEqual(catalog.json()["data"]["models"][0]["id"], "gpt-example")
+        self.assertEqual(created.json()["data"]["conversation"]["model"], "gpt-example")
+        self.assertEqual(
+            settings.json()["data"]["conversation"]["reasoning_effort"],
+            "medium",
+        )
+        self.assertIn(("models", "local"), self.service.calls)
+        self.assertIn(
+            (
+                "create",
+                "build",
+                "local",
+                "local-root",
+                "gpt-example",
+                "medium",
+            ),
+            self.service.calls,
+        )
+        self.assertIn(
+            ("settings", "conversation-1", "gpt-example", "medium"),
+            self.service.calls,
+        )
 
     def test_host_project_and_approval_routes_preserve_registered_identifiers(self):
         host = self.post("/api/conversation-hosts", {"kind": "ssh", "display_name": "Lab", "ssh_alias": "lab"})

@@ -6,6 +6,7 @@ import {
   initialConversationState,
   normalizeConversationDetail,
   normalizeEvent,
+  normalizeModelCatalog,
   normalizeWorkspace,
   reduceConversationState,
 } from '../src/conversation-state.ts';
@@ -15,7 +16,7 @@ const workspacePayload = {
   projects: [{ project_id: 'active-root', host_id: 'local', label: 'RightMemory', cwd: 'C:\\repo' }],
   conversations: [
     { conversation_id: 'c-old', pursuit_id: 'design', host_id: 'local', project_id: 'active-root', title: 'Older', status: 'idle', updated_at: '2026-01-01' },
-    { conversation_id: 'c-new', pursuit_id: 'design', host_id: 'local', project_id: 'active-root', title: 'Newer', status: 'running', updated_at: '2026-01-02' },
+    { conversation_id: 'c-new', pursuit_id: 'design', host_id: 'local', project_id: 'active-root', model: 'gpt-5.6', reasoning_effort: 'high', title: 'Newer', status: 'running', updated_at: '2026-01-02' },
     { conversation_id: 'c-other', pursuit_id: 'research', host_id: 'local', project_id: 'active-root', title: 'Other' },
   ],
   pending_requests: [{ key: 'approve-1', conversation_id: 'c-new', kind: 'approval', payload: { reason: 'Run tests' } }],
@@ -29,9 +30,44 @@ test('workspace records are normalized from the snake-case API without losing ra
   assert.equal(snapshot.hosts[0].displayName, 'This computer');
   assert.equal(snapshot.projects[0].cwd, 'C:\\repo');
   assert.equal(snapshot.conversations[1].conversationId, 'c-new');
+  assert.equal(snapshot.conversations[1].model, 'gpt-5.6');
+  assert.equal(snapshot.conversations[1].reasoningEffort, 'high');
   assert.equal(snapshot.pendingRequests[0].key, 'approve-1');
   assert.equal(snapshot.pursuitDefaults.design.projectId, 'active-root');
   assert.equal(snapshot.cursor, '42');
+});
+
+test('model catalogs and optimistic mid-conversation settings normalize without leaking API casing', () => {
+  const catalog = normalizeModelCatalog({ data: {
+    host_id: 'local',
+    models: [
+      {
+        id: 'gpt-5.6',
+        display_name: 'GPT-5.6',
+        default_reasoning_effort: 'medium',
+        supported_reasoning_efforts: [
+          { reasoning_effort: 'low', description: 'Faster answers' },
+          { reasoning_effort: 'medium', description: 'Balanced answers' },
+          { reasoning_effort: 'high', description: 'Deeper reasoning' },
+        ],
+        is_default: true,
+      },
+    ],
+    default_model: 'gpt-5.6',
+    default_reasoning_effort: 'medium',
+  } });
+  assert.equal(catalog.hostId, 'local');
+  assert.equal(catalog.defaultModel, 'gpt-5.6');
+  assert.deepEqual(catalog.models[0].supportedReasoningEfforts.map((option) => option.reasoningEffort), ['low', 'medium', 'high']);
+
+  let state = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot: normalizeWorkspace(workspacePayload) });
+  state = reduceConversationState(state, {
+    type: 'conversation-settings-selected', conversationId: 'c-new', model: 'gpt-5.6-mini', reasoningEffort: 'low',
+  });
+  const selected = state.conversations.find((conversation) => conversation.conversationId === 'c-new');
+  assert.equal(selected?.model, 'gpt-5.6-mini');
+  assert.equal(selected?.reasoningEffort, 'low');
+  assert.equal(state.conversations.find((conversation) => conversation.conversationId === 'c-old')?.model, '');
 });
 
 test('selection and pursuit loads remain scoped when responses arrive out of order', () => {

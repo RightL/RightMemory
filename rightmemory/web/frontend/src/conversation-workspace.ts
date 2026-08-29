@@ -6,6 +6,7 @@ import {
   initialConversationState,
   reduceConversationState,
   type ConversationAction,
+  type ConversationModelCatalog,
   type ConversationState,
   type PendingRequest,
   type WorkspaceSnapshot,
@@ -30,6 +31,11 @@ export class ConversationWorkspace implements ConversationRendererActions {
   private pursuitLoad = 0;
   private conversationLoad = 0;
   private collapsed = false;
+  private modelCatalogs = new Map<string, ConversationModelCatalog>();
+  private modelCatalogLoads = new Map<string, Promise<void>>();
+  private settingsUpdates = new Map<string, Promise<void>>();
+  private settingsIntents = new Map<string, symbol>();
+  private settingsFailures = new Set<string>();
 
   constructor(
     private workspaceHost: HTMLElement,
@@ -114,18 +120,65 @@ export class ConversationWorkspace implements ConversationRendererActions {
     this.dispatch({ type: 'conversation-closed' });
   }
 
-  async createConversation(hostId: string, projectId: string): Promise<void> {
+  async createConversation(hostId: string, projectId: string, model: string, reasoningEffort: string): Promise<void> {
     const pursuitId = this.state.selectedPursuitId;
     if (!pursuitId || this.state.creatingConversation) return;
     this.dispatch({ type: 'create-in-flight', active: true });
     this.dispatch({ type: 'error', message: null });
     try {
-      const conversation = await this.api.createConversation(pursuitId, hostId, projectId);
+      const conversation = await this.api.createConversation(pursuitId, hostId, projectId, model, reasoningEffort);
       if (this.destroyed) return;
       this.dispatch({ type: 'conversation-created', conversation });
       await this.loadConversation(conversation.conversationId);
     } catch (error) { if (!this.destroyed) this.dispatch({ type: 'error', message: errorMessage(error) }); }
     finally { if (!this.destroyed) this.dispatch({ type: 'create-in-flight', active: false }); }
+  }
+
+  loadModelCatalog(hostId: string): void {
+    if (!hostId) return;
+    const cached = this.modelCatalogs.get(hostId);
+    if (cached) { this.renderer.setModelCatalog(cached); return; }
+    if (this.modelCatalogLoads.has(hostId)) return;
+    const load = this.api.modelCatalog(hostId).then((catalog) => {
+      if (this.destroyed) return;
+      this.modelCatalogs.set(hostId, catalog);
+      this.renderer.setModelCatalog(catalog);
+    }).catch((error) => {
+      if (this.destroyed) return;
+      this.dispatch({ type: 'error', message: errorMessage(error) });
+      this.renderer.releaseModelCatalog(hostId);
+    }).finally(() => { this.modelCatalogLoads.delete(hostId); });
+    this.modelCatalogLoads.set(hostId, load);
+  }
+
+  updateConversationSettings(model: string, reasoningEffort: string): void {
+    const conversationId = this.state.currentConversationId;
+    const conversation = currentConversation(this.state);
+    if (!conversationId || !conversation || conversation.archived || !model || !reasoningEffort) return;
+    const intent = Symbol(conversationId);
+    this.settingsIntents.set(conversationId, intent);
+    this.settingsFailures.delete(conversationId);
+    this.dispatch({ type: 'conversation-settings-selected', conversationId, model, reasoningEffort });
+    const previous = this.settingsUpdates.get(conversationId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(async () => {
+      try {
+        const updated = await this.api.updateSettings(conversationId, model, reasoningEffort);
+        if (!this.destroyed && this.settingsIntents.get(conversationId) === intent) {
+          this.settingsFailures.delete(conversationId);
+          this.dispatch({ type: 'conversation-updated', conversation: updated });
+        }
+      } catch (error) {
+        if (!this.destroyed && this.settingsIntents.get(conversationId) === intent) {
+          this.settingsFailures.add(conversationId);
+          this.dispatch({ type: 'error', message: errorMessage(error) });
+          if (this.state.currentConversationId === conversationId) await this.loadConversation(conversationId);
+        }
+      }
+    }).finally(() => {
+      if (this.settingsUpdates.get(conversationId) === next) this.settingsUpdates.delete(conversationId);
+      if (this.settingsIntents.get(conversationId) === intent) this.settingsIntents.delete(conversationId);
+    });
+    this.settingsUpdates.set(conversationId, next);
   }
 
   async sendMessage(text: string): Promise<void> {
@@ -135,6 +188,9 @@ export class ConversationWorkspace implements ConversationRendererActions {
     this.dispatch({ type: 'send-in-flight', conversationId, active: true });
     this.dispatch({ type: 'error', message: null });
     try {
+      let settingsUpdate: Promise<void> | undefined;
+      while ((settingsUpdate = this.settingsUpdates.get(conversationId))) await settingsUpdate;
+      if (this.settingsFailures.has(conversationId)) return;
       const updated = await this.api.sendMessage(conversationId, text);
       if (!this.destroyed && updated) this.dispatch({ type: 'conversation-updated', conversation: updated });
       if (!this.destroyed && this.state.currentConversationId === conversationId) this.renderer.clearComposerIfUnchanged(text);
@@ -235,7 +291,10 @@ export class ConversationWorkspace implements ConversationRendererActions {
     finally { if (!this.destroyed) this.dispatch({ type: 'response-in-flight', key: request.key, active: false }); }
   }
 
-  retry(): void { void this.refresh(); }
+  retry(): void {
+    this.renderer.retryModelCatalogs();
+    void this.refresh();
+  }
 
   toggleCollapsed(): void {
     this.collapsed = !this.collapsed;

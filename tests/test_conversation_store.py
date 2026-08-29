@@ -16,7 +16,7 @@ from rightmemory.conversations.store import (
 
 
 class ConversationStoreTests(unittest.TestCase):
-    def test_empty_initialization_creates_root_local_v1_and_defaults(self):
+    def test_empty_initialization_creates_root_local_v2_and_defaults(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             store = ConversationStore(root)
@@ -26,7 +26,7 @@ class ConversationStoreTests(unittest.TestCase):
             self.assertEqual(store.db_path, root.resolve() / DATABASE_RELATIVE_PATH)
             self.assertTrue(store.db_path.is_file())
             self.assertEqual((root / ".runtime" / ".gitignore").read_text(encoding="utf-8"), "*\n")
-            self.assertEqual(initialized["schema_version"], 1)
+            self.assertEqual(initialized["schema_version"], 2)
             self.assertEqual(initialized["local_host"]["host_id"], "local")
             self.assertEqual(initialized["local_host"]["kind"], "local")
             self.assertEqual(initialized["default_local_project"]["project_id"], "local-root")
@@ -52,7 +52,7 @@ class ConversationStoreTests(unittest.TestCase):
                     for table in tables
                 }
 
-            self.assertEqual(version, 1)
+            self.assertEqual(version, 2)
             self.assertTrue(
                 {
                     "conversation_hosts",
@@ -64,9 +64,95 @@ class ConversationStoreTests(unittest.TestCase):
                 }.issubset(tables)
             )
             self.assertNotIn("pursuit_id", {row[3] for row in conversation_fks})
+            self.assertTrue(
+                {"model", "reasoning_effort"}.issubset(columns["pursuit_conversations"])
+            )
             self.assertTrue(all("root_id" not in names for names in columns.values()))
             forbidden_credentials = {"password", "passphrase", "private_key", "api_key", "token"}
             self.assertTrue(all(forbidden_credentials.isdisjoint(names) for names in columns.values()))
+
+    def test_version_one_database_upgrades_in_place_without_losing_rows(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = ConversationStore(root)
+            store.initialize()
+            legacy = store.create_conversation(
+                pursuit_id="P1",
+                host_id="local",
+                project_id="local-root",
+                thread_id="legacy-thread",
+            )
+            event = store.append_event(
+                kind="user.message",
+                payload={"text": "preserve me"},
+                conversation_id=legacy["conversation_id"],
+            )
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                connection.execute("ALTER TABLE pursuit_conversations DROP COLUMN model")
+                connection.execute(
+                    "ALTER TABLE pursuit_conversations DROP COLUMN reasoning_effort"
+                )
+                connection.execute("PRAGMA user_version = 1")
+                connection.commit()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                initializations = list(
+                    executor.map(
+                        lambda _: ConversationStore(root).initialize(), range(2)
+                    )
+                )
+            initialized = initializations[0]
+            upgraded = store.get_conversation(legacy["conversation_id"])
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(pursuit_conversations)"
+                    ).fetchall()
+                }
+
+            self.assertEqual(initialized["schema_version"], 2)
+            self.assertEqual(version, 2)
+            self.assertTrue({"model", "reasoning_effort"}.issubset(columns))
+            self.assertEqual(upgraded["thread_id"], "legacy-thread")
+            self.assertIsNone(upgraded["model"])
+            self.assertIsNone(upgraded["reasoning_effort"])
+            self.assertEqual(
+                store.list_events(conversation_id=legacy["conversation_id"]), [event]
+            )
+            configured = store.update_conversation(
+                legacy["conversation_id"],
+                model="gpt-after-upgrade",
+                reasoning_effort="medium",
+            )
+            self.assertEqual(configured["model"], "gpt-after-upgrade")
+            self.assertEqual(configured["reasoning_effort"], "medium")
+
+    def test_conversation_model_settings_persist_and_remain_nullable(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = ConversationStore(Path(tempdir))
+            created = store.create_conversation(
+                pursuit_id="P1",
+                host_id="local",
+                project_id="local-root",
+                thread_id="thread-settings",
+                model="gpt-example",
+                reasoning_effort="high",
+            )
+
+            self.assertEqual(created["model"], "gpt-example")
+            self.assertEqual(created["reasoning_effort"], "high")
+            self.assertEqual(
+                store.get_conversation(created["conversation_id"]), created
+            )
+            self.assertEqual(store.list_conversations(), [created])
+
+            cleared = store.update_conversation(
+                created["conversation_id"], model=None, reasoning_effort=None
+            )
+            self.assertIsNone(cleared["model"])
+            self.assertIsNone(cleared["reasoning_effort"])
 
     def test_each_memory_root_has_an_isolated_database(self):
         with tempfile.TemporaryDirectory() as tempdir:
