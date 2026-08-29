@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from ..pursuit_store import PursuitStore
 from ..pursuit_tree import plain_title
+from .jsonrpc import JsonRpcRemoteError
 from .models import DEFAULT_LOCAL_PROJECT_ID, LOCAL_HOST_ID, ConversationError
 from .projection import (
     bounded_json_object,
@@ -161,6 +162,9 @@ class ConversationService:
         self._pursuits = pursuit_store_factory(self.root)
         self._adapter_factory = adapter_factory
         self._adapters: dict[str, AppServerAdapter] = {}
+        self._resident_threads: dict[
+            str, tuple[AppServerAdapter, str, set[str]]
+        ] = {}
         self._adapter_lock = threading.RLock()
         self._conversation_locks: dict[str, threading.RLock] = {}
         self._conversation_locks_guard = threading.Lock()
@@ -257,6 +261,12 @@ class ConversationService:
             self._record_provider_failure(host, "starting a thread", exc)
         thread = _result_object(result, "thread", "thread/start")
         thread_id = _provider_id(thread.get("id"), "thread/start did not return a thread id")
+        if not self._mark_thread_resident(host["host_id"], adapter, thread_id):
+            raise ConversationError(
+                "provider_unavailable",
+                "The Codex connection changed while starting the thread.",
+                502,
+            )
         title = _optional_provider_title(thread.get("name") or thread.get("title"))
         status = status_from_thread(thread.get("status"))
         if status == "unknown":
@@ -298,14 +308,51 @@ class ConversationService:
             host = self._require_host(conversation["host_id"])
             adapter = self._adapter(host)
             self.store.update_conversation(conversation_id, status="starting", touch_activity=True)
+            try:
+                self._ensure_thread_resident(
+                    host["host_id"], adapter, conversation["thread_id"]
+                )
+            except Exception as exc:
+                if (
+                    _is_missing_rollout_error(exc)
+                    and not self.store.has_turn_evidence(conversation_id)
+                ):
+                    try:
+                        conversation, _ = self._replace_unmaterialized_thread(
+                            host, adapter, conversation, exc
+                        )
+                    except Exception as replacement_exc:
+                        self.store.update_conversation(
+                            conversation_id, status="unknown", touch_activity=True
+                        )
+                        self._append_event(
+                            "protocol.error",
+                            {
+                                "operation": "thread/recovery",
+                                "message": _exception_text(replacement_exc),
+                            },
+                            conversation_id=conversation_id,
+                        )
+                        self._record_provider_failure(
+                            host, "recovering the empty thread", replacement_exc
+                        )
+                else:
+                    self.store.update_conversation(
+                        conversation_id, status="unknown", touch_activity=True
+                    )
+                    self._append_event(
+                        "protocol.error",
+                        {"operation": "thread/resume", "message": _exception_text(exc)},
+                        conversation_id=conversation_id,
+                    )
+                    self._record_provider_failure(host, "resuming the thread", exc)
             self._append_event(
                 "user.message",
                 {"text": message},
                 conversation_id=conversation_id,
             )
+            state_cursor = self.store.latest_event_id()
             try:
-                adapter.resume_thread(conversation["thread_id"])
-                state_cursor = self.store.latest_event_id()
                 result = adapter.start_turn(conversation["thread_id"], message)
             except Exception as exc:
                 self.store.update_conversation(conversation_id, status="unknown", touch_activity=True)
@@ -372,10 +419,67 @@ class ConversationService:
             conversation = self._require_active_conversation(conversation_id)
             host = self._require_host(conversation["host_id"])
             adapter = self._adapter(host)
+            if (
+                conversation["status"] == "idle"
+                and self._thread_is_resident(
+                    host["host_id"], adapter, conversation["thread_id"]
+                )
+                and not self.store.has_turn_evidence(conversation_id)
+            ):
+                thread: dict[str, Any] = {
+                    "id": conversation["thread_id"],
+                    "status": {"type": "idle"},
+                }
+                if conversation["thread_title"] is not None:
+                    thread["name"] = conversation["thread_title"]
+                return {
+                    "conversation": self._decorate_conversation(
+                        conversation, self._pursuit_items()
+                    ),
+                    "thread": thread,
+                    "resolved": True,
+                }
             try:
                 state_cursor = self.store.latest_event_id()
                 result = adapter.resume_thread(conversation["thread_id"])
             except Exception as exc:
+                if (
+                    _is_missing_rollout_error(exc)
+                    and not self.store.has_turn_evidence(conversation_id)
+                ):
+                    try:
+                        replacement, thread = self._replace_unmaterialized_thread(
+                            host, adapter, conversation, exc
+                        )
+                    except Exception as replacement_exc:
+                        self.store.update_conversation(
+                            conversation_id, status="unknown", touch_activity=True
+                        )
+                        self._append_event(
+                            "protocol.error",
+                            {
+                                "operation": "thread/recovery",
+                                "message": _exception_text(replacement_exc),
+                            },
+                            conversation_id=conversation_id,
+                        )
+                        self._record_provider_failure(
+                            host, "recovering the empty thread", replacement_exc
+                        )
+                    updated, connection_current = self._update_after_rpc(
+                        host["host_id"],
+                        adapter,
+                        conversation_id,
+                        status="idle",
+                        active_turn_id=None,
+                    )
+                    return {
+                        "conversation": self._decorate_conversation(
+                            updated, self._pursuit_items()
+                        ),
+                        "thread": thread,
+                        "resolved": connection_current,
+                    }
                 self.store.update_conversation(
                     conversation_id, status="unknown", touch_activity=True
                 )
@@ -396,6 +500,9 @@ class ConversationService:
                     "thread/resume returned a different thread.",
                     502,
                 )
+            self._mark_thread_resident(
+                host["host_id"], adapter, conversation["thread_id"]
+            )
 
             callback_state_changed = self._state_changed_after(
                 conversation_id, state_cursor
@@ -452,7 +559,9 @@ class ConversationService:
             host = self._require_host(conversation["host_id"])
             adapter = self._adapter(host)
             try:
-                adapter.resume_thread(conversation["thread_id"])
+                self._ensure_thread_resident(
+                    host["host_id"], adapter, conversation["thread_id"]
+                )
                 adapter.interrupt_turn(conversation["thread_id"], turn_id)
             except Exception as exc:
                 self.store.update_conversation(conversation_id, status="unknown", touch_activity=True)
@@ -678,6 +787,7 @@ class ConversationService:
                         pass
                     finally:
                         self._adapters.pop(pending["host_id"], None)
+                        self._resident_threads.pop(pending["host_id"], None)
             try:
                 adapter.close()
             except Exception:
@@ -758,8 +868,10 @@ class ConversationService:
                         pass
                     finally:
                         self._adapters.pop(host_id, None)
+                        self._resident_threads.pop(host_id, None)
         with self._adapter_lock:
             self._adapters.clear()
+            self._resident_threads.clear()
         self._broker.close()
         for _host_id, adapter in adapters:
             try:
@@ -958,6 +1070,7 @@ class ConversationService:
                     # returned state, then publish the uncertainty fence while
                     # new connections remain excluded by this lock.
                     self._adapters.pop(host_id, None)
+                    self._resident_threads.pop(host_id, None)
                     self._mark_connection_lost(host_id, epoch, error)
                     return
 
@@ -1026,6 +1139,11 @@ class ConversationService:
                 winner = self._adapters.get(host_id)
                 if winner is None:
                     self._adapters[host_id] = adapter
+                    self._resident_threads[host_id] = (
+                        adapter,
+                        str(adapter.epoch),
+                        set(),
+                    )
                     return adapter
         # A concurrent request installed the canonical connection, or the
         # root closed while this process initialized. Close the unused process
@@ -1050,6 +1168,131 @@ class ConversationService:
         with self._adapter_lock:
             if self._adapters.get(host_id) is adapter:
                 self._adapters.pop(host_id, None)
+                self._resident_threads.pop(host_id, None)
+
+    def _mark_thread_resident(
+        self,
+        host_id: str,
+        adapter: AppServerAdapter,
+        thread_id: str,
+    ) -> bool:
+        """Remember a thread loaded in the current provider process."""
+        with self._adapter_lock:
+            current = self._adapters.get(host_id)
+            epoch = str(adapter.epoch)
+            if current is not adapter or str(current.epoch) != epoch:
+                return False
+            residency = self._resident_threads.get(host_id)
+            if (
+                residency is None
+                or residency[0] is not adapter
+                or residency[1] != epoch
+            ):
+                resident_thread_ids: set[str] = set()
+                self._resident_threads[host_id] = (
+                    adapter,
+                    epoch,
+                    resident_thread_ids,
+                )
+            else:
+                resident_thread_ids = residency[2]
+            resident_thread_ids.add(thread_id)
+            return True
+
+    def _thread_is_resident(
+        self,
+        host_id: str,
+        adapter: AppServerAdapter,
+        thread_id: str,
+    ) -> bool:
+        with self._adapter_lock:
+            current = self._adapters.get(host_id)
+            epoch = str(adapter.epoch)
+            residency = self._resident_threads.get(host_id)
+            return (
+                current is adapter
+                and str(current.epoch) == epoch
+                and residency is not None
+                and residency[0] is adapter
+                and residency[1] == epoch
+                and thread_id in residency[2]
+            )
+
+    def _ensure_thread_resident(
+        self,
+        host_id: str,
+        adapter: AppServerAdapter,
+        thread_id: str,
+    ) -> None:
+        if self._thread_is_resident(host_id, adapter, thread_id):
+            return
+        result = adapter.resume_thread(thread_id)
+        thread = _result_object(result, "thread", "thread/resume")
+        returned_thread_id = _provider_id(
+            thread.get("id"), "thread/resume did not return a thread id"
+        )
+        if returned_thread_id != thread_id:
+            raise ConversationError(
+                "provider_protocol",
+                "thread/resume returned a different thread.",
+                502,
+            )
+        if not self._mark_thread_resident(host_id, adapter, thread_id):
+            raise ConversationError(
+                "provider_unavailable",
+                "The Codex connection changed while resuming the thread.",
+                502,
+            )
+
+    def _replace_unmaterialized_thread(
+        self,
+        host: Mapping[str, Any],
+        adapter: AppServerAdapter,
+        conversation: Mapping[str, Any],
+        resume_error: JsonRpcRemoteError,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        _, project = self._require_host_project(
+            conversation["host_id"], conversation["project_id"]
+        )
+        cwd = self._validated_project_cwd(host, project["cwd"])
+        result = adapter.start_thread(cwd=cwd)
+        thread = _result_object(result, "thread", "thread/start")
+        replacement_thread_id = _provider_id(
+            thread.get("id"), "thread/start did not return a thread id"
+        )
+        previous_thread_id = str(conversation["thread_id"])
+        if replacement_thread_id == previous_thread_id:
+            raise ConversationError(
+                "provider_protocol",
+                "thread/start returned the thread that could not be resumed.",
+                502,
+            )
+        if not self._mark_thread_resident(
+            host["host_id"], adapter, replacement_thread_id
+        ):
+            raise ConversationError(
+                "provider_unavailable",
+                "The Codex connection changed while replacing the empty thread.",
+                502,
+            )
+        rebound = self.store.rebind_unstarted_thread(
+            conversation["conversation_id"],
+            expected_thread_id=previous_thread_id,
+            replacement_thread_id=replacement_thread_id,
+            thread_title=_optional_provider_title(
+                thread.get("name") or thread.get("title")
+            ),
+        )
+        self._append_event(
+            "thread.replaced",
+            {
+                "previous_thread_id": previous_thread_id,
+                "thread": bounded_json_object(thread),
+                "reason": _exception_text(resume_error),
+            },
+            conversation_id=rebound["conversation_id"],
+        )
+        return rebound, thread
 
     def _update_after_rpc(
         self,
@@ -1509,6 +1752,14 @@ def _exception_text(error: object) -> str:
     if error is None:
         return "Unknown provider error"
     return str(error).strip()[:2000] or "Unknown provider error"
+
+
+def _is_missing_rollout_error(error: object) -> bool:
+    return (
+        isinstance(error, JsonRpcRemoteError)
+        and error.code == -32600
+        and str(error).startswith("no rollout found for thread id ")
+    )
 
 
 def _now_iso() -> str:
