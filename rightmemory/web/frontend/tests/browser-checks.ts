@@ -340,12 +340,12 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
         { event_id: 1, conversation_id: 'conversation-1', turn_id: null, kind: 'user.message', payload: { text: 'Check this' } },
         { event_id: 2, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'turn.started', payload: { turn: { id: 'turn-1' } } },
         { event_id: 3, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'user-1', type: 'userMessage', content: [{ type: 'text', text: 'Check this' }] } } },
-        { event_id: 4, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.started', payload: { item: { id: 'agent-1', type: 'agentMessage' } } },
-        { event_id: 5, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'agent.message.delta', payload: { item_id: 'agent-1', delta: '<img src=x onerror=alert(1)>' } },
+        { event_id: 4, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.started', payload: { item: { id: 'commentary-1', type: 'agentMessage', phase: 'commentary' } } },
+        { event_id: 5, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'agent.message.delta', payload: { item_id: 'commentary-1', delta: 'DRAFT TOKEN **carefully**' } },
         { event_id: 6, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'turn.started', payload: { turn: { id: 'turn-1' } } },
         { event_id: 7, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'protocol.notification', payload: { method: 'turn/started' } },
-        { event_id: 8, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'agent.message.delta', payload: { item_id: 'agent-1', delta: ' remains text' } },
-        { event_id: 9, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'agent-1', type: 'agentMessage', content: [{ type: 'text', text: '<img src=x onerror=alert(1)> remains text' }] } } },
+        { event_id: 8, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'agent.message.delta', payload: { item_id: 'commentary-1', delta: ' with provisional text' } },
+        { event_id: 9, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'commentary-1', type: 'agentMessage', phase: 'commentary', content: [{ type: 'text', text: 'Working **carefully** with inline $x^2$ and \\(z^2\\).\n\n$$y = mx + b$$\n\n\\[\\int_0^1 x\\,dx\\]\n\n<img src=x onerror=alert(1)>' }] } } },
         { event_id: 10, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { type: 'commandExecution', command: 'echo <script>', aggregatedOutput: '<svg onload=alert(1)>', exitCode: 0 } } },
         { event_id: 11, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'future.item', payload: { html: '<iframe srcdoc=bad>' } },
       ],
@@ -367,11 +367,39 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     conversationRenderer.render(conversationState);
     check(conversationHost.querySelector<HTMLSelectElement>('.cw-new-form [name="host"]')?.value === 'gpu' && conversationHost.querySelector<HTMLSelectElement>('.cw-new-form [name="project"]')?.value === 'gpu-repo', 'The selected Pursuit restores its recent host and project');
     check(conversationHost.querySelector<HTMLSelectElement>('.cw-new-form [name="model"]')?.value === 'gpt-5.6-codex' && conversationHost.querySelector<HTMLSelectElement>('.cw-new-form [name="effort"]')?.value === 'high', 'New conversations use the selected host model defaults');
-    check(!conversationHost.querySelector('img,script,svg,iframe,[onerror],[onload]'), 'Conversation output must remain escaped text');
     check(conversationHost.querySelectorAll('.cw-user').length === 1, 'The local user message and provider echo merge across lifecycle events');
-    check(conversationHost.querySelectorAll('.cw-agent').length === 1 && conversationHost.querySelector('.cw-agent')?.textContent?.includes('remains text') && !conversationHost.textContent?.includes('(empty message)'), 'Started, interleaved delta, and completed events merge into one visible message by item id');
+    const runningCommentary = conversationHost.querySelector<HTMLDetailsElement>('.cw-commentary-group')!;
+    check(runningCommentary.open && runningCommentary.querySelector('.cw-commentary')?.textContent?.includes('Working carefully') && !conversationHost.textContent?.includes('DRAFT TOKEN'), 'Commentary stays expanded while work is running and completion replaces streamed text by item id');
+    check(runningCommentary.querySelector('.cw-commentary > small')?.textContent === 'UPDATE' && runningCommentary.querySelector('strong'), 'Commentary uses its phase label and renders Markdown structure');
+    check(runningCommentary.querySelectorAll('.katex').length >= 4 && runningCommentary.querySelectorAll('.katex-display').length >= 2, 'Conversation rich text renders both supported inline and display math delimiter styles');
+    check(!conversationHost.querySelector('img,script,svg,iframe,object,embed,[onerror],[onload]'), 'Raw HTML in conversation text cannot create active content');
     check(conversationHost.querySelector('.cw-command')?.textContent?.includes('exit 0'), 'Completed commands show output and exit status');
     check(!conversationHost.querySelector('.cw-unknown') && !conversationHost.textContent?.includes('future.item') && !conversationHost.textContent?.includes('turn/started'), 'Raw lifecycle, protocol, and unknown event cards stay hidden');
+    for (const rawEvent of [
+      { event_id: 12, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.started', payload: { item: { id: 'answer-1', type: 'agentMessage', phase: 'final_answer' } } },
+      { event_id: 13, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'agent.message.delta', payload: { item_id: 'answer-1', delta: '# PROVISIONAL STREAM\n\n- old result' } },
+    ]) {
+      const normalized = normalizeEvent(rawEvent);
+      check(normalized, 'Phase-aware agent event fixture must normalize');
+      conversationState = reduceConversationState(conversationState, { type: 'event', event: normalized });
+    }
+    conversationRenderer.render(conversationState);
+    const streamingCommentary = conversationHost.querySelector<HTMLDetailsElement>('.cw-commentary-group')!;
+    check(streamingCommentary.open && conversationHost.querySelector('.cw-final-answer')?.textContent?.includes('PROVISIONAL STREAM'), 'Commentary stays expanded while the final answer is still streaming');
+    const completedAnswer = normalizeEvent({ event_id: 14, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'answer-1', type: 'agentMessage', phase: 'final_answer', content: [{ type: 'text', text: '## Final result\n\n- kept result\n\n`const ready = true`\n\n[reference](https://example.com/) · [unsafe](javascript:alert(1))\n\n![remote tracker](https://example.com/tracker.png)\n\n<script>alert(1)</script>' }] } } });
+    check(completedAnswer, 'Completed final-answer fixture must normalize');
+    conversationState = reduceConversationState(conversationState, { type: 'event', event: completedAnswer });
+    conversationRenderer.render(conversationState);
+    const completedCommentary = conversationHost.querySelector<HTMLDetailsElement>('.cw-commentary-group')!;
+    check(!completedCommentary.open && completedCommentary.querySelector('summary')?.textContent === 'Work details', 'Commentary automatically collapses after the final answer completes');
+    completedCommentary.open = true;
+    check(completedCommentary.open && completedCommentary.querySelector('.cw-commentary'), 'Collapsed work details remain manually expandable');
+    check(conversationHost.querySelectorAll('.cw-agent').length === 2 && conversationHost.querySelectorAll('.cw-commentary').length === 1 && conversationHost.querySelectorAll('.cw-final-answer').length === 1, 'Distinct commentary and final-answer item ids produce exactly one phase bubble each');
+    const finalAnswer = conversationHost.querySelector<HTMLElement>('.cw-final-answer')!;
+    check(finalAnswer.querySelector('small')?.textContent === 'ANSWER' && finalAnswer.querySelector('h2') && finalAnswer.querySelector('li')?.textContent === 'kept result' && finalAnswer.querySelector('code')?.textContent === 'const ready = true' && !finalAnswer.textContent?.includes('PROVISIONAL STREAM'), 'The final answer renders completed Markdown without retaining streamed provisional content');
+    const safeLink = finalAnswer.querySelector<HTMLAnchorElement>('a[href="https://example.com/"]');
+    check(safeLink?.target === '_blank' && safeLink.rel.includes('noopener') && !conversationHost.querySelector('img,script,svg,iframe,object,embed,[onerror],[onload]') && ![...conversationHost.querySelectorAll<HTMLAnchorElement>('a')].some((link) => link.getAttribute('href')?.trim().toLowerCase().startsWith('javascript:')), 'Links are hardened while raw HTML and dangerous URLs remain harmless');
+    check(!conversationHost.textContent?.includes('(empty message)'), 'Empty item-started events do not create placeholder message text');
     const turnModel = conversationHost.querySelector<HTMLSelectElement>('.cw-composer [name="model"]')!;
     const turnEffort = conversationHost.querySelector<HTMLSelectElement>('.cw-composer [name="effort"]')!;
     check(!turnModel.disabled && !turnEffort.disabled && turnModel.value === 'gpt-5.6' && turnEffort.value === 'high', 'Model and reasoning selectors remain available while a turn awaits input');
@@ -416,7 +444,7 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
       card.querySelector<HTMLFormElement>('form')!.requestSubmit();
     }
     check(JSON.stringify(responses.slice(3)) === JSON.stringify([{ response: { kind: 'tool' } }, { response: { kind: 'future' } }]), 'Tool-call and future object requests remain answerable');
-    const failedResponse = normalizeEvent({ event_id: 12, conversation_id: 'conversation-1', kind: 'server_response_failed', payload: { request_key: 'future-1' } });
+    const failedResponse = normalizeEvent({ event_id: 15, conversation_id: 'conversation-1', kind: 'server_response_failed', payload: { request_key: 'future-1' } });
     check(failedResponse, 'Failed-response fixture must normalize');
     conversationState = reduceConversationState(conversationState, { type: 'event', event: failedResponse });
     conversationRenderer.render(conversationState);
@@ -431,7 +459,7 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     conversationRenderer.render(conversationState);
     check([...conversationHost.querySelectorAll<HTMLInputElement | HTMLButtonElement>('.cw-add-host input, .cw-add-host button')].every((entry) => entry.disabled), 'An in-flight host creation disables its form');
     conversationState = reduceConversationState(conversationState, { type: 'host-create-in-flight', active: false });
-    const idle = normalizeEvent({ event_id: 13, conversation_id: 'conversation-1', kind: 'thread.status', payload: { status: { type: 'idle' } } });
+    const idle = normalizeEvent({ event_id: 16, conversation_id: 'conversation-1', kind: 'thread.status', payload: { status: { type: 'idle' } } });
     check(idle, 'Idle status fixture must normalize');
     conversationState = reduceConversationState(conversationState, { type: 'event', event: idle });
     conversationRenderer.render(conversationState);
@@ -444,7 +472,7 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     composer.value = 'Next draft'; composer.dispatchEvent(new Event('input', { bubbles: true }));
     conversationRenderer.clearComposerIfUnchanged('Send from composer');
     check(composer.value === 'Next draft', 'A late send response does not erase text typed for the next message');
-    const disconnected = normalizeEvent({ event_id: 14, conversation_id: null, kind: 'connection.disconnected', payload: { host_id: 'local', conversation_ids: ['conversation-1'] } });
+    const disconnected = normalizeEvent({ event_id: 17, conversation_id: null, kind: 'connection.disconnected', payload: { host_id: 'local', conversation_ids: ['conversation-1'] } });
     check(disconnected, 'Disconnect fixture must normalize');
     conversationState = reduceConversationState(conversationState, { type: 'event', event: disconnected });
     conversationRenderer.render(conversationState);
@@ -452,9 +480,10 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     check(!reconnect.hidden && conversationHost.querySelector<HTMLButtonElement>('.cw-composer button[type="submit"]')?.disabled, 'Unknown provider state offers recovery while keeping Send disabled');
     reconnect.click();
     check(reconnects[0] === 'conversation-1', 'Reconnect targets the current conversation');
+    const conversationPreview = conversationHost.cloneNode(true) as HTMLElement;
     conversationRenderer.destroy(); conversationHost.remove();
     localStorage.removeItem(`rightmemory:conversation-draft:${encodeURIComponent(draftRoot)}:conversation-1`);
-    report('PASS conversation streaming, model settings, quiet lifecycle output, guarded requests, recovery, composer keys, and root-scoped drafts');
+    report('PASS conversation phase groups, rich streaming output, model settings, guarded requests, recovery, composer keys, and root-scoped drafts');
 
     const boundaryHost = document.createElement('section');
     const boundaryPane = document.createElement('aside');
@@ -485,6 +514,14 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     check(reloads === 1 && streamClosed, 'A cross-tab root change closes the old workspace before requesting a full reload');
     boundaryHost.remove(); boundaryPane.remove();
     report('PASS conversation root boundary and REST-to-SSE cursor replay');
+    document.body.append(conversationPreview);
+    conversationPreview.style.cssText = 'position:fixed;right:12px;top:12px;width:400px;height:min(700px,calc(100vh - 24px));z-index:1000;box-shadow:0 14px 42px #18312633';
+    conversationPane.style.cssText = 'position:fixed;right:424px;top:12px;z-index:1001';
+    conversationPane.textContent = 'Hide conversation fixture';
+    conversationPane.addEventListener('click', () => {
+      conversationPreview.hidden = !conversationPreview.hidden;
+      conversationPane.textContent = conversationPreview.hidden ? 'Show conversation fixture' : 'Hide conversation fixture';
+    });
     report('All browser checks passed.');
   } catch (error) {
     report(`FAIL: ${(error as Error).message}`);

@@ -14,7 +14,7 @@ Sign in with the Web Studio operator token and check the active root before edit
 
 ## Work Beside A Direction
 
-Selecting a direction also opens its conversation workspace. You can create a Codex conversation for that Pursuit, send messages, follow streamed replies and tool activity, answer approval or input requests, interrupt the current turn, and resume the conversation after reopening the browser. This work stays beside the map: conversation activity never marks a Pursuit complete, changes Focus, or writes progress into its note.
+Selecting a direction also opens its conversation workspace. You can create a Codex conversation for that Pursuit, choose the model and reasoning effort for later messages, send messages, follow streamed replies and tool activity, answer approval or input requests, interrupt the current turn, and resume the conversation after reopening the browser. Commentary remains expanded while a turn is working, then folds into an expandable work-details section when the final answer arrives. Message bodies render sanitized Markdown and TeX. This work stays beside the map: conversation activity never marks a Pursuit complete, changes Focus, or writes progress into its note.
 
 Each conversation has one primary Pursuit attachment and runs in one registered project on one host. A project is the working directory passed to Codex, not a second copy of the Pursuit tree. The built-in local project uses the active RightMemory root. Additional local or SSH projects can point at the repositories where the work actually happens.
 
