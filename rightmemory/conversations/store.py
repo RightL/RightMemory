@@ -51,8 +51,8 @@ _HOST_COLUMNS = """
 _PROJECT_COLUMNS = "project_id, host_id, label, cwd, last_used_at, created_at, updated_at"
 _CONVERSATION_COLUMNS = """
     conversation_id, pursuit_id, pursuit_title_snapshot, host_id, project_id,
-    provider, thread_id, thread_title, lifecycle, status, active_turn_id,
-    created_at, updated_at, last_activity_at
+    provider, thread_id, thread_title, model, reasoning_effort, lifecycle,
+    status, active_turn_id, created_at, updated_at, last_activity_at
 """
 _EVENT_COLUMNS = "event_id, conversation_id, turn_id, kind, payload_json, created_at"
 _DEFAULT_COLUMNS = "pursuit_id, host_id, project_id, last_used_at"
@@ -74,7 +74,7 @@ class ConversationStore:
         self.db_path = self.root / DATABASE_RELATIVE_PATH
 
     def initialize(self) -> dict[str, Any]:
-        """Create the version-one database and stable local records."""
+        """Create or upgrade the database and ensure stable local records."""
         if not self.root.is_dir():
             raise ConversationError("invalid_root", "The active memory root must be an existing directory.", 422)
         with self._connect() as connection:
@@ -271,6 +271,8 @@ class ConversationStore:
         pursuit_title_snapshot: str | None = None,
         thread_title: str | None = None,
         conversation_id: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
         lifecycle: str = "active",
         status: str = "idle",
         active_turn_id: str | None = None,
@@ -284,6 +286,10 @@ class ConversationStore:
         clean_thread_id = _id(thread_id, "thread_id")
         clean_pursuit_title = _optional_text(pursuit_title_snapshot, "pursuit_title_snapshot", 500)
         clean_thread_title = _optional_text(thread_title, "thread_title", 500)
+        clean_model = _optional_text(model, "model", 512)
+        clean_reasoning_effort = _optional_text(
+            reasoning_effort, "reasoning_effort", 512
+        )
         clean_lifecycle = _choice(lifecycle, "lifecycle", CONVERSATION_LIFECYCLES)
         clean_status = _choice(status, "status", CONVERSATION_STATUSES)
         clean_turn_id = _optional_id(active_turn_id, "active_turn_id")
@@ -306,9 +312,10 @@ class ConversationStore:
                 """
                 INSERT INTO pursuit_conversations(
                     conversation_id, pursuit_id, pursuit_title_snapshot, host_id,
-                    project_id, provider, thread_id, thread_title, lifecycle,
-                    status, active_turn_id, created_at, updated_at, last_activity_at
-                ) VALUES(?, ?, ?, ?, ?, 'codex', ?, ?, ?, ?, ?, ?, ?, ?)
+                    project_id, provider, thread_id, thread_title, model,
+                    reasoning_effort, lifecycle, status, active_turn_id,
+                    created_at, updated_at, last_activity_at
+                ) VALUES(?, ?, ?, ?, ?, 'codex', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     clean_conversation_id,
@@ -318,6 +325,8 @@ class ConversationStore:
                     clean_project_id,
                     clean_thread_id,
                     clean_thread_title,
+                    clean_model,
+                    clean_reasoning_effort,
                     clean_lifecycle,
                     clean_status,
                     clean_turn_id,
@@ -390,6 +399,8 @@ class ConversationStore:
         pursuit_id: str | object = _UNSET,
         pursuit_title_snapshot: str | None | object = _UNSET,
         thread_title: str | None | object = _UNSET,
+        model: str | None | object = _UNSET,
+        reasoning_effort: str | None | object = _UNSET,
         lifecycle: str | object = _UNSET,
         status: str | object = _UNSET,
         active_turn_id: str | None | object = _UNSET,
@@ -405,6 +416,12 @@ class ConversationStore:
             )
         if thread_title is not _UNSET:
             updates["thread_title"] = _optional_text(thread_title, "thread_title", 500)
+        if model is not _UNSET:
+            updates["model"] = _optional_text(model, "model", 512)
+        if reasoning_effort is not _UNSET:
+            updates["reasoning_effort"] = _optional_text(
+                reasoning_effort, "reasoning_effort", 512
+            )
         if lifecycle is not _UNSET:
             updates["lifecycle"] = _choice(lifecycle, "lifecycle", CONVERSATION_LIFECYCLES)
         if status is not _UNSET:
@@ -961,9 +978,32 @@ class ConversationStore:
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         if version == 0:
-            connection.executescript(_SCHEMA_V1)
+            connection.executescript(_SCHEMA_V2)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.execute("PRAGMA journal_mode = WAL")
+            return
+        if version == 1:
+            # DDL does not implicitly open a sqlite3 transaction. Take the
+            # write lock, then re-read the version so concurrent initializers
+            # cannot partially or repeatedly apply this operational upgrade.
+            connection.execute("BEGIN IMMEDIATE")
+            locked_version = int(
+                connection.execute("PRAGMA user_version").fetchone()[0]
+            )
+            if locked_version == 1:
+                connection.execute(
+                    "ALTER TABLE pursuit_conversations ADD COLUMN model TEXT"
+                )
+                connection.execute(
+                    "ALTER TABLE pursuit_conversations ADD COLUMN reasoning_effort TEXT"
+                )
+                connection.execute("PRAGMA user_version = 2")
+            elif locked_version != SCHEMA_VERSION:
+                raise ConversationError(
+                    "unsupported_schema",
+                    f"Unsupported conversation database schema version: {locked_version}.",
+                    500,
+                )
             return
         if version != SCHEMA_VERSION:
             raise ConversationError(
@@ -1142,6 +1182,8 @@ def _conversation_dict(row: sqlite3.Row) -> dict[str, Any]:
         provider=row["provider"],
         thread_id=row["thread_id"],
         thread_title=row["thread_title"],
+        model=row["model"],
+        reasoning_effort=row["reasoning_effort"],
         lifecycle=row["lifecycle"],
         status=row["status"],
         active_turn_id=row["active_turn_id"],
@@ -1438,7 +1480,7 @@ def _stale_pending_rows(connection: sqlite3.Connection, resolved_at: str) -> int
     return int(cursor.rowcount)
 
 
-_SCHEMA_V1 = """
+_SCHEMA_V2 = """
 CREATE TABLE IF NOT EXISTS conversation_hosts(
     host_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK(kind IN ('local', 'ssh')),
@@ -1478,6 +1520,8 @@ CREATE TABLE IF NOT EXISTS pursuit_conversations(
     provider TEXT NOT NULL DEFAULT 'codex' CHECK(provider = 'codex'),
     thread_id TEXT NOT NULL,
     thread_title TEXT,
+    model TEXT,
+    reasoning_effort TEXT,
     lifecycle TEXT NOT NULL CHECK(lifecycle IN ('active', 'archived')),
     status TEXT NOT NULL CHECK(status IN (
         'idle', 'starting', 'running', 'waiting_approval', 'waiting_input',

@@ -120,6 +120,38 @@ class CodexAppServer:
             params["ephemeral"] = ephemeral
         return self._request_object("thread/start", params)
 
+    def list_models(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int | None = None,
+        include_hidden: bool | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        _put_optional_string(params, "cursor", cursor)
+        if limit is not None:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise ValueError("model list limit must be a positive integer")
+            params["limit"] = limit
+        if include_hidden is not None:
+            if not isinstance(include_hidden, bool):
+                raise ValueError("include_hidden must be a boolean")
+            params["includeHidden"] = include_hidden
+        return self._request_object("model/list", params)
+
+    def read_config(
+        self,
+        *,
+        cwd: str | os.PathLike[str] | None = None,
+        include_layers: bool = False,
+    ) -> dict[str, Any]:
+        if not isinstance(include_layers, bool):
+            raise ValueError("include_layers must be a boolean")
+        params: dict[str, Any] = {"includeLayers": include_layers}
+        if cwd is not None:
+            params["cwd"] = os.fspath(cwd)
+        return self._request_object("config/read", params)
+
     def resume_thread(self, thread_id: str) -> dict[str, Any]:
         return self._request_object("thread/resume", {"threadId": _identifier(thread_id, "thread")})
 
@@ -161,6 +193,8 @@ class CodexAppServer:
         thread_id: str,
         text: str,
         *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
         approval_policy: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(text, str) or not text.strip():
@@ -169,6 +203,8 @@ class CodexAppServer:
             "threadId": _identifier(thread_id, "thread"),
             "input": [{"type": "text", "text": text}],
         }
+        _put_optional_string(params, "model", model)
+        _put_optional_string(params, "effort", reasoning_effort)
         _put_optional_string(params, "approvalPolicy", approval_policy)
         return self._request_object("turn/start", params)
 

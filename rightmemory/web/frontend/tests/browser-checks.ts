@@ -296,8 +296,12 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     const sentMessages: string[] = [];
     const responses: Array<{ decision?: string; response?: unknown }> = [];
     const reconnects: string[] = [];
+    const modelCatalogLoads: string[] = [];
+    const settingsUpdates: Array<{ model: string; reasoningEffort: string }> = [];
     const actions: ConversationRendererActions = {
       toggleCollapsed() {}, openConversation() {}, closeConversation() {}, createConversation() {}, interrupt() {}, archive() {}, reload() {},
+      loadModelCatalog(hostId) { modelCatalogLoads.push(hostId); },
+      updateConversationSettings(model, reasoningEffort) { settingsUpdates.push({ model, reasoningEffort }); },
       reconnect(conversationId) { reconnects.push(conversationId); },
       createHost() {}, probeHost() {}, createProject() {}, retry() {},
       sendMessage(text) { sentMessages.push(text); },
@@ -305,22 +309,45 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     };
     const draftRoot = `conversation-browser-${crypto.randomUUID()}`;
     const conversationRenderer = new ConversationRenderer(conversationHost, draftRoot, actions);
+    conversationRenderer.setModelCatalog({
+      hostId: 'local', defaultModel: 'gpt-5.6', defaultReasoningEffort: 'medium',
+      models: [
+        { id: 'gpt-5.6', displayName: 'GPT-5.6', defaultReasoningEffort: 'medium', isDefault: true, supportedReasoningEfforts: [
+          { reasoningEffort: 'low', description: 'Faster' }, { reasoningEffort: 'medium', description: 'Balanced' }, { reasoningEffort: 'high', description: 'Deeper reasoning' },
+        ] },
+        { id: 'gpt-5.6-mini', displayName: 'GPT-5.6 mini', defaultReasoningEffort: 'low', isDefault: false, supportedReasoningEfforts: [
+          { reasoningEffort: 'low', description: 'Faster' }, { reasoningEffort: 'medium', description: 'Balanced' },
+        ] },
+      ],
+    });
+    conversationRenderer.setModelCatalog({
+      hostId: 'gpu', defaultModel: 'gpt-5.6-codex', defaultReasoningEffort: 'high',
+      models: [{ id: 'gpt-5.6-codex', displayName: 'GPT-5.6 Codex', defaultReasoningEffort: 'high', isDefault: true, supportedReasoningEfforts: [
+        { reasoningEffort: 'medium', description: 'Balanced' }, { reasoningEffort: 'high', description: 'Deeper reasoning' },
+      ] }],
+    });
     let conversationState = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot: normalizeWorkspace({
       hosts: [{ host_id: 'local', kind: 'local', display_name: 'This computer' }, { host_id: 'gpu', kind: 'ssh', display_name: 'GPU' }],
       projects: [{ project_id: 'local-root', host_id: 'local', label: 'Fixture', cwd: 'C:\\fixture' }, { project_id: 'gpu-repo', host_id: 'gpu', label: 'Remote fixture', cwd: '/srv/fixture' }],
-      conversations: [{ conversation_id: 'conversation-1', pursuit_id: 'design', host_id: 'local', project_id: 'local-root', thread_title: 'Safe conversation', status: 'waiting_input' }],
+      conversations: [{ conversation_id: 'conversation-1', pursuit_id: 'design', host_id: 'local', project_id: 'local-root', model: 'gpt-5.6', reasoning_effort: 'high', thread_title: 'Safe conversation', status: 'waiting_input' }],
       pending_requests: [], pursuit_defaults: { design: { pursuit_id: 'design', host_id: 'gpu', project_id: 'gpu-repo' } }, cursor: 0,
     }) });
     conversationState = reduceConversationState(conversationState, { type: 'pursuit-selected', pursuitId: 'design' });
     conversationState = reduceConversationState(conversationState, { type: 'conversation-loading', conversationId: 'conversation-1' });
     const conversationDetail = normalizeConversationDetail({
-      conversation: { conversation_id: 'conversation-1', pursuit_id: 'design', host_id: 'local', project_id: 'local-root', thread_title: 'Safe conversation', status: 'waiting_input' },
+      conversation: { conversation_id: 'conversation-1', pursuit_id: 'design', host_id: 'local', project_id: 'local-root', model: 'gpt-5.6', reasoning_effort: 'high', thread_title: 'Safe conversation', status: 'waiting_input' },
       events: [
-        { event_id: 1, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { type: 'userMessage', content: [{ type: 'text', text: 'Check this' }] } } },
-        { event_id: 2, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'agent.delta', payload: { delta: '<img src=x onerror=alert(1)>' } },
-        { event_id: 3, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'agent.delta', payload: { delta: ' remains text' } },
-        { event_id: 4, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { type: 'commandExecution', command: 'echo <script>', aggregatedOutput: '<svg onload=alert(1)>', exitCode: 0 } } },
-        { event_id: 5, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'future.item', payload: { html: '<iframe srcdoc=bad>' } },
+        { event_id: 1, conversation_id: 'conversation-1', turn_id: null, kind: 'user.message', payload: { text: 'Check this' } },
+        { event_id: 2, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'turn.started', payload: { turn: { id: 'turn-1' } } },
+        { event_id: 3, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'user-1', type: 'userMessage', content: [{ type: 'text', text: 'Check this' }] } } },
+        { event_id: 4, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.started', payload: { item: { id: 'agent-1', type: 'agentMessage' } } },
+        { event_id: 5, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'agent.message.delta', payload: { item_id: 'agent-1', delta: '<img src=x onerror=alert(1)>' } },
+        { event_id: 6, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'turn.started', payload: { turn: { id: 'turn-1' } } },
+        { event_id: 7, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'protocol.notification', payload: { method: 'turn/started' } },
+        { event_id: 8, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'agent.message.delta', payload: { item_id: 'agent-1', delta: ' remains text' } },
+        { event_id: 9, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'agent-1', type: 'agentMessage', content: [{ type: 'text', text: '<img src=x onerror=alert(1)> remains text' }] } } },
+        { event_id: 10, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { type: 'commandExecution', command: 'echo <script>', aggregatedOutput: '<svg onload=alert(1)>', exitCode: 0 } } },
+        { event_id: 11, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'future.item', payload: { html: '<iframe srcdoc=bad>' } },
       ],
       pending_requests: [
         { request_key: 'input-1', conversation_id: 'conversation-1', method: 'item/tool/requestUserInput', state: 'pending', payload: { questions: [
@@ -332,17 +359,32 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
         { request_key: 'tool-1', conversation_id: 'conversation-1', method: 'item/tool/call', state: 'pending', payload: { prompt: 'Return tool output' } },
         { request_key: 'future-1', conversation_id: 'conversation-1', method: 'future/object/request', state: 'pending', payload: { prompt: 'Return future data' } },
       ],
-      cursor: 5,
+      cursor: 11,
     });
     check(conversationDetail, 'Conversation detail fixture must normalize');
     conversationState = reduceConversationState(conversationState, { type: 'conversation-loaded', detail: conversationDetail });
     conversationState = reduceConversationState(conversationState, { type: 'connection', connection: 'open' });
     conversationRenderer.render(conversationState);
     check(conversationHost.querySelector<HTMLSelectElement>('.cw-new-form [name="host"]')?.value === 'gpu' && conversationHost.querySelector<HTMLSelectElement>('.cw-new-form [name="project"]')?.value === 'gpu-repo', 'The selected Pursuit restores its recent host and project');
+    check(conversationHost.querySelector<HTMLSelectElement>('.cw-new-form [name="model"]')?.value === 'gpt-5.6-codex' && conversationHost.querySelector<HTMLSelectElement>('.cw-new-form [name="effort"]')?.value === 'high', 'New conversations use the selected host model defaults');
     check(!conversationHost.querySelector('img,script,svg,iframe,[onerror],[onload]'), 'Conversation output must remain escaped text');
-    check(conversationHost.querySelectorAll('.cw-agent').length === 1 && conversationHost.querySelector('.cw-agent')?.textContent?.includes('remains text'), 'Agent deltas merge into one visible message');
+    check(conversationHost.querySelectorAll('.cw-user').length === 1, 'The local user message and provider echo merge across lifecycle events');
+    check(conversationHost.querySelectorAll('.cw-agent').length === 1 && conversationHost.querySelector('.cw-agent')?.textContent?.includes('remains text') && !conversationHost.textContent?.includes('(empty message)'), 'Started, interleaved delta, and completed events merge into one visible message by item id');
     check(conversationHost.querySelector('.cw-command')?.textContent?.includes('exit 0'), 'Completed commands show output and exit status');
-    check(conversationHost.querySelector('.cw-unknown')?.textContent?.includes('future.item'), 'Unknown work items remain visible');
+    check(!conversationHost.querySelector('.cw-unknown') && !conversationHost.textContent?.includes('future.item') && !conversationHost.textContent?.includes('turn/started'), 'Raw lifecycle, protocol, and unknown event cards stay hidden');
+    const turnModel = conversationHost.querySelector<HTMLSelectElement>('.cw-composer [name="model"]')!;
+    const turnEffort = conversationHost.querySelector<HTMLSelectElement>('.cw-composer [name="effort"]')!;
+    check(!turnModel.disabled && !turnEffort.disabled && turnModel.value === 'gpt-5.6' && turnEffort.value === 'high', 'Model and reasoning selectors remain available while a turn awaits input');
+    turnModel.value = 'gpt-5.6-mini';
+    turnModel.dispatchEvent(new Event('change', { bubbles: true }));
+    const switchedEffort = conversationHost.querySelector<HTMLSelectElement>('.cw-composer [name="effort"]')!.value;
+    check(switchedEffort === 'low' && JSON.stringify(settingsUpdates.at(-1)) === JSON.stringify({ model: 'gpt-5.6-mini', reasoningEffort: 'low' }), 'Changing the model mid-conversation selects a supported reasoning default and saves both settings');
+    conversationState = reduceConversationState(conversationState, { type: 'conversation-settings-selected', conversationId: 'conversation-1', model: 'gpt-5.6-mini', reasoningEffort: 'low' });
+    conversationRenderer.render(conversationState);
+    turnEffort.value = 'medium';
+    turnEffort.dispatchEvent(new Event('change', { bubbles: true }));
+    check(JSON.stringify(settingsUpdates.at(-1)) === JSON.stringify({ model: 'gpt-5.6-mini', reasoningEffort: 'medium' }), 'Reasoning effort can change between messages without creating a new conversation');
+    check(modelCatalogLoads.length === 0, 'Preloaded model catalogs are reused without duplicate requests');
     const questionCard = conversationHost.querySelector<HTMLElement>('.cw-request:first-child')!;
     questionCard.querySelector<HTMLInputElement>('input[type="radio"]')!.checked = true;
     questionCard.querySelector<HTMLTextAreaElement>('textarea')!.value = 'Keep it concise';
@@ -374,7 +416,7 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
       card.querySelector<HTMLFormElement>('form')!.requestSubmit();
     }
     check(JSON.stringify(responses.slice(3)) === JSON.stringify([{ response: { kind: 'tool' } }, { response: { kind: 'future' } }]), 'Tool-call and future object requests remain answerable');
-    const failedResponse = normalizeEvent({ event_id: 6, conversation_id: 'conversation-1', kind: 'server_response_failed', payload: { request_key: 'future-1' } });
+    const failedResponse = normalizeEvent({ event_id: 12, conversation_id: 'conversation-1', kind: 'server_response_failed', payload: { request_key: 'future-1' } });
     check(failedResponse, 'Failed-response fixture must normalize');
     conversationState = reduceConversationState(conversationState, { type: 'event', event: failedResponse });
     conversationRenderer.render(conversationState);
@@ -389,7 +431,7 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     conversationRenderer.render(conversationState);
     check([...conversationHost.querySelectorAll<HTMLInputElement | HTMLButtonElement>('.cw-add-host input, .cw-add-host button')].every((entry) => entry.disabled), 'An in-flight host creation disables its form');
     conversationState = reduceConversationState(conversationState, { type: 'host-create-in-flight', active: false });
-    const idle = normalizeEvent({ event_id: 7, conversation_id: 'conversation-1', kind: 'thread.status', payload: { status: { type: 'idle' } } });
+    const idle = normalizeEvent({ event_id: 13, conversation_id: 'conversation-1', kind: 'thread.status', payload: { status: { type: 'idle' } } });
     check(idle, 'Idle status fixture must normalize');
     conversationState = reduceConversationState(conversationState, { type: 'event', event: idle });
     conversationRenderer.render(conversationState);
@@ -402,7 +444,7 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     composer.value = 'Next draft'; composer.dispatchEvent(new Event('input', { bubbles: true }));
     conversationRenderer.clearComposerIfUnchanged('Send from composer');
     check(composer.value === 'Next draft', 'A late send response does not erase text typed for the next message');
-    const disconnected = normalizeEvent({ event_id: 8, conversation_id: null, kind: 'connection.disconnected', payload: { host_id: 'local', conversation_ids: ['conversation-1'] } });
+    const disconnected = normalizeEvent({ event_id: 14, conversation_id: null, kind: 'connection.disconnected', payload: { host_id: 'local', conversation_ids: ['conversation-1'] } });
     check(disconnected, 'Disconnect fixture must normalize');
     conversationState = reduceConversationState(conversationState, { type: 'event', event: disconnected });
     conversationRenderer.render(conversationState);
@@ -412,7 +454,7 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     check(reconnects[0] === 'conversation-1', 'Reconnect targets the current conversation');
     conversationRenderer.destroy(); conversationHost.remove();
     localStorage.removeItem(`rightmemory:conversation-draft:${encodeURIComponent(draftRoot)}:conversation-1`);
-    report('PASS conversation streaming/work cards, escaped output, guarded requests, recovery, composer keys, and root-scoped drafts');
+    report('PASS conversation streaming, model settings, quiet lifecycle output, guarded requests, recovery, composer keys, and root-scoped drafts');
 
     const boundaryHost = document.createElement('section');
     const boundaryPane = document.createElement('aside');

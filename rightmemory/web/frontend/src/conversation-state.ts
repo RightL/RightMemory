@@ -22,12 +22,34 @@ export interface ConversationSummary {
   pursuitId: string | null;
   hostId: string;
   projectId: string;
+  model: string;
+  reasoningEffort: string;
   title: string;
   status: string;
   createdAt: string;
   updatedAt: string;
   archived: boolean;
   raw: JsonRecord;
+}
+
+export interface ReasoningEffortOption {
+  reasoningEffort: string;
+  description: string;
+}
+
+export interface ConversationModel {
+  id: string;
+  displayName: string;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: ReasoningEffortOption[];
+  isDefault: boolean;
+}
+
+export interface ConversationModelCatalog {
+  hostId: string;
+  models: ConversationModel[];
+  defaultModel: string;
+  defaultReasoningEffort: string;
 }
 
 export interface ConversationEvent {
@@ -107,6 +129,7 @@ export type ConversationAction =
   | { type: 'conversation-loaded'; detail: ConversationDetail }
   | { type: 'conversation-created'; conversation: ConversationSummary }
   | { type: 'conversation-updated'; conversation: ConversationSummary }
+  | { type: 'conversation-settings-selected'; conversationId: string; model: string; reasoningEffort: string }
   | { type: 'conversation-closed' }
   | { type: 'conversation-archived'; conversationId: string }
   | { type: 'host-added'; host: ConversationHost }
@@ -195,12 +218,47 @@ export function normalizeConversation(value: unknown): ConversationSummary | nul
     pursuitId,
     hostId: stringValue(raw.host_id),
     projectId: stringValue(raw.project_id),
+    model: stringValue(raw.model),
+    reasoningEffort: stringValue(raw.reasoning_effort ?? raw.effort),
     title: stringValue(raw.thread_title ?? raw.title ?? raw.name ?? raw.label, 'Untitled conversation'),
     status,
     createdAt: stringValue(raw.created_at),
     updatedAt: stringValue(raw.updated_at ?? raw.last_activity_at ?? raw.created_at),
     archived: boolValue(raw.archived) || stringValue(raw.lifecycle).toLowerCase() === 'archived' || status.toLowerCase() === 'archived',
     raw,
+  };
+}
+
+export function normalizeModelCatalog(value: unknown): ConversationModelCatalog {
+  const data = unwrapped(value);
+  const models = normalizedArray(data.models, (entry) => {
+    const raw = asRecord(entry);
+    const id = stringValue(raw.id ?? raw.model);
+    if (!id) return null;
+    const supportedReasoningEfforts = normalizedArray(
+      raw.supported_reasoning_efforts ?? raw.supportedReasoningEfforts,
+      (effortEntry) => {
+        const effort = asRecord(effortEntry);
+        const reasoningEffort = stringValue(effort.reasoning_effort ?? effort.reasoningEffort ?? effort.id ?? effort.value);
+        return reasoningEffort ? {
+          reasoningEffort,
+          description: stringValue(effort.description),
+        } : null;
+      },
+    );
+    return {
+      id,
+      displayName: stringValue(raw.display_name ?? raw.displayName, id),
+      defaultReasoningEffort: stringValue(raw.default_reasoning_effort ?? raw.defaultReasoningEffort),
+      supportedReasoningEfforts,
+      isDefault: boolValue(raw.is_default ?? raw.isDefault),
+    };
+  });
+  return {
+    hostId: stringValue(data.host_id ?? data.hostId),
+    models,
+    defaultModel: stringValue(data.default_model ?? data.defaultModel),
+    defaultReasoningEffort: stringValue(data.default_reasoning_effort ?? data.defaultReasoningEffort),
   };
 }
 
@@ -489,6 +547,13 @@ export function reduceConversationState(state: ConversationState, action: Conver
       const conversation = current ? newerSummary(current, action.conversation) : action.conversation;
       return { ...state, conversations: upsert(state.conversations, conversation, (item) => item.conversationId) };
     }
+    case 'conversation-settings-selected':
+      return {
+        ...state,
+        conversations: state.conversations.map((item) => item.conversationId === action.conversationId
+          ? { ...item, model: action.model, reasoningEffort: action.reasoningEffort }
+          : item),
+      };
     case 'conversation-closed':
       return { ...state, currentConversationId: null, loadingConversation: false, error: null };
     case 'conversation-archived':

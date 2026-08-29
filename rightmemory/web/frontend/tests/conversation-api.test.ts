@@ -25,7 +25,14 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
     requests.push({ path, options });
     if (path === '/api/conversation-workspace') return { data: { hosts: [], projects: [], conversations: [], pending_requests: [], cursor: null } };
     if (path.startsWith('/api/pursuit-conversations?')) return { data: { conversations: [], default: { pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one' } } };
-    if (path === '/api/pursuit-conversations') return { data: { conversation: { conversation_id: 'c1', pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one' } } };
+    if (path.startsWith('/api/conversation-models?')) return { data: {
+      host_id: 'h/one',
+      models: [{ id: 'gpt-5.6', display_name: 'GPT-5.6', default_reasoning_effort: 'medium', supported_reasoning_efforts: [{ reasoning_effort: 'low', description: 'Faster' }, { reasoning_effort: 'medium', description: 'Balanced' }], is_default: true }],
+      default_model: 'gpt-5.6',
+      default_reasoning_effort: 'medium',
+    } };
+    if (path === '/api/pursuit-conversations') return { data: { conversation: { conversation_id: 'c1', pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', model: 'gpt-5.6', reasoning_effort: 'medium' } } };
+    if (path.endsWith('/settings')) return { data: { conversation: { conversation_id: 'c/one', pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', model: 'gpt-5.6-mini', reasoning_effort: 'low' } } };
     if (path === '/api/conversation-hosts') return { data: { host: { host_id: 'h2', kind: 'ssh', display_name: 'GPU', ssh_alias: 'gpu' } } };
     if (path === '/api/conversation-projects') return { data: { project: { project_id: 'p2', host_id: 'h2', label: 'Repo', cwd: '/repo' } } };
     if (path.endsWith('/reconcile')) return { data: { conversation: { conversation_id: 'c/one', pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', status: 'idle' } } };
@@ -34,7 +41,9 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
   const api = new ConversationApi(fetchJson);
   await api.workspace();
   const pursuit = await api.pursuitConversations('p/one');
-  await api.createConversation('p/one', 'h1', 'project one');
+  const catalog = await api.modelCatalog('h/one');
+  const created = await api.createConversation('p/one', 'h1', 'project one', 'gpt-5.6', 'medium');
+  const updated = await api.updateSettings('c/one', 'gpt-5.6-mini', 'low');
   await api.sendMessage('c/one', 'hello');
   await api.interrupt('c/one');
   const reconciled = await api.reconcile('c/one');
@@ -42,16 +51,29 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
   await api.respond('c/one', 'input/2', { response: { scope: { answers: ['Current branch'] }, mode: { answers: ['Review'] } } });
   await api.createHost('GPU', 'gpu');
   await api.createProject('h2', 'Repo', '/repo');
+  const request = (path: string) => {
+    const entry = requests.find((candidate) => candidate.path === path);
+    assert(entry, `Missing request ${path}`);
+    return entry;
+  };
   assert.equal(requests[1].path, '/api/pursuit-conversations?pursuit_id=p%2Fone');
   assert.equal(pursuit.default?.projectId, 'project one');
-  assert.deepEqual(JSON.parse(String(requests[2].options?.body)), { pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one' });
-  assert.equal(requests[3].path, '/api/conversations/c%2Fone/messages');
-  assert.deepEqual(JSON.parse(String(requests[3].options?.body)), { text: 'hello' });
-  assert.equal(requests[5].path, '/api/conversations/c%2Fone/reconcile');
+  assert.equal(requests[2].path, '/api/conversation-models?host_id=h%2Fone');
+  assert.equal(catalog.models[0].displayName, 'GPT-5.6');
+  assert.equal(catalog.models[0].supportedReasoningEfforts[0].reasoningEffort, 'low');
+  assert.equal(catalog.defaultReasoningEffort, 'medium');
+  assert.equal(created.model, 'gpt-5.6');
+  assert.deepEqual(JSON.parse(String(request('/api/pursuit-conversations').options?.body)), {
+    pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', model: 'gpt-5.6', reasoning_effort: 'medium',
+  });
+  assert.equal(updated.reasoningEffort, 'low');
+  assert.deepEqual(JSON.parse(String(request('/api/conversations/c%2Fone/settings').options?.body)), { model: 'gpt-5.6-mini', reasoning_effort: 'low' });
+  assert.deepEqual(JSON.parse(String(request('/api/conversations/c%2Fone/messages').options?.body)), { text: 'hello' });
+  assert.equal(requests[7].path, '/api/conversations/c%2Fone/reconcile');
   assert.equal(reconciled.status, 'idle');
-  assert.equal(requests[6].path, '/api/conversations/c%2Fone/server-requests/request%2F1/respond');
-  assert.deepEqual(JSON.parse(String(requests[7].options?.body)), { response: { scope: { answers: ['Current branch'] }, mode: { answers: ['Review'] } } });
-  assert.deepEqual(JSON.parse(String(requests[8].options?.body)), { kind: 'ssh', display_name: 'GPU', ssh_alias: 'gpu' });
+  assert.equal(requests[8].path, '/api/conversations/c%2Fone/server-requests/request%2F1/respond');
+  assert.deepEqual(JSON.parse(String(requests[9].options?.body)), { response: { scope: { answers: ['Current branch'] }, mode: { answers: ['Review'] } } });
+  assert.deepEqual(JSON.parse(String(requests[10].options?.body)), { kind: 'ssh', display_name: 'GPU', ssh_alias: 'gpu' });
 });
 
 test('event stream handles snapshots, conversation events, unknown kinds, malformed data, and close', () => {

@@ -5,6 +5,8 @@ import {
   recordValue,
   textValue,
   type ConversationEvent,
+  type ConversationModel,
+  type ConversationModelCatalog,
   type ConversationState,
   type PendingRequest,
 } from './conversation-state.ts';
@@ -13,7 +15,9 @@ export interface ConversationRendererActions {
   toggleCollapsed(): void;
   openConversation(conversationId: string): void;
   closeConversation(): void;
-  createConversation(hostId: string, projectId: string): void;
+  createConversation(hostId: string, projectId: string, model: string, reasoningEffort: string): void;
+  loadModelCatalog(hostId: string): void;
+  updateConversationSettings(model: string, reasoningEffort: string): void;
   sendMessage(text: string): void;
   interrupt(): void;
   archive(): void;
@@ -39,6 +43,10 @@ const shell = `
       <form class="cw-new-form">
         <label><span>Host</span><select name="host" aria-label="Conversation host"></select></label>
         <label><span>Project</span><select name="project" aria-label="Conversation project"></select></label>
+        <div class="cw-new-models">
+          <label><span>Model</span><select name="model" aria-label="Conversation model"></select></label>
+          <label><span>Reasoning</span><select name="effort" aria-label="Conversation reasoning effort"></select></label>
+        </div>
         <button type="submit" class="cw-primary">New conversation</button>
       </form>
       <div class="cw-list-status" role="status"></div>
@@ -64,7 +72,14 @@ const shell = `
       <div class="cw-pending"></div>
       <form class="cw-composer">
         <textarea name="message" rows="3" aria-label="Message" placeholder="Message this conversation…"></textarea>
-        <div><small>Enter to send · Shift+Enter for a new line</small><button type="button" class="cw-stop">Stop</button><button type="submit" class="cw-primary">Send</button></div>
+        <div class="cw-composer-footer">
+          <div class="cw-turn-options" aria-label="Next response settings">
+            <select name="model" aria-label="Model for the next message" title="Model for the next message"></select>
+            <select name="effort" aria-label="Reasoning effort for the next message" title="Reasoning effort for the next message"></select>
+          </div>
+          <small>Enter to send · Shift+Enter for a new line</small>
+          <button type="button" class="cw-stop">Stop</button><button type="submit" class="cw-primary">Send</button>
+        </div>
       </form>
     </section>
   </div>
@@ -95,14 +110,15 @@ function visibleText(value: unknown): string {
 }
 
 function canonicalKind(value: string): string {
-  return value.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().replace(/[.\s/-]+/g, '_');
+  return value.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().replace(/[.\s/-]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
-function payloadParts(event: ConversationEvent): { payload: Record<string, unknown>; item: Record<string, unknown>; kind: string } {
+function payloadParts(event: ConversationEvent): { payload: Record<string, unknown>; item: Record<string, unknown>; itemId: string; kind: string } {
   const payload = recordValue(event.payload);
   const item = recordValue(payload.item ?? payload.work_item ?? payload.message);
   const discriminator = textValue(item.type ?? item.kind ?? payload.type ?? payload.kind);
-  return { payload, item, kind: canonicalKind(`${event.kind} ${discriminator}`) };
+  const itemId = textValue(item.id ?? payload.itemId ?? payload.item_id);
+  return { payload, item, itemId, kind: canonicalKind(`${event.kind} ${discriminator}`) };
 }
 
 function compactJson(value: unknown): string {
@@ -116,11 +132,54 @@ function eventText(payload: Record<string, unknown>, item: Record<string, unknow
   return visibleText(item.text ?? item.content ?? item.delta ?? payload.text ?? payload.content ?? payload.delta ?? payload.message);
 }
 
+function hiddenOperationalEvent(kind: string): boolean {
+  return kind === 'protocol_notification'
+    || kind === 'thread_started'
+    || kind === 'thread_status'
+    || kind === 'thread_name'
+    || kind === 'thread_archived'
+    || kind === 'thread_settings_updated'
+    || kind === 'turn_started'
+    || kind === 'turn_completed'
+    || kind === 'item_started'
+    || kind === 'item_completed'
+    || kind.startsWith('item_started_')
+    || kind.startsWith('server_request_');
+}
+
+function reasoningEffortLabel(value: string): string {
+  const labels: Record<string, string> = {
+    none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High',
+    xhigh: 'Extra high', max: 'Max', ultra: 'Ultra',
+  };
+  return labels[value.toLowerCase()] ?? value.replace(/[_-]+/g, ' ').replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function catalogDefaultModel(catalog: ConversationModelCatalog): ConversationModel | null {
+  return catalog.models.find((model) => model.id === catalog.defaultModel)
+    ?? catalog.models.find((model) => model.isDefault)
+    ?? catalog.models[0]
+    ?? null;
+}
+
+function modelDefaultEffort(catalog: ConversationModelCatalog, model: ConversationModel): string {
+  const supported = new Set(model.supportedReasoningEfforts.map((option) => option.reasoningEffort));
+  const candidates = [
+    model.id === catalog.defaultModel || model.isDefault ? catalog.defaultReasoningEffort : '',
+    model.defaultReasoningEffort,
+    catalog.defaultReasoningEffort,
+    model.supportedReasoningEfforts[0]?.reasoningEffort ?? '',
+  ];
+  return candidates.find((effort) => effort && supported.has(effort)) ?? '';
+}
+
 function activityNodes(events: ConversationEvent[]): HTMLElement[] {
   const nodes: HTMLElement[] = [];
-  let merge: { role: 'user' | 'agent'; turnId: string | null; text: HTMLElement; node: HTMLElement } | null = null;
+  type MessageNode = { role: 'user' | 'agent'; turnId: string | null; text: HTMLElement; node: HTMLElement };
+  let merge: MessageNode | null = null;
+  const messagesByItemId = new Map<string, MessageNode>();
   for (const event of events) {
-    const { payload, item, kind } = payloadParts(event);
+    const { payload, item, itemId, kind } = payloadParts(event);
     const roleValue = textValue(item.role ?? payload.role).toLowerCase();
     const isUser = roleValue === 'user' || kind.includes('user_message');
     const isAgent = roleValue === 'assistant' || roleValue === 'agent' || kind.includes('agent_message') || kind.includes('assistant_message') || kind.includes('agent_delta');
@@ -128,6 +187,15 @@ function activityNodes(events: ConversationEvent[]): HTMLElement[] {
       const role = isUser ? 'user' : 'agent';
       const text = eventText(payload, item);
       const delta = kind.includes('delta');
+      const identified = itemId ? messagesByItemId.get(itemId) : null;
+      if (!text && !identified) continue;
+      if (identified && identified.role === role) {
+        identified.text.textContent = delta
+          ? `${identified.text.textContent ?? ''}${text}`
+          : text || identified.text.textContent;
+        merge = identified;
+        continue;
+      }
       if (merge && merge.role === role && merge.turnId === event.turnId && delta) {
         merge.text.textContent = `${merge.text.textContent ?? ''}${text}`;
         continue;
@@ -136,13 +204,19 @@ function activityNodes(events: ConversationEvent[]): HTMLElement[] {
         merge.text.textContent = text;
         continue;
       }
+      if (merge && role === 'user' && merge.role === role && text && text === merge.text.textContent && (!merge.turnId || !event.turnId)) {
+        merge.turnId = event.turnId ?? merge.turnId;
+        continue;
+      }
       const node: HTMLElement = element('article', `cw-message cw-${role}`);
       appendText(node, 'small', role === 'user' ? 'YOU' : 'AGENT');
       const content = appendText(node, 'div', text || '(empty message)', 'cw-message-text');
       nodes.push(node);
       merge = { role, turnId: event.turnId, text: content, node };
+      if (itemId) messagesByItemId.set(itemId, merge);
       continue;
     }
+    if (hiddenOperationalEvent(kind)) continue;
     merge = null;
     if (kind.includes('command') || kind.includes('exec')) {
       const node = element('details', 'cw-work-card cw-command');
@@ -181,17 +255,15 @@ function activityNodes(events: ConversationEvent[]): HTMLElement[] {
       nodes.push(node);
       continue;
     }
-    if (kind.includes('turn_') || kind.includes('status') || kind.includes('interrupt')) {
-      const status = textValue(payload.status ?? payload.state) || event.kind.replace(/[._-]+/g, ' ');
-      const node = element('div', 'cw-status-event');
-      appendText(node, 'span', status);
+    if (kind.includes('protocol_error') || kind.includes('connection_disconnected')) {
+      const node = element('div', 'cw-system-message');
+      const message = kind.includes('connection_disconnected')
+        ? 'Connection lost. Reconnect to continue.'
+        : visibleText(payload.message ?? payload.error) || 'The conversation encountered a connection error.';
+      appendText(node, 'span', message);
       nodes.push(node);
       continue;
     }
-    const node = element('details', 'cw-work-card cw-unknown');
-    appendText(node, 'summary', event.kind || 'Unknown work item');
-    appendText(node, 'pre', compactJson(event.payload));
-    nodes.push(node);
   }
   return nodes;
 }
@@ -223,6 +295,9 @@ export class ConversationRenderer {
   private state: ConversationState | null = null;
   private pickerPursuitId: string | null = null;
   private pickerTouched = false;
+  private modelCatalogs = new Map<string, ConversationModelCatalog>();
+  private requestedModelCatalogs = new Set<string>();
+  private failedModelCatalogs = new Set<string>();
 
   constructor(private host: HTMLElement, private rootKey: string, private actions: ConversationRendererActions) {
     host.className = 'cw-pane';
@@ -238,13 +313,21 @@ export class ConversationRenderer {
     this.$('.cw-archive').addEventListener('click', () => actions.archive(), { signal: this.abort.signal });
     this.$('.cw-stop').addEventListener('click', () => actions.interrupt(), { signal: this.abort.signal });
     this.$('.cw-unread').addEventListener('click', () => this.scrollToBottom(), { signal: this.abort.signal });
-    this.$<HTMLSelectElement>('.cw-new-form [name="host"]').addEventListener('change', () => { this.pickerTouched = true; this.renderProjectOptions(); }, { signal: this.abort.signal });
+    this.$<HTMLSelectElement>('.cw-new-form [name="host"]').addEventListener('change', () => {
+      this.pickerTouched = true;
+      this.retryModelCatalog(this.$<HTMLSelectElement>('.cw-new-form [name="host"]').value);
+      this.renderProjectOptions();
+      this.renderNewConversationModelOptions();
+    }, { signal: this.abort.signal });
     this.$<HTMLSelectElement>('.cw-new-form [name="project"]').addEventListener('change', () => { this.pickerTouched = true; }, { signal: this.abort.signal });
+    this.$<HTMLSelectElement>('.cw-new-form [name="model"]').addEventListener('change', () => this.renderNewConversationEffortOptions(), { signal: this.abort.signal });
     this.$<HTMLFormElement>('.cw-new-form').addEventListener('submit', (event) => {
       event.preventDefault();
       const hostId = this.$<HTMLSelectElement>('.cw-new-form [name="host"]').value;
       const projectId = this.$<HTMLSelectElement>('.cw-new-form [name="project"]').value;
-      if (hostId && projectId) actions.createConversation(hostId, projectId);
+      const model = this.$<HTMLSelectElement>('.cw-new-form [name="model"]').value;
+      const reasoningEffort = this.$<HTMLSelectElement>('.cw-new-form [name="effort"]').value;
+      if (hostId && projectId && model && reasoningEffort) actions.createConversation(hostId, projectId, model, reasoningEffort);
     }, { signal: this.abort.signal });
     this.$<HTMLFormElement>('.cw-add-host form').addEventListener('submit', (event) => {
       event.preventDefault();
@@ -264,6 +347,11 @@ export class ConversationRenderer {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); this.submitComposer(); }
     }, { signal: this.abort.signal });
     this.$<HTMLTextAreaElement>('.cw-composer textarea').addEventListener('input', () => this.saveDraft(), { signal: this.abort.signal });
+    this.$<HTMLSelectElement>('.cw-composer [name="model"]').addEventListener('change', () => {
+      this.renderConversationEffortOptions();
+      this.submitConversationSettings();
+    }, { signal: this.abort.signal });
+    this.$<HTMLSelectElement>('.cw-composer [name="effort"]').addEventListener('change', () => this.submitConversationSettings(), { signal: this.abort.signal });
   }
 
   private $<T extends HTMLElement = HTMLElement>(selector: string): T { return this.host.querySelector<T>(selector)!; }
@@ -321,12 +409,13 @@ export class ConversationRenderer {
     hostSelect.value = preferredHost || (state.hosts.some((host) => host.hostId === priorHost) ? priorHost : local?.hostId ?? state.hosts[0]?.hostId ?? '');
     const preferredProject = !this.pickerTouched && preference?.hostId === hostSelect.value ? preference.projectId : '';
     this.renderProjectOptions(preferredProject);
+    this.renderNewConversationModelOptions();
     const projectHost = this.$<HTMLSelectElement>('.cw-add-project [name="host_id"]');
     const priorProjectHost = projectHost.value;
     projectHost.replaceChildren(...state.hosts.map((host) => new Option(host.displayName, host.hostId)));
     projectHost.value = state.hosts.some((host) => host.hostId === priorProjectHost) ? priorProjectHost : hostSelect.value;
     const newButton = this.$<HTMLButtonElement>('.cw-new-form button[type="submit"]');
-    newButton.disabled = state.creatingConversation || !state.selectedPursuitId || !hostSelect.value || !this.$<HTMLSelectElement>('.cw-new-form [name="project"]').value;
+    this.updateNewConversationButton();
     newButton.textContent = state.creatingConversation ? 'Creating…' : 'New conversation';
     this.setFormBusy('.cw-add-host form', state.creatingHost, state.creatingHost ? 'Adding…' : 'Add and probe');
     this.setFormBusy('.cw-add-project form', state.creatingProject, state.creatingProject ? 'Adding…' : 'Add project');
@@ -340,7 +429,114 @@ export class ConversationRenderer {
     const projects = this.state.projects.filter((project) => project.hostId === hostId);
     projectSelect.replaceChildren(...projects.map((project) => new Option(project.label || project.cwd, project.projectId)));
     projectSelect.value = projects.some((project) => project.projectId === preferredProjectId) ? preferredProjectId : projects.some((project) => project.projectId === previous) ? previous : projects[0]?.projectId ?? '';
-    this.$<HTMLButtonElement>('.cw-new-form button[type="submit"]').disabled = !!this.state?.creatingConversation || !hostId || !projectSelect.value;
+    this.updateNewConversationButton();
+  }
+
+  private ensureModelCatalog(hostId: string): ConversationModelCatalog | null {
+    const catalog = this.modelCatalogs.get(hostId) ?? null;
+    if (!catalog && hostId && !this.requestedModelCatalogs.has(hostId) && !this.failedModelCatalogs.has(hostId)) {
+      this.requestedModelCatalogs.add(hostId);
+      this.actions.loadModelCatalog(hostId);
+    }
+    return catalog;
+  }
+
+  private showUnavailableSelect(select: HTMLSelectElement, label: string, value = ''): void {
+    select.replaceChildren(new Option(label, value));
+    select.value = value;
+    select.disabled = true;
+  }
+
+  private populateModelSelect(select: HTMLSelectElement, catalog: ConversationModelCatalog, preferredModel: string): ConversationModel | null {
+    const selected = catalog.models.find((model) => model.id === preferredModel) ?? catalogDefaultModel(catalog);
+    select.replaceChildren(...catalog.models.map((model) => {
+      const option = new Option(model.displayName, model.id);
+      option.title = model.displayName === model.id ? model.id : `${model.displayName} (${model.id})`;
+      return option;
+    }));
+    if (preferredModel && !catalog.models.some((model) => model.id === preferredModel)) {
+      const unavailable = new Option(`${preferredModel} · unavailable`, preferredModel);
+      unavailable.disabled = true;
+      select.add(unavailable, 0);
+      select.value = preferredModel;
+      return null;
+    }
+    select.value = selected?.id ?? '';
+    return selected;
+  }
+
+  private populateEffortSelect(
+    select: HTMLSelectElement,
+    catalog: ConversationModelCatalog,
+    model: ConversationModel,
+    preferredEffort: string,
+  ): string {
+    const supported = model.supportedReasoningEfforts;
+    const selected = supported.some((option) => option.reasoningEffort === preferredEffort)
+      ? preferredEffort
+      : modelDefaultEffort(catalog, model);
+    select.replaceChildren(...supported.map((effort) => {
+      const option = new Option(reasoningEffortLabel(effort.reasoningEffort), effort.reasoningEffort);
+      option.title = effort.description;
+      return option;
+    }));
+    if (preferredEffort && !supported.some((option) => option.reasoningEffort === preferredEffort)) {
+      const unavailable = new Option(`${reasoningEffortLabel(preferredEffort)} · unavailable`, preferredEffort);
+      unavailable.disabled = true;
+      select.add(unavailable, 0);
+    }
+    select.value = selected || preferredEffort;
+    return select.value;
+  }
+
+  private renderNewConversationModelOptions(): void {
+    const hostId = this.$<HTMLSelectElement>('.cw-new-form [name="host"]').value;
+    const modelSelect = this.$<HTMLSelectElement>('.cw-new-form [name="model"]');
+    const effortSelect = this.$<HTMLSelectElement>('.cw-new-form [name="effort"]');
+    if (!hostId) {
+      this.showUnavailableSelect(modelSelect, 'Choose a host');
+      this.showUnavailableSelect(effortSelect, 'Reasoning');
+      this.updateNewConversationButton();
+      return;
+    }
+    const catalog = this.ensureModelCatalog(hostId);
+    if (!catalog) {
+      this.showUnavailableSelect(modelSelect, 'Loading models…');
+      this.showUnavailableSelect(effortSelect, 'Loading…');
+      this.updateNewConversationButton();
+      return;
+    }
+    const previousModel = modelSelect.value;
+    this.populateModelSelect(modelSelect, catalog, previousModel);
+    modelSelect.disabled = catalog.models.length === 0;
+    this.renderNewConversationEffortOptions();
+  }
+
+  private renderNewConversationEffortOptions(): void {
+    const hostId = this.$<HTMLSelectElement>('.cw-new-form [name="host"]').value;
+    const modelId = this.$<HTMLSelectElement>('.cw-new-form [name="model"]').value;
+    const effortSelect = this.$<HTMLSelectElement>('.cw-new-form [name="effort"]');
+    const catalog = this.modelCatalogs.get(hostId);
+    const model = catalog?.models.find((entry) => entry.id === modelId);
+    if (!catalog || !model) {
+      this.showUnavailableSelect(effortSelect, catalog ? 'Reasoning unavailable' : 'Loading…');
+      this.updateNewConversationButton();
+      return;
+    }
+    this.populateEffortSelect(effortSelect, catalog, model, effortSelect.value);
+    effortSelect.disabled = model.supportedReasoningEfforts.length === 0;
+    this.updateNewConversationButton();
+  }
+
+  private updateNewConversationButton(): void {
+    if (!this.state) return;
+    const form = this.$<HTMLFormElement>('.cw-new-form');
+    const hostId = form.querySelector<HTMLSelectElement>('[name="host"]')!.value;
+    const projectId = form.querySelector<HTMLSelectElement>('[name="project"]')!.value;
+    const model = form.querySelector<HTMLSelectElement>('[name="model"]')!;
+    const effort = form.querySelector<HTMLSelectElement>('[name="effort"]')!;
+    form.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled = this.state.creatingConversation
+      || !this.state.selectedPursuitId || !hostId || !projectId || model.disabled || effort.disabled || !model.value || !effort.value;
   }
 
   private renderList(state: ConversationState): void {
@@ -393,6 +589,7 @@ export class ConversationRenderer {
     this.$<HTMLButtonElement>('.cw-stop').textContent = interrupting ? 'Stopping…' : 'Stop';
     this.$<HTMLButtonElement>('.cw-composer button[type="submit"]').disabled = !conversationCanSend(state, conversation);
     this.$<HTMLTextAreaElement>('.cw-composer textarea').disabled = conversation.archived;
+    this.renderConversationModelOptions(conversation);
     const reconnect = this.$<HTMLButtonElement>('.cw-reconnect');
     reconnect.hidden = conversation.status.toLowerCase() !== 'unknown';
     reconnect.disabled = state.loadingConversation || state.reconcilingConversationId === conversation.conversationId;
@@ -402,6 +599,74 @@ export class ConversationRenderer {
       state.pendingRequests.filter((request) => request.conversationId === conversation.conversationId),
       new Set(state.respondingRequestKeys),
     );
+  }
+
+  private renderConversationModelOptions(conversation: NonNullable<ReturnType<typeof currentConversation>>): void {
+    const modelSelect = this.$<HTMLSelectElement>('.cw-composer [name="model"]');
+    const effortSelect = this.$<HTMLSelectElement>('.cw-composer [name="effort"]');
+    const catalog = this.ensureModelCatalog(conversation.hostId);
+    if (!catalog) {
+      this.showUnavailableSelect(modelSelect, conversation.model || 'Loading models…', conversation.model);
+      this.showUnavailableSelect(effortSelect, conversation.reasoningEffort ? reasoningEffortLabel(conversation.reasoningEffort) : 'Loading…', conversation.reasoningEffort);
+      return;
+    }
+    const model = this.populateModelSelect(modelSelect, catalog, conversation.model);
+    if (!model) {
+      this.showUnavailableSelect(effortSelect, conversation.reasoningEffort ? reasoningEffortLabel(conversation.reasoningEffort) : 'Reasoning unavailable', conversation.reasoningEffort);
+    } else {
+      this.populateEffortSelect(effortSelect, catalog, model, conversation.reasoningEffort);
+      effortSelect.disabled = conversation.archived || model.supportedReasoningEfforts.length === 0;
+    }
+    modelSelect.disabled = conversation.archived || catalog.models.length === 0;
+  }
+
+  private renderConversationEffortOptions(): void {
+    if (!this.state) return;
+    const conversation = currentConversation(this.state);
+    if (!conversation) return;
+    const modelSelect = this.$<HTMLSelectElement>('.cw-composer [name="model"]');
+    const effortSelect = this.$<HTMLSelectElement>('.cw-composer [name="effort"]');
+    const catalog = this.modelCatalogs.get(conversation.hostId);
+    const model = catalog?.models.find((entry) => entry.id === modelSelect.value);
+    if (!catalog || !model) {
+      this.showUnavailableSelect(effortSelect, 'Reasoning unavailable');
+      return;
+    }
+    this.populateEffortSelect(effortSelect, catalog, model, effortSelect.value);
+    effortSelect.disabled = conversation.archived || model.supportedReasoningEfforts.length === 0;
+  }
+
+  private submitConversationSettings(): void {
+    if (!this.state) return;
+    const conversation = currentConversation(this.state);
+    if (!conversation || conversation.archived) return;
+    const model = this.$<HTMLSelectElement>('.cw-composer [name="model"]').value;
+    const reasoningEffort = this.$<HTMLSelectElement>('.cw-composer [name="effort"]').value;
+    if (!model || !reasoningEffort || (model === conversation.model && reasoningEffort === conversation.reasoningEffort)) return;
+    this.actions.updateConversationSettings(model, reasoningEffort);
+  }
+
+  setModelCatalog(catalog: ConversationModelCatalog): void {
+    if (!catalog.hostId) return;
+    this.modelCatalogs.set(catalog.hostId, catalog);
+    this.requestedModelCatalogs.delete(catalog.hostId);
+    this.failedModelCatalogs.delete(catalog.hostId);
+    if (this.state) this.render(this.state);
+  }
+
+  releaseModelCatalog(hostId: string): void {
+    this.requestedModelCatalogs.delete(hostId);
+    this.failedModelCatalogs.add(hostId);
+  }
+
+  retryModelCatalogs(): void {
+    this.requestedModelCatalogs.clear();
+    this.failedModelCatalogs.clear();
+  }
+
+  private retryModelCatalog(hostId: string): void {
+    this.requestedModelCatalogs.delete(hostId);
+    this.failedModelCatalogs.delete(hostId);
   }
 
   private renderActivity(events: ConversationEvent[], forceBottom: boolean): void {
@@ -599,9 +864,11 @@ export class ConversationRenderer {
 
   selectHost(hostId: string): void {
     this.pickerTouched = true;
+    this.retryModelCatalog(hostId);
     const select = this.$<HTMLSelectElement>('.cw-new-form [name="host"]');
     select.value = hostId;
     this.renderProjectOptions();
+    this.renderNewConversationModelOptions();
   }
 
   selectProject(projectId: string): void {

@@ -72,6 +72,20 @@ def main() -> int:
                     "result": {"thread": {"id": "thread-1"}, "received": params},
                 }
             )
+        elif method == "model/list":
+            _emit(
+                {
+                    "id": request_id,
+                    "result": {"data": [], "nextCursor": None, "received": params},
+                }
+            )
+        elif method == "config/read":
+            _emit(
+                {
+                    "id": request_id,
+                    "result": {"config": {}, "origins": {}, "received": params},
+                }
+            )
         elif method == "thread/resume":
             _emit(
                 {

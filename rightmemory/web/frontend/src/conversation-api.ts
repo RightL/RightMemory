@@ -1,6 +1,7 @@
 import {
   normalizeConversation,
   normalizeConversationDetail,
+  normalizeModelCatalog,
   normalizePursuitConversationList,
   normalizeEvent,
   normalizeHost,
@@ -9,6 +10,7 @@ import {
   type ConversationDetail,
   type ConversationEvent,
   type ConversationHost,
+  type ConversationModelCatalog,
   type ConversationProject,
   type ConversationSummary,
   type PursuitConversationList,
@@ -55,8 +57,25 @@ export class ConversationApi {
     return normalizePursuitConversationList(responseData(response));
   }
 
-  async createConversation(pursuitId: string, hostId: string, projectId: string): Promise<ConversationSummary> {
-    const response = await this.fetchJson('/api/pursuit-conversations', body({ pursuit_id: pursuitId, host_id: hostId, project_id: projectId }));
+  async modelCatalog(hostId: string): Promise<ConversationModelCatalog> {
+    const response = await this.fetchJson(`/api/conversation-models?host_id=${encoded(hostId)}`);
+    return normalizeModelCatalog(responseData(response));
+  }
+
+  async createConversation(
+    pursuitId: string,
+    hostId: string,
+    projectId: string,
+    model: string,
+    reasoningEffort: string,
+  ): Promise<ConversationSummary> {
+    const response = await this.fetchJson('/api/pursuit-conversations', body({
+      pursuit_id: pursuitId,
+      host_id: hostId,
+      project_id: projectId,
+      model,
+      reasoning_effort: reasoningEffort,
+    }));
     const data = responseData(response);
     const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
     return required(normalizeConversation(record.conversation ?? data), 'The server did not return the new conversation.');
@@ -72,6 +91,13 @@ export class ConversationApi {
     const data = responseData(response);
     const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
     return normalizeConversation(record.conversation);
+  }
+
+  async updateSettings(conversationId: string, model: string, reasoningEffort: string): Promise<ConversationSummary> {
+    const response = await this.fetchJson(`/api/conversations/${encoded(conversationId)}/settings`, body({ model, reasoning_effort: reasoningEffort }));
+    const data = responseData(response);
+    const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
+    return required(normalizeConversation(record.conversation ?? data), 'The server did not return the updated conversation settings.');
   }
 
   async interrupt(conversationId: string): Promise<ConversationSummary | null> {

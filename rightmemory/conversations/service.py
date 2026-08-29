@@ -51,6 +51,18 @@ class AppServerAdapter(Protocol):
 
     def start_thread(self, cwd: str, **optional: Any) -> dict[str, Any]: ...
 
+    def list_models(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int | None = None,
+        include_hidden: bool | None = None,
+    ) -> dict[str, Any]: ...
+
+    def read_config(
+        self, *, cwd: str | None = None, include_layers: bool = False
+    ) -> dict[str, Any]: ...
+
     def resume_thread(self, thread_id: str) -> dict[str, Any]: ...
 
     def archive_thread(self, thread_id: str) -> dict[str, Any]: ...
@@ -245,18 +257,86 @@ class ConversationService:
 
     # Conversation lifecycle -----------------------------------------------
 
+    def model_catalog(self, host_id: str) -> dict[str, Any]:
+        host = self._require_host(host_id)
+        adapter = self._adapter(host)
+        raw_models: list[object] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        try:
+            while True:
+                result = adapter.list_models(cursor=cursor, include_hidden=False)
+                page = result.get("data") if isinstance(result, Mapping) else None
+                if not isinstance(page, list):
+                    raise ConversationError(
+                        "provider_protocol",
+                        "model/list returned an invalid model catalog.",
+                        502,
+                    )
+                raw_models.extend(page)
+                next_cursor = result.get("nextCursor")
+                if next_cursor is None:
+                    break
+                if (
+                    not isinstance(next_cursor, str)
+                    or not next_cursor.strip()
+                    or next_cursor in seen_cursors
+                ):
+                    raise ConversationError(
+                        "provider_protocol",
+                        "model/list returned an invalid pagination cursor.",
+                        502,
+                    )
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
+        except ConversationError:
+            raise
+        except Exception as exc:
+            self._record_provider_failure(host, "listing models", exc)
+
+        config: Mapping[str, Any] | None = None
+        try:
+            result = adapter.read_config()
+            candidate = result.get("config") if isinstance(result, Mapping) else None
+            if not isinstance(candidate, Mapping):
+                raise ConversationError(
+                    "provider_protocol",
+                    "config/read returned an invalid configuration.",
+                    502,
+                )
+            config = candidate
+        except JsonRpcRemoteError as exc:
+            if not _is_unsupported_config_read(exc):
+                self._record_provider_failure(host, "reading configuration", exc)
+        except ConversationError:
+            raise
+        except Exception as exc:
+            self._record_provider_failure(host, "reading configuration", exc)
+        return _normalize_model_catalog(host["host_id"], raw_models, config)
+
     def create_conversation(
         self,
         pursuit_id: str,
         host_id: str = LOCAL_HOST_ID,
         project_id: str = DEFAULT_LOCAL_PROJECT_ID,
+        model: object = None,
+        reasoning_effort: object = None,
     ) -> dict[str, Any]:
         item = self._require_pursuit(pursuit_id)
         host, project = self._require_host_project(host_id, project_id)
+        clean_model = _optional_setting(model, "model")
+        clean_effort = _optional_setting(reasoning_effort, "reasoning_effort")
+        if clean_model is not None or clean_effort is not None:
+            clean_model, clean_effort = _validate_model_settings(
+                clean_model,
+                clean_effort,
+                self.model_catalog(host["host_id"]),
+            )
         cwd = self._validated_project_cwd(host, project["cwd"])
         adapter = self._adapter(host)
+        thread_options = {"model": clean_model} if clean_model is not None else {}
         try:
-            result = adapter.start_thread(cwd=cwd)
+            result = adapter.start_thread(cwd=cwd, **thread_options)
         except Exception as exc:
             self._record_provider_failure(host, "starting a thread", exc)
         thread = _result_object(result, "thread", "thread/start")
@@ -279,6 +359,8 @@ class ConversationService:
                 project_id=project["project_id"],
                 thread_id=thread_id,
                 thread_title=title,
+                model=clean_model,
+                reasoning_effort=clean_effort,
                 status=status,
             )
         except Exception as exc:
@@ -293,6 +375,33 @@ class ConversationService:
             conversation_id=conversation["conversation_id"],
         )
         return {"conversation": self._decorate_conversation(conversation, {item["id"]: item})}
+
+    def update_settings(
+        self,
+        conversation_id: str,
+        model: object = None,
+        reasoning_effort: object = None,
+    ) -> dict[str, Any]:
+        with self._conversation_operation(conversation_id):
+            conversation = self._require_active_conversation(conversation_id)
+            clean_model, clean_effort = _validate_model_settings(
+                _optional_setting(model, "model"),
+                _optional_setting(reasoning_effort, "reasoning_effort"),
+                self.model_catalog(conversation["host_id"]),
+            )
+            # The lock covers only accepted user operations, not the lifetime
+            # of a running turn. A change during a turn remains available and
+            # is serialized before the next send snapshots these values.
+            updated = self.store.update_conversation(
+                conversation_id,
+                model=clean_model,
+                reasoning_effort=clean_effort,
+            )
+            return {
+                "conversation": self._decorate_conversation(
+                    updated, self._pursuit_items()
+                )
+            }
 
     def send_message(self, conversation_id: str, text: str) -> dict[str, Any]:
         with self._conversation_operation(conversation_id):
@@ -352,8 +461,15 @@ class ConversationService:
                 conversation_id=conversation_id,
             )
             state_cursor = self.store.latest_event_id()
+            turn_options = {
+                key: conversation[key]
+                for key in ("model", "reasoning_effort")
+                if conversation.get(key) is not None
+            }
             try:
-                result = adapter.start_turn(conversation["thread_id"], message)
+                result = adapter.start_turn(
+                    conversation["thread_id"], message, **turn_options
+                )
             except Exception as exc:
                 self.store.update_conversation(conversation_id, status="unknown", touch_activity=True)
                 self._append_event(
@@ -1255,7 +1371,12 @@ class ConversationService:
             conversation["host_id"], conversation["project_id"]
         )
         cwd = self._validated_project_cwd(host, project["cwd"])
-        result = adapter.start_thread(cwd=cwd)
+        thread_options = (
+            {"model": conversation["model"]}
+            if conversation.get("model") is not None
+            else {}
+        )
+        result = adapter.start_thread(cwd=cwd, **thread_options)
         thread = _result_object(result, "thread", "thread/start")
         replacement_thread_id = _provider_id(
             thread.get("id"), "thread/start did not return a thread id"
@@ -1665,6 +1786,160 @@ def _production_adapter_factory(host: Mapping[str, Any], **kwargs: Any) -> AppSe
     from .app_server import create_app_server
 
     return create_app_server(host, **kwargs)
+
+
+def _normalize_model_catalog(
+    host_id: str,
+    raw_models: list[object],
+    config: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    models: list[dict[str, Any]] = []
+    aliases: dict[str, str] = {}
+    seen_model_ids: set[str] = set()
+    for raw_model in raw_models:
+        if not isinstance(raw_model, Mapping) or raw_model.get("hidden") is True:
+            continue
+        raw_id = _catalog_string(raw_model.get("id"))
+        model_id = _catalog_string(raw_model.get("model"))
+        if model_id is None or model_id in seen_model_ids:
+            continue
+        seen_model_ids.add(model_id)
+        options: list[dict[str, str]] = []
+        effort_ids: set[str] = set()
+        raw_options = raw_model.get("supportedReasoningEfforts")
+        if isinstance(raw_options, list):
+            for raw_option in raw_options:
+                if not isinstance(raw_option, Mapping):
+                    continue
+                effort = _catalog_string(raw_option.get("reasoningEffort"))
+                if effort is None or effort in effort_ids:
+                    continue
+                description = raw_option.get("description")
+                options.append(
+                    {
+                        "reasoning_effort": effort,
+                        "description": description.strip()
+                        if isinstance(description, str)
+                        else "",
+                    }
+                )
+                effort_ids.add(effort)
+        default_effort = _catalog_string(raw_model.get("defaultReasoningEffort"))
+        if default_effort is not None and default_effort not in effort_ids:
+            options.append(
+                {"reasoning_effort": default_effort, "description": ""}
+            )
+            effort_ids.add(default_effort)
+        if default_effort is None and options:
+            default_effort = options[0]["reasoning_effort"]
+        display_name = _catalog_string(raw_model.get("displayName")) or model_id
+        models.append(
+            {
+                "id": model_id,
+                "display_name": display_name,
+                "default_reasoning_effort": default_effort,
+                "supported_reasoning_efforts": options,
+                "is_default": raw_model.get("isDefault") is True,
+            }
+        )
+        aliases[model_id] = model_id
+        if raw_id is not None:
+            aliases.setdefault(raw_id, model_id)
+
+    configured_model = (
+        _catalog_string(config.get("model")) if config is not None else None
+    )
+    default_model = aliases.get(configured_model) if configured_model is not None else None
+    if default_model is None:
+        default_entry = next(
+            (model for model in models if model["is_default"]),
+            models[0] if models else None,
+        )
+        default_model = default_entry["id"] if default_entry is not None else None
+    selected = next((model for model in models if model["id"] == default_model), None)
+    configured_effort = None
+    if config is not None:
+        configured_effort = _catalog_string(
+            config.get("model_reasoning_effort", config.get("modelReasoningEffort"))
+        )
+    supported = {
+        option["reasoning_effort"]
+        for option in selected["supported_reasoning_efforts"]
+    } if selected is not None else set()
+    default_reasoning_effort = (
+        configured_effort
+        if configured_effort is not None and configured_effort in supported
+        else selected["default_reasoning_effort"] if selected is not None else None
+    )
+    return {
+        "host_id": host_id,
+        "models": models,
+        "default_model": default_model,
+        "default_reasoning_effort": default_reasoning_effort,
+    }
+
+
+def _validate_model_settings(
+    model: str | None,
+    reasoning_effort: str | None,
+    catalog: Mapping[str, Any],
+) -> tuple[str | None, str | None]:
+    raw_models = catalog.get("models")
+    models: dict[str, Mapping[str, Any]] = {}
+    if isinstance(raw_models, list):
+        for item in raw_models:
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str):
+                models[item["id"]] = item
+    if model is not None and model not in models:
+        raise ConversationError(
+            "invalid_model", "The selected model is not available on this host.", 422
+        )
+    effective_model = model or catalog.get("default_model")
+    selected = models.get(effective_model) if isinstance(effective_model, str) else None
+    if reasoning_effort is not None:
+        options = selected.get("supported_reasoning_efforts") if selected is not None else None
+        supported: set[object] = set()
+        if isinstance(options, list):
+            supported = {
+                option.get("reasoning_effort")
+                for option in options
+                if isinstance(option, Mapping)
+            }
+        if reasoning_effort not in supported:
+            raise ConversationError(
+                "invalid_reasoning_effort",
+                "The selected reasoning effort is not supported by this model.",
+                422,
+            )
+    return model, reasoning_effort
+
+
+def _optional_setting(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    code = "invalid_model" if field == "model" else "invalid_reasoning_effort"
+    if not isinstance(value, str):
+        raise ConversationError(code, f"{field} must be a string or null.", 422)
+    clean = value.strip()
+    if not clean or len(clean) > 512 or any(character in clean for character in "\x00\r\n"):
+        raise ConversationError(code, f"{field} must be a bounded non-empty string or null.", 422)
+    return clean
+
+
+def _catalog_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    clean = value.strip()
+    return clean if clean else None
+
+
+def _is_unsupported_config_read(error: JsonRpcRemoteError) -> bool:
+    if error.code == -32601:
+        return True
+    message = str(error).lower()
+    return error.code == -32600 and any(
+        marker in message for marker in ("method not found", "unknown method", "unsupported")
+    )
 
 
 def _result_object(result: object, key: str, operation: str) -> dict[str, Any]:
