@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -136,6 +137,87 @@ class ConversationStoreTests(unittest.TestCase):
 
             self.assertNotEqual(first["conversation_id"], second["conversation_id"])
             self.assertEqual(store.find_conversation("gpu", "thread-shared"), second)
+
+    def test_unstarted_thread_rebind_is_stable_and_rejects_turn_history(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = ConversationStore(Path(tempdir))
+            conversation = self._create_local_conversation(store)
+
+            rebound = store.rebind_unstarted_thread(
+                conversation["conversation_id"],
+                expected_thread_id=conversation["thread_id"],
+                replacement_thread_id="replacement-thread",
+                thread_title="Replacement",
+            )
+
+            self.assertEqual(rebound["conversation_id"], conversation["conversation_id"])
+            self.assertEqual(rebound["thread_id"], "replacement-thread")
+            self.assertEqual(rebound["thread_title"], "Replacement")
+            self.assertIsNone(
+                store.find_conversation("local", conversation["thread_id"])
+            )
+            self.assertEqual(
+                store.find_conversation("local", "replacement-thread"), rebound
+            )
+            store.append_event(
+                conversation_id=conversation["conversation_id"],
+                turn_id="turn-1",
+                kind="turn.started",
+                payload={"turn": {"id": "turn-1"}},
+            )
+            self.assertTrue(store.has_turn_evidence(conversation["conversation_id"]))
+
+            with self.assertRaises(ConversationError) as caught:
+                store.rebind_unstarted_thread(
+                    conversation["conversation_id"],
+                    expected_thread_id="replacement-thread",
+                    replacement_thread_id="unsafe-thread",
+                )
+
+            self.assertEqual(
+                caught.exception.code, "conversation_has_turn_history"
+            )
+            persisted = store.get_conversation(conversation["conversation_id"])
+            assert persisted is not None
+            self.assertEqual(persisted["thread_id"], "replacement-thread")
+            self.assertIsNone(store.find_conversation("local", "unsafe-thread"))
+
+    def test_concurrent_stores_compare_and_swap_unstarted_thread_once(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            first = ConversationStore(root)
+            conversation = self._create_local_conversation(first)
+            second = ConversationStore(root)
+            second.initialize()
+            barrier = threading.Barrier(2)
+
+            def replace(store: ConversationStore, thread_id: str) -> str:
+                barrier.wait(timeout=3)
+                try:
+                    store.rebind_unstarted_thread(
+                        conversation["conversation_id"],
+                        expected_thread_id=conversation["thread_id"],
+                        replacement_thread_id=thread_id,
+                    )
+                except ConversationError as exc:
+                    return exc.code
+                return "rebound"
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                outcomes = [
+                    future.result(timeout=5)
+                    for future in (
+                        executor.submit(replace, first, "replacement-one"),
+                        executor.submit(replace, second, "replacement-two"),
+                    )
+                ]
+
+            self.assertCountEqual(outcomes, ["rebound", "thread_changed"])
+            persisted = first.get_conversation(conversation["conversation_id"])
+            assert persisted is not None
+            self.assertIn(
+                persisted["thread_id"], {"replacement-one", "replacement-two"}
+            )
 
     def test_host_runtime_details_are_json_safe_and_multiline_errors_survive(self):
         with tempfile.TemporaryDirectory() as tempdir:

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from rightmemory.conversations.jsonrpc import JsonRpcRemoteError
 from rightmemory.conversations.models import ConversationError
 from rightmemory.conversations.service import ConversationRuntimeRegistry, ConversationService
 
@@ -40,6 +41,7 @@ class _FakeAdapter:
         self.responses: list[tuple[Any, dict[str, Any], str | None]] = []
         self.thread_count = 0
         self.turn_count = 0
+        self.unmaterialized_threads: set[str] = set()
         self.closed = False
 
     def connect(self) -> dict[str, Any]:
@@ -62,10 +64,15 @@ class _FakeAdapter:
             "status": {"type": "idle"},
         }
         self.calls.append(("start_thread", cwd, optional))
+        self.unmaterialized_threads.add(thread["id"])
         return {"thread": thread}
 
     def resume_thread(self, thread_id: str) -> dict[str, Any]:
         self.calls.append(("resume_thread", thread_id))
+        if thread_id in self.unmaterialized_threads:
+            raise JsonRpcRemoteError(
+                -32600, f"no rollout found for thread id {thread_id}"
+            )
         return {"thread": {"id": thread_id, "status": {"type": "idle"}}}
 
     def archive_thread(self, thread_id: str) -> dict[str, Any]:
@@ -76,6 +83,7 @@ class _FakeAdapter:
         self.turn_count += 1
         turn = {"id": f"turn-{self.turn_count}", "status": "inProgress"}
         self.calls.append(("start_turn", thread_id, text, optional))
+        self.unmaterialized_threads.discard(thread_id)
         self.emit_notification(
             "turn/started", {"threadId": thread_id, "turn": turn}
         )
@@ -176,18 +184,139 @@ class ConversationServiceTests(unittest.TestCase):
             self.pursuit_stores[str(self.root)].root_key,
         )
 
-    def test_message_resumes_thread_and_keeps_durable_event_order(self):
+    def test_first_message_uses_resident_fresh_thread_and_keeps_event_order(self):
         conversation = self._create()
         result = self.service.send_message(conversation["conversation_id"], "Hello Codex")
         self.assertEqual(result["turn"]["id"], "turn-1")
         self.assertEqual(result["conversation"]["active_turn_id"], "turn-1")
         self.assertEqual(result["conversation"]["status"], "running")
         calls = [call[0] for call in self.adapter.calls]
-        self.assertLess(calls.index("resume_thread"), calls.index("start_turn"))
+        self.assertNotIn("resume_thread", calls)
+        self.assertIn("start_turn", calls)
         events = self.service.detail(conversation["conversation_id"])["events"]
         kinds = [event["kind"] for event in events]
         self.assertEqual(kinds[:3], ["thread.started", "user.message", "turn.started"])
         self.assertEqual(events[1]["payload"]["text"], "Hello Codex")
+
+    def test_new_adapter_epoch_resumes_persisted_thread_before_next_turn(self):
+        conversation = self._create()
+        self.service.send_message(conversation["conversation_id"], "First")
+        self.adapter.emit_notification(
+            "turn/completed",
+            {
+                "threadId": conversation["thread_id"],
+                "turn": {"id": "turn-1", "status": "completed"},
+            },
+        )
+        old_adapter = self.adapter
+        old_adapter.disconnect(RuntimeError("connection changed"))
+        self.service.probe_host("local")
+        self.adapter.turn_count = 1
+
+        result = self.service.send_message(conversation["conversation_id"], "Second")
+
+        self.assertIsNot(self.adapter, old_adapter)
+        calls = [call[0] for call in self.adapter.calls]
+        self.assertLess(calls.index("resume_thread"), calls.index("start_turn"))
+        self.assertEqual(result["conversation"]["status"], "running")
+
+    def test_new_epoch_replaces_an_unmaterialized_thread_before_first_send(self):
+        conversation = self._create()
+        old_thread_id = conversation["thread_id"]
+        old_adapter = self.adapter
+        old_adapter.disconnect(RuntimeError("connection changed"))
+        self.service.probe_host("local")
+        self.adapter.thread_count = 1
+        self.adapter.unmaterialized_threads.add(old_thread_id)
+
+        result = self.service.send_message(conversation["conversation_id"], "First")
+
+        self.assertIsNot(self.adapter, old_adapter)
+        replacement_thread_id = result["conversation"]["thread_id"]
+        self.assertEqual(replacement_thread_id, "thread-2")
+        self.assertNotEqual(replacement_thread_id, old_thread_id)
+        self.assertIsNone(self.service.store.find_conversation("local", old_thread_id))
+        calls = self.adapter.calls
+        self.assertIn(("resume_thread", old_thread_id), calls)
+        self.assertEqual(
+            [call[:3] for call in calls if call[0] == "start_turn"],
+            [("start_turn", replacement_thread_id, "First")],
+        )
+        events = self.service.detail(conversation["conversation_id"])["events"]
+        self.assertEqual(
+            [event["kind"] for event in events],
+            ["thread.started", "thread.replaced", "user.message", "turn.started"],
+        )
+        self.assertEqual(
+            sum(event["kind"] == "user.message" for event in events), 1
+        )
+        self.assertEqual(
+            events[1]["payload"]["previous_thread_id"], old_thread_id
+        )
+        self.assertEqual(
+            events[1]["payload"]["thread"]["id"], replacement_thread_id
+        )
+
+    def test_missing_rollout_is_not_recovered_after_turn_evidence(self):
+        conversation = self._create()
+        old_thread_id = conversation["thread_id"]
+        self.service.store.append_event(
+            kind="turn.started",
+            payload={"turn": {"id": "accepted-turn"}},
+            conversation_id=conversation["conversation_id"],
+            turn_id="accepted-turn",
+        )
+        self.adapter.disconnect(RuntimeError("connection changed"))
+        self.service.probe_host("local")
+        self.adapter.unmaterialized_threads.add(old_thread_id)
+
+        with self.assertRaises(ConversationError) as caught:
+            self.service.send_message(conversation["conversation_id"], "Unsafe")
+
+        self.assertEqual(caught.exception.code, "provider_unavailable")
+        self.assertNotIn("start_thread", [call[0] for call in self.adapter.calls])
+        persisted = self.service.store.get_conversation(conversation["conversation_id"])
+        assert persisted is not None
+        self.assertEqual(persisted["thread_id"], old_thread_id)
+        events = self.service.detail(conversation["conversation_id"])["events"]
+        self.assertEqual(events[-1]["kind"], "protocol.error")
+        self.assertEqual(events[-1]["payload"]["operation"], "thread/resume")
+        self.assertNotIn("user.message", [event["kind"] for event in events])
+
+    def test_create_fails_if_connection_epoch_changes_before_residency_mark(self):
+        original = self.service._mark_thread_resident
+        self.service._mark_thread_resident = lambda *args: False
+        try:
+            with self.assertRaises(ConversationError) as caught:
+                self._create()
+        finally:
+            self.service._mark_thread_resident = original
+
+        self.assertEqual(caught.exception.code, "provider_unavailable")
+        self.assertEqual(self.service.store.list_conversations(), [])
+        self.assertEqual(self.service.store.read_events(), [])
+
+    def test_resume_failure_is_labeled_and_does_not_persist_unsent_message(self):
+        conversation = self._create()
+        self.adapter.disconnect(RuntimeError("connection changed"))
+        self.service.probe_host("local")
+
+        def failing_resume(thread_id: str) -> dict[str, Any]:
+            self.adapter.calls.append(("resume_thread", thread_id))
+            raise RuntimeError("resume failed")
+
+        self.adapter.resume_thread = failing_resume
+        with self.assertRaises(ConversationError) as caught:
+            self.service.send_message(conversation["conversation_id"], "Not sent")
+
+        self.assertEqual(caught.exception.code, "provider_unavailable")
+        events = self.service.detail(conversation["conversation_id"])["events"]
+        self.assertEqual(
+            [event["kind"] for event in events],
+            ["thread.started", "protocol.error"],
+        )
+        self.assertEqual(events[-1]["payload"]["operation"], "thread/resume")
+        self.assertNotIn("start_turn", [call[0] for call in self.adapter.calls])
 
     def test_completion_callback_before_turn_start_returns_is_not_overwritten(self):
         conversation = self._create()
@@ -1032,6 +1161,60 @@ class ConversationServiceTests(unittest.TestCase):
             for event in self.service.detail(conversation["conversation_id"])["events"]
         ]
         self.assertIn("thread.reconciled", kinds)
+
+    def test_reconcile_replaces_legacy_wedged_zero_turn_thread(self):
+        conversation = self._create()
+        old_thread_id = conversation["thread_id"]
+        self.service.store.append_event(
+            kind="user.message",
+            payload={"text": "Legacy unsent message"},
+            conversation_id=conversation["conversation_id"],
+        )
+        self.service.store.append_event(
+            kind="protocol.error",
+            payload={
+                "operation": "turn/start",
+                "message": f"no rollout found for thread id {old_thread_id}",
+            },
+            conversation_id=conversation["conversation_id"],
+        )
+        self.service.store.update_conversation(
+            conversation["conversation_id"], status="unknown", touch_activity=True
+        )
+        old_adapter = self.adapter
+        old_adapter.disconnect(RuntimeError("connection changed"))
+        self.service.probe_host("local")
+        self.adapter.thread_count = 1
+        self.adapter.unmaterialized_threads.add(old_thread_id)
+
+        result = self.service.reconcile(conversation["conversation_id"])
+
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["conversation"]["status"], "idle")
+        self.assertIsNone(result["conversation"]["active_turn_id"])
+        self.assertEqual(result["conversation"]["thread_id"], "thread-2")
+        self.assertEqual(result["thread"]["id"], "thread-2")
+        self.assertIsNone(self.service.store.find_conversation("local", old_thread_id))
+        self.assertIn(("resume_thread", old_thread_id), self.adapter.calls)
+        self.assertNotIn("start_turn", [call[0] for call in self.adapter.calls])
+        events = self.service.detail(conversation["conversation_id"])["events"]
+        self.assertEqual(
+            [event["kind"] for event in events],
+            ["thread.started", "user.message", "protocol.error", "thread.replaced"],
+        )
+        self.assertEqual(events[1]["payload"]["text"], "Legacy unsent message")
+
+        calls_after_recovery = list(self.adapter.calls)
+        repeated = self.service.reconcile(conversation["conversation_id"])
+        self.assertTrue(repeated["resolved"])
+        self.assertEqual(repeated["conversation"]["thread_id"], "thread-2")
+        self.assertEqual(repeated["thread"]["id"], "thread-2")
+        self.assertEqual(self.adapter.calls, calls_after_recovery)
+        repeated_events = self.service.detail(conversation["conversation_id"])["events"]
+        self.assertEqual(
+            sum(event["kind"] == "thread.replaced" for event in repeated_events),
+            1,
+        )
 
     def test_reconcile_preserves_turn_fence_for_unknown_provider_state(self):
         conversation = self._create()

@@ -430,6 +430,110 @@ class ConversationStore:
             row = self._get_conversation_row(connection, clean_id)
         return _conversation_dict(row)
 
+    def has_turn_evidence(self, conversation_id: str) -> bool:
+        clean_id = _id(conversation_id, "conversation_id")
+        with self._connect() as connection:
+            current = self._get_conversation_row(connection, clean_id)
+            if current["active_turn_id"] is not None:
+                return True
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM conversation_events
+                WHERE conversation_id = ?
+                  AND (turn_id IS NOT NULL OR kind GLOB 'turn.*')
+                LIMIT 1
+                """,
+                (clean_id,),
+            ).fetchone()
+        return row is not None
+
+    def rebind_unstarted_thread(
+        self,
+        conversation_id: str,
+        *,
+        expected_thread_id: str,
+        replacement_thread_id: str,
+        thread_title: str | None = None,
+    ) -> dict[str, Any]:
+        """Replace a provider thread only before any turn was accepted."""
+        clean_id = _id(conversation_id, "conversation_id")
+        clean_expected = _id(expected_thread_id, "expected_thread_id")
+        clean_replacement = _id(replacement_thread_id, "replacement_thread_id")
+        clean_title = _optional_text(thread_title, "thread_title", 500)
+        now = _now_iso()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._get_conversation_row(connection, clean_id)
+            if current["thread_id"] != clean_expected:
+                raise ConversationError(
+                    "thread_changed",
+                    "The conversation provider thread changed before it could be replaced.",
+                    409,
+                )
+            turn_evidence = connection.execute(
+                """
+                SELECT 1
+                FROM conversation_events
+                WHERE conversation_id = ?
+                  AND (turn_id IS NOT NULL OR kind GLOB 'turn.*')
+                LIMIT 1
+                """,
+                (clean_id,),
+            ).fetchone()
+            if current["active_turn_id"] is not None or turn_evidence is not None:
+                raise ConversationError(
+                    "conversation_has_turn_history",
+                    "A conversation with accepted turn history cannot change provider threads.",
+                    409,
+                )
+            conflict = connection.execute(
+                """
+                SELECT conversation_id
+                FROM pursuit_conversations
+                WHERE host_id = ? AND thread_id = ? AND conversation_id != ?
+                """,
+                (current["host_id"], clean_replacement, clean_id),
+            ).fetchone()
+            if conflict is not None:
+                raise ConversationError(
+                    "thread_already_attached",
+                    "That provider thread is already attached on this host.",
+                    409,
+                )
+            cursor = connection.execute(
+                """
+                UPDATE pursuit_conversations
+                SET thread_id = ?, thread_title = ?, updated_at = ?, last_activity_at = ?
+                WHERE conversation_id = ?
+                  AND thread_id = ?
+                  AND active_turn_id IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM conversation_events
+                      WHERE conversation_id = ?
+                        AND (turn_id IS NOT NULL OR kind GLOB 'turn.*')
+                  )
+                """,
+                (
+                    clean_replacement,
+                    clean_title,
+                    now,
+                    now,
+                    clean_id,
+                    clean_expected,
+                    clean_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ConversationError(
+                    "thread_changed",
+                    "The conversation provider thread changed before it could be replaced.",
+                    409,
+                )
+            row = self._get_conversation_row(connection, clean_id)
+        return _conversation_dict(row)
+
     def archive_conversation(self, conversation_id: str) -> dict[str, Any]:
         return self.update_conversation(
             conversation_id,
