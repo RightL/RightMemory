@@ -107,7 +107,7 @@ Read-only retrieval and approval-gated orchestration remain optional source skil
 
 Open the visual map with `rightmemory pursuit`. It starts or reuses the existing Web Studio; sign in and select the intended root before editing. See [Pursuit Map](docs/PURSUIT_MAP.md) for the editor and its safety boundaries.
 
-The same view can attach a Codex conversation to the selected Pursuit. RightMemory owns the attachment plus its local or SSH host and working-directory project, while Codex App Server owns the thread, turns, streamed items, approvals, and interruption. Conversation state is operational data under the active root's `.runtime/web/` directory; it does not add progress fields or execution semantics to Pursuit Markdown.
+The same view can attach a Codex conversation to the selected Pursuit. RightMemory owns the attachment plus its local or SSH host and working-directory project, while Codex App Server owns the thread, turns, streamed items, approvals, and interruption. The conversation pane supports per-message model and reasoning choices, phase-aware commentary that folds after the final answer, and sanitized Markdown and TeX rendering. Conversation state is operational data under the active root's `.runtime/web/` directory; it does not add progress fields or execution semantics to Pursuit Markdown.
 
 Then start the background manager. It reviews idle agent sessions, evaluates prune generations, runs Dreamer consolidation, and produces Insight reflections when enough work has accumulated:
 

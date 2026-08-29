@@ -7,6 +7,7 @@ import { parseWholeTitleFormat, titleText, toggleWholeTitleMark, type TopicMark 
 import { keyboardCommand, navigate, readView, reconcileView, reveal, writeView, type ViewState } from './view-state.ts';
 import { ConversationWorkspace } from './conversation-workspace.ts';
 import type { FetchJson } from './conversation-api.ts';
+import 'katex/dist/katex.min.css';
 import './pursuit-map.css';
 
 export function apiTransport(fetchJson: FetchJson): Transport {

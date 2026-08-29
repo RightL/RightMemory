@@ -10,6 +10,7 @@ import {
   type ConversationState,
   type PendingRequest,
 } from './conversation-state.ts';
+import { RICH_TEXT_CACHE_LIMIT, renderRichText } from './rich-text.ts';
 
 export interface ConversationRendererActions {
   toggleCollapsed(): void;
@@ -173,11 +174,115 @@ function modelDefaultEffort(catalog: ConversationModelCatalog, model: Conversati
   return candidates.find((effort) => effort && supported.has(effort)) ?? '';
 }
 
+type AgentMessagePhase = 'commentary' | 'final_answer' | 'unknown';
+
+function agentMessagePhase(payload: Record<string, unknown>, item: Record<string, unknown>): AgentMessagePhase {
+  const phase = canonicalKind(textValue(item.phase ?? payload.phase));
+  if (phase === 'commentary') return 'commentary';
+  if (phase === 'final_answer') return 'final_answer';
+  return 'unknown';
+}
+
 function activityNodes(events: ConversationEvent[]): HTMLElement[] {
   const nodes: HTMLElement[] = [];
-  type MessageNode = { role: 'user' | 'agent'; turnId: string | null; text: HTMLElement; node: HTMLElement };
+  type MessageNode = {
+    role: 'user' | 'agent';
+    turnId: string | null;
+    itemId: string;
+    phase: AgentMessagePhase;
+    source: string;
+    completed: boolean;
+    label: HTMLElement;
+    content: HTMLElement;
+    node: HTMLElement;
+  };
+  type CommentaryGroup = { node: HTMLDetailsElement; body: HTMLElement; summary: HTMLElement };
   let merge: MessageNode | null = null;
   const messagesByItemId = new Map<string, MessageNode>();
+  const messageNodes = new Set<MessageNode>();
+  const commentaryGroups = new Map<string, CommentaryGroup>();
+  const turnsWithFinalAnswer = new Set<string>();
+
+  const turnKey = (turnId: string | null): string => turnId ?? '__without_turn__';
+
+  const commentaryGroup = (turnId: string | null): CommentaryGroup => {
+    const key = turnKey(turnId);
+    const existing = commentaryGroups.get(key);
+    if (existing) return existing;
+    const node = element('details', 'cw-commentary-group');
+    const summary = appendText(node, 'summary', turnsWithFinalAnswer.has(key) ? 'Work details' : 'Working…');
+    const body = element('div', 'cw-commentary-items');
+    node.append(body);
+    node.open = !turnsWithFinalAnswer.has(key);
+    const group = { node, body, summary };
+    commentaryGroups.set(key, group);
+    nodes.push(node);
+    return group;
+  };
+
+  const markFinalAnswer = (turnId: string | null): void => {
+    const key = turnKey(turnId);
+    turnsWithFinalAnswer.add(key);
+    const group = commentaryGroups.get(key);
+    if (!group) return;
+    group.summary.textContent = 'Work details';
+    group.node.open = false;
+  };
+
+  const placeMessage = (message: MessageNode): void => {
+    const topLevelIndex = nodes.indexOf(message.node);
+    if (message.role === 'agent' && message.phase === 'commentary') {
+      if (topLevelIndex >= 0) nodes.splice(topLevelIndex, 1);
+      commentaryGroup(message.turnId).body.append(message.node);
+      return;
+    }
+    if (message.node.parentElement?.classList.contains('cw-commentary-items')) message.node.remove();
+    if (topLevelIndex < 0) nodes.push(message.node);
+  };
+
+  const presentMessage = (message: MessageNode): void => {
+    message.node.classList.toggle('cw-commentary', message.role === 'agent' && message.phase === 'commentary');
+    message.node.classList.toggle('cw-final-answer', message.role === 'agent' && message.phase === 'final_answer');
+    message.label.textContent = message.role === 'user'
+      ? 'YOU'
+      : message.phase === 'commentary'
+        ? 'UPDATE'
+        : message.phase === 'final_answer'
+          ? 'ANSWER'
+          : 'AGENT';
+    message.node.hidden = !message.source;
+  };
+
+  const createMessage = (
+    role: 'user' | 'agent',
+    turnId: string | null,
+    itemId: string,
+    phase: AgentMessagePhase,
+    source: string,
+    completed: boolean,
+  ): MessageNode => {
+    const node = element('article', `cw-message cw-${role}`);
+    const label = appendText(node, 'small', '');
+    const content = element('div', 'cw-message-text');
+    node.append(content);
+    const message = { role, turnId, itemId, phase, source, completed, label, content, node };
+    messageNodes.add(message);
+    presentMessage(message);
+    placeMessage(message);
+    if (role === 'agent' && phase === 'final_answer' && completed) markFinalAnswer(turnId);
+    return message;
+  };
+
+  const updateMessage = (message: MessageNode, text: string, delta: boolean, phase: AgentMessagePhase, completed: boolean): void => {
+    const previousPhase = message.phase;
+    if (message.role === 'agent' && phase !== 'unknown') message.phase = phase;
+    if (completed) message.completed = true;
+    if (text) message.source = delta ? `${message.source}${text}` : text;
+    presentMessage(message);
+    if (message.phase !== previousPhase) placeMessage(message);
+    if (message.role === 'agent' && message.phase === 'final_answer' && completed) markFinalAnswer(message.turnId);
+  };
+
   for (const event of events) {
     const { payload, item, itemId, kind } = payloadParts(event);
     const roleValue = textValue(item.role ?? payload.role).toLowerCase();
@@ -187,33 +292,39 @@ function activityNodes(events: ConversationEvent[]): HTMLElement[] {
       const role = isUser ? 'user' : 'agent';
       const text = eventText(payload, item);
       const delta = kind.includes('delta');
+      const completed = !delta && kind.includes('completed');
+      const phase = role === 'agent' ? agentMessagePhase(payload, item) : 'unknown';
       const identified = itemId ? messagesByItemId.get(itemId) : null;
-      if (!text && !identified) continue;
       if (identified && identified.role === role) {
-        identified.text.textContent = delta
-          ? `${identified.text.textContent ?? ''}${text}`
-          : text || identified.text.textContent;
+        updateMessage(identified, text, delta, phase, completed);
         merge = identified;
         continue;
       }
-      if (merge && merge.role === role && merge.turnId === event.turnId && delta) {
-        merge.text.textContent = `${merge.text.textContent ?? ''}${text}`;
-        continue;
-      }
-      if (merge && merge.role === role && merge.turnId === event.turnId && !delta && text && text.startsWith(merge.text.textContent ?? '')) {
-        merge.text.textContent = text;
-        continue;
-      }
-      if (merge && role === 'user' && merge.role === role && text && text === merge.text.textContent && (!merge.turnId || !event.turnId)) {
+      if (merge && role === 'user' && merge.role === role && text && text === merge.source && (!merge.turnId || !event.turnId)) {
         merge.turnId = event.turnId ?? merge.turnId;
+        if (completed) merge.completed = true;
+        if (itemId) {
+          merge.itemId = itemId;
+          messagesByItemId.set(itemId, merge);
+        }
         continue;
       }
-      const node: HTMLElement = element('article', `cw-message cw-${role}`);
-      appendText(node, 'small', role === 'user' ? 'YOU' : 'AGENT');
-      const content = appendText(node, 'div', text || '(empty message)', 'cw-message-text');
-      nodes.push(node);
-      merge = { role, turnId: event.turnId, text: content, node };
-      if (itemId) messagesByItemId.set(itemId, merge);
+      if (itemId) {
+        merge = createMessage(role, event.turnId, itemId, phase, text, completed);
+        messagesByItemId.set(itemId, merge);
+        continue;
+      }
+      const phaseCompatible = role !== 'agent' || phase === 'unknown' || merge?.phase === 'unknown' || merge?.phase === phase;
+      if (merge && merge.role === role && merge.turnId === event.turnId && phaseCompatible && delta) {
+        updateMessage(merge, text, true, phase, false);
+        continue;
+      }
+      if (merge && merge.role === role && merge.turnId === event.turnId && phaseCompatible && !delta && text && text.startsWith(merge.source)) {
+        updateMessage(merge, text, false, phase, completed);
+        continue;
+      }
+      if (!text) continue;
+      merge = createMessage(role, event.turnId, '', phase, text, completed);
       continue;
     }
     if (hiddenOperationalEvent(kind)) continue;
@@ -264,6 +375,12 @@ function activityNodes(events: ConversationEvent[]): HTMLElement[] {
       nodes.push(node);
       continue;
     }
+  }
+  const visibleMessages = [...messageNodes].filter((message) => message.source);
+  const stableMessages = visibleMessages.filter((message) => message.completed);
+  const cacheableMessages = new Set(stableMessages.slice(-RICH_TEXT_CACHE_LIMIT));
+  for (const message of visibleMessages) {
+    renderRichText(message.content, message.source, cacheableMessages.has(message));
   }
   return nodes;
 }
