@@ -8,11 +8,11 @@ The Pursuit map is a visual editor for directions you want to keep visible. A no
 rightmemory pursuit
 ```
 
-This starts or reuses the existing Web Studio and opens its Pursuit Map view. Use `rightmemory pursuit --no-open` to print the address without opening a browser, or `rightmemory --profile <name> pursuit` for a named profile. The command does not create a separate service or a second authentication system.
+This starts or reuses the existing Web Studio and opens its Pursuit Map view. Use `rightmemory pursuit --no-open` to print the address without opening a browser, or `rightmemory --profile <name> pursuit` for a named profile. The command does not create a separate service.
 
-Web Studio listens on loopback by default, so another device cannot reach it. For use on a trusted network, explicitly restart it on a reachable interface, for example `rightmemory web restart --host 0.0.0.0 --port 8766`, then open that machine's network address and sign in normally. Exposing the listener also exposes the authenticated Web Studio service, so keep it behind an appropriate trusted network or TLS proxy.
+Web Studio accepts loopback hosts only, so another device cannot reach it directly. Opening the page automatically creates a signed local browser session and enables request protection without asking for a credential. The session keeps active-root selection and temporary conversation ownership separate between browsers; it is not remote-access authentication.
 
-Sign in with the Web Studio operator token and check the active root before editing. A newly generated token is printed by the launch command; an existing service keeps its existing token and sessions. The map uses that authenticated session's selected root. Starting the service or opening the map does not rewrite Pursuit files.
+Check the active root before editing. The map uses the current browser session's selected root. Starting the service or opening the map does not rewrite Pursuit files.
 
 ## Work Beside A Direction
 
@@ -30,7 +30,7 @@ RightMemory starts its own Codex App Server connection and keeps the Pursuit, ho
 
 Live conversation continuity across browsers or devices means that they are connected to the same Web Studio process and active root. A separately running Web Studio on another Git-synchronized device has its own root-local `.runtime` conversation database and attachment files; Git synchronization does not merge those operational conversations.
 
-SSH hosts are saved by their configured alias. The remote machine must already be reachable through non-interactive OpenSSH and provide `codex app-server` on the remote command path. Attachment transfer additionally requires `python3` on that path; without it, messages that have no attachments still work, while an attached send fails before its turn starts and leaves the local staged input available to retry or remove. Remote-file cleanup is best effort, so an unreachable host or missing `python3` can leave a file in `~/.cache/rightmemory/attachments/`. The browser never opens a direct Codex or SSH connection; the authenticated Web Studio backend owns those processes.
+SSH hosts are saved by their configured alias. The remote machine must already be reachable through non-interactive OpenSSH and provide `codex app-server` on the remote command path. Attachment transfer additionally requires `python3` on that path; without it, messages that have no attachments still work, while an attached send fails before its turn starts and leaves the local staged input available to retry or remove. Remote-file cleanup is best effort, so an unreachable host or missing `python3` can leave a file in `~/.cache/rightmemory/attachments/`. The browser never opens a direct Codex or SSH connection; the local Web Studio backend owns those processes.
 
 ## Edit On The Canvas
 
@@ -132,10 +132,10 @@ Both install modes include `maintain-pursuit-map` alongside `maintain-rightmemor
 | Existing Web service and map routes | [web/app.py](../rightmemory/web/app.py), [web/service.py](../rightmemory/web/service.py) |
 | Browser source and static build | [web/frontend](../rightmemory/web/frontend/), [web/static](../rightmemory/web/static/) |
 | Conversation runtime and operational store | [conversations](../rightmemory/conversations/) |
-| Authenticated conversation routes | [conversation_routes.py](../rightmemory/web/conversation_routes.py) |
+| Session-scoped conversation routes | [conversation_routes.py](../rightmemory/web/conversation_routes.py) |
 | Direct agent editing | [maintain-pursuit-map](../skills/maintain-pursuit-map/SKILL.md) |
 
-The internal API is `GET /api/pursuit-map`, `POST /api/pursuit-map/operations`, and the corresponding `/undo` and `/redo` endpoints. Mutations use the existing authenticated session, active-root selection, and CSRF protection. A revision conflict returns HTTP `409` with a fresh snapshot. These routes serve the editor; there is no public create/edit/move command family or task-execution API.
+The internal API is `GET /api/pursuit-map`, `POST /api/pursuit-map/operations`, and the corresponding `/undo` and `/redo` endpoints. Mutations use the current browser session, active-root selection, and CSRF protection. A revision conflict returns HTTP `409` with a fresh snapshot. These routes serve the editor; there is no public create/edit/move command family or task-execution API.
 
 For frontend changes, install locked dependencies and run the focused checks from `rightmemory/web/frontend`:
 

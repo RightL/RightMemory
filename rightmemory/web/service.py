@@ -58,14 +58,11 @@ class WebStudioService:
         self.memory_root = Path(memory_root).expanduser().resolve()
         self.allowed_root = Path(allowed_root).expanduser().resolve() if allowed_root is not None else self.memory_root
 
-    def session_data(self, *, authenticated: bool, csrf_token: str | None = None) -> dict[str, Any]:
+    def session_data(self, *, csrf_token: str) -> dict[str, Any]:
         data: dict[str, Any] = {
-            "authenticated": authenticated,
+            "active_root": str(self.memory_root),
+            "csrf_token": csrf_token,
         }
-        if authenticated:
-            data["active_root"] = str(self.memory_root)
-        if csrf_token:
-            data["csrf_token"] = csrf_token
         return data
 
     def overview(self) -> dict[str, Any]:

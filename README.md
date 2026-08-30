@@ -105,7 +105,7 @@ Read the RightMemory MCP tool instructions, then automatically use the RightMemo
 
 Read-only retrieval and approval-gated orchestration remain optional source skills. Choose one ordinary orchestration variant for a conversation; the independent maintenance skills are available alongside that choice. The shared schema and focused rule documents define valid state, while client skills define access and maintenance workflows.
 
-Open the visual map with `rightmemory pursuit`. It starts or reuses the existing Web Studio; sign in and select the intended root before editing. See [Pursuit Map](docs/PURSUIT_MAP.md) for the editor and its safety boundaries.
+Open the visual map with `rightmemory pursuit`. It starts or reuses the existing Web Studio and opens an automatic local browser session; check the intended root before editing. See [Pursuit Map](docs/PURSUIT_MAP.md) for the editor and its safety boundaries.
 
 The same view can attach a Codex conversation to the selected Pursuit. This workspace connects directly to Codex App Server; it does not run conversation turns through the Codex SDK. RightMemory owns the attachment plus its local or SSH host and working-directory project, while App Server owns the thread, turns, streamed items, approvals, and interruption.
 
@@ -113,7 +113,7 @@ The conversation pane supports per-message model and reasoning choices, phase-aw
 
 Side chats use separate, temporary App Server threads. They belong to the current browser/app session and disappear with it instead of becoming durable Pursuit conversations. Durable conversation attachments, staged inputs, and display state are operational data: they do not add fields or execution semantics to Pursuit Markdown. Map indicators summarize attached conversation activity such as working, waiting, an unread final answer, or a completed turn; they never assert that the Pursuit itself is complete.
 
-Multiple browsers or devices can follow the same live conversation when they reach the same Web Studio process and active root. Web Studio listens on loopback by default; remote-device access requires explicitly starting it on a reachable interface and protecting that authenticated service on the network. Separately running Web Studio instances do not synchronize the root-local `.runtime` conversation database or attachment files through Git.
+Multiple browsers on the same machine can follow the same live conversation when they reach the same Web Studio process and active root. Web Studio accepts loopback hosts only because its automatic browser sessions are not a remote-access security boundary. Separately running Web Studio instances do not synchronize the root-local `.runtime` conversation database or attachment files through Git.
 
 Then start the background manager. It reviews idle agent sessions, evaluates prune generations, runs Dreamer consolidation, and produces Insight reflections when enough work has accumulated:
 

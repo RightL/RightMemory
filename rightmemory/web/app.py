@@ -5,9 +5,11 @@ import os
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from ..conversations.service import ConversationRuntimeRegistry
@@ -15,16 +17,21 @@ from .conversation_routes import add_conversation_routes
 from .auth import (
     clear_session_cookie,
     create_session_cookie,
-    ensure_web_auth_files,
+    ensure_web_session_secret,
     read_session,
     require_csrf,
     require_session,
     revoke_session,
     set_session_cookie,
-    verify_operator_token,
 )
 from .models import error_detail, ok_response
-from .process import MANAGED_WEB_ENV, clear_web_process_files, consume_web_stop_request, register_web_process
+from .process import (
+    MANAGED_WEB_ENV,
+    clear_web_process_files,
+    consume_web_stop_request,
+    register_web_process,
+    validate_web_host,
+)
 from .service import WebStudioService, resolve_allowed_memory_root
 from ..pursuit_store import PursuitStoreError
 from ..shared_view_questions import question_response_payload, verify_question_view_token
@@ -33,12 +40,30 @@ from ..shared_view_questions import question_response_payload, verify_question_v
 def create_web_app(
     memory_root: Path,
     *,
-    operator_token: str | None = None,
     conversation_registry: ConversationRuntimeRegistry | None = None,
 ) -> FastAPI:
     root = Path(memory_root).expanduser().resolve()
-    ensure_web_auth_files(root, operator_token=operator_token)
+    ensure_web_session_secret(root)
     app = FastAPI(title="RightMemory Web Studio")
+
+    @app.middleware("http")
+    async def require_loopback_host(request: Request, call_next):
+        host_header = request.headers.get("host", "")
+        if not _is_loopback_host_header(host_header):
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": error_detail("invalid host header")},
+            )
+        origin = request.headers.get("origin")
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and origin and not _origin_matches_request(
+            origin, request.url.scheme, host_header
+        ):
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": error_detail("invalid request origin")},
+            )
+        return await call_next(request)
+
     static_root = Path(__file__).parent / "static"
     owns_conversation_registry = conversation_registry is None
     conversation_registry = conversation_registry or ConversationRuntimeRegistry()
@@ -74,26 +99,12 @@ def create_web_app(
         )
 
     @app.get("/api/session")
-    async def session(request: Request):
+    async def session(request: Request, response: Response):
         existing = read_session(root, request)
         if existing is None:
-            return WebStudioService(root).session_data(authenticated=False)
-        return service_for_active_root(existing.active_root).session_data(
-            authenticated=True,
-            csrf_token=existing.csrf_token,
-        )
-
-    @app.post("/api/login")
-    async def login(response: Response, payload: dict[str, str] = Body(...)):
-        token = payload.get("token", "")
-        if not verify_operator_token(root, token):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=error_detail("invalid operator token"),
-            )
-        cookie, session_info = create_session_cookie(root, active_root=root)
-        set_session_cookie(response, cookie)
-        return ok_response("logged in", {"csrf_token": session_info.csrf_token})
+            cookie, existing = create_session_cookie(root, active_root=root)
+            set_session_cookie(response, cookie)
+        return service_for_active_root(existing.active_root).session_data(csrf_token=existing.csrf_token)
 
     @app.post("/api/logout")
     async def logout(request: Request, response: Response, _session=Depends(current_session)):
@@ -399,7 +410,7 @@ def create_web_app(
     @app.get("/api/share/questions/{view_id}/ready")
     async def question_view_ready(view_id: str, request: Request):
         if not _verify_question_bearer(root, view_id, request):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=error_detail("login required"))
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=error_detail("authorization required"))
         return ok_response("shared view question ready", {"view_id": view_id, "status": "ready"})
 
     @app.post("/api/share/questions/{view_id}/ask")
@@ -415,7 +426,7 @@ def create_web_app(
         elif _verify_question_bearer(root, view_id, request):
             service = WebStudioService(root, allowed_root=root)
         else:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=error_detail("login required"))
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=error_detail("authorization required"))
         try:
             text = service.answer_question_view(view_id, payload)
         except Exception as exc:
@@ -597,6 +608,35 @@ def _verify_question_bearer(root: Path, view_id: str, request: Request) -> bool:
     )
 
 
+def _is_loopback_host_header(value: str) -> bool:
+    try:
+        hostname = urlsplit(f"//{value.strip()}").hostname
+    except ValueError:
+        return False
+    if hostname is None:
+        return False
+    try:
+        validate_web_host(hostname)
+    except ValueError:
+        return False
+    return True
+
+
+def _origin_matches_request(origin: str, scheme: str, host_header: str) -> bool:
+    try:
+        actual = urlsplit(origin)
+        expected = urlsplit(f"{scheme}://{host_header}")
+        actual_port = actual.port or (443 if actual.scheme == "https" else 80)
+        expected_port = expected.port or (443 if expected.scheme == "https" else 80)
+    except ValueError:
+        return False
+    return (
+        actual.scheme == expected.scheme
+        and actual.hostname == expected.hostname
+        and actual_port == expected_port
+    )
+
+
 def _best_effort_logout_root(configured_root: Path, session_root: str) -> Path | None:
     base = Path(configured_root).expanduser().resolve()
     try:
@@ -632,6 +672,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.serve:
         parser.error("--serve is required")
     root = args.memory_root.resolve()
+    validate_web_host(args.host)
     server = uvicorn.Server(uvicorn.Config(create_web_app(root), host=args.host, port=args.port))
     managed = os.environ.get(MANAGED_WEB_ENV) == "1"
     if managed:

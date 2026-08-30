@@ -356,7 +356,7 @@ class _ASGIStream:
             "query_string": parsed.query.encode("ascii"),
             "root_path": "",
             "headers": [
-                (b"host", b"testserver"),
+                (b"host", b"127.0.0.1"),
                 (b"cookie", self.cookie.encode("latin-1")),
                 *[
                     (key.lower().encode("latin-1"), value.encode("latin-1"))
@@ -364,7 +364,7 @@ class _ASGIStream:
                 ],
             ],
             "client": ("testclient", 50000),
-            "server": ("testserver", 80),
+            "server": ("127.0.0.1", 80),
             "state": {},
         }
         request_sent = False
@@ -416,12 +416,11 @@ class ConversationWebTests(unittest.TestCase):
         self.registry = _FakeRegistry()
         self.app = create_web_app(
             self.root,
-            operator_token="test-operator",
             conversation_registry=self.registry,
         )
         self.client = ASGITestClient(self.app)
-        login = self.client.post("/api/login", json={"token": "test-operator"})
-        self.csrf = login.json()["data"]["csrf_token"]
+        session = self.client.get("/api/session")
+        self.csrf = session.json()["csrf_token"]
         self.session_id = _session_id(self.client.cookies.get("rightmemory_session"))
 
     @property
@@ -447,7 +446,7 @@ class ConversationWebTests(unittest.TestCase):
             },
         )
 
-    def test_workspace_requires_login_and_is_root_scoped(self):
+    def test_workspace_requires_a_bootstrapped_session_and_is_root_scoped(self):
         anonymous = ASGITestClient(self.app)
         denied = anonymous.get("/api/conversation-workspace")
         response = self.client.get("/api/conversation-workspace")
@@ -1141,9 +1140,7 @@ class ConversationWebTests(unittest.TestCase):
 
     def test_logout_invalidates_only_its_own_session_streams(self):
         other_client = ASGITestClient(self.app)
-        other_login = other_client.post(
-            "/api/login", json={"token": "test-operator"}
-        )
+        other_client.get("/api/session")
         other_session_id = _session_id(
             other_client.cookies.get("rightmemory_session")
         )
@@ -1254,7 +1251,10 @@ class ConversationWebTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(read_session_cookie(self.root, signed_cookie))
-        self.assertFalse(self.client.get("/api/session").json()["authenticated"])
+        replacement = self.client.get("/api/session")
+        self.assertEqual(replacement.json()["active_root"], str(self.root))
+        self.assertTrue(replacement.json()["csrf_token"])
+        self.assertNotEqual(self.client.cookies.get("rightmemory_session"), signed_cookie)
         self.assertIn(deleted_root, self.registry.invalidated)
 
     def test_switching_active_root_invalidates_old_root_streams(self):

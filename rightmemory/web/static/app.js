@@ -1,9 +1,10 @@
 const state = {
   csrfToken: null,
-  authenticated: false,
   panel: location.hash === "#pursuit-map" ? "pursuit-map" : "overview",
   pursuitMap: null,
 };
+
+let sessionRefreshPromise = null;
 
 const titleByPanel = {
   overview: "Overview",
@@ -16,15 +17,7 @@ const titleByPanel = {
   settings: "Settings",
 };
 
-async function fetchJson(path, options = {}) {
-  const headers = {
-    "content-type": "application/json",
-    ...(options.headers || {}),
-  };
-  if (options.method && options.method !== "GET" && state.csrfToken) {
-    headers["x-csrf-token"] = state.csrfToken;
-  }
-  const response = await fetch(path, { ...options, headers });
+async function parseJsonResponse(response) {
   const responseText = await response.text();
   let payload = {};
   if (responseText) {
@@ -46,14 +39,40 @@ async function fetchJson(path, options = {}) {
   return payload;
 }
 
-function setMessage(text) {
-  document.querySelector("#message").textContent = text || "";
+async function bootstrapSession() {
+  if (!sessionRefreshPromise) {
+    sessionRefreshPromise = (async () => {
+      const response = await fetch("/api/session", { headers: { accept: "application/json" } });
+      const session = await parseJsonResponse(response);
+      state.csrfToken = session.csrf_token || null;
+      document.querySelector("#active-root").textContent = session.active_root || "";
+      return session;
+    })().finally(() => {
+      sessionRefreshPromise = null;
+    });
+  }
+  return sessionRefreshPromise;
 }
 
-function setAuthenticated(authenticated) {
-  state.authenticated = authenticated;
-  document.querySelector("#login-panel").hidden = authenticated;
-  document.querySelector("#app-panel").hidden = !authenticated;
+async function fetchJson(path, options = {}, retrySession = true) {
+  const headers = {
+    "content-type": "application/json",
+    ...(options.headers || {}),
+  };
+  if (options.method && options.method !== "GET" && state.csrfToken) {
+    headers["x-csrf-token"] = state.csrfToken;
+  }
+  const response = await fetch(path, { ...options, headers });
+  if (response.status === 401 && retrySession && path !== "/api/session") {
+    await response.text();
+    await bootstrapSession();
+    return fetchJson(path, options, false);
+  }
+  return parseJsonResponse(response);
+}
+
+function setMessage(text) {
+  document.querySelector("#message").textContent = text || "";
 }
 
 function renderOverview(data) {
@@ -1097,13 +1116,8 @@ async function loadPanel() {
 }
 
 async function loadSession() {
-  const session = await fetchJson("/api/session");
-  state.csrfToken = session.csrf_token || null;
-  setAuthenticated(session.authenticated);
-  document.querySelector("#active-root").textContent = session.active_root || "";
-  if (session.authenticated) {
-    await loadPanel();
-  }
+  await bootstrapSession();
+  await loadPanel();
 }
 
 function escapeHtml(value) {
@@ -1115,23 +1129,6 @@ function escapeHtml(value) {
     "'": "&#39;",
   }[char]));
 }
-
-document.querySelector("#login-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  try {
-    const token = new FormData(event.currentTarget).get("token");
-    const payload = await fetchJson("/api/login", {
-      method: "POST",
-      body: JSON.stringify({ token }),
-    });
-    state.csrfToken = payload.data.csrf_token;
-    setAuthenticated(true);
-    setMessage(payload.message);
-    await loadPanel();
-  } catch (error) {
-    setMessage(error.message);
-  }
-});
 
 document.querySelector("#refresh-button").addEventListener("click", async () => {
   try {
@@ -1160,7 +1157,7 @@ window.addEventListener("hashchange", () => {
   const panel = location.hash.slice(1);
   if (titleByPanel[panel] && panel !== state.panel) {
     state.panel = panel;
-    if (state.authenticated) loadPanel().catch((error) => setMessage(error.message));
+    loadPanel().catch((error) => setMessage(error.message));
   }
 });
 
@@ -1708,6 +1705,5 @@ function showSharedViewResult(text) {
 }
 
 loadSession().catch((error) => {
-  setAuthenticated(false);
   setMessage(error.message);
 });
