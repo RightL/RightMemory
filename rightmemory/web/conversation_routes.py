@@ -190,6 +190,7 @@ def add_conversation_routes(
             request.headers.get("x-filename"),
             session.session_id,
             request.headers.get("x-attachment-id"),
+            request.headers.get("x-attachment-kind"),
         )
         return ok_response("attachment staged", data)
 
@@ -210,7 +211,9 @@ def add_conversation_routes(
             path,
             media_type=metadata["media_type"],
             filename=metadata["display_name"],
-            content_disposition_type="inline",
+            content_disposition_type=(
+                "attachment" if metadata.get("kind") == "file" else "inline"
+            ),
             headers={
                 "Cache-Control": "private, no-store",
                 "Content-Security-Policy": "default-src 'none'; sandbox",
@@ -830,7 +833,7 @@ async def _bounded_request_body(request: Request, maximum: int) -> bytes:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=_conversation_error_detail(
-                    "attachment_too_large", "The pasted attachment is too large."
+                    "attachment_too_large", "The attachment is too large."
                 ),
             )
     body = bytearray()
@@ -840,7 +843,7 @@ async def _bounded_request_body(request: Request, maximum: int) -> bytes:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=_conversation_error_detail(
-                    "attachment_too_large", "The pasted attachment is too large."
+                    "attachment_too_large", "The attachment is too large."
                 ),
             )
     return bytes(body)

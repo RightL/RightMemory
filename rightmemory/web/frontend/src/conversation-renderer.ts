@@ -25,7 +25,7 @@ export interface ConversationRendererActions {
   acknowledgeRead(conversationId: string): void;
   loadModelCatalog(hostId: string): void;
   updateConversationSettings(model: string, reasoningEffort: string): void;
-  uploadAttachment(conversationId: string, file: File, attachmentId: string): Promise<ConversationAttachment>;
+  uploadAttachment(conversationId: string, file: File, attachmentId: string, attachmentKind?: 'file'): Promise<ConversationAttachment>;
   deleteAttachment(conversationId: string, attachmentId: string): Promise<void>;
   sendMessage(text: string, attachmentIds: string[]): boolean | Promise<boolean>;
   interrupt(): void;
@@ -84,7 +84,11 @@ const shell = `
       <div class="cw-pending"></div>
       <form class="cw-composer">
         <div class="cw-staged-attachments" aria-label="Attachments for the next message" aria-live="polite"></div>
-        <textarea name="message" rows="3" aria-label="Message" placeholder="Message this conversation…"></textarea>
+        <div class="cw-composer-input">
+          <button type="button" class="cw-attach" aria-label="Attach files" title="Attach files">📎</button>
+          <textarea name="message" rows="3" aria-label="Message" placeholder="Message this conversation…"></textarea>
+          <input class="cw-file-input" type="file" multiple hidden aria-label="Choose files to attach">
+        </div>
         <div class="cw-composer-notice" role="status" aria-live="polite" hidden></div>
         <div class="cw-composer-footer">
           <div class="cw-turn-options" aria-label="Next response settings">
@@ -101,6 +105,15 @@ const shell = `
 
 /** Larger plain-text pastes become managed files so the composer stays responsive. */
 export const LARGE_PASTE_CHARACTER_LIMIT = 8_000;
+export const MAX_PASTED_IMAGE_BYTES = 20 * 1024 * 1024;
+export const MAX_PASTED_TEXT_BYTES = 5 * 1024 * 1024;
+export const MAX_GENERIC_FILE_BYTES = 20 * 1024 * 1024;
+export const MAX_STAGED_IMAGE_COUNT = 4;
+export const MAX_STAGED_TEXT_COUNT = 4;
+export const MAX_STAGED_FILE_COUNT = 8;
+export const MAX_STAGED_ATTACHMENT_COUNT = 8;
+
+const PASTED_IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg']);
 
 type StagedAttachment = {
   clientId: string;
@@ -108,9 +121,9 @@ type StagedAttachment = {
   conversationId: string;
   file: File | null;
   displayName: string;
-  kind: 'image' | 'pasted_text';
+  kind: 'image' | 'pasted_text' | 'file';
   previewUrl: string;
-  status: 'uploading' | 'ready' | 'failed';
+  status: 'queued' | 'uploading' | 'ready' | 'failed';
   attachment: ConversationAttachment | null;
   error: string;
   removed: boolean;
@@ -245,7 +258,7 @@ function renderSentAttachments(
   parent.replaceChildren();
   for (const attachment of attachments) {
     const url = attachmentReadUrl(attachment);
-    if (attachment.kind === 'image' || attachment.mediaType.startsWith('image/')) {
+    if (attachment.kind === 'image') {
       const reusable = currentImages.get(attachment.attachmentId)?.shift()
         ?? reusableImages?.get(attachment.attachmentId)?.shift();
       if (reusable) {
@@ -268,9 +281,9 @@ function renderSentAttachments(
     }
     const link = element('a', 'cw-sent-file');
     link.href = url;
-    link.target = '_blank';
-    link.rel = 'noopener';
-    appendText(link, 'span', 'TXT', 'cw-file-icon');
+    link.download = attachment.displayName || 'attachment';
+    link.setAttribute('aria-label', `Download ${attachment.displayName || 'attachment'}`);
+    appendText(link, 'span', attachment.kind === 'pasted_text' ? 'TXT' : 'FILE', 'cw-file-icon');
     const copy = element('span');
     appendText(copy, 'strong', attachment.displayName || 'Pasted text');
     const meta = [attachment.kind === 'pasted_text' ? 'Pasted text' : attachment.mediaType, formatByteSize(attachment.byteSize)].filter(Boolean).join(' · ');
@@ -848,6 +861,8 @@ export class ConversationRenderer {
   private ephemeralDrafts = new Map<string, string>();
   private knownSideChatIds = new Set<string>();
   private attachmentSequence = 0;
+  private attachmentUploadQueue: StagedAttachment[] = [];
+  private attachmentUploadRunning = false;
 
   constructor(private host: HTMLElement, private rootKey: string, private actions: ConversationRendererActions) {
     host.className = 'cw-pane';
@@ -933,6 +948,13 @@ export class ConversationRenderer {
     }, { signal: this.abort.signal });
     composerInput.addEventListener('input', () => { this.saveDraft(); this.updateComposerControls(); }, { signal: this.abort.signal });
     composerInput.addEventListener('paste', (event) => this.handleComposerPaste(event), { signal: this.abort.signal });
+    const fileInput = this.$<HTMLInputElement>('.cw-file-input');
+    this.$<HTMLButtonElement>('.cw-attach').addEventListener('click', () => fileInput.click(), { signal: this.abort.signal });
+    fileInput.addEventListener('change', () => {
+      const files = Array.from(fileInput.files ?? []);
+      fileInput.value = '';
+      this.handleSelectedFiles(files);
+    }, { signal: this.abort.signal });
     this.$<HTMLSelectElement>('.cw-composer [name="model"]').addEventListener('change', () => {
       this.renderConversationEffortOptions();
       this.submitConversationSettings();
@@ -1299,6 +1321,7 @@ export class ConversationRenderer {
     this.$<HTMLButtonElement>('.cw-stop').disabled = !running || interrupting;
     this.$<HTMLButtonElement>('.cw-stop').textContent = interrupting ? 'Stopping…' : 'Stop';
     this.$<HTMLTextAreaElement>('.cw-composer textarea').disabled = conversation.archived;
+    this.$<HTMLButtonElement>('.cw-attach').disabled = conversation.archived;
     if (!state.sendingConversationIds.includes(conversation.conversationId)) {
       for (const staged of this.stagedAttachments.get(conversation.conversationId) ?? []) staged.submitting = false;
     }
@@ -1665,22 +1688,100 @@ export class ConversationRenderer {
     const conversation = this.state && currentConversation(this.state);
     const clipboard = event.clipboardData;
     if (!conversationId || !conversation || conversation.archived || !clipboard) return;
-    const images = [...clipboard.files].filter((file) => file.type.startsWith('image/'));
-    const pastedText = clipboard.getData('text/plain');
+    const clipboardErrors: string[] = [];
+    let files: File[] = [];
+    try { files = Array.from(clipboard.files ?? []); }
+    catch { clipboardErrors.push('Could not read clipboard attachments.'); }
+    if (!files.length) {
+      try {
+        files = Array.from(clipboard.items ?? [])
+          .filter((item) => item.kind === 'file')
+          .map((item) => item.getAsFile())
+          .filter((file): file is File => !!file);
+      } catch { clipboardErrors.push('Could not read clipboard attachment data.'); }
+    }
+    let pastedText = '';
+    try { pastedText = clipboard.getData('text/plain'); }
+    catch { clipboardErrors.push('Could not read clipboard text.'); }
     const largeText = pastedText.length >= LARGE_PASTE_CHARACTER_LIMIT;
-    if (!images.length && !largeText) return;
+    if (!files.length && !largeText) {
+      if (clipboardErrors.length) this.setComposerNotice([...new Set(clipboardErrors)].join(' '));
+      return;
+    }
     event.preventDefault();
     this.setComposerNotice('');
-    for (const file of images) this.stageAttachment(conversationId, file, 'image', file.name || 'Pasted image');
+    const notices = [...clipboardErrors, ...this.stageUserFiles(conversationId, files)];
     if (largeText) {
       const sequence = ++this.attachmentSequence;
       const file = new File([pastedText], `pasted-text-${sequence}.txt`, { type: 'text/plain;charset=utf-8' });
-      this.stageAttachment(conversationId, file, 'pasted_text', 'Pasted text');
+      const existing = (this.stagedAttachments.get(conversationId) ?? []).filter((entry) => !entry.removed);
+      const textCount = existing.filter((entry) => entry.kind === 'pasted_text').length;
+      if (file.size > MAX_PASTED_TEXT_BYTES) {
+        notices.push('The pasted text was not added because it exceeds the 5 MiB text limit.');
+      } else if (existing.length >= MAX_STAGED_ATTACHMENT_COUNT || textCount >= MAX_STAGED_TEXT_COUNT) {
+        notices.push('Up to 8 attachments, including 4 pasted texts, can be staged for one message. Remove one before pasting another.');
+      } else {
+        this.stageAttachment(conversationId, file, 'pasted_text', 'Pasted text');
+      }
     } else if (pastedText) {
       const input = this.$<HTMLTextAreaElement>('.cw-composer textarea');
       input.setRangeText(pastedText, input.selectionStart, input.selectionEnd, 'end');
       input.dispatchEvent(new Event('input', { bubbles: true }));
     }
+    if (notices.length) this.setComposerNotice([...new Set(notices)].join(' '));
+  }
+
+  private handleSelectedFiles(files: File[]): void {
+    const conversationId = this.lastConversationId;
+    const conversation = this.state && currentConversation(this.state);
+    if (!files.length || !conversationId || !conversation || conversation.archived) return;
+    this.setComposerNotice('');
+    const notices = this.stageUserFiles(conversationId, files);
+    if (notices.length) this.setComposerNotice([...new Set(notices)].join(' '));
+  }
+
+  private stageUserFiles(conversationId: string, files: File[]): string[] {
+    const notices: string[] = [];
+    const existing = (this.stagedAttachments.get(conversationId) ?? []).filter((entry) => !entry.removed);
+    let totalCount = existing.length;
+    let imageCount = existing.filter((entry) => entry.kind === 'image').length;
+    let fileCount = existing.filter((entry) => entry.kind === 'file').length;
+    for (const file of files) {
+      let mediaType = '';
+      let displayName = 'Attachment';
+      let byteSize = 0;
+      try {
+        mediaType = String(file.type || '').split(';', 1)[0].trim().toLowerCase();
+        displayName = file.name || (PASTED_IMAGE_MEDIA_TYPES.has(mediaType) ? 'Pasted image' : 'Attachment');
+        byteSize = Number(file.size);
+      } catch {
+        notices.push('A file could not be inspected and was not added.');
+        continue;
+      }
+      const kind: StagedAttachment['kind'] = PASTED_IMAGE_MEDIA_TYPES.has(mediaType) ? 'image' : 'file';
+      if (!Number.isFinite(byteSize) || byteSize <= 0) {
+        notices.push(`${displayName} was not added because it is empty or unreadable.`);
+        continue;
+      }
+      const maximum = kind === 'image' ? MAX_PASTED_IMAGE_BYTES : MAX_GENERIC_FILE_BYTES;
+      if (byteSize > maximum) {
+        notices.push(`${displayName} was not added because it exceeds the 20 MiB ${kind === 'image' ? 'image' : 'file'} limit.`);
+        continue;
+      }
+      const kindLimitReached = kind === 'image'
+        ? imageCount >= MAX_STAGED_IMAGE_COUNT
+        : fileCount >= MAX_STAGED_FILE_COUNT;
+      if (totalCount >= MAX_STAGED_ATTACHMENT_COUNT || kindLimitReached) {
+        const kindLimit = kind === 'image' ? MAX_STAGED_IMAGE_COUNT : MAX_STAGED_FILE_COUNT;
+        notices.push(`Up to 8 attachments, including ${kindLimit} ${kind === 'image' ? 'images' : 'files'}, can be staged for one message. Remove one before adding another.`);
+        continue;
+      }
+      this.stageAttachment(conversationId, file, kind, displayName);
+      totalCount++;
+      if (kind === 'image') imageCount++;
+      else fileCount++;
+    }
+    return notices;
   }
 
   private stageAttachment(conversationId: string, file: File, kind: StagedAttachment['kind'], displayName: string): void {
@@ -1692,8 +1793,8 @@ export class ConversationRenderer {
       file,
       displayName,
       kind,
-      previewUrl: kind === 'image' ? this.createPreviewUrl(file) : '',
-      status: 'uploading',
+      previewUrl: '',
+      status: 'queued',
       attachment: null,
       error: '',
       removed: false,
@@ -1706,10 +1807,38 @@ export class ConversationRenderer {
       this.renderStagedAttachments(conversationId);
       this.updateComposerControls();
     }
-    this.uploadStagedAttachment(staged);
+    this.enqueueStagedAttachment(staged);
   }
 
-  private uploadStagedAttachment(staged: StagedAttachment): void {
+  private enqueueStagedAttachment(staged: StagedAttachment): void {
+    if (!staged.file || staged.removed || this.attachmentUploadQueue.includes(staged)) return;
+    staged.status = 'queued';
+    staged.error = '';
+    staged.submitting = false;
+    this.attachmentUploadQueue.push(staged);
+    if (this.lastConversationId === staged.conversationId) {
+      this.renderStagedAttachments(staged.conversationId);
+      this.updateComposerControls();
+    }
+    void this.drainAttachmentUploadQueue();
+  }
+
+  private async drainAttachmentUploadQueue(): Promise<void> {
+    if (this.attachmentUploadRunning) return;
+    this.attachmentUploadRunning = true;
+    try {
+      while (this.attachmentUploadQueue.length) {
+        const staged = this.attachmentUploadQueue.shift()!;
+        if (staged.removed || !staged.file) continue;
+        await this.uploadStagedAttachment(staged);
+      }
+    } finally {
+      this.attachmentUploadRunning = false;
+      if (this.attachmentUploadQueue.length) void this.drainAttachmentUploadQueue();
+    }
+  }
+
+  private async uploadStagedAttachment(staged: StagedAttachment): Promise<void> {
     const { conversationId, file } = staged;
     if (!file || staged.removed) return;
     staged.status = 'uploading';
@@ -1719,7 +1848,13 @@ export class ConversationRenderer {
       this.renderStagedAttachments(conversationId);
       this.updateComposerControls();
     }
-    void this.actions.uploadAttachment(conversationId, file, staged.uploadId).then(async (attachment) => {
+    try {
+      const attachment = await this.actions.uploadAttachment(
+        conversationId,
+        file,
+        staged.uploadId,
+        staged.kind === 'file' ? 'file' : undefined,
+      );
       staged.attachment = attachment;
       staged.status = 'ready';
       if (staged.removed) {
@@ -1732,8 +1867,13 @@ export class ConversationRenderer {
           this.revokePreviewUrl(staged.previewUrl);
         } catch (error: unknown) {
           suppressed.delete(attachment.attachmentId);
+          if (!(this.stagedAttachments.get(conversationId) ?? []).includes(staged)) {
+            this.revokePreviewUrl(staged.previewUrl);
+            return;
+          }
           staged.removed = false;
           staged.removing = false;
+          if (staged.kind === 'image' && !staged.previewUrl) staged.previewUrl = this.createPreviewUrl(file);
           if (this.lastConversationId === conversationId) {
             this.setComposerNotice(error instanceof Error ? `Could not remove attachment: ${error.message}` : 'Could not remove attachment.');
             this.renderStagedAttachments(conversationId);
@@ -1742,23 +1882,25 @@ export class ConversationRenderer {
         }
         return;
       }
+      if (staged.kind === 'image' && !staged.previewUrl) staged.previewUrl = this.createPreviewUrl(file);
       if (this.lastConversationId === conversationId) {
         this.renderStagedAttachments(conversationId);
         this.updateComposerControls();
       }
-    }).catch((error: unknown) => {
+    } catch (error: unknown) {
       if (staged.removed) {
         this.stagedAttachments.set(conversationId, (this.stagedAttachments.get(conversationId) ?? []).filter((entry) => entry !== staged));
         this.revokePreviewUrl(staged.previewUrl);
         return;
       }
       staged.status = 'failed';
-      staged.error = error instanceof Error ? error.message : String(error);
+      staged.error = error instanceof Error && error.message ? error.message : String(error || 'The upload failed.');
       if (this.lastConversationId === conversationId) {
+        this.setComposerNotice(`Could not upload ${staged.displayName}: ${staged.error}`);
         this.renderStagedAttachments(conversationId);
         this.updateComposerControls();
       }
-    });
+    }
   }
 
   private retryStagedAttachment(conversationId: string, clientId: string): void {
@@ -1766,14 +1908,14 @@ export class ConversationRenderer {
       .find((entry) => entry.clientId === clientId);
     if (!staged || staged.status !== 'failed' || !staged.file || staged.removed || staged.removing || staged.submitting) return;
     this.setComposerNotice('');
-    this.uploadStagedAttachment(staged);
+    this.enqueueStagedAttachment(staged);
   }
 
   private restoreStagedAttachments(conversationId: string, attachments: ConversationAttachment[]): void {
     const current = this.stagedAttachments.get(conversationId) ?? [];
     const suppressed = this.suppressedAttachmentIds.get(conversationId) ?? new Set<string>();
     const byAttachmentId = new Map(
-      current.flatMap((entry) => entry.attachment ? [[entry.attachment.attachmentId, entry] as const] : []),
+      current.map((entry) => [entry.attachment?.attachmentId ?? entry.uploadId, entry] as const),
     );
     for (const attachment of attachments) {
       const existing = byAttachmentId.get(attachment.attachmentId);
@@ -1791,7 +1933,9 @@ export class ConversationRenderer {
         existing.error = '';
         continue;
       }
-      const kind: StagedAttachment['kind'] = attachment.kind === 'image' || attachment.mediaType.startsWith('image/') ? 'image' : 'pasted_text';
+      const kind: StagedAttachment['kind'] = attachment.kind === 'image'
+        ? 'image'
+        : attachment.kind === 'pasted_text' ? 'pasted_text' : 'file';
       const restored: StagedAttachment = {
         clientId: attachment.attachmentId,
         uploadId: attachment.attachmentId,
@@ -1815,27 +1959,50 @@ export class ConversationRenderer {
 
   private renderStagedAttachments(conversationId: string): void {
     const parent = this.$('.cw-staged-attachments');
+    const reusableImages = new Map<string, HTMLImageElement>();
+    for (const chip of parent.querySelectorAll<HTMLElement>('.cw-attachment-chip.cw-image[data-attachment-id]')) {
+      const attachmentId = chip.dataset.attachmentId;
+      const image = chip.querySelector<HTMLImageElement>('img');
+      if (attachmentId && image) reusableImages.set(attachmentId, image);
+    }
     const nodes: HTMLElement[] = [];
     for (const staged of this.stagedAttachments.get(conversationId) ?? []) {
       if (staged.removed) continue;
       const chip = element('article', `cw-attachment-chip cw-${staged.kind.replace('_', '-')}`);
-      chip.dataset.attachmentId = staged.attachment?.attachmentId ?? staged.uploadId;
+      const attachmentId = staged.attachment?.attachmentId ?? staged.uploadId;
+      chip.dataset.attachmentId = attachmentId;
       if (staged.kind === 'image') {
-        const image = element('img');
-        image.alt = '';
-        image.src = staged.previewUrl || (staged.attachment ? attachmentReadUrl(staged.attachment) : '');
-        chip.append(image);
-      } else appendText(chip, 'span', 'TXT', 'cw-file-icon');
+        if (staged.status === 'ready' && staged.attachment) {
+          const image = reusableImages.get(attachmentId) ?? element('img');
+          image.alt = '';
+          image.loading = 'lazy';
+          image.decoding = 'async';
+          const source = staged.previewUrl || attachmentReadUrl(staged.attachment);
+          if (image.getAttribute('src') !== source) image.src = source;
+          chip.append(image);
+        } else appendText(chip, 'span', 'IMG', 'cw-file-icon');
+      } else appendText(chip, 'span', staged.kind === 'pasted_text' ? 'TXT' : 'FILE', 'cw-file-icon');
       const copy = element('span', 'cw-attachment-copy');
       appendText(copy, 'strong', staged.displayName);
-      const state = staged.status === 'uploading'
-        ? 'Uploading…'
-        : staged.status === 'failed'
-          ? 'Upload failed'
-          : [formatByteSize(staged.attachment?.byteSize ?? staged.file?.size ?? 0), staged.removing ? 'Removing…' : staged.submitting ? 'Sending…' : 'Ready'].filter(Boolean).join(' · ');
-      const detail = appendText(copy, 'small', state);
+      const state = staged.status === 'queued'
+        ? 'Waiting to upload…'
+        : staged.status === 'uploading'
+          ? 'Uploading…'
+          : staged.status === 'failed'
+            ? `Upload failed: ${staged.error || 'The server rejected this attachment.'}`
+            : [formatByteSize(staged.attachment?.byteSize ?? staged.file?.size ?? 0), staged.removing ? 'Removing…' : staged.submitting ? 'Sending…' : 'Ready'].filter(Boolean).join(' · ');
+      const detail = appendText(copy, 'small', state, staged.status === 'failed' ? 'cw-attachment-error' : undefined);
       if (staged.error) detail.title = staged.error;
       const controls = element('span', 'cw-attachment-actions');
+      if (staged.kind === 'file' && staged.status === 'ready' && staged.attachment) {
+        const download = element('a', 'cw-attachment-download');
+        download.href = attachmentReadUrl(staged.attachment);
+        download.download = staged.displayName || 'attachment';
+        download.textContent = '↓';
+        download.setAttribute('aria-label', `Download ${staged.displayName}`);
+        download.title = `Download ${staged.displayName}`;
+        controls.append(download);
+      }
       if (staged.status === 'failed' && staged.file) {
         const retry = element('button', 'cw-attachment-retry');
         retry.type = 'button';
@@ -1864,8 +2031,8 @@ export class ConversationRenderer {
     const current = this.stagedAttachments.get(conversationId) ?? [];
     const staged = current.find((entry) => entry.clientId === clientId);
     if (!staged || staged.submitting || staged.removing) return;
+    this.setComposerNotice('');
     if (staged.attachment) {
-      this.setComposerNotice('');
       const suppressed = this.suppressedAttachmentIds.get(conversationId) ?? new Set<string>();
       suppressed.add(staged.attachment.attachmentId);
       this.suppressedAttachmentIds.set(conversationId, suppressed);
@@ -1895,6 +2062,9 @@ export class ConversationRenderer {
     }
     staged.removed = true;
     staged.removing = staged.status === 'uploading';
+    if (staged.status === 'queued') {
+      this.attachmentUploadQueue = this.attachmentUploadQueue.filter((entry) => entry !== staged);
+    }
     if (!staged.removing) {
       this.stagedAttachments.set(conversationId, current.filter((entry) => entry !== staged));
       this.revokePreviewUrl(staged.previewUrl);
@@ -1989,13 +2159,26 @@ export class ConversationRenderer {
     }
   }
 
-  forgetConversation(conversationId: string): void {
+  clearStagedAttachments(conversationId: string): void {
     for (const staged of this.stagedAttachments.get(conversationId) ?? []) {
       staged.removed = true;
       this.revokePreviewUrl(staged.previewUrl);
     }
     this.stagedAttachments.delete(conversationId);
+    this.attachmentUploadQueue = this.attachmentUploadQueue.filter((staged) => {
+      if (staged.conversationId !== conversationId) return true;
+      staged.removed = true;
+      return false;
+    });
     this.suppressedAttachmentIds.delete(conversationId);
+    if (this.lastConversationId === conversationId) {
+      this.renderStagedAttachments(conversationId);
+      this.updateComposerControls();
+    }
+  }
+
+  forgetConversation(conversationId: string): void {
+    this.clearStagedAttachments(conversationId);
     this.storeSideChatDraft(conversationId, '');
     this.knownSideChatIds.delete(conversationId);
     if (this.lastConversationId === conversationId) {
@@ -2098,8 +2281,12 @@ export class ConversationRenderer {
   destroy(): void {
     this.saveDraft();
     for (const staged of this.stagedAttachments.values()) {
-      for (const attachment of staged) this.revokePreviewUrl(attachment.previewUrl);
+      for (const attachment of staged) {
+        attachment.removed = true;
+        this.revokePreviewUrl(attachment.previewUrl);
+      }
     }
+    this.attachmentUploadQueue = [];
     this.abort.abort();
   }
 }

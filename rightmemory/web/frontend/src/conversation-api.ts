@@ -41,15 +41,17 @@ function body(value: unknown): RequestInit {
   return { method: 'POST', body: JSON.stringify(value) };
 }
 
-function attachmentBody(file: File, attachmentId: string): RequestInit {
+function attachmentBody(file: File, attachmentId: string, attachmentKind?: 'file'): RequestInit {
+  const headers: Record<string, string> = {
+    'content-type': file.type || 'application/octet-stream',
+    'x-filename': encodeURIComponent(file.name || 'attachment'),
+    'x-attachment-id': attachmentId,
+  };
+  if (attachmentKind === 'file') headers['x-attachment-kind'] = 'file';
   return {
     method: 'POST',
     body: file,
-    headers: {
-      'content-type': file.type || 'application/octet-stream',
-      'x-filename': encodeURIComponent(file.name || 'attachment'),
-      'x-attachment-id': attachmentId,
-    },
+    headers,
   };
 }
 
@@ -137,8 +139,16 @@ export class ConversationApi {
     return normalizeConversation(record.conversation);
   }
 
-  async uploadAttachment(conversationId: string, file: File, attachmentId: string): Promise<ConversationAttachment> {
-    const response = await this.fetchJson(`/api/conversations/${encoded(conversationId)}/attachments`, attachmentBody(file, attachmentId));
+  async uploadAttachment(
+    conversationId: string,
+    file: File,
+    attachmentId: string,
+    attachmentKind?: 'file',
+  ): Promise<ConversationAttachment> {
+    const response = await this.fetchJson(
+      `/api/conversations/${encoded(conversationId)}/attachments`,
+      attachmentBody(file, attachmentId, attachmentKind),
+    );
     const data = responseData(response);
     const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
     return required(

@@ -1552,11 +1552,11 @@ class ConversationStore:
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         if version == 0:
-            connection.executescript(_SCHEMA_V5)
+            connection.executescript(_SCHEMA_V6)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.execute("PRAGMA journal_mode = WAL")
             return
-        if version in {1, 2, 3, 4}:
+        if version in {1, 2, 3, 4, 5}:
             # DDL does not implicitly open a sqlite3 transaction. Take the
             # write lock, then re-read the version so concurrent initializers
             # cannot partially or repeatedly apply this operational upgrade.
@@ -1610,7 +1610,7 @@ class ConversationStore:
                     ON pursuit_conversations(kind, last_activity_at DESC)
                     """
                 )
-                connection.execute(_ATTACHMENT_TABLE_SQL)
+                connection.execute(_ATTACHMENT_TABLE_V5_SQL)
                 connection.execute(
                     """
                     CREATE INDEX IF NOT EXISTS conversation_attachments_by_conversation
@@ -1651,6 +1651,33 @@ class ConversationStore:
                 )
                 connection.execute("PRAGMA user_version = 5")
                 locked_version = 5
+            if locked_version == 5:
+                # SQLite cannot widen a CHECK constraint in place. Rebuild
+                # only the attachment table inside the existing write
+                # transaction and copy every operational column byte-for-byte.
+                connection.execute(
+                    "ALTER TABLE conversation_attachments "
+                    "RENAME TO conversation_attachments_v5"
+                )
+                connection.execute(_ATTACHMENT_TABLE_V6_SQL)
+                connection.execute(
+                    f"""
+                    INSERT INTO conversation_attachments({_ATTACHMENT_COLUMNS})
+                    SELECT {_ATTACHMENT_COLUMNS}
+                    FROM conversation_attachments_v5
+                    """
+                )
+                connection.execute("DROP TABLE conversation_attachments_v5")
+                connection.execute(
+                    """
+                    CREATE INDEX conversation_attachments_by_conversation
+                    ON conversation_attachments(
+                        conversation_id, created_at, attachment_id
+                    )
+                    """
+                )
+                connection.execute("PRAGMA user_version = 6")
+                locked_version = 6
             if locked_version != SCHEMA_VERSION:
                 raise ConversationError(
                     "unsupported_schema",
@@ -2290,7 +2317,7 @@ def _stale_pending_rows(connection: sqlite3.Connection, resolved_at: str) -> int
     return int(cursor.rowcount)
 
 
-_SCHEMA_V5 = """
+_SCHEMA_V6 = """
 CREATE TABLE IF NOT EXISTS conversation_hosts(
     host_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK(kind IN ('local', 'ssh')),
@@ -2393,7 +2420,7 @@ CREATE INDEX IF NOT EXISTS conversation_events_by_conversation
 CREATE TABLE IF NOT EXISTS conversation_attachments(
     attachment_id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('image', 'pasted_text')),
+    kind TEXT NOT NULL CHECK(kind IN ('image', 'pasted_text', 'file')),
     display_name TEXT NOT NULL,
     media_type TEXT NOT NULL,
     byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
@@ -2433,11 +2460,31 @@ CREATE INDEX IF NOT EXISTS pending_server_requests_by_state
 """
 
 
-_ATTACHMENT_TABLE_SQL = """
+_ATTACHMENT_TABLE_V5_SQL = """
 CREATE TABLE IF NOT EXISTS conversation_attachments(
     attachment_id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL,
     kind TEXT NOT NULL CHECK(kind IN ('image', 'pasted_text')),
+    display_name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+    sha256 TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    remote_path TEXT,
+    state TEXT NOT NULL CHECK(state IN ('staged', 'sent')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id)
+        REFERENCES pursuit_conversations(conversation_id) ON DELETE CASCADE
+)
+"""
+
+
+_ATTACHMENT_TABLE_V6_SQL = """
+CREATE TABLE conversation_attachments(
+    attachment_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('image', 'pasted_text', 'file')),
     display_name TEXT NOT NULL,
     media_type TEXT NOT NULL,
     byte_size INTEGER NOT NULL CHECK(byte_size >= 0),

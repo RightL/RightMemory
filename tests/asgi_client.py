@@ -175,6 +175,12 @@ class ASGITestClient:
             with suppress(asyncio.CancelledError):
                 await task
             raise TimeoutError("ASGI app did not send a complete response") from exc
+        if not task.done():
+            # A response can publish its final body just before the app exits
+            # its file/stream context. Give that cleanup a brief chance to
+            # finish before cancellation so test downloads do not leak handles.
+            with suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.01)
         if task.done():
             await task
         else:

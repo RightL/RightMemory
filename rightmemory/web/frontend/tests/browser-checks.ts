@@ -328,8 +328,12 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     selectionBoundary.append(conversationHost);
     const sentMessages: Array<{ text: string; attachmentIds: string[] }> = [];
     const uploadedFiles: File[] = [];
-    const uploadAttempts: Array<{ file: File; attachmentId: string }> = [];
+    const uploadAttempts: Array<{ file: File; attachmentId: string; attachmentKind?: 'file' }> = [];
+    let uploadsInFlight = 0;
+    let maximumUploadsInFlight = 0;
     let failNextUpload = false;
+    let uploadGate: Promise<void> | null = null;
+    let echoNextUploadId = false;
     let failNextDelete = false;
     let failNextSend = false;
     const deletedAttachmentIds: string[] = [];
@@ -350,15 +354,25 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
       updateConversationSettings(model, reasoningEffort) { settingsUpdates.push({ model, reasoningEffort }); },
       reconnect(conversationId) { reconnects.push(conversationId); },
       createHost() {}, probeHost() {}, createProject() {}, retry() {},
-      async uploadAttachment(conversationId, file, attachmentId) {
-        uploadAttempts.push({ file, attachmentId });
-        if (failNextUpload) { failNextUpload = false; throw new Error('fixture upload failed'); }
-        uploadedFiles.push(file);
-        return {
-          attachmentId: `uploaded-${uploadedFiles.length}`, conversationId,
-          kind: file.type.startsWith('image/') ? 'image' : 'pasted_text', displayName: file.name,
-          mediaType: file.type, byteSize: file.size, state: 'staged', url: '', raw: {},
-        };
+      async uploadAttachment(conversationId, file, attachmentId, attachmentKind) {
+        uploadAttempts.push({ file, attachmentId, attachmentKind });
+        uploadsInFlight++;
+        maximumUploadsInFlight = Math.max(maximumUploadsInFlight, uploadsInFlight);
+        try {
+          const gate = uploadGate;
+          uploadGate = null;
+          const echoUploadId = echoNextUploadId;
+          echoNextUploadId = false;
+          if (gate) await gate;
+          await pause(15);
+          if (failNextUpload) { failNextUpload = false; throw new Error('fixture upload failed'); }
+          uploadedFiles.push(file);
+          return {
+            attachmentId: echoUploadId ? attachmentId : `uploaded-${uploadedFiles.length}`, conversationId,
+            kind: attachmentKind === 'file' ? 'file' : file.type.startsWith('image/') ? 'image' : 'pasted_text', displayName: file.name,
+            mediaType: file.type, byteSize: file.size, state: 'staged', url: '', raw: {},
+          };
+        } finally { uploadsInFlight--; }
       },
       async deleteAttachment(_conversationId, attachmentId) {
         deletedAttachmentIds.push(attachmentId);
@@ -623,6 +637,8 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     failedPaste.setData('text/plain', 'F'.repeat(8_000));
     check(paste(failedPaste).defaultPrevented, 'A large paste enters managed upload before failure is known');
     await until(() => conversationHost.querySelector('.cw-pasted-text')?.textContent?.includes('Upload failed'), 'Failed pasted text should remain visibly staged');
+    check(conversationHost.querySelector('.cw-pasted-text')?.textContent?.includes('fixture upload failed')
+      && conversationHost.querySelector('.cw-composer-notice')?.textContent?.includes('fixture upload failed'), 'The visible chip and composer notice expose the actual upload rejection reason');
     composer.value = 'Must not send without the failed paste'; composer.dispatchEvent(new Event('input', { bubbles: true }));
     check(conversationHost.querySelector<HTMLButtonElement>('.cw-composer button[type="submit"]')?.disabled, 'A failed attachment blocks Send until the user retries or removes it');
     const retryUpload = conversationHost.querySelector<HTMLButtonElement>('.cw-pasted-text .cw-attachment-retry')!;
@@ -651,6 +667,8 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     const imagePaste = new DataTransfer();
     imagePaste.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'clipboard.png', { type: 'image/png' }));
     check(paste(imagePaste).defaultPrevented, 'Pasted images are intercepted for managed upload');
+    check(!conversationHost.querySelector('.cw-attachment-chip.cw-image img')
+      && conversationHost.querySelector('.cw-attachment-chip.cw-image')?.textContent?.includes('Uploading'), 'An image is not decoded or rendered while its upload is still untrusted');
     await until(() => conversationHost.querySelector('.cw-image')?.textContent?.includes('Ready'), 'Pasted image should finish staging');
     conversationRenderer.clearComposerIfUnchanged('', ['uploaded-1']);
     check(!conversationHost.querySelector('.cw-pasted-text') && conversationHost.querySelector<HTMLImageElement>('.cw-attachment-chip.cw-image img'), 'A successful send clears only its attachment and preserves a newly pasted image');
@@ -680,6 +698,137 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     check(composer.value === 'Before after', 'Ordinary text accompanying a pasted image is inserted at the textarea selection');
     conversationHost.querySelector<HTMLButtonElement>('.cw-attachment-remove')!.click();
     await until(() => deletedAttachmentIds.includes('uploaded-5'), 'Mixed small-text image cleanup should delete its staged attachment');
+    const excessiveImagePaste = new DataTransfer();
+    for (let index = 0; index < 5; index++) {
+      excessiveImagePaste.items.add(new File([new Uint8Array([137, 80, 78, 71])], `count-${index}.png`, { type: 'image/png' }));
+    }
+    const attemptsBeforeExcessiveImages = uploadAttempts.length;
+    check(paste(excessiveImagePaste).defaultPrevented, 'A multi-image clipboard paste is managed as one action');
+    check(conversationHost.querySelectorAll('.cw-attachment-chip').length === 4
+      && conversationHost.querySelector('.cw-composer-notice')?.textContent?.includes('including 4 images'), 'The fifth image is rejected by client-side count preflight before upload');
+    await until(() => [...conversationHost.querySelectorAll('.cw-attachment-chip')].every((chip) => chip.textContent?.includes('Ready')), 'Accepted images should complete their bounded upload queue');
+    const firstReadyImage = conversationHost.querySelector<HTMLImageElement>('.cw-attachment-chip.cw-image img');
+    check(firstReadyImage?.loading === 'lazy' && firstReadyImage.decoding === 'async', 'Ready staged images use deferred loading and asynchronous decoding');
+    conversationRenderer.render(conversationState);
+    check(conversationHost.querySelector<HTMLImageElement>('.cw-attachment-chip.cw-image img') === firstReadyImage, 'Rerendering keeps the keyed staged image node instead of decoding it again');
+    check(uploadAttempts.length === attemptsBeforeExcessiveImages + 4 && maximumUploadsInFlight === 1, 'Clipboard uploads are serialized and never run concurrently');
+    for (const remove of [...conversationHost.querySelectorAll<HTMLButtonElement>('.cw-attachment-remove')]) remove.click();
+    await until(() => !conversationHost.querySelector('.cw-attachment-chip'), 'Count-preflight fixture attachments should clean up');
+
+    const genericImagePaste = new DataTransfer();
+    genericImagePaste.items.add(new File([new Uint8Array([82, 73, 70, 70])], 'clipboard.webp', { type: 'image/webp' }));
+    const attemptsBeforeGenericImage = uploadAttempts.length;
+    check(paste(genericImagePaste).defaultPrevented, 'Non-native clipboard images are intercepted as managed files');
+    check(!conversationHost.querySelector('.cw-attachment-chip.cw-file img')
+      && conversationHost.querySelector('.cw-attachment-chip.cw-file')?.textContent?.includes('Uploading'), 'WebP stages as a generic FILE without eager image decoding or preview');
+    await until(() => conversationHost.querySelector('.cw-attachment-chip.cw-file')?.textContent?.includes('Ready'), 'A generic clipboard image should finish staging');
+    check(uploadAttempts.length === attemptsBeforeGenericImage + 1
+      && uploadAttempts.at(-1)?.attachmentKind === 'file'
+      && conversationHost.querySelector('.cw-attachment-chip.cw-file')?.textContent?.includes('FILE')
+      && !!conversationHost.querySelector('.cw-attachment-chip.cw-file .cw-attachment-download'), 'WebP uses the explicit generic-file upload contract and exposes a download action');
+    conversationHost.querySelector<HTMLButtonElement>('.cw-attachment-chip.cw-file .cw-attachment-remove')!.click();
+    await until(() => !conversationHost.querySelector('.cw-attachment-chip'), 'Generic clipboard file cleanup should remove its staged chip');
+
+    const attachButton = conversationHost.querySelector<HTMLButtonElement>('.cw-attach')!;
+    const fileInput = conversationHost.querySelector<HTMLInputElement>('.cw-file-input')!;
+    let pickerClicks = 0;
+    Object.defineProperty(fileInput, 'click', { configurable: true, value: () => { pickerClicks++; } });
+    attachButton.click();
+    check(pickerClicks === 1 && fileInput.multiple && fileInput.hidden, 'The paperclip opens a hidden multi-file picker');
+    const selectedFiles = new DataTransfer();
+    selectedFiles.items.add(new File(['selected text'], 'selected.txt', { type: 'text/plain' }));
+    selectedFiles.items.add(new File([new Uint8Array([80, 75, 3, 4])], 'archive.zip', { type: 'application/zip' }));
+    const attemptsBeforeSelection = uploadAttempts.length;
+    Object.defineProperty(fileInput, 'files', { configurable: true, value: selectedFiles.files });
+    fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+    check(conversationHost.querySelectorAll('.cw-attachment-chip.cw-file').length === 2
+      && !conversationHost.querySelector('.cw-attachment-chip.cw-file img'), 'Selected text and ZIP files stage as generic FILE chips without previews');
+    await until(() => [...conversationHost.querySelectorAll('.cw-attachment-chip.cw-file')].every((chip) => chip.textContent?.includes('Ready')), 'Selected generic files should complete staging');
+    check(uploadAttempts.length === attemptsBeforeSelection + 2
+      && uploadAttempts.slice(-2).every((attempt) => attempt.attachmentKind === 'file')
+      && conversationHost.querySelectorAll('.cw-attachment-chip.cw-file .cw-attachment-download').length === 2
+      && maximumUploadsInFlight === 1, 'File-picker uploads preserve generic-file identity and remain serialized');
+    for (const remove of [...conversationHost.querySelectorAll<HTMLButtonElement>('.cw-attachment-remove')]) remove.click();
+    await until(() => !conversationHost.querySelector('.cw-attachment-chip'), 'File-picker fixture attachments should clean up');
+
+    failNextUpload = true;
+    const removableFailure = new DataTransfer();
+    removableFailure.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'invalid.png', { type: 'image/png' }));
+    paste(removableFailure);
+    await until(() => conversationHost.querySelector('.cw-attachment-chip')?.textContent?.includes('Upload failed'), 'A rejected image remains removable without a preview');
+    conversationHost.querySelector<HTMLButtonElement>('.cw-attachment-remove')!.click();
+    check(!conversationHost.querySelector('.cw-attachment-chip')
+      && !conversationHost.querySelector('.cw-composer-notice')?.textContent, 'Removing a rejected image clears its stale failure notice');
+
+    let releaseReconcileUpload = () => {};
+    uploadGate = new Promise<void>((resolve) => { releaseReconcileUpload = resolve; });
+    echoNextUploadId = true;
+    const reconcilingImage = new DataTransfer();
+    reconcilingImage.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'reconcile.png', { type: 'image/png' }));
+    const attemptsBeforeReconcile = uploadAttempts.length;
+    paste(reconcilingImage);
+    await until(() => uploadAttempts.length === attemptsBeforeReconcile + 1, 'The reconciliation fixture upload should start');
+    const reconcilingUploadId = uploadAttempts.at(-1)!.attachmentId;
+    conversationState = {
+      ...conversationState,
+      attachmentsByConversation: {
+        ...conversationState.attachmentsByConversation,
+        'conversation-1': [
+          ...(conversationState.attachmentsByConversation['conversation-1'] ?? []),
+          {
+            attachmentId: reconcilingUploadId, conversationId: 'conversation-1', kind: 'image',
+            displayName: 'reconcile.png', mediaType: 'image/png', byteSize: 4, state: 'staged', url: '', raw: {},
+          },
+        ],
+      },
+    };
+    conversationRenderer.render(conversationState);
+    check(conversationHost.querySelectorAll('.cw-attachment-chip.cw-image').length === 1,
+      'A staged server record reconciles with its in-flight upload identity instead of creating a duplicate chip');
+    const reconciledImage = conversationHost.querySelector<HTMLImageElement>('.cw-attachment-chip.cw-image img');
+    releaseReconcileUpload();
+    await until(() => conversationHost.querySelector('.cw-attachment-chip.cw-image')?.textContent?.includes('Ready')
+      && uploadsInFlight === 0, 'The reconciled upload should finish');
+    check(conversationHost.querySelector<HTMLImageElement>('.cw-attachment-chip.cw-image img') === reconciledImage,
+      'The reconciled upload keeps its keyed image node when the local preview becomes available');
+    conversationHost.querySelector<HTMLButtonElement>('.cw-attachment-remove')!.click();
+    await until(() => !conversationHost.querySelector('.cw-attachment-chip'), 'The reconciliation fixture should clean up');
+
+    conversationState = {
+      ...conversationState,
+      attachmentsByConversation: {
+        ...conversationState.attachmentsByConversation,
+        'conversation-1': (conversationState.attachmentsByConversation['conversation-1'] ?? [])
+          .filter((attachment) => attachment.state !== 'staged'),
+      },
+    };
+    conversationRenderer.render(conversationState);
+    let releaseArchiveUpload = () => {};
+    uploadGate = new Promise<void>((resolve) => { releaseArchiveUpload = resolve; });
+    const archiveCleanupPaste = new DataTransfer();
+    archiveCleanupPaste.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'archive-running.png', { type: 'image/png' }));
+    archiveCleanupPaste.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'archive-queued.png', { type: 'image/png' }));
+    const attemptsBeforeArchiveCleanup = uploadAttempts.length;
+    paste(archiveCleanupPaste);
+    await until(() => uploadAttempts.length === attemptsBeforeArchiveCleanup + 1,
+      'The archive cleanup fixture should have one running upload and one queued upload');
+    composer.value = 'Draft remains separate from staged files';
+    composer.dispatchEvent(new Event('input', { bubbles: true }));
+    conversationRenderer.clearStagedAttachments('conversation-1');
+    check(!conversationHost.querySelector('.cw-attachment-chip') && composer.value === 'Draft remains separate from staged files',
+      'Successful archive cleanup forgets staged files without erasing unrelated draft text');
+    releaseArchiveUpload();
+    await until(() => uploadsInFlight === 0, 'The forgotten running upload should finish its cleanup');
+    check(uploadAttempts.length === attemptsBeforeArchiveCleanup + 1 && !conversationHost.querySelector('.cw-attachment-chip'),
+      'Archive cleanup cancels queued uploads and does not restore a running upload after completion');
+
+    const malformedClipboard = {
+      get files(): FileList { throw new Error('files unavailable'); },
+      get items(): DataTransferItemList { throw new Error('items unavailable'); },
+      getData(): string { throw new Error('text unavailable'); },
+    } as unknown as DataTransfer;
+    paste(malformedClipboard);
+    check(conversationHost.querySelector('.cw-composer-notice')?.textContent?.includes('Could not read clipboard'), 'Malformed clipboard data is contained and reported without taking down the conversation UI');
     const disconnected = normalizeEvent({ event_id: 32, conversation_id: null, kind: 'connection.disconnected', payload: { host_id: 'local', conversation_ids: ['conversation-1'] } });
     check(disconnected, 'Disconnect fixture must normalize');
     conversationState = reduceConversationState(conversationState, { type: 'event', event: disconnected });

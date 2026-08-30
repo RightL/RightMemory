@@ -46,6 +46,7 @@ test('conversation detail normalizes attachment metadata and unread summary curs
     attachments: [
       { attachment_id: 'image/1', kind: 'image', display_name: '图.png', media_type: 'image/png', byte_size: '2048', state: 'sent', url: '/preview/image-1' },
       { attachmentId: 'text-1', conversationId: 'c-with-files', type: 'pasted_text', filename: 'pasted-text.txt', contentType: 'text/plain', byteSize: 9000 },
+      { attachment_id: 'file-1', kind: 'file', display_name: 'archive.zip', media_type: 'application/zip', byte_size: 4096, state: 'staged' },
       { kind: 'image' },
     ],
     has_earlier_events: true,
@@ -55,10 +56,12 @@ test('conversation detail normalizes attachment metadata and unread summary curs
   assert.equal(detail.conversation.parentConversationId, 'c-new');
   assert.equal(detail.conversation.lastFinalEventId, 57);
   assert.equal(detail.conversation.lastReadEventId, 52);
-  assert.equal(detail.attachments.length, 2);
+  assert.equal(detail.attachments.length, 3);
   assert.equal(detail.attachments[0].conversationId, 'c-with-files');
   assert.equal(detail.attachments[0].byteSize, 2048);
   assert.equal(detail.attachments[1].kind, 'pasted_text');
+  assert.equal(detail.attachments[2].kind, 'file');
+  assert.equal(detail.attachments[2].displayName, 'archive.zip');
   assert.equal(detail.hasEarlierEvents, true);
 });
 

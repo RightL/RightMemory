@@ -27,6 +27,7 @@ from rightmemory.conversations.jsonrpc import (
     JsonRpcConnectionError,
 )
 from rightmemory.conversations.transport import (
+    AttachmentStagingError,
     REMOTE_CODEX_APP_SERVER_COMMAND,
     SubprocessTransport,
     TransportConfigurationError,
@@ -266,9 +267,9 @@ class CodexAppServerTests(unittest.TestCase):
 class ConversationTransportTests(unittest.TestCase):
     def test_ssh_attachment_staging_uses_bounded_argv_only_transfer(self):
         with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "source.txt"
+            source = Path(directory) / "source.docx"
             source.write_bytes(b"bounded paste")
-            remote_name = "a" * 32 + ".txt"
+            remote_name = "a" * 32 + ".docx"
             completed = subprocess.CompletedProcess(
                 [],
                 0,
@@ -299,8 +300,32 @@ class ConversationTransportTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][0], sys.executable)
         self.assertEqual(run.call_args.args[0][-2], "build-box")
 
+    def test_ssh_attachment_staging_rejects_path_outside_managed_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.pdf"
+            source.write_bytes(b"bounded paste")
+            remote_name = "a" * 32 + ".pdf"
+            completed = subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=f"/mnt/cache/{remote_name}\n".encode(),
+                stderr=b"",
+            )
+            with patch(
+                "rightmemory.conversations.transport.subprocess.run",
+                return_value=completed,
+            ), self.assertRaises(AttachmentStagingError):
+                stage_ssh_attachment(
+                    "build-box",
+                    source,
+                    remote_name,
+                    expected_size=source.stat().st_size,
+                    expected_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                    ssh_binary=sys.executable,
+                )
+
     def test_ssh_attachment_cleanup_validates_managed_path_and_uses_argv(self):
-        remote_name = "b" * 32 + ".txt"
+        remote_name = "b" * 32 + ".zip"
         completed = subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
         with patch(
             "rightmemory.conversations.transport.subprocess.run",
@@ -324,6 +349,7 @@ class ConversationTransportTests(unittest.TestCase):
             f"/tmp/{remote_name}",
             f"/home/user/.cache/rightmemory/attachments/../{remote_name}",
             "/home/user/.cache/rightmemory/attachments/not-managed.txt",
+            "/home/user/.cache/rightmemory/attachments/" + "c" * 32 + ".unsafe-name",
         ):
             with self.subTest(unsafe=unsafe), self.assertRaises(
                 TransportConfigurationError

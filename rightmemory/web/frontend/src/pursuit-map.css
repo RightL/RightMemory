@@ -460,13 +460,18 @@
 .cw-request-details pre { max-height: 160px; margin: 6px 0; padding: 7px; overflow: auto; background: white; border-radius: 5px; white-space: pre-wrap; word-break: break-word; font: 9px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .cw-request > small { display: block; margin-top: 5px; color: var(--cw-muted); font-size: 9px; }
 .cw-composer { padding: 9px; background: white; border-top: 1px solid var(--cw-border); }
+.cw-composer-input { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: end; gap: 6px; }
+.cw-attach { width: 32px; min-height: 32px !important; padding: 0 !important; color: #607068 !important; background: #f4f6f3 !important; border-color: #d8ded7 !important; border-radius: 50% !important; font-size: 15px !important; }
+.cw-attach:hover:not(:disabled) { color: var(--cw-ink) !important; background: #e9ede8 !important; }
 .cw-staged-attachments { display: flex; max-height: 124px; margin-bottom: 7px; padding: 1px; overflow-x: auto; gap: 6px; }
 .cw-attachment-chip { display: grid; min-width: 0; max-width: 210px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 5px; background: #f5f7f3; border: 1px solid #d8ded7; border-radius: 8px; }
 .cw-attachment-chip > img { width: 38px; height: 38px; object-fit: cover; background: #e9ede8; border-radius: 5px; }
 .cw-attachment-copy { display: grid; min-width: 0; }
 .cw-attachment-copy strong { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .cw-attachment-copy small { grid-column: auto; grid-row: auto; overflow: hidden; color: var(--cw-muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.cw-attachment-copy .cw-attachment-error { max-width: 130px; overflow: visible; color: #9b5946; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
 .cw-attachment-actions { display: flex; align-items: center; gap: 3px; }
+.cw-attachment-download { display: grid; width: 23px; min-height: 23px; place-items: center; color: #496d5e; border: 1px solid #ccd7d0; border-radius: 50%; font-size: 13px; line-height: 1; text-decoration: none; }
 .cw-attachment-retry { min-height: 23px !important; padding: 2px 6px !important; color: #496d5e !important; font-size: 9px !important; }
 .cw-attachment-remove { width: 23px; min-height: 23px !important; padding: 0 !important; color: #718078 !important; border-radius: 50% !important; font-size: 15px !important; line-height: 1; }
 .cw-composer-notice { margin: 5px 2px 0; color: #9b5946; font-size: 9px; overflow-wrap: anywhere; }
