@@ -1247,6 +1247,29 @@ class ConversationStore:
             )
         return cursor.rowcount == 1
 
+    def clear_attachment_remote_path(
+        self,
+        attachment_id: str,
+        *,
+        expected_remote_path: str,
+    ) -> bool:
+        """Clear one remote generation only when its exact path is still current."""
+        clean_id = _id(attachment_id, "attachment_id")
+        clean_expected = _text(
+            expected_remote_path, "expected_remote_path", 8192
+        )
+        now = _now_iso()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE conversation_attachments
+                SET remote_path = NULL, updated_at = ?
+                WHERE attachment_id = ? AND remote_path = ?
+                """,
+                (now, clean_id, clean_expected),
+            )
+        return cursor.rowcount == 1
+
     # Server-initiated requests ---------------------------------------------
 
     def create_pending_request(

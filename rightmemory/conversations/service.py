@@ -10,6 +10,7 @@ from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
+from uuid import uuid4
 
 from ..pursuit_store import PursuitStore
 from ..pursuit_tree import plain_title
@@ -28,6 +29,7 @@ from .attachments import (
 )
 from .models import DEFAULT_LOCAL_PROJECT_ID, LOCAL_HOST_ID, ConversationError
 from .projection import (
+    ProjectedNotification,
     bounded_json_object,
     project_notification,
     project_server_request,
@@ -44,6 +46,7 @@ from .transport import (
 
 MAX_MESSAGE_LENGTH = 200_000
 EVENT_PAGE_SIZE = 500
+REMOTE_CLEANUP_CLOSE_WAIT_SECONDS = 0.2
 _BUSY_CONVERSATION_STATUSES = frozenset(
     {"starting", "running", "waiting_approval", "waiting_input", "unknown"}
 )
@@ -189,7 +192,19 @@ class ConversationService:
         self.root = Path(root).expanduser().resolve()
         self.store = store_factory(self.root)
         self.store.initialize()
+        self._closed = False
+        self._attachment_upload_lock = threading.Lock()
+        self._remote_cleanup_condition = threading.Condition()
+        self._remote_cleanup_durable: dict[tuple[str, str], str] = {}
+        self._remote_cleanup_detached: dict[tuple[str, str], None] = {}
+        self._remote_cleanup_stopping = False
+        self._remote_cleanup_thread = threading.Thread(
+            target=self._remote_cleanup_loop,
+            name="rightmemory-remote-attachment-cleanup",
+            daemon=True,
+        )
         self._discard_orphaned_side_chats()
+        self._cleanup_terminal_remote_attachments()
         self._cleanup_orphaned_attachment_files()
         self._stale_orphaned_requests()
         self._mark_orphaned_conversations_unknown()
@@ -200,11 +215,10 @@ class ConversationService:
             str, tuple[AppServerAdapter, str, set[str]]
         ] = {}
         self._adapter_lock = threading.RLock()
-        self._attachment_upload_lock = threading.Lock()
         self._conversation_locks: dict[str, threading.RLock] = {}
         self._conversation_locks_guard = threading.Lock()
         self._broker = _EventBroker()
-        self._closed = False
+        self._remote_cleanup_thread.start()
 
     # Browser-facing projections -------------------------------------------
 
@@ -560,14 +574,18 @@ class ConversationService:
 
             self._stale_conversation_requests(conversation["conversation_id"])
             host = self.store.get_host(conversation["host_id"])
-            attachments = self.store.purge_side_chat(conversation["conversation_id"])
+            with self._attachment_upload_lock:
+                attachments = self.store.purge_side_chat(
+                    conversation["conversation_id"]
+                )
+                for attachment in attachments:
+                    self._unlink_managed_attachment_file(attachment)
             if adapter is not None:
                 self._forget_thread_resident(
                     conversation["host_id"], adapter, conversation["thread_id"]
                 )
             for attachment in attachments:
-                self._delete_remote_attachment_file(host, attachment)
-                self._unlink_managed_attachment_file(attachment)
+                self._schedule_detached_remote_cleanup(host, attachment)
             self._append_event(
                 "side_chat.closed",
                 {"conversation_id": conversation["conversation_id"]},
@@ -753,19 +771,20 @@ class ConversationService:
     ) -> dict[str, Any]:
         with self._conversation_operation(conversation_id, owner_session_id):
             conversation = self._require_active_conversation(conversation_id)
-            attachment = self._require_attachment(
-                conversation["conversation_id"], attachment_id
-            )
-            if attachment.get("state") != "staged":
-                raise ConversationError(
-                    "attachment_in_use",
-                    "Only an unsent staged attachment can be removed.",
-                    409,
-                )
             host = self.store.get_host(conversation["host_id"])
-            self._delete_remote_attachment_file(host, attachment)
-            self._unlink_managed_attachment_file(attachment)
-            self.store.delete_attachment(attachment["attachment_id"])
+            with self._attachment_upload_lock:
+                attachment = self._require_attachment(
+                    conversation["conversation_id"], attachment_id
+                )
+                if attachment.get("state") != "staged":
+                    raise ConversationError(
+                        "attachment_in_use",
+                        "Only an unsent staged attachment can be removed.",
+                        409,
+                    )
+                self._unlink_managed_attachment_file(attachment)
+                self.store.delete_attachment(attachment["attachment_id"])
+            self._schedule_detached_remote_cleanup(host, attachment)
             return {"attachment_id": attachment["attachment_id"]}
 
     def send_message(
@@ -1073,6 +1092,13 @@ class ConversationService:
                     conversation_id=conversation_id,
                     turn_id=active_turn_id,
                 )
+                if status in {
+                    "idle",
+                    "completed",
+                    "failed",
+                    "interrupted",
+                } and active_turn_id is None:
+                    self._cleanup_remote_attachment_copies(updated)
             return {
                 "conversation": self._decorate_conversation(updated, self._pursuit_items()),
                 "thread": thread,
@@ -1114,6 +1140,7 @@ class ConversationService:
                     conversation_id=conversation_id,
                     turn_id=turn_id,
                 )
+                self._cleanup_remote_attachment_copies(updated)
             return {"conversation": updated}
 
     def archive(
@@ -1136,6 +1163,9 @@ class ConversationService:
                     409,
                 )
             if conversation["lifecycle"] == "archived":
+                self._cleanup_remote_attachment_copies(
+                    conversation, include_staged=True
+                )
                 return {"conversation": conversation}
             host = self._require_host(conversation["host_id"])
             adapter = self._adapter(host)
@@ -1157,6 +1187,9 @@ class ConversationService:
                     "thread.archived",
                     {"thread_id": conversation["thread_id"]},
                     conversation_id=conversation_id,
+                )
+                self._cleanup_remote_attachment_copies(
+                    updated, include_staged=True
                 )
             return {"conversation": updated}
 
@@ -1404,6 +1437,11 @@ class ConversationService:
                 return
             self._closed = True
             adapters = list(self._adapters.items())
+        with self._remote_cleanup_condition:
+            self._remote_cleanup_stopping = True
+            self._remote_cleanup_durable.clear()
+            self._remote_cleanup_detached.clear()
+            self._remote_cleanup_condition.notify_all()
         # Wait for each host's current conversation operations to finish, then
         # persist an uncertainty fence before terminating the owned process.
         for host_id, adapter in adapters:
@@ -1434,62 +1472,109 @@ class ConversationService:
                 adapter.close()
             except Exception:
                 pass
+        self._remote_cleanup_thread.join(
+            timeout=REMOTE_CLEANUP_CLOSE_WAIT_SECONDS
+        )
 
     # Provider callback boundary -------------------------------------------
 
     def _on_notification(self, host_id: str, message: object) -> None:
-        try:
+        checkpoint: int | None = None
+        failure: BaseException | None = None
+        for attempt in range(2):
+            try:
+                if checkpoint is None:
+                    checkpoint = self.store.latest_event_id()
+                self._persist_notification(
+                    host_id,
+                    message,
+                    recover_after_event_id=checkpoint if attempt else None,
+                )
+                return
+            except Exception as exc:
+                failure = exc
+        self._fence_notification_failure(host_id, message, failure)
+
+    def _persist_notification(
+        self,
+        host_id: str,
+        message: object,
+        *,
+        recover_after_event_id: int | None,
+    ) -> None:
+        epoch = _message_value(message, "epoch")
+        with self._adapter_lock:
+            if not self._is_current_epoch_locked(host_id, epoch):
+                return
+        projected = project_notification(
+            _message_value(message, "method"),
+            _message_value(message, "params", {}),
+        )
+        if projected.thread_id is None:
+            return
+        conversation = self.store.find_conversation(host_id, projected.thread_id)
+        if conversation is None:
+            return
+        with self._conversation_lock_for(conversation["conversation_id"]):
+            # The adapter may have reconnected while this callback waited
+            # behind a user operation on the same conversation.
             with self._adapter_lock:
-                if not self._is_current_epoch_locked(host_id, _message_value(message, "epoch")):
+                if not self._is_current_epoch_locked(host_id, epoch):
                     return
-            projected = project_notification(
-                _message_value(message, "method"),
-                _message_value(message, "params", {}),
-            )
-            if projected.thread_id is None:
-                return
-            conversation = self.store.find_conversation(host_id, projected.thread_id)
-            if conversation is None:
-                return
-            with self._conversation_lock_for(conversation["conversation_id"]):
-                # The adapter may have reconnected while this callback waited
-                # behind a user operation on the same conversation.
-                with self._adapter_lock:
-                    if not self._is_current_epoch_locked(
-                        host_id, _message_value(message, "epoch")
-                    ):
-                        return
-                    conversation = self.store.find_conversation(
-                        host_id, projected.thread_id
+                conversation = self.store.find_conversation(
+                    host_id, projected.thread_id
+                )
+                if conversation is None:
+                    return
+                updates: dict[str, Any] = {}
+                terminal_turn_matches = not (
+                    projected.clears_active_turn
+                    and projected.turn_id is not None
+                    and projected.turn_id != conversation["active_turn_id"]
+                )
+                if (
+                    not terminal_turn_matches
+                    and recover_after_event_id is not None
+                    and conversation["active_turn_id"] is None
+                    and projected.status == conversation["status"]
+                    and projected.status in {"completed", "failed", "interrupted"}
+                ):
+                    terminal_turn_matches = True
+                if terminal_turn_matches:
+                    if projected.status is not None:
+                        updates["status"] = projected.status
+                    if projected.active_turn_id is not None:
+                        updates["active_turn_id"] = projected.active_turn_id
+                    elif projected.clears_active_turn:
+                        updates["active_turn_id"] = None
+                    elif projected.kind == "thread.status" and projected.status in {
+                        "idle",
+                        "failed",
+                    }:
+                        updates["active_turn_id"] = None
+                if projected.thread_title is not None:
+                    updates["thread_title"] = projected.thread_title
+                if projected.kind == "thread.archived":
+                    updates["lifecycle"] = "archived"
+                current = (
+                    self.store.update_conversation(
+                        conversation["conversation_id"],
+                        **updates,
+                        touch_activity=True,
                     )
-                    if conversation is None:
-                        return
-                    updates: dict[str, Any] = {}
-                    terminal_turn_matches = not (
-                        projected.clears_active_turn
-                        and projected.turn_id is not None
-                        and projected.turn_id != conversation["active_turn_id"]
+                    if updates
+                    else conversation
+                )
+                recovered = (
+                    self._matching_notification_event(
+                        conversation["conversation_id"],
+                        projected,
+                        after_event_id=recover_after_event_id,
                     )
-                    if terminal_turn_matches:
-                        if projected.status is not None:
-                            updates["status"] = projected.status
-                        if projected.active_turn_id is not None:
-                            updates["active_turn_id"] = projected.active_turn_id
-                        elif projected.clears_active_turn:
-                            updates["active_turn_id"] = None
-                        elif projected.kind == "thread.status" and projected.status in {
-                            "idle",
-                            "failed",
-                        }:
-                            updates["active_turn_id"] = None
-                    if projected.thread_title is not None:
-                        updates["thread_title"] = projected.thread_title
-                    if projected.kind == "thread.archived":
-                        updates["lifecycle"] = "archived"
-                    if updates:
-                        self.store.update_conversation(
-                            conversation["conversation_id"], **updates, touch_activity=True
-                        )
+                    if recover_after_event_id is not None
+                    else None
+                )
+                if recovered is None:
                     self._append_event(
                         projected.kind,
                         projected.payload,
@@ -1497,17 +1582,105 @@ class ConversationService:
                         turn_id=projected.turn_id,
                         mark_final=projected.completed_final_answer,
                     )
-                    if projected.kind == "thread.archived":
-                        self._stale_conversation_requests(
-                            conversation["conversation_id"]
-                        )
-                    elif projected.clears_active_turn and projected.turn_id is not None:
-                        self._stale_conversation_requests(
-                            conversation["conversation_id"], turn_id=projected.turn_id
-                        )
+                elif projected.completed_final_answer and not recovered.get(
+                    "marks_final"
+                ):
+                    self.store.mark_final_event(
+                        conversation["conversation_id"], recovered["event_id"]
+                    )
+                    self._broker.notify()
+                if projected.kind == "thread.archived":
+                    self._stale_conversation_requests(
+                        conversation["conversation_id"]
+                    )
+                    self._cleanup_remote_attachment_copies(
+                        current, include_staged=True
+                    )
+                elif projected.clears_active_turn and projected.turn_id is not None:
+                    self._stale_conversation_requests(
+                        conversation["conversation_id"], turn_id=projected.turn_id
+                    )
+                    if terminal_turn_matches and projected.status in {
+                        "completed",
+                        "failed",
+                        "interrupted",
+                    }:
+                        self._cleanup_remote_attachment_copies(current)
+                elif projected.kind == "thread.status" and projected.status in {
+                    "idle",
+                    "failed",
+                }:
+                    self._cleanup_remote_attachment_copies(current)
+
+    def _matching_notification_event(
+        self,
+        conversation_id: str,
+        projected: ProjectedNotification,
+        *,
+        after_event_id: int,
+    ) -> dict[str, Any] | None:
+        return next(
+            (
+                event
+                for event in reversed(
+                    self.store.latest_events(conversation_id, limit=200)
+                )
+                if event["event_id"] > after_event_id
+                and event["kind"] == projected.kind
+                and event["turn_id"] == projected.turn_id
+                and event["payload"] == projected.payload
+            ),
+            None,
+        )
+
+    def _fence_notification_failure(
+        self,
+        host_id: str,
+        message: object,
+        failure: BaseException | None,
+    ) -> None:
+        error_text = _exception_text(failure) if failure is not None else "unknown failure"
+        try:
+            self.store.update_host_runtime(host_id, last_error=error_text)
         except Exception:
-            # Provider reader threads must remain alive when a future protocol
-            # message cannot be projected or local state changed concurrently.
+            pass
+        params = _message_value(message, "params", {})
+        thread_id: str | None = None
+        if isinstance(params, Mapping):
+            direct = params.get("threadId")
+            nested = params.get("thread")
+            if isinstance(direct, str) and direct:
+                thread_id = direct
+            elif isinstance(nested, Mapping):
+                nested_id = nested.get("id")
+                if isinstance(nested_id, str) and nested_id:
+                    thread_id = nested_id
+        if thread_id is None:
+            return
+        try:
+            conversation = self.store.find_conversation(host_id, thread_id)
+            if conversation is None:
+                return
+            self.store.update_conversation(
+                conversation["conversation_id"],
+                status="unknown",
+                touch_activity=True,
+                emit_state_event=True,
+            )
+            self._broker.notify()
+            try:
+                self._append_event(
+                    "protocol.error",
+                    {
+                        "operation": "notification/persist",
+                        "method": _message_value(message, "method"),
+                        "message": error_text,
+                    },
+                    conversation_id=conversation["conversation_id"],
+                )
+            except Exception:
+                pass
+        except Exception:
             return
 
     def _on_server_request(self, host_id: str, message: object) -> None:
@@ -1723,11 +1896,18 @@ class ConversationService:
                         "The SSH host has no usable alias for attachment transfer.",
                         502,
                     )
+                existing_remote_path = attachment.get("remote_path")
+                remote_name = (
+                    PurePosixPath(existing_remote_path).name
+                    if isinstance(existing_remote_path, str)
+                    and existing_remote_path
+                    else f"{uuid4().hex}{local_path.suffix}"
+                )
                 try:
                     provider_path = stage_ssh_attachment(
                         alias,
                         local_path,
-                        local_path.name,
+                        remote_name,
                         expected_size=attachment["byte_size"],
                         expected_sha256=attachment["sha256"],
                     )
@@ -2338,12 +2518,103 @@ class ConversationService:
             )
             for conversation in side_chats
         }
-        _count, attachments = self.store.purge_side_chats()
+        with self._attachment_upload_lock:
+            _count, attachments = self.store.purge_side_chats()
+            for attachment in attachments:
+                self._unlink_managed_attachment_file(attachment)
         for attachment in attachments:
-            self._delete_remote_attachment_file(
+            self._schedule_detached_remote_cleanup(
                 hosts.get(str(attachment.get("conversation_id"))), attachment
             )
-            self._unlink_managed_attachment_file(attachment)
+
+    def _cleanup_terminal_remote_attachments(self) -> None:
+        """Snapshot startup candidates before the service accepts later turns."""
+        seen: set[str] = set()
+        filters = (
+            {"lifecycle": "archived"},
+            {"status": "idle"},
+            {"status": "completed"},
+            {"status": "failed"},
+            {"status": "interrupted"},
+        )
+        for query in filters:
+            offset = 0
+            while True:
+                conversations = self.store.list_conversations(
+                    **query, limit=1000, offset=offset
+                )
+                for conversation in conversations:
+                    conversation_id = conversation["conversation_id"]
+                    if conversation_id in seen:
+                        continue
+                    seen.add(conversation_id)
+                    self._cleanup_remote_attachment_copies(
+                        conversation,
+                        include_staged=conversation["lifecycle"] == "archived",
+                    )
+                if len(conversations) < 1000:
+                    break
+                offset += len(conversations)
+
+    def _remote_cleanup_loop(self) -> None:
+        while True:
+            with self._remote_cleanup_condition:
+                while (
+                    not self._remote_cleanup_stopping
+                    and not self._remote_cleanup_durable
+                    and not self._remote_cleanup_detached
+                ):
+                    self._remote_cleanup_condition.wait()
+                if self._remote_cleanup_stopping:
+                    return
+                if self._remote_cleanup_durable:
+                    attachment_key = next(iter(self._remote_cleanup_durable))
+                    alias = self._remote_cleanup_durable.pop(attachment_key)
+                    job: tuple[str, Any] = (
+                        "durable",
+                        (alias, attachment_key[0], attachment_key[1]),
+                    )
+                else:
+                    alias, remote_path = next(iter(self._remote_cleanup_detached))
+                    self._remote_cleanup_detached.pop((alias, remote_path), None)
+                    job = ("detached", (alias, remote_path))
+            try:
+                if job[0] == "durable":
+                    alias, attachment_id, remote_path = job[1]
+                    self._run_durable_remote_cleanup(
+                        alias, attachment_id, remote_path
+                    )
+                else:
+                    alias, remote_path = job[1]
+                    self._delete_remote_attachment_file(
+                        {"kind": "ssh", "ssh_alias": alias},
+                        {"remote_path": remote_path},
+                    )
+            except Exception:
+                # Cleanup never owns conversation correctness. Durable jobs keep
+                # remote_path for a later terminal scan when anything fails.
+                continue
+
+    def _remote_cleanup_should_stop(self) -> bool:
+        with self._remote_cleanup_condition:
+            return self._remote_cleanup_stopping
+
+    def _schedule_detached_remote_cleanup(
+        self,
+        host: Mapping[str, Any] | None,
+        attachment: Mapping[str, Any],
+    ) -> None:
+        if host is None or host.get("kind") != "ssh":
+            return
+        alias = host.get("ssh_alias")
+        remote_path = attachment.get("remote_path")
+        if not isinstance(alias, str) or not alias or not isinstance(remote_path, str):
+            return
+        with self._remote_cleanup_condition:
+            if self._remote_cleanup_stopping:
+                return
+            self._remote_cleanup_detached[(alias, remote_path)] = None
+            self._remote_cleanup_condition.notify()
 
     def _cleanup_orphaned_attachment_files(self) -> None:
         """Remove old crash leftovers only when all live references were inspected."""
@@ -2363,18 +2634,75 @@ class ConversationService:
         self,
         host: Mapping[str, Any] | None,
         attachment: Mapping[str, Any],
-    ) -> None:
+    ) -> bool:
         if host is None or host.get("kind") != "ssh":
-            return
+            return False
         alias = host.get("ssh_alias")
         remote_path = attachment.get("remote_path")
         if not isinstance(alias, str) or not alias or not isinstance(remote_path, str):
-            return
+            return False
         try:
             delete_ssh_attachment(alias, remote_path)
         except (OSError, RuntimeError, ValueError):
             # Cleanup is deliberately best effort. Local metadata can still be
             # discarded when a host is offline or its managed file is gone.
+            return False
+        return True
+
+    def _cleanup_remote_attachment_copies(
+        self,
+        conversation: Mapping[str, Any],
+        *,
+        include_staged: bool = False,
+    ) -> None:
+        host = self.store.get_host(str(conversation["host_id"]))
+        if host is None or host.get("kind") != "ssh":
+            return
+        alias = host.get("ssh_alias")
+        if not isinstance(alias, str) or not alias:
+            return
+        candidates = [
+            attachment
+            for attachment in self.store.list_attachments(
+                str(conversation["conversation_id"])
+            )
+            if isinstance(attachment.get("remote_path"), str)
+            and (include_staged or attachment.get("state") == "sent")
+        ]
+        with self._remote_cleanup_condition:
+            if self._remote_cleanup_stopping:
+                return
+            for attachment in candidates:
+                self._remote_cleanup_durable[
+                    (
+                        str(attachment["attachment_id"]),
+                        str(attachment["remote_path"]),
+                    )
+                ] = alias
+            self._remote_cleanup_condition.notify()
+
+    def _run_durable_remote_cleanup(
+        self,
+        alias: str,
+        attachment_id: str,
+        remote_path: str,
+    ) -> None:
+        attachment = self.store.get_attachment(attachment_id)
+        if attachment is None or attachment.get("remote_path") != remote_path:
+            return
+        if self._remote_cleanup_should_stop():
+            return
+        if not self._delete_remote_attachment_file(
+            {"kind": "ssh", "ssh_alias": alias}, attachment
+        ):
+            return
+        try:
+            self.store.clear_attachment_remote_path(
+                attachment_id, expected_remote_path=remote_path
+            )
+        except Exception:
+            # The remote unlink already succeeded. Keeping the path merely
+            # causes a harmless missing-file retry during later cleanup.
             return
 
     def _unlink_managed_attachment_file(self, attachment: Mapping[str, Any]) -> None:

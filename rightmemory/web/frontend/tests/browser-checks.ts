@@ -989,6 +989,30 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     raceHost.remove(); racePane.remove();
     report('PASS side-chat restore races and cross-page close tombstones reconcile temporary tabs');
 
+    if (matchMedia('(max-width: 760px)').matches) {
+      const workspaceProbe = document.createElement('section');
+      workspaceProbe.className = 'pursuit-workspace';
+      workspaceProbe.style.cssText = 'position:fixed;left:-1200px;top:0;width:390px';
+      const mapProbe = document.createElement('div');
+      mapProbe.className = 'pw-map-shell';
+      const paneProbe = conversationPreview.cloneNode(true) as HTMLElement;
+      paneProbe.removeAttribute('style');
+      workspaceProbe.append(mapProbe, paneProbe);
+      selectionBoundary.append(workspaceProbe);
+      const workspaceBounds = workspaceProbe.getBoundingClientRect();
+      const mapBounds = mapProbe.getBoundingClientRect();
+      const paneBounds = paneProbe.getBoundingClientRect();
+      const footer = paneProbe.querySelector<HTMLElement>('.cw-composer-footer')!;
+      const footerHint = footer.querySelector<HTMLElement>('small')!;
+      check(Math.abs(mapBounds.height + paneBounds.height - workspaceProbe.clientHeight) < 1
+        && paneBounds.bottom <= workspaceBounds.bottom + 1, 'Mobile workspace tracks stay within the bounded workspace height');
+      check(getComputedStyle(footer).display === 'grid'
+        && getComputedStyle(footerHint).order === '0'
+        && getComputedStyle(footerHint).flexBasis === 'auto', 'Mobile composer keeps its grid placement without flex-only overrides');
+      workspaceProbe.remove();
+      report('PASS bounded mobile workspace tracks and grid composer placement');
+    }
+
     document.body.append(conversationPreview);
     conversationPreview.style.cssText = 'position:fixed;right:12px;top:12px;width:400px;height:min(700px,calc(100vh - 24px));z-index:1000;box-shadow:0 14px 42px #18312633';
     conversationPane.style.cssText = 'position:fixed;right:424px;top:12px;z-index:1001';

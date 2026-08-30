@@ -821,6 +821,45 @@ class ConversationStoreTests(unittest.TestCase):
             self.assertTrue(store.delete_attachment(pasted["attachment_id"]))
             self.assertFalse(store.delete_attachment(pasted["attachment_id"]))
 
+    def test_attachment_remote_path_clear_is_compare_and_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ConversationStore(root)
+            store.initialize()
+            conversation = self._create_local_conversation(store)
+            attachment = store.create_attachment(
+                attachment_id="a" * 32,
+                conversation_id=conversation["conversation_id"],
+                kind="pasted_text",
+                display_name="Pasted text.txt",
+                media_type="text/plain",
+                byte_size=4,
+                sha256="b" * 64,
+                relative_path=".runtime/web/attachments/" + "a" * 32 + ".txt",
+                remote_path="/home/user/.cache/rightmemory/attachments/old.txt",
+                state="sent",
+            )
+
+            self.assertFalse(
+                store.clear_attachment_remote_path(
+                    attachment["attachment_id"],
+                    expected_remote_path="/home/user/.cache/rightmemory/attachments/new.txt",
+                )
+            )
+            self.assertEqual(
+                store.get_attachment(attachment["attachment_id"])["remote_path"],
+                "/home/user/.cache/rightmemory/attachments/old.txt",
+            )
+            self.assertTrue(
+                store.clear_attachment_remote_path(
+                    attachment["attachment_id"],
+                    expected_remote_path="/home/user/.cache/rightmemory/attachments/old.txt",
+                )
+            )
+            self.assertIsNone(
+                store.get_attachment(attachment["attachment_id"])["remote_path"]
+            )
+
     def test_each_memory_root_has_an_isolated_database(self):
         with tempfile.TemporaryDirectory() as tempdir:
             base = Path(tempdir)

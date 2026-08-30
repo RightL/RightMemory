@@ -380,11 +380,12 @@ def add_conversation_routes(
     ):
         active_root = resolve_allowed_memory_root(root, session.active_root)
         service = registry.service(active_root)
-        stream_generation = stream_lifecycle.generation(
-            active_root, session.session_id
-        )
-        stream_token = stream_lifecycle.open_stream(
-            active_root, session.session_id, view_id, page_id
+        stream_token, stream_generation = await run_in_threadpool(
+            stream_lifecycle.open_stream,
+            active_root,
+            session.session_id,
+            view_id,
+            page_id,
         )
 
         def cleanup_side_chats() -> None:
@@ -513,10 +514,13 @@ _SSE_HEARTBEAT_SECONDS = 15.0
 _SIDE_CHAT_RELEASE_GRACE_SECONDS = 15.0
 _MAX_RELEASED_VIEW_TOMBSTONES = 256
 _MAX_RAW_ATTACHMENT_BYTES = 20 * 1024 * 1024
+_VIEW_ACTIVE = "active"
+_VIEW_DISCONNECTED = "disconnected"
+_VIEW_RELEASED = "released"
 
 
 class _StreamLifecycle:
-    """Track explicit browser-view lifetimes without trusting transport loss."""
+    """Lease browser views across transient stream loss and page crashes."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -525,15 +529,11 @@ class _StreamLifecycle:
             tuple[str, str], dict[object, tuple[str, str]]
         ] = {}
         self._views: dict[
-            tuple[str, str], dict[tuple[str, str], bool]
+            tuple[str, str], dict[tuple[str, str], str]
         ] = {}
         self._cleanup_timers: dict[tuple[str, str], threading.Timer] = {}
         self._cleanup_tokens: dict[tuple[str, str], object] = {}
-
-    def generation(self, root: Path, session_id: str) -> int:
-        key = (_root_key(root), session_id)
-        with self._lock:
-            return self._generations.get(key, 0)
+        self._cleanup_gates: dict[tuple[str, str], threading.Event] = {}
 
     def is_current(
         self, root: Path, session_id: str, generation: int
@@ -559,18 +559,29 @@ class _StreamLifecycle:
         session_id: str,
         view_id: str,
         page_id: str,
-    ) -> object:
-        """Register a page stream without reviving an explicitly released page."""
+    ) -> tuple[object, int]:
+        """Register a stream and snapshot its invalidation generation atomically."""
         key = (_root_key(root), session_id)
         stream_token = object()
-        with self._lock:
-            self._views.setdefault(key, {}).setdefault((view_id, page_id), False)
-            self._streams.setdefault(key, {})[stream_token] = (view_id, page_id)
-            timer = self._cleanup_timers.pop(key, None)
-            self._cleanup_tokens.pop(key, None)
+        while True:
+            with self._lock:
+                cleanup_gate = self._cleanup_gates.get(key)
+                if cleanup_gate is None:
+                    page_key = (view_id, page_id)
+                    views = self._views.setdefault(key, {})
+                    if views.get(page_key) != _VIEW_RELEASED:
+                        views[page_key] = _VIEW_ACTIVE
+                    self._streams.setdefault(key, {})[stream_token] = page_key
+                    timer = self._cleanup_timers.pop(key, None)
+                    self._cleanup_tokens.pop(key, None)
+                    generation = self._generations.get(key, 0)
+                    break
+            # The route invokes this method in Starlette's worker pool, so a
+            # slow provider cleanup blocks only this key's reconnect attempt.
+            cleanup_gate.wait()
         if timer is not None:
             timer.cancel()
-        return stream_token
+        return stream_token, generation
 
     def close_stream(
         self,
@@ -579,18 +590,20 @@ class _StreamLifecycle:
         stream_token: object,
         cleanup: Callable[[], None],
     ) -> None:
-        """Forget a transport; a disconnect alone never ends the browser view."""
+        """Start a bounded abandonment lease after a page loses its last stream."""
         key = (_root_key(root), session_id)
         with self._lock:
             streams = self._streams.get(key)
             if streams is None or stream_token not in streams:
                 return
-            streams.pop(stream_token, None)
+            page_key = streams.pop(stream_token)
             if not streams:
                 self._streams.pop(key, None)
-            previous, timer = self._schedule_cleanup_locked(key, cleanup)
-        if previous is not None:
-            previous.cancel()
+            if page_key not in streams.values():
+                views = self._views.get(key)
+                if views is not None and views.get(page_key) == _VIEW_ACTIVE:
+                    views[page_key] = _VIEW_DISCONNECTED
+            timer = self._schedule_cleanup_locked(key, cleanup)
         if timer is not None:
             timer.start()
 
@@ -607,11 +620,9 @@ class _StreamLifecycle:
         with self._lock:
             views = self._views.setdefault(key, {})
             page_key = (view_id, page_id)
-            views[page_key] = True
+            views[page_key] = _VIEW_RELEASED
             self._prune_released_views_locked(key, preserve=page_key)
-            previous, timer = self._schedule_cleanup_locked(key, cleanup)
-        if previous is not None:
-            previous.cancel()
+            timer = self._schedule_cleanup_locked(key, cleanup)
         if timer is not None:
             timer.start()
         return True
@@ -627,8 +638,8 @@ class _StreamLifecycle:
         active_pages = set(self._streams.get(key, {}).values())
         inactive_released = [
             page_key
-            for page_key, released in views.items()
-            if released and page_key not in active_pages
+            for page_key, view_state in views.items()
+            if view_state == _VIEW_RELEASED and page_key not in active_pages
         ]
         excess = len(inactive_released) - _MAX_RELEASED_VIEW_TOMBSTONES
         if excess <= 0:
@@ -645,16 +656,19 @@ class _StreamLifecycle:
         self,
         key: tuple[str, str],
         cleanup: Callable[[], None],
-    ) -> tuple[threading.Timer | None, threading.Timer | None]:
+    ) -> threading.Timer | None:
         views = self._views.get(key)
         if (
             self._streams.get(key)
             or not views
-            or any(not released for released in views.values())
+            or any(view_state == _VIEW_ACTIVE for view_state in views.values())
         ):
-            return None, None
+            return None
+        if key in self._cleanup_timers:
+            # Repeated release requests are idempotent and must not extend the
+            # already-running abandonment lease.
+            return None
         cleanup_token = object()
-        previous = self._cleanup_timers.pop(key, None)
         self._cleanup_tokens[key] = cleanup_token
         timer = threading.Timer(
             _SIDE_CHAT_RELEASE_GRACE_SECONDS,
@@ -663,7 +677,7 @@ class _StreamLifecycle:
         )
         timer.daemon = True
         self._cleanup_timers[key] = timer
-        return previous, timer
+        return timer
 
     def close(self) -> None:
         """Cancel grace timers when the web application shuts down."""
@@ -683,14 +697,16 @@ class _StreamLifecycle:
         cleanup_token: object,
         cleanup: Callable[[], None],
     ) -> None:
+        cleanup_gate: threading.Event | None = None
         with self._lock:
             if (
                 self._cleanup_tokens.get(key) is not cleanup_token
+                or key in self._cleanup_gates
                 or self._streams.get(key)
                 or not self._views.get(key)
                 or any(
-                    not released
-                    for released in self._views[key].values()
+                    view_state == _VIEW_ACTIVE
+                    for view_state in self._views[key].values()
                 )
             ):
                 return
@@ -698,12 +714,20 @@ class _StreamLifecycle:
             self._cleanup_timers.pop(key, None)
             self._generations.pop(key, None)
             self._views.pop(key, None)
+            cleanup_gate = threading.Event()
+            self._cleanup_gates[key] = cleanup_gate
         try:
             cleanup()
         except Exception:
             # A later startup purge is the final recovery path if session-end
             # cleanup loses storage or provider access.
             return
+        finally:
+            with self._lock:
+                if self._cleanup_gates.get(key) is cleanup_gate:
+                    self._cleanup_gates.pop(key, None)
+            if cleanup_gate is not None:
+                cleanup_gate.set()
 
 
 def _root_key(root: Path) -> str:
