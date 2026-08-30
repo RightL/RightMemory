@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import struct
 import tempfile
 import threading
 import time
@@ -8,11 +9,16 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from rightmemory.conversations.jsonrpc import JsonRpcRemoteError
 from rightmemory.conversations.models import ConversationError
 from rightmemory.conversations.service import ConversationRuntimeRegistry, ConversationService
+
+
+def _png_fixture(width: int = 1200, height: int = 900) -> bytes:
+    ihdr = struct.pack(">II", width, height) + b"\x08\x02\x00\x00\x00"
+    return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", len(ihdr)) + b"IHDR" + ihdr + b"\x00" * 4
 
 
 class _FakePursuitStore:
@@ -370,6 +376,47 @@ class ConversationServiceTests(unittest.TestCase):
             uploaded["attachment_id"],
         )
 
+    def test_general_file_is_path_referenced_and_selected_text_can_remain_a_file(self):
+        conversation = self._create()
+        pdf = self.service.upload_attachment(
+            conversation["conversation_id"],
+            b"%PDF-1.7\nfixture",
+            "application/pdf",
+            "reference.PDF",
+        )["attachment"]
+        selected_text = self.service.upload_attachment(
+            conversation["conversation_id"],
+            b"selected text file",
+            "text/plain; charset=utf-8",
+            "selected.txt",
+            attachment_kind="file",
+        )["attachment"]
+
+        _metadata, pdf_path = self.service.attachment_file(
+            conversation["conversation_id"], pdf["attachment_id"]
+        )
+        _metadata, text_path = self.service.attachment_file(
+            conversation["conversation_id"], selected_text["attachment_id"]
+        )
+        self.assertEqual((pdf["kind"], pdf_path.suffix), ("file", ".pdf"))
+        self.assertEqual((selected_text["kind"], text_path.suffix), ("file", ".txt"))
+
+        self.service.send_message(
+            conversation["conversation_id"],
+            "Use both files.",
+            [pdf["attachment_id"], selected_text["attachment_id"]],
+        )
+
+        inputs = [call for call in self.adapter.calls if call[0] == "start_turn"][-1][2]
+        self.assertEqual([item["type"] for item in inputs], ["text", "text", "text"])
+        self.assertEqual(
+            [
+                self.service.store.get_attachment(attachment["attachment_id"])["state"]
+                for attachment in (pdf, selected_text)
+            ],
+            ["sent", "sent"],
+        )
+
     def test_attachment_upload_retry_is_idempotent_and_repairs_managed_file(self):
         conversation = self._create()
         attachment_id = "a" * 32
@@ -512,7 +559,7 @@ class ConversationServiceTests(unittest.TestCase):
 
     def test_pasted_image_uses_an_absolute_local_image_input(self):
         conversation = self._create()
-        png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"test"
+        png = _png_fixture()
         uploaded = self.service.upload_attachment(
             conversation["conversation_id"], png, "image/png", "capture.png"
         )["attachment"]
@@ -857,6 +904,100 @@ class ConversationServiceTests(unittest.TestCase):
                 stored = self.service.store.get_attachment(uploaded["attachment_id"])
                 self.assertIsNone(stored["remote_path"])
                 self.assertTrue(local_path.exists())
+
+    def test_archive_discards_staged_files_and_keeps_sent_attachment_history(self):
+        conversation, _sent, sent_uploads, sent_paths = (
+            self._create_sent_remote_attachments(b"sent context")
+        )
+        sent_attachment = self.service.store.get_attachment(
+            sent_uploads[0]["attachment_id"]
+        )
+        self.assertIsNotNone(sent_attachment)
+        sent_remote_path = sent_attachment["remote_path"]
+
+        staged = self.service.upload_attachment(
+            conversation["conversation_id"],
+            b"unsent composer context",
+            "text/plain",
+            "unsent.txt",
+        )["attachment"]
+        _metadata, staged_path = self.service.attachment_file(
+            conversation["conversation_id"], staged["attachment_id"]
+        )
+        staged_remote_path = (
+            "/home/user/.cache/rightmemory/attachments/" + staged_path.name
+        )
+        self.service.store.update_attachment(
+            staged["attachment_id"], remote_path=staged_remote_path
+        )
+
+        with patch(
+            "rightmemory.conversations.service.delete_ssh_attachment"
+        ) as cleanup:
+            archived = self.service.archive(conversation["conversation_id"])[
+                "conversation"
+            ]
+            self._wait_for_cleanup_calls(cleanup, count=2)
+            self._wait_until(
+                lambda: self.service.store.get_attachment(
+                    sent_uploads[0]["attachment_id"]
+                )["remote_path"]
+                is None
+            )
+
+        self.assertEqual(archived["lifecycle"], "archived")
+        cleanup.assert_has_calls(
+            [
+                call("build-box", sent_remote_path),
+                call("build-box", staged_remote_path),
+            ],
+            any_order=True,
+        )
+        self.assertIsNone(
+            self.service.store.get_attachment(staged["attachment_id"])
+        )
+        self.assertFalse(staged_path.exists())
+        persisted_sent = self.service.store.get_attachment(
+            sent_uploads[0]["attachment_id"]
+        )
+        self.assertEqual(persisted_sent["state"], "sent")
+        self.assertTrue(sent_paths[0].exists())
+        self.assertEqual(
+            [
+                attachment["attachment_id"]
+                for attachment in self.service.detail(
+                    conversation["conversation_id"]
+                )["attachments"]
+            ],
+            [sent_uploads[0]["attachment_id"]],
+        )
+
+    def test_repeated_archive_cleans_legacy_staged_composer_state(self):
+        conversation = self._create()
+        staged = self.service.upload_attachment(
+            conversation["conversation_id"],
+            b"legacy unsent context",
+            "text/plain",
+            "legacy.txt",
+        )["attachment"]
+        _metadata, staged_path = self.service.attachment_file(
+            conversation["conversation_id"], staged["attachment_id"]
+        )
+        self.service.store.archive_conversation(conversation["conversation_id"])
+
+        archived = self.service.archive(conversation["conversation_id"])[
+            "conversation"
+        ]
+
+        self.assertEqual(archived["lifecycle"], "archived")
+        self.assertIsNone(
+            self.service.store.get_attachment(staged["attachment_id"])
+        )
+        self.assertFalse(staged_path.exists())
+        self.assertEqual(
+            self.service.detail(conversation["conversation_id"])["attachments"],
+            [],
+        )
 
     def test_restart_retries_terminal_ssh_cleanup_after_host_failure(self):
         host = self.service.add_host("Remote", "build-box")["host"]

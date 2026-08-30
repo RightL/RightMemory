@@ -199,6 +199,7 @@ class _FakeConversationService:
         display_name=None,
         owner_session_id=None,
         attachment_id=None,
+        attachment_kind=None,
     ):
         self.calls.append(
             (
@@ -209,18 +210,39 @@ class _FakeConversationService:
                 display_name,
                 owner_session_id,
                 attachment_id,
+                attachment_kind,
             )
         )
         return {
             "attachment": {
                 "attachment_id": "attachment-1",
-                "kind": "pasted_text",
+                "kind": attachment_kind or "pasted_text",
                 "display_name": "notes.txt",
                 "media_type": "text/plain",
                 "byte_size": len(content),
                 "state": "staged",
             }
         }
+
+    def attachment_file(
+        self, conversation_id, attachment_id, owner_session_id=None
+    ):
+        self.calls.append(
+            ("attachment_file", conversation_id, attachment_id, owner_session_id)
+        )
+        path = self.root / "download-fixture.pdf"
+        path.write_bytes(b"%PDF fixture")
+        return (
+            {
+                "attachment_id": attachment_id,
+                "kind": "file",
+                "display_name": "reference.pdf",
+                "media_type": "application/pdf",
+                "byte_size": path.stat().st_size,
+                "state": "staged",
+            },
+            path,
+        )
 
     def delete_staged_attachment(
         self, conversation_id, attachment_id, owner_session_id=None
@@ -533,8 +555,12 @@ class ConversationWebTests(unittest.TestCase):
                 "content-type": "text/plain; charset=utf-8",
                 "x-filename": "pasted%20notes.txt",
                 "x-attachment-id": "0123456789abcdef0123456789abcdef",
+                "x-attachment-kind": "file",
                 "x-csrf-token": self.csrf,
             },
+        )
+        downloaded = self.client.get(
+            "/api/conversations/conversation-1/attachments/attachment-1"
         )
         deleted = self.client.request(
             "DELETE",
@@ -545,6 +571,10 @@ class ConversationWebTests(unittest.TestCase):
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(uploaded.status_code, 200)
         self.assertEqual(uploaded.json()["data"]["attachment"]["state"], "staged")
+        self.assertEqual(uploaded.json()["data"]["attachment"]["kind"], "file")
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertTrue(downloaded.headers["content-disposition"].startswith("attachment;"))
+        self.assertEqual(downloaded.headers["x-content-type-options"], "nosniff")
         self.assertEqual(deleted.status_code, 200)
         self.assertIn(
             (
@@ -555,6 +585,7 @@ class ConversationWebTests(unittest.TestCase):
                 "pasted%20notes.txt",
                 self.session_id,
                 "0123456789abcdef0123456789abcdef",
+                "file",
             ),
             self.service.calls,
         )

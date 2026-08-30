@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 LOCAL_HOST_ID = "local"
 DEFAULT_LOCAL_PROJECT_ID = "local-root"
 
@@ -25,7 +25,7 @@ CONVERSATION_STATUSES = frozenset(
     }
 )
 PENDING_REQUEST_STATES = frozenset({"pending", "resolved", "stale"})
-ATTACHMENT_KINDS = frozenset({"image", "pasted_text"})
+ATTACHMENT_KINDS = frozenset({"image", "pasted_text", "file"})
 ATTACHMENT_STATES = frozenset({"staged", "sent"})
 
 

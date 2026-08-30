@@ -459,8 +459,13 @@ export class ConversationWorkspace implements ConversationRendererActions {
     this.settingsUpdates.set(conversationId, { intent, promise: next });
   }
 
-  async uploadAttachment(conversationId: string, file: File, attachmentId: string): Promise<ConversationAttachment> {
-    return this.api.uploadAttachment(conversationId, file, attachmentId);
+  async uploadAttachment(
+    conversationId: string,
+    file: File,
+    attachmentId: string,
+    attachmentKind?: 'file',
+  ): Promise<ConversationAttachment> {
+    return this.api.uploadAttachment(conversationId, file, attachmentId, attachmentKind);
   }
 
   async deleteAttachment(conversationId: string, attachmentId: string): Promise<void> {
@@ -527,7 +532,10 @@ export class ConversationWorkspace implements ConversationRendererActions {
     this.archivingConversations.add(conversationId);
     try {
       await this.api.archive(conversationId);
-      if (!this.destroyed) this.dispatch({ type: 'conversation-archived', conversationId });
+      if (!this.destroyed) {
+        this.renderer.clearStagedAttachments(conversationId);
+        this.dispatch({ type: 'conversation-archived', conversationId });
+      }
     } catch (error) { if (!this.destroyed) this.dispatch({ type: 'error', message: errorMessage(error) }); }
     finally { this.archivingConversations.delete(conversationId); }
   }

@@ -16,7 +16,7 @@ from rightmemory.conversations.store import (
 
 
 class ConversationStoreTests(unittest.TestCase):
-    def test_empty_initialization_creates_root_local_v5_and_defaults(self):
+    def test_empty_initialization_creates_root_local_v6_and_defaults(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             store = ConversationStore(root)
@@ -26,7 +26,7 @@ class ConversationStoreTests(unittest.TestCase):
             self.assertEqual(store.db_path, root.resolve() / DATABASE_RELATIVE_PATH)
             self.assertTrue(store.db_path.is_file())
             self.assertEqual((root / ".runtime" / ".gitignore").read_text(encoding="utf-8"), "*\n")
-            self.assertEqual(initialized["schema_version"], 5)
+            self.assertEqual(initialized["schema_version"], 6)
             self.assertEqual(initialized["local_host"]["host_id"], "local")
             self.assertEqual(initialized["local_host"]["kind"], "local")
             self.assertEqual(initialized["default_local_project"]["project_id"], "local-root")
@@ -52,7 +52,7 @@ class ConversationStoreTests(unittest.TestCase):
                     for table in tables
                 }
 
-            self.assertEqual(version, 5)
+            self.assertEqual(version, 6)
             self.assertTrue(
                 {
                     "conversation_hosts",
@@ -185,8 +185,8 @@ class ConversationStoreTests(unittest.TestCase):
                     ).fetchall()
                 }
 
-            self.assertEqual(initialized["schema_version"], 5)
-            self.assertEqual(version, 5)
+            self.assertEqual(initialized["schema_version"], 6)
+            self.assertEqual(version, 6)
             self.assertTrue(
                 {
                     "model",
@@ -266,8 +266,8 @@ class ConversationStoreTests(unittest.TestCase):
                     ).fetchall()
                 }
 
-            self.assertEqual(initialized["schema_version"], 5)
-            self.assertEqual(version, 5)
+            self.assertEqual(initialized["schema_version"], 6)
+            self.assertEqual(version, 6)
             self.assertIn("owner_session_id", columns)
 
             parent = self._create_local_conversation(store)
@@ -316,11 +316,92 @@ class ConversationStoreTests(unittest.TestCase):
                 conversation_id=conversation["conversation_id"]
             )
 
-            self.assertEqual(initialized["schema_version"], 5)
+            self.assertEqual(initialized["schema_version"], 6)
             self.assertFalse(events[0]["marks_final"])
             self.assertEqual(events[0]["event_id"], older["event_id"])
             self.assertTrue(events[1]["marks_final"])
             self.assertEqual(events[1]["event_id"], latest["event_id"])
+
+    def test_version_five_database_upgrade_preserves_all_operational_rows(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = ConversationStore(root)
+            store.initialize()
+            conversation = self._create_local_conversation(store)
+            store.set_pursuit_default("P1", "local", "local-root")
+            store.append_event(
+                conversation_id=conversation["conversation_id"],
+                turn_id="turn-v5",
+                kind="user.message",
+                payload={"text": "preserve every table"},
+            )
+            attachment = store.create_attachment(
+                attachment_id="5" * 32,
+                conversation_id=conversation["conversation_id"],
+                kind="pasted_text",
+                display_name="legacy.txt",
+                media_type="text/plain",
+                byte_size=6,
+                sha256="5" * 64,
+                relative_path=".runtime/web/attachments/" + "5" * 32 + ".txt",
+                remote_path="/home/user/.cache/rightmemory/attachments/" + "5" * 32 + ".txt",
+            )
+            pending = store.create_pending_request(
+                host_id="local",
+                connection_epoch="epoch-v5",
+                rpc_id="request-v5",
+                method="item/tool/requestUserInput",
+                payload={"question": "preserve"},
+                conversation_id=conversation["conversation_id"],
+                thread_id=conversation["thread_id"],
+            )
+            store.resolve_pending_request("local", "epoch-v5", "request-v5")
+            tables = (
+                "conversation_hosts",
+                "conversation_projects",
+                "pursuit_conversations",
+                "pursuit_conversation_preferences",
+                "conversation_events",
+                "conversation_attachments",
+                "pending_server_requests",
+            )
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                before = {
+                    table: connection.execute(
+                        f"SELECT * FROM {table} ORDER BY rowid"
+                    ).fetchall()
+                    for table in tables
+                }
+                connection.execute("PRAGMA user_version = 5")
+                connection.commit()
+
+            initialized = ConversationStore(root).initialize()
+
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                after = {
+                    table: connection.execute(
+                        f"SELECT * FROM {table} ORDER BY rowid"
+                    ).fetchall()
+                    for table in tables
+                }
+                create_sql = connection.execute(
+                    "SELECT sql FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'conversation_attachments'"
+                ).fetchone()[0]
+
+            self.assertEqual(initialized["schema_version"], 6)
+            self.assertEqual(version, 6)
+            self.assertEqual(after, before)
+            self.assertIn("'file'", create_sql)
+            self.assertEqual(
+                store.get_attachment(attachment["attachment_id"])["remote_path"],
+                attachment["remote_path"],
+            )
+            self.assertEqual(
+                store.get_pending_request_by_key(pending["request_key"])["state"],
+                "resolved",
+            )
 
     def test_side_chats_are_filterable_and_cleanup_purges_events(self):
         with tempfile.TemporaryDirectory() as tempdir:

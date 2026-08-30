@@ -40,7 +40,19 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
     } };
     if (path.endsWith('/read')) return { data: { conversation: { conversation_id: 'c/one', pursuit_id: 'p/one', last_final_event_id: 51, last_read_event_id: 51 } } };
     if (path.endsWith('/settings')) return { data: { conversation: { conversation_id: 'c/one', pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', model: 'gpt-5.6-mini', reasoning_effort: 'low' } } };
-    if (path.endsWith('/attachments') && options?.method === 'POST') return { data: { attachment: { attachment_id: 'a/one', conversation_id: 'c/one', kind: 'image', display_name: 'diagram.png', media_type: 'image/png', byte_size: 3, state: 'staged' } } };
+    if (path.endsWith('/attachments') && options?.method === 'POST') {
+      const headers = options.headers as Record<string, string>;
+      const genericFile = headers['x-attachment-kind'] === 'file';
+      return { data: { attachment: {
+        attachment_id: genericFile ? 'a/two' : 'a/one',
+        conversation_id: 'c/one',
+        kind: genericFile ? 'file' : 'image',
+        display_name: decodeURIComponent(headers['x-filename']),
+        media_type: headers['content-type'],
+        byte_size: (options.body as File).size,
+        state: 'staged',
+      } } };
+    }
     if (path === '/api/conversation-hosts') return { data: { host: { host_id: 'h2', kind: 'ssh', display_name: 'GPU', ssh_alias: 'gpu' } } };
     if (path === '/api/conversation-projects') return { data: { project: { project_id: 'p2', host_id: 'h2', label: 'Repo', cwd: '/repo' } } };
     if (path.endsWith('/reconcile')) return { data: { conversation: { conversation_id: 'c/one', pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', status: 'idle' } } };
@@ -58,6 +70,8 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
   await api.deleteSideChat('side/one');
   const uploadId = '0123456789abcdef0123456789abcdef';
   const uploaded = await api.uploadAttachment('c/one', new File([new Uint8Array([1, 2, 3])], 'diagram.png', { type: 'image/png' }), uploadId);
+  const fileUploadId = 'fedcba9876543210fedcba9876543210';
+  const uploadedFile = await api.uploadAttachment('c/one', new File(['notes'], 'notes.txt', { type: 'text/plain' }), fileUploadId, 'file');
   await api.sendMessage('c/one', 'hello', ['a/one']);
   await api.deleteAttachment('c/one', 'a/one');
   await api.interrupt('c/one');
@@ -94,12 +108,21 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
   assert.deepEqual(JSON.parse(String(request('/api/conversations/c%2Fone/read').options?.body)), { event_id: 51 });
   assert.equal(request('/api/side-chats/side%2Fone').options?.method, 'DELETE');
   assert.deepEqual(JSON.parse(String(request('/api/conversations/c%2Fone/settings').options?.body)), { model: 'gpt-5.6-mini', reasoning_effort: 'low' });
-  const uploadRequest = request('/api/conversations/c%2Fone/attachments');
+  const uploadRequests = requests.filter((entry) => entry.path === '/api/conversations/c%2Fone/attachments');
+  assert.equal(uploadRequests.length, 2);
+  const uploadRequest = uploadRequests[0];
   assert(uploadRequest.options?.body instanceof File);
   assert.equal((uploadRequest.options?.headers as Record<string, string>)['content-type'], 'image/png');
   assert.equal((uploadRequest.options?.headers as Record<string, string>)['x-filename'], 'diagram.png');
   assert.equal((uploadRequest.options?.headers as Record<string, string>)['x-attachment-id'], uploadId);
+  assert.equal((uploadRequest.options?.headers as Record<string, string>)['x-attachment-kind'], undefined);
   assert.equal(uploaded.displayName, 'diagram.png');
+  const fileUploadRequest = uploadRequests[1];
+  assert.equal((fileUploadRequest.options?.headers as Record<string, string>)['content-type'], 'text/plain');
+  assert.equal((fileUploadRequest.options?.headers as Record<string, string>)['x-filename'], 'notes.txt');
+  assert.equal((fileUploadRequest.options?.headers as Record<string, string>)['x-attachment-id'], fileUploadId);
+  assert.equal((fileUploadRequest.options?.headers as Record<string, string>)['x-attachment-kind'], 'file');
+  assert.equal(uploadedFile.kind, 'file');
   assert.deepEqual(JSON.parse(String(request('/api/conversations/c%2Fone/messages').options?.body)), { text: 'hello', attachment_ids: ['a/one'] });
   assert.equal(request('/api/conversations/c%2Fone/attachments/a%2Fone').options?.method, 'DELETE');
   assert.equal(request('/api/conversations/c%2Fone/reconcile').path, '/api/conversations/c%2Fone/reconcile');

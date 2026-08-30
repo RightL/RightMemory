@@ -25,10 +25,20 @@ async function fetchJson(path, options = {}) {
     headers["x-csrf-token"] = state.csrfToken;
   }
   const response = await fetch(path, { ...options, headers });
-  const payload = await response.json();
+  const responseText = await response.text();
+  let payload = {};
+  if (responseText) {
+    try {
+      payload = JSON.parse(responseText);
+    } catch {
+      if (response.ok) throw new Error("The server returned an unreadable response.");
+      payload = { message: responseText.trim().slice(0, 500) };
+    }
+  }
   if (!response.ok) {
-    const detail = payload.detail || {};
-    const error = new Error(detail.message || payload.message || `Request failed: ${response.status}`);
+    const record = payload && typeof payload === "object" ? payload : {};
+    const detail = record.detail && typeof record.detail === "object" ? record.detail : {};
+    const error = new Error(detail.message || record.message || `Request failed: ${response.status}`);
     error.status = response.status;
     error.detail = detail;
     throw error;

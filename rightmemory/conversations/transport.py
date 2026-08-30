@@ -19,11 +19,13 @@ REMOTE_CODEX_APP_SERVER_COMMAND = shlex.join(
 )
 
 _SSH_ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-_REMOTE_ATTACHMENT_NAME = re.compile(r"[0-9a-f]{32}\.(?:png|jpg|txt)\Z")
+_REMOTE_ATTACHMENT_NAME = re.compile(r"[0-9a-f]{32}\.[a-z0-9]{1,16}\Z")
 
 _REMOTE_ATTACHMENT_SCRIPT = """\
-import hashlib, os, pathlib, sys, tempfile
+import hashlib, os, pathlib, re, sys, tempfile
 name, expected_size, expected_hash = sys.argv[1:]
+if re.fullmatch(r'[0-9a-f]{32}\\.[a-z0-9]{1,16}', name) is None:
+    raise SystemExit(24)
 expected_size = int(expected_size)
 root = pathlib.Path.home() / '.cache' / 'rightmemory' / 'attachments'
 root.mkdir(parents=True, exist_ok=True)
@@ -39,7 +41,9 @@ try:
     os.chmod(temporary, 0o600)
     destination = root / name
     os.replace(temporary, destination)
-    print(destination.resolve())
+    # Keep the lexical managed-cache path. Resolving it can follow a symlink and
+    # produce a path that the matching cleanup guard correctly refuses.
+    print(destination.absolute())
 except BaseException:
     try:
         os.unlink(temporary)
@@ -51,7 +55,7 @@ except BaseException:
 _REMOTE_ATTACHMENT_DELETE_SCRIPT = """\
 import pathlib, re, sys
 name = sys.argv[1]
-if re.fullmatch(r'[0-9a-f]{32}\\.(?:png|jpg|txt)', name) is None:
+if re.fullmatch(r'[0-9a-f]{32}\\.[a-z0-9]{1,16}', name) is None:
     raise SystemExit(24)
 path = pathlib.Path.home() / '.cache' / 'rightmemory' / 'attachments' / name
 try:
@@ -267,14 +271,15 @@ def stage_ssh_attachment(
             message = f"{message}: {diagnostic}"
         raise AttachmentStagingError(message)
     remote_path = completed.stdout.decode("utf-8", "strict").strip()
-    if (
-        not remote_path
-        or any(character in remote_path for character in "\x00\r\n")
-        or not PurePosixPath(remote_path).is_absolute()
-        or PurePosixPath(remote_path).name != remote_name
-    ):
+    try:
+        validated_remote_path = _validated_remote_attachment_path(remote_path)
+    except TransportConfigurationError as exc:
+        raise AttachmentStagingError(
+            "the SSH host returned an invalid attachment path"
+        ) from exc
+    if validated_remote_path.name != remote_name:
         raise AttachmentStagingError("the SSH host returned an invalid attachment path")
-    return remote_path
+    return str(validated_remote_path)
 
 
 def delete_ssh_attachment(
