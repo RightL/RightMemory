@@ -335,7 +335,9 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     let uploadGate: Promise<void> | null = null;
     let echoNextUploadId = false;
     let failNextDelete = false;
+    let notFoundNextDelete = false;
     let failNextSend = false;
+    let interrupts = 0;
     const deletedAttachmentIds: string[] = [];
     const responses: Array<{ decision?: string; response?: unknown }> = [];
     const reconnects: string[] = [];
@@ -346,7 +348,7 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     const settingsUpdates: Array<{ model: string; reasoningEffort: string }> = [];
     const earlierLoads: string[] = [];
     const actions: ConversationRendererActions = {
-      toggleCollapsed() {}, openConversation(conversationId) { openedConversations.push(conversationId); }, loadEarlier(conversationId) { earlierLoads.push(conversationId); }, closeConversation() {}, createConversation() {}, interrupt() {}, archive() {}, reload() {},
+      toggleCollapsed() {}, openConversation(conversationId) { openedConversations.push(conversationId); }, loadEarlier(conversationId) { earlierLoads.push(conversationId); }, closeConversation() {}, createConversation() {}, interrupt() { interrupts++; }, archive() {}, reload() {},
       createSideChat(parentConversationId) { createdSideChats.push(parentConversationId); },
       closeSideChat(sideChatId) { closedSideChats.push(sideChatId); },
       acknowledgeRead() {},
@@ -377,6 +379,10 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
       async deleteAttachment(_conversationId, attachmentId) {
         deletedAttachmentIds.push(attachmentId);
         if (failNextDelete) { failNextDelete = false; throw new Error('fixture delete failed'); }
+        if (notFoundNextDelete) {
+          notFoundNextDelete = false;
+          throw Object.assign(new Error('The attachment was not found.'), { status: 404, code: 'attachment_not_found' });
+        }
       },
       sendMessage(text, attachmentIds) {
         if (failNextSend) { failNextSend = false; return false; }
@@ -439,6 +445,22 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
         { event_id: 19, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.started', payload: { item: { type: 'subAgentActivity', id: 'subagent-call-1', kind: 'started', agentThreadId: 'agent-thread-1', agentPath: '/root/inspect_backend' } } },
         { event_id: 20, conversation_id: 'conversation-1', turn_id: 'turn-2', kind: 'item.started', payload: { item: { type: 'subAgentActivity', id: 'subagent-call-2', kind: 'resumed', agentThreadId: 'agent-thread-1', agentPath: '/root/inspect_backend' } } },
         { event_id: 21, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.started', payload: { threadId: 'provider-thread-1', turnId: 'turn-1', startedAtMs: 1720000000000, item: { type: 'collabAgentToolCall', id: 'collab-call-1', tool: 'spawnAgent', status: 'inProgress', senderThreadId: 'provider-thread-1', receiverThreadIds: ['agent-thread-1'], prompt: 'Inspect the attachment backend without changing files.', model: 'gpt-5.6', reasoningEffort: 'high', agentsStates: { 'agent-thread-1': { status: 'running', message: 'Tracing routes' } } } } },
+        { event_id: '21.1', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'reasoning.summary_part', payload: { itemId: 'reasoning-1', summaryIndex: 0 } },
+        { event_id: '21.2', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'reasoning.summary_delta', payload: { itemId: 'reasoning-1', summaryIndex: 0, delta: 'Inspecting **attachment state**.' } },
+        { event_id: '21.3', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'reasoning.summary_delta', payload: { itemId: 'reasoning-1', summaryIndex: 1, delta: 'Checking deletion behavior.' } },
+        { event_id: '21.4', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'reasoning-1', type: 'reasoning', summary: ['Confirmed the **staged record**.', 'Verified safe cleanup.'], content: ['PRIVATE CHAIN OF THOUGHT'] } } },
+        { event_id: '21.5', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.started', payload: { item: { id: 'mcp-tool-1', type: 'mcpToolCall', server: 'files', tool: 'search', status: 'inProgress', arguments: { query: 'attachment state' } } } },
+        { event_id: '21.55', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'mcp.progress', payload: { itemId: 'mcp-tool-1', message: 'Searching the attachment index' } },
+        { event_id: '21.6', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'mcp-tool-1', type: 'mcpToolCall', server: 'files', tool: 'search', status: 'completed', arguments: { query: 'attachment state' }, result: { raw: 'GIANT RAW RESULT MUST STAY HIDDEN' }, durationMs: 1250 } } },
+        { event_id: '21.7', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'dynamic-tool-1', type: 'dynamicToolCall', namespace: 'browser', tool: 'inspect', status: 'completed', arguments: { path: '/visible/page' }, durationMs: 80 } } },
+        { event_id: '21.8', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'web-search-1', type: 'webSearch', query: 'official docs' } } },
+        { event_id: '21.9', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'image-view-1', type: 'imageView', path: 'C:\\fixture\\screen.png' } } },
+        { event_id: '21.91', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'image-generation-1', type: 'imageGeneration', status: 'completed', revisedPrompt: 'A compact UI preview.' } } },
+        { event_id: '21.92', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'review-1', type: 'enteredReviewMode', review: 'Review current changes' } } },
+        { event_id: '21.93', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.completed', payload: { item: { id: 'compact-1', type: 'contextCompaction' } } },
+        { event_id: '21.94', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'protocol.notification', payload: { method: 'rawResponseItem/completed', params: { item: { id: 'legacy-raw-message', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'DUPLICATE LEGACY RAW OUTPUT' }] } } } },
+        { event_id: '21.95', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'protocol.notification', payload: { method: 'rawResponse/completed', params: { response: { output_text: 'DUPLICATE LEGACY RESPONSE' } } } },
+        { event_id: '21.96', conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'protocol.notification', payload: { method: 'item/reasoning/textDelta', params: { itemId: 'reasoning-1', delta: 'LEGACY RAW REASONING' } } },
         { event_id: 22, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'future.item', payload: { html: '<iframe srcdoc=bad>' } },
       ],
       attachments: [
@@ -494,9 +516,26 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     check(conversationHost.querySelectorAll('.cw-plan').length === 1 && [...conversationHost.querySelectorAll('.cw-plan li')].map((entry) => entry.textContent).join('|') === 'Inspect — completed|Verify — in progress', 'Plan lifecycle updates replace one stable plan card instead of duplicating it');
     check(conversationHost.querySelectorAll('.cw-subagent-activity').length === 2 && conversationHost.querySelectorAll('.cw-commentary-group').length === 2, 'The same child agent resumed in a later parent turn stays visible in that later turn instead of coalescing across turns');
     check(conversationHost.querySelector('.cw-subagent-activity')?.textContent?.includes('inspect backend') && conversationHost.querySelector('.cw-collab-activity')?.textContent?.includes('Started an agent') && conversationHost.querySelector('.cw-agent-states')?.textContent?.includes('agent thread 1') && conversationHost.querySelector('.cw-agent-states')?.textContent?.includes('Tracing routes'), 'Top-level App Server collaboration items preserve agentsStates map identities in compact work-detail activity');
-    check(['.cw-commentary', '.cw-command', '.cw-file', '.cw-plan', '.cw-subagent-activity', '.cw-collab-activity']
+    const reasoningSummary = conversationHost.querySelector<HTMLElement>('.cw-reasoning-summary')!;
+    check(reasoningSummary.textContent?.includes('Confirmed the staged record.')
+      && reasoningSummary.textContent?.includes('Verified safe cleanup.')
+      && reasoningSummary.querySelector('strong')
+      && !conversationHost.textContent?.includes('PRIVATE CHAIN OF THOUGHT'), 'Provider reasoning summaries replace streamed parts, render rich text, and never expose raw reasoning content');
+    check(conversationHost.querySelectorAll('.cw-provider-activity').length === 7
+      && conversationHost.textContent?.includes('MCP · files · search')
+      && conversationHost.textContent?.includes('Tool · inspect')
+      && conversationHost.textContent?.includes('Searching the web')
+      && conversationHost.textContent?.includes('Viewing an image')
+      && conversationHost.textContent?.includes('Generating an image')
+      && conversationHost.textContent?.includes('Entered review mode')
+      && conversationHost.textContent?.includes('Compacting conversation context')
+      && !conversationHost.textContent?.includes('GIANT RAW RESULT MUST STAY HIDDEN'), 'Known provider work items, including MCP progress, coalesce into compact safe activity rows without dumping raw results');
+    check(['.cw-commentary', '.cw-reasoning-summary', '.cw-command', '.cw-file', '.cw-plan', '.cw-subagent-activity', '.cw-collab-activity', '.cw-provider-activity']
       .every((selector) => runningCommentary.contains(conversationHost.querySelector(selector))), 'Commentary, command, file, plan, and agent activity share one per-turn Work details group');
-    check(!conversationHost.querySelector('.cw-unknown') && !conversationHost.textContent?.includes('future.item') && !conversationHost.textContent?.includes('turn/started'), 'Raw lifecycle, protocol, and unknown event cards stay hidden');
+    check(!conversationHost.querySelector('.cw-unknown') && !conversationHost.textContent?.includes('future.item') && !conversationHost.textContent?.includes('turn/started')
+      && !conversationHost.textContent?.includes('DUPLICATE LEGACY RAW OUTPUT')
+      && !conversationHost.textContent?.includes('DUPLICATE LEGACY RESPONSE')
+      && !conversationHost.textContent?.includes('LEGACY RAW REASONING'), 'Raw lifecycle, legacy provider output, private reasoning, and unknown event cards stay hidden');
     for (const rawEvent of [
       { event_id: 23, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'item.started', payload: { item: { id: 'answer-1', type: 'agentMessage', phase: 'final_answer' } } },
       { event_id: 24, conversation_id: 'conversation-1', turn_id: 'turn-1', kind: 'agent.message.delta', payload: { item_id: 'answer-1', delta: '# PROVISIONAL STREAM\n\n- old result' } },
@@ -542,7 +581,7 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     conversationRenderer.render(conversationState);
     const interruptedWork = conversationHost.querySelector<HTMLDetailsElement>('[data-activity-key="commentary:turn-2"]')!;
     const failedWork = conversationHost.querySelector<HTMLDetailsElement>('[data-activity-key="commentary:turn-3"]')!;
-    check(!interruptedWork.open && interruptedWork.querySelector('summary')?.textContent === 'Work details · Interrupted'
+    check(!interruptedWork.open && interruptedWork.querySelector('summary')?.textContent === 'Work details · Stopped'
       && !failedWork.open && failedWork.querySelector('summary')?.textContent === 'Work details · Failed', 'Interrupted and failed turns collapse their work details instead of remaining stuck on Working');
     check(conversationHost.querySelectorAll('.cw-agent').length === 3 && conversationHost.querySelectorAll('.cw-commentary').length === 2 && conversationHost.querySelectorAll('.cw-final-answer').length === 1, 'Distinct commentary and final-answer item ids each produce exactly one phase bubble');
     const finalAnswer = conversationHost.querySelector<HTMLElement>('.cw-final-answer')!;
@@ -613,6 +652,34 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     check(idle, 'Idle status fixture must normalize');
     conversationState = reduceConversationState(conversationState, { type: 'event', event: idle });
     conversationRenderer.render(conversationState);
+    conversationState = reduceConversationState(conversationState, { type: 'send-in-flight', conversationId: 'conversation-1', active: true });
+    conversationRenderer.render(conversationState);
+    const preparingButton = conversationHost.querySelector<HTMLButtonElement>('.cw-send-stop')!;
+    const preparingWork = conversationHost.querySelector<HTMLDetailsElement>('[data-activity-key="commentary:__pending__"]')!;
+    check(preparingButton.textContent === 'Preparing…' && preparingButton.disabled && preparingButton.dataset.mode === 'send'
+      && preparingWork.open && preparingWork.querySelector('summary')?.textContent?.startsWith('Preparing…'), 'A send shows immediate live work without exposing Stop before the provider has accepted a turn');
+    const startingConversation = conversationState.conversations.find((entry) => entry.conversationId === 'conversation-1')!;
+    conversationState = reduceConversationState(conversationState, { type: 'conversation-updated', conversation: { ...startingConversation, status: 'starting' } });
+    const startedTurn = normalizeEvent({ event_id: '31.1', conversation_id: 'conversation-1', turn_id: 'turn-4', kind: 'turn.started', payload: { turn: { id: 'turn-4' } } });
+    check(startedTurn, 'Started turn fixture must normalize');
+    conversationState = reduceConversationState(conversationState, { type: 'event', event: startedTurn });
+    conversationRenderer.render(conversationState);
+    const stopButton = conversationHost.querySelector<HTMLButtonElement>('.cw-send-stop')!;
+    check(stopButton.textContent === 'Stop' && !stopButton.disabled && stopButton.dataset.mode === 'stop'
+      && conversationHost.querySelector('[data-activity-key="commentary:turn-4"] summary')?.textContent?.startsWith('Working…'), 'The unified Send button becomes Stop only after the turn is interruptible');
+    stopButton.click(); stopButton.click();
+    const stoppingButton = conversationHost.querySelector<HTMLButtonElement>('.cw-send-stop')!;
+    check(interrupts === 1 && stoppingButton.disabled && stoppingButton.textContent === 'Stopping…'
+      && conversationHost.querySelector('[data-activity-key="commentary:turn-4"] summary')?.textContent?.startsWith('Stopping…'), 'Stop is latched immediately, invokes interrupt once, and keeps visible stopping state');
+    const stoppedTurn = normalizeEvent({ event_id: '31.2', conversation_id: 'conversation-1', turn_id: 'turn-4', kind: 'turn.interrupted', payload: { turn: { id: 'turn-4', status: 'interrupted' } } });
+    check(stoppedTurn, 'Interrupted turn fixture must normalize');
+    conversationState = reduceConversationState(conversationState, { type: 'event', event: stoppedTurn });
+    conversationState = reduceConversationState(conversationState, { type: 'send-in-flight', conversationId: 'conversation-1', active: false });
+    const stoppedConversation = conversationState.conversations.find((entry) => entry.conversationId === 'conversation-1')!;
+    conversationState = reduceConversationState(conversationState, { type: 'conversation-updated', conversation: { ...stoppedConversation, status: 'idle' } });
+    conversationRenderer.render(conversationState);
+    check(conversationHost.querySelector('[data-activity-key="commentary:turn-4"] summary')?.textContent === 'Work details · Stopped'
+      && conversationHost.querySelector<HTMLButtonElement>('.cw-send-stop')?.textContent === 'Send', 'A terminal interrupt ends the live indicator and restores the unified Send action');
     const composer = conversationHost.querySelector<HTMLTextAreaElement>('.cw-composer textarea')!;
     composer.value = 'Send from composer'; composer.dispatchEvent(new Event('input', { bubbles: true }));
     composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
@@ -679,6 +746,50 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     conversationHost.querySelector<HTMLButtonElement>('.cw-attachment-chip.cw-image .cw-attachment-remove')!.click();
     await until(() => deletedAttachmentIds.filter((id) => id === 'uploaded-2').length === 2 && !conversationHost.querySelector('.cw-attachment-chip'), 'Retrying staged image removal should delete its server attachment and clear the chip');
     check(deletedAttachmentIds.filter((id) => id === 'uploaded-2').length === 2, 'Image removal retries exactly after the failed backend deletion');
+    notFoundNextDelete = true;
+    conversationState = {
+      ...conversationState,
+      attachmentsByConversation: {
+        ...conversationState.attachmentsByConversation,
+        'conversation-1': [
+          ...(conversationState.attachmentsByConversation['conversation-1'] ?? []),
+          {
+            attachmentId: 'already-deleted', conversationId: 'conversation-1', kind: 'image', displayName: 'already-deleted.png',
+            mediaType: 'image/png', byteSize: 4, state: 'staged', url: '', raw: {},
+          },
+        ],
+      },
+    };
+    conversationRenderer.render(conversationState);
+    conversationHost.querySelector<HTMLButtonElement>('.cw-attachment-remove')!.click();
+    await until(() => !conversationHost.querySelector('.cw-attachment-chip'), 'A not-found delete response should clear the stale local chip');
+    check(!conversationHost.querySelector('.cw-composer-notice')?.textContent?.includes('not found'), 'Already-absent attachment deletion is treated as successful cleanup');
+    conversationState = {
+      ...conversationState,
+      attachmentsByConversation: {
+        ...conversationState.attachmentsByConversation,
+        'conversation-1': [
+          ...(conversationState.attachmentsByConversation['conversation-1'] ?? [])
+            .filter((attachment) => attachment.attachmentId !== 'already-deleted'),
+          {
+            attachmentId: 'stale-server-attachment', conversationId: 'conversation-1', kind: 'file', displayName: 'stale.zip',
+            mediaType: 'application/zip', byteSize: 4, state: 'staged', url: '', raw: {},
+          },
+        ],
+      },
+    };
+    conversationRenderer.render(conversationState);
+    check(conversationHost.querySelector('[data-attachment-id="stale-server-attachment"]'), 'An authoritative staged server attachment is restored');
+    conversationState = {
+      ...conversationState,
+      attachmentsByConversation: {
+        ...conversationState.attachmentsByConversation,
+        'conversation-1': (conversationState.attachmentsByConversation['conversation-1'] ?? [])
+          .filter((attachment) => attachment.attachmentId !== 'stale-server-attachment'),
+      },
+    };
+    conversationRenderer.render(conversationState);
+    check(!conversationHost.querySelector('[data-attachment-id="stale-server-attachment"]'), 'A later authoritative snapshot prunes an orphaned ready chip');
     const mixedPaste = new DataTransfer();
     mixedPaste.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'mixed.png', { type: 'image/png' }));
     mixedPaste.setData('text/plain', 'M'.repeat(8_000));

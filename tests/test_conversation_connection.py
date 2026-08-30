@@ -176,6 +176,7 @@ class CodexAppServerTests(unittest.TestCase):
             ],
             model="gpt-example",
             reasoning_effort="high",
+            summary="auto",
         )
         interrupted = server.interrupt_turn("thread-1", "turn-1")
 
@@ -209,6 +210,7 @@ class CodexAppServerTests(unittest.TestCase):
                 ],
                 "model": "gpt-example",
                 "effort": "high",
+                "summary": "auto",
             },
         )
         self.assertEqual(
