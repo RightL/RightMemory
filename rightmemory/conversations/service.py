@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+from urllib.parse import unquote
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
@@ -13,6 +14,18 @@ from typing import Any, Protocol
 from ..pursuit_store import PursuitStore
 from ..pursuit_tree import plain_title
 from .jsonrpc import JsonRpcRemoteError
+from .attachments import (
+    MAX_IMAGE_COUNT,
+    MAX_TEXT_COUNT,
+    MAX_TOTAL_COUNT,
+    ValidatedUpload,
+    attachment_base,
+    cleanup_orphaned_attachment_files,
+    public_attachment,
+    resolve_attachment_path,
+    validate_upload,
+    write_upload,
+)
 from .models import DEFAULT_LOCAL_PROJECT_ID, LOCAL_HOST_ID, ConversationError
 from .projection import (
     bounded_json_object,
@@ -22,6 +35,11 @@ from .projection import (
     status_from_thread,
 )
 from .store import ConversationStore
+from .transport import (
+    AttachmentStagingError,
+    delete_ssh_attachment,
+    stage_ssh_attachment,
+)
 
 
 MAX_MESSAGE_LENGTH = 200_000
@@ -67,7 +85,9 @@ class AppServerAdapter(Protocol):
 
     def archive_thread(self, thread_id: str) -> dict[str, Any]: ...
 
-    def start_turn(self, thread_id: str, text: str, **optional: Any) -> dict[str, Any]: ...
+    def start_turn(
+        self, thread_id: str, inputs: list[Mapping[str, Any]], **optional: Any
+    ) -> dict[str, Any]: ...
 
     def interrupt_turn(self, thread_id: str, turn_id: str) -> dict[str, Any]: ...
 
@@ -169,6 +189,8 @@ class ConversationService:
         self.root = Path(root).expanduser().resolve()
         self.store = store_factory(self.root)
         self.store.initialize()
+        self._discard_orphaned_side_chats()
+        self._cleanup_orphaned_attachment_files()
         self._stale_orphaned_requests()
         self._mark_orphaned_conversations_unknown()
         self._pursuits = pursuit_store_factory(self.root)
@@ -178,6 +200,7 @@ class ConversationService:
             str, tuple[AppServerAdapter, str, set[str]]
         ] = {}
         self._adapter_lock = threading.RLock()
+        self._attachment_upload_lock = threading.Lock()
         self._conversation_locks: dict[str, threading.RLock] = {}
         self._conversation_locks_guard = threading.Lock()
         self._broker = _EventBroker()
@@ -191,7 +214,19 @@ class ConversationService:
         # by a client that continues from this cursor.
         cursor = self.store.latest_event_id()
         items = self._pursuit_items()
-        conversations = [self._decorate_conversation(row, items) for row in self.store.list_conversations()]
+        conversations = [
+            self._decorate_conversation(row, items)
+            for row in self.store.list_conversations(kind="pursuit")
+        ]
+        conversation_ids = {
+            conversation["conversation_id"] for conversation in conversations
+        }
+        pending_requests = [
+            request
+            for request in self.store.list_pending_requests()
+            if request["conversation_id"] is None
+            or request["conversation_id"] in conversation_ids
+        ]
         defaults = {
             pursuit_id: value
             for pursuit_id in items
@@ -202,7 +237,7 @@ class ConversationService:
             "hosts": self.store.list_hosts(),
             "projects": self.store.list_projects(),
             "conversations": conversations,
-            "pending_requests": self.store.list_pending_requests(),
+            "pending_requests": pending_requests,
             "pursuit_defaults": defaults,
             "cursor": cursor,
         }
@@ -211,7 +246,9 @@ class ConversationService:
         item = self._require_pursuit(pursuit_id)
         conversations = [
             self._decorate_conversation(row, {item["id"]: item})
-            for row in self.store.list_conversations(pursuit_id=item["id"])
+            for row in self.store.list_conversations(
+                pursuit_id=item["id"], kind="pursuit"
+            )
         ]
         return {
             "conversations": conversations,
@@ -219,21 +256,31 @@ class ConversationService:
         }
 
     def detail(
-        self, conversation_id: str, after_event_id: int | None = None
+        self,
+        conversation_id: str,
+        after_event_id: int | None = None,
+        owner_session_id: str | None = None,
     ) -> dict[str, Any]:
         # As with workspace(), cursor-first makes a concurrent event replayable
         # instead of allowing a later cursor to hide an older snapshot.
         cursor = self.store.latest_event_id()
-        conversation = self._require_conversation(conversation_id)
-        events = (
-            self.store.latest_events(conversation["conversation_id"], limit=500)
-            if after_event_id is None
-            else self.store.read_events(
+        conversation = self._require_session_conversation(
+            conversation_id, owner_session_id
+        )
+        has_earlier_events = False
+        if after_event_id is None:
+            events = self.store.latest_events(
+                conversation["conversation_id"], limit=EVENT_PAGE_SIZE + 1
+            )
+            has_earlier_events = len(events) > EVENT_PAGE_SIZE
+            if has_earlier_events:
+                events = events[-EVENT_PAGE_SIZE:]
+        else:
+            events = self.store.read_events(
                 after_event_id=after_event_id,
                 limit=1000,
                 conversation_id=conversation["conversation_id"],
             )
-        )
         response_cursor = cursor
         if events:
             last_event_id = events[-1].get("event_id")
@@ -249,10 +296,41 @@ class ConversationService:
         return {
             "conversation": self._decorate_conversation(conversation, self._pursuit_items()),
             "events": events,
+            "attachments": [
+                public_attachment(attachment)
+                for attachment in self.store.list_attachments(
+                    conversation["conversation_id"]
+                )
+            ],
             "pending_requests": self.store.list_pending_requests(
                 conversation_id=conversation["conversation_id"]
             ),
+            "has_earlier_events": has_earlier_events,
             "cursor": response_cursor,
+        }
+
+    def earlier_history(
+        self,
+        conversation_id: str,
+        before_event_id: int,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Read one bounded page immediately before a displayed event."""
+        conversation = self._require_session_conversation(
+            conversation_id, owner_session_id
+        )
+        events = self.store.read_events_before(
+            conversation["conversation_id"],
+            before_event_id=before_event_id,
+            limit=EVENT_PAGE_SIZE + 1,
+        )
+        has_earlier_events = len(events) > EVENT_PAGE_SIZE
+        if has_earlier_events:
+            events = events[1:]
+        return {
+            "conversation_id": conversation["conversation_id"],
+            "events": events,
+            "has_earlier_events": has_earlier_events,
         }
 
     # Conversation lifecycle -----------------------------------------------
@@ -374,15 +452,184 @@ class ConversationService:
             {"thread": bounded_json_object(thread)},
             conversation_id=conversation["conversation_id"],
         )
+        self._publish_conversation_state(conversation["conversation_id"])
         return {"conversation": self._decorate_conversation(conversation, {item["id"]: item})}
+
+    def create_side_chat(
+        self, parent_conversation_id: str, owner_session_id: str
+    ) -> dict[str, Any]:
+        """Create one session-scoped Codex thread beside a Pursuit conversation."""
+        with self._conversation_operation(parent_conversation_id):
+            parent = self._require_active_conversation(parent_conversation_id)
+            if parent["kind"] != "pursuit":
+                raise ConversationError(
+                    "invalid_side_chat_parent",
+                    "A side chat must be created from a Pursuit conversation.",
+                    422,
+                )
+            host, project = self._require_host_project(
+                parent["host_id"], parent["project_id"]
+            )
+            cwd = self._validated_project_cwd(host, project["cwd"])
+            adapter = self._adapter(host)
+            thread_options: dict[str, Any] = {"ephemeral": True}
+            if parent.get("model") is not None:
+                thread_options["model"] = parent["model"]
+            try:
+                result = adapter.start_thread(cwd=cwd, **thread_options)
+            except Exception as exc:
+                self._record_provider_failure(host, "starting a side chat", exc)
+            thread = _result_object(result, "thread", "thread/start")
+            thread_id = _provider_id(
+                thread.get("id"), "thread/start did not return a thread id"
+            )
+            if not self._mark_thread_resident(host["host_id"], adapter, thread_id):
+                raise ConversationError(
+                    "provider_unavailable",
+                    "The Codex connection changed while starting the side chat.",
+                    502,
+                )
+            title = _optional_provider_title(thread.get("name") or thread.get("title"))
+            status = status_from_thread(thread.get("status"))
+            if status == "unknown":
+                status = "idle"
+            try:
+                conversation = self.store.create_conversation(
+                    kind="side_chat",
+                    parent_conversation_id=parent["conversation_id"],
+                    owner_session_id=owner_session_id,
+                    pursuit_id=parent["pursuit_id"],
+                    pursuit_title_snapshot=parent["pursuit_title_snapshot"],
+                    host_id=host["host_id"],
+                    project_id=project["project_id"],
+                    thread_id=thread_id,
+                    thread_title=title,
+                    model=parent["model"],
+                    reasoning_effort=parent["reasoning_effort"],
+                    status=status,
+                )
+            except Exception as exc:
+                self._forget_thread_resident(host["host_id"], adapter, thread_id)
+                try:
+                    adapter.archive_thread(thread_id)
+                except Exception:
+                    pass
+                raise ConversationError(
+                    "attachment_failed",
+                    f"Codex created side chat {thread_id}, but RightMemory could not attach it: {exc}",
+                    500,
+                ) from exc
+            self._append_event(
+                "thread.started",
+                {"thread": bounded_json_object(thread)},
+                conversation_id=conversation["conversation_id"],
+            )
+            self._publish_conversation_state(conversation["conversation_id"])
+            return {
+                "conversation": self._decorate_conversation(
+                    conversation, self._pursuit_items()
+                )
+            }
+
+    def close_side_chat(
+        self, conversation_id: str, owner_session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Discard one temporary side chat and its locally managed files."""
+        with self._conversation_operation(conversation_id, owner_session_id):
+            conversation = self._require_conversation(conversation_id)
+            if conversation["kind"] != "side_chat":
+                raise ConversationError(
+                    "not_side_chat", "Only a side chat can be closed here.", 409
+                )
+            adapter = self._existing_adapter(conversation["host_id"])
+            if adapter is not None:
+                if conversation["active_turn_id"] is not None:
+                    try:
+                        self._ensure_thread_resident(
+                            conversation["host_id"], adapter, conversation["thread_id"]
+                        )
+                        adapter.interrupt_turn(
+                            conversation["thread_id"], conversation["active_turn_id"]
+                        )
+                    except Exception:
+                        pass
+                try:
+                    adapter.archive_thread(conversation["thread_id"])
+                except Exception:
+                    pass
+
+            self._stale_conversation_requests(conversation["conversation_id"])
+            host = self.store.get_host(conversation["host_id"])
+            attachments = self.store.purge_side_chat(conversation["conversation_id"])
+            if adapter is not None:
+                self._forget_thread_resident(
+                    conversation["host_id"], adapter, conversation["thread_id"]
+                )
+            for attachment in attachments:
+                self._delete_remote_attachment_file(host, attachment)
+                self._unlink_managed_attachment_file(attachment)
+            self._append_event(
+                "side_chat.closed",
+                {"conversation_id": conversation["conversation_id"]},
+                owner_session_id=owner_session_id,
+            )
+            return {"conversation_id": conversation["conversation_id"]}
+
+    def close_side_chats_for_session(
+        self, owner_session_id: str
+    ) -> dict[str, Any]:
+        """Discard every temporary chat owned by one ended browser session."""
+        owned = [
+            conversation
+            for conversation in self.store.list_side_chats()
+            if self.store.side_chat_belongs_to_session(
+                conversation["conversation_id"], owner_session_id
+            )
+        ]
+        closed: list[str] = []
+        first_error: ConversationError | None = None
+        for conversation in owned:
+            conversation_id = conversation["conversation_id"]
+            try:
+                self.close_side_chat(conversation_id, owner_session_id)
+            except ConversationError as exc:
+                if exc.code == "conversation_not_found":
+                    continue
+                if first_error is None:
+                    first_error = exc
+            else:
+                closed.append(conversation_id)
+        if first_error is not None:
+            raise first_error
+        return {"conversation_ids": closed}
+
+    def acknowledge_read(
+        self,
+        conversation_id: str,
+        owner_session_id: str | None = None,
+        event_id: object = None,
+    ) -> dict[str, Any]:
+        with self._conversation_operation(conversation_id, owner_session_id):
+            conversation = self.store.acknowledge_read(
+                conversation_id,
+                event_id,
+                emit_state_event=True,
+            )
+            self._broker.notify()
+            return {
+                "conversation": self._decorate_conversation(
+                    conversation, self._pursuit_items()
+                )
+            }
 
     def update_settings(
         self,
         conversation_id: str,
         model: object = None,
         reasoning_effort: object = None,
+        owner_session_id: str | None = None,
     ) -> dict[str, Any]:
-        with self._conversation_operation(conversation_id):
+        with self._conversation_operation(conversation_id, owner_session_id):
             conversation = self._require_active_conversation(conversation_id)
             clean_model, clean_effort = _validate_model_settings(
                 _optional_setting(model, "model"),
@@ -396,17 +643,150 @@ class ConversationService:
                 conversation_id,
                 model=clean_model,
                 reasoning_effort=clean_effort,
+                emit_state_event=True,
             )
+            self._broker.notify()
             return {
                 "conversation": self._decorate_conversation(
                     updated, self._pursuit_items()
                 )
             }
 
-    def send_message(self, conversation_id: str, text: str) -> dict[str, Any]:
-        with self._conversation_operation(conversation_id):
+    def upload_attachment(
+        self,
+        conversation_id: str,
+        content: bytes,
+        media_type: object,
+        encoded_display_name: object = None,
+        owner_session_id: str | None = None,
+        attachment_id: object = None,
+    ) -> dict[str, Any]:
+        with self._conversation_operation(conversation_id, owner_session_id):
             conversation = self._require_active_conversation(conversation_id)
-            message = _message_text(text)
+            display_name = _decoded_display_name(encoded_display_name)
+            upload = validate_upload(
+                content,
+                media_type,
+                display_name,
+                attachment_id,
+            )
+            # A client-chosen identity makes a retry distinguishable from a
+            # new paste. Serializing identities across conversations also
+            # prevents a losing concurrent request from removing the winning
+            # request's managed file after a database conflict.
+            with self._attachment_upload_lock:
+                existing = self.store.get_attachment(upload.attachment_id)
+                if existing is not None:
+                    if not _same_staged_upload(
+                        existing,
+                        conversation["conversation_id"],
+                        upload,
+                    ):
+                        raise ConversationError(
+                            "attachment_conflict",
+                            "That attachment identity is already registered for different content.",
+                            409,
+                        )
+                    try:
+                        resolve_attachment_path(self.root, existing)
+                    except ConversationError:
+                        relative_path = write_upload(self.root, upload)
+                        if relative_path != existing.get("relative_path"):
+                            (self.root / Path(relative_path)).unlink(missing_ok=True)
+                            raise ConversationError(
+                                "attachment_conflict",
+                                "That attachment identity has incompatible managed storage.",
+                                409,
+                            )
+                    return {"attachment": public_attachment(existing)}
+
+                staged = self.store.list_attachments(
+                    conversation["conversation_id"], state="staged"
+                )
+                kind_count = sum(item.get("kind") == upload.kind for item in staged)
+                maximum_kind_count = (
+                    MAX_IMAGE_COUNT if upload.kind == "image" else MAX_TEXT_COUNT
+                )
+                if len(staged) >= MAX_TOTAL_COUNT or kind_count >= maximum_kind_count:
+                    raise ConversationError(
+                        "attachment_limit",
+                        "Remove a staged attachment before adding another.",
+                        409,
+                    )
+                relative_path = write_upload(self.root, upload)
+                try:
+                    attachment = self.store.create_attachment(
+                        attachment_id=upload.attachment_id,
+                        conversation_id=conversation["conversation_id"],
+                        kind=upload.kind,
+                        display_name=upload.display_name,
+                        media_type=upload.media_type,
+                        byte_size=upload.byte_size,
+                        sha256=upload.sha256,
+                        relative_path=relative_path,
+                        state="staged",
+                    )
+                except Exception:
+                    (self.root / Path(relative_path)).unlink(missing_ok=True)
+                    raise
+                return {"attachment": public_attachment(attachment)}
+
+    def attachment_file(
+        self,
+        conversation_id: str,
+        attachment_id: str,
+        owner_session_id: str | None = None,
+    ) -> tuple[dict[str, Any], Path]:
+        conversation = self._require_session_conversation(
+            conversation_id, owner_session_id
+        )
+        attachment = self._require_attachment(
+            conversation["conversation_id"], attachment_id
+        )
+        return public_attachment(attachment), resolve_attachment_path(self.root, attachment)
+
+    def delete_staged_attachment(
+        self,
+        conversation_id: str,
+        attachment_id: str,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._conversation_operation(conversation_id, owner_session_id):
+            conversation = self._require_active_conversation(conversation_id)
+            attachment = self._require_attachment(
+                conversation["conversation_id"], attachment_id
+            )
+            if attachment.get("state") != "staged":
+                raise ConversationError(
+                    "attachment_in_use",
+                    "Only an unsent staged attachment can be removed.",
+                    409,
+                )
+            host = self.store.get_host(conversation["host_id"])
+            self._delete_remote_attachment_file(host, attachment)
+            self._unlink_managed_attachment_file(attachment)
+            self.store.delete_attachment(attachment["attachment_id"])
+            return {"attachment_id": attachment["attachment_id"]}
+
+    def send_message(
+        self,
+        conversation_id: str,
+        text: object = None,
+        attachment_ids: object = None,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._conversation_operation(conversation_id, owner_session_id):
+            conversation = self._require_active_conversation(conversation_id)
+            message = _optional_message_text(text)
+            attachments = self._message_attachments(
+                conversation["conversation_id"], attachment_ids
+            )
+            if message is None and not attachments:
+                raise ConversationError(
+                    "invalid_message",
+                    "Write a message or attach pasted content before sending.",
+                    422,
+                )
             if (
                 conversation["active_turn_id"] is not None
                 or conversation["status"] in _BUSY_CONVERSATION_STATUSES
@@ -415,8 +795,34 @@ class ConversationService:
                     "conversation_busy", "This conversation already has an active turn.", 409
                 )
             host = self._require_host(conversation["host_id"])
-            adapter = self._adapter(host)
-            self.store.update_conversation(conversation_id, status="starting", touch_activity=True)
+            self.store.update_conversation(
+                conversation_id,
+                status="starting",
+                touch_activity=True,
+                emit_state_event=True,
+            )
+            self._broker.notify()
+            try:
+                # Remote attachment transfer and provider startup can both take
+                # long enough to matter to the user. Publish the busy state before
+                # either operation so the Pursuit indicator reflects real work.
+                turn_inputs = self._turn_inputs(host, message, attachments)
+                adapter = self._adapter(host)
+            except Exception:
+                current = self.store.get_conversation(conversation_id)
+                if (
+                    current is not None
+                    and current["status"] == "starting"
+                    and current["active_turn_id"] is None
+                ):
+                    self.store.update_conversation(
+                        conversation_id,
+                        status=conversation["status"],
+                        touch_activity=True,
+                        emit_state_event=True,
+                    )
+                    self._broker.notify()
+                raise
             try:
                 self._ensure_thread_resident(
                     host["host_id"], adapter, conversation["thread_id"]
@@ -457,7 +863,12 @@ class ConversationService:
                     self._record_provider_failure(host, "resuming the thread", exc)
             self._append_event(
                 "user.message",
-                {"text": message},
+                {
+                    "text": message or "",
+                    "attachments": [
+                        public_attachment(attachment) for attachment in attachments
+                    ],
+                },
                 conversation_id=conversation_id,
             )
             state_cursor = self.store.latest_event_id()
@@ -468,7 +879,7 @@ class ConversationService:
             }
             try:
                 result = adapter.start_turn(
-                    conversation["thread_id"], message, **turn_options
+                    conversation["thread_id"], turn_inputs, **turn_options
                 )
             except Exception as exc:
                 self.store.update_conversation(conversation_id, status="unknown", touch_activity=True)
@@ -480,6 +891,8 @@ class ConversationService:
                 self._record_provider_failure(host, "starting a turn", exc)
             turn = _result_object(result, "turn", "turn/start")
             turn_id = _provider_id(turn.get("id"), "turn/start did not return a turn id")
+            for attachment in attachments:
+                self.store.update_attachment(attachment["attachment_id"], state="sent")
             status = _status_from_returned_turn(turn)
             terminal_status = self._terminal_turn_status(conversation_id, turn_id)
             if terminal_status is not None:
@@ -529,9 +942,11 @@ class ConversationService:
                 )
             return {"conversation": updated, "turn": turn}
 
-    def reconcile(self, conversation_id: str) -> dict[str, Any]:
+    def reconcile(
+        self, conversation_id: str, owner_session_id: str | None = None
+    ) -> dict[str, Any]:
         """Reconnect and replace uncertain local turn state with provider state."""
-        with self._conversation_operation(conversation_id):
+        with self._conversation_operation(conversation_id, owner_session_id):
             conversation = self._require_active_conversation(conversation_id)
             host = self._require_host(conversation["host_id"])
             adapter = self._adapter(host)
@@ -664,8 +1079,10 @@ class ConversationService:
                 "resolved": connection_current and updated["status"] != "unknown",
             }
 
-    def interrupt(self, conversation_id: str) -> dict[str, Any]:
-        with self._conversation_operation(conversation_id):
+    def interrupt(
+        self, conversation_id: str, owner_session_id: str | None = None
+    ) -> dict[str, Any]:
+        with self._conversation_operation(conversation_id, owner_session_id):
             conversation = self._require_active_conversation(conversation_id)
             turn_id = conversation["active_turn_id"]
             if turn_id is None:
@@ -699,9 +1116,25 @@ class ConversationService:
                 )
             return {"conversation": updated}
 
-    def archive(self, conversation_id: str) -> dict[str, Any]:
-        with self._conversation_operation(conversation_id):
+    def archive(
+        self, conversation_id: str, owner_session_id: str | None = None
+    ) -> dict[str, Any]:
+        with self._conversation_operation(conversation_id, owner_session_id):
             conversation = self._require_conversation(conversation_id)
+            if conversation["kind"] == "side_chat":
+                raise ConversationError(
+                    "side_chat_must_close",
+                    "Close this temporary side chat instead of archiving it.",
+                    409,
+                )
+            if self.store.list_side_chats(
+                parent_conversation_id=conversation["conversation_id"]
+            ):
+                raise ConversationError(
+                    "side_chats_open",
+                    "Close this conversation's temporary side chats before archiving it.",
+                    409,
+                )
             if conversation["lifecycle"] == "archived":
                 return {"conversation": conversation}
             host = self._require_host(conversation["host_id"])
@@ -727,8 +1160,13 @@ class ConversationService:
                 )
             return {"conversation": updated}
 
-    def move(self, conversation_id: str, pursuit_id: str) -> dict[str, Any]:
-        with self._conversation_operation(conversation_id):
+    def move(
+        self,
+        conversation_id: str,
+        pursuit_id: str,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._conversation_operation(conversation_id, owner_session_id):
             conversation = self._require_conversation(conversation_id)
             item = self._require_pursuit(pursuit_id)
             previous = conversation["pursuit_id"]
@@ -743,6 +1181,7 @@ class ConversationService:
                 {"from_pursuit_id": previous, "to_pursuit_id": item["id"]},
                 conversation_id=conversation_id,
             )
+            self._publish_conversation_state(conversation_id)
             return {"conversation": self._decorate_conversation(updated, {item["id"]: item})}
 
     # Hosts, projects, and server requests ---------------------------------
@@ -791,6 +1230,7 @@ class ConversationService:
         decision: object = None,
         response: object = None,
         expected_conversation_id: str | None = None,
+        owner_session_id: str | None = None,
     ) -> dict[str, Any]:
         pending = self._pending_by_key(request_key)
         if pending is None:
@@ -803,7 +1243,7 @@ class ConversationService:
                 response=response,
                 expected_conversation_id=expected_conversation_id,
             )
-        with self._conversation_operation(conversation_id):
+        with self._conversation_operation(conversation_id, owner_session_id):
             return self._respond_request(
                 request_key,
                 decision=decision,
@@ -1055,6 +1495,7 @@ class ConversationService:
                         projected.payload,
                         conversation_id=conversation["conversation_id"],
                         turn_id=projected.turn_id,
+                        mark_final=projected.completed_final_answer,
                     )
                     if projected.kind == "thread.archived":
                         self._stale_conversation_requests(
@@ -1208,6 +1649,115 @@ class ConversationService:
 
     # Internal validation and connection helpers ---------------------------
 
+    def _require_attachment(
+        self, conversation_id: str, attachment_id: object
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(attachment_id, str)
+            or not attachment_id
+            or len(attachment_id) > 128
+            or any(character in attachment_id for character in "\x00\r\n")
+        ):
+            raise ConversationError("invalid_attachment", "The attachment id is invalid.", 422)
+        attachment = self.store.get_attachment(attachment_id)
+        if (
+            attachment is None
+            or attachment.get("conversation_id") != conversation_id
+        ):
+            raise ConversationError("attachment_not_found", "The attachment was not found.", 404)
+        return attachment
+
+    def _message_attachments(
+        self, conversation_id: str, attachment_ids: object
+    ) -> list[dict[str, Any]]:
+        if attachment_ids is None:
+            return []
+        if not isinstance(attachment_ids, list):
+            raise ConversationError(
+                "invalid_attachment", "attachment_ids must be a list.", 422
+            )
+        if len(attachment_ids) > MAX_TOTAL_COUNT:
+            raise ConversationError(
+                "attachment_limit", "A message has too many attachments.", 422
+            )
+        attachments: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for attachment_id in attachment_ids:
+            attachment = self._require_attachment(conversation_id, attachment_id)
+            clean_id = attachment["attachment_id"]
+            if clean_id in seen:
+                raise ConversationError(
+                    "invalid_attachment", "An attachment cannot appear twice.", 422
+                )
+            seen.add(clean_id)
+            if attachment.get("state") != "staged":
+                raise ConversationError(
+                    "attachment_in_use",
+                    "An attachment can be sent only once.",
+                    409,
+                )
+            attachments.append(attachment)
+        if sum(item.get("kind") == "image" for item in attachments) > MAX_IMAGE_COUNT:
+            raise ConversationError("attachment_limit", "A message has too many images.", 422)
+        if sum(item.get("kind") == "pasted_text" for item in attachments) > MAX_TEXT_COUNT:
+            raise ConversationError("attachment_limit", "A message has too many pasted texts.", 422)
+        return attachments
+
+    def _turn_inputs(
+        self,
+        host: Mapping[str, Any],
+        message: str | None,
+        attachments: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        inputs: list[dict[str, Any]] = []
+        if message is not None:
+            inputs.append({"type": "text", "text": message})
+        for attachment in attachments:
+            local_path = resolve_attachment_path(self.root, attachment)
+            provider_path = str(local_path)
+            if host.get("kind") == "ssh":
+                alias = host.get("ssh_alias")
+                if not isinstance(alias, str) or not alias:
+                    raise ConversationError(
+                        "attachment_staging_failed",
+                        "The SSH host has no usable alias for attachment transfer.",
+                        502,
+                    )
+                try:
+                    provider_path = stage_ssh_attachment(
+                        alias,
+                        local_path,
+                        local_path.name,
+                        expected_size=attachment["byte_size"],
+                        expected_sha256=attachment["sha256"],
+                    )
+                except (AttachmentStagingError, OSError, ValueError) as exc:
+                    raise ConversationError(
+                        "attachment_staging_failed",
+                        f"Could not copy {attachment['display_name']} to the SSH host: {_exception_text(exc)}",
+                        502,
+                    ) from exc
+                self.store.update_attachment(
+                    attachment["attachment_id"], remote_path=provider_path
+                )
+            if attachment.get("kind") == "image":
+                inputs.append({"type": "localImage", "path": provider_path})
+            elif attachment.get("kind") == "pasted_text":
+                inputs.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            "Read the pasted text at this managed absolute path as part "
+                            f"of the user's message: {provider_path}"
+                        ),
+                    }
+                )
+            else:
+                raise ConversationError(
+                    "invalid_attachment", "The attachment kind is unsupported.", 422
+                )
+        return inputs
+
     def _adapter(self, host: dict[str, Any]) -> AppServerAdapter:
         host_id = host["host_id"]
         with self._adapter_lock:
@@ -1315,6 +1865,23 @@ class ConversationService:
             resident_thread_ids.add(thread_id)
             return True
 
+    def _forget_thread_resident(
+        self,
+        host_id: str,
+        adapter: AppServerAdapter,
+        thread_id: str,
+    ) -> None:
+        """Forget one thread without disturbing other threads on its host."""
+        with self._adapter_lock:
+            residency = self._resident_threads.get(host_id)
+            if (
+                self._adapters.get(host_id) is adapter
+                and residency is not None
+                and residency[0] is adapter
+                and residency[1] == str(adapter.epoch)
+            ):
+                residency[2].discard(thread_id)
+
     def _thread_is_resident(
         self,
         host_id: str,
@@ -1371,11 +1938,11 @@ class ConversationService:
             conversation["host_id"], conversation["project_id"]
         )
         cwd = self._validated_project_cwd(host, project["cwd"])
-        thread_options = (
-            {"model": conversation["model"]}
-            if conversation.get("model") is not None
-            else {}
-        )
+        thread_options: dict[str, Any] = {}
+        if conversation.get("kind") == "side_chat":
+            thread_options["ephemeral"] = True
+        if conversation.get("model") is not None:
+            thread_options["model"] = conversation["model"]
         result = adapter.start_thread(cwd=cwd, **thread_options)
         thread = _result_object(result, "thread", "thread/start")
         replacement_thread_id = _provider_id(
@@ -1427,12 +1994,14 @@ class ConversationService:
             current = self._adapters.get(host_id)
             if current is not adapter or str(current.epoch) != str(adapter.epoch):
                 return self._require_conversation(conversation_id), False
-            return (
-                self.store.update_conversation(
-                    conversation_id, **updates, touch_activity=True
-                ),
-                True,
+            updated = self.store.update_conversation(
+                conversation_id,
+                **updates,
+                touch_activity=True,
+                emit_state_event=True,
             )
+        self._broker.notify()
+        return updated, True
 
     def _mark_connection_lost(
         self,
@@ -1548,6 +2117,29 @@ class ConversationService:
             raise ConversationError("conversation_not_found", "The conversation was not found.", 404)
         return conversation
 
+    def _require_session_conversation(
+        self,
+        conversation_id: str,
+        owner_session_id: str | None,
+    ) -> dict[str, Any]:
+        conversation = self._require_conversation(conversation_id)
+        if conversation["kind"] != "side_chat":
+            return conversation
+        if (
+            not isinstance(owner_session_id, str)
+            or not owner_session_id
+            or not self.store.side_chat_belongs_to_session(
+                conversation["conversation_id"], owner_session_id
+            )
+        ):
+            # A side-chat id is not an authorization capability. Use the same
+            # response as a missing row so another browser session cannot use
+            # this endpoint to discover session-owned temporary work.
+            raise ConversationError(
+                "conversation_not_found", "The conversation was not found.", 404
+            )
+        return conversation
+
     def _require_active_conversation(self, conversation_id: str) -> dict[str, Any]:
         conversation = self._require_conversation(conversation_id)
         if conversation["lifecycle"] != "active":
@@ -1555,12 +2147,16 @@ class ConversationService:
         return conversation
 
     @contextmanager
-    def _conversation_operation(self, conversation_id: str) -> Iterator[None]:
+    def _conversation_operation(
+        self,
+        conversation_id: str,
+        owner_session_id: str | None = None,
+    ) -> Iterator[None]:
         """Serialize one conversation's user operations and provider callbacks."""
         # Validate before retaining a lock so arbitrary missing ids cannot grow
         # this service-lifetime registry. Re-read state after acquiring the lock
         # in each operation because another waiter may have changed it.
-        self._require_conversation(conversation_id)
+        self._require_session_conversation(conversation_id, owner_session_id)
         with self._conversation_lock_for(conversation_id):
             yield
 
@@ -1626,13 +2222,22 @@ class ConversationService:
         *,
         conversation_id: str | None = None,
         turn_id: str | None = None,
+        mark_final: bool = False,
+        owner_session_id: str | None = None,
     ) -> dict[str, Any]:
         event = self.store.append_event(
             kind=kind,
             payload=payload,
             conversation_id=conversation_id,
             turn_id=turn_id,
+            mark_final=mark_final,
+            owner_session_id=owner_session_id,
         )
+        self._broker.notify()
+        return event
+
+    def _publish_conversation_state(self, conversation_id: str) -> dict[str, Any]:
+        event = self.store.append_conversation_state_event(conversation_id)
         self._broker.notify()
         return event
 
@@ -1723,6 +2328,68 @@ class ConversationService:
         }
         for host_id, epoch in epochs:
             self.store.mark_pending_requests_stale(host_id, epoch)
+
+    def _discard_orphaned_side_chats(self) -> None:
+        """A new runtime starts after the browser session that owned these chats."""
+        side_chats = self.store.list_side_chats()
+        hosts = {
+            conversation["conversation_id"]: self.store.get_host(
+                conversation["host_id"]
+            )
+            for conversation in side_chats
+        }
+        _count, attachments = self.store.purge_side_chats()
+        for attachment in attachments:
+            self._delete_remote_attachment_file(
+                hosts.get(str(attachment.get("conversation_id"))), attachment
+            )
+            self._unlink_managed_attachment_file(attachment)
+
+    def _cleanup_orphaned_attachment_files(self) -> None:
+        """Remove old crash leftovers only when all live references were inspected."""
+        conversations = self.store.list_conversations(limit=1000)
+        if len(conversations) >= 1000:
+            return
+        referenced_paths = (
+            attachment.get("relative_path")
+            for conversation in conversations
+            for attachment in self.store.list_attachments(
+                conversation["conversation_id"]
+            )
+        )
+        cleanup_orphaned_attachment_files(self.root, referenced_paths)
+
+    def _delete_remote_attachment_file(
+        self,
+        host: Mapping[str, Any] | None,
+        attachment: Mapping[str, Any],
+    ) -> None:
+        if host is None or host.get("kind") != "ssh":
+            return
+        alias = host.get("ssh_alias")
+        remote_path = attachment.get("remote_path")
+        if not isinstance(alias, str) or not alias or not isinstance(remote_path, str):
+            return
+        try:
+            delete_ssh_attachment(alias, remote_path)
+        except (OSError, RuntimeError, ValueError):
+            # Cleanup is deliberately best effort. Local metadata can still be
+            # discarded when a host is offline or its managed file is gone.
+            return
+
+    def _unlink_managed_attachment_file(self, attachment: Mapping[str, Any]) -> None:
+        relative_path = attachment.get("relative_path")
+        if not isinstance(relative_path, str) or not relative_path:
+            return
+        try:
+            base = attachment_base(self.root)
+            path = (self.root / Path(relative_path)).resolve()
+            path.relative_to(base)
+            path.unlink(missing_ok=True)
+        except (OSError, RuntimeError, ValueError):
+            # Side chats are disposable. A missing, changed, or inaccessible
+            # managed file must not prevent the runtime from forgetting them.
+            return
 
     def _mark_orphaned_conversations_unknown(self) -> None:
         """A fresh runtime cannot trust live-status caches from a dead process."""
@@ -1973,14 +2640,43 @@ def _optional_provider_title(value: object) -> str | None:
     return clean[:500] if clean else None
 
 
-def _message_text(value: object) -> str:
+def _optional_message_text(value: object) -> str | None:
+    if value is None or value == "":
+        return None
     if not isinstance(value, str):
-        raise ConversationError("invalid_message", "The message must be text.", 422)
+        raise ConversationError("invalid_message", "The message must be text or null.", 422)
     if not value.strip():
-        raise ConversationError("invalid_message", "The message cannot be empty.", 422)
+        return None
     if len(value) > MAX_MESSAGE_LENGTH or "\x00" in value:
         raise ConversationError("invalid_message", "The message is too large or contains invalid text.", 413)
     return value
+
+
+def _decoded_display_name(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConversationError("invalid_attachment", "The attachment name is invalid.", 422)
+    try:
+        return unquote(value, encoding="utf-8", errors="strict")
+    except UnicodeError as exc:
+        raise ConversationError("invalid_attachment", "The attachment name is invalid.", 422) from exc
+
+
+def _same_staged_upload(
+    attachment: Mapping[str, Any],
+    conversation_id: str,
+    upload: ValidatedUpload,
+) -> bool:
+    return (
+        attachment.get("conversation_id") == conversation_id
+        and attachment.get("state") == "staged"
+        and attachment.get("kind") == upload.kind
+        and attachment.get("display_name") == upload.display_name
+        and attachment.get("media_type") == upload.media_type
+        and attachment.get("byte_size") == upload.byte_size
+        and attachment.get("sha256") == upload.sha256
+    )
 
 
 def _status_from_returned_turn(turn: Mapping[str, Any]) -> str:

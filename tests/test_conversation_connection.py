@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -29,7 +32,9 @@ from rightmemory.conversations.transport import (
     TransportConfigurationError,
     build_local_transport,
     build_ssh_transport,
+    delete_ssh_attachment,
     resolve_codex_binary,
+    stage_ssh_attachment,
     transport_for_host,
     validate_ssh_alias,
 )
@@ -164,7 +169,10 @@ class CodexAppServerTests(unittest.TestCase):
         archived = server.archive_thread("thread-1")
         turn = server.start_turn(
             "thread-1",
-            "hello",
+            [
+                {"type": "text", "text": "hello"},
+                {"type": "localImage", "path": "/tmp/pasted.png"},
+            ],
             model="gpt-example",
             reasoning_effort="high",
         )
@@ -194,7 +202,10 @@ class CodexAppServerTests(unittest.TestCase):
             turn["received"],
             {
                 "threadId": "thread-1",
-                "input": [{"type": "text", "text": "hello"}],
+                "input": [
+                    {"type": "text", "text": "hello"},
+                    {"type": "localImage", "path": "/tmp/pasted.png"},
+                ],
                 "model": "gpt-example",
                 "effort": "high",
             },
@@ -234,7 +245,7 @@ class CodexAppServerTests(unittest.TestCase):
         server_holder["server"] = server
         server.connect()
         epoch = server.epoch
-        server.start_turn("thread-1", "run it")
+        server.start_turn("thread-1", [{"type": "text", "text": "run it"}])
 
         self.assertTrue(response_seen.wait(1))
         self.assertEqual(requests[0].epoch, epoch)
@@ -253,6 +264,74 @@ class CodexAppServerTests(unittest.TestCase):
 
 
 class ConversationTransportTests(unittest.TestCase):
+    def test_ssh_attachment_staging_uses_bounded_argv_only_transfer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.txt"
+            source.write_bytes(b"bounded paste")
+            remote_name = "a" * 32 + ".txt"
+            completed = subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=(
+                    f"/home/user/.cache/rightmemory/attachments/{remote_name}\n"
+                ).encode(),
+                stderr=b"",
+            )
+            with patch(
+                "rightmemory.conversations.transport.subprocess.run",
+                return_value=completed,
+            ) as run:
+                remote_path = stage_ssh_attachment(
+                    "build-box",
+                    source,
+                    remote_name,
+                    expected_size=source.stat().st_size,
+                    expected_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                    ssh_binary=sys.executable,
+                )
+
+        self.assertEqual(
+            remote_path,
+            f"/home/user/.cache/rightmemory/attachments/{remote_name}",
+        )
+        self.assertFalse(run.call_args.kwargs["shell"])
+        self.assertEqual(run.call_args.kwargs["input"], b"bounded paste")
+        self.assertEqual(run.call_args.args[0][0], sys.executable)
+        self.assertEqual(run.call_args.args[0][-2], "build-box")
+
+    def test_ssh_attachment_cleanup_validates_managed_path_and_uses_argv(self):
+        remote_name = "b" * 32 + ".txt"
+        completed = subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+        with patch(
+            "rightmemory.conversations.transport.subprocess.run",
+            return_value=completed,
+        ) as run:
+            delete_ssh_attachment(
+                "build-box",
+                f"/home/user/.cache/rightmemory/attachments/{remote_name}",
+                ssh_binary=sys.executable,
+            )
+
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[0], sys.executable)
+        self.assertEqual(argv[-2], "build-box")
+        self.assertFalse(run.call_args.kwargs["shell"])
+        remote_argv = shlex.split(argv[-1])
+        self.assertEqual(remote_argv[:2], ["python3", "-c"])
+        self.assertEqual(remote_argv[-1], remote_name)
+
+        for unsafe in (
+            f"/tmp/{remote_name}",
+            f"/home/user/.cache/rightmemory/attachments/../{remote_name}",
+            "/home/user/.cache/rightmemory/attachments/not-managed.txt",
+        ):
+            with self.subTest(unsafe=unsafe), self.assertRaises(
+                TransportConfigurationError
+            ):
+                delete_ssh_attachment(
+                    "build-box", unsafe, ssh_binary=sys.executable
+                )
+
     def test_local_transport_keeps_executable_and_arguments_separate(self):
         transport = build_local_transport(sys.executable, cwd=FAKE_SERVER.parent)
         self.assertEqual(

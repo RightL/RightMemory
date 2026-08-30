@@ -7,6 +7,10 @@ import { parseWholeTitleFormat, titleText, toggleWholeTitleMark, type TopicMark 
 import { keyboardCommand, navigate, readView, reconcileView, reveal, writeView, type ViewState } from './view-state.ts';
 import { ConversationWorkspace } from './conversation-workspace.ts';
 import type { FetchJson } from './conversation-api.ts';
+import {
+  aggregateConversationIndicators,
+  type OperationalConversationIndicatorInput,
+} from './conversation-indicators.ts';
 import 'katex/dist/katex.min.css';
 import './pursuit-map.css';
 
@@ -101,6 +105,7 @@ const markup = `
 export interface PursuitMapController {
   refresh(): Promise<void>;
   setActive(active: boolean): void;
+  setConversationIndicators(conversations: readonly OperationalConversationIndicatorInput[]): void;
   getSelectedId(): string | null;
   subscribeSelection(listener: (id: string | null) => void): () => void;
   readonly hasUnsavedChanges: boolean;
@@ -119,7 +124,15 @@ export async function mountPursuitMap(host: HTMLElement, fetchJson: FetchJson): 
   const transport = apiTransport(fetchJson);
   const snapshot = await transport.load();
   const map = new PursuitMap(mapHost, snapshot, transport, { selectionBoundary: host });
-  const conversations = new ConversationWorkspace(host, paneHost, fetchJson, snapshot.root_key);
+  const conversations = new ConversationWorkspace(
+    host,
+    paneHost,
+    fetchJson,
+    snapshot.root_key,
+    () => location.reload(),
+    undefined,
+    (items) => map.setConversationIndicators(items),
+  );
   const unsubscribeSelection = map.subscribeSelection((id) => conversations.selectPursuit(id));
   await conversations.start();
   return new PursuitWorkspaceController(map, conversations, unsubscribeSelection);
@@ -137,6 +150,7 @@ class PursuitWorkspaceController implements PursuitMapController {
   constructor(private map: PursuitMap, private conversations: ConversationWorkspace, private unsubscribeSelection: () => void) {}
   async refresh(): Promise<void> { await Promise.all([this.map.refresh(), this.conversations.refresh()]); }
   setActive(active: boolean): void { this.map.setActive(active); this.conversations.setActive(active); }
+  setConversationIndicators(conversations: readonly OperationalConversationIndicatorInput[]): void { this.map.setConversationIndicators(conversations); }
   getSelectedId(): string | null { return this.map.getSelectedId(); }
   subscribeSelection(listener: (id: string | null) => void): () => void { return this.map.subscribeSelection(listener); }
   get hasUnsavedChanges(): boolean { return this.map.hasUnsavedChanges; }
@@ -228,6 +242,10 @@ class PursuitMap implements PursuitMapController {
   private saveView(): void { writeView(localStorage, this.queue.snapshot.root_key, this.view); }
   private get snapshot(): Snapshot { return this.queue.snapshot; }
   private get selected() { return indexTree(this.snapshot).get(this.view.selected ?? ''); }
+
+  setConversationIndicators(conversations: readonly OperationalConversationIndicatorInput[]): void {
+    this.renderer.setConversationIndicators(aggregateConversationIndicators(conversations));
+  }
 
   private displaySnapshot(): Snapshot {
     const draft = this.drafts.title;

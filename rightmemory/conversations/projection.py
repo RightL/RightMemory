@@ -52,6 +52,7 @@ class ProjectedNotification:
     thread_id: str | None
     turn_id: str | None
     payload: dict[str, Any]
+    completed_final_answer: bool = False
     status: str | None = None
     active_turn_id: str | None = None
     clears_active_turn: bool = False
@@ -73,6 +74,7 @@ def project_notification(method: object, params: object) -> ProjectedNotificatio
     thread_id = _identifier(safe_params.get("threadId")) or _nested_id(safe_params, "thread")
     turn_id = _identifier(safe_params.get("turnId")) or _nested_id(safe_params, "turn")
     kind = _NOTIFICATION_KINDS.get(safe_method, "protocol.notification")
+    completed_final_answer = _is_completed_final_answer(safe_method, safe_params)
     payload = bounded_json_object(safe_params)
     if kind == "protocol.notification":
         payload = {"method": _bounded_string(safe_method, 512), "params": payload}
@@ -111,10 +113,23 @@ def project_notification(method: object, params: object) -> ProjectedNotificatio
         thread_id=thread_id,
         turn_id=turn_id,
         payload=payload,
+        completed_final_answer=completed_final_answer,
         status=status,
         active_turn_id=active_turn_id,
         clears_active_turn=clears_active_turn,
         thread_title=thread_title,
+    )
+
+
+def _is_completed_final_answer(method: str, params: Mapping[str, Any]) -> bool:
+    """Classify the terminal message before transcript payload bounding."""
+    if method != "item/completed":
+        return False
+    item = params.get("item")
+    return (
+        isinstance(item, Mapping)
+        and item.get("type") == "agentMessage"
+        and item.get("phase") == "final_answer"
     )
 
 

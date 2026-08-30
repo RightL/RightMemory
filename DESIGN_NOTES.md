@@ -30,7 +30,13 @@ This allows immediate canvas editing while preserving an inspectable Git change.
 
 A Codex conversation can be displayed beside one Pursuit without becoming part of the Pursuit graph. RightMemory stores the attachment, host, and working-directory project below the active root's `.runtime` directory. Codex App Server remains authoritative for the thread and turn protocol. Deleting a Pursuit does not delete its conversation, and conversation events do not infer completion, Focus, or map edits.
 
-RightMemory opens its own App Server process locally or through a named SSH host. It does not share live ownership with a task currently open in the Codex desktop app. Registered working directories form RightMemory's project layer because the stable protocol needed for conversation control is available across Codex versions while native desktop Project methods are experimental and version-specific.
+RightMemory opens its own App Server process locally or through a named SSH host. The conversation workspace speaks that protocol directly rather than routing turns through the Codex SDK, and it does not share live ownership with a task currently open in the Codex desktop app. Registered working directories form RightMemory's project layer because the stable protocol needed for conversation control is available across Codex versions while native desktop Project methods are experimental and version-specific.
+
+Composer inputs follow the same boundary. Pasted PNG and JPEG images and large text are staged in root-local runtime state, not embedded in Pursuit Markdown. Before a remote turn starts, RightMemory copies staged inputs to the conversation's SSH host so App Server and its tools receive paths that exist in their own environment. These files support a conversation turn; they are not graph resources or durable semantic evidence by themselves.
+
+App Server thread items are also the source for visible subagent activity. The browser presents those items with the turn's other work details instead of guessing agent activity from prose. Side chats use separate App Server threads but remain scoped to the current browser/app session. They are not saved as durable Pursuit attachments and do not enter the map's conversation summaries.
+
+A Pursuit node may show the aggregate state of its attached conversations: active work, a waiting request, an unread final answer, or a completed turn. This is a navigation and attention aid. In particular, a completed conversation turn does not mean the Pursuit is semantically complete; only an explicit map edit changes what directions the user keeps visible.
 
 ### Existing data remains readable
 

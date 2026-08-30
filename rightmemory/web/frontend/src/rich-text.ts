@@ -291,10 +291,10 @@ export function renderRichText(target: HTMLElement, source: string, cacheable = 
     ALLOW_ARIA_ATTR: true,
     ALLOW_DATA_ATTR: false,
     FORBID_ATTR: ["src", "srcset"],
-    FORBID_TAGS: ["audio", "button", "embed", "form", "iframe", "img", "input", "object", "picture", "script", "select", "source", "style", "svg", "textarea", "video"],
+    FORBID_TAGS: ["animate", "animateMotion", "animateTransform", "audio", "button", "embed", "foreignObject", "form", "iframe", "image", "img", "input", "object", "picture", "script", "select", "set", "source", "style", "textarea", "video"],
     RETURN_DOM_FRAGMENT: true,
     SANITIZE_NAMED_PROPS: true,
-    USE_PROFILES: { html: true, mathMl: true },
+    USE_PROFILES: { html: true, mathMl: true, svg: true, svgFilters: false },
   });
   secureLinks(fragment, target.ownerDocument);
   if (cacheable) rememberRender(target.ownerDocument, source, fragment);

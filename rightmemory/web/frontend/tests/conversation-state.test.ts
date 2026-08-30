@@ -37,6 +37,66 @@ test('workspace records are normalized from the snake-case API without losing ra
   assert.equal(snapshot.cursor, '42');
 });
 
+test('conversation detail normalizes attachment metadata and unread summary cursors defensively', () => {
+  const detail = normalizeConversationDetail({
+    conversation: {
+      conversation_id: 'c-with-files', pursuit_id: 'design', kind: 'side_chat', parent_conversation_id: 'c-new',
+      last_final_event_id: '57', last_read_event_id: 52,
+    },
+    attachments: [
+      { attachment_id: 'image/1', kind: 'image', display_name: '图.png', media_type: 'image/png', byte_size: '2048', state: 'sent', url: '/preview/image-1' },
+      { attachmentId: 'text-1', conversationId: 'c-with-files', type: 'pasted_text', filename: 'pasted-text.txt', contentType: 'text/plain', byteSize: 9000 },
+      { kind: 'image' },
+    ],
+    has_earlier_events: true,
+  });
+  assert(detail);
+  assert.equal(detail.conversation.kind, 'side_chat');
+  assert.equal(detail.conversation.parentConversationId, 'c-new');
+  assert.equal(detail.conversation.lastFinalEventId, 57);
+  assert.equal(detail.conversation.lastReadEventId, 52);
+  assert.equal(detail.attachments.length, 2);
+  assert.equal(detail.attachments[0].conversationId, 'c-with-files');
+  assert.equal(detail.attachments[0].byteSize, 2048);
+  assert.equal(detail.attachments[1].kind, 'pasted_text');
+  assert.equal(detail.hasEarlierEvents, true);
+});
+
+test('earlier history pages prepend chronologically, dedupe, and survive a later detail refresh', () => {
+  let state = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot: normalizeWorkspace(workspacePayload) });
+  state = reduceConversationState(state, { type: 'conversation-loading', conversationId: 'c-new' });
+  const detail = normalizeConversationDetail({
+    conversation: workspacePayload.conversations[1],
+    events: [
+      { event_id: 501, conversation_id: 'c-new', kind: 'user.message', payload: { text: 'Recent' } },
+      { event_id: 502, conversation_id: 'c-new', kind: 'item.completed', payload: {} },
+    ],
+    has_earlier_events: true,
+    cursor: 502,
+  });
+  assert(detail);
+  state = reduceConversationState(state, { type: 'conversation-loaded', detail });
+  assert.equal(state.hasEarlierEventsByConversation['c-new'], true);
+  state = reduceConversationState(state, { type: 'conversation-history-in-flight', conversationId: 'c-new', active: true });
+  state = reduceConversationState(state, {
+    type: 'conversation-history-loaded',
+    page: {
+      conversationId: 'c-new',
+      events: [
+        normalizeEvent({ event_id: 1, conversation_id: 'c-new', kind: 'thread.started', payload: {} })!,
+        normalizeEvent({ event_id: 501, conversation_id: 'c-new', kind: 'user.message', payload: { text: 'Recent' } })!,
+      ],
+      hasEarlierEvents: false,
+    },
+  });
+  assert.deepEqual(state.eventsByConversation['c-new'].map((event) => event.eventId), ['1', '501', '502']);
+  assert.equal(state.hasEarlierEventsByConversation['c-new'], false);
+  assert.deepEqual(state.loadingEarlierConversationIds, []);
+
+  state = reduceConversationState(state, { type: 'conversation-loaded', detail });
+  assert.equal(state.hasEarlierEventsByConversation['c-new'], false);
+});
+
 test('model catalogs and optimistic mid-conversation settings normalize without leaking API casing', () => {
   const catalog = normalizeModelCatalog({ data: {
     host_id: 'local',
@@ -80,6 +140,95 @@ test('selection and pursuit loads remain scoped when responses arrive out of ord
   assert.equal(state.loadingPursuit, false);
 });
 
+test('session side chats stay out of Pursuit lists and defaults while their detail state can be restored and removed', () => {
+  let state = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot: normalizeWorkspace(workspacePayload) });
+  state = reduceConversationState(state, { type: 'pursuit-selected', pursuitId: 'design' });
+  const sideChat = normalizeWorkspace({ conversations: [{
+    conversation_id: 'side-1', pursuit_id: 'design', kind: 'side_chat', parent_conversation_id: 'c-new',
+    host_id: 'local', project_id: 'active-root', title: 'Untitled conversation', status: 'idle', updated_at: '2026-01-03',
+  }] }).conversations[0];
+  state = reduceConversationState(state, { type: 'side-chat-session', conversationIds: ['side-1', 'side-1', ''] });
+  state = reduceConversationState(state, { type: 'conversation-created', conversation: sideChat });
+  assert.deepEqual(state.sessionSideChatIds, ['side-1']);
+  assert.equal(state.pursuitDefaults.design.hostId, 'local');
+  assert.deepEqual(conversationsForPursuit(state).map((item) => item.conversationId), ['c-new', 'c-old']);
+
+  state = reduceConversationState(state, { type: 'conversation-closed' });
+  const detail = normalizeConversationDetail({
+    conversation: sideChat.raw,
+    events: [{ event_id: 60, conversation_id: 'side-1', kind: 'user.message', payload: { text: 'temporary' } }],
+    pending_requests: [], cursor: 60,
+  });
+  assert(detail);
+  state = reduceConversationState(state, { type: 'side-chat-restored', detail });
+  assert.equal(state.currentConversationId, null);
+  assert.equal(state.eventsByConversation['side-1'][0].eventId, '60');
+  state = reduceConversationState(state, { type: 'side-chat-removed', conversationId: 'side-1' });
+  assert(!state.conversations.some((item) => item.conversationId === 'side-1'));
+  assert(!state.eventsByConversation['side-1']);
+  assert.deepEqual(state.sessionSideChatIds, []);
+});
+
+test('a global side-chat close event removes stale state in another page', () => {
+  let state = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot: normalizeWorkspace(workspacePayload) });
+  const sideChat = normalizeWorkspace({ conversations: [{
+    conversation_id: 'side-remote', pursuit_id: 'design', kind: 'side_chat', parent_conversation_id: 'c-new',
+    host_id: 'local', project_id: 'active-root', title: 'Side chat', status: 'idle', updated_at: '2026-01-03',
+  }] }).conversations[0];
+  state = reduceConversationState(state, { type: 'side-chat-session', conversationIds: ['side-remote'] });
+  state = reduceConversationState(state, { type: 'conversation-created', conversation: sideChat });
+  state = reduceConversationState(state, { type: 'send-in-flight', conversationId: 'side-remote', active: true });
+  const closed = normalizeEvent({
+    event_id: 61, conversation_id: null, kind: 'side_chat.closed',
+    payload: { conversation_id: 'side-remote' },
+  });
+  assert(closed);
+  state = reduceConversationState(state, { type: 'event', event: closed });
+  assert(!state.conversations.some((item) => item.conversationId === 'side-remote'));
+  assert.deepEqual(state.sessionSideChatIds, []);
+  assert.deepEqual(state.sendingConversationIds, []);
+  assert.equal(state.cursor, '61');
+});
+
+test('side-chat restore keeps detail requests and replays only newer live events', () => {
+  let state = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot: normalizeWorkspace(workspacePayload) });
+  state = reduceConversationState(state, { type: 'side-chat-session', conversationIds: ['side-race'] });
+  const live = normalizeEvent({
+    event_id: 44, conversation_id: 'side-race', turn_id: 'turn-race', kind: 'server_request_resolved',
+    payload: { request_key: 'older-request' },
+  });
+  assert(live);
+  state = reduceConversationState(state, { type: 'event', event: live });
+  const detail = normalizeConversationDetail({
+    conversation: { conversation_id: 'side-race', pursuit_id: 'design', kind: 'side_chat', parent_conversation_id: 'c-new', status: 'waiting_input' },
+    events: [],
+    pending_requests: [
+      { request_key: 'older-request', conversation_id: 'side-race', method: 'item/tool/requestUserInput', payload: {} },
+      { request_key: 'current-request', conversation_id: 'side-race', method: 'item/tool/requestUserInput', payload: {} },
+    ],
+    cursor: 43,
+  });
+  assert(detail);
+  state = reduceConversationState(state, { type: 'side-chat-restored', detail });
+  assert(!state.pendingRequests.some((request) => request.key === 'older-request'));
+  assert(state.pendingRequests.some((request) => request.key === 'current-request'));
+  assert.equal(state.cursor, '44');
+});
+
+test('fresh workspace snapshots retain requests owned by restored side chats', () => {
+  let state = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot: normalizeWorkspace(workspacePayload) });
+  state = reduceConversationState(state, { type: 'side-chat-session', conversationIds: ['side-pending'] });
+  state = {
+    ...state,
+    pendingRequests: [...state.pendingRequests, normalizeWorkspace({ pending_requests: [{
+      request_key: 'side-input', conversation_id: 'side-pending', method: 'item/tool/requestUserInput', payload: {},
+    }] }).pendingRequests[0]],
+  };
+  const newer = normalizeWorkspace({ ...workspacePayload, cursor: 50, pending_requests: [] });
+  state = reduceConversationState(state, { type: 'workspace-loaded', snapshot: newer });
+  assert(state.pendingRequests.some((request) => request.conversationId === 'side-pending' && request.key === 'side-input'));
+});
+
 test('conversation history, streaming events, status, unknown kinds, and pending resolution reduce independently', () => {
   let state = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot: normalizeWorkspace(workspacePayload) });
   state = reduceConversationState(state, { type: 'pursuit-selected', pursuitId: 'design' });
@@ -103,6 +252,99 @@ test('conversation history, streaming events, status, unknown kinds, and pending
   assert.equal(state.conversations.find((item) => item.conversationId === 'c-new')?.status, 'completed');
   state = reduceConversationState(state, { type: 'pending-resolved', conversationId: 'c-new', key: 'approve-1' });
   assert.equal(state.pendingRequests.length, 0);
+});
+
+test('a live final answer advances the unread cursor before any workspace refresh', () => {
+  let state = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot: normalizeWorkspace(workspacePayload) });
+  const final = normalizeEvent({
+    event_id: 53,
+    conversation_id: 'c-old',
+    turn_id: 't-final',
+    kind: 'item.completed',
+    payload: { item: { id: 'answer-final', type: 'agentMessage', phase: 'final_answer', content: [{ type: 'text', text: 'Done' }] } },
+  });
+  assert(final);
+  state = reduceConversationState(state, { type: 'event', event: final });
+  const conversation = state.conversations.find((item) => item.conversationId === 'c-old');
+  assert.equal(conversation?.lastFinalEventId, 53);
+  assert.equal(conversation?.lastReadEventId, null);
+});
+
+test('conversation state events advance status and read cursors monotonically', () => {
+  let state = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot: normalizeWorkspace(workspacePayload) });
+  const first = normalizeEvent({
+    event_id: 43,
+    conversation_id: 'c-new',
+    kind: 'conversation.state',
+    payload: { conversation: {
+      ...workspacePayload.conversations[1], status: 'starting', model: 'gpt-5.6-next',
+      reasoning_effort: 'medium', last_final_event_id: 41, last_read_event_id: 40,
+    } },
+  });
+  const staleRead = normalizeEvent({
+    event_id: 44,
+    conversation_id: 'c-new',
+    kind: 'conversation.state',
+    payload: { conversation: {
+      ...workspacePayload.conversations[1], status: 'running', model: 'gpt-5.6-next',
+      reasoning_effort: 'medium', last_final_event_id: 41, last_read_event_id: 39,
+    } },
+  });
+  const added = normalizeEvent({
+    event_id: 45,
+    conversation_id: 'c-remote',
+    kind: 'conversation.state',
+    payload: { conversation: {
+      conversation_id: 'c-remote', pursuit_id: 'design', host_id: 'gpu', project_id: 'gpu-root', updated_at: '2026-01-04',
+      title: 'Started elsewhere', status: 'starting', model: 'gpt-5.6', reasoning_effort: 'high',
+    } },
+  });
+  assert(first && staleRead && added);
+  state = reduceConversationState(state, { type: 'event', event: first });
+  state = reduceConversationState(state, { type: 'event', event: staleRead });
+  assert.deepEqual(state.pursuitDefaults.design, {
+    pursuitId: 'design', hostId: 'local', projectId: 'active-root', lastUsedAt: '2026-01-02',
+  });
+  state = reduceConversationState(state, { type: 'event', event: added });
+  const conversation = state.conversations.find((item) => item.conversationId === 'c-new');
+  assert.equal(conversation?.status, 'running');
+  assert.equal(conversation?.lastReadEventId, 40);
+  assert.equal(conversation?.model, 'gpt-5.6-next');
+  assert.equal(conversation?.reasoningEffort, 'medium');
+  assert.equal(state.conversations.find((item) => item.conversationId === 'c-remote')?.status, 'starting');
+  assert.deepEqual(state.pursuitDefaults.design, {
+    pursuitId: 'design', hostId: 'gpu', projectId: 'gpu-root', lastUsedAt: '2026-01-04',
+  });
+
+  const moved = normalizeEvent({
+    event_id: 46,
+    conversation_id: 'c-new',
+    kind: 'conversation.state',
+    payload: { conversation: {
+      ...workspacePayload.conversations[1], pursuit_id: 'research', host_id: 'local', project_id: 'active-root',
+      updated_at: '2026-01-05', status: 'idle',
+    } },
+  });
+  assert(moved);
+  state = reduceConversationState(state, { type: 'event', event: moved });
+  assert.deepEqual(state.pursuitDefaults.research, {
+    pursuitId: 'research', hostId: 'local', projectId: 'active-root', lastUsedAt: '2026-01-05',
+  });
+});
+
+test('a bounded final event advances unread state from its safe event marker', () => {
+  let state = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot: normalizeWorkspace(workspacePayload) });
+  const final = normalizeEvent({
+    event_id: 54,
+    conversation_id: 'c-old',
+    turn_id: 't-large-final',
+    kind: 'item.completed',
+    marks_final: true,
+    payload: { truncated: true, summary: '{"item":{"type":"agentMessage"…' },
+  });
+  assert(final);
+  state = reduceConversationState(state, { type: 'event', event: final });
+  assert.equal(state.conversations.find((item) => item.conversationId === 'c-old')?.lastFinalEventId, 54);
 });
 
 test('a late conversation detail cannot replace the conversation the user opened next', () => {
@@ -142,6 +384,10 @@ test('archived lifecycle is kept separate from operational turn status', () => {
   });
   assert.equal(snapshot.conversations[0].archived, true);
   assert.equal(snapshot.conversations[0].status, 'completed');
+  let state = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot: normalizeWorkspace(workspacePayload) });
+  state = reduceConversationState(state, { type: 'conversation-archived', conversationId: 'c-new' });
+  assert.equal(state.conversations.find((item) => item.conversationId === 'c-new')?.archived, true);
+  assert.equal(state.conversations.find((item) => item.conversationId === 'c-new')?.status, 'idle');
 });
 
 test('a workspace response older than streamed events cannot restore stale status, title, or pending requests', () => {
@@ -229,8 +475,30 @@ test('sendability stays guarded while transport, provider, or a send is busy', (
   assert.equal(conversationCanSend(state, conversation), true);
   state = reduceConversationState(state, { type: 'send-in-flight', conversationId: 'c-old', active: true });
   assert.equal(conversationCanSend(state, conversation), false);
+  state = reduceConversationState(state, { type: 'send-in-flight', conversationId: 'c-new', active: true });
+  assert.deepEqual(state.sendingConversationIds, ['c-old', 'c-new']);
+  state = reduceConversationState(state, { type: 'send-in-flight', conversationId: 'c-old', active: false });
+  assert.deepEqual(state.sendingConversationIds, ['c-new']);
+  assert.equal(conversationCanSend(state, conversation), true);
   const running = { ...conversation, status: 'running' };
-  assert.equal(conversationCanSend({ ...state, sendingConversationId: null }, running), false);
+  assert.equal(conversationCanSend({ ...state, sendingConversationIds: [] }, running), false);
+});
+
+test('interrupt and reconnect requests stay scoped to each concurrent conversation', () => {
+  let state = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot: normalizeWorkspace(workspacePayload) });
+  state = reduceConversationState(state, { type: 'connection', connection: 'open' });
+  state = reduceConversationState(state, { type: 'interrupt-in-flight', conversationId: 'c-old', active: true });
+  state = reduceConversationState(state, { type: 'interrupt-in-flight', conversationId: 'c-new', active: true });
+  assert.deepEqual(state.interruptingConversationIds, ['c-old', 'c-new']);
+  state = reduceConversationState(state, { type: 'interrupt-in-flight', conversationId: 'c-old', active: false });
+  assert.deepEqual(state.interruptingConversationIds, ['c-new']);
+
+  state = reduceConversationState(state, { type: 'reconcile-in-flight', conversationId: 'c-old', active: true });
+  state = reduceConversationState(state, { type: 'reconcile-in-flight', conversationId: 'c-new', active: true });
+  assert.deepEqual(state.reconcilingConversationIds, ['c-old', 'c-new']);
+  assert.equal(conversationCanSend(state, state.conversations.find((item) => item.conversationId === 'c-old')!), false);
+  state = reduceConversationState(state, { type: 'reconcile-in-flight', conversationId: 'c-old', active: false });
+  assert.deepEqual(state.reconcilingConversationIds, ['c-new']);
 });
 
 test('an equal-cursor workspace response conservatively keeps local metadata and live summaries', () => {
@@ -254,11 +522,12 @@ test('detail events beyond its captured cursor project once before an SSE duplic
   const detail = normalizeConversationDetail({ conversation: workspacePayload.conversations[1], events: [raced], pending_requests: workspacePayload.pending_requests, cursor: 42 });
   assert(detail);
   state = reduceConversationState(state, { type: 'conversation-loaded', detail });
-  assert.equal(state.cursor, '43');
+  assert.equal(state.cursor, '42');
   assert.equal(state.conversations.find((item) => item.conversationId === 'c-new')?.status, 'completed');
   const replay = normalizeEvent(raced);
   assert(replay);
   const replayed = reduceConversationState(state, { type: 'event', event: replay });
+  assert.equal(replayed.cursor, '43');
   assert.equal(replayed.conversations.find((item) => item.conversationId === 'c-new')?.status, 'completed');
   assert.equal(replayed.eventsByConversation['c-new'].length, 1);
 });

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from rightmemory.conversations.jsonrpc import JsonRpcRemoteError
 from rightmemory.conversations.models import ConversationError
@@ -152,10 +154,12 @@ class _FakeAdapter:
         self.calls.append(("archive_thread", thread_id))
         return {}
 
-    def start_turn(self, thread_id: str, text: str, **optional: Any) -> dict[str, Any]:
+    def start_turn(
+        self, thread_id: str, inputs: list[dict[str, Any]], **optional: Any
+    ) -> dict[str, Any]:
         self.turn_count += 1
         turn = {"id": f"turn-{self.turn_count}", "status": "inProgress"}
-        self.calls.append(("start_turn", thread_id, text, optional))
+        self.calls.append(("start_turn", thread_id, inputs, optional))
         self.unmaterialized_threads.discard(thread_id)
         self.emit_notification(
             "turn/started", {"threadId": thread_id, "turn": turn}
@@ -268,8 +272,909 @@ class ConversationServiceTests(unittest.TestCase):
         self.assertIn("start_turn", calls)
         events = self.service.detail(conversation["conversation_id"])["events"]
         kinds = [event["kind"] for event in events]
-        self.assertEqual(kinds[:3], ["thread.started", "user.message", "turn.started"])
-        self.assertEqual(events[1]["payload"]["text"], "Hello Codex")
+        self.assertEqual(
+            kinds,
+            [
+                "thread.started",
+                "conversation.state",
+                "conversation.state",
+                "user.message",
+                "turn.started",
+                "conversation.state",
+            ],
+        )
+        self.assertEqual(events[3]["payload"]["text"], "Hello Codex")
+
+    def test_pasted_text_is_staged_as_a_managed_file_and_sent_once(self):
+        conversation = self._create()
+        uploaded = self.service.upload_attachment(
+            conversation["conversation_id"],
+            "large pasted context".encode("utf-8"),
+            "text/plain; charset=utf-8",
+            "notes%20from%20clipboard.txt",
+        )["attachment"]
+
+        metadata, path = self.service.attachment_file(
+            conversation["conversation_id"], uploaded["attachment_id"]
+        )
+        self.assertTrue(path.is_absolute())
+        self.assertEqual(path.read_text(encoding="utf-8"), "large pasted context")
+        self.assertEqual(metadata["display_name"], "notes from clipboard.txt")
+
+        self.service.send_message(
+            conversation["conversation_id"], None, [uploaded["attachment_id"]]
+        )
+
+        start = [call for call in self.adapter.calls if call[0] == "start_turn"][-1]
+        self.assertEqual([item["type"] for item in start[2]], ["text"])
+        stored = self.service.store.get_attachment(uploaded["attachment_id"])
+        self.assertEqual(stored["state"], "sent")
+        event = next(
+            item
+            for item in self.service.detail(conversation["conversation_id"])["events"]
+            if item["kind"] == "user.message"
+        )
+        self.assertEqual(
+            event["payload"]["attachments"][0]["attachment_id"],
+            uploaded["attachment_id"],
+        )
+
+    def test_attachment_upload_retry_is_idempotent_and_repairs_managed_file(self):
+        conversation = self._create()
+        attachment_id = "a" * 32
+        first = self.service.upload_attachment(
+            conversation["conversation_id"],
+            b"stable pasted context",
+            "text/plain; charset=utf-8",
+            "retry.txt",
+            attachment_id=attachment_id,
+        )["attachment"]
+        _metadata, path = self.service.attachment_file(
+            conversation["conversation_id"], attachment_id
+        )
+
+        path.unlink()
+        second = self.service.upload_attachment(
+            conversation["conversation_id"],
+            b"stable pasted context",
+            "text/plain; charset=utf-8",
+            "retry.txt",
+            attachment_id=attachment_id,
+        )["attachment"]
+        self.assertEqual(second, first)
+        self.assertEqual(path.read_bytes(), b"stable pasted context")
+
+        path.write_bytes(b"corrupt")
+        third = self.service.upload_attachment(
+            conversation["conversation_id"],
+            b"stable pasted context",
+            "text/plain; charset=utf-8",
+            "retry.txt",
+            attachment_id=attachment_id,
+        )["attachment"]
+        self.assertEqual(third, first)
+        self.assertEqual(path.read_bytes(), b"stable pasted context")
+        self.assertEqual(
+            len(self.service.store.list_attachments(conversation["conversation_id"])),
+            1,
+        )
+
+    def test_attachment_upload_identity_conflicts_are_rejected(self):
+        conversation = self._create()
+        other_conversation = self._create("beta")
+        attachment_id = "b" * 32
+        self.service.upload_attachment(
+            conversation["conversation_id"],
+            b"original",
+            "text/plain",
+            "identity.txt",
+            attachment_id=attachment_id,
+        )
+
+        conflicting_attempts = (
+            (
+                conversation["conversation_id"],
+                b"changed",
+                "identity.txt",
+            ),
+            (
+                conversation["conversation_id"],
+                b"original",
+                "renamed.txt",
+            ),
+            (
+                other_conversation["conversation_id"],
+                b"original",
+                "identity.txt",
+            ),
+        )
+        for target_id, content, name in conflicting_attempts:
+            with self.subTest(target_id=target_id, content=content, name=name):
+                with self.assertRaises(ConversationError) as caught:
+                    self.service.upload_attachment(
+                        target_id,
+                        content,
+                        "text/plain",
+                        name,
+                        attachment_id=attachment_id,
+                    )
+                self.assertEqual(caught.exception.code, "attachment_conflict")
+                self.assertEqual(caught.exception.status, 409)
+
+        self.service.store.update_attachment(attachment_id, state="sent")
+        with self.assertRaises(ConversationError) as caught:
+            self.service.upload_attachment(
+                conversation["conversation_id"],
+                b"original",
+                "text/plain",
+                "identity.txt",
+                attachment_id=attachment_id,
+            )
+        self.assertEqual(caught.exception.code, "attachment_conflict")
+        self.assertEqual(caught.exception.status, 409)
+
+    def test_client_attachment_identity_is_strict_lowercase_hex(self):
+        conversation = self._create()
+        for attachment_id in (
+            "",
+            "a" * 31,
+            "A" * 32,
+            "g" * 32,
+            "01234567-89abcdef0123456789abcdef",
+        ):
+            with self.subTest(attachment_id=attachment_id):
+                with self.assertRaises(ConversationError) as caught:
+                    self.service.upload_attachment(
+                        conversation["conversation_id"],
+                        b"content",
+                        "text/plain",
+                        None,
+                        attachment_id=attachment_id,
+                    )
+                self.assertEqual(caught.exception.code, "invalid_attachment")
+                self.assertEqual(caught.exception.status, 422)
+
+    def test_attachment_retry_overwrites_file_left_before_database_commit(self):
+        conversation = self._create()
+        attachment_id = "c" * 32
+        orphan = (
+            self.root
+            / ".runtime"
+            / "web"
+            / "attachments"
+            / f"{attachment_id}.txt"
+        )
+        orphan.write_bytes(b"partial write before process exit")
+        self.assertIsNone(self.service.store.get_attachment(attachment_id))
+
+        uploaded = self.service.upload_attachment(
+            conversation["conversation_id"],
+            b"complete retry",
+            "text/plain",
+            None,
+            attachment_id=attachment_id,
+        )["attachment"]
+
+        self.assertEqual(uploaded["attachment_id"], attachment_id)
+        self.assertEqual(orphan.read_bytes(), b"complete retry")
+        self.assertIsNotNone(self.service.store.get_attachment(attachment_id))
+
+    def test_pasted_image_uses_an_absolute_local_image_input(self):
+        conversation = self._create()
+        png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"test"
+        uploaded = self.service.upload_attachment(
+            conversation["conversation_id"], png, "image/png", "capture.png"
+        )["attachment"]
+
+        self.service.send_message(
+            conversation["conversation_id"], "Inspect this.", [uploaded["attachment_id"]]
+        )
+
+        inputs = [call for call in self.adapter.calls if call[0] == "start_turn"][-1][2]
+        self.assertEqual([item["type"] for item in inputs], ["text", "localImage"])
+        self.assertTrue(Path(inputs[1]["path"]).is_absolute())
+
+    def test_remote_attachment_staging_is_visible_as_work_and_failure_restores_idle(self):
+        host = self.service.add_host("Remote", "build-box")["host"]
+        project = self.service.add_project(
+            host["host_id"], "Repository", "/srv/repository"
+        )["project"]
+        conversation = self.service.create_conversation(
+            "alpha", host["host_id"], project["project_id"]
+        )["conversation"]
+        uploaded = self.service.upload_attachment(
+            conversation["conversation_id"],
+            b"remote pasted context",
+            "text/plain",
+            "remote.txt",
+        )["attachment"]
+        staging_started = threading.Event()
+        release_staging = threading.Event()
+        failures: list[BaseException] = []
+        streamed: list[dict[str, Any] | None] = []
+        stream = self.service.stream_events(
+            after_event_id=self.service.store.latest_event_id(),
+            heartbeat_seconds=5,
+        )
+
+        def consume_state_change() -> None:
+            streamed.append(next(stream))
+
+        def fail_after_observation(*_args, **_kwargs):
+            staging_started.set()
+            if not release_staging.wait(2):
+                raise AssertionError("test did not release remote staging")
+            raise OSError("remote copy failed")
+
+        def send() -> None:
+            try:
+                self.service.send_message(
+                    conversation["conversation_id"],
+                    None,
+                    [uploaded["attachment_id"]],
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+        with patch(
+            "rightmemory.conversations.service.stage_ssh_attachment",
+            side_effect=fail_after_observation,
+        ):
+            consumer = threading.Thread(target=consume_state_change)
+            consumer.start()
+            sender = threading.Thread(target=send)
+            sender.start()
+            self.assertTrue(staging_started.wait(1))
+            consumer.join(1)
+            during_staging = self.service.store.get_conversation(
+                conversation["conversation_id"]
+            )
+            self.assertEqual(during_staging["status"], "starting")
+            self.assertFalse(consumer.is_alive())
+            self.assertEqual(streamed[0]["kind"], "conversation.state")
+            self.assertEqual(
+                streamed[0]["payload"]["conversation"]["status"], "starting"
+            )
+            release_staging.set()
+            sender.join(2)
+            stream.close()
+
+        self.assertFalse(sender.is_alive())
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], ConversationError)
+        self.assertEqual(failures[0].code, "attachment_staging_failed")
+        restored = self.service.store.get_conversation(conversation["conversation_id"])
+        self.assertEqual(restored["status"], "idle")
+        self.assertIsNone(restored["active_turn_id"])
+        self.assertEqual(
+            self.service.store.get_attachment(uploaded["attachment_id"])["state"],
+            "staged",
+        )
+
+    def test_staged_delete_forgets_missing_or_changed_files_and_remote_cleanup_failure(self):
+        host = self.service.add_host("Remote", "build-box")["host"]
+        project = self.service.add_project(
+            host["host_id"], "Repository", "/srv/repository"
+        )["project"]
+        conversation = self.service.create_conversation(
+            "alpha", host["host_id"], project["project_id"]
+        )["conversation"]
+
+        for condition in ("missing", "changed"):
+            with self.subTest(condition=condition):
+                uploaded = self.service.upload_attachment(
+                    conversation["conversation_id"],
+                    f"{condition} content".encode(),
+                    "text/plain",
+                    f"{condition}.txt",
+                )["attachment"]
+                _metadata, path = self.service.attachment_file(
+                    conversation["conversation_id"], uploaded["attachment_id"]
+                )
+                remote_path = (
+                    "/home/user/.cache/rightmemory/attachments/" + path.name
+                )
+                self.service.store.update_attachment(
+                    uploaded["attachment_id"], remote_path=remote_path
+                )
+                if condition == "missing":
+                    path.unlink()
+                else:
+                    path.write_bytes(b"changed after validation")
+
+                with patch(
+                    "rightmemory.conversations.service.delete_ssh_attachment",
+                    side_effect=RuntimeError("host offline"),
+                ) as cleanup:
+                    self.service.delete_staged_attachment(
+                        conversation["conversation_id"], uploaded["attachment_id"]
+                    )
+
+                cleanup.assert_called_once_with("build-box", remote_path)
+                self.assertFalse(path.exists())
+                self.assertIsNone(
+                    self.service.store.get_attachment(uploaded["attachment_id"])
+                )
+
+    def test_remote_side_chat_files_are_cleaned_on_close_and_startup(self):
+        owner_session_id = "remote-cleanup-session"
+        host = self.service.add_host("Remote", "build-box")["host"]
+        project = self.service.add_project(
+            host["host_id"], "Repository", "/srv/repository"
+        )["project"]
+        parent = self.service.create_conversation(
+            "alpha", host["host_id"], project["project_id"]
+        )["conversation"]
+
+        first = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+        first_upload = self.service.upload_attachment(
+            first["conversation_id"],
+            b"first",
+            "text/plain",
+            None,
+            owner_session_id,
+        )["attachment"]
+        _metadata, first_path = self.service.attachment_file(
+            first["conversation_id"],
+            first_upload["attachment_id"],
+            owner_session_id,
+        )
+        first_remote = (
+            "/home/user/.cache/rightmemory/attachments/" + first_path.name
+        )
+        self.service.store.update_attachment(
+            first_upload["attachment_id"], remote_path=first_remote
+        )
+        with patch(
+            "rightmemory.conversations.service.delete_ssh_attachment"
+        ) as cleanup:
+            self.service.close_side_chat(first["conversation_id"], owner_session_id)
+        cleanup.assert_called_once_with("build-box", first_remote)
+
+        second = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+        second_upload = self.service.upload_attachment(
+            second["conversation_id"],
+            b"second",
+            "text/plain",
+            None,
+            owner_session_id,
+        )["attachment"]
+        _metadata, second_path = self.service.attachment_file(
+            second["conversation_id"],
+            second_upload["attachment_id"],
+            owner_session_id,
+        )
+        second_remote = (
+            "/home/user/.cache/rightmemory/attachments/" + second_path.name
+        )
+        self.service.store.update_attachment(
+            second_upload["attachment_id"], remote_path=second_remote
+        )
+
+        self.registry.close()
+        self.registry = ConversationRuntimeRegistry(
+            self.adapters,
+            pursuit_store_factory=lambda root: self.pursuit_stores[
+                str(root.resolve())
+            ],
+        )
+        with patch(
+            "rightmemory.conversations.service.delete_ssh_attachment"
+        ) as cleanup:
+            self.service = self.registry.service(self.root)
+        cleanup.assert_called_once_with("build-box", second_remote)
+        self.assertFalse(second_path.exists())
+
+    def test_startup_removes_only_old_unreferenced_attachment_files(self):
+        conversation = self._create()
+        uploaded = self.service.upload_attachment(
+            conversation["conversation_id"], b"still referenced", "text/plain", None
+        )["attachment"]
+        _metadata, referenced = self.service.attachment_file(
+            conversation["conversation_id"], uploaded["attachment_id"]
+        )
+        base = referenced.parent
+        old_orphan = base / ("c" * 32 + ".txt")
+        fresh_orphan = base / ("d" * 32 + ".txt")
+        old_orphan.write_bytes(b"old orphan")
+        fresh_orphan.write_bytes(b"fresh orphan")
+        old_time = 1
+        os.utime(old_orphan, (old_time, old_time))
+        os.utime(referenced, (old_time, old_time))
+
+        self.registry.close()
+        self.registry = ConversationRuntimeRegistry(
+            self.adapters,
+            pursuit_store_factory=lambda root: self.pursuit_stores[
+                str(root.resolve())
+            ],
+        )
+        self.service = self.registry.service(self.root)
+
+        self.assertFalse(old_orphan.exists())
+        self.assertTrue(fresh_orphan.exists())
+        self.assertTrue(referenced.exists())
+
+    def test_side_chat_inherits_parent_runtime_without_entering_pursuit_lists(self):
+        owner_session_id = "side-chat-session"
+        parent = self.service.create_conversation(
+            "alpha", model="gpt-deep", reasoning_effort="high"
+        )["conversation"]
+        default_before = self.service.store.get_pursuit_default("alpha")
+
+        side_chat = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+
+        self.assertEqual(side_chat["kind"], "side_chat")
+        self.assertEqual(
+            side_chat["parent_conversation_id"], parent["conversation_id"]
+        )
+        for field in (
+            "pursuit_id",
+            "host_id",
+            "project_id",
+            "model",
+            "reasoning_effort",
+        ):
+            self.assertEqual(side_chat[field], parent[field])
+        side_start = [
+            call for call in self.adapter.calls if call[0] == "start_thread"
+        ][-1]
+        self.assertEqual(Path(side_start[1]), self.root)
+        self.assertEqual(
+            side_start[2], {"ephemeral": True, "model": "gpt-deep"}
+        )
+        self.assertEqual(
+            self.service.store.get_pursuit_default("alpha"), default_before
+        )
+        self.assertEqual(
+            [item["conversation_id"] for item in self.service.workspace()["conversations"]],
+            [parent["conversation_id"]],
+        )
+        self.assertEqual(
+            [
+                item["conversation_id"]
+                for item in self.service.list_for_pursuit("alpha")["conversations"]
+            ],
+            [parent["conversation_id"]],
+        )
+
+        sent = self.service.send_message(
+            side_chat["conversation_id"],
+            "Explore this",
+            owner_session_id=owner_session_id,
+        )
+        self.assertEqual(sent["conversation"]["kind"], "side_chat")
+        self.assertEqual(
+            [call for call in self.adapter.calls if call[0] == "start_turn"][-1][1],
+            side_chat["thread_id"],
+        )
+
+    def test_side_chat_operations_reject_a_different_session_without_mutation(self):
+        owner_session_id = "owning-session"
+        other_session_id = "different-session"
+        parent = self._create()
+        side_chat = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+        uploaded = self.service.upload_attachment(
+            side_chat["conversation_id"],
+            b"private context",
+            "text/plain",
+            None,
+            owner_session_id,
+        )["attachment"]
+        self.assertNotIn("owner_session_id", side_chat)
+
+        operations = (
+            lambda: self.service.detail(
+                side_chat["conversation_id"], owner_session_id=other_session_id
+            ),
+            lambda: self.service.earlier_history(
+                side_chat["conversation_id"], 1, other_session_id
+            ),
+            lambda: self.service.attachment_file(
+                side_chat["conversation_id"],
+                uploaded["attachment_id"],
+                other_session_id,
+            ),
+            lambda: self.service.send_message(
+                side_chat["conversation_id"],
+                "Do not send",
+                owner_session_id=other_session_id,
+            ),
+            lambda: self.service.delete_staged_attachment(
+                side_chat["conversation_id"],
+                uploaded["attachment_id"],
+                other_session_id,
+            ),
+            lambda: self.service.update_settings(
+                side_chat["conversation_id"],
+                "gpt-default",
+                "low",
+                other_session_id,
+            ),
+            lambda: self.service.acknowledge_read(
+                side_chat["conversation_id"], other_session_id
+            ),
+            lambda: self.service.reconcile(
+                side_chat["conversation_id"], other_session_id
+            ),
+            lambda: self.service.interrupt(
+                side_chat["conversation_id"], other_session_id
+            ),
+            lambda: self.service.archive(
+                side_chat["conversation_id"], other_session_id
+            ),
+            lambda: self.service.move(
+                side_chat["conversation_id"], "beta", other_session_id
+            ),
+            lambda: self.service.close_side_chat(
+                side_chat["conversation_id"], other_session_id
+            ),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation):
+                with self.assertRaises(ConversationError) as caught:
+                    operation()
+                self.assertEqual(caught.exception.code, "conversation_not_found")
+                self.assertEqual(caught.exception.status, 404)
+
+        with self.assertRaises(ConversationError) as missing_owner:
+            self.service.detail(side_chat["conversation_id"])
+        self.assertEqual(missing_owner.exception.code, "conversation_not_found")
+        self.assertIsNotNone(
+            self.service.store.get_attachment(uploaded["attachment_id"])
+        )
+        self.assertIsNotNone(
+            self.service.store.get_conversation(side_chat["conversation_id"])
+        )
+        self.service.close_side_chat(side_chat["conversation_id"], owner_session_id)
+
+    def test_empty_side_chat_recovery_starts_another_ephemeral_thread(self):
+        owner_session_id = "recovering-side-chat-session"
+        parent = self.service.create_conversation(
+            "alpha", model="gpt-deep", reasoning_effort="high"
+        )["conversation"]
+        side_chat = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+        old_thread_id = side_chat["thread_id"]
+        old_adapter = self.adapter
+        old_adapter.disconnect(RuntimeError("connection changed"))
+        self.service.probe_host("local")
+        self.adapter.thread_count = 2
+        self.adapter.unmaterialized_threads.add(old_thread_id)
+
+        recovered = self.service.reconcile(
+            side_chat["conversation_id"], owner_session_id
+        )
+
+        self.assertIsNot(self.adapter, old_adapter)
+        self.assertTrue(recovered["resolved"])
+        self.assertEqual(recovered["conversation"]["kind"], "side_chat")
+        self.assertEqual(recovered["conversation"]["thread_id"], "thread-3")
+        replacement_start = next(
+            call for call in self.adapter.calls if call[0] == "start_thread"
+        )
+        self.assertEqual(
+            replacement_start[2], {"ephemeral": True, "model": "gpt-deep"}
+        )
+
+    def test_side_chat_with_turn_history_is_never_replaced_after_disconnect(self):
+        owner_session_id = "used-side-chat-session"
+        parent = self._create()
+        side_chat = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+        sent = self.service.send_message(
+            side_chat["conversation_id"],
+            "First turn",
+            owner_session_id=owner_session_id,
+        )
+        self.adapter.emit_notification(
+            "turn/completed",
+            {
+                "threadId": side_chat["thread_id"],
+                "turn": {"id": sent["turn"]["id"], "status": "completed"},
+            },
+        )
+        old_thread_id = side_chat["thread_id"]
+        self.adapter.disconnect(RuntimeError("connection changed"))
+        self.service.probe_host("local")
+        self.adapter.unmaterialized_threads.add(old_thread_id)
+
+        with self.assertRaises(ConversationError) as caught:
+            self.service.reconcile(side_chat["conversation_id"], owner_session_id)
+
+        self.assertEqual(caught.exception.code, "provider_unavailable")
+        self.assertNotIn("start_thread", [call[0] for call in self.adapter.calls])
+        persisted = self.service.store.get_conversation(
+            side_chat["conversation_id"]
+        )
+        assert persisted is not None
+        self.assertEqual(persisted["kind"], "side_chat")
+        self.assertEqual(persisted["thread_id"], old_thread_id)
+
+    def test_session_cleanup_closes_only_its_side_chats_and_running_resources(self):
+        owner_session_id = "ending-session"
+        other_session_id = "surviving-session"
+        parent = self._create()
+        owned = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+        second_owned = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+        surviving = self.service.create_side_chat(
+            parent["conversation_id"], other_session_id
+        )["conversation"]
+        uploaded = self.service.upload_attachment(
+            owned["conversation_id"],
+            b"temporary context",
+            "text/plain",
+            None,
+            owner_session_id,
+        )["attachment"]
+        _metadata, managed_path = self.service.attachment_file(
+            owned["conversation_id"], uploaded["attachment_id"], owner_session_id
+        )
+        self.service.send_message(
+            owned["conversation_id"],
+            "Run temporarily",
+            owner_session_id=owner_session_id,
+        )
+
+        result = self.service.close_side_chats_for_session(owner_session_id)
+
+        self.assertEqual(
+            set(result["conversation_ids"]),
+            {owned["conversation_id"], second_owned["conversation_id"]},
+        )
+        self.assertFalse(managed_path.exists())
+        self.assertIsNone(
+            self.service.store.get_conversation(owned["conversation_id"])
+        )
+        self.assertIsNone(
+            self.service.store.get_conversation(second_owned["conversation_id"])
+        )
+        self.assertIsNotNone(
+            self.service.store.get_conversation(surviving["conversation_id"])
+        )
+        self.assertIn(
+            ("interrupt_turn", owned["thread_id"], "turn-1"),
+            self.adapter.calls,
+        )
+        self.assertIn(("archive_thread", owned["thread_id"]), self.adapter.calls)
+        self.assertIn(
+            ("archive_thread", second_owned["thread_id"]), self.adapter.calls
+        )
+
+    def test_parent_archive_requires_side_chats_to_close_first(self):
+        owner_session_id = "archive-guard-session"
+        parent = self._create()
+        side_chat = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+
+        with self.assertRaises(ConversationError) as parent_error:
+            self.service.archive(parent["conversation_id"])
+        with self.assertRaises(ConversationError) as side_error:
+            self.service.archive(side_chat["conversation_id"], owner_session_id)
+
+        self.assertEqual(parent_error.exception.code, "side_chats_open")
+        self.assertEqual(parent_error.exception.status, 409)
+        self.assertEqual(side_error.exception.code, "side_chat_must_close")
+        self.assertEqual(side_error.exception.status, 409)
+        self.assertEqual(
+            self.service.store.get_conversation(parent["conversation_id"])[
+                "lifecycle"
+            ],
+            "active",
+        )
+        self.service.close_side_chat(side_chat["conversation_id"], owner_session_id)
+        archived = self.service.archive(parent["conversation_id"])["conversation"]
+        self.assertEqual(archived["lifecycle"], "archived")
+
+    def test_closing_side_chat_interrupts_work_and_removes_managed_state(self):
+        owner_session_id = "closing-side-chat-session"
+        parent = self._create()
+        side_chat = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+        uploaded = self.service.upload_attachment(
+            side_chat["conversation_id"],
+            b"temporary side context",
+            "text/plain",
+            "temporary.txt",
+            owner_session_id,
+        )["attachment"]
+        _metadata, managed_path = self.service.attachment_file(
+            side_chat["conversation_id"],
+            uploaded["attachment_id"],
+            owner_session_id,
+        )
+        self.service.send_message(
+            side_chat["conversation_id"],
+            "Use this",
+            [uploaded["attachment_id"]],
+            owner_session_id,
+        )
+        self.adapter.emit_request(
+            901,
+            "item/commandExecution/requestApproval",
+            {
+                "threadId": side_chat["thread_id"],
+                "turnId": "turn-1",
+                "itemId": "side-command",
+                "command": "echo temporary",
+            },
+        )
+        detail = self.service.detail(
+            side_chat["conversation_id"], owner_session_id=owner_session_id
+        )
+        pending = detail[
+            "pending_requests"
+        ][0]
+        side_event_ids = {event["event_id"] for event in detail["events"]}
+        self.assertEqual(self.service.workspace()["pending_requests"], [])
+
+        result = self.service.close_side_chat(
+            side_chat["conversation_id"], owner_session_id
+        )
+
+        self.assertEqual(result, {"conversation_id": side_chat["conversation_id"]})
+        self.assertFalse(managed_path.exists())
+        self.assertIsNone(
+            self.service.store.get_conversation(side_chat["conversation_id"])
+        )
+        self.assertIsNone(
+            self.service.store.get_pending_request_by_key(pending["request_key"])
+        )
+        remaining_events = self.service.store.read_events()
+        self.assertTrue(
+            side_event_ids.isdisjoint(
+                event["event_id"] for event in remaining_events
+            )
+        )
+        closed_event = next(
+            event for event in remaining_events if event["kind"] == "side_chat.closed"
+        )
+        self.assertIsNone(closed_event["conversation_id"])
+        owner_events = self.service.store.read_events_for_session(owner_session_id)
+        owner_closed_event = next(
+            event for event in owner_events if event["kind"] == "side_chat.closed"
+        )
+        self.assertEqual(
+            owner_closed_event["payload"],
+            {"conversation_id": side_chat["conversation_id"]},
+        )
+        self.assertFalse(
+            any(
+                event["kind"] == "side_chat.closed"
+                for event in self.service.store.read_events_for_session(
+                    "another-browser-session"
+                )
+            )
+        )
+        self.assertIn(
+            ("interrupt_turn", side_chat["thread_id"], "turn-1"),
+            self.adapter.calls,
+        )
+        self.assertIn(("archive_thread", side_chat["thread_id"]), self.adapter.calls)
+        self.assertFalse(
+            self.service._thread_is_resident(
+                side_chat["host_id"], self.adapter, side_chat["thread_id"]
+            )
+        )
+
+    def test_new_runtime_discards_leftover_side_chat_and_its_file(self):
+        owner_session_id = "orphaned-side-chat-session"
+        parent = self._create()
+        side_chat = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+        uploaded = self.service.upload_attachment(
+            side_chat["conversation_id"],
+            b"temporary",
+            "text/plain",
+            None,
+            owner_session_id,
+        )["attachment"]
+        _metadata, managed_path = self.service.attachment_file(
+            side_chat["conversation_id"],
+            uploaded["attachment_id"],
+            owner_session_id,
+        )
+        side_event_ids = {
+            event["event_id"]
+            for event in self.service.detail(
+                side_chat["conversation_id"], owner_session_id=owner_session_id
+            )["events"]
+        }
+
+        self.registry.close()
+        self.registry = ConversationRuntimeRegistry(
+            self.adapters,
+            pursuit_store_factory=lambda root: self.pursuit_stores[
+                str(root.resolve())
+            ],
+        )
+        self.service = self.registry.service(self.root)
+
+        self.assertFalse(managed_path.exists())
+        self.assertIsNone(
+            self.service.store.get_conversation(side_chat["conversation_id"])
+        )
+        self.assertTrue(
+            side_event_ids.isdisjoint(
+                event["event_id"] for event in self.service.store.read_events()
+            )
+        )
+        self.assertEqual(
+            [item["conversation_id"] for item in self.service.workspace()["conversations"]],
+            [parent["conversation_id"]],
+        )
+
+    def test_acknowledge_read_advances_to_the_latest_final_event(self):
+        conversation = self._create()
+        final = self.service.store.append_event(
+            kind="item.completed",
+            payload={
+                "item": {
+                    "id": "answer-1",
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": "Done",
+                }
+            },
+            conversation_id=conversation["conversation_id"],
+        )
+        self.service.store.mark_final_event(
+            conversation["conversation_id"], final["event_id"]
+        )
+
+        updated = self.service.acknowledge_read(conversation["conversation_id"])[
+            "conversation"
+        ]
+
+        self.assertEqual(updated["last_final_event_id"], final["event_id"])
+        self.assertEqual(updated["last_read_event_id"], final["event_id"])
+
+    def test_acknowledge_read_marks_only_the_final_the_browser_observed(self):
+        conversation = self._create()
+        first = self.service.store.append_event(
+            kind="item.completed",
+            payload={"item": {"type": "agentMessage", "phase": "final_answer"}},
+            conversation_id=conversation["conversation_id"],
+            mark_final=True,
+        )
+        second = self.service.store.append_event(
+            kind="item.completed",
+            payload={"item": {"type": "agentMessage", "phase": "final_answer"}},
+            conversation_id=conversation["conversation_id"],
+            mark_final=True,
+        )
+
+        updated = self.service.acknowledge_read(
+            conversation["conversation_id"], event_id=first["event_id"]
+        )["conversation"]
+
+        self.assertEqual(updated["last_final_event_id"], second["event_id"])
+        self.assertEqual(updated["last_read_event_id"], first["event_id"])
+        state_event = self.service.store.read_events(
+            conversation_id=conversation["conversation_id"]
+        )[-1]
+        self.assertEqual(state_event["kind"], "conversation.state")
+        self.assertEqual(
+            state_event["payload"]["conversation"]["last_read_event_id"],
+            first["event_id"],
+        )
 
     def test_model_catalog_normalizes_pages_and_uses_effective_config_defaults(self):
         self.service.probe_host("local")
@@ -365,6 +1270,17 @@ class ConversationServiceTests(unittest.TestCase):
         )["conversation"]
         self.assertEqual(updated["model"], "gpt-default")
         self.assertEqual(updated["reasoning_effort"], "medium")
+        state_event = self.service.store.read_events(
+            conversation_id=created["conversation_id"]
+        )[-1]
+        self.assertEqual(state_event["kind"], "conversation.state")
+        self.assertEqual(
+            state_event["payload"]["conversation"]["model"], "gpt-default"
+        )
+        self.assertEqual(
+            state_event["payload"]["conversation"]["reasoning_effort"],
+            "medium",
+        )
         self.adapter.emit_notification(
             "turn/completed",
             {
@@ -449,7 +1365,13 @@ class ConversationServiceTests(unittest.TestCase):
         self.assertEqual(replacement_start[2], {"model": "gpt-deep"})
         self.assertEqual(
             [call[:3] for call in calls if call[0] == "start_turn"],
-            [("start_turn", replacement_thread_id, "First")],
+            [
+                (
+                    "start_turn",
+                    replacement_thread_id,
+                    [{"type": "text", "text": "First"}],
+                )
+            ],
         )
         self.assertEqual(
             next(call for call in calls if call[0] == "start_turn")[3],
@@ -458,16 +1380,30 @@ class ConversationServiceTests(unittest.TestCase):
         events = self.service.detail(conversation["conversation_id"])["events"]
         self.assertEqual(
             [event["kind"] for event in events],
-            ["thread.started", "thread.replaced", "user.message", "turn.started"],
+            [
+                "thread.started",
+                "conversation.state",
+                "conversation.state",
+                "thread.replaced",
+                "user.message",
+                "turn.started",
+                "conversation.state",
+            ],
         )
         self.assertEqual(
             sum(event["kind"] == "user.message" for event in events), 1
         )
         self.assertEqual(
-            events[1]["payload"]["previous_thread_id"], old_thread_id
+            next(event for event in events if event["kind"] == "thread.replaced")[
+                "payload"
+            ]["previous_thread_id"],
+            old_thread_id,
         )
         self.assertEqual(
-            events[1]["payload"]["thread"]["id"], replacement_thread_id
+            next(event for event in events if event["kind"] == "thread.replaced")[
+                "payload"
+            ]["thread"]["id"],
+            replacement_thread_id,
         )
 
     def test_missing_rollout_is_not_recovered_after_turn_evidence(self):
@@ -526,7 +1462,12 @@ class ConversationServiceTests(unittest.TestCase):
         events = self.service.detail(conversation["conversation_id"])["events"]
         self.assertEqual(
             [event["kind"] for event in events],
-            ["thread.started", "protocol.error"],
+            [
+                "thread.started",
+                "conversation.state",
+                "conversation.state",
+                "protocol.error",
+            ],
         )
         self.assertEqual(events[-1]["payload"]["operation"], "thread/resume")
         self.assertNotIn("start_turn", [call[0] for call in self.adapter.calls])
@@ -585,9 +1526,21 @@ class ConversationServiceTests(unittest.TestCase):
         events = self.service.detail(conversation["conversation_id"])["events"]
         self.assertEqual(
             [event["kind"] for event in events],
-            ["thread.started", "user.message", "protocol.error"],
+            [
+                "thread.started",
+                "conversation.state",
+                "conversation.state",
+                "user.message",
+                "protocol.error",
+                "conversation.state",
+            ],
         )
-        self.assertEqual(events[-1]["turn_id"], "turn-1")
+        self.assertEqual(
+            next(
+                event for event in events if event["kind"] == "protocol.error"
+            )["turn_id"],
+            "turn-1",
+        )
 
     def test_disconnect_after_turn_start_response_cannot_restore_running_state(self):
         conversation = self._create()
@@ -988,7 +1941,12 @@ class ConversationServiceTests(unittest.TestCase):
                 "delta": "partial",
             },
         )
-        completed_item = {"id": "item-1", "type": "agentMessage", "text": "partial complete"}
+        completed_item = {
+            "id": "item-1",
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "partial complete",
+        }
         self.adapter.emit_notification(
             "item/completed",
             {"threadId": thread_id, "turnId": "turn-1", "item": completed_item},
@@ -1014,8 +1972,81 @@ class ConversationServiceTests(unittest.TestCase):
         self.assertIsNone(detail["conversation"]["active_turn_id"])
         by_kind = {event["kind"]: event for event in detail["events"]}
         self.assertEqual(by_kind["item.completed"]["payload"]["item"], completed_item)
+        self.assertEqual(
+            detail["conversation"]["last_final_event_id"],
+            by_kind["item.completed"]["event_id"],
+        )
         self.assertEqual(by_kind["protocol.notification"]["payload"]["method"], "future/progress")
         self.assertEqual(by_kind["thread.name"]["payload"]["threadName"], "A useful Codex title")
+
+    def test_large_completed_final_marks_unread_before_payload_bounding(self):
+        conversation = self._create()
+        original_append = self.service.store.append_event
+        final_fence: dict[str, Any] = {}
+
+        def observing_append(**kwargs: Any) -> dict[str, Any]:
+            event = original_append(**kwargs)
+            if kwargs.get("mark_final"):
+                final_fence["event"] = event
+                final_fence["conversation"] = self.service.store.get_conversation(
+                    conversation["conversation_id"]
+                )
+            return event
+
+        with patch.object(
+            self.service.store, "append_event", side_effect=observing_append
+        ):
+            self.adapter.emit_notification(
+                "item/completed",
+                {
+                    "threadId": conversation["thread_id"],
+                    "turnId": "turn-large-final",
+                    "item": {
+                        "id": "answer-large",
+                        "type": "agentMessage",
+                        "text": "😀" * 100_000,
+                        "phase": "final_answer",
+                    },
+                },
+            )
+
+        detail = self.service.detail(conversation["conversation_id"])
+        completed = next(
+            event for event in detail["events"] if event["kind"] == "item.completed"
+        )
+        self.assertTrue(completed["payload"].get("truncated"))
+        self.assertTrue(completed["marks_final"])
+        self.assertEqual(final_fence["event"]["event_id"], completed["event_id"])
+        self.assertEqual(
+            final_fence["conversation"]["last_final_event_id"], completed["event_id"]
+        )
+        self.assertEqual(
+            detail["conversation"]["last_final_event_id"], completed["event_id"]
+        )
+
+        self.adapter.emit_notification(
+            "item/completed",
+            {
+                "threadId": conversation["thread_id"],
+                "turnId": "turn-later-final",
+                "item": {
+                    "id": "answer-later",
+                    "type": "agentMessage",
+                    "text": "Later answer",
+                    "phase": "final_answer",
+                },
+            },
+        )
+        replayed = self.service.detail(conversation["conversation_id"])
+        replayed_by_id = {
+            event["event_id"]: event for event in replayed["events"]
+        }
+        self.assertTrue(replayed_by_id[completed["event_id"]]["marks_final"])
+        self.assertTrue(
+            replayed_by_id[replayed["conversation"]["last_final_event_id"]][
+                "marks_final"
+            ]
+        )
 
     def test_delayed_terminal_notification_for_old_turn_records_without_overwrite(self):
         conversation = self._create()
@@ -1413,9 +2444,21 @@ class ConversationServiceTests(unittest.TestCase):
         events = self.service.detail(conversation["conversation_id"])["events"]
         self.assertEqual(
             [event["kind"] for event in events],
-            ["thread.started", "user.message", "protocol.error", "thread.replaced"],
+            [
+                "thread.started",
+                "conversation.state",
+                "user.message",
+                "protocol.error",
+                "thread.replaced",
+                "conversation.state",
+            ],
         )
-        self.assertEqual(events[1]["payload"]["text"], "Legacy unsent message")
+        self.assertEqual(
+            next(event for event in events if event["kind"] == "user.message")[
+                "payload"
+            ]["text"],
+            "Legacy unsent message",
+        )
 
         calls_after_recovery = list(self.adapter.calls)
         repeated = self.service.reconcile(conversation["conversation_id"])
@@ -1753,15 +2796,30 @@ class ConversationServiceTests(unittest.TestCase):
 
     def test_default_detail_returns_latest_bounded_history(self):
         conversation = self._create()
-        for index in range(510):
+        for index in range(1010):
             self.service.store.append_event(
                 kind="test.event",
                 payload={"index": index},
                 conversation_id=conversation["conversation_id"],
             )
-        latest = self.service.detail(conversation["conversation_id"])["events"]
+        detail = self.service.detail(conversation["conversation_id"])
+        latest = detail["events"]
+        self.assertTrue(detail["has_earlier_events"])
         self.assertEqual(len(latest), 500)
-        self.assertEqual(latest[0]["payload"]["index"], 10)
+        self.assertEqual(latest[0]["payload"]["index"], 510)
+
+        earlier = self.service.earlier_history(
+            conversation["conversation_id"], latest[0]["event_id"]
+        )
+        self.assertTrue(earlier["has_earlier_events"])
+        self.assertEqual(len(earlier["events"]), 500)
+        self.assertEqual(earlier["events"][0]["payload"]["index"], 10)
+        oldest = self.service.earlier_history(
+            conversation["conversation_id"], earlier["events"][0]["event_id"]
+        )
+        self.assertFalse(oldest["has_earlier_events"])
+        self.assertEqual(oldest["events"][0]["kind"], "thread.started")
+        self.assertEqual(oldest["events"][-1]["payload"]["index"], 9)
         from_start = self.service.detail(conversation["conversation_id"], 0)["events"]
         self.assertEqual(from_start[0]["kind"], "thread.started")
 

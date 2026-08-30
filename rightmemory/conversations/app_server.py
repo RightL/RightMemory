@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Mapping
 
 from .jsonrpc import (
@@ -191,17 +192,15 @@ class CodexAppServer:
     def start_turn(
         self,
         thread_id: str,
-        text: str,
+        inputs: list[Mapping[str, Any]],
         *,
         model: str | None = None,
         reasoning_effort: str | None = None,
         approval_policy: str | None = None,
     ) -> dict[str, Any]:
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("turn text must be a non-empty string")
         params: dict[str, Any] = {
             "threadId": _identifier(thread_id, "thread"),
-            "input": [{"type": "text", "text": text}],
+            "input": _turn_inputs(inputs),
         }
         _put_optional_string(params, "model", model)
         _put_optional_string(params, "effort", reasoning_effort)
@@ -293,3 +292,63 @@ def _put_optional_string(target: dict[str, Any], key: str, value: str | None) ->
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{key} must be a non-empty string")
     target[key] = value.strip()
+
+
+def _turn_inputs(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value or len(value) > 16:
+        raise ValueError("turn inputs must be a non-empty list with at most 16 items")
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ValueError("each turn input must be an object")
+        kind = item.get("type")
+        if kind == "text":
+            if set(item) != {"type", "text"}:
+                raise ValueError("text turn inputs may contain only type and text")
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip() or "\x00" in text:
+                raise ValueError("text turn inputs must contain non-empty text")
+            normalized.append({"type": "text", "text": text})
+            continue
+        if kind == "localImage":
+            if not set(item).issubset({"type", "path", "detail"}):
+                raise ValueError("local image turn inputs contain unsupported fields")
+            path = item.get("path")
+            if (
+                not isinstance(path, str)
+                or not path
+                or any(character in path for character in "\x00\r\n")
+                or not (
+                    PurePosixPath(path).is_absolute()
+                    or PureWindowsPath(path).is_absolute()
+                )
+            ):
+                raise ValueError("local image turn inputs require an absolute path")
+            normalized_item = {"type": "localImage", "path": path}
+            _put_image_detail(normalized_item, item.get("detail"))
+            normalized.append(normalized_item)
+            continue
+        if kind == "image":
+            if not set(item).issubset({"type", "url", "detail"}):
+                raise ValueError("image turn inputs contain unsupported fields")
+            url = item.get("url")
+            if (
+                not isinstance(url, str)
+                or not url.strip()
+                or any(character in url for character in "\x00\r\n")
+            ):
+                raise ValueError("image turn inputs require a URL")
+            normalized_item = {"type": "image", "url": url.strip()}
+            _put_image_detail(normalized_item, item.get("detail"))
+            normalized.append(normalized_item)
+            continue
+        raise ValueError("unsupported turn input type")
+    return normalized
+
+
+def _put_image_detail(target: dict[str, Any], value: object) -> None:
+    if value is None:
+        return
+    if value not in {"auto", "low", "high", "original"}:
+        raise ValueError("image detail must be auto, low, high, or original")
+    target["detail"] = value
