@@ -36,6 +36,7 @@ from .projection import (
     bounded_json_object,
     project_notification,
     project_server_request,
+    public_provider_object,
     server_request_result,
     status_from_thread,
 )
@@ -50,6 +51,7 @@ from .transport import (
 MAX_MESSAGE_LENGTH = 200_000
 EVENT_PAGE_SIZE = 500
 REMOTE_CLEANUP_CLOSE_WAIT_SECONDS = 0.2
+DEFAULT_REASONING_SUMMARY = "auto"
 _BUSY_CONVERSATION_STATUSES = frozenset(
     {"starting", "running", "waiting_approval", "waiting_input", "unknown"}
 )
@@ -780,9 +782,14 @@ class ConversationService:
             conversation = self._require_active_conversation(conversation_id)
             host = self.store.get_host(conversation["host_id"])
             with self._attachment_upload_lock:
-                attachment = self._require_attachment(
-                    conversation["conversation_id"], attachment_id
-                )
+                try:
+                    attachment = self._require_attachment(
+                        conversation["conversation_id"], attachment_id
+                    )
+                except ConversationError as exc:
+                    if exc.code == "attachment_not_found":
+                        return {"attachment_id": str(attachment_id)}
+                    raise
                 if attachment.get("state") != "staged":
                     raise ConversationError(
                         "attachment_in_use",
@@ -903,6 +910,7 @@ class ConversationService:
                 for key in ("model", "reasoning_effort")
                 if conversation.get(key) is not None
             }
+            turn_options["summary"] = DEFAULT_REASONING_SUMMARY
             try:
                 result = adapter.start_turn(
                     conversation["thread_id"], turn_inputs, **turn_options
@@ -1517,6 +1525,8 @@ class ConversationService:
             _message_value(message, "method"),
             _message_value(message, "params", {}),
         )
+        if not projected.persist:
+            return
         if projected.thread_id is None:
             return
         conversation = self.store.find_conversation(host_id, projected.thread_id)
@@ -2472,6 +2482,8 @@ class ConversationService:
                 and event["payload"].get("willRetry") is False
             ):
                 return "failed"
+            elif event["kind"] == "turn.interrupted":
+                return "interrupted"
         return None
 
     def _state_changed_after(
@@ -2987,7 +2999,7 @@ def _result_object(result: object, key: str, operation: str) -> dict[str, Any]:
         raise ConversationError(
             "provider_protocol", f"{operation} returned an invalid result.", 502
         )
-    return dict(result[key])
+    return public_provider_object(result[key])
 
 
 def _provider_id(value: object, problem: str) -> str:

@@ -22,6 +22,8 @@ _NOTIFICATION_KINDS = {
     "item/started": "item.started",
     "item/completed": "item.completed",
     "item/agentMessage/delta": "agent.delta",
+    "item/reasoning/summaryPartAdded": "reasoning.summary_part",
+    "item/reasoning/summaryTextDelta": "reasoning.summary_delta",
     "item/plan/delta": "plan.delta",
     "turn/plan/updated": "plan.updated",
     "item/commandExecution/outputDelta": "command.output",
@@ -57,6 +59,7 @@ class ProjectedNotification:
     active_turn_id: str | None = None
     clears_active_turn: bool = False
     thread_title: str | None = None
+    persist: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,8 +78,26 @@ def project_notification(method: object, params: object) -> ProjectedNotificatio
     turn_id = _identifier(safe_params.get("turnId")) or _nested_id(safe_params, "turn")
     kind = _NOTIFICATION_KINDS.get(safe_method, "protocol.notification")
     completed_final_answer = _is_completed_final_answer(safe_method, safe_params)
-    payload = bounded_json_object(safe_params)
-    if kind == "protocol.notification":
+    persist = not (
+        (
+            safe_method.startswith("item/reasoning/")
+            and safe_method not in {
+                "item/reasoning/summaryPartAdded",
+                "item/reasoning/summaryTextDelta",
+            }
+        )
+        or safe_method.startswith("rawResponse")
+    )
+    if safe_method in {
+        "item/reasoning/summaryPartAdded",
+        "item/reasoning/summaryTextDelta",
+    }:
+        payload = bounded_json_object(_reasoning_summary_payload(safe_params))
+    elif persist:
+        payload = bounded_json_object(_public_provider_payload(safe_params))
+    else:
+        payload = {}
+    if kind == "protocol.notification" and persist:
         payload = {"method": _bounded_string(safe_method, 512), "params": payload}
 
     status: str | None = None
@@ -118,7 +139,82 @@ def project_notification(method: object, params: object) -> ProjectedNotificatio
         active_turn_id=active_turn_id,
         clears_active_turn=clears_active_turn,
         thread_title=thread_title,
+        persist=persist,
     )
+
+
+def _reasoning_summary_payload(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep only provider-authored summary data and routing identifiers."""
+    payload: dict[str, Any] = {}
+    for key in ("threadId", "turnId", "itemId"):
+        identifier = _identifier(params.get(key))
+        if identifier is not None:
+            payload[key] = identifier
+    summary_index = params.get("summaryIndex")
+    if isinstance(summary_index, int) and not isinstance(summary_index, bool) and summary_index >= 0:
+        payload["summaryIndex"] = summary_index
+    delta = params.get("delta")
+    if isinstance(delta, str):
+        payload["delta"] = delta
+    for key in ("part", "summaryPart"):
+        if key in params:
+            part = _public_summary(params.get(key))
+            if part is not None:
+                payload[key] = part
+    return payload
+
+
+def _public_provider_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    public = _public_provider_value(value)
+    return public if isinstance(public, dict) else {}
+
+
+def public_provider_object(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a browser-safe provider object without raw reasoning content."""
+    return _public_provider_payload(value)
+
+
+def _public_provider_value(value: Any) -> Any:
+    """Recursively remove raw reasoning while retaining model-written summaries."""
+    if isinstance(value, Mapping):
+        if value.get("type") == "reasoning":
+            return _public_reasoning_item(value)
+        return {str(key): _public_provider_value(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_public_provider_value(child) for child in value]
+    return value
+
+
+def _public_reasoning_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    public: dict[str, Any] = {"type": "reasoning"}
+    item_id = _identifier(item.get("id"))
+    if item_id is not None:
+        public["id"] = item_id
+    status = item.get("status")
+    if isinstance(status, str) and status:
+        public["status"] = status
+    summary = _public_summary(item.get("summary"))
+    if summary is not None:
+        public["summary"] = summary
+    return public
+
+
+def _public_summary(value: Any) -> Any:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        text = value.get("text")
+        if not isinstance(text, str):
+            return None
+        part: dict[str, Any] = {"text": text}
+        kind = value.get("type")
+        if isinstance(kind, str) and kind:
+            part["type"] = kind
+        return part
+    if isinstance(value, (list, tuple)):
+        parts = [part for child in value if (part := _public_summary(child)) is not None]
+        return parts
+    return None
 
 
 def _is_completed_final_answer(method: str, params: Mapping[str, Any]) -> bool:

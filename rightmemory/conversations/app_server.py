@@ -196,6 +196,7 @@ class CodexAppServer:
         *,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        summary: str | None = None,
         approval_policy: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
@@ -204,6 +205,15 @@ class CodexAppServer:
         }
         _put_optional_string(params, "model", model)
         _put_optional_string(params, "effort", reasoning_effort)
+        if summary is not None:
+            if not isinstance(summary, str) or summary not in {
+                "auto",
+                "concise",
+                "detailed",
+                "none",
+            }:
+                raise ValueError("summary must be auto, concise, detailed, or none")
+            params["summary"] = summary
         _put_optional_string(params, "approvalPolicy", approval_policy)
         return self._request_object("turn/start", params)
 

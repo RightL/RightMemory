@@ -96,7 +96,7 @@ const shell = `
             <select name="effort" aria-label="Reasoning effort for the next message" title="Reasoning effort for the next message"></select>
           </div>
           <small>Enter to send · Shift+Enter for a new line</small>
-          <button type="button" class="cw-stop">Stop</button><button type="submit" class="cw-primary">Send</button>
+          <button type="submit" class="cw-primary cw-send-stop" data-mode="send">Send</button>
         </div>
       </form>
     </section>
@@ -129,6 +129,14 @@ type StagedAttachment = {
   removed: boolean;
   submitting: boolean;
   removing: boolean;
+  snapshotSeen: boolean;
+};
+
+type LiveWorkState = {
+  active: boolean;
+  stopping: boolean;
+  label: string;
+  startedAt: number | null;
 };
 
 function attachmentUploadId(): string {
@@ -187,6 +195,26 @@ function compactJson(value: unknown): string {
     const text = JSON.stringify(value, null, 2) ?? String(value);
     return text.length > 20_000 ? `${text.slice(0, 20_000)}\n… output truncated in browser` : text;
   } catch { return String(value); }
+}
+
+function shortVisibleText(value: unknown, limit = 180): string {
+  const direct = visibleText(value).replace(/\s+/g, ' ').trim();
+  if (direct) return direct.length > limit ? `${direct.slice(0, limit - 1)}…` : direct;
+  const record = recordValue(value);
+  const candidate = visibleText(
+    record.query ?? record.prompt ?? record.path ?? record.url ?? record.command ?? record.name ?? record.description,
+  ).replace(/\s+/g, ' ').trim();
+  return candidate.length > limit ? `${candidate.slice(0, limit - 1)}…` : candidate;
+}
+
+function attachmentAlreadyAbsent(error: unknown): boolean {
+  const value = error as { status?: unknown; code?: unknown; error?: unknown; message?: unknown } | null;
+  const nested = recordValue(value?.error);
+  const status = Number(value?.status ?? nested.status ?? 0);
+  const code = canonicalKind(textValue(value?.code ?? nested.code));
+  const message = textValue(value?.message ?? nested.message).toLowerCase();
+  const specificallyMissing = /attachment (?:was |is )?not found/.test(message);
+  return code === 'attachment_not_found' || specificallyMissing && (status === 0 || status === 404);
 }
 
 function eventText(payload: Record<string, unknown>, item: Record<string, unknown>): string {
@@ -307,6 +335,59 @@ function activityStatusLabel(value: string): string {
   return labels[canonical] ?? canonical.replace(/_/g, ' ').replace(/^./, (letter) => letter.toUpperCase());
 }
 
+type ProviderActivity = { label: string; detail: string };
+
+function providerActivity(
+  itemKind: string,
+  eventKind: string,
+  payload: Record<string, unknown>,
+  item: Record<string, unknown>,
+): ProviderActivity | null {
+  const combined = `${itemKind} ${eventKind}`;
+  const toolName = textValue(item.tool ?? item.name ?? item.toolName ?? item.tool_name ?? payload.tool ?? payload.name ?? payload.toolName ?? payload.tool_name);
+  const server = textValue(item.server ?? item.serverName ?? item.server_name ?? payload.server ?? payload.serverName ?? payload.server_name);
+  const failureDetail = shortVisibleText(item.error ?? payload.error ?? item.failure ?? payload.failure);
+  const detail = failureDetail || shortVisibleText(
+    item.query ?? payload.query
+      ?? item.prompt ?? payload.prompt
+      ?? item.revisedPrompt ?? item.revised_prompt ?? payload.revisedPrompt ?? payload.revised_prompt
+      ?? item.path ?? payload.path
+      ?? item.url ?? payload.url
+      ?? item.review ?? payload.review
+      ?? item.message ?? payload.message
+      ?? item.arguments ?? payload.arguments
+      ?? item.input ?? payload.input,
+  );
+  if (combined.includes('mcp_tool_call') || combined.includes('mcp_tool') || combined.includes('mcp_progress')) {
+    const target = [server, toolName].filter(Boolean).join(' · ');
+    return { label: target ? `MCP · ${target}` : 'Using an MCP tool', detail };
+  }
+  if (combined.includes('dynamic_tool_call') || combined.includes('dynamic_tool')) {
+    return { label: toolName ? `Tool · ${toolName}` : 'Using a tool', detail };
+  }
+  if (combined.includes('web_search')) return { label: 'Searching the web', detail };
+  if (combined.includes('image_view')) return { label: 'Viewing an image', detail };
+  if (combined.includes('image_generation') || combined.includes('generate_image')) return { label: 'Generating an image', detail };
+  if (combined.includes('entered_review_mode') || combined.includes('enter_review_mode')) return { label: 'Entered review mode', detail };
+  if (combined.includes('exited_review_mode') || combined.includes('exit_review_mode')) return { label: 'Exited review mode', detail };
+  if (combined.includes('context_compaction') || /(^|_)compaction(_|$)/.test(combined)) return { label: 'Compacting conversation context', detail };
+  if (combined.includes('function_call') || combined.includes('custom_tool_call')) {
+    return { label: toolName ? `Tool · ${toolName}` : 'Using a tool', detail };
+  }
+  return null;
+}
+
+function lifecycleStatus(kind: string, payload: Record<string, unknown>, item: Record<string, unknown>): string {
+  const explicit = textValue(item.status ?? payload.status ?? item.state ?? payload.state);
+  if (explicit) return activityStatusLabel(explicit);
+  if (item.error || payload.error || item.failure || payload.failure || item.success === false || payload.success === false) return 'Failed';
+  if (item.success === true || payload.success === true) return 'Completed';
+  if (kind.includes('failed') || kind.includes('error')) return 'Failed';
+  if (kind.includes('completed') || kind.includes('finished')) return 'Completed';
+  if (kind.includes('started') || kind.includes('delta') || kind.includes('progress')) return 'Running';
+  return 'Active';
+}
+
 function collabToolLabel(value: string): string {
   const labels: Record<string, string> = {
     spawnAgent: 'Started an agent', sendInput: 'Sent agent input', resumeAgent: 'Resumed an agent',
@@ -332,6 +413,17 @@ function hiddenOperationalEvent(kind: string): boolean {
     || kind.startsWith('server_request_');
 }
 
+function hiddenRawProviderEvent(event: ConversationEvent): boolean {
+  const payload = recordValue(event.payload);
+  const method = canonicalKind(textValue(payload.method ?? recordValue(payload.params).method));
+  const eventKind = canonicalKind(event.kind);
+  const protocolKind = method || eventKind;
+  if (protocolKind.startsWith('raw_response')) return true;
+  return protocolKind.includes('item_reasoning_text')
+    || protocolKind.includes('reasoning_raw')
+    || protocolKind.includes('reasoning_content');
+}
+
 function terminalWorkLabel(event: ConversationEvent): string | null {
   if (!event.turnId) return null;
   const kind = canonicalKind(event.kind);
@@ -339,10 +431,10 @@ function terminalWorkLabel(event: ConversationEvent): string | null {
   const turn = recordValue(payload.turn);
   const explicit = canonicalKind(textValue(turn.status ?? payload.status ?? payload.state));
   if (explicit === 'failed') return 'Work details · Failed';
-  if (explicit === 'interrupted') return 'Work details · Interrupted';
+  if (explicit === 'interrupted' || explicit === 'cancelled' || explicit === 'canceled') return 'Work details · Stopped';
   if (explicit === 'completed') return 'Work details';
   if (kind.includes('turn_failed') || kind === 'protocol_error' && payload.willRetry === false) return 'Work details · Failed';
-  if (kind.includes('interrupt')) return 'Work details · Interrupted';
+  if (kind.includes('interrupt') || kind.includes('cancel')) return 'Work details · Stopped';
   if (kind.includes('turn_completed') || kind.includes('turn_complete')) return 'Work details';
   return null;
 }
@@ -353,6 +445,22 @@ function reasoningEffortLabel(value: string): string {
     xhigh: 'Extra high', max: 'Max', ultra: 'Ultra',
   };
   return labels[value.toLowerCase()] ?? value.replace(/[_-]+/g, ' ').replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function operationalStatus(value: string): string {
+  return canonicalKind(value);
+}
+
+function turnCanInterrupt(status: string): boolean {
+  return ['starting', 'running', 'in_progress', 'waiting_approval', 'waiting_input'].includes(operationalStatus(status));
+}
+
+function liveWorkLabel(status: string, stopping: boolean, sending: boolean): string {
+  if (stopping) return 'Stopping…';
+  const canonical = operationalStatus(status);
+  if (canonical === 'waiting_approval') return 'Waiting for approval';
+  if (canonical === 'waiting_input') return 'Waiting for input';
+  return sending && !turnCanInterrupt(status) ? 'Preparing…' : 'Working…';
 }
 
 function catalogDefaultModel(catalog: ConversationModelCatalog): ConversationModel | null {
@@ -386,6 +494,7 @@ function activityNodes(
   events: ConversationEvent[],
   attachments: ConversationAttachment[],
   reusableImages?: Map<string, HTMLElement[]>,
+  liveWork?: LiveWorkState,
 ): HTMLElement[] {
   const nodes: HTMLElement[] = [];
   type MessageNode = {
@@ -418,6 +527,20 @@ function activityNodes(
     steps: unknown[] | null;
     fallback: string;
   };
+  type ReasoningWorkNode = {
+    node: HTMLElement;
+    content: HTMLElement;
+    parts: Map<string, string>;
+    source: string;
+    completed: boolean;
+  };
+  type CompactWorkNode = {
+    node: HTMLElement;
+    dot: HTMLElement;
+    heading: HTMLElement;
+    status: HTMLElement;
+    detail: HTMLElement;
+  };
   let merge: MessageNode | null = null;
   const messagesByItemId = new Map<string, MessageNode>();
   const messageNodes = new Set<MessageNode>();
@@ -426,6 +549,8 @@ function activityNodes(
   const commandActivityNodes = new Map<string, DetailsWorkNode>();
   const fileActivityNodes = new Map<string, DetailsWorkNode>();
   const planActivityNodes = new Map<string, PlanWorkNode>();
+  const reasoningActivityNodes = new Map<string, ReasoningWorkNode>();
+  const providerActivityNodes = new Map<string, CompactWorkNode>();
   const turnsWithFinalAnswer = new Set<string>();
   const terminalTurns = new Map<string, string>();
   const providerEchoItemIds = new Set<string>();
@@ -434,6 +559,27 @@ function activityNodes(
 
   const turnKey = (turnId: string | null): string => turnId ?? '__without_turn__';
 
+  const presentCommentarySummary = (
+    group: CommentaryGroup,
+    label: string,
+    active = false,
+    startedAt: number | null = null,
+  ): void => {
+    group.summary.replaceChildren();
+    if (active) {
+      const dot = element('span', 'cw-working-dot');
+      dot.setAttribute('aria-hidden', 'true');
+      appendText(group.summary, 'span', label, 'cw-working-label');
+      group.summary.prepend(dot);
+      if (startedAt !== null) {
+        const elapsed = appendText(group.summary, 'time', '', 'cw-work-elapsed');
+        elapsed.dataset.startedAt = String(startedAt);
+      }
+      return;
+    }
+    group.summary.textContent = label;
+  };
+
   const commentaryGroup = (turnId: string | null): CommentaryGroup => {
     const key = turnKey(turnId);
     const existing = commentaryGroups.get(key);
@@ -441,11 +587,13 @@ function activityNodes(
     const node = element('details', 'cw-commentary-group');
     node.dataset.activityKey = `commentary:${key}`;
     const terminalLabel = terminalTurns.get(key);
-    const summary = appendText(node, 'summary', turnsWithFinalAnswer.has(key) ? 'Work details' : terminalLabel ?? 'Working…');
+    const summary = element('summary');
+    node.append(summary);
     const body = element('div', 'cw-commentary-items');
     node.append(body);
     node.open = !turnsWithFinalAnswer.has(key) && !terminalLabel;
     const group = { node, body, summary };
+    presentCommentarySummary(group, turnsWithFinalAnswer.has(key) ? 'Work details' : terminalLabel ?? 'Working…');
     commentaryGroups.set(key, group);
     nodes.push(node);
     return group;
@@ -456,7 +604,7 @@ function activityNodes(
     turnsWithFinalAnswer.add(key);
     const group = commentaryGroups.get(key);
     if (!group) return;
-    group.summary.textContent = 'Work details';
+    presentCommentarySummary(group, 'Work details');
     group.node.open = false;
   };
 
@@ -464,9 +612,9 @@ function activityNodes(
     const key = turnKey(turnId);
     if (turnsWithFinalAnswer.has(key)) return;
     terminalTurns.set(key, label);
-    const group = commentaryGroups.get(key);
+    const group = commentaryGroups.get(key) ?? (label === 'Work details' ? null : commentaryGroup(turnId));
     if (!group) return;
-    group.summary.textContent = label;
+    presentCommentarySummary(group, label);
     group.node.open = false;
   };
 
@@ -561,6 +709,7 @@ function activityNodes(
   };
 
   for (const event of events) {
+    if (hiddenRawProviderEvent(event)) continue;
     const terminalLabel = terminalWorkLabel(event);
     if (terminalLabel) markTerminalTurn(event.turnId, terminalLabel);
     const { payload, item, itemId, kind } = payloadParts(event);
@@ -639,7 +788,51 @@ function activityNodes(
       continue;
     }
     const itemType = textValue(item.type ?? item.kind ?? payload.type ?? payload.kind);
-    if (canonicalKind(itemType) === 'sub_agent_activity') {
+    const itemKind = canonicalKind(itemType);
+    const reasoningEvent = itemKind === 'reasoning' || kind.includes('reasoning_summary');
+    if (reasoningEvent) {
+      merge = null;
+      const summaryIndex = textValue(payload.summaryIndex ?? payload.summary_index, '0');
+      const reasoningId = itemId || textValue(item.id ?? payload.id) || `${event.turnId ?? 'turn'}:${summaryIndex}`;
+      const key = `reasoning:${turnKey(event.turnId)}:${reasoningId}`;
+      const summaryValue = item.summary ?? payload.summary;
+      const completedParts = Array.isArray(summaryValue)
+        ? summaryValue.map((part) => visibleText(part)).filter(Boolean)
+        : [];
+      const completedSummary = completedParts.length ? completedParts.join('\n\n') : visibleText(summaryValue);
+      const delta = kind.includes('summary_delta') ? visibleText(payload.delta) : '';
+      const nextText = completedSummary || delta;
+      let work = reasoningActivityNodes.get(key);
+      if (!work && nextText) {
+        const node = element('article', 'cw-reasoning-summary');
+        node.dataset.activityKey = key;
+        appendText(node, 'small', 'REASONING SUMMARY');
+        const content = element('div', 'cw-message-text');
+        node.append(content);
+        work = { node, content, parts: new Map(), source: '', completed: false };
+        reasoningActivityNodes.set(key, work);
+        commentaryGroup(event.turnId).body.append(node);
+      }
+      if (work) {
+        if (completedSummary) {
+          work.parts = new Map(completedParts.length
+            ? completedParts.map((part, index) => [String(index), part])
+            : [['0', completedSummary]]);
+          work.source = completedSummary;
+          work.completed = true;
+        } else if (delta) {
+          const currentPart = work.parts.get(summaryIndex) ?? '';
+          work.parts.set(summaryIndex, mergeLifecycleOutput(currentPart, delta, true, false));
+          work.source = [...work.parts.entries()]
+            .sort(([left], [right]) => Number(left) - Number(right))
+            .map(([, part]) => part)
+            .filter(Boolean)
+            .join('\n\n');
+        }
+      }
+      continue;
+    }
+    if (itemKind === 'sub_agent_activity') {
       merge = null;
       const agentThreadId = textValue(item.agentThreadId ?? item.agent_thread_id ?? payload.agentThreadId ?? payload.agent_thread_id);
       const agentPath = textValue(item.agentPath ?? item.agent_path ?? payload.agentPath ?? payload.agent_path);
@@ -662,7 +855,7 @@ function activityNodes(
       if (agentPath) appendText(copy, 'small', agentPath);
       continue;
     }
-    if (canonicalKind(itemType) === 'collab_agent_tool_call') {
+    if (itemKind === 'collab_agent_tool_call') {
       merge = null;
       const key = `collab:${turnKey(event.turnId)}:${itemId || textValue(item.id ?? payload.id) || event.eventId}`;
       let node = agentActivityNodes.get(key);
@@ -710,7 +903,6 @@ function activityNodes(
       }
       continue;
     }
-    const itemKind = canonicalKind(itemType);
     const lifecycleKey = `${turnKey(event.turnId)}:${itemId || event.eventId}`;
     const commandEvent = itemKind.includes('command_execution') || /(^|_)(command|exec)(_|$)/.test(kind);
     if (commandEvent) {
@@ -803,6 +995,43 @@ function activityNodes(
       } else if (work.fallback) appendText(work.body, 'pre', work.fallback);
       continue;
     }
+    const provider = providerActivity(itemKind, kind, payload, item);
+    if (provider) {
+      merge = null;
+      const key = `provider:${lifecycleKey}`;
+      let work = providerActivityNodes.get(key);
+      if (!work) {
+        const node = element('article', 'cw-agent-activity cw-provider-activity');
+        node.dataset.activityKey = key;
+        const dot = element('span', 'cw-agent-activity-dot');
+        const copy = element('div', 'cw-agent-activity-copy');
+        const headingRow = element('div', 'cw-agent-activity-heading');
+        const heading = appendText(headingRow, 'strong', provider.label);
+        const status = appendText(headingRow, 'span', '', 'cw-agent-status');
+        const detail = appendText(copy, 'p', '');
+        copy.prepend(headingRow);
+        node.append(dot, copy);
+        work = { node, dot, heading, status, detail };
+        providerActivityNodes.set(key, work);
+        commentaryGroup(event.turnId).body.append(node);
+      }
+      if (!kind.includes('mcp_progress') || work.heading.textContent === 'Using an MCP tool') {
+        work.heading.textContent = provider.label;
+      }
+      const status = lifecycleStatus(kind, payload, item);
+      work.status.textContent = status;
+      work.status.className = `cw-agent-status cw-${canonicalKind(status)}`;
+      work.dot.classList.toggle('cw-active', ['running', 'active', 'in_progress', 'started'].includes(canonicalKind(status)));
+      work.detail.textContent = provider.detail;
+      work.detail.hidden = !provider.detail;
+      const duration = Number(item.durationMs ?? item.duration_ms ?? payload.durationMs ?? payload.duration_ms ?? 0);
+      let durationNode = work.node.querySelector<HTMLElement>('.cw-provider-duration');
+      if (duration > 0) {
+        if (!durationNode) durationNode = appendText(work.node.querySelector<HTMLElement>('.cw-agent-activity-copy')!, 'small', '', 'cw-provider-duration');
+        durationNode.textContent = duration < 1_000 ? `${Math.round(duration)} ms` : `${(duration / 1_000).toFixed(1)} s`;
+      } else if (durationNode) durationNode.remove();
+      continue;
+    }
     if (hiddenOperationalEvent(kind)) continue;
     merge = null;
     if (kind.includes('protocol_error') || kind.includes('connection_disconnected')) {
@@ -816,11 +1045,25 @@ function activityNodes(
       continue;
     }
   }
+  if (liveWork?.active) {
+    const activeTurnId = [...events].reverse().find((event) => {
+      if (!event.turnId) return false;
+      const key = turnKey(event.turnId);
+      return !terminalTurns.has(key) && !turnsWithFinalAnswer.has(key);
+    })?.turnId ?? '__pending__';
+    const group = commentaryGroup(activeTurnId);
+    presentCommentarySummary(group, liveWork.label, true, liveWork.startedAt);
+    group.node.classList.toggle('cw-stopping', liveWork.stopping);
+    group.node.open = true;
+  }
   const visibleMessages = [...messageNodes].filter((message) => message.source);
   const stableMessages = visibleMessages.filter((message) => message.completed);
   const cacheableMessages = new Set(stableMessages.slice(-RICH_TEXT_CACHE_LIMIT));
   for (const message of visibleMessages) {
     renderRichText(message.content, message.source, cacheableMessages.has(message));
+  }
+  for (const reasoning of reasoningActivityNodes.values()) {
+    renderRichText(reasoning.content, reasoning.source, reasoning.completed);
   }
   return nodes;
 }
@@ -863,6 +1106,11 @@ export class ConversationRenderer {
   private attachmentSequence = 0;
   private attachmentUploadQueue: StagedAttachment[] = [];
   private attachmentUploadRunning = false;
+  private workStartedAt = new Map<string, number>();
+  private elapsedTimer: ReturnType<typeof setInterval> | null = null;
+  private stoppingConversationIds = new Set<string>();
+  private observedInterruptIds = new Set<string>();
+  private stoppingBaselineErrors = new Map<string, string | null>();
 
   constructor(private host: HTMLElement, private rootKey: string, private actions: ConversationRendererActions) {
     host.className = 'cw-pane';
@@ -879,7 +1127,17 @@ export class ConversationRenderer {
       if (conversation) actions.reconnect(conversation.conversationId);
     }, { signal: this.abort.signal });
     this.$('.cw-archive').addEventListener('click', () => actions.archive(), { signal: this.abort.signal });
-    this.$('.cw-stop').addEventListener('click', () => actions.interrupt(), { signal: this.abort.signal });
+    this.$<HTMLButtonElement>('.cw-send-stop').addEventListener('click', (event) => {
+      const button = event.currentTarget as HTMLButtonElement;
+      if (button.dataset.mode !== 'stop') return;
+      event.preventDefault();
+      const conversationId = this.lastConversationId;
+      if (button.disabled || !conversationId || this.stoppingConversationIds.has(conversationId)) return;
+      this.stoppingConversationIds.add(conversationId);
+      this.stoppingBaselineErrors.set(conversationId, this.state?.error ?? null);
+      if (this.state) this.render(this.state);
+      actions.interrupt();
+    }, { signal: this.abort.signal });
     this.$('.cw-unread').addEventListener('click', () => this.scrollToBottom(), { signal: this.abort.signal });
     this.$('.cw-activity').addEventListener('scroll', () => {
       if (!this.lastConversationId || !this.isFollowingActivity(this.lastConversationId)) return;
@@ -944,7 +1202,11 @@ export class ConversationRenderer {
     composer.addEventListener('submit', (event) => { event.preventDefault(); this.submitComposer(); }, { signal: this.abort.signal });
     const composerInput = this.$<HTMLTextAreaElement>('.cw-composer textarea');
     composerInput.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); this.submitComposer(); }
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing
+        && this.$<HTMLButtonElement>('.cw-send-stop').dataset.mode === 'send') {
+        event.preventDefault();
+        this.submitComposer();
+      }
     }, { signal: this.abort.signal });
     composerInput.addEventListener('input', () => { this.saveDraft(); this.updateComposerControls(); }, { signal: this.abort.signal });
     composerInput.addEventListener('paste', (event) => this.handleComposerPaste(event), { signal: this.abort.signal });
@@ -1288,6 +1550,7 @@ export class ConversationRenderer {
     if (!conversation) {
       if (this.lastConversationId) this.saveDraft(this.lastConversationId);
       this.lastConversationId = null;
+      this.updateElapsedTimer(false);
       return;
     }
     const changed = this.lastConversationId !== conversation.conversationId;
@@ -1302,9 +1565,31 @@ export class ConversationRenderer {
     const host = state.hosts.find((item) => item.hostId === conversation.hostId)?.displayName || conversation.hostId;
     const project = state.projects.find((item) => item.projectId === conversation.projectId);
     this.$('.cw-detail-location').textContent = [host, project?.cwd || project?.label || conversation.projectId].filter(Boolean).join(' · ');
-    this.$('.cw-turn-status').textContent = state.loadingConversation
-      ? 'Loading history…'
-      : state.sendingConversationIds.includes(conversation.conversationId) ? 'Sending…' : conversation.status || 'unknown';
+    const sending = state.sendingConversationIds.includes(conversation.conversationId);
+    const interruptible = turnCanInterrupt(conversation.status);
+    const interrupting = state.interruptingConversationIds.includes(conversation.conversationId);
+    if (interrupting) this.observedInterruptIds.add(conversation.conversationId);
+    const newInterruptError = this.observedInterruptIds.has(conversation.conversationId)
+      && !interrupting
+      && !!state.error
+      && state.error !== this.stoppingBaselineErrors.get(conversation.conversationId);
+    if ((!interruptible && !sending) || newInterruptError) {
+      this.stoppingConversationIds.delete(conversation.conversationId);
+      this.observedInterruptIds.delete(conversation.conversationId);
+      this.stoppingBaselineErrors.delete(conversation.conversationId);
+    }
+    const stopping = interrupting || this.stoppingConversationIds.has(conversation.conversationId);
+    const liveActive = sending || interruptible || stopping;
+    if (liveActive && !this.workStartedAt.has(conversation.conversationId)) {
+      this.workStartedAt.set(conversation.conversationId, Date.now());
+    } else if (!liveActive) {
+      this.workStartedAt.delete(conversation.conversationId);
+    }
+    const liveLabel = liveWorkLabel(conversation.status, stopping, sending);
+    const statusNode = this.$('.cw-turn-status');
+    statusNode.textContent = state.loadingConversation ? 'Loading history…' : liveActive ? liveLabel : activityStatusLabel(conversation.status || 'unknown');
+    statusNode.classList.toggle('cw-working', liveActive && !stopping && !liveLabel.startsWith('Waiting'));
+    statusNode.classList.toggle('cw-stopping', stopping);
     const loadEarlier = this.$<HTMLButtonElement>('.cw-load-earlier');
     const loadingEarlier = state.loadingEarlierConversationIds.includes(conversation.conversationId);
     const hasEarlierEvents = Boolean(state.hasEarlierEventsByConversation[conversation.conversationId]);
@@ -1316,10 +1601,13 @@ export class ConversationRenderer {
       queueMicrotask(() => this.$('.cw-activity').focus({ preventScroll: true }));
     }
     this.$('.cw-side-chat-note').hidden = conversation.kind !== 'side_chat';
-    const running = ['starting', 'running', 'in_progress', 'waiting_approval', 'waiting approval', 'waiting_input', 'waiting input'].includes(conversation.status.toLowerCase());
-    const interrupting = state.interruptingConversationIds.includes(conversation.conversationId);
-    this.$<HTMLButtonElement>('.cw-stop').disabled = !running || interrupting;
-    this.$<HTMLButtonElement>('.cw-stop').textContent = interrupting ? 'Stopping…' : 'Stop';
+    const sendStop = this.$<HTMLButtonElement>('.cw-send-stop');
+    sendStop.dataset.mode = interruptible || stopping ? 'stop' : 'send';
+    sendStop.type = interruptible || stopping ? 'button' : 'submit';
+    sendStop.textContent = stopping ? 'Stopping…' : interruptible ? 'Stop' : sending ? 'Preparing…' : 'Send';
+    sendStop.classList.toggle('cw-stop', interruptible || stopping);
+    sendStop.classList.toggle('cw-primary', !interruptible && !stopping);
+    if (interruptible || stopping) sendStop.disabled = stopping;
     this.$<HTMLTextAreaElement>('.cw-composer textarea').disabled = conversation.archived;
     this.$<HTMLButtonElement>('.cw-attach').disabled = conversation.archived;
     if (!state.sendingConversationIds.includes(conversation.conversationId)) {
@@ -1353,7 +1641,14 @@ export class ConversationRenderer {
       state.eventsByConversation[conversation.conversationId] ?? [],
       state.attachmentsByConversation[conversation.conversationId] ?? [],
       changed,
+      {
+        active: liveActive,
+        stopping,
+        label: liveLabel,
+        startedAt: liveLabel.startsWith('Waiting') ? null : this.workStartedAt.get(conversation.conversationId) ?? null,
+      },
     );
+    this.updateElapsedTimer(liveActive && !liveLabel.startsWith('Waiting'));
     this.renderPending(
       state.pendingRequests.filter((request) => request.conversationId === conversation.conversationId),
       new Set(state.respondingRequestKeys),
@@ -1428,8 +1723,16 @@ export class ConversationRenderer {
     this.failedModelCatalogs.delete(hostId);
   }
 
-  private renderActivity(events: ConversationEvent[], attachments: ConversationAttachment[], forceBottom: boolean): void {
-    const signature = `${events.map((event) => event.eventId).join('\u001f')}\u001e${attachments.map((attachment) => `${attachment.attachmentId}:${attachment.state}`).join('\u001f')}`;
+  private renderActivity(
+    events: ConversationEvent[],
+    attachments: ConversationAttachment[],
+    forceBottom: boolean,
+    liveWork?: LiveWorkState,
+  ): void {
+    const liveSignature = liveWork?.active
+      ? `${liveWork.label}:${liveWork.stopping ? 1 : 0}:${liveWork.startedAt ?? ''}`
+      : '';
+    const signature = `${events.map((event) => event.eventId).join('\u001f')}\u001e${attachments.map((attachment) => `${attachment.attachmentId}:${attachment.state}`).join('\u001f')}\u001e${liveSignature}`;
     if (signature === this.activitySignature && !forceBottom) return;
     this.activitySignature = signature;
     const activity = this.$('.cw-activity');
@@ -1464,7 +1767,7 @@ export class ConversationRenderer {
     }
     const nearBottom = forceBottom || activity.scrollHeight - activity.scrollTop - activity.clientHeight < 90;
     const hadContent = activity.childElementCount > 0;
-    const nodes = activityNodes(events, attachments, reusableImages);
+    const nodes = activityNodes(events, attachments, reusableImages, liveWork);
     if (!nodes.length) {
       activity.replaceChildren();
       appendText(activity, 'p', 'No activity yet. Send the first message when you are ready.', 'cw-empty-copy');
@@ -1475,7 +1778,7 @@ export class ConversationRenderer {
         if (!previous) continue;
         const nextLabel = details.querySelector(':scope > summary')?.textContent ?? '';
         const commentaryJustCompleted = details.classList.contains('cw-commentary-group')
-          && previous.label === 'Working…'
+          && !previous.label.startsWith('Work details')
           && nextLabel.startsWith('Work details');
         if (!commentaryJustCompleted) details.open = previous.open;
       }
@@ -1505,6 +1808,30 @@ export class ConversationRenderer {
       } else if (nearBottom) this.scrollToBottom();
       else if (hadContent) this.$('.cw-unread').hidden = false;
     });
+  }
+
+  private refreshElapsedTimes(): void {
+    const now = Date.now();
+    for (const elapsed of this.host.querySelectorAll<HTMLTimeElement>('.cw-work-elapsed[data-started-at]')) {
+      const startedAt = Number(elapsed.dataset.startedAt);
+      if (!Number.isFinite(startedAt)) continue;
+      const seconds = Math.max(0, Math.floor((now - startedAt) / 1_000));
+      const minutes = Math.floor(seconds / 60);
+      elapsed.textContent = minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+      elapsed.dateTime = `PT${seconds}S`;
+    }
+  }
+
+  private updateElapsedTimer(active: boolean): void {
+    if (!active) {
+      if (this.elapsedTimer !== null) clearInterval(this.elapsedTimer);
+      this.elapsedTimer = null;
+      return;
+    }
+    this.refreshElapsedTimes();
+    if (this.elapsedTimer === null) {
+      this.elapsedTimer = setInterval(() => this.refreshElapsedTimes(), 1_000);
+    }
   }
 
   private renderPending(requests: PendingRequest[], responding: Set<string>): void {
@@ -1800,6 +2127,7 @@ export class ConversationRenderer {
       removed: false,
       submitting: false,
       removing: false,
+      snapshotSeen: false,
     };
     const current = this.stagedAttachments.get(conversationId) ?? [];
     this.stagedAttachments.set(conversationId, [...current, staged]);
@@ -1914,6 +2242,20 @@ export class ConversationRenderer {
   private restoreStagedAttachments(conversationId: string, attachments: ConversationAttachment[]): void {
     const current = this.stagedAttachments.get(conversationId) ?? [];
     const suppressed = this.suppressedAttachmentIds.get(conversationId) ?? new Set<string>();
+    const authoritativeStagedIds = new Set(
+      attachments
+        .filter((attachment) => attachment.state.toLowerCase() === 'staged')
+        .map((attachment) => attachment.attachmentId),
+    );
+    if (!this.state?.loadingConversation) {
+      for (const entry of current) {
+        const attachmentId = entry.attachment?.attachmentId;
+        if (!attachmentId || !entry.snapshotSeen || entry.status !== 'ready'
+          || entry.submitting || entry.removing || authoritativeStagedIds.has(attachmentId)) continue;
+        entry.removed = true;
+        this.revokePreviewUrl(entry.previewUrl);
+      }
+    }
     const byAttachmentId = new Map(
       current.map((entry) => [entry.attachment?.attachmentId ?? entry.uploadId, entry] as const),
     );
@@ -1931,6 +2273,7 @@ export class ConversationRenderer {
         existing.attachment = attachment;
         existing.status = 'ready';
         existing.error = '';
+        existing.snapshotSeen = true;
         continue;
       }
       const kind: StagedAttachment['kind'] = attachment.kind === 'image'
@@ -1950,6 +2293,7 @@ export class ConversationRenderer {
         removed: false,
         submitting: false,
         removing: false,
+        snapshotSeen: true,
       };
       current.push(restored);
       byAttachmentId.set(attachment.attachmentId, restored);
@@ -2049,6 +2393,16 @@ export class ConversationRenderer {
           this.updateComposerControls();
         }
       }).catch((error: unknown) => {
+        if (attachmentAlreadyAbsent(error)) {
+          this.stagedAttachments.set(conversationId, (this.stagedAttachments.get(conversationId) ?? []).filter((entry) => entry !== staged));
+          this.revokePreviewUrl(staged.previewUrl);
+          if (this.lastConversationId === conversationId) {
+            this.setComposerNotice('');
+            this.renderStagedAttachments(conversationId);
+            this.updateComposerControls();
+          }
+          return;
+        }
         suppressed.delete(staged.attachment!.attachmentId);
         staged.removed = false;
         staged.removing = false;
@@ -2078,8 +2432,13 @@ export class ConversationRenderer {
   private updateComposerControls(): void {
     if (!this.state) return;
     const conversation = currentConversation(this.state);
-    const button = this.$<HTMLButtonElement>('.cw-composer button[type="submit"]');
+    const button = this.$<HTMLButtonElement>('.cw-send-stop');
     if (!conversation) { button.disabled = true; return; }
+    if (button.dataset.mode === 'stop') {
+      button.disabled = this.stoppingConversationIds.has(conversation.conversationId)
+        || this.state.interruptingConversationIds.includes(conversation.conversationId);
+      return;
+    }
     const staged = (this.stagedAttachments.get(conversation.conversationId) ?? []).filter((entry) => !entry.removed);
     const ready = staged.filter((entry) => entry.status === 'ready' && entry.attachment);
     const unavailable = staged.some((entry) => entry.status !== 'ready' || entry.submitting || entry.removing);
@@ -2089,7 +2448,8 @@ export class ConversationRenderer {
 
   private submitComposer(): void {
     const input = this.$<HTMLTextAreaElement>('.cw-composer textarea');
-    if (this.$<HTMLButtonElement>('.cw-composer button[type="submit"]').disabled) return;
+    const button = this.$<HTMLButtonElement>('.cw-send-stop');
+    if (button.dataset.mode !== 'send' || button.disabled) return;
     const text = input.value.trim();
     const conversationId = this.lastConversationId;
     if (!conversationId) return;
@@ -2280,6 +2640,7 @@ export class ConversationRenderer {
 
   destroy(): void {
     this.saveDraft();
+    this.updateElapsedTimer(false);
     for (const staged of this.stagedAttachments.values()) {
       for (const attachment of staged) {
         attachment.removed = true;

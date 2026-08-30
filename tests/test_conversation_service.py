@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import struct
 import tempfile
@@ -694,6 +695,42 @@ class ConversationServiceTests(unittest.TestCase):
                 self.assertIsNone(
                     self.service.store.get_attachment(uploaded["attachment_id"])
                 )
+
+    def test_staged_delete_is_idempotent_but_does_not_delete_sent_attachments(self):
+        conversation = self._create()
+        staged = self.service.upload_attachment(
+            conversation["conversation_id"], b"draft context", "text/plain", "draft.txt"
+        )["attachment"]
+        staged_id = staged["attachment_id"]
+
+        self.assertEqual(
+            self.service.delete_staged_attachment(
+                conversation["conversation_id"], staged_id
+            ),
+            {"attachment_id": staged_id},
+        )
+        self.assertEqual(
+            self.service.delete_staged_attachment(
+                conversation["conversation_id"], staged_id
+            ),
+            {"attachment_id": staged_id},
+        )
+        self.assertIsNone(self.service.store.get_attachment(staged_id))
+
+        uploaded = self.service.upload_attachment(
+            conversation["conversation_id"], b"sent context", "text/plain", "sent.txt"
+        )["attachment"]
+        self.service.send_message(
+            conversation["conversation_id"], None, [uploaded["attachment_id"]]
+        )
+        with self.assertRaises(ConversationError) as caught:
+            self.service.delete_staged_attachment(
+                conversation["conversation_id"], uploaded["attachment_id"]
+            )
+        self.assertEqual(caught.exception.code, "attachment_in_use")
+        self.assertIsNotNone(
+            self.service.store.get_attachment(uploaded["attachment_id"])
+        )
 
     def test_remote_side_chat_files_are_cleaned_on_close_and_startup(self):
         owner_session_id = "remote-cleanup-session"
@@ -2255,7 +2292,11 @@ class ConversationServiceTests(unittest.TestCase):
         ][-1]
         self.assertEqual(
             first_start[3],
-            {"model": "gpt-deep", "reasoning_effort": "high"},
+            {
+                "model": "gpt-deep",
+                "reasoning_effort": "high",
+                "summary": "auto",
+            },
         )
 
         updated = self.service.update_settings(
@@ -2287,7 +2328,11 @@ class ConversationServiceTests(unittest.TestCase):
         ][-1]
         self.assertEqual(
             second_start[3],
-            {"model": "gpt-default", "reasoning_effort": "medium"},
+            {
+                "model": "gpt-default",
+                "reasoning_effort": "medium",
+                "summary": "auto",
+            },
         )
 
     def test_model_settings_reject_unavailable_model_and_effort_pairs(self):
@@ -2368,7 +2413,11 @@ class ConversationServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             next(call for call in calls if call[0] == "start_turn")[3],
-            {"model": "gpt-deep", "reasoning_effort": "high"},
+            {
+                "model": "gpt-deep",
+                "reasoning_effort": "high",
+                "summary": "auto",
+            },
         )
         events = self.service.detail(conversation["conversation_id"])["events"]
         self.assertEqual(
@@ -2490,6 +2539,51 @@ class ConversationServiceTests(unittest.TestCase):
         persisted = self.service.detail(conversation["conversation_id"])["conversation"]
         self.assertEqual(persisted["status"], "completed")
         self.assertIsNone(persisted["active_turn_id"])
+
+    def test_turn_start_response_and_fallback_strip_raw_reasoning(self):
+        conversation = self._create()
+
+        def start_without_notification(
+            thread_id: str, inputs: list[dict[str, Any]], **optional: Any
+        ) -> dict[str, Any]:
+            self.adapter.turn_count += 1
+            turn = {
+                "id": "turn-1",
+                "status": "inProgress",
+                "items": [
+                    {
+                        "id": "reasoning-1",
+                        "type": "reasoning",
+                        "summary": ["Checked the request."],
+                        "content": ["private turn reasoning"],
+                        "encryptedContent": "turn-ciphertext",
+                    }
+                ],
+            }
+            self.adapter.calls.append(("start_turn", thread_id, inputs, optional))
+            self.adapter.unmaterialized_threads.discard(thread_id)
+            return {"turn": turn}
+
+        self.adapter.start_turn = start_without_notification
+        result = self.service.send_message(conversation["conversation_id"], "Work")
+        fallback = next(
+            event
+            for event in self.service.detail(conversation["conversation_id"])["events"]
+            if event["kind"] == "turn.started"
+        )
+
+        for turn in (result["turn"], fallback["payload"]["turn"]):
+            self.assertEqual(
+                turn["items"][0],
+                {
+                    "type": "reasoning",
+                    "id": "reasoning-1",
+                    "summary": ["Checked the request."],
+                },
+            )
+        serialized = json.dumps({"result": result, "fallback": fallback})
+        self.assertNotIn("private turn reasoning", serialized)
+        self.assertNotIn("turn-ciphertext", serialized)
 
     def test_terminal_error_before_turn_start_returns_is_not_ignored(self):
         conversation = self._create()
@@ -2972,6 +3066,73 @@ class ConversationServiceTests(unittest.TestCase):
         self.assertEqual(by_kind["protocol.notification"]["payload"]["method"], "future/progress")
         self.assertEqual(by_kind["thread.name"]["payload"]["threadName"], "A useful Codex title")
 
+    def test_reasoning_summaries_persist_without_raw_reasoning(self):
+        conversation = self._create()
+        self.service.send_message(conversation["conversation_id"], "Work")
+        routing = {
+            "threadId": conversation["thread_id"],
+            "turnId": "turn-1",
+            "itemId": "reasoning-1",
+        }
+        self.adapter.emit_notification(
+            "item/reasoning/summaryPartAdded",
+            {**routing, "summaryIndex": 0},
+        )
+        self.adapter.emit_notification(
+            "item/reasoning/summaryTextDelta",
+            {
+                **routing,
+                "summaryIndex": 0,
+                "delta": "Checking the current state.",
+            },
+        )
+        self.adapter.emit_notification(
+            "item/reasoning/textDelta",
+            {**routing, "contentIndex": 0, "delta": "private chain of thought"},
+        )
+        self.adapter.emit_notification(
+            "rawResponseItem/completed",
+            {**routing, "item": {"reasoning_text": "raw response reasoning"}},
+        )
+        self.adapter.emit_notification(
+            "item/completed",
+            {
+                **routing,
+                "item": {
+                    "id": "reasoning-1",
+                    "type": "reasoning",
+                    "summary": ["Checked the current state."],
+                    "content": ["private completed reasoning"],
+                    "encryptedContent": "ciphertext",
+                },
+            },
+        )
+
+        events = self.service.detail(conversation["conversation_id"])["events"]
+        self.assertEqual(
+            [event["kind"] for event in events if event["kind"].startswith("reasoning.")],
+            ["reasoning.summary_part", "reasoning.summary_delta"],
+        )
+        completed = next(
+            event
+            for event in events
+            if event["kind"] == "item.completed"
+            and event["payload"].get("item", {}).get("type") == "reasoning"
+        )
+        self.assertEqual(
+            completed["payload"]["item"],
+            {
+                "type": "reasoning",
+                "id": "reasoning-1",
+                "summary": ["Checked the current state."],
+            },
+        )
+        serialized = json.dumps(events)
+        self.assertNotIn("private chain of thought", serialized)
+        self.assertNotIn("raw response reasoning", serialized)
+        self.assertNotIn("private completed reasoning", serialized)
+        self.assertNotIn("ciphertext", serialized)
+
     def test_large_completed_final_marks_unread_before_payload_bounding(self):
         conversation = self._create()
         original_append = self.service.store.append_event
@@ -3398,6 +3559,56 @@ class ConversationServiceTests(unittest.TestCase):
             for event in self.service.detail(conversation["conversation_id"])["events"]
         ]
         self.assertIn("thread.reconciled", kinds)
+
+    def test_reconcile_response_and_event_strip_raw_reasoning(self):
+        conversation = self._create()
+        self.service.send_message(conversation["conversation_id"], "Run")
+        self.adapter.disconnect(RuntimeError("connection lost"))
+        self.service.probe_host("local")
+
+        def resume_with_reasoning(thread_id: str) -> dict[str, Any]:
+            return {
+                "thread": {
+                    "id": thread_id,
+                    "status": {"type": "idle"},
+                    "turns": [
+                        {
+                            "id": "turn-1",
+                            "status": "completed",
+                            "items": [
+                                {
+                                    "id": "reasoning-1",
+                                    "type": "reasoning",
+                                    "summary": ["Checked the recovered state."],
+                                    "content": ["private resumed reasoning"],
+                                    "encryptedContent": "resume-ciphertext",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+
+        self.adapter.resume_thread = resume_with_reasoning
+        result = self.service.reconcile(conversation["conversation_id"])
+        reconciled_event = next(
+            event
+            for event in self.service.detail(conversation["conversation_id"])["events"]
+            if event["kind"] == "thread.reconciled"
+        )
+
+        for thread in (result["thread"], reconciled_event["payload"]["thread"]):
+            self.assertEqual(
+                thread["turns"][0]["items"][0],
+                {
+                    "type": "reasoning",
+                    "id": "reasoning-1",
+                    "summary": ["Checked the recovered state."],
+                },
+            )
+        serialized = json.dumps({"result": result, "event": reconciled_event})
+        self.assertNotIn("private resumed reasoning", serialized)
+        self.assertNotIn("resume-ciphertext", serialized)
 
     def test_reconcile_replaces_legacy_wedged_zero_turn_thread(self):
         conversation = self._create()
