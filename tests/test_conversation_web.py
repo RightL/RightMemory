@@ -51,6 +51,7 @@ class _FakeConversationService:
         self.workspace_release: threading.Event | None = None
         self.side_chat_cleanup_sessions: list[str] = []
         self.side_chat_cleanup_event = threading.Event()
+        self.side_chat_cleanup_release: threading.Event | None = None
 
     def workspace(self):
         if self.workspace_started is not None:
@@ -151,6 +152,11 @@ class _FakeConversationService:
     def close_side_chats_for_session(self, owner_session_id):
         self.side_chat_cleanup_sessions.append(owner_session_id)
         self.side_chat_cleanup_event.set()
+        if (
+            self.side_chat_cleanup_release is not None
+            and not self.side_chat_cleanup_release.wait(timeout=2.0)
+        ):
+            raise TimeoutError("test side-chat cleanup was not released")
         return {"conversation_ids": []}
 
     def acknowledge_read(self, conversation_id, owner_session_id=None, event_id=None):
@@ -667,7 +673,7 @@ class ConversationWebTests(unittest.TestCase):
         self.assertIn((7, 500), self.service.store.calls)
         self.assertIn(self.session_id, self.service.store.session_ids)
 
-    def test_event_stream_disconnect_never_cleans_side_chats(self):
+    def test_crashed_page_cleans_side_chats_after_abandonment_grace(self):
         async def scenario():
             stream = _ASGIStream(
                 self.app,
@@ -677,11 +683,83 @@ class ConversationWebTests(unittest.TestCase):
             await stream.start()
             await stream.wait_for_text("event: snapshot")
             await stream.close()
-            await asyncio.sleep(0.12)
-            return self.service.side_chat_cleanup_event.is_set()
+            await asyncio.sleep(0.02)
+            cleaned_during_grace = self.service.side_chat_cleanup_event.is_set()
+            cleaned_after_grace = await asyncio.to_thread(
+                self.service.side_chat_cleanup_event.wait, 0.75
+            )
+            return cleaned_during_grace, cleaned_after_grace
 
-        self.assertFalse(asyncio.run(scenario()))
-        self.assertEqual(self.service.side_chat_cleanup_sessions, [])
+        with patch(
+            "rightmemory.web.conversation_routes._SIDE_CHAT_RELEASE_GRACE_SECONDS",
+            0.08,
+        ):
+            during_grace, after_grace = asyncio.run(scenario())
+
+        self.assertFalse(during_grace)
+        self.assertTrue(after_grace)
+        self.assertEqual(self.service.side_chat_cleanup_sessions, [self.session_id])
+
+    def test_reconnect_at_cleanup_expiry_waits_for_destructive_cleanup(self):
+        async def scenario():
+            cleanup_release = threading.Event()
+            self.service.side_chat_cleanup_release = cleanup_release
+            first = _ASGIStream(
+                self.app,
+                "/api/conversation-events?after_event_id=8&view_id=view-one&page_id=page-one",
+                cookie=self.client.cookies.header_value(),
+            )
+            reconnect = _ASGIStream(
+                self.app,
+                "/api/conversation-events?after_event_id=8&view_id=view-one&page_id=page-one",
+                cookie=self.client.cookies.header_value(),
+            )
+            try:
+                await first.start()
+                await first.wait_for_text("event: snapshot")
+                await first.close()
+                cleanup_entered = await asyncio.to_thread(
+                    self.service.side_chat_cleanup_event.wait, 0.75
+                )
+
+                reconnect_workspace_started = threading.Event()
+                self.service.workspace_started = reconnect_workspace_started
+                await reconnect.start()
+                registered_before_cleanup_finished = await asyncio.to_thread(
+                    reconnect_workspace_started.wait, 0.12
+                )
+
+                cleanup_release.set()
+                registered_after_cleanup_finished = await asyncio.to_thread(
+                    reconnect_workspace_started.wait, 0.75
+                )
+                await reconnect.wait_for_text("event: snapshot")
+                cleanup_count_at_reconnect = len(
+                    self.service.side_chat_cleanup_sessions
+                )
+                return (
+                    cleanup_entered,
+                    registered_before_cleanup_finished,
+                    registered_after_cleanup_finished,
+                    cleanup_count_at_reconnect,
+                )
+            finally:
+                cleanup_release.set()
+                if reconnect._task is not None and not reconnect._task.done():
+                    await reconnect.close()
+
+        with patch(
+            "rightmemory.web.conversation_routes._SIDE_CHAT_RELEASE_GRACE_SECONDS",
+            0.05,
+        ):
+            entered, registered_early, registered_after, cleanup_count = asyncio.run(
+                scenario()
+            )
+
+        self.assertTrue(entered)
+        self.assertFalse(registered_early)
+        self.assertTrue(registered_after)
+        self.assertEqual(cleanup_count, 1)
 
     def test_explicit_view_release_cleans_after_disconnected_stream(self):
         async def scenario():
@@ -692,75 +770,63 @@ class ConversationWebTests(unittest.TestCase):
             )
             await stream.start()
             await stream.wait_for_text("event: snapshot")
+            first_release = await self.release_view("view-one", "page-one")
             await stream.close()
-            release = await self.release_view("view-one", "page-one")
+            await asyncio.sleep(0.12)
+            duplicate_release = await self.release_view("view-one", "page-one")
             cleaned = await asyncio.to_thread(
-                self.service.side_chat_cleanup_event.wait, 0.75
+                self.service.side_chat_cleanup_event.wait, 0.14
             )
-            return release, cleaned
+            return first_release, duplicate_release, cleaned
 
         with patch(
             "rightmemory.web.conversation_routes._SIDE_CHAT_RELEASE_GRACE_SECONDS",
-            0.05,
+            0.2,
         ):
-            release, cleaned = asyncio.run(scenario())
+            first_release, duplicate_release, cleaned = asyncio.run(scenario())
 
-        self.assertEqual(release.status_code, 200)
-        self.assertTrue(release.json()["data"]["released"])
+        self.assertEqual(first_release.status_code, 200)
+        self.assertTrue(first_release.json()["data"]["released"])
+        self.assertEqual(duplicate_release.status_code, 200)
+        self.assertTrue(duplicate_release.json()["data"]["released"])
         self.assertTrue(cleaned)
         self.assertEqual(self.service.side_chat_cleanup_sessions, [self.session_id])
 
-    def test_event_stream_reconnect_cancels_pending_side_chat_cleanup(self):
+    def test_exact_page_reconnect_cancels_abandonment_cleanup(self):
         async def scenario():
             first = _ASGIStream(
                 self.app,
-                "/api/conversation-events?after_event_id=8&view_id=view-one&page_id=page-old",
+                "/api/conversation-events?after_event_id=8&view_id=view-one&page_id=page-one",
                 cookie=self.client.cookies.header_value(),
             )
             await first.start()
             await first.wait_for_text("event: snapshot")
-            released_old = await self.release_view("view-one", "page-old")
             await first.close()
+            await asyncio.sleep(0.03)
 
             reconnected = _ASGIStream(
                 self.app,
-                "/api/conversation-events?after_event_id=8&view_id=view-one&page_id=page-new",
+                "/api/conversation-events?after_event_id=8&view_id=view-one&page_id=page-one",
                 cookie=self.client.cookies.header_value(),
             )
             await reconnected.start()
             await reconnected.wait_for_text("event: snapshot")
-            stale_release = await self.release_view("view-one", "page-old")
             await asyncio.sleep(0.18)
             cleaned_while_connected = self.service.side_chat_cleanup_event.is_set()
             await reconnected.close()
-            await asyncio.sleep(0.18)
-            cleaned_after_disconnect = self.service.side_chat_cleanup_event.is_set()
-            released_new = await self.release_view("view-one", "page-new")
-            cleaned_after_release = await asyncio.to_thread(
+            cleaned_after_second_disconnect = await asyncio.to_thread(
                 self.service.side_chat_cleanup_event.wait, 0.75
             )
-            return (
-                released_old,
-                stale_release,
-                released_new,
-                cleaned_while_connected,
-                cleaned_after_disconnect,
-                cleaned_after_release,
-            )
+            return cleaned_while_connected, cleaned_after_second_disconnect
 
         with patch(
             "rightmemory.web.conversation_routes._SIDE_CHAT_RELEASE_GRACE_SECONDS",
             0.12,
         ):
-            result = asyncio.run(scenario())
+            connected, disconnected = asyncio.run(scenario())
 
-        released_old, stale_release, released_new, connected, disconnected, released = result
-        self.assertTrue(released_old.json()["data"]["released"])
-        self.assertTrue(stale_release.json()["data"]["released"])
-        self.assertTrue(released_new.json()["data"]["released"])
         self.assertFalse(connected)
-        self.assertFalse(disconnected)
-        self.assertTrue(released)
+        self.assertTrue(disconnected)
         self.assertEqual(self.service.side_chat_cleanup_sessions, [self.session_id])
 
     def test_reconnect_after_release_does_not_revive_page_instance(self):
@@ -830,7 +896,7 @@ class ConversationWebTests(unittest.TestCase):
         self.assertTrue(after_disconnect)
         self.assertEqual(self.service.side_chat_cleanup_sessions, [self.session_id])
 
-    def test_duplicated_tab_pages_must_all_release_before_session_cleanup(self):
+    def test_duplicated_tabs_keep_session_alive_until_last_page_is_abandoned(self):
         async def scenario():
             first = _ASGIStream(
                 self.app,
@@ -846,32 +912,26 @@ class ConversationWebTests(unittest.TestCase):
             await first.wait_for_text("event: snapshot")
             await second.start()
             await second.wait_for_text("event: snapshot")
-            await self.release_view("view-one", "page-one")
             await first.close()
             await asyncio.sleep(0.12)
             cleaned_with_second_open = self.service.side_chat_cleanup_event.is_set()
             await second.close()
-            await asyncio.sleep(0.12)
-            cleaned_after_both_closed = self.service.side_chat_cleanup_event.is_set()
-            await self.release_view("view-one", "page-two")
-            cleaned_after_both_released = await asyncio.to_thread(
+            cleaned_after_both_abandoned = await asyncio.to_thread(
                 self.service.side_chat_cleanup_event.wait, 0.75
             )
             return (
                 cleaned_with_second_open,
-                cleaned_after_both_closed,
-                cleaned_after_both_released,
+                cleaned_after_both_abandoned,
             )
 
         with patch(
             "rightmemory.web.conversation_routes._SIDE_CHAT_RELEASE_GRACE_SECONDS",
             0.05,
         ):
-            open_second, both_closed, both_released = asyncio.run(scenario())
+            open_second, both_abandoned = asyncio.run(scenario())
 
         self.assertFalse(open_second)
-        self.assertFalse(both_closed)
-        self.assertTrue(both_released)
+        self.assertTrue(both_abandoned)
         self.assertEqual(self.service.side_chat_cleanup_sessions, [self.session_id])
 
     def test_query_cursor_replays_events_created_between_rest_and_sse(self):

@@ -498,12 +498,10 @@
   .pursuit-workspace { grid-template-columns: minmax(0, 1fr) minmax(300px, 350px); }
 }
 @media (max-width: 760px) {
-  .pursuit-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(260px, 46%) minmax(280px, 54%); height: calc(100dvh - 150px); }
+  .pursuit-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(200px, 46fr) minmax(280px, 54fr); height: calc(100dvh - 150px); }
   .pursuit-workspace.pw-conversations-collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 44px; }
   .cw-pane { border-top: 1px solid var(--cw-border); border-left: 0; }
   .cw-collapsed .cw-rail-header { height: auto; flex-direction: row; justify-content: space-between; }
   .cw-collapsed .cw-rail-title strong { writing-mode: initial; margin-top: 0; }
   .pw-map-shell > .pursuit-map { height: 100%; }
-  .cw-composer-footer { flex-wrap: wrap; }
-  .cw-composer-footer small { order: 3; flex-basis: 100%; }
 }

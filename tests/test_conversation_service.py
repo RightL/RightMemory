@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -238,6 +239,56 @@ class ConversationServiceTests(unittest.TestCase):
 
     def _create(self, pursuit_id: str = "alpha") -> dict[str, Any]:
         return self.service.create_conversation(pursuit_id)["conversation"]
+
+    def _wait_for_cleanup_calls(self, cleanup: Any, count: int = 1) -> None:
+        deadline = time.monotonic() + 2
+        while cleanup.call_count < count and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertGreaterEqual(cleanup.call_count, count)
+
+    def _wait_until(self, predicate: Any) -> None:
+        deadline = time.monotonic() + 2
+        while not predicate() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(predicate())
+
+    def _create_sent_remote_attachments(
+        self, *contents: bytes
+    ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], list[Path]]:
+        host = self.service.add_host("Remote", "build-box")["host"]
+        project = self.service.add_project(
+            host["host_id"], "Repository", "/srv/repository"
+        )["project"]
+        conversation = self.service.create_conversation(
+            "alpha", host["host_id"], project["project_id"]
+        )["conversation"]
+        uploads: list[dict[str, Any]] = []
+        local_paths: list[Path] = []
+        for content in contents:
+            uploaded = self.service.upload_attachment(
+                conversation["conversation_id"], content, "text/plain", None
+            )["attachment"]
+            uploads.append(uploaded)
+            _metadata, local_path = self.service.attachment_file(
+                conversation["conversation_id"], uploaded["attachment_id"]
+            )
+            local_paths.append(local_path)
+
+        def remote_path(
+            _alias: str, _source: object, remote_name: str, **_kwargs: Any
+        ) -> str:
+            return "/home/user/.cache/rightmemory/attachments/" + remote_name
+
+        with patch(
+            "rightmemory.conversations.service.stage_ssh_attachment",
+            side_effect=remote_path,
+        ):
+            sent = self.service.send_message(
+                conversation["conversation_id"],
+                "Use the attachments",
+                [upload["attachment_id"] for upload in uploads],
+            )
+        return conversation, sent, uploads, local_paths
 
     @property
     def adapter(self) -> _FakeAdapter:
@@ -589,6 +640,7 @@ class ConversationServiceTests(unittest.TestCase):
                     self.service.delete_staged_attachment(
                         conversation["conversation_id"], uploaded["attachment_id"]
                     )
+                    self._wait_for_cleanup_calls(cleanup)
 
                 cleanup.assert_called_once_with("build-box", remote_path)
                 self.assertFalse(path.exists())
@@ -631,6 +683,7 @@ class ConversationServiceTests(unittest.TestCase):
             "rightmemory.conversations.service.delete_ssh_attachment"
         ) as cleanup:
             self.service.close_side_chat(first["conversation_id"], owner_session_id)
+            self._wait_for_cleanup_calls(cleanup)
         cleanup.assert_called_once_with("build-box", first_remote)
 
         second = self.service.create_side_chat(
@@ -666,6 +719,7 @@ class ConversationServiceTests(unittest.TestCase):
             "rightmemory.conversations.service.delete_ssh_attachment"
         ) as cleanup:
             self.service = self.registry.service(self.root)
+            self._wait_for_cleanup_calls(cleanup)
         cleanup.assert_called_once_with("build-box", second_remote)
         self.assertFalse(second_path.exists())
 
@@ -698,6 +752,697 @@ class ConversationServiceTests(unittest.TestCase):
         self.assertFalse(old_orphan.exists())
         self.assertTrue(fresh_orphan.exists())
         self.assertTrue(referenced.exists())
+
+    def test_terminal_ssh_turns_remove_remote_copies_but_keep_local_history(self):
+        host = self.service.add_host("Remote", "build-box")["host"]
+        project = self.service.add_project(
+            host["host_id"], "Repository", "/srv/repository"
+        )["project"]
+
+        for index, terminal_status in enumerate(("completed", "failed")):
+            with self.subTest(terminal_status=terminal_status):
+                conversation = self.service.create_conversation(
+                    "alpha" if index == 0 else "beta",
+                    host["host_id"],
+                    project["project_id"],
+                )["conversation"]
+                uploaded = self.service.upload_attachment(
+                    conversation["conversation_id"],
+                    f"{terminal_status} context".encode(),
+                    "text/plain",
+                    None,
+                )["attachment"]
+                _metadata, local_path = self.service.attachment_file(
+                    conversation["conversation_id"], uploaded["attachment_id"]
+                )
+                remote_path = (
+                    "/home/user/.cache/rightmemory/attachments/" + local_path.name
+                )
+                with patch(
+                    "rightmemory.conversations.service.stage_ssh_attachment",
+                    return_value=remote_path,
+                ):
+                    sent = self.service.send_message(
+                        conversation["conversation_id"],
+                        "Use the attachment",
+                        [uploaded["attachment_id"]],
+                    )
+
+                with patch(
+                    "rightmemory.conversations.service.delete_ssh_attachment"
+                ) as cleanup:
+                    self.adapter.emit_notification(
+                        "turn/completed",
+                        {
+                            "threadId": conversation["thread_id"],
+                            "turn": {
+                                "id": sent["turn"]["id"],
+                                "status": terminal_status,
+                            },
+                        },
+                    )
+                    self._wait_for_cleanup_calls(cleanup)
+
+                cleanup.assert_called_once_with("build-box", remote_path)
+                stored = self.service.store.get_attachment(uploaded["attachment_id"])
+                self.assertEqual(stored["state"], "sent")
+                self.assertIsNone(stored["remote_path"])
+                self.assertTrue(local_path.exists())
+                _metadata, preview_path = self.service.attachment_file(
+                    conversation["conversation_id"], uploaded["attachment_id"]
+                )
+                self.assertEqual(preview_path, local_path)
+
+    def test_interrupt_and_archive_remove_sent_ssh_attachment_copies(self):
+        host = self.service.add_host("Remote", "build-box")["host"]
+        project = self.service.add_project(
+            host["host_id"], "Repository", "/srv/repository"
+        )["project"]
+
+        for index, operation in enumerate(("interrupt", "archive")):
+            with self.subTest(operation=operation):
+                conversation = self.service.create_conversation(
+                    "alpha" if index == 0 else "beta",
+                    host["host_id"],
+                    project["project_id"],
+                )["conversation"]
+                uploaded = self.service.upload_attachment(
+                    conversation["conversation_id"],
+                    operation.encode(),
+                    "text/plain",
+                    None,
+                )["attachment"]
+                _metadata, local_path = self.service.attachment_file(
+                    conversation["conversation_id"], uploaded["attachment_id"]
+                )
+                remote_path = (
+                    "/home/user/.cache/rightmemory/attachments/" + local_path.name
+                )
+                with patch(
+                    "rightmemory.conversations.service.stage_ssh_attachment",
+                    return_value=remote_path,
+                ):
+                    self.service.send_message(
+                        conversation["conversation_id"],
+                        operation,
+                        [uploaded["attachment_id"]],
+                    )
+                with patch(
+                    "rightmemory.conversations.service.delete_ssh_attachment"
+                ) as cleanup:
+                    getattr(self.service, operation)(conversation["conversation_id"])
+                    self._wait_for_cleanup_calls(cleanup)
+
+                cleanup.assert_called_once_with("build-box", remote_path)
+                stored = self.service.store.get_attachment(uploaded["attachment_id"])
+                self.assertIsNone(stored["remote_path"])
+                self.assertTrue(local_path.exists())
+
+    def test_restart_retries_terminal_ssh_cleanup_after_host_failure(self):
+        host = self.service.add_host("Remote", "build-box")["host"]
+        project = self.service.add_project(
+            host["host_id"], "Repository", "/srv/repository"
+        )["project"]
+        conversation = self.service.create_conversation(
+            "alpha", host["host_id"], project["project_id"]
+        )["conversation"]
+        uploaded = self.service.upload_attachment(
+            conversation["conversation_id"], b"restart", "text/plain", None
+        )["attachment"]
+        _metadata, local_path = self.service.attachment_file(
+            conversation["conversation_id"], uploaded["attachment_id"]
+        )
+        remote_path = "/home/user/.cache/rightmemory/attachments/" + local_path.name
+        with patch(
+            "rightmemory.conversations.service.stage_ssh_attachment",
+            return_value=remote_path,
+        ):
+            sent = self.service.send_message(
+                conversation["conversation_id"],
+                "Finish",
+                [uploaded["attachment_id"]],
+            )
+        with patch(
+            "rightmemory.conversations.service.delete_ssh_attachment",
+            side_effect=RuntimeError("host offline"),
+        ) as failed_cleanup:
+            self.adapter.emit_notification(
+                "turn/completed",
+                {
+                    "threadId": conversation["thread_id"],
+                    "turn": {"id": sent["turn"]["id"], "status": "completed"},
+                },
+            )
+            self._wait_for_cleanup_calls(failed_cleanup)
+        self.assertEqual(
+            self.service.store.get_attachment(uploaded["attachment_id"])[
+                "remote_path"
+            ],
+            remote_path,
+        )
+
+        self.registry.close()
+        self.registry = ConversationRuntimeRegistry(
+            self.adapters,
+            pursuit_store_factory=lambda root: self.pursuit_stores[
+                str(root.resolve())
+            ],
+        )
+        with patch(
+            "rightmemory.conversations.service.delete_ssh_attachment"
+        ) as cleanup:
+            self.service = self.registry.service(self.root)
+            self._wait_for_cleanup_calls(cleanup)
+
+        cleanup.assert_called_once_with("build-box", remote_path)
+        self._wait_until(
+            lambda: self.service.store.get_attachment(uploaded["attachment_id"])[
+                "remote_path"
+            ]
+            is None
+        )
+        stored = self.service.store.get_attachment(uploaded["attachment_id"])
+        self.assertIsNone(stored["remote_path"])
+        self.assertTrue(local_path.exists())
+
+    def test_reconcile_inactive_ssh_turn_removes_remote_copy(self):
+        host = self.service.add_host("Remote", "build-box")["host"]
+        project = self.service.add_project(
+            host["host_id"], "Repository", "/srv/repository"
+        )["project"]
+        conversation = self.service.create_conversation(
+            "alpha", host["host_id"], project["project_id"]
+        )["conversation"]
+        uploaded = self.service.upload_attachment(
+            conversation["conversation_id"], b"reconcile", "text/plain", None
+        )["attachment"]
+        _metadata, local_path = self.service.attachment_file(
+            conversation["conversation_id"], uploaded["attachment_id"]
+        )
+        remote_path = "/home/user/.cache/rightmemory/attachments/" + local_path.name
+        with patch(
+            "rightmemory.conversations.service.stage_ssh_attachment",
+            return_value=remote_path,
+        ):
+            self.service.send_message(
+                conversation["conversation_id"],
+                "Reconcile",
+                [uploaded["attachment_id"]],
+            )
+        self.service.store.update_conversation(
+            conversation["conversation_id"], status="unknown", touch_activity=True
+        )
+
+        with patch(
+            "rightmemory.conversations.service.delete_ssh_attachment"
+        ) as cleanup:
+            result = self.service.reconcile(conversation["conversation_id"])
+            self._wait_for_cleanup_calls(cleanup)
+
+        self.assertTrue(result["resolved"])
+        cleanup.assert_called_once_with("build-box", remote_path)
+        self.assertIsNone(
+            self.service.store.get_attachment(uploaded["attachment_id"])[
+                "remote_path"
+            ]
+        )
+
+    def test_terminal_callback_does_not_wait_for_blocked_remote_cleanup(self):
+        conversation, sent, uploads, _paths = self._create_sent_remote_attachments(
+            b"callback"
+        )
+        cleanup_started = threading.Event()
+        release_cleanup = threading.Event()
+
+        def blocked_cleanup(_alias: str, _remote_path: str) -> None:
+            cleanup_started.set()
+            release_cleanup.wait(2)
+
+        with patch(
+            "rightmemory.conversations.service.delete_ssh_attachment",
+            side_effect=blocked_cleanup,
+        ):
+            started_at = time.monotonic()
+            self.adapter.emit_notification(
+                "turn/completed",
+                {
+                    "threadId": conversation["thread_id"],
+                    "turn": {"id": sent["turn"]["id"], "status": "completed"},
+                },
+            )
+            elapsed = time.monotonic() - started_at
+            self.assertLess(elapsed, 0.5)
+            self.assertTrue(cleanup_started.wait(1))
+            detail = self.service.detail(conversation["conversation_id"])
+            self.assertEqual(detail["conversation"]["status"], "completed")
+            self.assertTrue(
+                any(event["kind"] == "turn.completed" for event in detail["events"])
+            )
+            release_cleanup.set()
+            self._wait_until(
+                lambda: self.service.store.get_attachment(
+                    uploads[0]["attachment_id"]
+                )["remote_path"]
+                is None
+            )
+
+    def test_cleanup_worker_coalesces_and_runs_one_ssh_delete_at_a_time(self):
+        conversation, sent, uploads, _paths = self._create_sent_remote_attachments(
+            b"first", b"second"
+        )
+        first_started = threading.Event()
+        release_first = threading.Event()
+        count_lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+
+        def bounded_cleanup(_alias: str, _remote_path: str) -> None:
+            nonlocal active, maximum_active
+            with count_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+                first = not first_started.is_set()
+                first_started.set()
+            if first:
+                release_first.wait(2)
+            with count_lock:
+                active -= 1
+
+        with patch(
+            "rightmemory.conversations.service.delete_ssh_attachment",
+            side_effect=bounded_cleanup,
+        ) as cleanup:
+            self.adapter.emit_notification(
+                "turn/completed",
+                {
+                    "threadId": conversation["thread_id"],
+                    "turn": {"id": sent["turn"]["id"], "status": "completed"},
+                },
+            )
+            self.assertTrue(first_started.wait(1))
+            current = self.service.store.get_conversation(
+                conversation["conversation_id"]
+            )
+            for _index in range(20):
+                self.service._cleanup_remote_attachment_copies(current)
+            release_first.set()
+            self._wait_until(
+                lambda: all(
+                    self.service.store.get_attachment(upload["attachment_id"])[
+                        "remote_path"
+                    ]
+                    is None
+                    for upload in uploads
+                )
+            )
+            self.assertEqual(cleanup.call_count, 2)
+            self.assertEqual(maximum_active, 1)
+
+    def test_old_turn_cleanup_cannot_delete_new_turn_attachment(self):
+        conversation, sent, old_uploads, _paths = self._create_sent_remote_attachments(
+            b"old turn"
+        )
+        old_attachment = self.service.store.get_attachment(
+            old_uploads[0]["attachment_id"]
+        )
+        old_remote_path = old_attachment["remote_path"]
+        cleanup_started = threading.Event()
+        release_cleanup = threading.Event()
+
+        def blocked_cleanup(_alias: str, _remote_path: str) -> None:
+            cleanup_started.set()
+            release_cleanup.wait(2)
+
+        with patch(
+            "rightmemory.conversations.service.delete_ssh_attachment",
+            side_effect=blocked_cleanup,
+        ) as cleanup:
+            self.adapter.emit_notification(
+                "turn/completed",
+                {
+                    "threadId": conversation["thread_id"],
+                    "turn": {"id": sent["turn"]["id"], "status": "completed"},
+                },
+            )
+            self.assertTrue(cleanup_started.wait(1))
+
+            new_upload = self.service.upload_attachment(
+                conversation["conversation_id"], b"new turn", "text/plain", None
+            )["attachment"]
+            _metadata, new_local_path = self.service.attachment_file(
+                conversation["conversation_id"], new_upload["attachment_id"]
+            )
+            new_remote_path = (
+                "/home/user/.cache/rightmemory/attachments/" + new_local_path.name
+            )
+            with patch(
+                "rightmemory.conversations.service.stage_ssh_attachment",
+                return_value=new_remote_path,
+            ):
+                self.service.send_message(
+                    conversation["conversation_id"],
+                    "New turn",
+                    [new_upload["attachment_id"]],
+                )
+
+            release_cleanup.set()
+            self._wait_until(
+                lambda: self.service.store.get_attachment(
+                    old_uploads[0]["attachment_id"]
+                )["remote_path"]
+                is None
+            )
+
+        cleanup.assert_called_once_with("build-box", old_remote_path)
+        self.assertEqual(
+            self.service.store.get_attachment(new_upload["attachment_id"])[
+                "remote_path"
+            ],
+            new_remote_path,
+        )
+
+    def test_side_chat_attachment_id_reuse_cannot_aba_remote_cleanup(self):
+        owner_session_id = "attachment-aba-session"
+        attachment_id = "e" * 32
+        host = self.service.add_host("Remote", "build-box")["host"]
+        project = self.service.add_project(
+            host["host_id"], "Repository", "/srv/repository"
+        )["project"]
+        parent = self.service.create_conversation(
+            "alpha", host["host_id"], project["project_id"]
+        )["conversation"]
+        old_side_chat = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+        old_upload = self.service.upload_attachment(
+            old_side_chat["conversation_id"],
+            b"old generation",
+            "text/plain",
+            None,
+            owner_session_id,
+            attachment_id,
+        )["attachment"]
+        staged_paths: list[str] = []
+
+        def staged_path(
+            _alias: str, _source: object, remote_name: str, **_kwargs: Any
+        ) -> str:
+            path = "/home/user/.cache/rightmemory/attachments/" + remote_name
+            staged_paths.append(path)
+            return path
+
+        cleanup_started = threading.Event()
+        release_cleanup = threading.Event()
+
+        def blocked_cleanup(_alias: str, _remote_path: str) -> None:
+            cleanup_started.set()
+            release_cleanup.wait(2)
+
+        with patch(
+            "rightmemory.conversations.service.uuid4",
+            side_effect=[
+                SimpleNamespace(hex="1" * 32),
+                SimpleNamespace(hex="2" * 32),
+            ],
+        ), patch(
+            "rightmemory.conversations.service.stage_ssh_attachment",
+            side_effect=staged_path,
+        ), patch(
+            "rightmemory.conversations.service.delete_ssh_attachment",
+            side_effect=blocked_cleanup,
+        ) as cleanup:
+            old_sent = self.service.send_message(
+                old_side_chat["conversation_id"],
+                "Use the old generation",
+                [old_upload["attachment_id"]],
+                owner_session_id,
+            )
+            old_remote_path = self.service.store.get_attachment(attachment_id)[
+                "remote_path"
+            ]
+            self.adapter.emit_notification(
+                "turn/completed",
+                {
+                    "threadId": old_side_chat["thread_id"],
+                    "turn": {
+                        "id": old_sent["turn"]["id"],
+                        "status": "completed",
+                    },
+                },
+            )
+            self.assertTrue(cleanup_started.wait(1))
+
+            self.service.close_side_chat(
+                old_side_chat["conversation_id"], owner_session_id
+            )
+            new_side_chat = self.service.create_side_chat(
+                parent["conversation_id"], owner_session_id
+            )["conversation"]
+            new_upload = self.service.upload_attachment(
+                new_side_chat["conversation_id"],
+                b"new generation",
+                "text/plain",
+                None,
+                owner_session_id,
+                attachment_id,
+            )["attachment"]
+            self.service.send_message(
+                new_side_chat["conversation_id"],
+                "Use the new generation",
+                [new_upload["attachment_id"]],
+                owner_session_id,
+            )
+            new_remote_path = self.service.store.get_attachment(attachment_id)[
+                "remote_path"
+            ]
+            self.assertNotEqual(old_remote_path, new_remote_path)
+
+            release_cleanup.set()
+            self._wait_for_cleanup_calls(cleanup, 2)
+
+        self.assertEqual(staged_paths, [old_remote_path, new_remote_path])
+        self.assertTrue(
+            all(call.args[1] == old_remote_path for call in cleanup.call_args_list)
+        )
+        surviving = self.service.store.get_attachment(attachment_id)
+        self.assertIsNotNone(surviving)
+        self.assertEqual(surviving["conversation_id"], new_side_chat["conversation_id"])
+        self.assertEqual(surviving["remote_path"], new_remote_path)
+
+    def test_startup_snapshot_cannot_delete_attachment_sent_after_constructor(self):
+        conversation, sent, old_uploads, _paths = self._create_sent_remote_attachments(
+            b"old startup turn"
+        )
+        with patch(
+            "rightmemory.conversations.service.delete_ssh_attachment",
+            side_effect=RuntimeError("offline"),
+        ) as failed_cleanup:
+            self.adapter.emit_notification(
+                "turn/completed",
+                {
+                    "threadId": conversation["thread_id"],
+                    "turn": {"id": sent["turn"]["id"], "status": "completed"},
+                },
+            )
+            self._wait_for_cleanup_calls(failed_cleanup)
+        old_remote_path = self.service.store.get_attachment(
+            old_uploads[0]["attachment_id"]
+        )["remote_path"]
+
+        self.registry.close()
+        self.registry = ConversationRuntimeRegistry(
+            self.adapters,
+            pursuit_store_factory=lambda root: self.pursuit_stores[
+                str(root.resolve())
+            ],
+        )
+        cleanup_started = threading.Event()
+        release_cleanup = threading.Event()
+
+        def blocked_cleanup(_alias: str, _remote_path: str) -> None:
+            cleanup_started.set()
+            release_cleanup.wait(2)
+
+        with patch(
+            "rightmemory.conversations.service.delete_ssh_attachment",
+            side_effect=blocked_cleanup,
+        ) as cleanup:
+            self.service = self.registry.service(self.root)
+            self.assertTrue(cleanup_started.wait(1))
+
+            new_upload = self.service.upload_attachment(
+                conversation["conversation_id"],
+                b"sent after startup",
+                "text/plain",
+                None,
+            )["attachment"]
+            _metadata, new_local_path = self.service.attachment_file(
+                conversation["conversation_id"], new_upload["attachment_id"]
+            )
+            new_remote_path = (
+                "/home/user/.cache/rightmemory/attachments/" + new_local_path.name
+            )
+            with patch(
+                "rightmemory.conversations.service.stage_ssh_attachment",
+                return_value=new_remote_path,
+            ):
+                self.service.send_message(
+                    conversation["conversation_id"],
+                    "Post-startup turn",
+                    [new_upload["attachment_id"]],
+                )
+
+            release_cleanup.set()
+            self._wait_until(
+                lambda: self.service.store.get_attachment(
+                    old_uploads[0]["attachment_id"]
+                )["remote_path"]
+                is None
+            )
+
+        cleanup.assert_called_once_with("build-box", old_remote_path)
+        self.assertEqual(
+            self.service.store.get_attachment(new_upload["attachment_id"])[
+                "remote_path"
+            ],
+            new_remote_path,
+        )
+
+    def test_startup_and_close_do_not_wait_for_blocked_remote_cleanup(self):
+        conversation, sent, uploads, _paths = self._create_sent_remote_attachments(
+            b"restart availability"
+        )
+        with patch(
+            "rightmemory.conversations.service.delete_ssh_attachment",
+            side_effect=RuntimeError("offline"),
+        ) as failed_cleanup:
+            self.adapter.emit_notification(
+                "turn/completed",
+                {
+                    "threadId": conversation["thread_id"],
+                    "turn": {"id": sent["turn"]["id"], "status": "completed"},
+                },
+            )
+            self._wait_for_cleanup_calls(failed_cleanup)
+        remote_path = self.service.store.get_attachment(
+            uploads[0]["attachment_id"]
+        )["remote_path"]
+        self.registry.close()
+        self.registry = ConversationRuntimeRegistry(
+            self.adapters,
+            pursuit_store_factory=lambda root: self.pursuit_stores[
+                str(root.resolve())
+            ],
+        )
+        cleanup_started = threading.Event()
+        release_cleanup = threading.Event()
+
+        def blocked_cleanup(_alias: str, _remote_path: str) -> None:
+            cleanup_started.set()
+            release_cleanup.wait(2)
+
+        with patch(
+            "rightmemory.conversations.service.delete_ssh_attachment",
+            side_effect=blocked_cleanup,
+        ) as cleanup:
+            started_at = time.monotonic()
+            self.service = self.registry.service(self.root)
+            self.assertLess(time.monotonic() - started_at, 0.5)
+            self.assertTrue(cleanup_started.wait(1))
+
+            started_at = time.monotonic()
+            self.service.close()
+            self.assertLess(time.monotonic() - started_at, 0.8)
+            self.assertTrue(self.service._remote_cleanup_thread.is_alive())
+            release_cleanup.set()
+            self._wait_until(
+                lambda: not self.service._remote_cleanup_thread.is_alive()
+            )
+
+        cleanup.assert_called_once_with("build-box", remote_path)
+
+    def test_final_notification_retries_one_off_persistence_failure_once(self):
+        conversation = self._create()
+        original_append = self.service.store.append_event
+        failed_once = False
+
+        def flaky_append(**kwargs: Any) -> dict[str, Any]:
+            nonlocal failed_once
+            if kwargs.get("mark_final") and not failed_once:
+                failed_once = True
+                original_append(**kwargs)
+                raise ConversationError("storage_error", "temporary failure", 500)
+            return original_append(**kwargs)
+
+        with patch.object(
+            self.service.store, "append_event", side_effect=flaky_append
+        ):
+            self.adapter.emit_notification(
+                "item/completed",
+                {
+                    "threadId": conversation["thread_id"],
+                    "turnId": "turn-final",
+                    "item": {
+                        "id": "answer-final",
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": "Recovered final",
+                    },
+                },
+            )
+
+        detail = self.service.detail(conversation["conversation_id"])
+        finals = [
+            event
+            for event in detail["events"]
+            if event["kind"] == "item.completed"
+            and event["payload"].get("item", {}).get("id") == "answer-final"
+        ]
+        self.assertTrue(failed_once)
+        self.assertEqual(len(finals), 1)
+        self.assertTrue(finals[0]["marks_final"])
+        self.assertEqual(
+            detail["conversation"]["last_final_event_id"], finals[0]["event_id"]
+        )
+
+    def test_persistent_final_persistence_failure_fences_conversation(self):
+        conversation = self._create()
+        original_append = self.service.store.append_event
+
+        def reject_final(**kwargs: Any) -> dict[str, Any]:
+            if kwargs.get("mark_final"):
+                raise ConversationError("storage_error", "persistent failure", 500)
+            return original_append(**kwargs)
+
+        with patch.object(
+            self.service.store, "append_event", side_effect=reject_final
+        ):
+            self.adapter.emit_notification(
+                "item/completed",
+                {
+                    "threadId": conversation["thread_id"],
+                    "turnId": "turn-final",
+                    "item": {
+                        "id": "answer-final",
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": "Could not persist",
+                    },
+                },
+            )
+
+        detail = self.service.detail(conversation["conversation_id"])
+        self.assertEqual(detail["conversation"]["status"], "unknown")
+        self.assertFalse(
+            any(event["kind"] == "item.completed" for event in detail["events"])
+        )
+        failures = [
+            event
+            for event in detail["events"]
+            if event["kind"] == "protocol.error"
+            and event["payload"].get("operation") == "notification/persist"
+        ]
+        self.assertEqual(len(failures), 1)
 
     def test_side_chat_inherits_parent_runtime_without_entering_pursuit_lists(self):
         owner_session_id = "side-chat-session"
@@ -1072,6 +1817,113 @@ class ConversationServiceTests(unittest.TestCase):
                 side_chat["host_id"], self.adapter, side_chat["thread_id"]
             )
         )
+
+    def test_side_chat_close_blocks_same_id_upload_until_old_file_is_unlinked(self):
+        owner_session_id = "local-attachment-aba-session"
+        attachment_id = "d" * 32
+        parent = self._create()
+        old_side_chat = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+        new_side_chat = self.service.create_side_chat(
+            parent["conversation_id"], owner_session_id
+        )["conversation"]
+        old_upload = self.service.upload_attachment(
+            old_side_chat["conversation_id"],
+            b"old bytes",
+            "text/plain",
+            None,
+            owner_session_id,
+            attachment_id,
+        )["attachment"]
+
+        class ObservedLock:
+            def __init__(self) -> None:
+                self.lock = threading.Lock()
+                self.replacement_waiting = threading.Event()
+
+            def __enter__(self) -> "ObservedLock":
+                if threading.current_thread().name == "replacement-upload":
+                    self.replacement_waiting.set()
+                self.lock.acquire()
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                self.lock.release()
+
+        observed_lock = ObservedLock()
+        self.service._attachment_upload_lock = observed_lock
+        unlink_started = threading.Event()
+        release_unlink = threading.Event()
+        upload_finished = threading.Event()
+        close_errors: list[BaseException] = []
+        upload_errors: list[BaseException] = []
+        original_unlink = self.service._unlink_managed_attachment_file
+
+        def blocked_unlink(attachment: dict[str, Any]) -> None:
+            if attachment["attachment_id"] == old_upload["attachment_id"]:
+                unlink_started.set()
+                if not release_unlink.wait(2):
+                    raise AssertionError("test did not release the old unlink")
+            original_unlink(attachment)
+
+        def close_old_side_chat() -> None:
+            try:
+                self.service.close_side_chat(
+                    old_side_chat["conversation_id"], owner_session_id
+                )
+            except BaseException as exc:
+                close_errors.append(exc)
+
+        def upload_replacement() -> None:
+            try:
+                self.service.upload_attachment(
+                    new_side_chat["conversation_id"],
+                    b"new bytes",
+                    "text/plain",
+                    None,
+                    owner_session_id,
+                    attachment_id,
+                )
+            except BaseException as exc:
+                upload_errors.append(exc)
+            finally:
+                upload_finished.set()
+
+        with patch.object(
+            self.service,
+            "_unlink_managed_attachment_file",
+            side_effect=blocked_unlink,
+        ):
+            close_thread = threading.Thread(target=close_old_side_chat)
+            close_thread.start()
+            self.assertTrue(unlink_started.wait(1))
+
+            upload_thread = threading.Thread(
+                target=upload_replacement,
+                name="replacement-upload",
+            )
+            upload_thread.start()
+            self.assertTrue(observed_lock.replacement_waiting.wait(1))
+            self.assertFalse(upload_finished.is_set())
+
+            release_unlink.set()
+            close_thread.join(2)
+            upload_thread.join(2)
+
+        self.assertFalse(close_thread.is_alive())
+        self.assertFalse(upload_thread.is_alive())
+        self.assertEqual(close_errors, [])
+        self.assertEqual(upload_errors, [])
+        replacement = self.service.store.get_attachment(attachment_id)
+        self.assertIsNotNone(replacement)
+        self.assertEqual(
+            replacement["conversation_id"], new_side_chat["conversation_id"]
+        )
+        _metadata, replacement_path = self.service.attachment_file(
+            new_side_chat["conversation_id"], attachment_id, owner_session_id
+        )
+        self.assertEqual(replacement_path.read_bytes(), b"new bytes")
 
     def test_new_runtime_discards_leftover_side_chat_and_its_file(self):
         owner_session_id = "orphaned-side-chat-session"
