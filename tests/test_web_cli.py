@@ -37,7 +37,7 @@ class WebCliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("web: stopped", stdout.getvalue())
 
-    def test_web_start_records_pid_and_settings(self):
+    def test_web_start_records_pid_and_settings_without_operator_token(self):
         stdout = io.StringIO()
 
         class FakeProcess:
@@ -50,7 +50,7 @@ class WebCliTests(unittest.TestCase):
                 patch("rightmemory.web.process.subprocess.Popen", return_value=FakeProcess()) as popen,
                 patch("sys.stdout", stdout),
             ):
-                result = main(["web", "start", "--host", "0.0.0.0", "--port", "8766"])
+                result = main(["web", "start", "--host", "127.0.0.1", "--port", "8766"])
 
             command = popen.call_args.args[0]
             settings = web_settings_path(root).read_text(encoding="utf-8")
@@ -58,11 +58,24 @@ class WebCliTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(pid_text, "12345")
-        self.assertIn("0.0.0.0", settings)
+        self.assertIn("127.0.0.1", settings)
         self.assertIn("8766", settings)
         self.assertIn("rightmemory.web.app", command)
         self.assertIn("web: running pid 12345", stdout.getvalue())
-        self.assertIn("operator token", stdout.getvalue())
+        self.assertNotIn("operator token", stdout.getvalue().lower())
+        self.assertFalse((root / ".runtime" / "web" / "operator-token.sha256").exists())
+
+    def test_web_start_rejects_non_loopback_host_before_spawn(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("rightmemory.cli.default_memory_root", return_value=root),
+                patch("rightmemory.web.process.subprocess.Popen") as popen,
+                self.assertRaisesRegex(ValueError, "loopback"),
+            ):
+                main(["web", "start", "--host", "0.0.0.0"])
+
+        popen.assert_not_called()
 
     def test_web_start_prepends_source_checkout_to_pythonpath(self):
         stdout = io.StringIO()
@@ -174,7 +187,7 @@ class PursuitCliTests(unittest.TestCase):
     def test_pursuit_reuses_a_running_web_service(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            running = WebServiceStatus("running", 1234, "0.0.0.0", 9101, web_log_path(root))
+            running = WebServiceStatus("running", 1234, "127.0.0.1", 9101, web_log_path(root))
             with (
                 patch("rightmemory.cli.default_memory_root", return_value=root),
                 patch("rightmemory.cli.web_service_status", return_value=running),
@@ -197,7 +210,7 @@ class PursuitCliTests(unittest.TestCase):
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            running = WebServiceStatus("running", 1234, "::", 9102, web_log_path(root))
+            running = WebServiceStatus("running", 1234, "::1", 9102, web_log_path(root))
             with (
                 patch("rightmemory.cli.default_memory_root", return_value=root),
                 patch("rightmemory.cli.web_service_status", return_value=running),

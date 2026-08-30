@@ -643,7 +643,7 @@ class ConversationStore:
         conversation_id: str,
         owner_session_id: str,
     ) -> bool:
-        """Return whether a side chat belongs to one authenticated web session."""
+        """Return whether a side chat belongs to one signed browser session."""
         clean_conversation_id = _id(conversation_id, "conversation_id")
         clean_owner_session_id = _id(owner_session_id, "owner_session_id")
         with self._connect() as connection:

@@ -487,25 +487,6 @@ pre {
   font-weight: 700;
 }
 
-.login-panel {
-  max-width: 520px;
-  margin: 10vh auto 0;
-}
-
-.login-form {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-  padding: 18px;
-}
-
-.login-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  margin-top: 8px;
-}
-
 .pursuit-view .workspace { padding: 16px 18px; }
 .pursuit-view .topbar { margin-bottom: 10px; align-items: center; }
 .pursuit-view h1 { font-size: 21px; }

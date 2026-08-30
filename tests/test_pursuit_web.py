@@ -15,14 +15,14 @@ class PursuitWebTests(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
         self._seed_root(self.root)
-        self.app = create_web_app(self.root, operator_token="test-operator")
-        self.client, self.csrf = self._login()
+        self.app = create_web_app(self.root)
+        self.client, self.csrf = self._bootstrap()
 
-    def _login(self):
+    def _bootstrap(self):
         client = TestClient(self.app, request_timeout_seconds=30)
-        response = client.post("/api/login", json={"token": "test-operator"})
+        response = client.get("/api/session")
         self.assertEqual(response.status_code, 200)
-        return client, response.json()["data"]["csrf_token"]
+        return client, response.json()["csrf_token"]
 
     @staticmethod
     def _git(root, *args):
@@ -62,14 +62,13 @@ class PursuitWebTests(unittest.TestCase):
             headers={"x-csrf-token": csrf or self.csrf},
         )
 
-    def test_reads_and_mutations_require_authentication(self):
+    def test_reads_and_mutations_require_a_bootstrapped_session(self):
         client = TestClient(self.app, request_timeout_seconds=30)
         responses = [client.get("/api/pursuit-map")]
         for endpoint in ("operations", "undo", "redo"):
             responses.append(client.post(f"/api/pursuit-map/{endpoint}", json={}))
         for response in responses:
             self.assertEqual(response.status_code, 401)
-            self.assertEqual(response.json()["detail"]["message"], "login required")
 
     def test_all_mutations_require_csrf(self):
         before = self._git(self.root, "rev-parse", "HEAD")
@@ -175,7 +174,7 @@ class PursuitWebTests(unittest.TestCase):
         applied = self._operation({"type": "rename", "id": "alpha", "title": "Owner edit"})
         self.assertEqual(applied.status_code, 200, applied.text)
         result = applied.json()["data"]
-        other_client, other_csrf = self._login()
+        other_client, other_csrf = self._bootstrap()
         response = other_client.post(
             "/api/pursuit-map/undo",
             json={"expected_revision": result["snapshot"]["revision"], "commit": result["commit"]},
@@ -224,7 +223,7 @@ class PursuitWebTests(unittest.TestCase):
         other_root = self.root / "other"
         self._seed_root(other_root)
         before = self._snapshot()
-        unchanged_client, _ = self._login()
+        unchanged_client, _ = self._bootstrap()
         selected = self.client.post(
             "/api/active-root", json={"root": str(other_root)}, headers={"x-csrf-token": self.csrf},
         )
@@ -295,15 +294,15 @@ class PursuitWebTests(unittest.TestCase):
             root = Path(tempdir)
             for name in ("MEMORY.md", "PURSUITS.md"):
                 (root / name).write_bytes((self.root / name).read_bytes())
-            client = TestClient(create_web_app(root, operator_token="test-operator"), request_timeout_seconds=30)
-            login = client.post("/api/login", json={"token": "test-operator"})
+            client = TestClient(create_web_app(root), request_timeout_seconds=30)
+            session = client.get("/api/session")
             snapshot = self._snapshot(client)
             self.assertTrue(snapshot["valid"], snapshot["diagnostics"])
             self.assertFalse(snapshot["writable"])
             self.assertTrue(snapshot["diagnostics"])
             response = self._operation(
                 {"type": "create", "title": "Blocked"}, snapshot=snapshot, client=client,
-                csrf=login.json()["data"]["csrf_token"],
+                csrf=session.json()["csrf_token"],
             )
             self.assertEqual(response.status_code, 409, response.text)
             self.assertEqual(response.json()["detail"]["code"], "read_only")
