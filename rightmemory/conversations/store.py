@@ -6,12 +6,15 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 from uuid import uuid4
 
 from ..session import _ensure_runtime_gitignore
 from .models import (
+    ATTACHMENT_KINDS,
+    ATTACHMENT_STATES,
+    CONVERSATION_KINDS,
     CONVERSATION_LIFECYCLES,
     CONVERSATION_STATUSES,
     DEFAULT_LOCAL_PROJECT_ID,
@@ -19,6 +22,7 @@ from .models import (
     LOCAL_HOST_ID,
     PENDING_REQUEST_STATES,
     SCHEMA_VERSION,
+    ConversationAttachment,
     ConversationError,
     ConversationEvent,
     ConversationHost,
@@ -40,6 +44,7 @@ _EVENT_KIND_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _METHOD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_./-]{0,255}$")
 _SSH_ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _REQUEST_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _UNSET = object()
 
@@ -50,11 +55,19 @@ _HOST_COLUMNS = """
 """
 _PROJECT_COLUMNS = "project_id, host_id, label, cwd, last_used_at, created_at, updated_at"
 _CONVERSATION_COLUMNS = """
-    conversation_id, pursuit_id, pursuit_title_snapshot, host_id, project_id,
+    conversation_id, kind, parent_conversation_id, pursuit_id,
+    pursuit_title_snapshot, host_id, project_id,
     provider, thread_id, thread_title, model, reasoning_effort, lifecycle,
-    status, active_turn_id, created_at, updated_at, last_activity_at
+    status, active_turn_id, last_final_event_id, last_read_event_id,
+    created_at, updated_at, last_activity_at
 """
-_EVENT_COLUMNS = "event_id, conversation_id, turn_id, kind, payload_json, created_at"
+_EVENT_COLUMNS = (
+    "event_id, conversation_id, turn_id, kind, payload_json, created_at, marks_final"
+)
+_ATTACHMENT_COLUMNS = """
+    attachment_id, conversation_id, kind, display_name, media_type, byte_size,
+    sha256, relative_path, remote_path, state, created_at, updated_at
+"""
 _DEFAULT_COLUMNS = "pursuit_id, host_id, project_id, last_used_at"
 _PENDING_COLUMNS = """
     request_key, host_id, connection_epoch, rpc_id_json, conversation_id,
@@ -268,6 +281,9 @@ class ConversationStore:
         host_id: str,
         project_id: str,
         thread_id: str,
+        kind: str = "pursuit",
+        parent_conversation_id: str | None = None,
+        owner_session_id: str | None = None,
         pursuit_title_snapshot: str | None = None,
         thread_title: str | None = None,
         conversation_id: str | None = None,
@@ -280,6 +296,25 @@ class ConversationStore:
         # A row represents a provider-confirmed thread. Callers intentionally
         # persist only after thread/start returns a stable, non-empty thread id.
         clean_conversation_id = _id(conversation_id or uuid4().hex, "conversation_id")
+        clean_kind = _choice(kind, "conversation kind", CONVERSATION_KINDS)
+        clean_parent_id = _optional_id(parent_conversation_id, "parent_conversation_id")
+        clean_owner_session_id = _optional_id(owner_session_id, "owner_session_id")
+        if clean_kind == "pursuit" and (
+            clean_parent_id is not None or clean_owner_session_id is not None
+        ):
+            raise ConversationError(
+                "invalid_parent_conversation",
+                "A Pursuit conversation cannot have a parent or session owner.",
+                422,
+            )
+        if clean_kind == "side_chat" and (
+            clean_parent_id is None or clean_owner_session_id is None
+        ):
+            raise ConversationError(
+                "invalid_parent_conversation",
+                "A side chat requires its parent Pursuit conversation and session owner.",
+                422,
+            )
         clean_pursuit_id = _id(pursuit_id, "pursuit_id")
         clean_host_id = _id(host_id, "host_id")
         clean_project_id = _id(project_id, "project_id")
@@ -296,6 +331,19 @@ class ConversationStore:
         now = _now_iso()
         with self._connect() as connection:
             self._require_host_project(connection, clean_host_id, clean_project_id)
+            if clean_parent_id is not None:
+                parent = self._get_conversation_row(connection, clean_parent_id)
+                if (
+                    parent["kind"] != "pursuit"
+                    or parent["pursuit_id"] != clean_pursuit_id
+                    or parent["host_id"] != clean_host_id
+                    or parent["project_id"] != clean_project_id
+                ):
+                    raise ConversationError(
+                        "invalid_parent_conversation",
+                        "A side chat must belong to its parent Pursuit conversation and project.",
+                        422,
+                    )
             if self._get_conversation_row(connection, clean_conversation_id, required=False) is not None:
                 raise ConversationError("conversation_conflict", "That conversation identity is already registered.", 409)
             conflict = connection.execute(
@@ -311,14 +359,19 @@ class ConversationStore:
             connection.execute(
                 """
                 INSERT INTO pursuit_conversations(
-                    conversation_id, pursuit_id, pursuit_title_snapshot, host_id,
-                    project_id, provider, thread_id, thread_title, model,
+                    conversation_id, kind, parent_conversation_id,
+                    owner_session_id, pursuit_id, pursuit_title_snapshot,
+                    host_id, project_id, provider,
+                    thread_id, thread_title, model,
                     reasoning_effort, lifecycle, status, active_turn_id,
                     created_at, updated_at, last_activity_at
-                ) VALUES(?, ?, ?, ?, ?, 'codex', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'codex', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     clean_conversation_id,
+                    clean_kind,
+                    clean_parent_id,
+                    clean_owner_session_id,
                     clean_pursuit_id,
                     clean_pursuit_title,
                     clean_host_id,
@@ -335,7 +388,14 @@ class ConversationStore:
                     now,
                 ),
             )
-            self._set_pursuit_default(connection, clean_pursuit_id, clean_host_id, clean_project_id, now)
+            if clean_kind == "pursuit":
+                self._set_pursuit_default(
+                    connection,
+                    clean_pursuit_id,
+                    clean_host_id,
+                    clean_project_id,
+                    now,
+                )
             row = self._get_conversation_row(connection, clean_conversation_id)
         return _conversation_dict(row)
 
@@ -363,6 +423,7 @@ class ConversationStore:
         host_id: str | None = None,
         lifecycle: str | None = None,
         status: str | None = None,
+        kind: str | None = None,
         limit: int = 200,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -380,6 +441,9 @@ class ConversationStore:
         if status is not None:
             clauses.append("status = ?")
             values.append(_choice(status, "status", CONVERSATION_STATUSES))
+        if kind is not None:
+            clauses.append("kind = ?")
+            values.append(_choice(kind, "conversation kind", CONVERSATION_KINDS))
         clean_limit = _limit(limit, maximum=1000)
         clean_offset = _offset(offset)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -405,6 +469,7 @@ class ConversationStore:
         status: str | object = _UNSET,
         active_turn_id: str | None | object = _UNSET,
         touch_activity: bool = False,
+        emit_state_event: bool = False,
     ) -> dict[str, Any]:
         clean_id = _id(conversation_id, "conversation_id")
         updates: dict[str, Any] = {}
@@ -429,6 +494,7 @@ class ConversationStore:
         if active_turn_id is not _UNSET:
             updates["active_turn_id"] = _optional_id(active_turn_id, "active_turn_id")
         clean_touch = _boolean(touch_activity, "touch_activity")
+        clean_emit_state = _boolean(emit_state_event, "emit_state_event")
         now = _now_iso()
         updates["updated_at"] = now
         if clean_touch:
@@ -445,6 +511,8 @@ class ConversationStore:
                     now,
                 )
             row = self._get_conversation_row(connection, clean_id)
+            if clean_emit_state:
+                _insert_conversation_state_event(connection, row, now)
         return _conversation_dict(row)
 
     def has_turn_evidence(self, conversation_id: str) -> bool:
@@ -560,6 +628,138 @@ class ConversationStore:
             touch_activity=True,
         )
 
+    def delete_conversation(self, conversation_id: str) -> bool:
+        """Delete operational conversation state while retaining detached events."""
+        clean_id = _id(conversation_id, "conversation_id")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM pursuit_conversations WHERE conversation_id = ?",
+                (clean_id,),
+            )
+        return cursor.rowcount == 1
+
+    def side_chat_belongs_to_session(
+        self,
+        conversation_id: str,
+        owner_session_id: str,
+    ) -> bool:
+        """Return whether a side chat belongs to one authenticated web session."""
+        clean_conversation_id = _id(conversation_id, "conversation_id")
+        clean_owner_session_id = _id(owner_session_id, "owner_session_id")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM pursuit_conversations
+                WHERE conversation_id = ?
+                  AND kind = 'side_chat'
+                  AND owner_session_id = ?
+                """,
+                (clean_conversation_id, clean_owner_session_id),
+            ).fetchone()
+        return row is not None
+
+    def purge_side_chat(self, conversation_id: str) -> list[dict[str, Any]]:
+        """Atomically erase one side chat's durable transcript and metadata."""
+        clean_id = _id(conversation_id, "conversation_id")
+        with self._connect() as connection:
+            conversation = self._get_conversation_row(connection, clean_id)
+            if conversation["kind"] != "side_chat":
+                raise ConversationError(
+                    "not_side_chat", "Only a side chat can be purged here.", 409
+                )
+            attachment_rows = connection.execute(
+                f"SELECT {_ATTACHMENT_COLUMNS} FROM conversation_attachments "
+                "WHERE conversation_id = ? ORDER BY created_at, attachment_id",
+                (clean_id,),
+            ).fetchall()
+            connection.execute(
+                "DELETE FROM conversation_events WHERE conversation_id = ?",
+                (clean_id,),
+            )
+            connection.execute(
+                "DELETE FROM pending_server_requests WHERE conversation_id = ?",
+                (clean_id,),
+            )
+            connection.execute(
+                "DELETE FROM conversation_attachments WHERE conversation_id = ?",
+                (clean_id,),
+            )
+            cursor = connection.execute(
+                "DELETE FROM pursuit_conversations WHERE conversation_id = ?",
+                (clean_id,),
+            )
+            if cursor.rowcount != 1:
+                raise ConversationError(
+                    "conversation_not_found", "The side chat was already closed.", 404
+                )
+        return [_attachment_dict(row) for row in attachment_rows]
+
+    def purge_side_chats(self) -> tuple[int, list[dict[str, Any]]]:
+        """Atomically erase all side chats left by an ended app runtime."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT conversation_id FROM pursuit_conversations "
+                "WHERE kind = 'side_chat'"
+            ).fetchall()
+            if not rows:
+                return 0, []
+            side_chat_ids = (
+                "SELECT conversation_id FROM pursuit_conversations "
+                "WHERE kind = 'side_chat'"
+            )
+            attachment_rows = connection.execute(
+                f"SELECT {_ATTACHMENT_COLUMNS} FROM conversation_attachments "
+                f"WHERE conversation_id IN ({side_chat_ids}) "
+                "ORDER BY created_at, attachment_id"
+            ).fetchall()
+            connection.execute(
+                f"DELETE FROM conversation_events "
+                f"WHERE conversation_id IN ({side_chat_ids})"
+            )
+            connection.execute(
+                f"DELETE FROM pending_server_requests "
+                f"WHERE conversation_id IN ({side_chat_ids})"
+            )
+            connection.execute(
+                f"DELETE FROM conversation_attachments "
+                f"WHERE conversation_id IN ({side_chat_ids})"
+            )
+            cursor = connection.execute(
+                "DELETE FROM pursuit_conversations WHERE kind = 'side_chat'"
+            )
+        return int(cursor.rowcount), [_attachment_dict(row) for row in attachment_rows]
+
+    def list_side_chats(
+        self,
+        *,
+        parent_conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List temporary side chats left in the durable recovery store."""
+        clean_parent_id = _optional_id(
+            parent_conversation_id, "parent_conversation_id"
+        )
+        with self._connect() as connection:
+            if clean_parent_id is None:
+                rows = connection.execute(
+                    f"SELECT {_CONVERSATION_COLUMNS} FROM pursuit_conversations "
+                    "WHERE kind = 'side_chat' "
+                    "ORDER BY last_activity_at DESC, conversation_id"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    f"SELECT {_CONVERSATION_COLUMNS} FROM pursuit_conversations "
+                    "WHERE kind = 'side_chat' AND parent_conversation_id = ? "
+                    "ORDER BY last_activity_at DESC, conversation_id",
+                    (clean_parent_id,),
+                ).fetchall()
+        return [_conversation_dict(row) for row in rows]
+
+    def cleanup_side_chats(self) -> int:
+        """Discard all side chats after their browser/app session is lost."""
+        count, _attachments = self.purge_side_chats()
+        return count
+
     def mark_orphaned_conversations_unknown(self) -> int:
         """Fence live-status caches that cannot survive a runtime restart."""
         now = _now_iso()
@@ -608,32 +808,74 @@ class ConversationStore:
         payload: dict[str, Any],
         conversation_id: str | None = None,
         turn_id: str | None = None,
+        mark_final: bool = False,
+        owner_session_id: str | None = None,
     ) -> dict[str, Any]:
         clean_kind = _event_kind(kind)
-        payload_json = _json_object(payload, "event payload", MAX_EVENT_PAYLOAD_BYTES)
         clean_conversation_id = _optional_id(conversation_id, "conversation_id")
         clean_turn_id = _optional_id(turn_id, "turn_id")
+        clean_mark_final = _boolean(mark_final, "mark_final")
+        clean_owner_session_id = _optional_id(owner_session_id, "owner_session_id")
+        stored_payload = dict(payload)
+        if "__rightmemory_session_scope" in stored_payload:
+            raise ConversationError(
+                "invalid_input", "Event payload uses a reserved field.", 422
+            )
+        if clean_owner_session_id is not None:
+            stored_payload["__rightmemory_session_scope"] = _session_scope(
+                clean_owner_session_id
+            )
+        payload_json = _json_object(
+            stored_payload, "event payload", MAX_EVENT_PAYLOAD_BYTES
+        )
+        if clean_mark_final and clean_conversation_id is None:
+            raise ConversationError(
+                "invalid_input",
+                "A final event must belong to a conversation.",
+                422,
+            )
         now = _now_iso()
         with self._connect() as connection:
             if clean_conversation_id is not None:
                 self._get_conversation_row(connection, clean_conversation_id)
             cursor = connection.execute(
                 """
-                INSERT INTO conversation_events(conversation_id, turn_id, kind, payload_json, created_at)
-                VALUES(?, ?, ?, ?, ?)
+                INSERT INTO conversation_events(
+                    conversation_id, turn_id, kind, payload_json, created_at,
+                    marks_final
+                )
+                VALUES(?, ?, ?, ?, ?, ?)
                 """,
-                (clean_conversation_id, clean_turn_id, clean_kind, payload_json, now),
+                (
+                    clean_conversation_id,
+                    clean_turn_id,
+                    clean_kind,
+                    payload_json,
+                    now,
+                    int(clean_mark_final),
+                ),
             )
             event_id = int(cursor.lastrowid)
             if clean_conversation_id is not None:
-                connection.execute(
-                    """
-                    UPDATE pursuit_conversations
-                    SET updated_at = ?, last_activity_at = ?
-                    WHERE conversation_id = ?
-                    """,
-                    (now, now, clean_conversation_id),
-                )
+                if clean_mark_final:
+                    connection.execute(
+                        """
+                        UPDATE pursuit_conversations
+                        SET updated_at = ?, last_activity_at = ?,
+                            last_final_event_id = ?
+                        WHERE conversation_id = ?
+                        """,
+                        (now, now, event_id, clean_conversation_id),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE pursuit_conversations
+                        SET updated_at = ?, last_activity_at = ?
+                        WHERE conversation_id = ?
+                        """,
+                        (now, now, clean_conversation_id),
+                    )
             row = connection.execute(
                 f"SELECT {_EVENT_COLUMNS} FROM conversation_events WHERE event_id = ?",
                 (event_id,),
@@ -653,17 +895,68 @@ class ConversationStore:
         with self._connect() as connection:
             if clean_conversation_id is None:
                 rows = connection.execute(
-                    f"SELECT {_EVENT_COLUMNS} FROM conversation_events WHERE event_id > ? "
-                    "ORDER BY event_id LIMIT ?",
+                    f"SELECT {_EVENT_COLUMNS} FROM conversation_events "
+                    "WHERE event_id > ? ORDER BY event_id LIMIT ?",
                     (clean_cursor, clean_limit),
                 ).fetchall()
             else:
                 rows = connection.execute(
                     f"SELECT {_EVENT_COLUMNS} FROM conversation_events "
-                    "WHERE event_id > ? AND conversation_id = ? ORDER BY event_id LIMIT ?",
+                    "WHERE event_id > ? AND conversation_id = ? "
+                    "ORDER BY event_id LIMIT ?",
                     (clean_cursor, clean_conversation_id, clean_limit),
                 ).fetchall()
         return [_event_dict(row) for row in rows]
+
+    def read_events_for_session(
+        self,
+        owner_session_id: str,
+        *,
+        after_event_id: int = 0,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Read root events while hiding side chats owned by other sessions."""
+        clean_owner_session_id = _id(owner_session_id, "owner_session_id")
+        session_scope = _session_scope(clean_owner_session_id)
+        clean_cursor = _cursor(after_event_id)
+        clean_limit = _limit(limit, maximum=MAX_EVENTS_PER_READ)
+        event_columns = ", ".join(
+            f"event.{column.strip()}" for column in _EVENT_COLUMNS.split(",")
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT {event_columns}
+                FROM conversation_events AS event
+                LEFT JOIN pursuit_conversations AS conversation
+                  ON conversation.conversation_id = event.conversation_id
+                WHERE event.event_id > ?
+                  AND (
+                      event.conversation_id IS NULL
+                      OR conversation.kind = 'pursuit'
+                      OR (
+                          conversation.kind = 'side_chat'
+                          AND conversation.owner_session_id = ?
+                      )
+                  )
+                  AND (
+                      json_extract(event.payload_json, '$.__rightmemory_session_scope') IS NULL
+                      OR json_extract(event.payload_json, '$.__rightmemory_session_scope') = ?
+                  )
+                ORDER BY event.event_id
+                LIMIT ?
+                """,
+                (
+                    clean_cursor,
+                    clean_owner_session_id,
+                    session_scope,
+                    clean_limit,
+                ),
+            ).fetchall()
+        events = [_event_dict(row) for row in rows]
+        for event in events:
+            event["payload"].pop("__rightmemory_session_scope", None)
+        return events
 
     def list_events(
         self,
@@ -691,10 +984,268 @@ class ConversationStore:
         rows.reverse()
         return [_event_dict(row) for row in rows]
 
+    def read_events_before(
+        self,
+        conversation_id: str,
+        *,
+        before_event_id: int,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return the newest events before one cursor in chronological order."""
+        clean_conversation_id = _id(conversation_id, "conversation_id")
+        clean_cursor = _positive_event_id(before_event_id, "before_event_id")
+        clean_limit = _limit(limit, maximum=MAX_EVENTS_PER_READ)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT {_EVENT_COLUMNS} FROM conversation_events "
+                "WHERE conversation_id = ? AND event_id < ? "
+                "ORDER BY event_id DESC LIMIT ?",
+                (clean_conversation_id, clean_cursor, clean_limit),
+            ).fetchall()
+        rows.reverse()
+        return [_event_dict(row) for row in rows]
+
     def latest_event_id(self) -> int:
         with self._connect() as connection:
             row = connection.execute("SELECT COALESCE(MAX(event_id), 0) FROM conversation_events").fetchone()
         return int(row[0])
+
+    def mark_final_event(
+        self,
+        conversation_id: str,
+        event_id: int,
+    ) -> dict[str, Any]:
+        """Record the newest final-response event for unread-state projection."""
+        clean_conversation_id = _id(conversation_id, "conversation_id")
+        clean_event_id = _positive_event_id(event_id, "event_id")
+        now = _now_iso()
+        with self._connect() as connection:
+            self._get_conversation_row(connection, clean_conversation_id)
+            _require_conversation_event(
+                connection, clean_conversation_id, clean_event_id
+            )
+            connection.execute(
+                """
+                UPDATE conversation_events
+                SET marks_final = 1
+                WHERE event_id = ? AND conversation_id = ?
+                """,
+                (clean_event_id, clean_conversation_id),
+            )
+            connection.execute(
+                """
+                UPDATE pursuit_conversations
+                SET last_final_event_id = ?, updated_at = ?
+                WHERE conversation_id = ?
+                  AND (
+                      last_final_event_id IS NULL
+                      OR last_final_event_id < ?
+                  )
+                """,
+                (
+                    clean_event_id,
+                    now,
+                    clean_conversation_id,
+                    clean_event_id,
+                ),
+            )
+            row = self._get_conversation_row(connection, clean_conversation_id)
+        return _conversation_dict(row)
+
+    def acknowledge_read(
+        self,
+        conversation_id: str,
+        event_id: int | None = None,
+        *,
+        emit_state_event: bool = False,
+    ) -> dict[str, Any]:
+        """Advance the durable read cursor, defaulting to the latest final."""
+        clean_conversation_id = _id(conversation_id, "conversation_id")
+        clean_event_id = (
+            _positive_event_id(event_id, "event_id")
+            if event_id is not None
+            else None
+        )
+        clean_emit_state = _boolean(emit_state_event, "emit_state_event")
+        now = _now_iso()
+        with self._connect() as connection:
+            current = self._get_conversation_row(connection, clean_conversation_id)
+            target = (
+                clean_event_id
+                if clean_event_id is not None
+                else current["last_final_event_id"]
+            )
+            if target is not None:
+                _require_conversation_event(
+                    connection,
+                    clean_conversation_id,
+                    int(target),
+                    must_mark_final=True,
+                )
+                connection.execute(
+                    """
+                    UPDATE pursuit_conversations
+                    SET last_read_event_id = ?, updated_at = ?
+                    WHERE conversation_id = ?
+                      AND (
+                          last_read_event_id IS NULL
+                          OR last_read_event_id < ?
+                      )
+                    """,
+                    (target, now, clean_conversation_id, target),
+                )
+            row = self._get_conversation_row(connection, clean_conversation_id)
+            if clean_emit_state:
+                _insert_conversation_state_event(connection, row, now)
+        return _conversation_dict(row)
+
+    def append_conversation_state_event(
+        self, conversation_id: str
+    ) -> dict[str, Any]:
+        """Append a full summary without treating publication as new activity."""
+        clean_conversation_id = _id(conversation_id, "conversation_id")
+        with self._connect() as connection:
+            row = self._get_conversation_row(connection, clean_conversation_id)
+            event = _insert_conversation_state_event(
+                connection,
+                row,
+                _now_iso(),
+            )
+        return event
+
+    # Composer attachments --------------------------------------------------
+
+    def create_attachment(
+        self,
+        *,
+        conversation_id: str,
+        kind: str,
+        display_name: str,
+        media_type: str,
+        byte_size: int,
+        sha256: str,
+        relative_path: str,
+        attachment_id: str | None = None,
+        remote_path: str | None = None,
+        state: str = "staged",
+    ) -> dict[str, Any]:
+        clean_attachment_id = _id(
+            attachment_id or uuid4().hex, "attachment_id"
+        )
+        clean_conversation_id = _id(conversation_id, "conversation_id")
+        clean_kind = _choice(kind, "attachment kind", ATTACHMENT_KINDS)
+        clean_display_name = _text(display_name, "display_name", 500)
+        clean_media_type = _text(media_type, "media_type", 255)
+        clean_byte_size = _byte_size(byte_size)
+        clean_sha256 = _sha256(sha256)
+        clean_relative_path = _relative_path(relative_path)
+        clean_remote_path = _optional_text(remote_path, "remote_path", 8192)
+        clean_state = _choice(state, "attachment state", ATTACHMENT_STATES)
+        now = _now_iso()
+        with self._connect() as connection:
+            self._get_conversation_row(connection, clean_conversation_id)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO conversation_attachments(
+                        attachment_id, conversation_id, kind, display_name,
+                        media_type, byte_size, sha256, relative_path,
+                        remote_path, state, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        clean_attachment_id,
+                        clean_conversation_id,
+                        clean_kind,
+                        clean_display_name,
+                        clean_media_type,
+                        clean_byte_size,
+                        clean_sha256,
+                        clean_relative_path,
+                        clean_remote_path,
+                        clean_state,
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ConversationError(
+                    "attachment_conflict",
+                    "That attachment identity is already registered.",
+                    409,
+                ) from exc
+            row = self._get_attachment_row(connection, clean_attachment_id)
+        return _attachment_dict(row)
+
+    def get_attachment(self, attachment_id: str) -> dict[str, Any] | None:
+        clean_id = _id(attachment_id, "attachment_id")
+        with self._connect() as connection:
+            row = self._get_attachment_row(connection, clean_id, required=False)
+        return _attachment_dict(row) if row is not None else None
+
+    def list_attachments(
+        self,
+        conversation_id: str,
+        *,
+        kind: str | None = None,
+        state: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clean_conversation_id = _id(conversation_id, "conversation_id")
+        clauses = ["conversation_id = ?"]
+        values: list[Any] = [clean_conversation_id]
+        if kind is not None:
+            clauses.append("kind = ?")
+            values.append(_choice(kind, "attachment kind", ATTACHMENT_KINDS))
+        if state is not None:
+            clauses.append("state = ?")
+            values.append(_choice(state, "attachment state", ATTACHMENT_STATES))
+        with self._connect() as connection:
+            self._get_conversation_row(connection, clean_conversation_id)
+            rows = connection.execute(
+                f"SELECT {_ATTACHMENT_COLUMNS} FROM conversation_attachments "
+                f"WHERE {' AND '.join(clauses)} ORDER BY created_at, attachment_id",
+                values,
+            ).fetchall()
+        return [_attachment_dict(row) for row in rows]
+
+    def update_attachment(
+        self,
+        attachment_id: str,
+        *,
+        remote_path: str | None | object = _UNSET,
+        state: str | object = _UNSET,
+    ) -> dict[str, Any]:
+        clean_id = _id(attachment_id, "attachment_id")
+        updates: dict[str, Any] = {}
+        if remote_path is not _UNSET:
+            updates["remote_path"] = _optional_text(
+                remote_path, "remote_path", 8192
+            )
+        if state is not _UNSET:
+            updates["state"] = _choice(
+                state, "attachment state", ATTACHMENT_STATES
+            )
+        updates["updated_at"] = _now_iso()
+        with self._connect() as connection:
+            self._get_attachment_row(connection, clean_id)
+            _update_row(
+                connection,
+                "conversation_attachments",
+                "attachment_id",
+                clean_id,
+                updates,
+            )
+            row = self._get_attachment_row(connection, clean_id)
+        return _attachment_dict(row)
+
+    def delete_attachment(self, attachment_id: str) -> bool:
+        clean_id = _id(attachment_id, "attachment_id")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM conversation_attachments WHERE attachment_id = ?",
+                (clean_id,),
+            )
+        return cursor.rowcount == 1
 
     # Server-initiated requests ---------------------------------------------
 
@@ -978,11 +1529,11 @@ class ConversationStore:
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         if version == 0:
-            connection.executescript(_SCHEMA_V2)
+            connection.executescript(_SCHEMA_V5)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.execute("PRAGMA journal_mode = WAL")
             return
-        if version == 1:
+        if version in {1, 2, 3, 4}:
             # DDL does not implicitly open a sqlite3 transaction. Take the
             # write lock, then re-read the version so concurrent initializers
             # cannot partially or repeatedly apply this operational upgrade.
@@ -997,8 +1548,87 @@ class ConversationStore:
                 connection.execute(
                     "ALTER TABLE pursuit_conversations ADD COLUMN reasoning_effort TEXT"
                 )
-                connection.execute("PRAGMA user_version = 2")
-            elif locked_version != SCHEMA_VERSION:
+                locked_version = 2
+            if locked_version == 2:
+                connection.execute(
+                    """
+                    ALTER TABLE pursuit_conversations
+                    ADD COLUMN kind TEXT NOT NULL DEFAULT 'pursuit'
+                        CHECK(kind IN ('pursuit', 'side_chat'))
+                    """
+                )
+                connection.execute(
+                    """
+                    ALTER TABLE pursuit_conversations
+                    ADD COLUMN parent_conversation_id TEXT
+                        REFERENCES pursuit_conversations(conversation_id)
+                        ON DELETE SET NULL
+                    """
+                )
+                connection.execute(
+                    """
+                    ALTER TABLE pursuit_conversations
+                    ADD COLUMN last_final_event_id INTEGER
+                        REFERENCES conversation_events(event_id)
+                        ON DELETE SET NULL
+                    """
+                )
+                connection.execute(
+                    """
+                    ALTER TABLE pursuit_conversations
+                    ADD COLUMN last_read_event_id INTEGER
+                        REFERENCES conversation_events(event_id)
+                        ON DELETE SET NULL
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS pursuit_conversations_by_kind
+                    ON pursuit_conversations(kind, last_activity_at DESC)
+                    """
+                )
+                connection.execute(_ATTACHMENT_TABLE_SQL)
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS conversation_attachments_by_conversation
+                    ON conversation_attachments(conversation_id, created_at, attachment_id)
+                    """
+                )
+                locked_version = 3
+            if locked_version == 3:
+                connection.execute(
+                    """
+                    ALTER TABLE pursuit_conversations
+                    ADD COLUMN owner_session_id TEXT
+                    """
+                )
+                connection.execute("PRAGMA user_version = 4")
+                locked_version = 4
+            if locked_version == 4:
+                connection.execute(
+                    """
+                    ALTER TABLE conversation_events
+                    ADD COLUMN marks_final INTEGER NOT NULL DEFAULT 0
+                        CHECK(marks_final IN (0, 1))
+                    """
+                )
+                # Version four knew only the latest final event for each
+                # conversation. Preserve every marker that can be recovered;
+                # subsequent final events retain their own durable flag.
+                connection.execute(
+                    """
+                    UPDATE conversation_events
+                    SET marks_final = 1
+                    WHERE event_id IN (
+                        SELECT last_final_event_id
+                        FROM pursuit_conversations
+                        WHERE last_final_event_id IS NOT NULL
+                    )
+                    """
+                )
+                connection.execute("PRAGMA user_version = 5")
+                locked_version = 5
+            if locked_version != SCHEMA_VERSION:
                 raise ConversationError(
                     "unsupported_schema",
                     f"Unsupported conversation database schema version: {locked_version}.",
@@ -1092,6 +1722,24 @@ class ConversationStore:
             raise ConversationError("conversation_not_found", "The conversation was not found.", 404)
         return row
 
+    def _get_attachment_row(
+        self,
+        connection: sqlite3.Connection,
+        attachment_id: str,
+        *,
+        required: bool = True,
+    ) -> sqlite3.Row | None:
+        row = connection.execute(
+            f"SELECT {_ATTACHMENT_COLUMNS} FROM conversation_attachments "
+            "WHERE attachment_id = ?",
+            (attachment_id,),
+        ).fetchone()
+        if row is None and required:
+            raise ConversationError(
+                "attachment_not_found", "The conversation attachment was not found.", 404
+            )
+        return row
+
     def _get_pending_row(
         self,
         connection: sqlite3.Connection,
@@ -1175,6 +1823,8 @@ def _project_dict(row: sqlite3.Row) -> dict[str, Any]:
 def _conversation_dict(row: sqlite3.Row) -> dict[str, Any]:
     return PursuitConversation(
         conversation_id=row["conversation_id"],
+        kind=row["kind"],
+        parent_conversation_id=row["parent_conversation_id"],
         pursuit_id=row["pursuit_id"],
         pursuit_title_snapshot=row["pursuit_title_snapshot"],
         host_id=row["host_id"],
@@ -1187,9 +1837,36 @@ def _conversation_dict(row: sqlite3.Row) -> dict[str, Any]:
         lifecycle=row["lifecycle"],
         status=row["status"],
         active_turn_id=row["active_turn_id"],
+        last_final_event_id=(
+            int(row["last_final_event_id"])
+            if row["last_final_event_id"] is not None
+            else None
+        ),
+        last_read_event_id=(
+            int(row["last_read_event_id"])
+            if row["last_read_event_id"] is not None
+            else None
+        ),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         last_activity_at=row["last_activity_at"],
+    ).to_dict()
+
+
+def _attachment_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return ConversationAttachment(
+        attachment_id=row["attachment_id"],
+        conversation_id=row["conversation_id"],
+        kind=row["kind"],
+        display_name=row["display_name"],
+        media_type=row["media_type"],
+        byte_size=int(row["byte_size"]),
+        sha256=row["sha256"],
+        relative_path=row["relative_path"],
+        remote_path=row["remote_path"],
+        state=row["state"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     ).to_dict()
 
 
@@ -1201,6 +1878,7 @@ def _event_dict(row: sqlite3.Row) -> dict[str, Any]:
         kind=row["kind"],
         payload=_decode_json_object(row["payload_json"]),
         created_at=row["created_at"],
+        marks_final=bool(row["marks_final"]),
     ).to_dict()
 
 
@@ -1244,6 +1922,63 @@ def _update_row(
     )
 
 
+def _insert_conversation_state_event(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    created_at: str,
+) -> dict[str, Any]:
+    """Publish a summary change in the same transaction as its mutation."""
+    payload_json = _json_object(
+        {"conversation": _conversation_dict(row)},
+        "event payload",
+        MAX_EVENT_PAYLOAD_BYTES,
+    )
+    cursor = connection.execute(
+        """
+        INSERT INTO conversation_events(
+            conversation_id, turn_id, kind, payload_json, created_at,
+            marks_final
+        )
+        VALUES(?, NULL, 'conversation.state', ?, ?, 0)
+        """,
+        (row["conversation_id"], payload_json, created_at),
+    )
+    event_row = connection.execute(
+        f"SELECT {_EVENT_COLUMNS} FROM conversation_events WHERE event_id = ?",
+        (int(cursor.lastrowid),),
+    ).fetchone()
+    return _event_dict(event_row)
+
+
+def _require_conversation_event(
+    connection: sqlite3.Connection,
+    conversation_id: str,
+    event_id: int,
+    *,
+    must_mark_final: bool = False,
+) -> None:
+    row = connection.execute(
+        "SELECT conversation_id, marks_final FROM conversation_events WHERE event_id = ?",
+        (event_id,),
+    ).fetchone()
+    if row is None:
+        raise ConversationError(
+            "event_not_found", "The conversation event was not found.", 404
+        )
+    if row["conversation_id"] != conversation_id:
+        raise ConversationError(
+            "event_conversation_mismatch",
+            "The event does not belong to that conversation.",
+            422,
+        )
+    if must_mark_final and not bool(row["marks_final"]):
+        raise ConversationError(
+            "event_not_final",
+            "Only a completed final response can be acknowledged as read.",
+            422,
+        )
+
+
 def _id(value: object, field: str) -> str:
     if not isinstance(value, str):
         raise ConversationError("invalid_input", f"{field} must be a string.", 422)
@@ -1257,6 +1992,54 @@ def _optional_id(value: object, field: str) -> str | None:
     if value is None:
         return None
     return _id(value, field)
+
+
+def _positive_event_id(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConversationError(
+            "invalid_input", f"{field} must be a positive integer.", 422
+        )
+    return value
+
+
+def _byte_size(value: object) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > 9_223_372_036_854_775_807
+    ):
+        raise ConversationError(
+            "invalid_input", "byte_size must be a non-negative 64-bit integer.", 422
+        )
+    return value
+
+
+def _sha256(value: object) -> str:
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise ConversationError(
+            "invalid_input", "sha256 must be a 64-character lowercase digest.", 422
+        )
+    return value
+
+
+def _relative_path(value: object) -> str:
+    clean = _text(value, "relative_path", 8192).replace("\\", "/")
+    if _WINDOWS_ABSOLUTE_RE.match(clean):
+        raise ConversationError(
+            "invalid_input", "relative_path must remain inside attachment storage.", 422
+        )
+    path = PurePosixPath(clean)
+    if path.is_absolute() or ".." in path.parts:
+        raise ConversationError(
+            "invalid_input", "relative_path must remain inside attachment storage.", 422
+        )
+    normalized = str(path)
+    if normalized in {"", "."}:
+        raise ConversationError(
+            "invalid_input", "relative_path must name a stored attachment.", 422
+        )
+    return normalized
 
 
 def _text(value: object, field: str, maximum: int) -> str:
@@ -1345,6 +2128,10 @@ def _rpc_id_json(value: object) -> str:
 def _request_key(host_id: str, epoch: str, rpc_id_json: str) -> str:
     encoded = "\x00".join((host_id, epoch, rpc_id_json)).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _session_scope(owner_session_id: str) -> str:
+    return hashlib.sha256(owner_session_id.encode("utf-8")).hexdigest()
 
 
 def _pending_request_key(value: object) -> str:
@@ -1480,7 +2267,7 @@ def _stale_pending_rows(connection: sqlite3.Connection, resolved_at: str) -> int
     return int(cursor.rowcount)
 
 
-_SCHEMA_V2 = """
+_SCHEMA_V5 = """
 CREATE TABLE IF NOT EXISTS conversation_hosts(
     host_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK(kind IN ('local', 'ssh')),
@@ -1513,6 +2300,9 @@ CREATE TABLE IF NOT EXISTS conversation_projects(
 
 CREATE TABLE IF NOT EXISTS pursuit_conversations(
     conversation_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL DEFAULT 'pursuit' CHECK(kind IN ('pursuit', 'side_chat')),
+    parent_conversation_id TEXT,
+    owner_session_id TEXT,
     pursuit_id TEXT NOT NULL,
     pursuit_title_snapshot TEXT,
     host_id TEXT NOT NULL,
@@ -1528,19 +2318,29 @@ CREATE TABLE IF NOT EXISTS pursuit_conversations(
         'completed', 'failed', 'interrupted', 'unknown'
     )),
     active_turn_id TEXT,
+    last_final_event_id INTEGER,
+    last_read_event_id INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_activity_at TEXT NOT NULL,
     UNIQUE(host_id, thread_id),
     FOREIGN KEY(host_id) REFERENCES conversation_hosts(host_id) ON DELETE RESTRICT,
     FOREIGN KEY(project_id, host_id)
-        REFERENCES conversation_projects(project_id, host_id) ON DELETE RESTRICT
+        REFERENCES conversation_projects(project_id, host_id) ON DELETE RESTRICT,
+    FOREIGN KEY(parent_conversation_id)
+        REFERENCES pursuit_conversations(conversation_id) ON DELETE SET NULL,
+    FOREIGN KEY(last_final_event_id)
+        REFERENCES conversation_events(event_id) ON DELETE SET NULL,
+    FOREIGN KEY(last_read_event_id)
+        REFERENCES conversation_events(event_id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS pursuit_conversations_by_pursuit
     ON pursuit_conversations(pursuit_id, last_activity_at DESC);
 CREATE INDEX IF NOT EXISTS pursuit_conversations_by_host
     ON pursuit_conversations(host_id, last_activity_at DESC);
+CREATE INDEX IF NOT EXISTS pursuit_conversations_by_kind
+    ON pursuit_conversations(kind, last_activity_at DESC);
 
 CREATE TABLE IF NOT EXISTS pursuit_conversation_preferences(
     pursuit_id TEXT PRIMARY KEY,
@@ -1559,12 +2359,33 @@ CREATE TABLE IF NOT EXISTS conversation_events(
     kind TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    marks_final INTEGER NOT NULL DEFAULT 0 CHECK(marks_final IN (0, 1)),
     FOREIGN KEY(conversation_id)
         REFERENCES pursuit_conversations(conversation_id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS conversation_events_by_conversation
     ON conversation_events(conversation_id, event_id);
+
+CREATE TABLE IF NOT EXISTS conversation_attachments(
+    attachment_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('image', 'pasted_text')),
+    display_name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+    sha256 TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    remote_path TEXT,
+    state TEXT NOT NULL CHECK(state IN ('staged', 'sent')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id)
+        REFERENCES pursuit_conversations(conversation_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS conversation_attachments_by_conversation
+    ON conversation_attachments(conversation_id, created_at, attachment_id);
 
 CREATE TABLE IF NOT EXISTS pending_server_requests(
     request_key TEXT PRIMARY KEY,
@@ -1586,4 +2407,24 @@ CREATE TABLE IF NOT EXISTS pending_server_requests(
 
 CREATE INDEX IF NOT EXISTS pending_server_requests_by_state
     ON pending_server_requests(host_id, state, created_at);
+"""
+
+
+_ATTACHMENT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS conversation_attachments(
+    attachment_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('image', 'pasted_text')),
+    display_name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+    sha256 TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    remote_path TEXT,
+    state TEXT NOT NULL CHECK(state IN ('staged', 'sent')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id)
+        REFERENCES pursuit_conversations(conversation_id) ON DELETE CASCADE
+)
 """

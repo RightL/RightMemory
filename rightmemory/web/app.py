@@ -101,7 +101,19 @@ def create_web_app(
         revoke_session(root, _session.session_id)
         active_root = _best_effort_logout_root(root, _session.active_root)
         if active_root is not None:
-            conversation_stream_lifecycle.invalidate(active_root)
+            conversation_stream_lifecycle.invalidate(
+                active_root, _session.session_id
+            )
+            try:
+                conversation_service = conversation_registry.service(active_root)
+                await run_in_threadpool(
+                    conversation_service.close_side_chats_for_session,
+                    _session.session_id,
+                )
+            except Exception:
+                # Revocation remains authoritative; startup purging is the
+                # recovery path if provider or storage cleanup is unavailable.
+                pass
             try:
                 conversation_registry.invalidate_root_session(active_root)
             except Exception:
@@ -554,7 +566,19 @@ def create_web_app(
                 detail=error_detail("invalid active root", technical=str(exc)),
             ) from exc
         cookie, updated_session = create_session_cookie(root, active_root=data["active_root"], session_id=session.session_id)
-        conversation_stream_lifecycle.invalidate(service.memory_root)
+        conversation_stream_lifecycle.invalidate(
+            service.memory_root, session.session_id
+        )
+        try:
+            conversation_service = conversation_registry.service(service.memory_root)
+            await run_in_threadpool(
+                conversation_service.close_side_chats_for_session,
+                session.session_id,
+            )
+        except Exception:
+            # The root switch succeeds even if temporary-provider cleanup must
+            # fall back to the next runtime's startup purge.
+            pass
         conversation_registry.invalidate_root_session(service.memory_root)
         set_session_cookie(response, cookie)
         data["csrf_token"] = updated_session.csrf_token

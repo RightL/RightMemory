@@ -32,7 +32,15 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
       default_reasoning_effort: 'medium',
     } };
     if (path === '/api/pursuit-conversations') return { data: { conversation: { conversation_id: 'c1', pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', model: 'gpt-5.6', reasoning_effort: 'medium' } } };
+    if (path.endsWith('/side-chats') && options?.method === 'POST') return { data: { conversation: { conversation_id: 'side/one', pursuit_id: 'p/one', kind: 'side_chat', parent_conversation_id: 'c/one', host_id: 'h1', project_id: 'project one' } } };
+    if (path.includes('/history?')) return { data: {
+      conversation_id: 'c/one',
+      events: [{ event_id: 12, conversation_id: 'c/one', kind: 'user.message', payload: { text: 'Earlier' } }],
+      has_earlier_events: true,
+    } };
+    if (path.endsWith('/read')) return { data: { conversation: { conversation_id: 'c/one', pursuit_id: 'p/one', last_final_event_id: 51, last_read_event_id: 51 } } };
     if (path.endsWith('/settings')) return { data: { conversation: { conversation_id: 'c/one', pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', model: 'gpt-5.6-mini', reasoning_effort: 'low' } } };
+    if (path.endsWith('/attachments') && options?.method === 'POST') return { data: { attachment: { attachment_id: 'a/one', conversation_id: 'c/one', kind: 'image', display_name: 'diagram.png', media_type: 'image/png', byte_size: 3, state: 'staged' } } };
     if (path === '/api/conversation-hosts') return { data: { host: { host_id: 'h2', kind: 'ssh', display_name: 'GPU', ssh_alias: 'gpu' } } };
     if (path === '/api/conversation-projects') return { data: { project: { project_id: 'p2', host_id: 'h2', label: 'Repo', cwd: '/repo' } } };
     if (path.endsWith('/reconcile')) return { data: { conversation: { conversation_id: 'c/one', pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', status: 'idle' } } };
@@ -44,13 +52,21 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
   const catalog = await api.modelCatalog('h/one');
   const created = await api.createConversation('p/one', 'h1', 'project one', 'gpt-5.6', 'medium');
   const updated = await api.updateSettings('c/one', 'gpt-5.6-mini', 'low');
-  await api.sendMessage('c/one', 'hello');
+  const sideChat = await api.createSideChat('c/one');
+  const earlier = await api.earlierConversation('c/one', '40');
+  const read = await api.acknowledgeRead('c/one', 51);
+  await api.deleteSideChat('side/one');
+  const uploadId = '0123456789abcdef0123456789abcdef';
+  const uploaded = await api.uploadAttachment('c/one', new File([new Uint8Array([1, 2, 3])], 'diagram.png', { type: 'image/png' }), uploadId);
+  await api.sendMessage('c/one', 'hello', ['a/one']);
+  await api.deleteAttachment('c/one', 'a/one');
   await api.interrupt('c/one');
   const reconciled = await api.reconcile('c/one');
   await api.respond('c/one', 'request/1', { decision: 'accept' });
   await api.respond('c/one', 'input/2', { response: { scope: { answers: ['Current branch'] }, mode: { answers: ['Review'] } } });
   await api.createHost('GPU', 'gpu');
   await api.createProject('h2', 'Repo', '/repo');
+  await api.releaseView('view/one', 'page one');
   const request = (path: string) => {
     const entry = requests.find((candidate) => candidate.path === path);
     assert(entry, `Missing request ${path}`);
@@ -67,13 +83,34 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
     pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', model: 'gpt-5.6', reasoning_effort: 'medium',
   });
   assert.equal(updated.reasoningEffort, 'low');
+  assert.equal(sideChat.parentConversationId, 'c/one');
+  assert.equal(sideChat.kind, 'side_chat');
+  assert.equal(earlier.events[0].eventId, '12');
+  assert.equal(earlier.hasEarlierEvents, true);
+  assert.equal(requests.find((entry) => entry.path.includes('/history?'))?.path, '/api/conversations/c%2Fone/history?before_event_id=40');
+  assert.equal(read.lastReadEventId, 51);
+  assert.equal(request('/api/conversations/c%2Fone/side-chats').options?.method, 'POST');
+  assert.equal(request('/api/conversations/c%2Fone/read').options?.method, 'POST');
+  assert.deepEqual(JSON.parse(String(request('/api/conversations/c%2Fone/read').options?.body)), { event_id: 51 });
+  assert.equal(request('/api/side-chats/side%2Fone').options?.method, 'DELETE');
   assert.deepEqual(JSON.parse(String(request('/api/conversations/c%2Fone/settings').options?.body)), { model: 'gpt-5.6-mini', reasoning_effort: 'low' });
-  assert.deepEqual(JSON.parse(String(request('/api/conversations/c%2Fone/messages').options?.body)), { text: 'hello' });
-  assert.equal(requests[7].path, '/api/conversations/c%2Fone/reconcile');
+  const uploadRequest = request('/api/conversations/c%2Fone/attachments');
+  assert(uploadRequest.options?.body instanceof File);
+  assert.equal((uploadRequest.options?.headers as Record<string, string>)['content-type'], 'image/png');
+  assert.equal((uploadRequest.options?.headers as Record<string, string>)['x-filename'], 'diagram.png');
+  assert.equal((uploadRequest.options?.headers as Record<string, string>)['x-attachment-id'], uploadId);
+  assert.equal(uploaded.displayName, 'diagram.png');
+  assert.deepEqual(JSON.parse(String(request('/api/conversations/c%2Fone/messages').options?.body)), { text: 'hello', attachment_ids: ['a/one'] });
+  assert.equal(request('/api/conversations/c%2Fone/attachments/a%2Fone').options?.method, 'DELETE');
+  assert.equal(request('/api/conversations/c%2Fone/reconcile').path, '/api/conversations/c%2Fone/reconcile');
   assert.equal(reconciled.status, 'idle');
-  assert.equal(requests[8].path, '/api/conversations/c%2Fone/server-requests/request%2F1/respond');
-  assert.deepEqual(JSON.parse(String(requests[9].options?.body)), { response: { scope: { answers: ['Current branch'] }, mode: { answers: ['Review'] } } });
-  assert.deepEqual(JSON.parse(String(requests[10].options?.body)), { kind: 'ssh', display_name: 'GPU', ssh_alias: 'gpu' });
+  assert.equal(request('/api/conversations/c%2Fone/server-requests/request%2F1/respond').path, '/api/conversations/c%2Fone/server-requests/request%2F1/respond');
+  const inputResponse = requests.find((entry) => entry.path.endsWith('/input%2F2/respond'))!;
+  assert.deepEqual(JSON.parse(String(inputResponse.options?.body)), { response: { scope: { answers: ['Current branch'] }, mode: { answers: ['Review'] } } });
+  assert.deepEqual(JSON.parse(String(request('/api/conversation-hosts').options?.body)), { kind: 'ssh', display_name: 'GPU', ssh_alias: 'gpu' });
+  const releaseRequest = request('/api/conversation-session/release');
+  assert.equal(releaseRequest.options?.keepalive, true);
+  assert.deepEqual(JSON.parse(String(releaseRequest.options?.body)), { view_id: 'view/one', page_id: 'page one' });
 });
 
 test('event stream handles snapshots, conversation events, unknown kinds, malformed data, and close', () => {
@@ -84,7 +121,7 @@ test('event stream handles snapshots, conversation events, unknown kinds, malfor
   let errors = 0;
   let streamUrl = '';
   const api = new ConversationApi(async () => ({ data: {} }), (url) => { streamUrl = url; return fake; });
-  const stream = api.events('42', {
+  const stream = api.events('42', 'view/one', 'page one', {
     snapshot: (snapshot) => snapshots.push(snapshot),
     event: (event) => events.push(event),
     open: () => { opens++; },
@@ -97,7 +134,7 @@ test('event stream handles snapshots, conversation events, unknown kinds, malfor
   fake.onerror?.(new Event('error'));
   assert.equal(opens, 1);
   assert.equal(errors, 1);
-  assert.equal(streamUrl, '/api/conversation-events?after_event_id=42');
+  assert.equal(streamUrl, '/api/conversation-events?after_event_id=42&view_id=view%2Fone&page_id=page%20one');
   assert.equal(snapshots.length, 1);
   assert.equal((snapshots[0] as { rootKey: string }).rootKey, 'root-one');
   assert.equal(events.length, 1);

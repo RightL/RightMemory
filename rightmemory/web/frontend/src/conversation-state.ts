@@ -20,6 +20,8 @@ export interface ConversationProject {
 export interface ConversationSummary {
   conversationId: string;
   pursuitId: string | null;
+  kind: string;
+  parentConversationId: string | null;
   hostId: string;
   projectId: string;
   model: string;
@@ -28,7 +30,21 @@ export interface ConversationSummary {
   status: string;
   createdAt: string;
   updatedAt: string;
+  lastFinalEventId: number | null;
+  lastReadEventId: number | null;
   archived: boolean;
+  raw: JsonRecord;
+}
+
+export interface ConversationAttachment {
+  attachmentId: string;
+  conversationId: string;
+  kind: 'image' | 'pasted_text' | string;
+  displayName: string;
+  mediaType: string;
+  byteSize: number;
+  state: string;
+  url: string;
   raw: JsonRecord;
 }
 
@@ -59,6 +75,7 @@ export interface ConversationEvent {
   kind: string;
   payload: unknown;
   createdAt: string;
+  marksFinal: boolean;
 }
 
 export interface PendingRequest {
@@ -95,8 +112,16 @@ export interface PursuitConversationList {
 export interface ConversationDetail {
   conversation: ConversationSummary;
   events: ConversationEvent[];
+  attachments: ConversationAttachment[];
   pendingRequests: PendingRequest[];
+  hasEarlierEvents: boolean;
   cursor: string | null;
+}
+
+export interface ConversationHistoryPage {
+  conversationId: string;
+  events: ConversationEvent[];
+  hasEarlierEvents: boolean;
 }
 
 export type ConnectionState = 'closed' | 'connecting' | 'open' | 'retrying';
@@ -104,14 +129,19 @@ export type ConnectionState = 'closed' | 'connecting' | 'open' | 'retrying';
 export interface ConversationState extends WorkspaceSnapshot {
   selectedPursuitId: string | null;
   currentConversationId: string | null;
+  sessionSideChatIds: string[];
   eventsByConversation: Record<string, ConversationEvent[]>;
+  attachmentsByConversation: Record<string, ConversationAttachment[]>;
+  hasEarlierEventsByConversation: Record<string, boolean>;
+  loadingEarlierConversationIds: string[];
   loadingWorkspace: boolean;
   loadingPursuit: boolean;
   loadingConversation: boolean;
   creatingConversation: boolean;
-  sendingConversationId: string | null;
-  interruptingConversationId: string | null;
-  reconcilingConversationId: string | null;
+  creatingSideChat: boolean;
+  sendingConversationIds: string[];
+  interruptingConversationIds: string[];
+  reconcilingConversationIds: string[];
   creatingHost: boolean;
   creatingProject: boolean;
   respondingRequestKeys: string[];
@@ -127,8 +157,13 @@ export type ConversationAction =
   | { type: 'pursuit-loaded'; pursuitId: string; conversations: ConversationSummary[]; default: PursuitConversationDefault | null }
   | { type: 'conversation-loading'; conversationId: string }
   | { type: 'conversation-loaded'; detail: ConversationDetail }
-  | { type: 'conversation-created'; conversation: ConversationSummary }
+  | { type: 'conversation-history-in-flight'; conversationId: string; active: boolean }
+  | { type: 'conversation-history-loaded'; page: ConversationHistoryPage }
+  | { type: 'conversation-created'; conversation: ConversationSummary; select?: boolean }
   | { type: 'conversation-updated'; conversation: ConversationSummary }
+  | { type: 'side-chat-session'; conversationIds: string[] }
+  | { type: 'side-chat-restored'; detail: ConversationDetail }
+  | { type: 'side-chat-removed'; conversationId: string }
   | { type: 'conversation-settings-selected'; conversationId: string; model: string; reasoningEffort: string }
   | { type: 'conversation-closed' }
   | { type: 'conversation-archived'; conversationId: string }
@@ -138,6 +173,7 @@ export type ConversationAction =
   | { type: 'event'; event: ConversationEvent }
   | { type: 'pending-resolved'; conversationId: string; key: string }
   | { type: 'create-in-flight'; active: boolean }
+  | { type: 'side-chat-create-in-flight'; active: boolean }
   | { type: 'send-in-flight'; conversationId: string; active: boolean }
   | { type: 'interrupt-in-flight'; conversationId: string; active: boolean }
   | { type: 'reconcile-in-flight'; conversationId: string; active: boolean }
@@ -150,9 +186,10 @@ export type ConversationAction =
 export function initialConversationState(): ConversationState {
   return {
     rootKey: '', hosts: [], projects: [], conversations: [], pendingRequests: [], pursuitDefaults: {}, cursor: null,
-    selectedPursuitId: null, currentConversationId: null, eventsByConversation: {},
+    selectedPursuitId: null, currentConversationId: null, sessionSideChatIds: [], eventsByConversation: {}, attachmentsByConversation: {},
+    hasEarlierEventsByConversation: {}, loadingEarlierConversationIds: [],
     loadingWorkspace: true, loadingPursuit: false, loadingConversation: false,
-    creatingConversation: false, sendingConversationId: null, interruptingConversationId: null, reconcilingConversationId: null,
+    creatingConversation: false, creatingSideChat: false, sendingConversationIds: [], interruptingConversationIds: [], reconcilingConversationIds: [],
     creatingHost: false, creatingProject: false, respondingRequestKeys: [],
     connection: 'closed', error: null,
   };
@@ -168,6 +205,11 @@ function stringValue(value: unknown, fallback = ''): string {
 
 function boolValue(value: unknown): boolean {
   return value === true || value === 1 || value === 'true';
+}
+
+function integerValue(value: unknown): number | null {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN;
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function arrayValue(value: unknown): unknown[] {
@@ -216,6 +258,8 @@ export function normalizeConversation(value: unknown): ConversationSummary | nul
   return {
     conversationId,
     pursuitId,
+    kind: stringValue(raw.kind, 'conversation'),
+    parentConversationId: stringValue(raw.parent_conversation_id ?? raw.parentConversationId) || null,
     hostId: stringValue(raw.host_id),
     projectId: stringValue(raw.project_id),
     model: stringValue(raw.model),
@@ -224,7 +268,33 @@ export function normalizeConversation(value: unknown): ConversationSummary | nul
     status,
     createdAt: stringValue(raw.created_at),
     updatedAt: stringValue(raw.updated_at ?? raw.last_activity_at ?? raw.created_at),
+    lastFinalEventId: integerValue(raw.last_final_event_id ?? raw.lastFinalEventId),
+    lastReadEventId: integerValue(raw.last_read_event_id ?? raw.lastReadEventId),
     archived: boolValue(raw.archived) || stringValue(raw.lifecycle).toLowerCase() === 'archived' || status.toLowerCase() === 'archived',
+    raw,
+  };
+}
+
+export function normalizeAttachment(value: unknown, fallbackConversationId = ''): ConversationAttachment | null {
+  const outer = asRecord(value);
+  const raw = Object.keys(asRecord(outer.attachment)).length ? asRecord(outer.attachment) : outer;
+  const attachmentId = stringValue(raw.attachment_id ?? raw.attachmentId ?? raw.id);
+  if (!attachmentId) return null;
+  const byteSizeValue = raw.byte_size ?? raw.byteSize ?? raw.size;
+  const byteSize = typeof byteSizeValue === 'number'
+    ? byteSizeValue
+    : typeof byteSizeValue === 'string' && /^\d+$/.test(byteSizeValue)
+      ? Number(byteSizeValue)
+      : 0;
+  return {
+    attachmentId,
+    conversationId: stringValue(raw.conversation_id ?? raw.conversationId, fallbackConversationId),
+    kind: stringValue(raw.kind ?? raw.type, 'file'),
+    displayName: stringValue(raw.display_name ?? raw.displayName ?? raw.filename ?? raw.name, 'Attachment'),
+    mediaType: stringValue(raw.media_type ?? raw.mediaType ?? raw.content_type ?? raw.contentType, 'application/octet-stream'),
+    byteSize: Number.isSafeInteger(byteSize) && byteSize >= 0 ? byteSize : 0,
+    state: stringValue(raw.state ?? raw.status, 'ready'),
+    url: stringValue(raw.url ?? raw.preview_url ?? raw.previewUrl),
     raw,
   };
 }
@@ -266,11 +336,20 @@ export function normalizeEvent(value: unknown, fallbackId = ''): ConversationEve
   const raw = asRecord(value);
   const conversationId = stringValue(raw.conversation_id ?? asRecord(raw.conversation).conversation_id);
   const kind = stringValue(raw.kind ?? raw.type, 'unknown');
-  if (!conversationId && canonicalEventKind(kind) !== 'connection_disconnected') return null;
+  const globalKind = canonicalEventKind(kind);
+  if (!conversationId && globalKind !== 'connection_disconnected' && globalKind !== 'side_chat_closed') return null;
   const turnId = stringValue(raw.turn_id) || null;
   const createdAt = stringValue(raw.created_at ?? raw.timestamp);
   const eventId = stringValue(raw.event_id ?? raw.id) || fallbackId || `${conversationId}:${turnId ?? ''}:${kind}:${createdAt}`;
-  return { eventId, conversationId, turnId, kind, payload: raw.payload ?? raw.data ?? {}, createdAt };
+  return {
+    eventId,
+    conversationId,
+    turnId,
+    kind,
+    payload: raw.payload ?? raw.data ?? {},
+    createdAt,
+    marksFinal: raw.marks_final === true || raw.marksFinal === true || raw.marks_final === 1,
+  };
 }
 
 export function normalizePendingRequest(value: unknown): PendingRequest | null {
@@ -353,9 +432,26 @@ export function normalizeConversationDetail(value: unknown): ConversationDetail 
   return {
     conversation,
     events: normalizedArray(data.events, (entry, index) => normalizeEvent(entry, `${conversation.conversationId}:loaded:${index}`)),
+    attachments: normalizedArray(data.attachments ?? asRecord(data.conversation).attachments, (entry) => normalizeAttachment(entry, conversation.conversationId)),
     pendingRequests: normalizedArray(data.pending_requests, normalizePendingRequest)
       .filter((request) => !request.raw.state || request.raw.state === 'pending'),
+    hasEarlierEvents: boolValue(data.has_earlier_events),
     cursor: stringValue(data.cursor) || null,
+  };
+}
+
+export function normalizeConversationHistoryPage(
+  value: unknown,
+  conversationId: string,
+): ConversationHistoryPage {
+  const data = unwrapped(value);
+  return {
+    conversationId: stringValue(data.conversation_id, conversationId),
+    events: normalizedArray(
+      data.events,
+      (entry, index) => normalizeEvent(entry, `${conversationId}:earlier:${index}`),
+    ),
+    hasEarlierEvents: boolValue(data.has_earlier_events),
   };
 }
 
@@ -454,6 +550,17 @@ function eventStatus(event: ConversationEvent): string | null {
   return null;
 }
 
+function completedFinalAnswerEvent(event: ConversationEvent): boolean {
+  if (event.marksFinal) return true;
+  if (canonicalEventKind(event.kind) !== 'item_completed') return false;
+  const payload = asRecord(event.payload);
+  const item = asRecord(payload.item ?? asRecord(payload.params).item ?? payload.message);
+  const type = stringValue(item.type ?? item.kind ?? payload.type);
+  const phase = stringValue(item.phase ?? payload.phase);
+  return ['agentmessage', 'agent_message'].includes(canonicalEventKind(type))
+    && canonicalEventKind(phase) === 'final_answer';
+}
+
 export function reduceConversationState(state: ConversationState, action: ConversationAction): ConversationState {
   switch (action.type) {
     case 'workspace-loading':
@@ -471,7 +578,25 @@ export function reduceConversationState(state: ConversationState, action: Conver
           error: null,
         };
       }
-      return { ...state, ...action.snapshot, eventsByConversation: state.eventsByConversation, loadingWorkspace: false, error: null };
+      return {
+        ...state,
+        ...action.snapshot,
+        conversations: [
+          ...action.snapshot.conversations,
+          ...state.conversations.filter((conversation) =>
+            conversation.kind === 'side_chat'
+            && state.sessionSideChatIds.includes(conversation.conversationId)
+            && !action.snapshot.conversations.some((incoming) => incoming.conversationId === conversation.conversationId)),
+        ],
+        pendingRequests: mergeById(
+          action.snapshot.pendingRequests,
+          state.pendingRequests.filter((request) => state.sessionSideChatIds.includes(request.conversationId)),
+          (request) => `${request.conversationId}\u001f${request.key}`,
+        ),
+        eventsByConversation: state.eventsByConversation,
+        loadingWorkspace: false,
+        error: null,
+      };
     case 'pursuit-selected':
       return {
         ...state,
@@ -501,18 +626,36 @@ export function reduceConversationState(state: ConversationState, action: Conver
       const withoutPending = state.pendingRequests.filter((item) => item.conversationId !== conversation.conversationId);
       const currentSummary = state.conversations.find((item) => item.conversationId === conversation.conversationId);
       const summary = stale && currentSummary ? newerSummary(conversation, currentSummary) : conversation;
+      const currentEvents = state.eventsByConversation[conversation.conversationId] ?? [];
+      const mergedEvents = mergeEvents(currentEvents, action.detail.events);
+      const currentOldest = cursorNumber(currentEvents[0]?.eventId ?? null);
+      const incomingOldest = cursorNumber(action.detail.events[0]?.eventId ?? null);
+      const retainedEarlierHistory = currentOldest !== null
+        && (incomingOldest === null || currentOldest < incomingOldest);
+      const hasEarlierEvents = retainedEarlierHistory
+        ? state.hasEarlierEventsByConversation[conversation.conversationId] ?? action.detail.hasEarlierEvents
+        : action.detail.hasEarlierEvents;
       const pendingRequests = stale
         ? state.pendingRequests
         : [...withoutPending, ...action.detail.pendingRequests];
+      const streamCursor = state.cursor;
       let loaded: ConversationState = {
         ...state,
         conversations: upsert(state.conversations, summary, (item) => item.conversationId),
         eventsByConversation: {
           ...state.eventsByConversation,
-          [conversation.conversationId]: mergeEvents(state.eventsByConversation[conversation.conversationId] ?? [], action.detail.events),
+          [conversation.conversationId]: mergedEvents,
+        },
+        attachmentsByConversation: {
+          ...state.attachmentsByConversation,
+          [conversation.conversationId]: action.detail.attachments,
+        },
+        hasEarlierEventsByConversation: {
+          ...state.hasEarlierEventsByConversation,
+          [conversation.conversationId]: hasEarlierEvents,
         },
         pendingRequests,
-        cursor: newestCursor(state.cursor, action.detail.cursor),
+        cursor: streamCursor,
         loadingConversation: false,
         error: null,
       };
@@ -523,13 +666,43 @@ export function reduceConversationState(state: ConversationState, action: Conver
           loaded = reduceConversationState(loaded, { type: 'event', event });
         }
       }
-      return loaded;
+      return { ...loaded, cursor: streamCursor };
+    }
+    case 'conversation-history-in-flight':
+      return {
+        ...state,
+        loadingEarlierConversationIds: action.active
+          ? [...new Set([...state.loadingEarlierConversationIds, action.conversationId])]
+          : state.loadingEarlierConversationIds.filter((id) => id !== action.conversationId),
+      };
+    case 'conversation-history-loaded': {
+      if (!state.conversations.some((item) => item.conversationId === action.page.conversationId)) {
+        return state;
+      }
+      return {
+        ...state,
+        eventsByConversation: {
+          ...state.eventsByConversation,
+          [action.page.conversationId]: mergeEvents(
+            state.eventsByConversation[action.page.conversationId] ?? [],
+            action.page.events,
+          ),
+        },
+        hasEarlierEventsByConversation: {
+          ...state.hasEarlierEventsByConversation,
+          [action.page.conversationId]: action.page.hasEarlierEvents,
+        },
+        loadingEarlierConversationIds: state.loadingEarlierConversationIds.filter(
+          (id) => id !== action.page.conversationId,
+        ),
+        error: null,
+      };
     }
     case 'conversation-created':
       return {
         ...state,
         conversations: upsert(state.conversations, action.conversation, (item) => item.conversationId),
-        pursuitDefaults: action.conversation.pursuitId ? {
+        pursuitDefaults: action.conversation.kind !== 'side_chat' && action.conversation.pursuitId ? {
           ...state.pursuitDefaults,
           [action.conversation.pursuitId]: {
             pursuitId: action.conversation.pursuitId,
@@ -538,10 +711,72 @@ export function reduceConversationState(state: ConversationState, action: Conver
             lastUsedAt: action.conversation.updatedAt || action.conversation.createdAt,
           },
         } : state.pursuitDefaults,
-        currentConversationId: action.conversation.conversationId,
-        loadingConversation: true,
+        currentConversationId: action.select === false ? state.currentConversationId : action.conversation.conversationId,
+        loadingConversation: action.select === false ? state.loadingConversation : true,
         error: null,
       };
+    case 'side-chat-session':
+      return { ...state, sessionSideChatIds: [...new Set(action.conversationIds.filter(Boolean))] };
+    case 'side-chat-restored': {
+      const conversation = action.detail.conversation;
+      if (conversation.kind !== 'side_chat') return state;
+      const currentSummary = state.conversations.find((item) => item.conversationId === conversation.conversationId);
+      const summary = currentSummary ? newerSummary(conversation, currentSummary) : conversation;
+      const currentEvents = state.eventsByConversation[conversation.conversationId] ?? [];
+      const withoutPending = state.pendingRequests.filter((item) => item.conversationId !== conversation.conversationId);
+      let restored: ConversationState = {
+        ...state,
+        conversations: upsert(state.conversations, summary, (item) => item.conversationId),
+        eventsByConversation: {
+          ...state.eventsByConversation,
+          [conversation.conversationId]: mergeEvents(currentEvents, action.detail.events),
+        },
+        attachmentsByConversation: {
+          ...state.attachmentsByConversation,
+          [conversation.conversationId]: mergeById(
+            action.detail.attachments,
+            state.attachmentsByConversation[conversation.conversationId] ?? [],
+            (item) => item.attachmentId,
+          ),
+        },
+        hasEarlierEventsByConversation: {
+          ...state.hasEarlierEventsByConversation,
+          [conversation.conversationId]: action.detail.hasEarlierEvents,
+        },
+        pendingRequests: [...withoutPending, ...action.detail.pendingRequests],
+        cursor: action.detail.cursor,
+      };
+      const detailCursor = cursorNumber(action.detail.cursor);
+      for (const event of currentEvents) {
+        const eventCursor = cursorNumber(event.eventId);
+        if (eventCursor !== null && (detailCursor === null || eventCursor > detailCursor)) {
+          restored = reduceConversationState(restored, { type: 'event', event });
+        }
+      }
+      return { ...restored, cursor: state.cursor };
+    }
+    case 'side-chat-removed': {
+      const eventsByConversation = { ...state.eventsByConversation };
+      const attachmentsByConversation = { ...state.attachmentsByConversation };
+      const hasEarlierEventsByConversation = { ...state.hasEarlierEventsByConversation };
+      delete eventsByConversation[action.conversationId];
+      delete attachmentsByConversation[action.conversationId];
+      delete hasEarlierEventsByConversation[action.conversationId];
+      return {
+        ...state,
+        conversations: state.conversations.filter((item) => item.conversationId !== action.conversationId),
+        sessionSideChatIds: state.sessionSideChatIds.filter((id) => id !== action.conversationId),
+        currentConversationId: state.currentConversationId === action.conversationId ? null : state.currentConversationId,
+        eventsByConversation,
+        attachmentsByConversation,
+        hasEarlierEventsByConversation,
+        loadingEarlierConversationIds: state.loadingEarlierConversationIds.filter((id) => id !== action.conversationId),
+        pendingRequests: state.pendingRequests.filter((item) => item.conversationId !== action.conversationId),
+        sendingConversationIds: state.sendingConversationIds.filter((id) => id !== action.conversationId),
+        interruptingConversationIds: state.interruptingConversationIds.filter((id) => id !== action.conversationId),
+        reconcilingConversationIds: state.reconcilingConversationIds.filter((id) => id !== action.conversationId),
+      };
+    }
     case 'conversation-updated': {
       const current = state.conversations.find((item) => item.conversationId === action.conversation.conversationId);
       const conversation = current ? newerSummary(current, action.conversation) : action.conversation;
@@ -559,7 +794,7 @@ export function reduceConversationState(state: ConversationState, action: Conver
     case 'conversation-archived':
       return {
         ...state,
-        conversations: state.conversations.map((item) => item.conversationId === action.conversationId ? { ...item, archived: true, status: 'archived' } : item),
+        conversations: state.conversations.map((item) => item.conversationId === action.conversationId ? { ...item, archived: true, status: 'idle' } : item),
         currentConversationId: state.currentConversationId === action.conversationId ? null : state.currentConversationId,
         pendingRequests: state.pendingRequests.filter((item) => item.conversationId !== action.conversationId),
       };
@@ -593,6 +828,13 @@ export function reduceConversationState(state: ConversationState, action: Conver
           cursor: newestCursor(state.cursor, action.event.eventId),
         };
       }
+      if (eventKind === 'side_chat_closed') {
+        const conversationId = stringValue(payload.conversation_id ?? payload.conversationId);
+        const removed = conversationId
+          ? reduceConversationState(state, { type: 'side-chat-removed', conversationId })
+          : state;
+        return { ...removed, cursor: newestCursor(state.cursor, action.event.eventId) };
+      }
       const previous = state.eventsByConversation[action.event.conversationId] ?? [];
       const duplicate = previous.some((event) => event.eventId === action.event.eventId);
       const eventCursor = cursorNumber(action.event.eventId);
@@ -603,6 +845,41 @@ export function reduceConversationState(state: ConversationState, action: Conver
         ? state.eventsByConversation
         : { ...state.eventsByConversation, [action.event.conversationId]: [...previous, action.event] };
       if (alreadyCovered) return { ...state, eventsByConversation, cursor: newestCursor(state.cursor, action.event.eventId) };
+      if (eventKind === 'conversation_state') {
+        const incoming = normalizeConversation(asRecord(payload.conversation));
+        if (!incoming || incoming.conversationId !== action.event.conversationId) {
+          return { ...state, eventsByConversation, cursor: newestCursor(state.cursor, action.event.eventId) };
+        }
+        const current = state.conversations.find((item) => item.conversationId === incoming.conversationId);
+        const synced = current ? {
+          ...incoming,
+          lastFinalEventId: incoming.lastFinalEventId === null
+            ? current.lastFinalEventId
+            : Math.max(current.lastFinalEventId ?? 0, incoming.lastFinalEventId),
+          lastReadEventId: incoming.lastReadEventId === null
+            ? current.lastReadEventId
+            : Math.max(current.lastReadEventId ?? 0, incoming.lastReadEventId),
+        } : incoming;
+        const updatesPursuitDefault = synced.kind !== 'side_chat'
+          && !!synced.pursuitId
+          && (!current || current.pursuitId !== synced.pursuitId);
+        const pursuitDefaults = updatesPursuitDefault && synced.pursuitId ? {
+          ...state.pursuitDefaults,
+          [synced.pursuitId]: {
+            pursuitId: synced.pursuitId,
+            hostId: synced.hostId,
+            projectId: synced.projectId,
+            lastUsedAt: synced.updatedAt || synced.createdAt,
+          },
+        } : state.pursuitDefaults;
+        return {
+          ...state,
+          eventsByConversation,
+          conversations: upsert(state.conversations, synced, (item) => item.conversationId),
+          pursuitDefaults,
+          cursor: newestCursor(state.cursor, action.event.eventId),
+        };
+      }
       let status = eventStatus(action.event);
       let pendingRequests = state.pendingRequests;
       if (eventKind === 'server_response_failed') {
@@ -628,11 +905,19 @@ export function reduceConversationState(state: ConversationState, action: Conver
           }
         }
       }
+      const finalEventId = completedFinalAnswerEvent(action.event) ? eventCursor : null;
+      const readEventId = integerValue(payload.last_read_event_id ?? payload.lastReadEventId);
       const conversations = state.conversations.map((item) => item.conversationId === action.event.conversationId ? {
         ...item,
         status: status ?? item.status,
         title: stringValue(payload.threadName ?? payload.thread_name ?? payload.title, item.title),
         archived: item.archived || eventKind === 'thread_archived',
+        lastFinalEventId: finalEventId === null
+          ? item.lastFinalEventId
+          : Math.max(item.lastFinalEventId ?? 0, finalEventId),
+        lastReadEventId: readEventId === null
+          ? item.lastReadEventId
+          : Math.max(item.lastReadEventId ?? 0, readEventId),
         updatedAt: action.event.createdAt || item.updatedAt,
       } : item);
       return { ...state, eventsByConversation, conversations, pendingRequests, cursor: newestCursor(state.cursor, action.event.eventId) };
@@ -641,20 +926,34 @@ export function reduceConversationState(state: ConversationState, action: Conver
       return { ...state, pendingRequests: state.pendingRequests.filter((item) => item.conversationId !== action.conversationId || item.key !== action.key) };
     case 'create-in-flight':
       return { ...state, creatingConversation: action.active };
+    case 'side-chat-create-in-flight':
+      return { ...state, creatingSideChat: action.active };
     case 'send-in-flight':
       return {
         ...state,
-        sendingConversationId: action.active ? action.conversationId : state.sendingConversationId === action.conversationId ? null : state.sendingConversationId,
+        sendingConversationIds: action.active
+          ? state.sendingConversationIds.includes(action.conversationId)
+            ? state.sendingConversationIds
+            : [...state.sendingConversationIds, action.conversationId]
+          : state.sendingConversationIds.filter((conversationId) => conversationId !== action.conversationId),
       };
     case 'interrupt-in-flight':
       return {
         ...state,
-        interruptingConversationId: action.active ? action.conversationId : state.interruptingConversationId === action.conversationId ? null : state.interruptingConversationId,
+        interruptingConversationIds: action.active
+          ? state.interruptingConversationIds.includes(action.conversationId)
+            ? state.interruptingConversationIds
+            : [...state.interruptingConversationIds, action.conversationId]
+          : state.interruptingConversationIds.filter((id) => id !== action.conversationId),
       };
     case 'reconcile-in-flight':
       return {
         ...state,
-        reconcilingConversationId: action.active ? action.conversationId : state.reconcilingConversationId === action.conversationId ? null : state.reconcilingConversationId,
+        reconcilingConversationIds: action.active
+          ? state.reconcilingConversationIds.includes(action.conversationId)
+            ? state.reconcilingConversationIds
+            : [...state.reconcilingConversationIds, action.conversationId]
+          : state.reconcilingConversationIds.filter((id) => id !== action.conversationId),
       };
     case 'response-in-flight':
       return {
@@ -683,7 +982,7 @@ function mergeById<T>(base: T[], overlay: T[], id: (item: T) => string): T[] {
 export function conversationsForPursuit(state: ConversationState): ConversationSummary[] {
   if (!state.selectedPursuitId) return [];
   return state.conversations
-    .filter((conversation) => conversation.pursuitId === state.selectedPursuitId && !conversation.archived)
+    .filter((conversation) => conversation.pursuitId === state.selectedPursuitId && conversation.kind !== 'side_chat' && !conversation.archived)
     .sort((left, right) => (right.updatedAt || right.createdAt).localeCompare(left.updatedAt || left.createdAt));
 }
 
@@ -697,8 +996,8 @@ export function conversationCanSend(state: ConversationState, conversation: Conv
   return state.connection === 'open'
     && !state.loadingConversation
     && !conversation.archived
-    && state.sendingConversationId !== conversation.conversationId
-    && state.reconcilingConversationId !== conversation.conversationId
+    && !state.sendingConversationIds.includes(conversation.conversationId)
+    && !state.reconcilingConversationIds.includes(conversation.conversationId)
     && !providerBusy
     && status !== 'unknown';
 }

@@ -4,12 +4,13 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 5
 LOCAL_HOST_ID = "local"
 DEFAULT_LOCAL_PROJECT_ID = "local-root"
 
 HOST_KINDS = frozenset({"local", "ssh"})
 CONVERSATION_LIFECYCLES = frozenset({"active", "archived"})
+CONVERSATION_KINDS = frozenset({"pursuit", "side_chat"})
 CONVERSATION_STATUSES = frozenset(
     {
         "idle",
@@ -24,6 +25,8 @@ CONVERSATION_STATUSES = frozenset(
     }
 )
 PENDING_REQUEST_STATES = frozenset({"pending", "resolved", "stale"})
+ATTACHMENT_KINDS = frozenset({"image", "pasted_text"})
+ATTACHMENT_STATES = frozenset({"staged", "sent"})
 
 
 class ConversationError(RuntimeError):
@@ -73,6 +76,8 @@ class ConversationProject:
 @dataclass(frozen=True, slots=True)
 class PursuitConversation:
     conversation_id: str
+    kind: str
+    parent_conversation_id: str | None
     pursuit_id: str
     pursuit_title_snapshot: str | None
     host_id: str
@@ -85,6 +90,8 @@ class PursuitConversation:
     lifecycle: str
     status: str
     active_turn_id: str | None
+    last_final_event_id: int | None
+    last_read_event_id: int | None
     created_at: str
     updated_at: str
     last_activity_at: str
@@ -101,6 +108,26 @@ class ConversationEvent:
     kind: str
     payload: dict[str, Any]
     created_at: str
+    marks_final: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationAttachment:
+    attachment_id: str
+    conversation_id: str
+    kind: str
+    display_name: str
+    media_type: str
+    byte_size: int
+    sha256: str
+    relative_path: str
+    remote_path: str | None
+    state: str
+    created_at: str
+    updated_at: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

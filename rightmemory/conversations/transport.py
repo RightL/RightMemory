@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 
@@ -18,10 +19,58 @@ REMOTE_CODEX_APP_SERVER_COMMAND = shlex.join(
 )
 
 _SSH_ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_REMOTE_ATTACHMENT_NAME = re.compile(r"[0-9a-f]{32}\.(?:png|jpg|txt)\Z")
+
+_REMOTE_ATTACHMENT_SCRIPT = """\
+import hashlib, os, pathlib, sys, tempfile
+name, expected_size, expected_hash = sys.argv[1:]
+expected_size = int(expected_size)
+root = pathlib.Path.home() / '.cache' / 'rightmemory' / 'attachments'
+root.mkdir(parents=True, exist_ok=True)
+data = sys.stdin.buffer.read(expected_size + 1)
+if len(data) != expected_size or hashlib.sha256(data).hexdigest() != expected_hash:
+    raise SystemExit(23)
+descriptor, temporary = tempfile.mkstemp(prefix='.upload-', dir=root)
+try:
+    with os.fdopen(descriptor, 'wb') as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(temporary, 0o600)
+    destination = root / name
+    os.replace(temporary, destination)
+    print(destination.resolve())
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+"""
+
+_REMOTE_ATTACHMENT_DELETE_SCRIPT = """\
+import pathlib, re, sys
+name = sys.argv[1]
+if re.fullmatch(r'[0-9a-f]{32}\\.(?:png|jpg|txt)', name) is None:
+    raise SystemExit(24)
+path = pathlib.Path.home() / '.cache' / 'rightmemory' / 'attachments' / name
+try:
+    path.unlink()
+except FileNotFoundError:
+    pass
+"""
 
 
 class TransportConfigurationError(ValueError):
     """A host cannot be launched safely with its current configuration."""
+
+
+class AttachmentStagingError(RuntimeError):
+    """A managed attachment could not be copied to a configured SSH host."""
+
+
+class AttachmentCleanupError(RuntimeError):
+    """A remotely staged attachment could not be removed from an SSH host."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +169,208 @@ def transport_for_host(
             raise TransportConfigurationError("SSH host is missing its configured alias")
         return build_ssh_transport(alias, environment=environment)
     raise TransportConfigurationError(f"unsupported conversation host kind: {kind!r}")
+
+
+def stage_ssh_attachment(
+    ssh_alias: str,
+    source: str | os.PathLike[str],
+    remote_name: str,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+    ssh_binary: str | os.PathLike[str] | None = None,
+    connect_timeout_seconds: int = DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS,
+    transfer_timeout_seconds: int = 45,
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    """Atomically stage one bounded file without interpolating user data into a shell."""
+
+    alias = validate_ssh_alias(ssh_alias)
+    if _REMOTE_ATTACHMENT_NAME.fullmatch(remote_name) is None:
+        raise TransportConfigurationError("remote attachment name is invalid")
+    if (
+        isinstance(expected_size, bool)
+        or not isinstance(expected_size, int)
+        or expected_size < 1
+        or expected_size > 20 * 1024 * 1024
+    ):
+        raise TransportConfigurationError("remote attachment size is invalid")
+    if not isinstance(expected_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        raise TransportConfigurationError("remote attachment digest is invalid")
+    if (
+        isinstance(transfer_timeout_seconds, bool)
+        or not isinstance(transfer_timeout_seconds, int)
+        or transfer_timeout_seconds < 1
+        or transfer_timeout_seconds > 120
+    ):
+        raise TransportConfigurationError("attachment transfer timeout must be between 1 and 120 seconds")
+    if (
+        isinstance(connect_timeout_seconds, bool)
+        or not isinstance(connect_timeout_seconds, int)
+        or connect_timeout_seconds < 1
+        or connect_timeout_seconds > 60
+    ):
+        raise TransportConfigurationError("SSH connect timeout must be between 1 and 60 seconds")
+
+    path = Path(source).resolve()
+    if not path.is_file() or path.stat().st_size != expected_size:
+        raise AttachmentStagingError("managed attachment is unavailable or changed size")
+    payload = path.read_bytes()
+    if len(payload) != expected_size or hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise AttachmentStagingError("managed attachment changed before transfer")
+
+    env = _environment(environment)
+    executable = resolve_ssh_binary(ssh_binary, environment=env)
+    remote_command = shlex.join(
+        (
+            "python3",
+            "-c",
+            _REMOTE_ATTACHMENT_SCRIPT,
+            remote_name,
+            str(expected_size),
+            expected_sha256,
+        )
+    )
+    argv = (
+        executable,
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={connect_timeout_seconds}",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "PermitLocalCommand=no",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "--",
+        alias,
+        remote_command,
+    )
+    try:
+        completed = subprocess.run(
+            list(argv),
+            input=payload,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=transfer_timeout_seconds,
+            check=False,
+            shell=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AttachmentStagingError("the SSH attachment transfer did not complete") from exc
+    if completed.returncode != 0:
+        diagnostic = completed.stderr.decode("utf-8", "replace").strip()[-500:]
+        message = "the SSH host rejected the attachment transfer"
+        if diagnostic:
+            message = f"{message}: {diagnostic}"
+        raise AttachmentStagingError(message)
+    remote_path = completed.stdout.decode("utf-8", "strict").strip()
+    if (
+        not remote_path
+        or any(character in remote_path for character in "\x00\r\n")
+        or not PurePosixPath(remote_path).is_absolute()
+        or PurePosixPath(remote_path).name != remote_name
+    ):
+        raise AttachmentStagingError("the SSH host returned an invalid attachment path")
+    return remote_path
+
+
+def delete_ssh_attachment(
+    ssh_alias: str,
+    remote_path: str,
+    *,
+    ssh_binary: str | os.PathLike[str] | None = None,
+    connect_timeout_seconds: int = DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS,
+    cleanup_timeout_seconds: int = 15,
+    environment: Mapping[str, str] | None = None,
+) -> None:
+    """Best-effort caller primitive for deleting one validated managed remote file."""
+
+    alias = validate_ssh_alias(ssh_alias)
+    remote_name = _validated_remote_attachment_path(remote_path).name
+    if (
+        isinstance(cleanup_timeout_seconds, bool)
+        or not isinstance(cleanup_timeout_seconds, int)
+        or cleanup_timeout_seconds < 1
+        or cleanup_timeout_seconds > 60
+    ):
+        raise TransportConfigurationError(
+            "attachment cleanup timeout must be between 1 and 60 seconds"
+        )
+    if (
+        isinstance(connect_timeout_seconds, bool)
+        or not isinstance(connect_timeout_seconds, int)
+        or connect_timeout_seconds < 1
+        or connect_timeout_seconds > 60
+    ):
+        raise TransportConfigurationError(
+            "SSH connect timeout must be between 1 and 60 seconds"
+        )
+
+    env = _environment(environment)
+    executable = resolve_ssh_binary(ssh_binary, environment=env)
+    remote_command = shlex.join(
+        ("python3", "-c", _REMOTE_ATTACHMENT_DELETE_SCRIPT, remote_name)
+    )
+    argv = (
+        executable,
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={connect_timeout_seconds}",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "PermitLocalCommand=no",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "--",
+        alias,
+        remote_command,
+    )
+    try:
+        completed = subprocess.run(
+            list(argv),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=cleanup_timeout_seconds,
+            check=False,
+            shell=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AttachmentCleanupError(
+            "the SSH attachment cleanup did not complete"
+        ) from exc
+    if completed.returncode != 0:
+        diagnostic = completed.stderr.decode("utf-8", "replace").strip()[-500:]
+        message = "the SSH host rejected the attachment cleanup"
+        if diagnostic:
+            message = f"{message}: {diagnostic}"
+        raise AttachmentCleanupError(message)
+
+
+def _validated_remote_attachment_path(value: object) -> PurePosixPath:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 4096
+        or any(character in value for character in "\x00\r\n")
+    ):
+        raise TransportConfigurationError("remote attachment path is invalid")
+    path = PurePosixPath(value)
+    if (
+        not path.is_absolute()
+        or "." in path.parts
+        or ".." in path.parts
+        or _REMOTE_ATTACHMENT_NAME.fullmatch(path.name) is None
+        or tuple(path.parts[-4:-1]) != (".cache", "rightmemory", "attachments")
+    ):
+        raise TransportConfigurationError("remote attachment path is invalid")
+    return path
 
 
 def resolve_codex_binary(

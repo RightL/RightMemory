@@ -1,15 +1,19 @@
 import {
   normalizeConversation,
   normalizeConversationDetail,
+  normalizeConversationHistoryPage,
   normalizeModelCatalog,
   normalizePursuitConversationList,
   normalizeEvent,
+  normalizeAttachment,
   normalizeHost,
   normalizeProject,
   normalizeWorkspace,
   type ConversationDetail,
+  type ConversationAttachment,
   type ConversationEvent,
   type ConversationHost,
+  type ConversationHistoryPage,
   type ConversationModelCatalog,
   type ConversationProject,
   type ConversationSummary,
@@ -35,6 +39,18 @@ function encoded(value: string): string { return encodeURIComponent(value); }
 
 function body(value: unknown): RequestInit {
   return { method: 'POST', body: JSON.stringify(value) };
+}
+
+function attachmentBody(file: File, attachmentId: string): RequestInit {
+  return {
+    method: 'POST',
+    body: file,
+    headers: {
+      'content-type': file.type || 'application/octet-stream',
+      'x-filename': encodeURIComponent(file.name || 'attachment'),
+      'x-attachment-id': attachmentId,
+    },
+  };
 }
 
 function required<T>(value: T | null, message: string): T {
@@ -86,11 +102,56 @@ export class ConversationApi {
     return required(normalizeConversationDetail(responseData(response)), 'The server returned an invalid conversation.');
   }
 
-  async sendMessage(conversationId: string, text: string): Promise<ConversationSummary | null> {
-    const response = await this.fetchJson(`/api/conversations/${encoded(conversationId)}/messages`, body({ text }));
+  async earlierConversation(
+    conversationId: string,
+    beforeEventId: string,
+  ): Promise<ConversationHistoryPage> {
+    const response = await this.fetchJson(
+      `/api/conversations/${encoded(conversationId)}/history?before_event_id=${encoded(beforeEventId)}`,
+    );
+    return normalizeConversationHistoryPage(responseData(response), conversationId);
+  }
+
+  async createSideChat(parentConversationId: string): Promise<ConversationSummary> {
+    const response = await this.fetchJson(`/api/conversations/${encoded(parentConversationId)}/side-chats`, body({}));
+    const data = responseData(response);
+    const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
+    return required(normalizeConversation(record.conversation ?? data), 'The server did not return the new side chat.');
+  }
+
+  async deleteSideChat(sideChatId: string): Promise<void> {
+    await this.fetchJson(`/api/side-chats/${encoded(sideChatId)}`, { method: 'DELETE' });
+  }
+
+  async acknowledgeRead(conversationId: string, eventId: number): Promise<ConversationSummary> {
+    const response = await this.fetchJson(`/api/conversations/${encoded(conversationId)}/read`, body({ event_id: eventId }));
+    const data = responseData(response);
+    const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
+    return required(normalizeConversation(record.conversation ?? data), 'The server did not return the read conversation.');
+  }
+
+  async sendMessage(conversationId: string, text: string, attachmentIds: string[] = []): Promise<ConversationSummary | null> {
+    const response = await this.fetchJson(`/api/conversations/${encoded(conversationId)}/messages`, body({ text, attachment_ids: attachmentIds }));
     const data = responseData(response);
     const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
     return normalizeConversation(record.conversation);
+  }
+
+  async uploadAttachment(conversationId: string, file: File, attachmentId: string): Promise<ConversationAttachment> {
+    const response = await this.fetchJson(`/api/conversations/${encoded(conversationId)}/attachments`, attachmentBody(file, attachmentId));
+    const data = responseData(response);
+    const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
+    return required(
+      normalizeAttachment(record.attachment ?? data, conversationId),
+      'The server did not return the uploaded attachment.',
+    );
+  }
+
+  async deleteAttachment(conversationId: string, attachmentId: string): Promise<void> {
+    await this.fetchJson(
+      `/api/conversations/${encoded(conversationId)}/attachments/${encoded(attachmentId)}`,
+      { method: 'DELETE' },
+    );
   }
 
   async updateSettings(conversationId: string, model: string, reasoningEffort: string): Promise<ConversationSummary> {
@@ -150,13 +211,22 @@ export class ConversationApi {
     return required(normalizeProject(record.project ?? data), 'The server did not return the new project.');
   }
 
-  events(afterEventId: string | null, handlers: {
+  async releaseView(viewId: string, pageId: string): Promise<void> {
+    await this.fetchJson('/api/conversation-session/release', {
+      ...body({ view_id: viewId, page_id: pageId }),
+      keepalive: true,
+    });
+  }
+
+  events(afterEventId: string | null, viewId: string, pageId: string, handlers: {
     snapshot(snapshot: WorkspaceSnapshot): void;
     event(event: ConversationEvent): void;
     open(): void;
     error(): void;
   }): EventStream {
-    const source = this.eventSourceFactory(`/api/conversation-events?after_event_id=${encoded(afterEventId ?? '0')}`);
+    const source = this.eventSourceFactory(
+      `/api/conversation-events?after_event_id=${encoded(afterEventId ?? '0')}&view_id=${encoded(viewId)}&page_id=${encoded(pageId)}`,
+    );
     const parse = (message: MessageEvent<string>, kind?: 'snapshot' | 'conversation') => {
       try {
         const value: unknown = JSON.parse(message.data);

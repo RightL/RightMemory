@@ -2,8 +2,10 @@ import {
   conversationCanSend,
   conversationsForPursuit,
   currentConversation,
+  normalizeAttachment,
   recordValue,
   textValue,
+  type ConversationAttachment,
   type ConversationEvent,
   type ConversationModel,
   type ConversationModelCatalog,
@@ -15,11 +17,17 @@ import { RICH_TEXT_CACHE_LIMIT, renderRichText } from './rich-text.ts';
 export interface ConversationRendererActions {
   toggleCollapsed(): void;
   openConversation(conversationId: string): void;
+  loadEarlier(conversationId: string): void;
   closeConversation(): void;
   createConversation(hostId: string, projectId: string, model: string, reasoningEffort: string): void;
+  createSideChat(parentConversationId: string): void;
+  closeSideChat(sideChatId: string): void;
+  acknowledgeRead(conversationId: string): void;
   loadModelCatalog(hostId: string): void;
   updateConversationSettings(model: string, reasoningEffort: string): void;
-  sendMessage(text: string): void;
+  uploadAttachment(conversationId: string, file: File, attachmentId: string): Promise<ConversationAttachment>;
+  deleteAttachment(conversationId: string, attachmentId: string): Promise<void>;
+  sendMessage(text: string, attachmentIds: string[]): boolean | Promise<boolean>;
   interrupt(): void;
   archive(): void;
   reload(): void;
@@ -62,17 +70,22 @@ const shell = `
       </div>
     </section>
     <section class="cw-detail-view" hidden>
+      <nav class="cw-conversation-tabs" role="tablist" aria-label="Conversation tabs"></nav>
       <header class="cw-detail-header">
         <button type="button" class="cw-back" aria-label="Back to conversations">‹</button>
         <div><strong class="cw-detail-title"></strong><small class="cw-detail-location"></small></div>
         <div class="cw-detail-actions"><button type="button" class="cw-reload" aria-label="Reload conversation" title="Reload conversation">↻</button><button type="button" class="cw-reconnect" hidden>Reconnect and check status</button><button type="button" class="cw-archive">Archive</button></div>
       </header>
+      <p class="cw-side-chat-note" hidden>Side chats are temporary and disappear when you close this app.</p>
       <div class="cw-turn-status" role="status"></div>
+      <button type="button" class="cw-load-earlier" hidden>Load earlier messages</button>
       <div class="cw-activity" tabindex="0" aria-label="Conversation activity"></div>
       <button type="button" class="cw-unread" hidden>New activity ↓</button>
       <div class="cw-pending"></div>
       <form class="cw-composer">
+        <div class="cw-staged-attachments" aria-label="Attachments for the next message" aria-live="polite"></div>
         <textarea name="message" rows="3" aria-label="Message" placeholder="Message this conversation…"></textarea>
+        <div class="cw-composer-notice" role="status" aria-live="polite" hidden></div>
         <div class="cw-composer-footer">
           <div class="cw-turn-options" aria-label="Next response settings">
             <select name="model" aria-label="Model for the next message" title="Model for the next message"></select>
@@ -86,6 +99,34 @@ const shell = `
   </div>
 `;
 
+/** Larger plain-text pastes become managed files so the composer stays responsive. */
+export const LARGE_PASTE_CHARACTER_LIMIT = 8_000;
+
+type StagedAttachment = {
+  clientId: string;
+  uploadId: string;
+  conversationId: string;
+  file: File | null;
+  displayName: string;
+  kind: 'image' | 'pasted_text';
+  previewUrl: string;
+  status: 'uploading' | 'ready' | 'failed';
+  attachment: ConversationAttachment | null;
+  error: string;
+  removed: boolean;
+  submitting: boolean;
+  removing: boolean;
+};
+
+function attachmentUploadId(): string {
+  const bytes = new Uint8Array(16);
+  try { crypto.getRandomValues(bytes); }
+  catch {
+    for (let index = 0; index < bytes.length; index++) bytes[index] = Math.floor(Math.random() * 256);
+  }
+  return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -97,6 +138,11 @@ function appendText(parent: HTMLElement, tag: keyof HTMLElementTagNameMap, value
   node.textContent = value;
   parent.append(node);
   return node;
+}
+
+function sideChatTitle(value: string): string {
+  const title = value.trim();
+  return !title || /^(untitled( conversation)?|new conversation)$/i.test(title) ? 'Side chat' : title;
 }
 
 function visibleText(value: unknown): string {
@@ -116,9 +162,10 @@ function canonicalKind(value: string): string {
 
 function payloadParts(event: ConversationEvent): { payload: Record<string, unknown>; item: Record<string, unknown>; itemId: string; kind: string } {
   const payload = recordValue(event.payload);
-  const item = recordValue(payload.item ?? payload.work_item ?? payload.message);
+  const params = recordValue(payload.params);
+  const item = recordValue(payload.item ?? params.item ?? payload.work_item ?? payload.message);
   const discriminator = textValue(item.type ?? item.kind ?? payload.type ?? payload.kind);
-  const itemId = textValue(item.id ?? payload.itemId ?? payload.item_id);
+  const itemId = textValue(item.id ?? payload.itemId ?? payload.item_id ?? params.itemId ?? params.item_id);
   return { payload, item, itemId, kind: canonicalKind(`${event.kind} ${discriminator}`) };
 }
 
@@ -133,8 +180,132 @@ function eventText(payload: Record<string, unknown>, item: Record<string, unknow
   return visibleText(item.text ?? item.content ?? item.delta ?? payload.text ?? payload.content ?? payload.delta ?? payload.message);
 }
 
+function formatByteSize(value: number): string {
+  if (!value) return '';
+  if (value < 1_024) return `${value} B`;
+  if (value < 1_048_576) return `${Math.round(value / 1_024)} KB`;
+  return `${(value / 1_048_576).toFixed(value < 10_485_760 ? 1 : 0)} MB`;
+}
+
+function attachmentReadUrl(attachment: ConversationAttachment): string {
+  const fallback = `/api/conversations/${encodeURIComponent(attachment.conversationId)}/attachments/${encodeURIComponent(attachment.attachmentId)}`;
+  if (!attachment.url) return fallback;
+  try {
+    const candidate = new URL(attachment.url, location.href);
+    if (candidate.origin === location.origin) return `${candidate.pathname}${candidate.search}${candidate.hash}`;
+  } catch { /* Fall back to the authenticated same-origin route. */ }
+  return fallback;
+}
+
+function attachmentCandidates(
+  event: ConversationEvent,
+  payload: Record<string, unknown>,
+  item: Record<string, unknown>,
+  known: Map<string, ConversationAttachment>,
+): ConversationAttachment[] {
+  const entries: unknown[] = [];
+  for (const value of [item.attachments, payload.attachments]) {
+    if (Array.isArray(value)) entries.push(...value);
+  }
+  for (const value of [item.attachment_ids, item.attachmentIds, payload.attachment_ids, payload.attachmentIds]) {
+    if (Array.isArray(value)) entries.push(...value);
+  }
+  const result = new Map<string, ConversationAttachment>();
+  for (const entry of entries) {
+    const id = typeof entry === 'string' ? entry : textValue(recordValue(entry).attachment_id ?? recordValue(entry).attachmentId ?? recordValue(entry).id);
+    const normalized = known.get(id) ?? normalizeAttachment(
+      typeof entry === 'string' ? { attachment_id: entry, conversation_id: event.conversationId } : { ...recordValue(entry), conversation_id: textValue(recordValue(entry).conversation_id, event.conversationId) },
+      event.conversationId,
+    );
+    if (normalized) result.set(normalized.attachmentId, normalized);
+  }
+  for (const attachment of known.values()) {
+    const rawEventId = textValue(attachment.raw.event_id ?? attachment.raw.eventId);
+    const rawTurnId = textValue(attachment.raw.turn_id ?? attachment.raw.turnId);
+    if (rawEventId && rawEventId === event.eventId || rawTurnId && event.turnId && rawTurnId === event.turnId) {
+      result.set(attachment.attachmentId, attachment);
+    }
+  }
+  return [...result.values()];
+}
+
+function renderSentAttachments(
+  parent: HTMLElement,
+  attachments: ConversationAttachment[],
+  reusableImages?: Map<string, HTMLElement[]>,
+): void {
+  const currentImages = new Map<string, HTMLElement[]>();
+  for (const image of parent.querySelectorAll<HTMLElement>('.cw-sent-image[data-attachment-id]')) {
+    const id = image.dataset.attachmentId;
+    if (!id) continue;
+    const entries = currentImages.get(id) ?? [];
+    entries.push(image);
+    currentImages.set(id, entries);
+  }
+  parent.replaceChildren();
+  for (const attachment of attachments) {
+    const url = attachmentReadUrl(attachment);
+    if (attachment.kind === 'image' || attachment.mediaType.startsWith('image/')) {
+      const reusable = currentImages.get(attachment.attachmentId)?.shift()
+        ?? reusableImages?.get(attachment.attachmentId)?.shift();
+      if (reusable) {
+        parent.append(reusable);
+        continue;
+      }
+      const link = element('a', 'cw-sent-image');
+      link.dataset.attachmentId = attachment.attachmentId;
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.setAttribute('aria-label', `Open image ${attachment.displayName}`);
+      const image = element('img');
+      image.src = url;
+      image.alt = attachment.displayName;
+      image.loading = 'lazy';
+      link.append(image);
+      parent.append(link);
+      continue;
+    }
+    const link = element('a', 'cw-sent-file');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    appendText(link, 'span', 'TXT', 'cw-file-icon');
+    const copy = element('span');
+    appendText(copy, 'strong', attachment.displayName || 'Pasted text');
+    const meta = [attachment.kind === 'pasted_text' ? 'Pasted text' : attachment.mediaType, formatByteSize(attachment.byteSize)].filter(Boolean).join(' · ');
+    if (meta) appendText(copy, 'small', meta);
+    link.append(copy);
+    parent.append(link);
+  }
+  parent.hidden = attachments.length === 0;
+}
+
+function shortAgentPath(path: string): string {
+  return path.split('/').filter(Boolean).at(-1)?.replace(/[_-]+/g, ' ') || 'Subagent';
+}
+
+function activityStatusLabel(value: string): string {
+  const canonical = canonicalKind(value);
+  const labels: Record<string, string> = {
+    in_progress: 'Running', started: 'Started', interacted: 'Active', completed: 'Completed',
+    failed: 'Failed', interrupted: 'Interrupted', pending: 'Pending', idle: 'Idle', working: 'Working',
+  };
+  return labels[canonical] ?? canonical.replace(/_/g, ' ').replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function collabToolLabel(value: string): string {
+  const labels: Record<string, string> = {
+    spawnAgent: 'Started an agent', sendInput: 'Sent agent input', resumeAgent: 'Resumed an agent',
+    wait: 'Waiting for agents', closeAgent: 'Closed an agent', sendMessage: 'Messaged an agent',
+    followupTask: 'Assigned follow-up work', interruptAgent: 'Interrupted an agent', listAgents: 'Checked agent activity',
+  };
+  return labels[value] ?? value.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/^./, (letter) => letter.toUpperCase());
+}
+
 function hiddenOperationalEvent(kind: string): boolean {
-  return kind === 'protocol_notification'
+  return kind === 'conversation_state'
+    || kind === 'protocol_notification'
     || kind === 'thread_started'
     || kind === 'thread_status'
     || kind === 'thread_name'
@@ -146,6 +317,21 @@ function hiddenOperationalEvent(kind: string): boolean {
     || kind === 'item_completed'
     || kind.startsWith('item_started_')
     || kind.startsWith('server_request_');
+}
+
+function terminalWorkLabel(event: ConversationEvent): string | null {
+  if (!event.turnId) return null;
+  const kind = canonicalKind(event.kind);
+  const payload = recordValue(event.payload);
+  const turn = recordValue(payload.turn);
+  const explicit = canonicalKind(textValue(turn.status ?? payload.status ?? payload.state));
+  if (explicit === 'failed') return 'Work details · Failed';
+  if (explicit === 'interrupted') return 'Work details · Interrupted';
+  if (explicit === 'completed') return 'Work details';
+  if (kind.includes('turn_failed') || kind === 'protocol_error' && payload.willRetry === false) return 'Work details · Failed';
+  if (kind.includes('interrupt')) return 'Work details · Interrupted';
+  if (kind.includes('turn_completed') || kind.includes('turn_complete')) return 'Work details';
+  return null;
 }
 
 function reasoningEffortLabel(value: string): string {
@@ -183,7 +369,11 @@ function agentMessagePhase(payload: Record<string, unknown>, item: Record<string
   return 'unknown';
 }
 
-function activityNodes(events: ConversationEvent[]): HTMLElement[] {
+function activityNodes(
+  events: ConversationEvent[],
+  attachments: ConversationAttachment[],
+  reusableImages?: Map<string, HTMLElement[]>,
+): HTMLElement[] {
   const nodes: HTMLElement[] = [];
   type MessageNode = {
     role: 'user' | 'agent';
@@ -194,14 +384,40 @@ function activityNodes(events: ConversationEvent[]): HTMLElement[] {
     completed: boolean;
     label: HTMLElement;
     content: HTMLElement;
+    attachments: Map<string, ConversationAttachment>;
+    attachmentList: HTMLElement;
     node: HTMLElement;
   };
   type CommentaryGroup = { node: HTMLDetailsElement; body: HTMLElement; summary: HTMLElement };
+  type DetailsWorkNode = {
+    node: HTMLDetailsElement;
+    summary: HTMLElement;
+    meta: HTMLElement;
+    output: HTMLElement;
+    outputText: string;
+    title: string;
+    status: string;
+    exitCode: string;
+  };
+  type PlanWorkNode = {
+    node: HTMLElement;
+    body: HTMLElement;
+    steps: unknown[] | null;
+    fallback: string;
+  };
   let merge: MessageNode | null = null;
   const messagesByItemId = new Map<string, MessageNode>();
   const messageNodes = new Set<MessageNode>();
   const commentaryGroups = new Map<string, CommentaryGroup>();
+  const agentActivityNodes = new Map<string, HTMLElement>();
+  const commandActivityNodes = new Map<string, DetailsWorkNode>();
+  const fileActivityNodes = new Map<string, DetailsWorkNode>();
+  const planActivityNodes = new Map<string, PlanWorkNode>();
   const turnsWithFinalAnswer = new Set<string>();
+  const terminalTurns = new Map<string, string>();
+  const providerEchoItemIds = new Set<string>();
+  let pendingLocalUserMessage: MessageNode | null = null;
+  const knownAttachments = new Map(attachments.map((attachment) => [attachment.attachmentId, attachment]));
 
   const turnKey = (turnId: string | null): string => turnId ?? '__without_turn__';
 
@@ -210,10 +426,12 @@ function activityNodes(events: ConversationEvent[]): HTMLElement[] {
     const existing = commentaryGroups.get(key);
     if (existing) return existing;
     const node = element('details', 'cw-commentary-group');
-    const summary = appendText(node, 'summary', turnsWithFinalAnswer.has(key) ? 'Work details' : 'Working…');
+    node.dataset.activityKey = `commentary:${key}`;
+    const terminalLabel = terminalTurns.get(key);
+    const summary = appendText(node, 'summary', turnsWithFinalAnswer.has(key) ? 'Work details' : terminalLabel ?? 'Working…');
     const body = element('div', 'cw-commentary-items');
     node.append(body);
-    node.open = !turnsWithFinalAnswer.has(key);
+    node.open = !turnsWithFinalAnswer.has(key) && !terminalLabel;
     const group = { node, body, summary };
     commentaryGroups.set(key, group);
     nodes.push(node);
@@ -226,6 +444,16 @@ function activityNodes(events: ConversationEvent[]): HTMLElement[] {
     const group = commentaryGroups.get(key);
     if (!group) return;
     group.summary.textContent = 'Work details';
+    group.node.open = false;
+  };
+
+  const markTerminalTurn = (turnId: string | null, label: string): void => {
+    const key = turnKey(turnId);
+    if (turnsWithFinalAnswer.has(key)) return;
+    terminalTurns.set(key, label);
+    const group = commentaryGroups.get(key);
+    if (!group) return;
+    group.summary.textContent = label;
     group.node.open = false;
   };
 
@@ -250,7 +478,8 @@ function activityNodes(events: ConversationEvent[]): HTMLElement[] {
         : message.phase === 'final_answer'
           ? 'ANSWER'
           : 'AGENT';
-    message.node.hidden = !message.source;
+    message.node.hidden = !message.source && message.attachments.size === 0;
+    renderSentAttachments(message.attachmentList, [...message.attachments.values()], reusableImages);
   };
 
   const createMessage = (
@@ -260,12 +489,21 @@ function activityNodes(events: ConversationEvent[]): HTMLElement[] {
     phase: AgentMessagePhase,
     source: string,
     completed: boolean,
+    attachments: ConversationAttachment[],
+    activityKey: string,
   ): MessageNode => {
     const node = element('article', `cw-message cw-${role}`);
+    node.dataset.activityKey = activityKey;
     const label = appendText(node, 'small', '');
     const content = element('div', 'cw-message-text');
-    node.append(content);
-    const message = { role, turnId, itemId, phase, source, completed, label, content, node };
+    const attachmentList = element('div', 'cw-sent-attachments');
+    node.append(content, attachmentList);
+    const message = {
+      role, turnId, itemId, phase, source, completed, label, content,
+      attachments: new Map(attachments.map((attachment) => [attachment.attachmentId, attachment])),
+      attachmentList,
+      node,
+    };
     messageNodes.add(message);
     presentMessage(message);
     placeMessage(message);
@@ -273,31 +511,84 @@ function activityNodes(events: ConversationEvent[]): HTMLElement[] {
     return message;
   };
 
-  const updateMessage = (message: MessageNode, text: string, delta: boolean, phase: AgentMessagePhase, completed: boolean): void => {
+  const updateMessage = (
+    message: MessageNode,
+    text: string,
+    delta: boolean,
+    phase: AgentMessagePhase,
+    completed: boolean,
+    attachments: ConversationAttachment[],
+  ): void => {
     const previousPhase = message.phase;
     if (message.role === 'agent' && phase !== 'unknown') message.phase = phase;
     if (completed) message.completed = true;
     if (text) message.source = delta ? `${message.source}${text}` : text;
+    for (const attachment of attachments) message.attachments.set(attachment.attachmentId, attachment);
     presentMessage(message);
     if (message.phase !== previousPhase) placeMessage(message);
     if (message.role === 'agent' && message.phase === 'final_answer' && completed) markFinalAnswer(message.turnId);
   };
 
+  const mergeLifecycleOutput = (current: string, next: string, delta: boolean, terminal: boolean): string => {
+    if (!next) return current;
+    if (terminal || !current) return next;
+    if (next === current || current.endsWith(next)) return current;
+    if (!delta && next.startsWith(current)) return next;
+    const separator = current.endsWith('\n') || next.startsWith('\n') || delta ? '' : '\n';
+    return `${current}${separator}${next}`;
+  };
+
+  const presentDetailsWork = (work: DetailsWorkNode, showExit: boolean): void => {
+    work.summary.textContent = work.title;
+    const meta = [work.status, showExit && work.exitCode ? `exit ${work.exitCode}` : ''].filter(Boolean).join(' · ');
+    work.meta.textContent = meta;
+    work.meta.hidden = !meta;
+    work.output.textContent = work.outputText;
+    work.output.hidden = !work.outputText;
+  };
+
   for (const event of events) {
+    const terminalLabel = terminalWorkLabel(event);
+    if (terminalLabel) markTerminalTurn(event.turnId, terminalLabel);
     const { payload, item, itemId, kind } = payloadParts(event);
     const roleValue = textValue(item.role ?? payload.role).toLowerCase();
     const isUser = roleValue === 'user' || kind.includes('user_message');
     const isAgent = roleValue === 'assistant' || roleValue === 'agent' || kind.includes('agent_message') || kind.includes('assistant_message') || kind.includes('agent_delta');
     if (isUser || isAgent) {
       const role = isUser ? 'user' : 'agent';
+      if (role === 'agent') pendingLocalUserMessage = null;
+      const localUserEvent = role === 'user' && canonicalKind(event.kind) === 'user_message';
       const text = eventText(payload, item);
       const delta = kind.includes('delta');
       const completed = !delta && kind.includes('completed');
       const phase = role === 'agent' ? agentMessagePhase(payload, item) : 'unknown';
+      const messageAttachments = role === 'user' ? attachmentCandidates(event, payload, item, knownAttachments) : [];
       const identified = itemId ? messagesByItemId.get(itemId) : null;
+      if (role === 'user' && !localUserEvent && pendingLocalUserMessage) {
+        pendingLocalUserMessage.turnId = event.turnId ?? pendingLocalUserMessage.turnId;
+        if (completed) pendingLocalUserMessage.completed = true;
+        if (itemId) {
+          pendingLocalUserMessage.itemId = itemId;
+          messagesByItemId.set(itemId, pendingLocalUserMessage);
+          providerEchoItemIds.add(itemId);
+        }
+        for (const attachment of messageAttachments) pendingLocalUserMessage.attachments.set(attachment.attachmentId, attachment);
+        presentMessage(pendingLocalUserMessage);
+        merge = pendingLocalUserMessage;
+        pendingLocalUserMessage = null;
+        continue;
+      }
       if (identified && identified.role === role) {
-        updateMessage(identified, text, delta, phase, completed);
+        updateMessage(
+          identified,
+          role === 'user' && providerEchoItemIds.has(itemId) ? '' : text,
+          delta,
+          phase,
+          completed,
+          messageAttachments,
+        );
         merge = identified;
+        if (localUserEvent) pendingLocalUserMessage = identified;
         continue;
       }
       if (merge && role === 'user' && merge.role === role && text && text === merge.source && (!merge.turnId || !event.turnId)) {
@@ -307,67 +598,203 @@ function activityNodes(events: ConversationEvent[]): HTMLElement[] {
           merge.itemId = itemId;
           messagesByItemId.set(itemId, merge);
         }
+        for (const attachment of messageAttachments) merge.attachments.set(attachment.attachmentId, attachment);
+        presentMessage(merge);
+        if (localUserEvent) pendingLocalUserMessage = merge;
         continue;
       }
       if (itemId) {
-        merge = createMessage(role, event.turnId, itemId, phase, text, completed);
+        merge = createMessage(role, event.turnId, itemId, phase, text, completed, messageAttachments, `message:${itemId || event.eventId}`);
         messagesByItemId.set(itemId, merge);
+        if (localUserEvent) pendingLocalUserMessage = merge;
         continue;
       }
       const phaseCompatible = role !== 'agent' || phase === 'unknown' || merge?.phase === 'unknown' || merge?.phase === phase;
       if (merge && merge.role === role && merge.turnId === event.turnId && phaseCompatible && delta) {
-        updateMessage(merge, text, true, phase, false);
+        updateMessage(merge, text, true, phase, false, messageAttachments);
+        if (localUserEvent) pendingLocalUserMessage = merge;
         continue;
       }
       if (merge && merge.role === role && merge.turnId === event.turnId && phaseCompatible && !delta && text && text.startsWith(merge.source)) {
-        updateMessage(merge, text, false, phase, completed);
+        updateMessage(merge, text, false, phase, completed, messageAttachments);
+        if (localUserEvent) pendingLocalUserMessage = merge;
         continue;
       }
-      if (!text) continue;
-      merge = createMessage(role, event.turnId, '', phase, text, completed);
+      if (!text && !messageAttachments.length) continue;
+      merge = createMessage(role, event.turnId, '', phase, text, completed, messageAttachments, `message:${event.eventId}`);
+      if (localUserEvent) pendingLocalUserMessage = merge;
       continue;
     }
-    if (hiddenOperationalEvent(kind)) continue;
-    merge = null;
-    if (kind.includes('command') || kind.includes('exec')) {
-      const node = element('details', 'cw-work-card cw-command');
-      const command = visibleText(item.command ?? item.cmd ?? payload.command ?? payload.cmd ?? item.argv ?? payload.argv) || 'Command';
-      appendText(node, 'summary', command);
+    const itemType = textValue(item.type ?? item.kind ?? payload.type ?? payload.kind);
+    if (canonicalKind(itemType) === 'sub_agent_activity') {
+      merge = null;
+      const agentThreadId = textValue(item.agentThreadId ?? item.agent_thread_id ?? payload.agentThreadId ?? payload.agent_thread_id);
+      const agentPath = textValue(item.agentPath ?? item.agent_path ?? payload.agentPath ?? payload.agent_path);
+      const key = `subagent:${turnKey(event.turnId)}:${agentThreadId || agentPath || itemId || event.eventId}`;
+      let node = agentActivityNodes.get(key);
+      if (!node) {
+        node = element('article', 'cw-agent-activity cw-subagent-activity');
+        node.dataset.activityKey = key;
+        node.append(element('span', 'cw-agent-activity-dot'), element('div', 'cw-agent-activity-copy'));
+        agentActivityNodes.set(key, node);
+        commentaryGroup(event.turnId).body.append(node);
+      }
+      const copy = node.querySelector<HTMLElement>('.cw-agent-activity-copy')!;
+      copy.replaceChildren();
+      const status = textValue(item.kind ?? payload.kind, 'active');
+      const heading = element('div', 'cw-agent-activity-heading');
+      appendText(heading, 'strong', shortAgentPath(agentPath));
+      appendText(heading, 'span', activityStatusLabel(status), `cw-agent-status cw-${canonicalKind(status)}`);
+      copy.append(heading);
+      if (agentPath) appendText(copy, 'small', agentPath);
+      continue;
+    }
+    if (canonicalKind(itemType) === 'collab_agent_tool_call') {
+      merge = null;
+      const key = `collab:${turnKey(event.turnId)}:${itemId || textValue(item.id ?? payload.id) || event.eventId}`;
+      let node = agentActivityNodes.get(key);
+      if (!node) {
+        node = element('article', 'cw-agent-activity cw-collab-activity');
+        node.dataset.activityKey = key;
+        node.append(element('span', 'cw-agent-activity-dot'), element('div', 'cw-agent-activity-copy'));
+        agentActivityNodes.set(key, node);
+        commentaryGroup(event.turnId).body.append(node);
+      }
+      const copy = node.querySelector<HTMLElement>('.cw-agent-activity-copy')!;
+      copy.replaceChildren();
+      const tool = textValue(item.tool ?? payload.tool ?? item.name ?? payload.name, 'agent activity');
+      const status = textValue(item.status ?? payload.status, 'inProgress');
+      const heading = element('div', 'cw-agent-activity-heading');
+      appendText(heading, 'strong', collabToolLabel(tool));
+      appendText(heading, 'span', activityStatusLabel(status), `cw-agent-status cw-${canonicalKind(status)}`);
+      copy.append(heading);
+      const prompt = visibleText(item.prompt ?? payload.prompt);
+      if (prompt) appendText(copy, 'p', prompt.length > 180 ? `${prompt.slice(0, 177)}…` : prompt);
+      const receiverValue = item.receiverThreadIds ?? item.receiver_thread_ids ?? payload.receiverThreadIds ?? payload.receiver_thread_ids;
+      const receiverIds: unknown[] = Array.isArray(receiverValue) ? receiverValue : [];
+      const model = textValue(item.model ?? payload.model);
+      const effort = textValue(item.reasoningEffort ?? item.reasoning_effort ?? payload.reasoningEffort ?? payload.reasoning_effort);
+      const meta = [
+        receiverIds.length ? `${receiverIds.length} agent${receiverIds.length === 1 ? '' : 's'}` : '',
+        model,
+        effort ? `${reasoningEffortLabel(effort)} reasoning` : '',
+      ].filter(Boolean).join(' · ');
+      if (meta) appendText(copy, 'small', meta);
+      const statesValue = item.agentsStates ?? item.agents_states ?? payload.agentsStates ?? payload.agents_states;
+      const states = Array.isArray(statesValue)
+        ? statesValue.map((value, index) => [String(index + 1), value] as const)
+        : Object.entries(recordValue(statesValue));
+      if (states.length) {
+        const stateList = element('ul', 'cw-agent-states');
+        for (const [threadId, value] of states) {
+          const state = recordValue(value);
+          const label = textValue(state.nickname ?? state.agentPath ?? state.agent_path ?? state.path ?? state.threadId ?? state.thread_id, threadId || 'Agent');
+          const stateStatus = activityStatusLabel(textValue(state.status ?? state.state, 'active'));
+          const message = visibleText(state.message);
+          appendText(stateList, 'li', `${shortAgentPath(label)} · ${stateStatus}${message ? ` — ${message}` : ''}`);
+        }
+        copy.append(stateList);
+      }
+      continue;
+    }
+    const itemKind = canonicalKind(itemType);
+    const lifecycleKey = `${turnKey(event.turnId)}:${itemId || event.eventId}`;
+    const commandEvent = itemKind.includes('command_execution') || /(^|_)(command|exec)(_|$)/.test(kind);
+    if (commandEvent) {
+      merge = null;
+      const key = `command:${lifecycleKey}`;
+      let work = commandActivityNodes.get(key);
+      if (!work) {
+        const node = element('details', 'cw-work-card cw-command');
+        node.dataset.activityKey = key;
+        const summary = appendText(node, 'summary', 'Command');
+        const meta = appendText(node, 'small', '');
+        const output = appendText(node, 'pre', '');
+        work = { node, summary, meta, output, outputText: '', title: 'Command', status: '', exitCode: '' };
+        commandActivityNodes.set(key, work);
+        commentaryGroup(event.turnId).body.append(node);
+      }
+      const command = visibleText(item.command ?? item.cmd ?? payload.command ?? payload.cmd ?? item.argv ?? payload.argv);
+      if (command) work.title = command;
+      const status = textValue(item.status ?? payload.status);
+      if (status) work.status = activityStatusLabel(status);
       const exitCode = item.exit_code ?? item.exitCode ?? payload.exit_code ?? payload.exitCode;
-      const meta = [textValue(item.status ?? payload.status), exitCode !== undefined ? `exit ${textValue(exitCode)}` : ''].filter(Boolean).join(' · ');
-      if (meta) appendText(node, 'small', meta);
-      const output = visibleText(item.output ?? item.aggregated_output ?? item.aggregatedOutput ?? item.stdout ?? item.delta ?? payload.output ?? payload.aggregatedOutput ?? payload.stdout ?? payload.stderr ?? payload.delta);
-      if (output) appendText(node, 'pre', output);
-      nodes.push(node);
+      if (exitCode !== undefined && exitCode !== null) work.exitCode = textValue(exitCode);
+      const aggregate = visibleText(item.aggregated_output ?? item.aggregatedOutput ?? payload.aggregated_output ?? payload.aggregatedOutput);
+      const delta = visibleText(item.delta ?? payload.delta);
+      const ordinary = visibleText(item.output ?? item.stdout ?? item.stderr ?? payload.output ?? payload.stdout ?? payload.stderr);
+      const nextOutput = aggregate || delta || ordinary;
+      const terminal = Boolean(aggregate) || kind.includes('completed') && Boolean(nextOutput);
+      const incremental = Boolean(delta) || !aggregate && !kind.includes('completed') && kind.includes('output');
+      work.outputText = mergeLifecycleOutput(work.outputText, nextOutput, incremental, terminal);
+      presentDetailsWork(work, true);
       continue;
     }
-    if (kind.includes('file') || kind.includes('diff') || kind.includes('patch')) {
-      const node = element('details', 'cw-work-card cw-file');
-      const path = textValue(item.path ?? item.file_path ?? payload.path ?? payload.file_path, 'File change');
-      appendText(node, 'summary', path);
-      const diff = visibleText(item.diff ?? item.patch ?? item.changes ?? item.delta ?? payload.diff ?? payload.patch ?? payload.changes ?? payload.delta);
-      appendText(node, 'pre', diff || compactJson(event.payload));
-      nodes.push(node);
+    const fileEvent = itemKind.includes('file_change') || /(^|_)(file|diff|patch)(_|$)/.test(kind);
+    if (fileEvent) {
+      merge = null;
+      const key = `file:${lifecycleKey}`;
+      let work = fileActivityNodes.get(key);
+      if (!work) {
+        const node = element('details', 'cw-work-card cw-file');
+        node.dataset.activityKey = key;
+        const summary = appendText(node, 'summary', 'File change');
+        const meta = appendText(node, 'small', '');
+        const output = appendText(node, 'pre', '');
+        work = { node, summary, meta, output, outputText: '', title: 'File change', status: '', exitCode: '' };
+        fileActivityNodes.set(key, work);
+        commentaryGroup(event.turnId).body.append(node);
+      }
+      const path = textValue(item.path ?? item.file_path ?? payload.path ?? payload.file_path);
+      if (path) work.title = path;
+      const status = textValue(item.status ?? payload.status);
+      if (status) work.status = activityStatusLabel(status);
+      const completedChange = visibleText(item.diff ?? item.patch ?? item.changes ?? payload.diff ?? payload.patch ?? payload.changes);
+      const delta = visibleText(item.delta ?? payload.delta);
+      const nextOutput = completedChange || delta;
+      const terminal = Boolean(completedChange) && kind.includes('completed');
+      work.outputText = mergeLifecycleOutput(work.outputText, nextOutput, Boolean(delta), terminal);
+      presentDetailsWork(work, false);
       continue;
     }
-    if (kind.includes('plan')) {
-      const node = element('section', 'cw-work-card cw-plan');
-      appendText(node, 'strong', 'Plan');
-      const steps = Array.isArray(item.steps) ? item.steps : Array.isArray(item.plan) ? item.plan : Array.isArray(payload.steps) ? payload.steps : Array.isArray(payload.plan) ? payload.plan : [];
-      if (steps.length) {
+    const planEvent = itemKind === 'plan' || itemKind.endsWith('_plan') || /(^|_)plan(_|$)/.test(kind);
+    if (planEvent) {
+      merge = null;
+      const key = `plan:${turnKey(event.turnId)}:${itemId || 'turn-plan'}`;
+      let work = planActivityNodes.get(key);
+      if (!work) {
+        const node = element('section', 'cw-work-card cw-plan');
+        node.dataset.activityKey = key;
+        appendText(node, 'strong', 'Plan');
+        const body = element('div');
+        node.append(body);
+        work = { node, body, steps: null, fallback: '' };
+        planActivityNodes.set(key, work);
+        commentaryGroup(event.turnId).body.append(node);
+      }
+      const deltaRecord = recordValue(item.delta ?? payload.delta);
+      const stepCandidates = [item.steps, item.plan, payload.steps, payload.plan, deltaRecord.steps, deltaRecord.plan];
+      const steps = stepCandidates.find((candidate) => Array.isArray(candidate));
+      if (Array.isArray(steps)) work.steps = steps;
+      const fallback = visibleText(item.delta ?? payload.delta ?? item.text ?? payload.text);
+      if (!steps && fallback) work.fallback = mergeLifecycleOutput(work.fallback, fallback, kind.includes('delta'), kind.includes('completed'));
+      work.body.replaceChildren();
+      if (work.steps) {
         const list = element('ol');
-        for (const step of steps) {
+        for (const step of work.steps) {
           const record = recordValue(step);
           const label = visibleText(record.step ?? record.text ?? record.label ?? step);
           appendText(list, 'li', [label, textValue(record.status)].filter(Boolean).join(' — '));
         }
-        node.append(list);
-      } else appendText(node, 'pre', compactJson(event.payload));
-      nodes.push(node);
+        work.body.append(list);
+      } else if (work.fallback) appendText(work.body, 'pre', work.fallback);
       continue;
     }
+    if (hiddenOperationalEvent(kind)) continue;
+    merge = null;
     if (kind.includes('protocol_error') || kind.includes('connection_disconnected')) {
       const node = element('div', 'cw-system-message');
+      node.dataset.activityKey = `system:${event.eventId}`;
       const message = kind.includes('connection_disconnected')
         ? 'Connection lost. Reconnect to continue.'
         : visibleText(payload.message ?? payload.error) || 'The conversation encountered a connection error.';
@@ -409,12 +836,18 @@ export class ConversationRenderer {
   private collapsed = false;
   private lastConversationId: string | null = null;
   private activitySignature = '';
+  private activityFirstEventId: string | null = null;
   private state: ConversationState | null = null;
   private pickerPursuitId: string | null = null;
   private pickerTouched = false;
   private modelCatalogs = new Map<string, ConversationModelCatalog>();
   private requestedModelCatalogs = new Set<string>();
   private failedModelCatalogs = new Set<string>();
+  private stagedAttachments = new Map<string, StagedAttachment[]>();
+  private suppressedAttachmentIds = new Map<string, Set<string>>();
+  private ephemeralDrafts = new Map<string, string>();
+  private knownSideChatIds = new Set<string>();
+  private attachmentSequence = 0;
 
   constructor(private host: HTMLElement, private rootKey: string, private actions: ConversationRendererActions) {
     host.className = 'cw-pane';
@@ -423,6 +856,9 @@ export class ConversationRenderer {
     this.$('.cw-error button').addEventListener('click', () => actions.retry(), { signal: this.abort.signal });
     this.$('.cw-back').addEventListener('click', () => actions.closeConversation(), { signal: this.abort.signal });
     this.$('.cw-reload').addEventListener('click', () => actions.reload(), { signal: this.abort.signal });
+    this.$('.cw-load-earlier').addEventListener('click', () => {
+      if (this.lastConversationId) actions.loadEarlier(this.lastConversationId);
+    }, { signal: this.abort.signal });
     this.$('.cw-reconnect').addEventListener('click', () => {
       const conversation = this.state && currentConversation(this.state);
       if (conversation) actions.reconnect(conversation.conversationId);
@@ -430,6 +866,37 @@ export class ConversationRenderer {
     this.$('.cw-archive').addEventListener('click', () => actions.archive(), { signal: this.abort.signal });
     this.$('.cw-stop').addEventListener('click', () => actions.interrupt(), { signal: this.abort.signal });
     this.$('.cw-unread').addEventListener('click', () => this.scrollToBottom(), { signal: this.abort.signal });
+    this.$('.cw-activity').addEventListener('scroll', () => {
+      if (!this.lastConversationId || !this.isFollowingActivity(this.lastConversationId)) return;
+      this.$('.cw-unread').hidden = true;
+      this.actions.acknowledgeRead(this.lastConversationId);
+    }, { signal: this.abort.signal });
+    const tabs = this.$('.cw-conversation-tabs');
+    tabs.addEventListener('click', (event) => {
+      const target = (event.target as Element | null)?.closest<HTMLButtonElement>('button');
+      if (!target) return;
+      const closeId = target.dataset.closeSideChat;
+      const conversationId = target.dataset.conversationId;
+      const parentId = target.dataset.newSideChat;
+      if (closeId) this.requestCloseSideChat(closeId);
+      else if (parentId) actions.createSideChat(parentId);
+      else if (conversationId) actions.openConversation(conversationId);
+    }, { signal: this.abort.signal });
+    tabs.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      const options = [...tabs.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+      const current = (event.target as Element | null)?.closest<HTMLButtonElement>('[role="tab"]');
+      const index = current ? options.indexOf(current) : -1;
+      if (index < 0 || !options.length) return;
+      event.preventDefault();
+      const next = event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? options.length - 1
+          : (index + (event.key === 'ArrowRight' ? 1 : -1) + options.length) % options.length;
+      options[next].focus();
+      options[next].click();
+    }, { signal: this.abort.signal });
     this.$<HTMLSelectElement>('.cw-new-form [name="host"]').addEventListener('change', () => {
       this.pickerTouched = true;
       this.retryModelCatalog(this.$<HTMLSelectElement>('.cw-new-form [name="host"]').value);
@@ -460,10 +927,12 @@ export class ConversationRenderer {
     }, { signal: this.abort.signal });
     const composer = this.$<HTMLFormElement>('.cw-composer');
     composer.addEventListener('submit', (event) => { event.preventDefault(); this.submitComposer(); }, { signal: this.abort.signal });
-    this.$<HTMLTextAreaElement>('.cw-composer textarea').addEventListener('keydown', (event) => {
+    const composerInput = this.$<HTMLTextAreaElement>('.cw-composer textarea');
+    composerInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); this.submitComposer(); }
     }, { signal: this.abort.signal });
-    this.$<HTMLTextAreaElement>('.cw-composer textarea').addEventListener('input', () => this.saveDraft(), { signal: this.abort.signal });
+    composerInput.addEventListener('input', () => { this.saveDraft(); this.updateComposerControls(); }, { signal: this.abort.signal });
+    composerInput.addEventListener('paste', (event) => this.handleComposerPaste(event), { signal: this.abort.signal });
     this.$<HTMLSelectElement>('.cw-composer [name="model"]').addEventListener('change', () => {
       this.renderConversationEffortOptions();
       this.submitConversationSettings();
@@ -472,6 +941,15 @@ export class ConversationRenderer {
   }
 
   private $<T extends HTMLElement = HTMLElement>(selector: string): T { return this.host.querySelector<T>(selector)!; }
+
+  private requestCloseSideChat(conversationId: string): void {
+    const conversation = this.state?.conversations.find((item) => item.conversationId === conversationId);
+    if (!conversation || conversation.kind !== 'side_chat') return;
+    if (!window.confirm(
+      'Close this side chat? This permanently discards its temporary thread, messages, unsent draft, and staged attachments, including unsent work in another open tab. This cannot be undone.',
+    )) return;
+    this.actions.closeSideChat(conversationId);
+  }
 
   setCollapsed(collapsed: boolean): void {
     this.collapsed = collapsed;
@@ -484,6 +962,9 @@ export class ConversationRenderer {
 
   render(state: ConversationState): void {
     this.state = state;
+    for (const conversation of state.conversations) {
+      if (conversation.kind === 'side_chat') this.knownSideChatIds.add(conversation.conversationId);
+    }
     const current = currentConversation(state);
     const hasPursuit = !!state.selectedPursuitId;
     this.$('.cw-no-pursuit').hidden = hasPursuit || !!current;
@@ -493,7 +974,92 @@ export class ConversationRenderer {
     this.renderConnection(state.connection);
     this.renderPicker(state);
     this.renderList(state);
+    this.renderTabs(state, current);
     this.renderDetail(state, current);
+  }
+
+  private renderTabs(state: ConversationState, conversation: ReturnType<typeof currentConversation>): void {
+    const parent = conversation?.kind === 'side_chat'
+      ? state.conversations.find((item) => item.conversationId === conversation.parentConversationId) ?? null
+      : conversation;
+    const tabs = this.$('.cw-conversation-tabs');
+    const focused = tabs.contains(document.activeElement) ? document.activeElement as HTMLButtonElement : null;
+    const focusKey = focused ? {
+      conversationId: focused.dataset.conversationId,
+      closeSideChat: focused.dataset.closeSideChat,
+      newSideChat: focused.dataset.newSideChat,
+    } : null;
+    if (focusKey?.newSideChat && state.creatingSideChat) {
+      tabs.dataset.pendingSideChatFocus = focusKey.newSideChat;
+    }
+    const pendingSideChatFocus = tabs.dataset.pendingSideChatFocus;
+    if (!conversation || !parent) {
+      delete tabs.dataset.pendingSideChatFocus;
+      tabs.replaceChildren();
+      return;
+    }
+    const nodes: HTMLElement[] = [];
+    const addTab = (summary: NonNullable<ReturnType<typeof currentConversation>>, label: string, closeable: boolean): void => {
+      const wrapper = element('span', 'cw-conversation-tab-wrap');
+      wrapper.setAttribute('role', 'presentation');
+      const tab = element('button', 'cw-conversation-tab');
+      tab.type = 'button';
+      tab.dataset.conversationId = summary.conversationId;
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-selected', String(summary.conversationId === conversation.conversationId));
+      tab.tabIndex = summary.conversationId === conversation.conversationId ? 0 : -1;
+      tab.title = label;
+      tab.textContent = label;
+      wrapper.append(tab);
+      if (closeable) {
+        const close = element('button', 'cw-close-side-chat');
+        close.type = 'button';
+        close.dataset.closeSideChat = summary.conversationId;
+        close.textContent = '×';
+        close.setAttribute('aria-label', `Close ${label}`);
+        close.title = `Close ${label}`;
+        wrapper.append(close);
+      }
+      nodes.push(wrapper);
+    };
+    addTab(parent, parent.title.trim() || 'Conversation', false);
+    for (const conversationId of state.sessionSideChatIds) {
+      const sideChat = state.conversations.find((item) => item.conversationId === conversationId);
+      if (!sideChat || sideChat.kind !== 'side_chat' || sideChat.parentConversationId !== parent.conversationId) continue;
+      addTab(sideChat, sideChatTitle(sideChat.title), true);
+    }
+    const create = element('button', 'cw-new-side-chat');
+    create.type = 'button';
+    create.dataset.newSideChat = parent.conversationId;
+    create.textContent = state.creatingSideChat ? '…' : '+';
+    create.disabled = state.creatingSideChat || parent.archived;
+    create.setAttribute('aria-label', state.creatingSideChat ? 'Creating side chat' : 'New side chat');
+    create.title = state.creatingSideChat ? 'Creating side chat…' : 'New side chat';
+    nodes.push(create);
+    tabs.replaceChildren(...nodes);
+    if (focusKey || pendingSideChatFocus) {
+      const buttons = [...tabs.querySelectorAll<HTMLButtonElement>('button')];
+      const selected = buttons.find((button) => button.getAttribute('aria-selected') === 'true');
+      const retained = buttons.find((button) =>
+        button.dataset.conversationId === focusKey?.conversationId
+        && button.dataset.closeSideChat === focusKey?.closeSideChat
+        && button.dataset.newSideChat === focusKey?.newSideChat);
+      const createFocusParent = pendingSideChatFocus ?? focusKey?.newSideChat;
+      const openedFromCreate = !!createFocusParent
+        && conversation.kind === 'side_chat'
+        && conversation.parentConversationId === createFocusParent;
+      const failedCreate = !!pendingSideChatFocus
+        && !state.creatingSideChat
+        && conversation.conversationId === pendingSideChatFocus;
+      const restoredCreate = failedCreate
+        ? buttons.find((button) => button.dataset.newSideChat === pendingSideChatFocus && !button.disabled)
+        : null;
+      const target = openedFromCreate || failedCreate
+        ? restoredCreate ?? selected
+        : retained && !retained.disabled ? retained : selected;
+      target?.focus();
+      if (openedFromCreate || failedCreate) delete tabs.dataset.pendingSideChatFocus;
+    }
   }
 
   private renderError(message: string | null): void {
@@ -661,6 +1227,9 @@ export class ConversationRenderer {
     const status = this.$('.cw-list-status');
     status.textContent = state.loadingWorkspace || state.loadingPursuit ? 'Loading conversations…' : '';
     const list = this.$('.cw-conversation-list');
+    const focusedId = list.contains(document.activeElement)
+      ? (document.activeElement as HTMLElement).dataset.conversationId
+      : undefined;
     list.replaceChildren();
     const conversations = conversationsForPursuit(state);
     if (!conversations.length && !state.loadingPursuit) {
@@ -671,12 +1240,25 @@ export class ConversationRenderer {
       const button = element('button', 'cw-conversation');
       button.type = 'button';
       button.dataset.conversationId = conversation.conversationId;
-      const title = appendText(button, 'span', conversation.title);
+      const heading = element('span', 'cw-conversation-heading');
+      const title = appendText(heading, 'span', conversation.title);
       title.className = 'cw-conversation-title';
+      const unreadFinal = conversation.lastFinalEventId !== null
+        && conversation.lastFinalEventId > (conversation.lastReadEventId ?? 0);
+      if (unreadFinal) {
+        appendText(heading, 'span', 'NEW', 'cw-conversation-new');
+        button.classList.add('cw-has-unread-final');
+        button.setAttribute('aria-label', `${conversation.title}, new final response`);
+      }
+      button.append(heading);
       const host = state.hosts.find((item) => item.hostId === conversation.hostId)?.displayName || conversation.hostId;
       appendText(button, 'small', [host, conversation.status].filter(Boolean).join(' · '));
       button.addEventListener('click', () => this.actions.openConversation(conversation.conversationId), { signal: this.abort.signal });
       list.append(button);
+    }
+    if (focusedId) {
+      const buttons = [...list.querySelectorAll<HTMLButtonElement>('.cw-conversation')];
+      (buttons.find((button) => button.dataset.conversationId === focusedId) ?? buttons[0])?.focus();
     }
   }
 
@@ -692,26 +1274,63 @@ export class ConversationRenderer {
       this.lastConversationId = conversation.conversationId;
       this.loadDraft(conversation.conversationId);
       this.activitySignature = '\u0000';
+      this.activityFirstEventId = null;
     }
-    this.$('.cw-detail-title').textContent = conversation.title;
+    this.$('.cw-detail-title').textContent = conversation.kind === 'side_chat' ? sideChatTitle(conversation.title) : conversation.title;
     const host = state.hosts.find((item) => item.hostId === conversation.hostId)?.displayName || conversation.hostId;
     const project = state.projects.find((item) => item.projectId === conversation.projectId);
     this.$('.cw-detail-location').textContent = [host, project?.cwd || project?.label || conversation.projectId].filter(Boolean).join(' · ');
     this.$('.cw-turn-status').textContent = state.loadingConversation
       ? 'Loading history…'
-      : state.sendingConversationId === conversation.conversationId ? 'Sending…' : conversation.status || 'unknown';
+      : state.sendingConversationIds.includes(conversation.conversationId) ? 'Sending…' : conversation.status || 'unknown';
+    const loadEarlier = this.$<HTMLButtonElement>('.cw-load-earlier');
+    const loadingEarlier = state.loadingEarlierConversationIds.includes(conversation.conversationId);
+    const hasEarlierEvents = Boolean(state.hasEarlierEventsByConversation[conversation.conversationId]);
+    const moveHistoryFocus = !hasEarlierEvents && !loadEarlier.hidden && document.activeElement === loadEarlier;
+    loadEarlier.hidden = !hasEarlierEvents;
+    loadEarlier.disabled = loadingEarlier;
+    loadEarlier.textContent = loadingEarlier ? 'Loading earlier messages…' : 'Load earlier messages';
+    if (moveHistoryFocus) {
+      queueMicrotask(() => this.$('.cw-activity').focus({ preventScroll: true }));
+    }
+    this.$('.cw-side-chat-note').hidden = conversation.kind !== 'side_chat';
     const running = ['starting', 'running', 'in_progress', 'waiting_approval', 'waiting approval', 'waiting_input', 'waiting input'].includes(conversation.status.toLowerCase());
-    const interrupting = state.interruptingConversationId === conversation.conversationId;
+    const interrupting = state.interruptingConversationIds.includes(conversation.conversationId);
     this.$<HTMLButtonElement>('.cw-stop').disabled = !running || interrupting;
     this.$<HTMLButtonElement>('.cw-stop').textContent = interrupting ? 'Stopping…' : 'Stop';
-    this.$<HTMLButtonElement>('.cw-composer button[type="submit"]').disabled = !conversationCanSend(state, conversation);
     this.$<HTMLTextAreaElement>('.cw-composer textarea').disabled = conversation.archived;
+    if (!state.sendingConversationIds.includes(conversation.conversationId)) {
+      for (const staged of this.stagedAttachments.get(conversation.conversationId) ?? []) staged.submitting = false;
+    }
+    this.restoreStagedAttachments(
+      conversation.conversationId,
+      state.attachmentsByConversation[conversation.conversationId] ?? [],
+    );
+    this.renderStagedAttachments(conversation.conversationId);
+    this.updateComposerControls();
     this.renderConversationModelOptions(conversation);
     const reconnect = this.$<HTMLButtonElement>('.cw-reconnect');
     reconnect.hidden = conversation.status.toLowerCase() !== 'unknown';
-    reconnect.disabled = state.loadingConversation || state.reconcilingConversationId === conversation.conversationId;
-    reconnect.textContent = state.reconcilingConversationId === conversation.conversationId ? 'Checking…' : 'Reconnect and check status';
-    this.renderActivity(state.eventsByConversation[conversation.conversationId] ?? [], changed);
+    const reconciling = state.reconcilingConversationIds.includes(conversation.conversationId);
+    reconnect.disabled = state.loadingConversation || reconciling;
+    reconnect.textContent = reconciling ? 'Checking…' : 'Reconnect and check status';
+    const archive = this.$<HTMLButtonElement>('.cw-archive');
+    const sessionSideChats = state.sessionSideChatIds.map((conversationId) =>
+      state.conversations.find((item) => item.conversationId === conversationId));
+    const hasSessionSideChat = conversation.kind !== 'side_chat' && (
+      state.creatingSideChat
+      || sessionSideChats.some((sideChat) => !sideChat)
+      || sessionSideChats.some((sideChat) => sideChat?.kind === 'side_chat'
+        && sideChat.parentConversationId === conversation.conversationId)
+    );
+    archive.hidden = conversation.kind === 'side_chat';
+    archive.disabled = hasSessionSideChat;
+    archive.title = hasSessionSideChat ? 'Close side chats before archiving' : 'Archive conversation';
+    this.renderActivity(
+      state.eventsByConversation[conversation.conversationId] ?? [],
+      state.attachmentsByConversation[conversation.conversationId] ?? [],
+      changed,
+    );
     this.renderPending(
       state.pendingRequests.filter((request) => request.conversationId === conversation.conversationId),
       new Set(state.respondingRequestKeys),
@@ -786,21 +1405,81 @@ export class ConversationRenderer {
     this.failedModelCatalogs.delete(hostId);
   }
 
-  private renderActivity(events: ConversationEvent[], forceBottom: boolean): void {
-    const signature = events.map((event) => event.eventId).join('\u001f');
+  private renderActivity(events: ConversationEvent[], attachments: ConversationAttachment[], forceBottom: boolean): void {
+    const signature = `${events.map((event) => event.eventId).join('\u001f')}\u001e${attachments.map((attachment) => `${attachment.attachmentId}:${attachment.state}`).join('\u001f')}`;
     if (signature === this.activitySignature && !forceBottom) return;
     this.activitySignature = signature;
     const activity = this.$('.cw-activity');
+    const nextFirstEventId = events[0]?.eventId ?? null;
+    const prepended = this.activityFirstEventId !== null
+      && nextFirstEventId !== this.activityFirstEventId
+      && events.some((event) => event.eventId === this.activityFirstEventId);
+    this.activityFirstEventId = nextFirstEventId;
+    const previousScrollHeight = activity.scrollHeight;
+    const previousScrollTop = activity.scrollTop;
+    const disclosureStates = new Map<string, { open: boolean; label: string }>();
+    for (const details of activity.querySelectorAll<HTMLDetailsElement>('details[data-activity-key]')) {
+      const key = details.dataset.activityKey;
+      if (key) disclosureStates.set(key, { open: details.open, label: details.querySelector(':scope > summary')?.textContent ?? '' });
+    }
+    const active = document.activeElement instanceof HTMLElement && activity.contains(document.activeElement)
+      ? document.activeElement
+      : null;
+    const activeOwner = active?.closest<HTMLElement>('[data-activity-key]') ?? null;
+    const focusableSelector = 'a[href],button,summary,input,select,textarea,[tabindex]:not([tabindex="-1"])';
+    const activeFocusables = activeOwner ? [...activeOwner.querySelectorAll<HTMLElement>(focusableSelector)] : [];
+    const focusedActivity = activeOwner?.dataset.activityKey && active
+      ? { key: activeOwner.dataset.activityKey, index: activeFocusables.indexOf(active) }
+      : null;
+    const reusableImages = new Map<string, HTMLElement[]>();
+    for (const image of activity.querySelectorAll<HTMLElement>('.cw-sent-image[data-attachment-id]')) {
+      const id = image.dataset.attachmentId;
+      if (!id) continue;
+      const entries = reusableImages.get(id) ?? [];
+      entries.push(image);
+      reusableImages.set(id, entries);
+    }
     const nearBottom = forceBottom || activity.scrollHeight - activity.scrollTop - activity.clientHeight < 90;
     const hadContent = activity.childElementCount > 0;
-    const nodes = activityNodes(events);
+    const nodes = activityNodes(events, attachments, reusableImages);
     if (!nodes.length) {
       activity.replaceChildren();
       appendText(activity, 'p', 'No activity yet. Send the first message when you are ready.', 'cw-empty-copy');
-    } else activity.replaceChildren(...nodes);
+    } else {
+      activity.replaceChildren(...nodes);
+      for (const details of activity.querySelectorAll<HTMLDetailsElement>('details[data-activity-key]')) {
+        const previous = disclosureStates.get(details.dataset.activityKey ?? '');
+        if (!previous) continue;
+        const nextLabel = details.querySelector(':scope > summary')?.textContent ?? '';
+        const commentaryJustCompleted = details.classList.contains('cw-commentary-group')
+          && previous.label === 'Working…'
+          && nextLabel.startsWith('Work details');
+        if (!commentaryJustCompleted) details.open = previous.open;
+      }
+      if (focusedActivity && focusedActivity.index >= 0) {
+        const nextOwner = [...activity.querySelectorAll<HTMLElement>('[data-activity-key]')]
+          .find((node) => node.dataset.activityKey === focusedActivity.key);
+        const nextFocusables = nextOwner ? [...nextOwner.querySelectorAll<HTMLElement>(focusableSelector)] : [];
+        let nextFocus = nextFocusables[focusedActivity.index] ?? nextFocusables[0];
+        let closedAncestor: HTMLDetailsElement | null = null;
+        for (
+          let ancestor = nextFocus?.parentElement ?? null;
+          ancestor && activity.contains(ancestor);
+          ancestor = ancestor.parentElement
+        ) {
+          if (ancestor instanceof HTMLDetailsElement && !ancestor.open) closedAncestor = ancestor;
+        }
+        if (closedAncestor) {
+          nextFocus = closedAncestor.querySelector<HTMLElement>(':scope > summary') ?? nextFocus;
+        }
+        nextFocus?.focus({ preventScroll: true });
+      }
+    }
     if (!nodes.length) return;
     requestAnimationFrame(() => {
-      if (nearBottom) this.scrollToBottom();
+      if (prepended && hadContent && !forceBottom) {
+        activity.scrollTop = previousScrollTop + (activity.scrollHeight - previousScrollHeight);
+      } else if (nearBottom) this.scrollToBottom();
       else if (hadContent) this.$('.cw-unread').hidden = false;
     });
   }
@@ -964,19 +1643,375 @@ export class ConversationRenderer {
     card.append(form);
   }
 
+  private setComposerNotice(message: string): void {
+    const notice = this.$('.cw-composer-notice');
+    notice.textContent = message;
+    notice.hidden = !message;
+  }
+
+  private createPreviewUrl(file: File): string {
+    try { return typeof URL.createObjectURL === 'function' ? URL.createObjectURL(file) : ''; }
+    catch { return ''; }
+  }
+
+  private revokePreviewUrl(value: string): void {
+    if (!value) return;
+    try { if (typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(value); }
+    catch { /* Preview cleanup is best-effort. */ }
+  }
+
+  private handleComposerPaste(event: ClipboardEvent): void {
+    const conversationId = this.lastConversationId;
+    const conversation = this.state && currentConversation(this.state);
+    const clipboard = event.clipboardData;
+    if (!conversationId || !conversation || conversation.archived || !clipboard) return;
+    const images = [...clipboard.files].filter((file) => file.type.startsWith('image/'));
+    const pastedText = clipboard.getData('text/plain');
+    const largeText = pastedText.length >= LARGE_PASTE_CHARACTER_LIMIT;
+    if (!images.length && !largeText) return;
+    event.preventDefault();
+    this.setComposerNotice('');
+    for (const file of images) this.stageAttachment(conversationId, file, 'image', file.name || 'Pasted image');
+    if (largeText) {
+      const sequence = ++this.attachmentSequence;
+      const file = new File([pastedText], `pasted-text-${sequence}.txt`, { type: 'text/plain;charset=utf-8' });
+      this.stageAttachment(conversationId, file, 'pasted_text', 'Pasted text');
+    } else if (pastedText) {
+      const input = this.$<HTMLTextAreaElement>('.cw-composer textarea');
+      input.setRangeText(pastedText, input.selectionStart, input.selectionEnd, 'end');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+
+  private stageAttachment(conversationId: string, file: File, kind: StagedAttachment['kind'], displayName: string): void {
+    const uploadId = attachmentUploadId();
+    const staged: StagedAttachment = {
+      clientId: uploadId,
+      uploadId,
+      conversationId,
+      file,
+      displayName,
+      kind,
+      previewUrl: kind === 'image' ? this.createPreviewUrl(file) : '',
+      status: 'uploading',
+      attachment: null,
+      error: '',
+      removed: false,
+      submitting: false,
+      removing: false,
+    };
+    const current = this.stagedAttachments.get(conversationId) ?? [];
+    this.stagedAttachments.set(conversationId, [...current, staged]);
+    if (this.lastConversationId === conversationId) {
+      this.renderStagedAttachments(conversationId);
+      this.updateComposerControls();
+    }
+    this.uploadStagedAttachment(staged);
+  }
+
+  private uploadStagedAttachment(staged: StagedAttachment): void {
+    const { conversationId, file } = staged;
+    if (!file || staged.removed) return;
+    staged.status = 'uploading';
+    staged.error = '';
+    staged.submitting = false;
+    if (this.lastConversationId === conversationId) {
+      this.renderStagedAttachments(conversationId);
+      this.updateComposerControls();
+    }
+    void this.actions.uploadAttachment(conversationId, file, staged.uploadId).then(async (attachment) => {
+      staged.attachment = attachment;
+      staged.status = 'ready';
+      if (staged.removed) {
+        const suppressed = this.suppressedAttachmentIds.get(conversationId) ?? new Set<string>();
+        suppressed.add(attachment.attachmentId);
+        this.suppressedAttachmentIds.set(conversationId, suppressed);
+        try {
+          await this.actions.deleteAttachment(conversationId, attachment.attachmentId);
+          this.stagedAttachments.set(conversationId, (this.stagedAttachments.get(conversationId) ?? []).filter((entry) => entry !== staged));
+          this.revokePreviewUrl(staged.previewUrl);
+        } catch (error: unknown) {
+          suppressed.delete(attachment.attachmentId);
+          staged.removed = false;
+          staged.removing = false;
+          if (this.lastConversationId === conversationId) {
+            this.setComposerNotice(error instanceof Error ? `Could not remove attachment: ${error.message}` : 'Could not remove attachment.');
+            this.renderStagedAttachments(conversationId);
+            this.updateComposerControls();
+          }
+        }
+        return;
+      }
+      if (this.lastConversationId === conversationId) {
+        this.renderStagedAttachments(conversationId);
+        this.updateComposerControls();
+      }
+    }).catch((error: unknown) => {
+      if (staged.removed) {
+        this.stagedAttachments.set(conversationId, (this.stagedAttachments.get(conversationId) ?? []).filter((entry) => entry !== staged));
+        this.revokePreviewUrl(staged.previewUrl);
+        return;
+      }
+      staged.status = 'failed';
+      staged.error = error instanceof Error ? error.message : String(error);
+      if (this.lastConversationId === conversationId) {
+        this.renderStagedAttachments(conversationId);
+        this.updateComposerControls();
+      }
+    });
+  }
+
+  private retryStagedAttachment(conversationId: string, clientId: string): void {
+    const staged = (this.stagedAttachments.get(conversationId) ?? [])
+      .find((entry) => entry.clientId === clientId);
+    if (!staged || staged.status !== 'failed' || !staged.file || staged.removed || staged.removing || staged.submitting) return;
+    this.setComposerNotice('');
+    this.uploadStagedAttachment(staged);
+  }
+
+  private restoreStagedAttachments(conversationId: string, attachments: ConversationAttachment[]): void {
+    const current = this.stagedAttachments.get(conversationId) ?? [];
+    const suppressed = this.suppressedAttachmentIds.get(conversationId) ?? new Set<string>();
+    const byAttachmentId = new Map(
+      current.flatMap((entry) => entry.attachment ? [[entry.attachment.attachmentId, entry] as const] : []),
+    );
+    for (const attachment of attachments) {
+      const existing = byAttachmentId.get(attachment.attachmentId);
+      if (attachment.state.toLowerCase() !== 'staged') {
+        if (existing && !existing.submitting) {
+          existing.removed = true;
+          this.revokePreviewUrl(existing.previewUrl);
+        }
+        continue;
+      }
+      if (suppressed.has(attachment.attachmentId)) continue;
+      if (existing) {
+        existing.attachment = attachment;
+        existing.status = 'ready';
+        existing.error = '';
+        continue;
+      }
+      const kind: StagedAttachment['kind'] = attachment.kind === 'image' || attachment.mediaType.startsWith('image/') ? 'image' : 'pasted_text';
+      const restored: StagedAttachment = {
+        clientId: attachment.attachmentId,
+        uploadId: attachment.attachmentId,
+        conversationId,
+        file: null,
+        displayName: attachment.kind === 'pasted_text' ? 'Pasted text' : attachment.displayName,
+        kind,
+        previewUrl: '',
+        status: 'ready',
+        attachment,
+        error: '',
+        removed: false,
+        submitting: false,
+        removing: false,
+      };
+      current.push(restored);
+      byAttachmentId.set(attachment.attachmentId, restored);
+    }
+    this.stagedAttachments.set(conversationId, current.filter((entry) => !entry.removed || entry.removing));
+  }
+
+  private renderStagedAttachments(conversationId: string): void {
+    const parent = this.$('.cw-staged-attachments');
+    const nodes: HTMLElement[] = [];
+    for (const staged of this.stagedAttachments.get(conversationId) ?? []) {
+      if (staged.removed) continue;
+      const chip = element('article', `cw-attachment-chip cw-${staged.kind.replace('_', '-')}`);
+      chip.dataset.attachmentId = staged.attachment?.attachmentId ?? staged.uploadId;
+      if (staged.kind === 'image') {
+        const image = element('img');
+        image.alt = '';
+        image.src = staged.previewUrl || (staged.attachment ? attachmentReadUrl(staged.attachment) : '');
+        chip.append(image);
+      } else appendText(chip, 'span', 'TXT', 'cw-file-icon');
+      const copy = element('span', 'cw-attachment-copy');
+      appendText(copy, 'strong', staged.displayName);
+      const state = staged.status === 'uploading'
+        ? 'Uploading…'
+        : staged.status === 'failed'
+          ? 'Upload failed'
+          : [formatByteSize(staged.attachment?.byteSize ?? staged.file?.size ?? 0), staged.removing ? 'Removing…' : staged.submitting ? 'Sending…' : 'Ready'].filter(Boolean).join(' · ');
+      const detail = appendText(copy, 'small', state);
+      if (staged.error) detail.title = staged.error;
+      const controls = element('span', 'cw-attachment-actions');
+      if (staged.status === 'failed' && staged.file) {
+        const retry = element('button', 'cw-attachment-retry');
+        retry.type = 'button';
+        retry.textContent = 'Retry';
+        retry.disabled = staged.submitting || staged.removing;
+        retry.setAttribute('aria-label', `Retry ${staged.displayName}`);
+        retry.addEventListener('click', () => this.retryStagedAttachment(conversationId, staged.clientId), { signal: this.abort.signal });
+        controls.append(retry);
+      }
+      const remove = element('button', 'cw-attachment-remove');
+      remove.type = 'button';
+      remove.textContent = '×';
+      remove.disabled = staged.submitting || staged.removing;
+      remove.setAttribute('aria-label', `Remove ${staged.displayName}`);
+      remove.title = `Remove ${staged.displayName}`;
+      remove.addEventListener('click', () => this.removeStagedAttachment(conversationId, staged.clientId), { signal: this.abort.signal });
+      controls.append(remove);
+      chip.append(copy, controls);
+      nodes.push(chip);
+    }
+    parent.replaceChildren(...nodes);
+    parent.hidden = nodes.length === 0;
+  }
+
+  private removeStagedAttachment(conversationId: string, clientId: string): void {
+    const current = this.stagedAttachments.get(conversationId) ?? [];
+    const staged = current.find((entry) => entry.clientId === clientId);
+    if (!staged || staged.submitting || staged.removing) return;
+    if (staged.attachment) {
+      this.setComposerNotice('');
+      const suppressed = this.suppressedAttachmentIds.get(conversationId) ?? new Set<string>();
+      suppressed.add(staged.attachment.attachmentId);
+      this.suppressedAttachmentIds.set(conversationId, suppressed);
+      staged.removing = true;
+      if (this.lastConversationId === conversationId) {
+        this.renderStagedAttachments(conversationId);
+        this.updateComposerControls();
+      }
+      void this.actions.deleteAttachment(conversationId, staged.attachment.attachmentId).then(() => {
+        this.stagedAttachments.set(conversationId, (this.stagedAttachments.get(conversationId) ?? []).filter((entry) => entry !== staged));
+        this.revokePreviewUrl(staged.previewUrl);
+        if (this.lastConversationId === conversationId) {
+          this.renderStagedAttachments(conversationId);
+          this.updateComposerControls();
+        }
+      }).catch((error: unknown) => {
+        suppressed.delete(staged.attachment!.attachmentId);
+        staged.removed = false;
+        staged.removing = false;
+        if (this.lastConversationId === conversationId) {
+          this.setComposerNotice(error instanceof Error ? `Could not remove attachment: ${error.message}` : 'Could not remove attachment.');
+          this.renderStagedAttachments(conversationId);
+          this.updateComposerControls();
+        }
+      });
+      return;
+    }
+    staged.removed = true;
+    staged.removing = staged.status === 'uploading';
+    if (!staged.removing) {
+      this.stagedAttachments.set(conversationId, current.filter((entry) => entry !== staged));
+      this.revokePreviewUrl(staged.previewUrl);
+    }
+    if (this.lastConversationId === conversationId) {
+      this.renderStagedAttachments(conversationId);
+      this.updateComposerControls();
+    }
+  }
+
+  private updateComposerControls(): void {
+    if (!this.state) return;
+    const conversation = currentConversation(this.state);
+    const button = this.$<HTMLButtonElement>('.cw-composer button[type="submit"]');
+    if (!conversation) { button.disabled = true; return; }
+    const staged = (this.stagedAttachments.get(conversation.conversationId) ?? []).filter((entry) => !entry.removed);
+    const ready = staged.filter((entry) => entry.status === 'ready' && entry.attachment);
+    const unavailable = staged.some((entry) => entry.status !== 'ready' || entry.submitting || entry.removing);
+    const hasText = !!this.$<HTMLTextAreaElement>('.cw-composer textarea').value.trim();
+    button.disabled = !conversationCanSend(this.state, conversation) || unavailable || !hasText && ready.length === 0;
+  }
+
   private submitComposer(): void {
     const input = this.$<HTMLTextAreaElement>('.cw-composer textarea');
     if (this.$<HTMLButtonElement>('.cw-composer button[type="submit"]').disabled) return;
     const text = input.value.trim();
-    if (text) this.actions.sendMessage(text);
+    const conversationId = this.lastConversationId;
+    if (!conversationId) return;
+    const staged = (this.stagedAttachments.get(conversationId) ?? [])
+      .filter((entry) => !entry.removed && entry.status === 'ready' && entry.attachment);
+    const attachmentIds = staged.map((entry) => entry.attachment!.attachmentId);
+    if (!text && !attachmentIds.length) return;
+    for (const entry of staged) entry.submitting = true;
+    this.renderStagedAttachments(conversationId);
+    this.updateComposerControls();
+    void Promise.resolve(this.actions.sendMessage(text, attachmentIds)).then((accepted) => {
+      if (!accepted) this.releaseSubmittingAttachments(conversationId, attachmentIds);
+    }).catch(() => this.releaseSubmittingAttachments(conversationId, attachmentIds));
   }
 
-  clearComposerIfUnchanged(submittedText: string): void {
+  private releaseSubmittingAttachments(conversationId: string, attachmentIds: string[]): void {
+    const submitted = new Set(attachmentIds);
+    for (const staged of this.stagedAttachments.get(conversationId) ?? []) {
+      if (staged.attachment && submitted.has(staged.attachment.attachmentId)) staged.submitting = false;
+    }
+    if (this.lastConversationId === conversationId) {
+      this.renderStagedAttachments(conversationId);
+      this.updateComposerControls();
+    }
+  }
+
+  clearComposerIfUnchanged(
+    submittedText: string,
+    submittedAttachmentIds: string[] = [],
+    conversationId: string | null = this.lastConversationId,
+  ): void {
     const input = this.$<HTMLTextAreaElement>('.cw-composer textarea');
-    if (input.value.trim() !== submittedText) return;
-    input.value = '';
-    try { if (this.lastConversationId) localStorage.removeItem(this.draftKey(this.lastConversationId)); }
-    catch { /* Storage can be unavailable in hardened browser modes. */ }
+    if (!conversationId) return;
+    const sideChat = this.knownSideChatIds.has(conversationId);
+    if (this.lastConversationId === conversationId) {
+      if (input.value.trim() === submittedText) {
+        input.value = '';
+        if (sideChat) this.storeSideChatDraft(conversationId, '');
+        else {
+          try { localStorage.removeItem(this.draftKey(conversationId)); }
+          catch { /* Storage can be unavailable in hardened browser modes. */ }
+        }
+      }
+    } else {
+      if (sideChat) {
+        if (this.sideChatDraftValue(conversationId).trim() === submittedText) this.storeSideChatDraft(conversationId, '');
+      } else {
+        try {
+          const saved = localStorage.getItem(this.draftKey(conversationId));
+          if ((saved ?? '').trim() === submittedText) localStorage.removeItem(this.draftKey(conversationId));
+        } catch { /* Storage can be unavailable in hardened browser modes. */ }
+      }
+    }
+    const submitted = new Set(submittedAttachmentIds);
+    const suppressed = this.suppressedAttachmentIds.get(conversationId) ?? new Set<string>();
+    for (const attachmentId of submitted) suppressed.add(attachmentId);
+    this.suppressedAttachmentIds.set(conversationId, suppressed);
+    const remaining: StagedAttachment[] = [];
+    for (const staged of this.stagedAttachments.get(conversationId) ?? []) {
+      if (staged.attachment && submitted.has(staged.attachment.attachmentId)) this.revokePreviewUrl(staged.previewUrl);
+      else remaining.push(staged);
+    }
+    this.stagedAttachments.set(conversationId, remaining);
+    if (this.lastConversationId === conversationId) {
+      this.renderStagedAttachments(conversationId);
+      this.updateComposerControls();
+    }
+  }
+
+  forgetConversation(conversationId: string): void {
+    for (const staged of this.stagedAttachments.get(conversationId) ?? []) {
+      staged.removed = true;
+      this.revokePreviewUrl(staged.previewUrl);
+    }
+    this.stagedAttachments.delete(conversationId);
+    this.suppressedAttachmentIds.delete(conversationId);
+    this.storeSideChatDraft(conversationId, '');
+    this.knownSideChatIds.delete(conversationId);
+    if (this.lastConversationId === conversationId) {
+      this.$<HTMLTextAreaElement>('.cw-composer textarea').value = '';
+      this.lastConversationId = null;
+      this.activitySignature = '';
+    }
+  }
+
+  focusConversationTab(conversationId: string): void {
+    queueMicrotask(() => {
+      const tabs = [...this.$('.cw-conversation-tabs').querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+      const tab = tabs.find((candidate) => candidate.dataset.conversationId === conversationId)
+        ?? tabs.find((candidate) => candidate.getAttribute('aria-selected') === 'true');
+      tab?.focus();
+    });
   }
 
   selectHost(hostId: string): void {
@@ -1007,9 +2042,31 @@ export class ConversationRenderer {
     return `rightmemory:conversation-draft:${encodeURIComponent(this.rootKey)}:${encodeURIComponent(conversationId)}`;
   }
 
+  private sideChatDraftKey(conversationId: string): string {
+    return `rightmemory:side-chat-draft:${encodeURIComponent(this.rootKey)}:${encodeURIComponent(conversationId)}`;
+  }
+
+  private sideChatDraftValue(conversationId: string): string {
+    try { return sessionStorage.getItem(this.sideChatDraftKey(conversationId)) ?? this.ephemeralDrafts.get(conversationId) ?? ''; }
+    catch { return this.ephemeralDrafts.get(conversationId) ?? ''; }
+  }
+
+  private storeSideChatDraft(conversationId: string, value: string): void {
+    if (value) this.ephemeralDrafts.set(conversationId, value);
+    else this.ephemeralDrafts.delete(conversationId);
+    try {
+      if (value) sessionStorage.setItem(this.sideChatDraftKey(conversationId), value);
+      else sessionStorage.removeItem(this.sideChatDraftKey(conversationId));
+    } catch { /* Keep the in-memory fallback when session storage is unavailable. */ }
+  }
+
   private saveDraft(conversationId = this.lastConversationId): void {
     if (!conversationId) return;
     const value = this.$<HTMLTextAreaElement>('.cw-composer textarea').value;
+    if (this.knownSideChatIds.has(conversationId)) {
+      this.storeSideChatDraft(conversationId, value);
+      return;
+    }
     try {
       if (value) localStorage.setItem(this.draftKey(conversationId), value);
       else localStorage.removeItem(this.draftKey(conversationId));
@@ -1017,6 +2074,10 @@ export class ConversationRenderer {
   }
 
   private loadDraft(conversationId: string): void {
+    if (this.knownSideChatIds.has(conversationId)) {
+      this.$<HTMLTextAreaElement>('.cw-composer textarea').value = this.sideChatDraftValue(conversationId);
+      return;
+    }
     try { this.$<HTMLTextAreaElement>('.cw-composer textarea').value = localStorage.getItem(this.draftKey(conversationId)) ?? ''; }
     catch { this.$<HTMLTextAreaElement>('.cw-composer textarea').value = ''; }
   }
@@ -1025,10 +2086,20 @@ export class ConversationRenderer {
     const activity = this.$('.cw-activity');
     activity.scrollTop = activity.scrollHeight;
     this.$('.cw-unread').hidden = true;
+    if (this.lastConversationId) this.actions.acknowledgeRead(this.lastConversationId);
+  }
+
+  isFollowingActivity(conversationId: string): boolean {
+    if (this.lastConversationId !== conversationId || this.$<HTMLElement>('.cw-detail-view').hidden) return false;
+    const activity = this.$('.cw-activity');
+    return activity.scrollHeight - activity.scrollTop - activity.clientHeight < 90;
   }
 
   destroy(): void {
     this.saveDraft();
+    for (const staged of this.stagedAttachments.values()) {
+      for (const attachment of staged) this.revokePreviewUrl(attachment.previewUrl);
+    }
     this.abort.abort();
   }
 }
