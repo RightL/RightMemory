@@ -11,12 +11,102 @@ from rightmemory.conversations import ConversationError
 from rightmemory.conversations.store import (
     DATABASE_RELATIVE_PATH,
     MAX_EVENT_PAYLOAD_BYTES,
+    MAX_INITIAL_CONTEXT_BYTES,
     ConversationStore,
 )
 
 
+_V6_CONVERSATION_COLUMNS = """
+    conversation_id, kind, parent_conversation_id, owner_session_id,
+    pursuit_id, pursuit_title_snapshot, host_id, project_id, provider,
+    thread_id, thread_title, model, reasoning_effort, lifecycle, status,
+    active_turn_id, last_final_event_id, last_read_event_id, created_at,
+    updated_at, last_activity_at
+"""
+
+
+def _downgrade_conversations_to_v6(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA foreign_keys = OFF")
+    connection.execute(
+        """
+        CREATE TABLE pursuit_conversations_v6(
+            conversation_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL DEFAULT 'pursuit'
+                CHECK(kind IN ('pursuit', 'side_chat')),
+            parent_conversation_id TEXT,
+            owner_session_id TEXT,
+            pursuit_id TEXT NOT NULL,
+            pursuit_title_snapshot TEXT,
+            host_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            provider TEXT NOT NULL DEFAULT 'codex' CHECK(provider = 'codex'),
+            thread_id TEXT NOT NULL,
+            thread_title TEXT,
+            model TEXT,
+            reasoning_effort TEXT,
+            lifecycle TEXT NOT NULL CHECK(lifecycle IN ('active', 'archived')),
+            status TEXT NOT NULL CHECK(status IN (
+                'idle', 'starting', 'running', 'waiting_approval',
+                'waiting_input', 'completed', 'failed', 'interrupted',
+                'unknown'
+            )),
+            active_turn_id TEXT,
+            last_final_event_id INTEGER,
+            last_read_event_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_activity_at TEXT NOT NULL,
+            UNIQUE(host_id, thread_id),
+            FOREIGN KEY(host_id)
+                REFERENCES conversation_hosts(host_id) ON DELETE RESTRICT,
+            FOREIGN KEY(project_id, host_id)
+                REFERENCES conversation_projects(project_id, host_id)
+                ON DELETE RESTRICT,
+            FOREIGN KEY(parent_conversation_id)
+                REFERENCES pursuit_conversations_v6(conversation_id)
+                ON DELETE SET NULL,
+            FOREIGN KEY(last_final_event_id)
+                REFERENCES conversation_events(event_id) ON DELETE SET NULL,
+            FOREIGN KEY(last_read_event_id)
+                REFERENCES conversation_events(event_id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute(
+        f"""
+        INSERT INTO pursuit_conversations_v6({_V6_CONVERSATION_COLUMNS})
+        SELECT {_V6_CONVERSATION_COLUMNS}
+        FROM pursuit_conversations
+        """
+    )
+    connection.execute("DROP TABLE pursuit_conversations")
+    connection.execute(
+        "ALTER TABLE pursuit_conversations_v6 RENAME TO pursuit_conversations"
+    )
+    connection.execute(
+        """
+        CREATE INDEX pursuit_conversations_by_pursuit
+        ON pursuit_conversations(pursuit_id, last_activity_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX pursuit_conversations_by_host
+        ON pursuit_conversations(host_id, last_activity_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX pursuit_conversations_by_kind
+        ON pursuit_conversations(kind, last_activity_at DESC)
+        """
+    )
+    connection.execute("PRAGMA user_version = 6")
+    connection.commit()
+
+
 class ConversationStoreTests(unittest.TestCase):
-    def test_empty_initialization_creates_root_local_v6_and_defaults(self):
+    def test_empty_initialization_creates_root_local_v7_and_defaults(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             store = ConversationStore(root)
@@ -26,7 +116,7 @@ class ConversationStoreTests(unittest.TestCase):
             self.assertEqual(store.db_path, root.resolve() / DATABASE_RELATIVE_PATH)
             self.assertTrue(store.db_path.is_file())
             self.assertEqual((root / ".runtime" / ".gitignore").read_text(encoding="utf-8"), "*\n")
-            self.assertEqual(initialized["schema_version"], 6)
+            self.assertEqual(initialized["schema_version"], 7)
             self.assertEqual(initialized["local_host"]["host_id"], "local")
             self.assertEqual(initialized["local_host"]["kind"], "local")
             self.assertEqual(initialized["default_local_project"]["project_id"], "local-root")
@@ -52,7 +142,7 @@ class ConversationStoreTests(unittest.TestCase):
                     for table in tables
                 }
 
-            self.assertEqual(version, 6)
+            self.assertEqual(version, 7)
             self.assertTrue(
                 {
                     "conversation_hosts",
@@ -74,12 +164,66 @@ class ConversationStoreTests(unittest.TestCase):
                     "last_final_event_id",
                     "last_read_event_id",
                     "owner_session_id",
+                    "execution_cwd",
+                    "initial_context_state",
+                    "initial_context_text",
+                    "initial_context_accepted_turn_id",
                 }.issubset(columns["pursuit_conversations"])
             )
             self.assertIn("marks_final", columns["conversation_events"])
             self.assertTrue(all("root_id" not in names for names in columns.values()))
             forbidden_credentials = {"password", "passphrase", "private_key", "api_key", "token"}
             self.assertTrue(all(forbidden_credentials.isdisjoint(names) for names in columns.values()))
+
+    def test_concurrent_initialization_is_safe_on_a_truly_fresh_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            stores = [ConversationStore(root) for _ in range(8)]
+            barrier = threading.Barrier(len(stores))
+
+            def initialize(store: ConversationStore) -> dict:
+                barrier.wait()
+                return store.initialize()
+
+            with ThreadPoolExecutor(max_workers=len(stores)) as executor:
+                initialized = list(executor.map(initialize, stores))
+
+            self.assertFalse(barrier.broken)
+            self.assertTrue(
+                all(result["schema_version"] == 7 for result in initialized)
+            )
+            self.assertEqual(
+                {result["local_host"]["host_id"] for result in initialized},
+                {"local"},
+            )
+            self.assertEqual(
+                {
+                    result["default_local_project"]["project_id"]
+                    for result in initialized
+                },
+                {"local-root"},
+            )
+            self.assertEqual(
+                (root / ".runtime" / ".gitignore").read_text(encoding="utf-8"),
+                "*\n",
+            )
+            with closing(sqlite3.connect(stores[0].db_path)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                host_count = connection.execute(
+                    "SELECT COUNT(*) FROM conversation_hosts WHERE host_id = 'local'"
+                ).fetchone()[0]
+                project_count = connection.execute(
+                    "SELECT COUNT(*) FROM conversation_projects "
+                    "WHERE project_id = 'local-root'"
+                ).fetchone()[0]
+                violations = connection.execute(
+                    "PRAGMA foreign_key_check"
+                ).fetchall()
+
+            self.assertEqual(version, 7)
+            self.assertEqual(host_count, 1)
+            self.assertEqual(project_count, 1)
+            self.assertEqual(violations, [])
 
     def test_version_one_database_upgrades_in_place_without_losing_rows(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -185,8 +329,8 @@ class ConversationStoreTests(unittest.TestCase):
                     ).fetchall()
                 }
 
-            self.assertEqual(initialized["schema_version"], 6)
-            self.assertEqual(version, 6)
+            self.assertEqual(initialized["schema_version"], 7)
+            self.assertEqual(version, 7)
             self.assertTrue(
                 {
                     "model",
@@ -196,6 +340,10 @@ class ConversationStoreTests(unittest.TestCase):
                     "last_final_event_id",
                     "last_read_event_id",
                     "owner_session_id",
+                    "execution_cwd",
+                    "initial_context_state",
+                    "initial_context_text",
+                    "initial_context_accepted_turn_id",
                 }.issubset(columns)
             )
             self.assertEqual(upgraded["thread_id"], "legacy-thread")
@@ -205,6 +353,10 @@ class ConversationStoreTests(unittest.TestCase):
             self.assertIsNone(upgraded["reasoning_effort"])
             self.assertIsNone(upgraded["last_final_event_id"])
             self.assertIsNone(upgraded["last_read_event_id"])
+            self.assertEqual(upgraded["execution_cwd"], str(root.resolve()))
+            self.assertEqual(upgraded["initial_context_state"], "unknown")
+            self.assertIsNone(upgraded["initial_context_text"])
+            self.assertIsNone(upgraded["initial_context_accepted_turn_id"])
             self.assertEqual(
                 store.list_events(conversation_id=legacy["conversation_id"]), [event]
             )
@@ -266,8 +418,8 @@ class ConversationStoreTests(unittest.TestCase):
                     ).fetchall()
                 }
 
-            self.assertEqual(initialized["schema_version"], 6)
-            self.assertEqual(version, 6)
+            self.assertEqual(initialized["schema_version"], 7)
+            self.assertEqual(version, 7)
             self.assertIn("owner_session_id", columns)
 
             parent = self._create_local_conversation(store)
@@ -316,7 +468,7 @@ class ConversationStoreTests(unittest.TestCase):
                 conversation_id=conversation["conversation_id"]
             )
 
-            self.assertEqual(initialized["schema_version"], 6)
+            self.assertEqual(initialized["schema_version"], 7)
             self.assertFalse(events[0]["marks_final"])
             self.assertEqual(events[0]["event_id"], older["event_id"])
             self.assertTrue(events[1]["marks_final"])
@@ -356,21 +508,25 @@ class ConversationStoreTests(unittest.TestCase):
                 thread_id=conversation["thread_id"],
             )
             store.resolve_pending_request("local", "epoch-v5", "request-v5")
-            tables = (
+            other_tables = (
                 "conversation_hosts",
                 "conversation_projects",
-                "pursuit_conversations",
                 "pursuit_conversation_preferences",
                 "conversation_events",
                 "conversation_attachments",
                 "pending_server_requests",
             )
             with closing(sqlite3.connect(store.db_path)) as connection:
+                _downgrade_conversations_to_v6(connection)
+                before_conversations = connection.execute(
+                    f"SELECT {_V6_CONVERSATION_COLUMNS} "
+                    "FROM pursuit_conversations ORDER BY rowid"
+                ).fetchall()
                 before = {
                     table: connection.execute(
                         f"SELECT * FROM {table} ORDER BY rowid"
                     ).fetchall()
-                    for table in tables
+                    for table in other_tables
                 }
                 connection.execute("PRAGMA user_version = 5")
                 connection.commit()
@@ -379,19 +535,24 @@ class ConversationStoreTests(unittest.TestCase):
 
             with closing(sqlite3.connect(store.db_path)) as connection:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
+                after_conversations = connection.execute(
+                    f"SELECT {_V6_CONVERSATION_COLUMNS} "
+                    "FROM pursuit_conversations ORDER BY rowid"
+                ).fetchall()
                 after = {
                     table: connection.execute(
                         f"SELECT * FROM {table} ORDER BY rowid"
                     ).fetchall()
-                    for table in tables
+                    for table in other_tables
                 }
                 create_sql = connection.execute(
                     "SELECT sql FROM sqlite_master "
                     "WHERE type = 'table' AND name = 'conversation_attachments'"
                 ).fetchone()[0]
 
-            self.assertEqual(initialized["schema_version"], 6)
-            self.assertEqual(version, 6)
+            self.assertEqual(initialized["schema_version"], 7)
+            self.assertEqual(version, 7)
+            self.assertEqual(after_conversations, before_conversations)
             self.assertEqual(after, before)
             self.assertIn("'file'", create_sql)
             self.assertEqual(
@@ -401,6 +562,575 @@ class ConversationStoreTests(unittest.TestCase):
             self.assertEqual(
                 store.get_pending_request_by_key(pending["request_key"])["state"],
                 "resolved",
+            )
+
+    def test_version_six_upgrade_preserves_rows_evidence_and_foreign_keys(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = ConversationStore(root)
+            store.initialize()
+            eligible = store.create_conversation(
+                conversation_id="legacy-eligible",
+                pursuit_id="P-eligible",
+                host_id="local",
+                project_id="local-root",
+                thread_id="thread-eligible",
+            )
+            store.upsert_host(
+                host_id="remote-v6",
+                kind="ssh",
+                display_name="Remote v6",
+                ssh_alias="remote-v6",
+            )
+            store.create_project(
+                project_id="remote-project-v6",
+                host_id="remote-v6",
+                cwd="/srv/legacy-project",
+                label="Legacy project",
+            )
+            unknown = store.create_conversation(
+                conversation_id="legacy-unknown",
+                pursuit_id="P-unknown",
+                host_id="remote-v6",
+                project_id="remote-project-v6",
+                thread_id="thread-unknown",
+            )
+            store.append_event(
+                conversation_id=unknown["conversation_id"],
+                kind="user.message",
+                payload={"text": "provider acceptance was never observed"},
+            )
+            accepted = store.create_conversation(
+                conversation_id="legacy-event-accepted",
+                pursuit_id="P-accepted",
+                host_id="local",
+                project_id="local-root",
+                thread_id="thread-event-accepted",
+            )
+            first_turn = store.append_event(
+                conversation_id=accepted["conversation_id"],
+                turn_id="turn-event-first",
+                kind="turn.started",
+                payload={"turn": {"id": "turn-event-first"}},
+            )
+            final = store.append_event(
+                conversation_id=accepted["conversation_id"],
+                turn_id="turn-event-later",
+                kind="turn.completed",
+                payload={"turn": {"id": "turn-event-later"}},
+                mark_final=True,
+            )
+            store.acknowledge_read(accepted["conversation_id"], final["event_id"])
+            side_chat = store.create_conversation(
+                conversation_id="legacy-active-side",
+                kind="side_chat",
+                pursuit_id=eligible["pursuit_id"],
+                parent_conversation_id=eligible["conversation_id"],
+                owner_session_id="legacy-owner",
+                host_id="local",
+                project_id="local-root",
+                thread_id="thread-active-side",
+                active_turn_id="turn-active-preferred",
+            )
+            store.append_event(
+                conversation_id=side_chat["conversation_id"],
+                turn_id="turn-side-event",
+                kind="turn.started",
+                payload={"turn": {"id": "turn-side-event"}},
+            )
+            attachment = store.create_attachment(
+                attachment_id="6" * 32,
+                conversation_id=accepted["conversation_id"],
+                kind="file",
+                display_name="preserved.bin",
+                media_type="application/octet-stream",
+                byte_size=3,
+                sha256="6" * 64,
+                relative_path=".runtime/web/attachments/" + "6" * 32 + ".bin",
+            )
+            pending = store.create_pending_request(
+                host_id="local",
+                connection_epoch="epoch-v6",
+                rpc_id="request-v6",
+                method="item/tool/requestUserInput",
+                payload={"question": "preserve child row"},
+                conversation_id=side_chat["conversation_id"],
+            )
+            store.resolve_pending_request("local", "epoch-v6", "request-v6")
+            other_tables = (
+                "conversation_hosts",
+                "conversation_projects",
+                "pursuit_conversation_preferences",
+                "conversation_events",
+                "conversation_attachments",
+                "pending_server_requests",
+            )
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                _downgrade_conversations_to_v6(connection)
+                before_conversations = connection.execute(
+                    f"SELECT {_V6_CONVERSATION_COLUMNS} "
+                    "FROM pursuit_conversations ORDER BY conversation_id"
+                ).fetchall()
+                before_other = {
+                    table: connection.execute(
+                        f"SELECT * FROM {table} ORDER BY rowid"
+                    ).fetchall()
+                    for table in other_tables
+                }
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                initialized = list(
+                    executor.map(
+                        lambda _: ConversationStore(root).initialize(), range(2)
+                    )
+                )
+
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                after_conversations = connection.execute(
+                    f"SELECT {_V6_CONVERSATION_COLUMNS} "
+                    "FROM pursuit_conversations ORDER BY conversation_id"
+                ).fetchall()
+                after_other = {
+                    table: connection.execute(
+                        f"SELECT * FROM {table} ORDER BY rowid"
+                    ).fetchall()
+                    for table in other_tables
+                }
+                violations = connection.execute(
+                    "PRAGMA foreign_key_check"
+                ).fetchall()
+                foreign_keys = {
+                    table: connection.execute(
+                        f"PRAGMA foreign_key_list({table})"
+                    ).fetchall()
+                    for table in (
+                        "pursuit_conversations",
+                        "conversation_events",
+                        "conversation_attachments",
+                        "pending_server_requests",
+                    )
+                }
+
+            self.assertTrue(all(value["schema_version"] == 7 for value in initialized))
+            self.assertEqual(version, 7)
+            self.assertEqual(after_conversations, before_conversations)
+            self.assertEqual(after_other, before_other)
+            self.assertEqual(violations, [])
+            for rows in foreign_keys.values():
+                self.assertTrue(
+                    all("_v6" not in row[2] and "_v7" not in row[2] for row in rows)
+                )
+            self.assertIn(
+                "pursuit_conversations",
+                {row[2] for row in foreign_keys["pursuit_conversations"]},
+            )
+            for table in (
+                "conversation_events",
+                "conversation_attachments",
+                "pending_server_requests",
+            ):
+                self.assertIn(
+                    "pursuit_conversations", {row[2] for row in foreign_keys[table]}
+                )
+
+            migrated_eligible = store.get_conversation(eligible["conversation_id"])
+            migrated_unknown = store.get_conversation(unknown["conversation_id"])
+            migrated_accepted = store.get_conversation(accepted["conversation_id"])
+            migrated_side = store.get_conversation(side_chat["conversation_id"])
+            self.assertEqual(migrated_eligible["initial_context_state"], "eligible")
+            self.assertEqual(migrated_unknown["initial_context_state"], "unknown")
+            self.assertEqual(migrated_accepted["initial_context_state"], "accepted")
+            self.assertEqual(migrated_side["initial_context_state"], "accepted")
+            self.assertIsNone(migrated_unknown["initial_context_text"])
+            self.assertEqual(
+                migrated_accepted["initial_context_accepted_turn_id"],
+                first_turn["turn_id"],
+            )
+            self.assertEqual(
+                migrated_side["initial_context_accepted_turn_id"],
+                "turn-active-preferred",
+            )
+            self.assertEqual(migrated_eligible["execution_cwd"], str(root.resolve()))
+            self.assertEqual(migrated_unknown["execution_cwd"], "/srv/legacy-project")
+            self.assertEqual(
+                store.get_attachment(attachment["attachment_id"])["display_name"],
+                attachment["display_name"],
+            )
+            self.assertEqual(
+                store.get_pending_request_by_key(pending["request_key"])["state"],
+                "resolved",
+            )
+            with self.assertRaises(ConversationError) as raised:
+                store.reset_initial_context_to_prepared(unknown["conversation_id"])
+            self.assertEqual(raised.exception.code, "initial_context_unavailable")
+            reopened = store.reset_initial_context_to_eligible(
+                unknown["conversation_id"]
+            )
+            self.assertEqual(reopened["initial_context_state"], "eligible")
+            self.assertIsNone(reopened["initial_context_text"])
+
+    def test_manager_rows_are_global_and_do_not_change_pursuit_defaults(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = ConversationStore(root)
+            pursuit = self._create_local_conversation(store)
+            pursuit_default = store.get_pursuit_default(pursuit["pursuit_id"])
+            project_before = store.get_project("local-root")
+            manager = store.create_conversation(
+                conversation_id="manager-root",
+                kind="manager",
+                host_id="local",
+                project_id="local-root",
+                thread_id="manager-thread",
+            )
+            side_chat = store.create_conversation(
+                conversation_id="manager-isolation-side",
+                kind="side_chat",
+                pursuit_id=pursuit["pursuit_id"],
+                parent_conversation_id=pursuit["conversation_id"],
+                owner_session_id="session-a",
+                host_id="local",
+                project_id="local-root",
+                thread_id="manager-isolation-side-thread",
+            )
+            manager_event = store.append_event(
+                conversation_id=manager["conversation_id"],
+                kind="assistant.message",
+                payload={"text": "manager is root-global"},
+            )
+            pursuit_event = store.append_event(
+                conversation_id=pursuit["conversation_id"],
+                kind="assistant.message",
+                payload={"text": "pursuit is root-global"},
+            )
+            side_event = store.append_event(
+                conversation_id=side_chat["conversation_id"],
+                kind="assistant.message",
+                payload={"text": "side chat is session-owned"},
+            )
+            manager_request = store.create_pending_request(
+                host_id="local",
+                connection_epoch="manager-epoch",
+                rpc_id="manager-request",
+                method="item/tool/requestUserInput",
+                payload={"question": "manager"},
+                conversation_id=manager["conversation_id"],
+            )
+            side_request = store.create_pending_request(
+                host_id="local",
+                connection_epoch="manager-epoch",
+                rpc_id="side-request",
+                method="item/tool/requestUserInput",
+                payload={"question": "side"},
+                conversation_id=side_chat["conversation_id"],
+            )
+
+            self.assertIsNone(manager["pursuit_id"])
+            self.assertEqual(manager["kind"], "manager")
+            self.assertEqual(manager["execution_cwd"], str(root.resolve()))
+            self.assertEqual(manager["initial_context_state"], "eligible")
+            self.assertIsNone(manager["initial_context_text"])
+            self.assertIsNone(manager["initial_context_accepted_turn_id"])
+            self.assertEqual(
+                [
+                    row["conversation_id"]
+                    for row in store.list_conversations(kind="manager")
+                ],
+                [manager["conversation_id"]],
+            )
+            self.assertNotIn(
+                manager["conversation_id"],
+                {
+                    row["conversation_id"]
+                    for row in store.list_conversations(
+                        pursuit_id=pursuit["pursuit_id"]
+                    )
+                },
+            )
+            self.assertEqual(
+                store.get_pursuit_default(pursuit["pursuit_id"]), pursuit_default
+            )
+            self.assertEqual(
+                store.get_project("local-root")["last_used_at"],
+                project_before["last_used_at"],
+            )
+            for session_id in ("session-a", "session-b"):
+                visible_event_ids = {
+                    event["event_id"]
+                    for event in store.read_events_for_session(session_id)
+                }
+                self.assertIn(manager_event["event_id"], visible_event_ids)
+                self.assertIn(pursuit_event["event_id"], visible_event_ids)
+                if session_id == "session-a":
+                    self.assertIn(side_event["event_id"], visible_event_ids)
+                else:
+                    self.assertNotIn(side_event["event_id"], visible_event_ids)
+                visible_request_keys = {
+                    request["request_key"]
+                    for request in store.list_pending_requests_for_session(
+                        session_id
+                    )
+                }
+                self.assertIn(manager_request["request_key"], visible_request_keys)
+                if session_id == "session-a":
+                    self.assertIn(side_request["request_key"], visible_request_keys)
+                else:
+                    self.assertNotIn(side_request["request_key"], visible_request_keys)
+            self.assertEqual(
+                ConversationStore(root).get_conversation(manager["conversation_id"]),
+                store.get_conversation(manager["conversation_id"]),
+            )
+
+            invalid_shapes = (
+                {
+                    "kind": "manager",
+                    "pursuit_id": "P-invalid",
+                    "thread_id": "manager-with-pursuit",
+                },
+                {"kind": "pursuit", "thread_id": "pursuit-without-pursuit"},
+                {
+                    "kind": "side_chat",
+                    "parent_conversation_id": pursuit["conversation_id"],
+                    "owner_session_id": "session-a",
+                    "thread_id": "side-without-pursuit",
+                },
+            )
+            for values in invalid_shapes:
+                with self.assertRaises(ConversationError):
+                    store.create_conversation(
+                        host_id="local", project_id="local-root", **values
+                    )
+
+    def test_project_edits_do_not_change_conversation_execution_cwd(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = ConversationStore(root)
+            store.upsert_host(
+                host_id="execution-host",
+                kind="ssh",
+                display_name="Execution host",
+                ssh_alias="execution-old",
+            )
+            store.create_project(
+                project_id="execution-project",
+                host_id="execution-host",
+                cwd="/srv/project-old",
+                label="Old project",
+            )
+            first = store.create_conversation(
+                conversation_id="execution-first",
+                pursuit_id="P-execution",
+                host_id="execution-host",
+                project_id="execution-project",
+                thread_id="execution-thread-first",
+            )
+
+            store.update_host_config(
+                "execution-host",
+                display_name="Execution host renamed",
+                ssh_alias="execution-new",
+                platform_hint="linux",
+            )
+            project = store.update_project(
+                "execution-project", label="New project", cwd="/srv/project-new"
+            )
+            first_after = store.update_conversation(
+                first["conversation_id"], thread_title="Still old cwd"
+            )
+            second = store.create_conversation(
+                conversation_id="execution-second",
+                pursuit_id="P-execution",
+                host_id="execution-host",
+                project_id="execution-project",
+                thread_id="execution-thread-second",
+            )
+
+            self.assertEqual(project["cwd"], "/srv/project-new")
+            self.assertEqual(first_after["execution_cwd"], "/srv/project-old")
+            self.assertEqual(second["execution_cwd"], "/srv/project-new")
+            self.assertEqual(
+                ConversationStore(root).get_conversation(first["conversation_id"])[
+                    "execution_cwd"
+                ],
+                "/srv/project-old",
+            )
+            self.assertTrue(store.host_has_conversations("execution-host"))
+            self.assertTrue(store.project_has_conversations("execution-project"))
+            with self.assertRaises(ConversationError):
+                store.create_conversation(
+                    conversation_id="execution-side-wrong",
+                    kind="side_chat",
+                    pursuit_id=first["pursuit_id"],
+                    parent_conversation_id=first["conversation_id"],
+                    owner_session_id="execution-session",
+                    host_id="execution-host",
+                    project_id="execution-project",
+                    thread_id="execution-side-wrong-thread",
+                )
+            side = store.create_conversation(
+                conversation_id="execution-side-right",
+                kind="side_chat",
+                pursuit_id=first["pursuit_id"],
+                parent_conversation_id=first["conversation_id"],
+                owner_session_id="execution-session",
+                host_id="execution-host",
+                project_id="execution-project",
+                thread_id="execution-side-right-thread",
+                execution_cwd=first["execution_cwd"],
+            )
+            self.assertEqual(side["execution_cwd"], "/srv/project-old")
+            with self.assertRaises(ConversationError):
+                store.update_host_config("local", ssh_alias="not-allowed")
+            with self.assertRaises(ConversationError):
+                store.update_host_config("execution-host", ssh_alias=None)
+
+    def test_initial_context_transitions_are_durable_and_bounded(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = ConversationStore(root)
+            conversation = self._create_local_conversation(store)
+            context = "Opening context\n包含 Unicode without changing exact bytes."
+
+            prepared = store.prepare_initial_context(
+                conversation["conversation_id"], context
+            )
+            self.assertEqual(prepared["initial_context_state"], "prepared")
+            self.assertEqual(prepared["initial_context_text"], context)
+            self.assertEqual(
+                store.prepare_initial_context(conversation["conversation_id"], context)[
+                    "initial_context_text"
+                ],
+                context,
+            )
+            with self.assertRaises(ConversationError) as different:
+                store.prepare_initial_context(
+                    conversation["conversation_id"], context + " changed"
+                )
+            self.assertEqual(different.exception.code, "initial_context_conflict")
+
+            unknown = store.mark_initial_context_unknown(
+                conversation["conversation_id"]
+            )
+            self.assertEqual(unknown["initial_context_state"], "unknown")
+            self.assertEqual(
+                store.mark_initial_context_unknown(conversation["conversation_id"])[
+                    "initial_context_text"
+                ],
+                context,
+            )
+            reset = store.reset_initial_context_to_prepared(
+                conversation["conversation_id"]
+            )
+            self.assertEqual(reset["initial_context_state"], "prepared")
+            self.assertEqual(reset["initial_context_text"], context)
+            self.assertEqual(
+                store.reset_initial_context_to_prepared(conversation["conversation_id"])[
+                    "initial_context_state"
+                ],
+                "prepared",
+            )
+            accepted = store.mark_initial_context_accepted(
+                conversation["conversation_id"], "opening-turn"
+            )
+            self.assertEqual(accepted["initial_context_state"], "accepted")
+            self.assertEqual(
+                accepted["initial_context_accepted_turn_id"], "opening-turn"
+            )
+            self.assertTrue(store.has_turn_evidence(conversation["conversation_id"]))
+            self.assertEqual(
+                store.mark_initial_context_accepted(
+                    conversation["conversation_id"], "opening-turn"
+                )["initial_context_state"],
+                "accepted",
+            )
+            for transition in (
+                lambda: store.mark_initial_context_accepted(
+                    conversation["conversation_id"], "different-turn"
+                ),
+                lambda: store.mark_initial_context_unknown(
+                    conversation["conversation_id"]
+                ),
+                lambda: store.reset_initial_context_to_prepared(
+                    conversation["conversation_id"]
+                ),
+                lambda: store.mark_initial_context_skipped(
+                    conversation["conversation_id"]
+                ),
+            ):
+                with self.assertRaises(ConversationError) as terminal:
+                    transition()
+                self.assertEqual(terminal.exception.code, "initial_context_conflict")
+            self.assertEqual(
+                ConversationStore(root).get_conversation(
+                    conversation["conversation_id"]
+                )["initial_context_text"],
+                context,
+            )
+
+            skipped = store.create_conversation(
+                conversation_id="context-skipped",
+                pursuit_id="P-skipped",
+                host_id="local",
+                project_id="local-root",
+                thread_id="context-skipped-thread",
+            )
+            skipped = store.prepare_initial_context(
+                skipped["conversation_id"], "retained before explicit skip"
+            )
+            skipped = store.mark_initial_context_skipped(
+                skipped["conversation_id"]
+            )
+            self.assertEqual(skipped["initial_context_state"], "skipped")
+            self.assertEqual(
+                skipped["initial_context_text"], "retained before explicit skip"
+            )
+            self.assertEqual(
+                store.mark_initial_context_skipped(skipped["conversation_id"])[
+                    "initial_context_state"
+                ],
+                "skipped",
+            )
+            with self.assertRaises(ConversationError):
+                store.prepare_initial_context(
+                    skipped["conversation_id"], "cannot reopen"
+                )
+
+            oversized = "界" * (MAX_INITIAL_CONTEXT_BYTES // 3 + 1)
+            fresh = store.create_conversation(
+                conversation_id="context-oversized",
+                pursuit_id="P-oversized",
+                host_id="local",
+                project_id="local-root",
+                thread_id="context-oversized-thread",
+            )
+            with self.assertRaises(ConversationError) as too_large:
+                store.prepare_initial_context(fresh["conversation_id"], oversized)
+            self.assertEqual(too_large.exception.code, "payload_too_large")
+            self.assertEqual(
+                store.get_conversation(fresh["conversation_id"])[
+                    "initial_context_state"
+                ],
+                "eligible",
+            )
+
+            boundary_text = "x" * MAX_INITIAL_CONTEXT_BYTES
+            boundary = store.prepare_initial_context(
+                fresh["conversation_id"], boundary_text
+            )
+            state_event = store.append_conversation_state_event(
+                fresh["conversation_id"]
+            )
+            state_summary = state_event["payload"]["conversation"]
+            self.assertEqual(boundary["initial_context_text"], boundary_text)
+            self.assertEqual(state_summary["initial_context_state"], "prepared")
+            self.assertIsNone(state_summary["initial_context_accepted_turn_id"])
+            self.assertNotIn("initial_context_text", state_summary)
+            self.assertEqual(
+                store.get_conversation(fresh["conversation_id"])[
+                    "initial_context_text"
+                ],
+                boundary_text,
             )
 
     def test_side_chats_are_filterable_and_cleanup_purges_events(self):
@@ -1032,6 +1762,22 @@ class ConversationStoreTests(unittest.TestCase):
             self.assertEqual(
                 store.find_conversation("local", "replacement-thread"), rebound
             )
+            skipped = store.create_conversation(
+                pursuit_id="P-skipped-rebind",
+                host_id="local",
+                project_id="local-root",
+                thread_id="skipped-thread",
+            )
+            store.mark_initial_context_skipped(skipped["conversation_id"])
+            with self.assertRaises(ConversationError) as skipped_error:
+                store.rebind_unstarted_thread(
+                    skipped["conversation_id"],
+                    expected_thread_id="skipped-thread",
+                    replacement_thread_id="unsafe-skipped-thread",
+                )
+            self.assertEqual(
+                skipped_error.exception.code, "conversation_has_turn_history"
+            )
             store.append_event(
                 conversation_id=conversation["conversation_id"],
                 turn_id="turn-1",
@@ -1105,6 +1851,33 @@ class ConversationStoreTests(unittest.TestCase):
             self.assertEqual(updated["last_error"], "first line\nsecond line")
             self.assertEqual(updated["capabilities"]["nested"], {"available": True})
             json.dumps(updated)
+
+    def test_provider_turn_fingerprint_uses_distinct_membership_not_arrival_order(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = ConversationStore(Path(tempdir))
+            conversation = self._create_local_conversation(store)
+            conversation_id = conversation["conversation_id"]
+            for turn_id in ("current-turn", "old-turn"):
+                store.append_event(
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    kind="turn.completed",
+                    payload={"turn": {"id": turn_id}},
+                )
+
+            fingerprint = store.provider_turn_fingerprint(conversation_id)
+            self.assertEqual(fingerprint["count"], 2)
+            self.assertEqual(len(fingerprint["sha256"]), 64)
+            self.assertTrue(store.has_provider_turn_id(conversation_id, "old-turn"))
+            store.append_event(
+                conversation_id=conversation_id,
+                turn_id="current-turn",
+                kind="turn.completed",
+                payload={"turn": {"id": "current-turn", "replayed": True}},
+            )
+            self.assertEqual(
+                store.provider_turn_fingerprint(conversation_id), fingerprint
+            )
 
     def test_events_use_a_monotonic_cursor_and_reject_oversized_payloads(self):
         with tempfile.TemporaryDirectory() as tempdir:

@@ -236,7 +236,10 @@ def _write_gitignore_if_missing(directory: Path, content: bytes) -> None:
     gitignore = directory / ".gitignore"
     if gitignore.exists():
         return
-    tmp_path = directory / f".gitignore.{os.getpid()}.tmp"
+    # Multiple runtime components can initialize the same fresh root in one
+    # process. A per-call name prevents their durable writes from sharing and
+    # racing on the same Windows file handle.
+    tmp_path = directory / f".gitignore.{os.getpid()}.{uuid4().hex}.tmp"
     with tmp_path.open("wb") as handle:
         handle.write(content)
         handle.flush()
@@ -245,5 +248,10 @@ def _write_gitignore_if_missing(directory: Path, content: bytes) -> None:
         os.replace(tmp_path, gitignore)
     except OSError:
         tmp_path.unlink(missing_ok=True)
+        # On Windows another initializer can publish the target between the
+        # existence check and replace while holding the new file open. The
+        # desired file now exists, so this caller has nothing left to publish.
+        if gitignore.exists():
+            return
         raise
     _fsync_directory(directory)

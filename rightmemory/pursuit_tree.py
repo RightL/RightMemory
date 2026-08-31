@@ -15,7 +15,6 @@ from typing import Mapping
 from .graph import (
     ANCHOR_RE,
     FOCUS_HEADING_RE,
-    NODE_RE,
     BlockKey,
     DocumentBlock,
     GraphManifest,
@@ -146,20 +145,6 @@ def _reserved(manifest: GraphManifest, block: DocumentBlock) -> bool:
     )
 
 
-def _node_title(block: DocumentBlock) -> str:
-    match = NODE_RE.match(block.line)
-    if match is None:
-        return block.line.strip()
-    start = block.line.index("`", block.line.index("`") + 1) + 1
-    end = match.start(2) - 1
-    suffix = block.line[start:end].rstrip()
-    for arrow in ("\u2192", "->"):
-        if suffix.endswith(arrow):
-            suffix = suffix[:-len(arrow)].rstrip()
-            break
-    return suffix.strip() or block.item_id or "Legacy item"
-
-
 def load_pursuit_tree(root: Path) -> PursuitTree:
     return _project(build_graph_manifest(Path(root)))
 
@@ -185,7 +170,7 @@ def _project(manifest: GraphManifest) -> PursuitTree:
             legacy = block.kind == "node"
             item_data[item_id] = {
                 "id": item_id,
-                "title": _node_title(block) if legacy else heading_title(block.line),
+                "title": block.title,
                 "body": block_body_text(manifest, block).strip("\r\n"),
                 "parent_id": parent_id,
                 "edges": graph_item.edges if graph_item is not None else (),

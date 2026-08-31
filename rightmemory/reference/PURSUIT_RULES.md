@@ -28,7 +28,7 @@ Canonical storage is `PURSUITS.md` and its reachable `PURSUIT_<id>.md` detail fi
 
 There are two normal entrances for semantic map changes: the human-facing editor and the explicitly invoked `maintain-pursuit-map` workflow. Creating, deleting, renaming, merging, reorganizing, and focusing directions are decisions owned by the user.
 
-A precise requested map edit is authorized directly. Broad cleanup or ambiguous reorganization requires a concise proposed tree change and approval before editing.
+A request to modify the map authorizes the requested change. Read-only inspection does not authorize editing. Ask only when a missing target or materially different interpretation prevents a safe change; there is no routine proposal-and-approval step.
 
 Update, ordinary orchestration, review, pruning, insight generation, and acting agents may read Pursuit as context. They do not infer, submit, or apply map changes from task progress, blockage, waiting, next steps, handoff, or completion. Sync repair may reconcile already-authorized map state within its bounded repair transaction; it does not choose new directions for the user.
 

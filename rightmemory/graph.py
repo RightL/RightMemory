@@ -190,6 +190,15 @@ class SourceSpan:
     end_line: int
 
 
+@dataclass(frozen=True)
+class SourceTextPart:
+    """One physical source line retained in a block's owned-text projection."""
+
+    source_path: Path
+    line_number: int
+    text: str
+
+
 @dataclass
 class DocumentBlock:
     key: BlockKey
@@ -197,6 +206,8 @@ class DocumentBlock:
     source_path: Path
     family: str
     line: str = ""
+    title: str = ""
+    prose: str = ""
     depth: int = 0
     line_number: int = 0
     end_line: int = 0
@@ -211,6 +222,7 @@ class DocumentBlock:
     logical_children: list[BlockKey] = field(default_factory=list)
     physical_parts: list[str | BlockKey] = field(default_factory=list)
     logical_parts: list[str | BlockKey] = field(default_factory=list)
+    logical_text_parts: list[SourceTextPart] = field(default_factory=list)
     traversal_rank: int = -1
 
     @property
@@ -238,6 +250,8 @@ class GraphItem:
     item_kind: str
     anchor_kind: str | None
     edges: tuple[tuple[str, str], ...]
+    title: str = ""
+    prose: str = ""
     malformed_edges: tuple[str, ...] = ()
     block_key: BlockKey | None = None
     end_line: int = 0
@@ -485,7 +499,7 @@ def _parse_document(
         parent_key = stack[-1] if stack else document.root_key
         fence = FENCE_RE.match(line)
         if fence is not None:
-            _append_text(manifest.blocks[parent_key], line)
+            _append_text(manifest.blocks[parent_key], line, line_number)
             marker = fence.group(1)
             if fence_char is None:
                 fence_char = marker[0]
@@ -495,7 +509,7 @@ def _parse_document(
                 fence_length = 0
             continue
         if fence_char is not None:
-            _append_text(manifest.blocks[parent_key], line)
+            _append_text(manifest.blocks[parent_key], line, line_number)
             continue
 
         heading_match = HEADING_RE.match(line)
@@ -543,11 +557,16 @@ def _parse_document(
                     line_number,
                 )
 
+            addressed = anchor or candidate or unsupported
+            title_end = addressed.start(2) - 1 if addressed is not None else len(line)
+            indexed_title = line[heading_match.end():title_end].strip()
+
             key = (document.path, line_number)
             block = DocumentBlock(
                 key=key,
                 kind="heading",
                 line=line,
+                title=indexed_title,
                 depth=depth,
                 line_number=line_number,
                 end_line=line_number,
@@ -625,6 +644,7 @@ def _parse_document(
                     item_kind="heading",
                     anchor_kind=anchor_kind,
                     edges=tuple(edges),
+                    title=block.title,
                     malformed_edges=tuple(malformed),
                     block_key=key,
                     physical_parent=parent_key,
@@ -670,7 +690,7 @@ def _parse_document(
             field_match = LEGACY_PURSUIT_FIELD_RE.match(line)
             if field_match:
                 in_pursuit_next = field_match.group(1).casefold() == "next"
-                _append_text(parent, line)
+                _append_text(parent, line, line_number)
                 continue
         if in_focus:
             focus_candidate = FOCUS_CANDIDATE_RE.match(line)
@@ -683,7 +703,7 @@ def _parse_document(
                         document.path,
                         line_number,
                     )
-                    _append_text(parent, line)
+                    _append_text(parent, line, line_number)
                     continue
                 key = (document.path, line_number)
                 block = DocumentBlock(
@@ -707,7 +727,7 @@ def _parse_document(
         if document.family == "pursuit" and in_pursuit_next:
             # Older roots used Next lists. Retain every line as unstructured body
             # until another legacy field or heading, including unknown actions.
-            _append_text(parent, line)
+            _append_text(parent, line, line_number)
             continue
 
         node_candidate = NODE_CANDIDATE_RE.match(line)
@@ -744,7 +764,7 @@ def _parse_document(
                     document.path,
                     line_number,
                 )
-                _append_text(parent, line)
+                _append_text(parent, line, line_number)
                 continue
             if node is None:
                 _add_error(
@@ -754,14 +774,17 @@ def _parse_document(
                     document.path,
                     line_number,
                 )
-                _append_text(parent, line)
+                _append_text(parent, line, line_number)
                 continue
             edges, malformed = _parse_edges(node.group(2) or "")
+            prose = _node_prose(line, node)
             key = (document.path, line_number)
             block = DocumentBlock(
                 key=key,
                 kind="node",
                 line=line,
+                title=prose or node_id,
+                prose=prose,
                 line_number=line_number,
                 end_line=line_number,
                 item_id=node_id,
@@ -783,6 +806,8 @@ def _parse_document(
                     item_kind="node",
                     anchor_kind=None,
                     edges=tuple(edges),
+                    title=block.title,
+                    prose=block.prose,
                     malformed_edges=tuple(malformed),
                     block_key=key,
                     end_line=line_number,
@@ -792,16 +817,31 @@ def _parse_document(
             )
             continue
 
-        _append_text(parent, line)
+        _append_text(parent, line, line_number)
 
     for key in stack:
         manifest.blocks[key].end_line = len(document.lines)
     return f_references
 
 
-def _append_text(block: DocumentBlock, line: str) -> None:
+def _append_text(block: DocumentBlock, line: str, line_number: int) -> None:
+    source_part = SourceTextPart(block.source_path, line_number, line)
     block.physical_parts.append(line)
     block.logical_parts.append(line)
+    block.logical_text_parts.append(source_part)
+
+
+def _node_prose(line: str, match: re.Match[str]) -> str:
+    """Return the prose owned by a parsed graph-node line."""
+    first_tick = line.index("`")
+    prose_start = line.index("`", first_tick + 1) + 1
+    prose_end = match.start(2) - 1
+    prose = line[prose_start:prose_end].rstrip()
+    for arrow in ("\u2192", "->"):
+        if prose.endswith(arrow):
+            prose = prose[:-len(arrow)].rstrip()
+            break
+    return prose.strip()
 
 
 def _append_child(parent: DocumentBlock, key: BlockKey) -> None:
@@ -954,6 +994,7 @@ def _attach_detail_document(manifest: GraphManifest, owner_key: BlockKey, detail
             owner.logical_children.append(part)
             _update_item_logical_parent(manifest, child)
         owner.logical_parts.append(part)
+    owner.logical_text_parts.extend(detail_root.logical_text_parts)
 
 
 def _update_item_logical_parent(manifest: GraphManifest, block: DocumentBlock) -> None:

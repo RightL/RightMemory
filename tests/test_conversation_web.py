@@ -135,6 +135,18 @@ class _FakeConversationService:
             }
         }
 
+    def create_manager(self, model=None, reasoning_effort=None):
+        self.calls.append(("create_manager", model, reasoning_effort))
+        return {
+            "conversation": {
+                "conversation_id": "manager-1",
+                "kind": "manager",
+                "pursuit_id": None,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
+            }
+        }
+
     def create_side_chat(self, parent_conversation_id, owner_session_id):
         self.calls.append(("create_side_chat", parent_conversation_id, owner_session_id))
         return {
@@ -184,10 +196,22 @@ class _FakeConversationService:
         }
 
     def send_message(
-        self, conversation_id, text, attachment_ids=None, owner_session_id=None
+        self,
+        conversation_id,
+        text,
+        attachment_ids=None,
+        owner_session_id=None,
+        message_references=None,
     ):
         self.calls.append(
-            ("message", conversation_id, text, attachment_ids, owner_session_id)
+            (
+                "message",
+                conversation_id,
+                text,
+                attachment_ids,
+                owner_session_id,
+                message_references,
+            )
         )
         return {"conversation_id": conversation_id}
 
@@ -300,9 +324,47 @@ class _FakeConversationService:
         self.calls.append(("probe", host_id))
         return {"host": {"host_id": host_id, "kind": "ssh", "display_name": "Remote"}}
 
+    def update_host(
+        self,
+        host_id,
+        display_name=None,
+        ssh_alias=None,
+        platform_hint=None,
+        enabled=None,
+    ):
+        self.calls.append(
+            (
+                "update_host",
+                host_id,
+                display_name,
+                ssh_alias,
+                platform_hint,
+                enabled,
+            )
+        )
+        return {
+            "host": {
+                "host_id": host_id,
+                "display_name": display_name,
+                "ssh_alias": ssh_alias,
+                "platform_hint": platform_hint,
+                "enabled": enabled,
+            }
+        }
+
     def add_project(self, host_id, label, cwd):
         self.calls.append(("project", host_id, label, cwd))
         return {"project": {"project_id": "project-1", "host_id": host_id, "label": label, "cwd": cwd}}
+
+    def update_project(self, project_id, label=None, cwd=None):
+        self.calls.append(("update_project", project_id, label, cwd))
+        return {
+            "project": {
+                "project_id": project_id,
+                "label": label,
+                "cwd": cwd,
+            }
+        }
 
 
 class _FakeRegistry:
@@ -487,11 +549,89 @@ class ConversationWebTests(unittest.TestCase):
         self.assertEqual(reconciled.status_code, 200)
         self.assertTrue(reconciled.json()["data"]["resolved"])
         self.assertIn(
-            ("message", "conversation-1", "Continue.", None, self.session_id),
+            (
+                "message",
+                "conversation-1",
+                "Continue.",
+                None,
+                self.session_id,
+                None,
+            ),
             self.service.calls,
         )
         self.assertIn(
             ("reconcile", "conversation-1", self.session_id), self.service.calls
+        )
+
+    def test_manager_config_and_reference_routes_forward_exact_shapes(self):
+        created = self.post(
+            "/api/manager-conversations",
+            {"model": "gpt-example", "reasoning_effort": "medium"},
+        )
+        sent = self.post(
+            "/api/conversations/manager-1/messages",
+            {
+                "text": "Inspect the selected Pursuit.",
+                "attachment_ids": ["attachment-1"],
+                "references": [{"kind": "pursuit", "id": "build"}],
+            },
+        )
+        host = self.client.request(
+            "PATCH",
+            "/api/conversation-hosts/host-1",
+            json={
+                "display_name": "Builder",
+                "ssh_alias": "builder",
+                "platform_hint": "linux",
+                "enabled": False,
+            },
+            headers={"x-csrf-token": self.csrf},
+        )
+        project = self.client.request(
+            "PATCH",
+            "/api/conversation-projects/project-1",
+            json={"label": "Repository", "cwd": "/srv/repository"},
+            headers={"x-csrf-token": self.csrf},
+        )
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(created.json()["data"]["conversation"]["kind"], "manager")
+        self.assertEqual(sent.status_code, 200)
+        self.assertEqual(host.status_code, 200)
+        self.assertEqual(project.status_code, 200)
+        self.assertIn(
+            ("create_manager", "gpt-example", "medium"), self.service.calls
+        )
+        self.assertIn(
+            (
+                "message",
+                "manager-1",
+                "Inspect the selected Pursuit.",
+                ["attachment-1"],
+                self.session_id,
+                [{"kind": "pursuit", "id": "build"}],
+            ),
+            self.service.calls,
+        )
+        self.assertIn(
+            (
+                "update_host",
+                "host-1",
+                "Builder",
+                "builder",
+                "linux",
+                False,
+            ),
+            self.service.calls,
+        )
+        self.assertIn(
+            (
+                "update_project",
+                "project-1",
+                "Repository",
+                "/srv/repository",
+            ),
+            self.service.calls,
         )
 
     def test_side_chat_create_close_and_read_routes_require_csrf(self):

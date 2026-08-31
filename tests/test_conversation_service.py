@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import struct
 import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -105,6 +107,7 @@ class _FakeAdapter:
             "model_reasoning_effort": None,
         }
         self.config_error: BaseException | None = None
+        self.thread_turns: dict[str, list[dict[str, Any]]] = {}
 
     def connect(self) -> dict[str, Any]:
         self.calls.append(("connect",))
@@ -156,7 +159,22 @@ class _FakeAdapter:
             raise JsonRpcRemoteError(
                 -32600, f"no rollout found for thread id {thread_id}"
             )
-        return {"thread": {"id": thread_id, "status": {"type": "idle"}}}
+        return {
+            "thread": {
+                "id": thread_id,
+                "status": {"type": "idle"},
+                "turns": list(self.thread_turns.get(thread_id, [])),
+            }
+        }
+
+    def read_thread(
+        self, thread_id: str, *, include_turns: bool = True
+    ) -> dict[str, Any]:
+        self.calls.append(("read_thread", thread_id, include_turns))
+        thread: dict[str, Any] = {"id": thread_id, "status": {"type": "idle"}}
+        if include_turns:
+            thread["turns"] = list(self.thread_turns.get(thread_id, []))
+        return {"thread": thread}
 
     def archive_thread(self, thread_id: str) -> dict[str, Any]:
         self.calls.append(("archive_thread", thread_id))
@@ -239,8 +257,15 @@ class ConversationServiceTests(unittest.TestCase):
             pursuit_store_factory=pursuit_factory,
         )
         self.service = self.registry.service(self.root)
+        self.opening_context_token = "opaque-opening-context-token"
+        self.opening_context_patch = patch(
+            "rightmemory.conversations.service.build_opening_context",
+            return_value=SimpleNamespace(text=self.opening_context_token),
+        )
+        self.build_opening_context = self.opening_context_patch.start()
 
     def tearDown(self):
+        self.opening_context_patch.stop()
         self.registry.close()
         self.temporary.cleanup()
 
@@ -258,6 +283,41 @@ class ConversationServiceTests(unittest.TestCase):
         while not predicate() and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertTrue(predicate())
+
+    def _finish_turn(
+        self,
+        conversation: dict[str, Any],
+        sent: dict[str, Any],
+        status: str = "completed",
+    ) -> None:
+        self.adapter.emit_notification(
+            "turn/completed",
+            {
+                "threadId": conversation["thread_id"],
+                "turn": {"id": sent["turn"]["id"], "status": status},
+            },
+        )
+
+    def _set_migrated_unknown_context(
+        self, conversation: dict[str, Any]
+    ) -> None:
+        self.service.store.append_event(
+            conversation_id=conversation["conversation_id"],
+            kind="user.message",
+            payload={"text": "legacy message without local turn evidence"},
+        )
+        with closing(sqlite3.connect(self.service.store.db_path)) as connection:
+            connection.execute(
+                """
+                UPDATE pursuit_conversations
+                SET initial_context_state = 'unknown',
+                    initial_context_text = NULL,
+                    initial_context_accepted_turn_id = NULL
+                WHERE conversation_id = ?
+                """,
+                (conversation["conversation_id"],),
+            )
+            connection.commit()
 
     def _create_sent_remote_attachments(
         self, *contents: bytes
@@ -343,6 +403,41 @@ class ConversationServiceTests(unittest.TestCase):
         )
         self.assertEqual(events[3]["payload"]["text"], "Hello Codex")
 
+    def test_mutation_responses_do_not_expose_opening_context_snapshot(self):
+        conversation = self._create()
+        sent = self.service.send_message(conversation["conversation_id"], "Run it")
+        self.assertNotIn("initial_context_text", sent["conversation"])
+        self.assertEqual(
+            self.service.store.get_conversation(conversation["conversation_id"])[
+                "initial_context_text"
+            ],
+            self.opening_context_token,
+        )
+
+        self.adapter.emit_request(
+            401,
+            "item/commandExecution/requestApproval",
+            {
+                "threadId": conversation["thread_id"],
+                "turnId": sent["turn"]["id"],
+                "itemId": "projection-command",
+                "command": "echo safe",
+            },
+        )
+        pending = self.service.workspace()["pending_requests"][0]
+        responded = self.service.respond_request(
+            pending["request_key"],
+            "accept",
+            None,
+            conversation["conversation_id"],
+        )
+        self.assertNotIn("initial_context_text", responded["conversation"])
+
+        interrupted = self.service.interrupt(conversation["conversation_id"])
+        self.assertNotIn("initial_context_text", interrupted["conversation"])
+        archived = self.service.archive(conversation["conversation_id"])
+        self.assertNotIn("initial_context_text", archived["conversation"])
+
     def test_pasted_text_is_staged_as_a_managed_file_and_sent_once(self):
         conversation = self._create()
         uploaded = self.service.upload_attachment(
@@ -364,7 +459,14 @@ class ConversationServiceTests(unittest.TestCase):
         )
 
         start = [call for call in self.adapter.calls if call[0] == "start_turn"][-1]
-        self.assertEqual([item["type"] for item in start[2]], ["text"])
+        self.assertEqual([item["type"] for item in start[2]], ["text", "text"])
+        self.assertIsNotNone(
+            next(
+                item
+                for item in self.service.detail(conversation["conversation_id"])["events"]
+                if item["kind"] == "user.message"
+            )["payload"]["opening_context"]
+        )
         stored = self.service.store.get_attachment(uploaded["attachment_id"])
         self.assertEqual(stored["state"], "sent")
         event = next(
@@ -2401,16 +2503,12 @@ class ConversationServiceTests(unittest.TestCase):
             call for call in calls if call[0] == "start_thread"
         )
         self.assertEqual(replacement_start[2], {"model": "gpt-deep"})
-        self.assertEqual(
-            [call[:3] for call in calls if call[0] == "start_turn"],
-            [
-                (
-                    "start_turn",
-                    replacement_thread_id,
-                    [{"type": "text", "text": "First"}],
-                )
-            ],
-        )
+        turn_starts = [call for call in calls if call[0] == "start_turn"]
+        self.assertEqual(len(turn_starts), 1)
+        self.assertEqual(turn_starts[0][1], replacement_thread_id)
+        self.assertEqual(len(turn_starts[0][2]), 1)
+        self.assertEqual(turn_starts[0][2][0]["type"], "text")
+        self.assertEqual(self.build_opening_context.call_count, 1)
         self.assertEqual(
             next(call for call in calls if call[0] == "start_turn")[3],
             {
@@ -2540,6 +2638,74 @@ class ConversationServiceTests(unittest.TestCase):
         self.assertEqual(persisted["status"], "completed")
         self.assertIsNone(persisted["active_turn_id"])
 
+    def test_terminal_turn_start_response_rejects_late_started_notification(self):
+        for returned_status in ("completed", "failed", "interrupted"):
+            with self.subTest(returned_status=returned_status):
+                conversation = self._create()
+                turn_id = f"terminal-{returned_status}"
+
+                def terminal_start_turn(
+                    thread_id: str,
+                    inputs: list[dict[str, Any]],
+                    **optional: Any,
+                ) -> dict[str, Any]:
+                    self.adapter.calls.append(
+                        ("start_turn", thread_id, inputs, optional)
+                    )
+                    self.adapter.unmaterialized_threads.discard(thread_id)
+                    return {
+                        "turn": {"id": turn_id, "status": returned_status}
+                    }
+
+                with patch.object(
+                    self.adapter,
+                    "start_turn",
+                    side_effect=terminal_start_turn,
+                ):
+                    result = self.service.send_message(
+                        conversation["conversation_id"], "Finish immediately"
+                    )
+
+                self.assertEqual(
+                    result["conversation"]["status"], returned_status
+                )
+                self.assertIsNone(result["conversation"]["active_turn_id"])
+                events = self.service.detail(conversation["conversation_id"])[
+                    "events"
+                ]
+                self.assertNotIn("turn.started", [event["kind"] for event in events])
+                terminal = [
+                    event
+                    for event in events
+                    if event["kind"] == "turn.completed"
+                    and event["turn_id"] == turn_id
+                ]
+                self.assertEqual(len(terminal), 1)
+                self.assertEqual(
+                    terminal[0]["payload"]["turn"]["status"], returned_status
+                )
+
+                self.adapter.emit_notification(
+                    "turn/started",
+                    {
+                        "threadId": conversation["thread_id"],
+                        "turn": {"id": turn_id, "status": "inProgress"},
+                    },
+                )
+                after_late_start = self.service.detail(
+                    conversation["conversation_id"]
+                )
+                self.assertEqual(
+                    after_late_start["conversation"]["status"], returned_status
+                )
+                self.assertIsNone(
+                    after_late_start["conversation"]["active_turn_id"]
+                )
+                self.assertNotIn(
+                    "turn.started",
+                    [event["kind"] for event in after_late_start["events"]],
+                )
+
     def test_turn_start_response_and_fallback_strip_raw_reasoning(self):
         conversation = self._create()
 
@@ -2572,18 +2738,60 @@ class ConversationServiceTests(unittest.TestCase):
             if event["kind"] == "turn.started"
         )
 
-        for turn in (result["turn"], fallback["payload"]["turn"]):
-            self.assertEqual(
-                turn["items"][0],
-                {
-                    "type": "reasoning",
-                    "id": "reasoning-1",
-                    "summary": ["Checked the request."],
-                },
-            )
+        self.assertEqual(result["turn"], {"id": "turn-1", "status": "running"})
+        self.assertEqual(
+            fallback["payload"]["turn"]["items"][0],
+            {
+                "type": "reasoning",
+                "id": "reasoning-1",
+                "summary": ["Checked the request."],
+            },
+        )
         serialized = json.dumps({"result": result, "fallback": fallback})
         self.assertNotIn("private turn reasoning", serialized)
         self.assertNotIn("turn-ciphertext", serialized)
+
+    def test_send_result_does_not_echo_large_opening_or_provider_payloads(self):
+        conversation = self._create()
+        opening_sentinel = "OPENING-SNAPSHOT-MUST-NOT-ECHO:"
+        provider_sentinel = "PROVIDER-TURN-MUST-NOT-ECHO:"
+        large_opening = opening_sentinel + "o" * 80_000
+        large_provider_payload = provider_sentinel + "p" * 80_000
+        self.build_opening_context.return_value = SimpleNamespace(text=large_opening)
+
+        def start_with_large_echo(
+            thread_id: str,
+            inputs: list[dict[str, Any]],
+            **optional: Any,
+        ) -> dict[str, Any]:
+            self.assertIn(opening_sentinel, inputs[0]["text"])
+            self.adapter.calls.append(("start_turn", thread_id, inputs, optional))
+            self.adapter.unmaterialized_threads.discard(thread_id)
+            return {
+                "turn": {
+                    "id": "large-payload-turn",
+                    "status": "inProgress",
+                    "echoedOpening": large_opening,
+                    "providerPayload": large_provider_payload,
+                }
+            }
+
+        with patch.object(
+            self.adapter, "start_turn", side_effect=start_with_large_echo
+        ):
+            result = self.service.send_message(
+                conversation["conversation_id"], "Use the opening snapshot"
+            )
+
+        self.assertEqual(
+            result["turn"], {"id": "large-payload-turn", "status": "running"}
+        )
+        self.assertNotIn("initial_context_text", result["conversation"])
+        serialized = json.dumps(result)
+        self.assertNotIn(opening_sentinel, serialized)
+        self.assertNotIn(provider_sentinel, serialized)
+        self.assertLess(len(serialized), 10_000)
+        self._finish_turn(conversation, result)
 
     def test_terminal_error_before_turn_start_returns_is_not_ignored(self):
         conversation = self._create()
@@ -3597,15 +3805,18 @@ class ConversationServiceTests(unittest.TestCase):
             if event["kind"] == "thread.reconciled"
         )
 
-        for thread in (result["thread"], reconciled_event["payload"]["thread"]):
-            self.assertEqual(
-                thread["turns"][0]["items"][0],
-                {
-                    "type": "reasoning",
-                    "id": "reasoning-1",
-                    "summary": ["Checked the recovered state."],
-                },
-            )
+        self.assertNotIn("thread", result)
+        self.assertEqual(result["provider_thread_id"], conversation["thread_id"])
+        self.assertEqual(result["latest_provider_turn_id"], "turn-1")
+        self.assertLess(len(json.dumps(result)), 10_000)
+        self.assertEqual(
+            reconciled_event["payload"]["thread"]["turns"][0]["items"][0],
+            {
+                "type": "reasoning",
+                "id": "reasoning-1",
+                "summary": ["Checked the recovered state."],
+            },
+        )
         serialized = json.dumps({"result": result, "event": reconciled_event})
         self.assertNotIn("private resumed reasoning", serialized)
         self.assertNotIn("resume-ciphertext", serialized)
@@ -3641,7 +3852,7 @@ class ConversationServiceTests(unittest.TestCase):
         self.assertEqual(result["conversation"]["status"], "idle")
         self.assertIsNone(result["conversation"]["active_turn_id"])
         self.assertEqual(result["conversation"]["thread_id"], "thread-2")
-        self.assertEqual(result["thread"]["id"], "thread-2")
+        self.assertEqual(result["provider_thread_id"], "thread-2")
         self.assertIsNone(self.service.store.find_conversation("local", old_thread_id))
         self.assertIn(("resume_thread", old_thread_id), self.adapter.calls)
         self.assertNotIn("start_turn", [call[0] for call in self.adapter.calls])
@@ -3668,7 +3879,7 @@ class ConversationServiceTests(unittest.TestCase):
         repeated = self.service.reconcile(conversation["conversation_id"])
         self.assertTrue(repeated["resolved"])
         self.assertEqual(repeated["conversation"]["thread_id"], "thread-2")
-        self.assertEqual(repeated["thread"]["id"], "thread-2")
+        self.assertEqual(repeated["provider_thread_id"], "thread-2")
         self.assertEqual(self.adapter.calls, calls_after_recovery)
         repeated_events = self.service.detail(conversation["conversation_id"])["events"]
         self.assertEqual(
@@ -4118,6 +4329,852 @@ class ConversationServiceTests(unittest.TestCase):
             thread.join(timeout=1)
             self.assertTrue(stopped.is_set())
             self.assertEqual(first["pursuit_id"], "alpha")
+
+    def test_opening_context_is_part_of_only_the_first_text_turn(self):
+        conversation = self._create()
+
+        first = self.service.send_message(
+            conversation["conversation_id"], "First user message"
+        )
+        first_start = [
+            item for item in self.adapter.calls if item[0] == "start_turn"
+        ][-1]
+        self.assertEqual(len(first_start[2]), 1)
+        self.assertEqual(first_start[2][0]["type"], "text")
+        first_stored = self.service.store.get_conversation(
+            conversation["conversation_id"]
+        )
+        self.assertEqual(first_stored["initial_context_state"], "accepted")
+        self.assertEqual(
+            first_stored["initial_context_accepted_turn_id"], first["turn"]["id"]
+        )
+        self._finish_turn(conversation, first)
+
+        second = self.service.send_message(
+            conversation["conversation_id"], "Second user message"
+        )
+        second_start = [
+            item for item in self.adapter.calls if item[0] == "start_turn"
+        ][-1]
+        self.assertEqual(len(second_start[2]), 1)
+        self.assertEqual(second_start[2][0]["type"], "text")
+        self.assertEqual(self.build_opening_context.call_count, 1)
+        messages = [
+            event
+            for event in self.service.detail(conversation["conversation_id"])["events"]
+            if event["kind"] == "user.message"
+        ]
+        self.assertIsNotNone(messages[0]["payload"]["opening_context"])
+        self.assertIsNone(messages[1]["payload"]["opening_context"])
+        self._finish_turn(conversation, second)
+
+    def test_attachment_only_first_turn_carries_opening_context_in_same_request(self):
+        conversation = self._create()
+        attachment = self.service.upload_attachment(
+            conversation["conversation_id"],
+            b"attachment-only input",
+            "text/plain",
+            "notes.txt",
+        )["attachment"]
+
+        sent = self.service.send_message(
+            conversation["conversation_id"],
+            None,
+            [attachment["attachment_id"]],
+        )
+
+        starts = [item for item in self.adapter.calls if item[0] == "start_turn"]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0][2][0]["type"], "text")
+        self.assertGreaterEqual(len(starts[0][2]), 2)
+        stored = self.service.store.get_conversation(conversation["conversation_id"])
+        self.assertEqual(stored["initial_context_state"], "accepted")
+        self.assertEqual(stored["initial_context_accepted_turn_id"], sent["turn"]["id"])
+        self.assertEqual(self.build_opening_context.call_count, 1)
+        self._finish_turn(conversation, sent)
+
+    def test_failure_before_provider_reuses_prepared_opening_snapshot(self):
+        conversation = self._create()
+        with patch.object(
+            self.service, "_turn_inputs", side_effect=RuntimeError("pre-provider failure")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "pre-provider failure"):
+                self.service.send_message(conversation["conversation_id"], "Retry me")
+
+        prepared = self.service.store.get_conversation(conversation["conversation_id"])
+        self.assertEqual(prepared["initial_context_state"], "prepared")
+        self.assertIsNotNone(prepared["initial_context_text"])
+        self.assertEqual(self.build_opening_context.call_count, 1)
+
+        sent = self.service.send_message(conversation["conversation_id"], "Retry me")
+        self.assertEqual(self.build_opening_context.call_count, 1)
+        self.assertEqual(
+            self.service.store.get_conversation(conversation["conversation_id"])[
+                "initial_context_accepted_turn_id"
+            ],
+            sent["turn"]["id"],
+        )
+        self._finish_turn(conversation, sent)
+
+    def test_user_message_persistence_failure_restores_retryable_state(self):
+        conversation = self._create()
+        with patch.object(
+            self.service,
+            "_append_or_reuse_user_message_event",
+            side_effect=RuntimeError("user event failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "user event failed"):
+                self.service.send_message(conversation["conversation_id"], "Retry me")
+
+        restored = self.service.store.get_conversation(conversation["conversation_id"])
+        self.assertEqual(restored["status"], "idle")
+        self.assertIsNone(restored["active_turn_id"])
+        self.assertEqual(restored["initial_context_state"], "prepared")
+        self.assertEqual(restored["initial_context_text"], self.opening_context_token)
+        self.assertNotIn("start_turn", [call[0] for call in self.adapter.calls])
+
+        sent = self.service.send_message(conversation["conversation_id"], "Retry me")
+        self.assertEqual(self.build_opening_context.call_count, 1)
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in self.service.detail(conversation["conversation_id"])[
+                        "events"
+                    ]
+                    if event["kind"] == "user.message"
+                ]
+            ),
+            1,
+        )
+        self._finish_turn(conversation, sent)
+
+    def test_state_cursor_failure_reuses_durable_message_without_wedging(self):
+        conversation = self._create()
+        with patch.object(
+            self.service.store,
+            "latest_event_id",
+            side_effect=RuntimeError("cursor failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "cursor failed"):
+                self.service.send_message(conversation["conversation_id"], "Retry me")
+
+        restored = self.service.store.get_conversation(conversation["conversation_id"])
+        self.assertEqual(restored["status"], "idle")
+        self.assertIsNone(restored["active_turn_id"])
+        self.assertEqual(restored["initial_context_state"], "prepared")
+        self.assertNotIn("start_turn", [call[0] for call in self.adapter.calls])
+        durable_messages = [
+            event
+            for event in self.service.store.latest_events(
+                conversation["conversation_id"], limit=100
+            )
+            if event["kind"] == "user.message"
+        ]
+        self.assertEqual(len(durable_messages), 1)
+
+        sent = self.service.send_message(conversation["conversation_id"], "Retry me")
+        messages_after_retry = [
+            event
+            for event in self.service.detail(conversation["conversation_id"])["events"]
+            if event["kind"] == "user.message"
+        ]
+        self.assertEqual(messages_after_retry, durable_messages)
+        self.assertEqual(self.build_opening_context.call_count, 1)
+        self._finish_turn(conversation, sent)
+
+    def test_accepted_opening_context_stays_consumed_after_failure_and_stop(self):
+        for terminal in ("failed", "interrupted"):
+            with self.subTest(terminal=terminal):
+                conversation = self._create()
+                first = self.service.send_message(
+                    conversation["conversation_id"], "Initial"
+                )
+                if terminal == "failed":
+                    self._finish_turn(conversation, first, "failed")
+                else:
+                    self.service.interrupt(conversation["conversation_id"])
+
+                stored = self.service.store.get_conversation(
+                    conversation["conversation_id"]
+                )
+                self.assertEqual(stored["initial_context_state"], "accepted")
+                accepted_turn_id = stored["initial_context_accepted_turn_id"]
+                again = self.service.send_message(
+                    conversation["conversation_id"], "Continue"
+                )
+                message_events = [
+                    event
+                    for event in self.service.detail(conversation["conversation_id"])[
+                        "events"
+                    ]
+                    if event["kind"] == "user.message"
+                ]
+                self.assertIsNone(message_events[-1]["payload"]["opening_context"])
+                self.assertEqual(
+                    self.service.store.get_conversation(
+                        conversation["conversation_id"]
+                    )["initial_context_accepted_turn_id"],
+                    accepted_turn_id,
+                )
+                self._finish_turn(conversation, again)
+
+    def test_transport_unknown_reconcile_accepts_provider_turn_history(self):
+        conversation = self._create()
+        attachment = self.service.upload_attachment(
+            conversation["conversation_id"],
+            b"accepted attachment",
+            "text/plain",
+            "accepted.txt",
+        )["attachment"]
+        with patch.object(
+            self.adapter, "start_turn", side_effect=RuntimeError("response lost")
+        ):
+            with self.assertRaises(ConversationError):
+                self.service.send_message(
+                    conversation["conversation_id"],
+                    "First",
+                    [attachment["attachment_id"]],
+                )
+
+        uncertain = self.service.store.get_conversation(conversation["conversation_id"])
+        self.assertEqual(uncertain["initial_context_state"], "unknown")
+        self.assertEqual(
+            self.service.store.get_attachment(attachment["attachment_id"])["state"],
+            "staged",
+        )
+        self.adapter.unmaterialized_threads.discard(conversation["thread_id"])
+        self.adapter.thread_turns[conversation["thread_id"]] = [
+            {"id": "provider-turn", "status": "completed"}
+        ]
+
+        reconciled = self.service.reconcile(conversation["conversation_id"])
+
+        self.assertTrue(reconciled["resolved"])
+        uncertainty = self.service.store.latest_turn_start_uncertainty(
+            conversation["conversation_id"]
+        )
+        self.assertIsNotNone(uncertainty)
+        self.assertEqual(
+            reconciled["accepted_user_event_id"],
+            uncertainty["payload"]["user_event_id"],
+        )
+        self.assertEqual(reconciled["latest_provider_turn_id"], "provider-turn")
+        self.assertNotIn("thread", reconciled)
+        self.assertEqual(
+            reconciled["conversation"]["initial_context_state"], "accepted"
+        )
+        self.assertEqual(
+            reconciled["conversation"]["initial_context_accepted_turn_id"],
+            "provider-turn",
+        )
+        self.assertEqual(
+            self.service.store.get_attachment(attachment["attachment_id"])["state"],
+            "sent",
+        )
+        self.assertIn(
+            ("read_thread", conversation["thread_id"], True), self.adapter.calls
+        )
+
+    def test_provider_notification_identifies_the_pending_user_event_when_turn_start_response_is_lost(self):
+        conversation = self._create()
+
+        def accepted_then_lost(
+            thread_id: str, inputs: list[dict[str, Any]], **optional: Any
+        ) -> dict[str, Any]:
+            del inputs, optional
+            self.adapter.unmaterialized_threads.discard(thread_id)
+            self.adapter.emit_notification(
+                "turn/started",
+                {
+                    "threadId": thread_id,
+                    "turn": {"id": "notification-turn", "status": "inProgress"},
+                },
+            )
+            raise RuntimeError("response lost")
+
+        with patch.object(self.adapter, "start_turn", side_effect=accepted_then_lost):
+            with self.assertRaises(ConversationError):
+                self.service.send_message(conversation["conversation_id"], "First")
+
+        events = self.service.detail(conversation["conversation_id"])["events"]
+        user_event = next(event for event in events if event["kind"] == "user.message")
+        accepted_event = next(event for event in events if event["kind"] == "turn.started")
+        self.assertEqual(
+            accepted_event["payload"]["accepted_user_event_id"],
+            user_event["event_id"],
+        )
+        self.assertEqual(accepted_event["turn_id"], "notification-turn")
+
+    def test_later_transport_unknown_reconcile_identifies_the_exact_accepted_user_event(self):
+        conversation = self._create()
+        first = self.service.send_message(conversation["conversation_id"], "First")
+        self._finish_turn(conversation, first)
+        self.adapter.thread_turns[conversation["thread_id"]] = [
+            {"id": first["turn"]["id"], "status": "completed"}
+        ]
+
+        with patch.object(
+            self.adapter, "start_turn", side_effect=RuntimeError("response lost")
+        ):
+            with self.assertRaises(ConversationError):
+                self.service.send_message(conversation["conversation_id"], "Second")
+        uncertainty = self.service.store.latest_turn_start_uncertainty(
+            conversation["conversation_id"]
+        )
+        self.assertEqual(
+            uncertainty["payload"]["provider_turn_baseline"]["count"], 1
+        )
+        self.assertEqual(
+            len(uncertainty["payload"]["provider_turn_baseline"]["sha256"]),
+            64,
+        )
+        self.adapter.thread_turns[conversation["thread_id"]].append(
+            {"id": "provider-second-turn", "status": "completed"}
+        )
+
+        reconciled = self.service.reconcile(conversation["conversation_id"])
+
+        self.assertTrue(reconciled["resolved"])
+        self.assertEqual(
+            reconciled["accepted_user_event_id"],
+            uncertainty["payload"]["user_event_id"],
+        )
+        self.assertEqual(
+            reconciled["latest_provider_turn_id"], "provider-second-turn"
+        )
+
+    def test_delayed_old_turn_event_does_not_accept_an_unstarted_pending_message(self):
+        conversation = self._create()
+        thread_id = conversation["thread_id"]
+        provider_turns = [
+            {"id": "old-turn", "status": "completed"},
+            {"id": "current-turn", "status": "completed"},
+        ]
+        self.service.store.append_event(
+            kind="turn.completed",
+            payload={"turn": provider_turns[1]},
+            conversation_id=conversation["conversation_id"],
+            turn_id="current-turn",
+        )
+        self.service.store.append_event(
+            kind="turn.completed",
+            payload={"turn": provider_turns[0]},
+            conversation_id=conversation["conversation_id"],
+            turn_id="old-turn",
+        )
+        self.adapter.thread_turns[thread_id] = provider_turns
+
+        with patch.object(
+            self.adapter, "start_turn", side_effect=RuntimeError("response lost")
+        ):
+            with self.assertRaises(ConversationError):
+                self.service.send_message(
+                    conversation["conversation_id"], "Not accepted"
+                )
+
+        uncertainty = self.service.store.latest_turn_start_uncertainty(
+            conversation["conversation_id"]
+        )
+        self.assertEqual(
+            uncertainty["payload"]["provider_turn_baseline"]["count"], 2
+        )
+        self.adapter.unmaterialized_threads.discard(thread_id)
+        reconciled = self.service.reconcile(conversation["conversation_id"])
+
+        self.assertTrue(reconciled["resolved"])
+        self.assertIsNone(reconciled["accepted_user_event_id"])
+        self.assertEqual(reconciled["latest_provider_turn_id"], "current-turn")
+
+    def test_long_provider_history_does_not_accept_an_unstarted_pending_message(self):
+        conversation = self._create()
+        first = self.service.send_message(conversation["conversation_id"], "First")
+        self._finish_turn(conversation, first)
+        provider_turns = [
+            {"id": f"historical-turn-{index}", "status": "completed"}
+            for index in range(205)
+        ]
+        for turn in provider_turns:
+            self.service.store.append_event(
+                kind="turn.completed",
+                payload={"turn": turn},
+                conversation_id=conversation["conversation_id"],
+                turn_id=turn["id"],
+            )
+        self.adapter.thread_turns[conversation["thread_id"]] = provider_turns
+        with patch.object(
+            self.adapter, "start_turn", side_effect=RuntimeError("response lost")
+        ):
+            with self.assertRaises(ConversationError):
+                self.service.send_message(conversation["conversation_id"], "Not accepted")
+
+        reconciled = self.service.reconcile(conversation["conversation_id"])
+
+        self.assertTrue(reconciled["resolved"])
+        self.assertIsNone(reconciled["accepted_user_event_id"])
+        self.assertEqual(
+            reconciled["latest_provider_turn_id"], "historical-turn-204"
+        )
+
+    def test_transport_unknown_reconcile_resets_empty_thread_for_exact_retry(self):
+        conversation = self._create()
+        attachment = self.service.upload_attachment(
+            conversation["conversation_id"],
+            b"retry attachment",
+            "text/plain",
+            "retry.txt",
+        )["attachment"]
+        with patch.object(
+            self.adapter, "start_turn", side_effect=RuntimeError("response lost")
+        ):
+            with self.assertRaises(ConversationError):
+                self.service.send_message(
+                    conversation["conversation_id"],
+                    "First",
+                    [attachment["attachment_id"]],
+                )
+
+        self.adapter.unmaterialized_threads.discard(conversation["thread_id"])
+        reconciled = self.service.reconcile(conversation["conversation_id"])
+        self.assertTrue(reconciled["resolved"])
+        self.assertEqual(
+            reconciled["conversation"]["initial_context_state"], "prepared"
+        )
+        self.assertEqual(self.build_opening_context.call_count, 1)
+        self.assertEqual(
+            self.service.store.get_attachment(attachment["attachment_id"])["state"],
+            "staged",
+        )
+
+        retried = self.service.send_message(
+            conversation["conversation_id"],
+            "First",
+            [attachment["attachment_id"]],
+        )
+        self.assertEqual(self.build_opening_context.call_count, 1)
+        self.assertEqual(
+            self.service.store.get_conversation(conversation["conversation_id"])[
+                "initial_context_accepted_turn_id"
+            ],
+            retried["turn"]["id"],
+        )
+        user_messages = [
+            event
+            for event in self.service.detail(conversation["conversation_id"])["events"]
+            if event["kind"] == "user.message"
+        ]
+        self.assertEqual(len(user_messages), 1)
+        self.assertEqual(
+            self.service.store.get_attachment(attachment["attachment_id"])["state"],
+            "sent",
+        )
+        self._finish_turn(conversation, retried)
+
+    def test_transport_unknown_nonempty_history_without_turn_id_stays_fenced(self):
+        conversation = self._create()
+        with patch.object(
+            self.adapter, "start_turn", side_effect=RuntimeError("response lost")
+        ):
+            with self.assertRaises(ConversationError):
+                self.service.send_message(conversation["conversation_id"], "First")
+
+        self.adapter.unmaterialized_threads.discard(conversation["thread_id"])
+        self.adapter.thread_turns[conversation["thread_id"]] = [
+            {
+                "status": "completed",
+                "futureProviderIdentity": "not-a-supported-turn-id",
+            }
+        ]
+
+        reconciled = self.service.reconcile(conversation["conversation_id"])
+
+        self.assertFalse(reconciled["resolved"])
+        self.assertEqual(
+            reconciled["conversation"]["initial_context_state"], "unknown"
+        )
+        self.assertIsNone(
+            reconciled["conversation"]["initial_context_accepted_turn_id"]
+        )
+        with self.assertRaises(ConversationError) as caught:
+            self.service.send_message(conversation["conversation_id"], "Do not resend")
+        self.assertEqual(caught.exception.code, "conversation_uncertain")
+        self.assertEqual(self.build_opening_context.call_count, 1)
+
+    def test_migrated_unknown_empty_history_becomes_eligible_after_thread_read(self):
+        conversation = self._create()
+        self._set_migrated_unknown_context(conversation)
+        self.adapter.unmaterialized_threads.discard(conversation["thread_id"])
+        self.adapter.thread_turns[conversation["thread_id"]] = []
+
+        reconciled = self.service.reconcile(conversation["conversation_id"])
+
+        self.assertTrue(reconciled["resolved"])
+        self.assertEqual(
+            reconciled["conversation"]["initial_context_state"], "eligible"
+        )
+        self.assertIn(
+            ("read_thread", conversation["thread_id"], True), self.adapter.calls
+        )
+        sent = self.service.send_message(
+            conversation["conversation_id"], "New first provider message"
+        )
+        self.assertEqual(self.build_opening_context.call_count, 1)
+        stored = self.service.store.get_conversation(conversation["conversation_id"])
+        self.assertEqual(stored["initial_context_state"], "accepted")
+        self.assertEqual(
+            stored["initial_context_accepted_turn_id"], sent["turn"]["id"]
+        )
+        self._finish_turn(conversation, sent)
+
+    def test_migrated_unknown_nonempty_history_is_skipped_after_thread_read(self):
+        conversation = self._create()
+        self._set_migrated_unknown_context(conversation)
+        self.adapter.unmaterialized_threads.discard(conversation["thread_id"])
+        self.adapter.thread_turns[conversation["thread_id"]] = [
+            {"id": "legacy-provider-turn", "status": "completed"}
+        ]
+
+        reconciled = self.service.reconcile(conversation["conversation_id"])
+
+        self.assertTrue(reconciled["resolved"])
+        self.assertEqual(
+            reconciled["conversation"]["initial_context_state"], "skipped"
+        )
+        self.assertIsNone(
+            reconciled["conversation"]["initial_context_accepted_turn_id"]
+        )
+        starts_before = len(
+            [call for call in self.adapter.calls if call[0] == "start_thread"]
+        )
+        self.service._forget_thread_resident(
+            conversation["host_id"], self.adapter, conversation["thread_id"]
+        )
+        self.adapter.unmaterialized_threads.add(conversation["thread_id"])
+        with self.assertRaises(ConversationError) as caught:
+            self.service.reconcile(conversation["conversation_id"])
+        self.assertEqual(caught.exception.code, "provider_unavailable")
+        self.assertEqual(
+            len([call for call in self.adapter.calls if call[0] == "start_thread"]),
+            starts_before,
+        )
+        self.assertEqual(self.build_opening_context.call_count, 0)
+
+    def test_migrated_unknown_stays_fenced_when_thread_read_is_unavailable(self):
+        conversation = self._create()
+        self._set_migrated_unknown_context(conversation)
+        self.adapter.unmaterialized_threads.discard(conversation["thread_id"])
+        self.adapter.emit_notification(
+            "turn/started",
+            {
+                "threadId": conversation["thread_id"],
+                "turn": {"id": "ambiguous-notification", "status": "inProgress"},
+            },
+        )
+        self.assertEqual(
+            self.service.store.get_conversation(conversation["conversation_id"])[
+                "initial_context_state"
+            ],
+            "unknown",
+        )
+        with patch.object(
+            self.adapter,
+            "read_thread",
+            side_effect=RuntimeError("thread/read unavailable"),
+        ):
+            reconciled = self.service.reconcile(conversation["conversation_id"])
+
+        self.assertFalse(reconciled["resolved"])
+        self.assertEqual(
+            reconciled["conversation"]["initial_context_state"], "unknown"
+        )
+        with self.assertRaises(ConversationError) as caught:
+            self.service.send_message(conversation["conversation_id"], "Do not send")
+        self.assertEqual(caught.exception.code, "conversation_uncertain")
+        self.assertEqual(self.build_opening_context.call_count, 0)
+
+    def test_migrated_unknown_stays_fenced_when_local_turn_evidence_conflicts(self):
+        conversation = self._create()
+        self._set_migrated_unknown_context(conversation)
+        self.adapter.unmaterialized_threads.discard(conversation["thread_id"])
+        self.adapter.thread_turns[conversation["thread_id"]] = []
+        self.adapter.emit_notification(
+            "turn/started",
+            {
+                "threadId": conversation["thread_id"],
+                "turn": {"id": "local-evidence", "status": "inProgress"},
+            },
+        )
+
+        reconciled = self.service.reconcile(conversation["conversation_id"])
+
+        self.assertFalse(reconciled["resolved"])
+        self.assertEqual(
+            reconciled["conversation"]["initial_context_state"], "unknown"
+        )
+        self.assertIsNone(
+            reconciled["conversation"]["initial_context_accepted_turn_id"]
+        )
+        self.assertTrue(
+            self.service.store.has_turn_evidence(conversation["conversation_id"])
+        )
+        with self.assertRaises(ConversationError) as caught:
+            self.service.send_message(conversation["conversation_id"], "Do not send")
+        self.assertEqual(caught.exception.code, "conversation_uncertain")
+
+    def test_manager_is_persistent_local_root_bound_and_not_side_chat_cleaned(self):
+        manager = self.service.create_manager()["conversation"]
+        manager_record = self.service.store.get_conversation(
+            manager["conversation_id"]
+        )
+        manager_start = [
+            item for item in self.adapter.calls if item[0] == "start_thread"
+        ][-1]
+
+        self.assertEqual(manager["kind"], "manager")
+        self.assertEqual(manager["host_id"], "local")
+        self.assertEqual(manager["project_id"], "local-root")
+        self.assertEqual(Path(manager["execution_cwd"]), self.root)
+        self.assertIsNone(manager["pursuit_id"])
+        self.assertIsNone(manager["pursuit_title_snapshot"])
+        self.assertIsNone(manager_record["parent_conversation_id"])
+        self.assertEqual(Path(manager_start[1]), self.root)
+        self.assertNotIn("ephemeral", manager_start[2])
+
+        parent = self._create()
+        side_chat = self.service.create_side_chat(
+            parent["conversation_id"], "browser-session"
+        )["conversation"]
+        closed = self.service.close_side_chats_for_session("browser-session")
+
+        self.assertEqual(closed["conversation_ids"], [side_chat["conversation_id"]])
+        self.assertIsNotNone(
+            self.service.store.get_conversation(manager["conversation_id"])
+        )
+        self.assertIn(
+            manager["conversation_id"],
+            [item["conversation_id"] for item in self.service.workspace()["conversations"]],
+        )
+
+    def test_manager_message_references_are_resolved_and_fixed_at_send(self):
+        manager = self.service.create_manager()["conversation"]
+        with patch(
+            "rightmemory.conversations.service.manager_initial_context",
+            return_value="opaque-manager-context-token",
+        ):
+            sent = self.service.send_message(
+                manager["conversation_id"],
+                "Use the current selection",
+                message_references=[
+                    {"kind": "pursuit", "id": "alpha"},
+                    {"kind": "pursuit", "id": "alpha"},
+                ],
+            )
+
+        message = next(
+            event
+            for event in self.service.detail(manager["conversation_id"])["events"]
+            if event["kind"] == "user.message"
+        )
+        references = message["payload"]["references"]
+        self.assertEqual(len(references), 1)
+        self.assertEqual(references[0]["kind"], "pursuit")
+        self.assertEqual(references[0]["id"], "alpha")
+        self.assertEqual(references[0]["title"], "Alpha")
+        self.assertEqual(references[0]["host_id"], "local")
+        self.assertEqual(references[0]["root_key"], self.pursuit_stores[str(self.root)].root_key)
+
+        self.pursuit_stores[str(self.root)].items[0]["title"] = "Changed later"
+        stored_again = next(
+            event
+            for event in self.service.detail(manager["conversation_id"])["events"]
+            if event["kind"] == "user.message"
+        )
+        self.assertEqual(stored_again["payload"]["references"], references)
+        self._finish_turn(manager, sent)
+
+    def test_project_edit_preserves_existing_replacement_and_side_chat_cwd(self):
+        host = self.service.add_host("Remote", "build-box")["host"]
+        project = self.service.add_project(
+            host["host_id"], "Repository", "/srv/original"
+        )["project"]
+        conversation = self.service.create_conversation(
+            "alpha", host["host_id"], project["project_id"]
+        )["conversation"]
+        remote_adapter = self.adapter
+
+        updated = self.service.update_project(
+            project["project_id"], cwd="/srv/changed"
+        )["project"]
+        self.assertEqual(updated["cwd"], "/srv/changed")
+        self.assertEqual(
+            self.service.store.get_conversation(conversation["conversation_id"])[
+                "execution_cwd"
+            ],
+            "/srv/original",
+        )
+
+        side_chat = self.service.create_side_chat(
+            conversation["conversation_id"], "browser-session"
+        )["conversation"]
+        self.assertEqual(side_chat["execution_cwd"], "/srv/original")
+        side_start = [
+            item for item in remote_adapter.calls if item[0] == "start_thread"
+        ][-1]
+        self.assertEqual(side_start[1], "/srv/original")
+        self.assertTrue(side_start[2]["ephemeral"])
+
+        self.service._forget_thread_resident(
+            host["host_id"], remote_adapter, conversation["thread_id"]
+        )
+        sent = self.service.send_message(conversation["conversation_id"], "Start")
+        rebound = self.service.store.get_conversation(conversation["conversation_id"])
+        replacement_starts = [
+            item
+            for item in remote_adapter.calls
+            if item[0] == "start_thread" and item[1] == "/srv/original"
+        ]
+        self.assertGreaterEqual(len(replacement_starts), 3)
+        self.assertEqual(rebound["execution_cwd"], "/srv/original")
+        self._finish_turn(rebound, sent)
+
+        future = self.service.create_conversation(
+            "beta", host["host_id"], project["project_id"]
+        )["conversation"]
+        self.assertEqual(future["execution_cwd"], "/srv/changed")
+        self.assertEqual(
+            [item for item in remote_adapter.calls if item[0] == "start_thread"][-1][1],
+            "/srv/changed",
+        )
+
+    def test_ssh_alias_update_waits_for_first_conversation_attachment(self):
+        host = self.service.add_host("Remote", "build-box")["host"]
+        project = self.service.add_project(
+            host["host_id"], "Repository", "/srv/repository"
+        )["project"]
+        self.service.probe_host(host["host_id"])
+        remote_adapter = self.adapter
+        original_start_thread = remote_adapter.start_thread
+        start_entered = threading.Event()
+        allow_start_to_finish = threading.Event()
+        update_started = threading.Event()
+        update_finished = threading.Event()
+        created: list[dict[str, Any]] = []
+        create_errors: list[BaseException] = []
+        update_errors: list[BaseException] = []
+
+        def blocking_start_thread(cwd: str, **optional: Any) -> dict[str, Any]:
+            start_entered.set()
+            if not allow_start_to_finish.wait(timeout=2):
+                raise RuntimeError("test did not release thread/start")
+            return original_start_thread(cwd, **optional)
+
+        def create() -> None:
+            try:
+                created.append(
+                    self.service.create_conversation(
+                        "alpha", host["host_id"], project["project_id"]
+                    )["conversation"]
+                )
+            except BaseException as exc:
+                create_errors.append(exc)
+
+        def update() -> None:
+            update_started.set()
+            try:
+                self.service.update_host(host["host_id"], ssh_alias="new-target")
+            except BaseException as exc:
+                update_errors.append(exc)
+            finally:
+                update_finished.set()
+
+        with patch.object(
+            remote_adapter, "start_thread", side_effect=blocking_start_thread
+        ):
+            creator = threading.Thread(target=create)
+            updater = threading.Thread(target=update)
+            creator.start()
+            self.assertTrue(start_entered.wait(timeout=2))
+            updater.start()
+            self.assertTrue(update_started.wait(timeout=2))
+            self.assertFalse(update_finished.wait(timeout=0.1))
+            allow_start_to_finish.set()
+            creator.join(timeout=2)
+            updater.join(timeout=2)
+
+        self.assertFalse(creator.is_alive())
+        self.assertFalse(updater.is_alive())
+        self.assertEqual(create_errors, [])
+        self.assertEqual(len(created), 1)
+        self.assertEqual(len(update_errors), 1)
+        self.assertIsInstance(update_errors[0], ConversationError)
+        self.assertEqual(update_errors[0].code, "host_in_use")
+        self.assertEqual(
+            self.service.store.get_host(host["host_id"])["ssh_alias"], "build-box"
+        )
+
+    def test_ssh_alias_update_cannot_leave_old_connect_cached(self):
+        host = self.service.add_host("Remote", "build-box")["host"]
+        original_connect = _FakeAdapter.connect
+        connect_entered = threading.Event()
+        allow_connect_to_finish = threading.Event()
+        update_started = threading.Event()
+        update_finished = threading.Event()
+        probe_results: list[dict[str, Any]] = []
+        update_results: list[dict[str, Any]] = []
+        errors: list[BaseException] = []
+
+        def blocking_connect(adapter: _FakeAdapter) -> dict[str, Any]:
+            connect_entered.set()
+            if not allow_connect_to_finish.wait(timeout=2):
+                raise RuntimeError("test did not release adapter connect")
+            return original_connect(adapter)
+
+        def probe() -> None:
+            try:
+                probe_results.append(self.service.probe_host(host["host_id"]))
+            except BaseException as exc:
+                errors.append(exc)
+
+        def update() -> None:
+            update_started.set()
+            try:
+                update_results.append(
+                    self.service.update_host(
+                        host["host_id"], ssh_alias="new-target"
+                    )
+                )
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                update_finished.set()
+
+        with patch.object(_FakeAdapter, "connect", new=blocking_connect):
+            probing = threading.Thread(target=probe)
+            updating = threading.Thread(target=update)
+            probing.start()
+            self.assertTrue(connect_entered.wait(timeout=2))
+            updating.start()
+            self.assertTrue(update_started.wait(timeout=2))
+            self.assertFalse(update_finished.wait(timeout=0.1))
+            allow_connect_to_finish.set()
+            probing.join(timeout=2)
+            updating.join(timeout=2)
+
+        self.assertFalse(probing.is_alive())
+        self.assertFalse(updating.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(probe_results), 1)
+        self.assertEqual(len(update_results), 1)
+        old_adapter = self.adapters.instances[-1]
+        self.assertEqual(old_adapter.host["ssh_alias"], "build-box")
+        self.assertTrue(old_adapter.closed)
+        self.assertIsNone(self.service._existing_adapter(host["host_id"]))
+        self.assertEqual(update_results[0]["host"]["ssh_alias"], "new-target")
+
+        self.service.probe_host(host["host_id"])
+        new_adapter = self.adapters.instances[-1]
+        self.assertIsNot(new_adapter, old_adapter)
+        self.assertEqual(new_adapter.host["ssh_alias"], "new-target")
 
     def test_deleted_pursuit_does_not_delete_or_reclassify_conversation(self):
         conversation = self._create()

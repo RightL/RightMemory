@@ -16,6 +16,7 @@ import {
   type ConversationHistoryPage,
   type ConversationModelCatalog,
   type ConversationProject,
+  type ConversationReference,
   type ConversationSummary,
   type PursuitConversationList,
   type WorkspaceSnapshot,
@@ -32,6 +33,12 @@ export interface EventStream {
 }
 
 export type EventSourceFactory = (url: string) => EventStream;
+
+export interface ConversationReconciliation {
+  conversation: ConversationSummary;
+  resolved: boolean;
+  acceptedUserEventId: string | null;
+}
 
 function responseData(response: { data: unknown }): unknown { return response.data; }
 
@@ -58,6 +65,12 @@ function attachmentBody(file: File, attachmentId: string, attachmentKind?: 'file
 function required<T>(value: T | null, message: string): T {
   if (!value) throw new Error(message);
   return value;
+}
+
+function optionalEventId(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return String(value);
+  if (typeof value === 'string' && /^\d+$/.test(value) && Number(value) > 0) return value;
+  return null;
 }
 
 export class ConversationApi {
@@ -99,6 +112,16 @@ export class ConversationApi {
     return required(normalizeConversation(record.conversation ?? data), 'The server did not return the new conversation.');
   }
 
+  async createManager(model: string, reasoningEffort: string): Promise<ConversationSummary> {
+    const response = await this.fetchJson('/api/manager-conversations', body({
+      model,
+      reasoning_effort: reasoningEffort,
+    }));
+    const data = responseData(response);
+    const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
+    return required(normalizeConversation(record.conversation ?? data), 'The server did not return the new Manager conversation.');
+  }
+
   async conversation(conversationId: string): Promise<ConversationDetail> {
     const response = await this.fetchJson(`/api/conversations/${encoded(conversationId)}`);
     return required(normalizeConversationDetail(responseData(response)), 'The server returned an invalid conversation.');
@@ -132,8 +155,18 @@ export class ConversationApi {
     return required(normalizeConversation(record.conversation ?? data), 'The server did not return the read conversation.');
   }
 
-  async sendMessage(conversationId: string, text: string, attachmentIds: string[] = []): Promise<ConversationSummary | null> {
-    const response = await this.fetchJson(`/api/conversations/${encoded(conversationId)}/messages`, body({ text, attachment_ids: attachmentIds }));
+  async sendMessage(
+    conversationId: string,
+    text: string,
+    attachmentIds: string[] = [],
+    references: ConversationReference[] = [],
+  ): Promise<ConversationSummary | null> {
+    const payload: Record<string, unknown> = {
+      text,
+      attachment_ids: attachmentIds,
+    };
+    if (references.length) payload.references = references;
+    const response = await this.fetchJson(`/api/conversations/${encoded(conversationId)}/messages`, body(payload));
     const data = responseData(response);
     const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
     return normalizeConversation(record.conversation);
@@ -178,11 +211,15 @@ export class ConversationApi {
     return normalizeConversation(record.conversation);
   }
 
-  async reconcile(conversationId: string): Promise<ConversationSummary> {
+  async reconcile(conversationId: string): Promise<ConversationReconciliation> {
     const response = await this.fetchJson(`/api/conversations/${encoded(conversationId)}/reconcile`, body({}));
     const data = responseData(response);
     const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
-    return required(normalizeConversation(record.conversation), 'The server did not return the reconciled conversation.');
+    return {
+      conversation: required(normalizeConversation(record.conversation), 'The server did not return the reconciled conversation.'),
+      resolved: record.resolved === true,
+      acceptedUserEventId: optionalEventId(record.accepted_user_event_id ?? record.acceptedUserEventId),
+    };
   }
 
   async archive(conversationId: string): Promise<void> {

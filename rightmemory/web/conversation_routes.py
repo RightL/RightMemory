@@ -84,6 +84,20 @@ def add_conversation_routes(
         )
         return ok_response("conversation created", data)
 
+    @app.post("/api/manager-conversations")
+    async def create_manager_conversation(
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        service=Depends(current_conversation_service),
+    ):
+        data = await mutation(
+            request,
+            service.create_manager,
+            payload.get("model"),
+            payload.get("reasoning_effort"),
+        )
+        return ok_response("Manager conversation created", data)
+
     @app.get("/api/conversations/{conversation_id}")
     async def conversation_detail(
         conversation_id: str,
@@ -170,6 +184,7 @@ def add_conversation_routes(
             payload.get("text"),
             payload.get("attachment_ids"),
             session.session_id,
+            payload.get("references"),
         )
         return ok_response("message sent", data)
 
@@ -358,6 +373,24 @@ def add_conversation_routes(
         data = await mutation(request, service.probe_host, host_id)
         return ok_response("conversation host checked", data)
 
+    @app.patch("/api/conversation-hosts/{host_id}")
+    async def update_conversation_host(
+        host_id: str,
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        service=Depends(current_conversation_service),
+    ):
+        data = await mutation(
+            request,
+            service.update_host,
+            host_id,
+            payload.get("display_name"),
+            payload.get("ssh_alias"),
+            payload.get("platform_hint"),
+            payload.get("enabled"),
+        )
+        return ok_response("conversation host updated", data)
+
     @app.post("/api/conversation-projects")
     async def create_conversation_project(
         request: Request,
@@ -372,6 +405,22 @@ def add_conversation_routes(
             payload.get("cwd"),
         )
         return ok_response("conversation project added", data)
+
+    @app.patch("/api/conversation-projects/{project_id}")
+    async def update_conversation_project(
+        project_id: str,
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        service=Depends(current_conversation_service),
+    ):
+        data = await mutation(
+            request,
+            service.update_project,
+            project_id,
+            payload.get("label"),
+            payload.get("cwd"),
+        )
+        return ok_response("conversation project updated", data)
 
     @app.get("/api/conversation-events")
     async def conversation_events(

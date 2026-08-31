@@ -4,13 +4,13 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 LOCAL_HOST_ID = "local"
 DEFAULT_LOCAL_PROJECT_ID = "local-root"
 
 HOST_KINDS = frozenset({"local", "ssh"})
 CONVERSATION_LIFECYCLES = frozenset({"active", "archived"})
-CONVERSATION_KINDS = frozenset({"pursuit", "side_chat"})
+CONVERSATION_KINDS = frozenset({"pursuit", "side_chat", "manager"})
 CONVERSATION_STATUSES = frozenset(
     {
         "idle",
@@ -27,6 +27,9 @@ CONVERSATION_STATUSES = frozenset(
 PENDING_REQUEST_STATES = frozenset({"pending", "resolved", "stale"})
 ATTACHMENT_KINDS = frozenset({"image", "pasted_text", "file"})
 ATTACHMENT_STATES = frozenset({"staged", "sent"})
+INITIAL_CONTEXT_STATES = frozenset(
+    {"eligible", "prepared", "unknown", "accepted", "skipped"}
+)
 
 
 class ConversationError(RuntimeError):
@@ -78,10 +81,11 @@ class PursuitConversation:
     conversation_id: str
     kind: str
     parent_conversation_id: str | None
-    pursuit_id: str
+    pursuit_id: str | None
     pursuit_title_snapshot: str | None
     host_id: str
     project_id: str
+    execution_cwd: str
     provider: str
     thread_id: str
     thread_title: str | None
@@ -90,6 +94,9 @@ class PursuitConversation:
     lifecycle: str
     status: str
     active_turn_id: str | None
+    initial_context_state: str
+    initial_context_text: str | None
+    initial_context_accepted_turn_id: str | None
     last_final_event_id: int | None
     last_read_event_id: int | None
     created_at: str

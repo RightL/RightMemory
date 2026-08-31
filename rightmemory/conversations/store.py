@@ -7,7 +7,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 from uuid import uuid4
 
 from ..session import _ensure_runtime_gitignore
@@ -37,6 +37,7 @@ DATABASE_RELATIVE_PATH = Path(".runtime") / "web" / "conversations.sqlite3"
 MAX_EVENT_PAYLOAD_BYTES = 256 * 1024
 MAX_PENDING_PAYLOAD_BYTES = 128 * 1024
 MAX_CAPABILITIES_BYTES = 64 * 1024
+MAX_INITIAL_CONTEXT_BYTES = 256 * 1024
 MAX_EVENTS_PER_READ = 1000
 
 _ID_RE = re.compile(r"^[^\x00\r\n]{1,512}$")
@@ -57,8 +58,10 @@ _PROJECT_COLUMNS = "project_id, host_id, label, cwd, last_used_at, created_at, u
 _CONVERSATION_COLUMNS = """
     conversation_id, kind, parent_conversation_id, pursuit_id,
     pursuit_title_snapshot, host_id, project_id,
-    provider, thread_id, thread_title, model, reasoning_effort, lifecycle,
-    status, active_turn_id, last_final_event_id, last_read_event_id,
+    execution_cwd, provider, thread_id, thread_title, model,
+    reasoning_effort, lifecycle, status, active_turn_id,
+    initial_context_state, initial_context_text,
+    initial_context_accepted_turn_id, last_final_event_id, last_read_event_id,
     created_at, updated_at, last_activity_at
 """
 _EVENT_COLUMNS = (
@@ -214,6 +217,70 @@ class ConversationStore:
             row = self._get_host_row(connection, clean_host_id)
         return _host_dict(row)
 
+    def update_host_config(
+        self,
+        host_id: str,
+        *,
+        display_name: str | object = _UNSET,
+        ssh_alias: str | None | object = _UNSET,
+        codex_command_override: str | None | object = _UNSET,
+        platform_hint: str | None | object = _UNSET,
+        enabled: bool | object = _UNSET,
+    ) -> dict[str, Any]:
+        """Update user-owned host configuration without touching runtime facts."""
+        clean_host_id = _id(host_id, "host_id")
+        updates: dict[str, Any] = {}
+        if display_name is not _UNSET:
+            updates["display_name"] = _text(display_name, "display_name", 200)
+        if ssh_alias is not _UNSET:
+            clean_alias = _optional_text(ssh_alias, "ssh_alias", 255)
+            if clean_alias is not None:
+                _ssh_alias(clean_alias)
+            updates["ssh_alias"] = clean_alias
+        if codex_command_override is not _UNSET:
+            updates["codex_command_override"] = _optional_text(
+                codex_command_override, "codex_command_override", 2048
+            )
+        if platform_hint is not _UNSET:
+            updates["platform_hint"] = _optional_text(
+                platform_hint, "platform_hint", 100
+            )
+        if enabled is not _UNSET:
+            updates["enabled"] = int(_boolean(enabled, "enabled"))
+        now = _now_iso()
+        updates["updated_at"] = now
+        with self._connect() as connection:
+            current = self._get_host_row(connection, clean_host_id)
+            prospective_alias = updates.get("ssh_alias", current["ssh_alias"])
+            if current["kind"] == "local":
+                if prospective_alias is not None:
+                    raise ConversationError(
+                        "invalid_host", "A local host cannot have an SSH alias.", 422
+                    )
+            elif prospective_alias is None:
+                raise ConversationError(
+                    "invalid_host", "An SSH host requires an SSH config alias.", 422
+                )
+            _update_row(
+                connection,
+                "conversation_hosts",
+                "host_id",
+                clean_host_id,
+                updates,
+            )
+            row = self._get_host_row(connection, clean_host_id)
+        return _host_dict(row)
+
+    def host_has_conversations(self, host_id: str) -> bool:
+        clean_host_id = _id(host_id, "host_id")
+        with self._connect() as connection:
+            self._get_host_row(connection, clean_host_id)
+            row = connection.execute(
+                "SELECT 1 FROM pursuit_conversations WHERE host_id = ? LIMIT 1",
+                (clean_host_id,),
+            ).fetchone()
+        return row is not None
+
     # Projects ---------------------------------------------------------------
 
     def create_project(
@@ -272,15 +339,60 @@ class ConversationStore:
                 ).fetchall()
         return [_project_dict(row) for row in rows]
 
+    def update_project(
+        self,
+        project_id: str,
+        *,
+        label: str | object = _UNSET,
+        cwd: str | object = _UNSET,
+    ) -> dict[str, Any]:
+        """Update a registered project; conversation execution snapshots stay fixed."""
+        clean_project_id = _id(project_id, "project_id")
+        updates: dict[str, Any] = {}
+        if label is not _UNSET:
+            updates["label"] = _text(label, "label", 300)
+        if cwd is not _UNSET:
+            updates["cwd"] = _cwd(cwd)
+        updates["updated_at"] = _now_iso()
+        with self._connect() as connection:
+            self._get_project_row(connection, clean_project_id)
+            try:
+                _update_row(
+                    connection,
+                    "conversation_projects",
+                    "project_id",
+                    clean_project_id,
+                    updates,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ConversationError(
+                    "project_conflict",
+                    "That host and working directory are already registered.",
+                    409,
+                ) from exc
+            row = self._get_project_row(connection, clean_project_id)
+        return _project_dict(row)
+
+    def project_has_conversations(self, project_id: str) -> bool:
+        clean_project_id = _id(project_id, "project_id")
+        with self._connect() as connection:
+            self._get_project_row(connection, clean_project_id)
+            row = connection.execute(
+                "SELECT 1 FROM pursuit_conversations WHERE project_id = ? LIMIT 1",
+                (clean_project_id,),
+            ).fetchone()
+        return row is not None
+
     # Conversations and Pursuit defaults ------------------------------------
 
     def create_conversation(
         self,
         *,
-        pursuit_id: str,
+        pursuit_id: str | None = None,
         host_id: str,
         project_id: str,
         thread_id: str,
+        execution_cwd: str | None = None,
         kind: str = "pursuit",
         parent_conversation_id: str | None = None,
         owner_session_id: str | None = None,
@@ -299,26 +411,43 @@ class ConversationStore:
         clean_kind = _choice(kind, "conversation kind", CONVERSATION_KINDS)
         clean_parent_id = _optional_id(parent_conversation_id, "parent_conversation_id")
         clean_owner_session_id = _optional_id(owner_session_id, "owner_session_id")
+        clean_pursuit_id = _optional_id(pursuit_id, "pursuit_id")
         if clean_kind == "pursuit" and (
-            clean_parent_id is not None or clean_owner_session_id is not None
+            clean_parent_id is not None
+            or clean_owner_session_id is not None
+            or clean_pursuit_id is None
         ):
             raise ConversationError(
                 "invalid_parent_conversation",
-                "A Pursuit conversation cannot have a parent or session owner.",
+                "A Pursuit conversation requires a Pursuit and cannot have a parent or session owner.",
                 422,
             )
         if clean_kind == "side_chat" and (
-            clean_parent_id is None or clean_owner_session_id is None
+            clean_parent_id is None
+            or clean_owner_session_id is None
+            or clean_pursuit_id is None
         ):
             raise ConversationError(
                 "invalid_parent_conversation",
-                "A side chat requires its parent Pursuit conversation and session owner.",
+                "A side chat requires its Pursuit, parent conversation, and session owner.",
                 422,
             )
-        clean_pursuit_id = _id(pursuit_id, "pursuit_id")
+        if clean_kind == "manager" and (
+            clean_parent_id is not None
+            or clean_owner_session_id is not None
+            or clean_pursuit_id is not None
+        ):
+            raise ConversationError(
+                "invalid_parent_conversation",
+                "A manager conversation cannot have a Pursuit, parent, or session owner.",
+                422,
+            )
         clean_host_id = _id(host_id, "host_id")
         clean_project_id = _id(project_id, "project_id")
         clean_thread_id = _id(thread_id, "thread_id")
+        clean_execution_cwd = (
+            _cwd(execution_cwd) if execution_cwd is not None else None
+        )
         clean_pursuit_title = _optional_text(pursuit_title_snapshot, "pursuit_title_snapshot", 500)
         clean_thread_title = _optional_text(thread_title, "thread_title", 500)
         clean_model = _optional_text(model, "model", 512)
@@ -330,7 +459,10 @@ class ConversationStore:
         clean_turn_id = _optional_id(active_turn_id, "active_turn_id")
         now = _now_iso()
         with self._connect() as connection:
-            self._require_host_project(connection, clean_host_id, clean_project_id)
+            project = self._require_host_project(
+                connection, clean_host_id, clean_project_id
+            )
+            stored_execution_cwd = clean_execution_cwd or project["cwd"]
             if clean_parent_id is not None:
                 parent = self._get_conversation_row(connection, clean_parent_id)
                 if (
@@ -338,10 +470,11 @@ class ConversationStore:
                     or parent["pursuit_id"] != clean_pursuit_id
                     or parent["host_id"] != clean_host_id
                     or parent["project_id"] != clean_project_id
+                    or parent["execution_cwd"] != stored_execution_cwd
                 ):
                     raise ConversationError(
                         "invalid_parent_conversation",
-                        "A side chat must belong to its parent Pursuit conversation and project.",
+                        "A side chat must retain its parent Pursuit, project, and execution directory.",
                         422,
                     )
             if self._get_conversation_row(connection, clean_conversation_id, required=False) is not None:
@@ -361,11 +494,11 @@ class ConversationStore:
                 INSERT INTO pursuit_conversations(
                     conversation_id, kind, parent_conversation_id,
                     owner_session_id, pursuit_id, pursuit_title_snapshot,
-                    host_id, project_id, provider,
+                    host_id, project_id, execution_cwd, provider,
                     thread_id, thread_title, model,
                     reasoning_effort, lifecycle, status, active_turn_id,
                     created_at, updated_at, last_activity_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'codex', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'codex', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     clean_conversation_id,
@@ -376,6 +509,7 @@ class ConversationStore:
                     clean_pursuit_title,
                     clean_host_id,
                     clean_project_id,
+                    stored_execution_cwd,
                     clean_thread_id,
                     clean_thread_title,
                     clean_model,
@@ -397,6 +531,258 @@ class ConversationStore:
                     now,
                 )
             row = self._get_conversation_row(connection, clean_conversation_id)
+        return _conversation_dict(row)
+
+    def prepare_initial_context(
+        self, conversation_id: str, text: str
+    ) -> dict[str, Any]:
+        """Persist the exact first-turn context before provider submission."""
+        clean_id = _id(conversation_id, "conversation_id")
+        clean_text = _initial_context_text(text)
+        now = _now_iso()
+        with self._connect() as connection:
+            current = self._get_conversation_row(connection, clean_id)
+            if current["initial_context_state"] == "prepared":
+                if current["initial_context_text"] == clean_text:
+                    return _conversation_dict(current)
+                _raise_initial_context_transition("prepared", "prepared")
+            if current["initial_context_state"] != "eligible":
+                _raise_initial_context_transition(
+                    current["initial_context_state"], "prepared"
+                )
+            cursor = connection.execute(
+                """
+                UPDATE pursuit_conversations
+                SET initial_context_state = 'prepared',
+                    initial_context_text = ?,
+                    initial_context_accepted_turn_id = NULL,
+                    updated_at = ?
+                WHERE conversation_id = ?
+                  AND initial_context_state = 'eligible'
+                """,
+                (clean_text, now, clean_id),
+            )
+            if cursor.rowcount != 1:
+                current = self._get_conversation_row(connection, clean_id)
+                if (
+                    current["initial_context_state"] == "prepared"
+                    and current["initial_context_text"] == clean_text
+                ):
+                    return _conversation_dict(current)
+                _raise_initial_context_transition(
+                    current["initial_context_state"], "prepared"
+                )
+            row = self._get_conversation_row(connection, clean_id)
+        return _conversation_dict(row)
+
+    def mark_initial_context_unknown(
+        self, conversation_id: str
+    ) -> dict[str, Any]:
+        """Record that a prepared context may have reached the provider."""
+        clean_id = _id(conversation_id, "conversation_id")
+        now = _now_iso()
+        with self._connect() as connection:
+            current = self._get_conversation_row(connection, clean_id)
+            if current["initial_context_state"] == "unknown":
+                return _conversation_dict(current)
+            if current["initial_context_state"] != "prepared":
+                _raise_initial_context_transition(
+                    current["initial_context_state"], "unknown"
+                )
+            cursor = connection.execute(
+                """
+                UPDATE pursuit_conversations
+                SET initial_context_state = 'unknown', updated_at = ?
+                WHERE conversation_id = ?
+                  AND initial_context_state = 'prepared'
+                """,
+                (now, clean_id),
+            )
+            if cursor.rowcount != 1:
+                current = self._get_conversation_row(connection, clean_id)
+                if current["initial_context_state"] == "unknown":
+                    return _conversation_dict(current)
+                _raise_initial_context_transition(
+                    current["initial_context_state"], "unknown"
+                )
+            row = self._get_conversation_row(connection, clean_id)
+        return _conversation_dict(row)
+
+    def mark_initial_context_accepted(
+        self, conversation_id: str, turn_id: str
+    ) -> dict[str, Any]:
+        """Bind the prepared context to the provider-accepted first turn."""
+        clean_id = _id(conversation_id, "conversation_id")
+        clean_turn_id = _id(turn_id, "turn_id")
+        now = _now_iso()
+        with self._connect() as connection:
+            current = self._get_conversation_row(connection, clean_id)
+            if current["initial_context_state"] == "accepted":
+                if current["initial_context_accepted_turn_id"] == clean_turn_id:
+                    return _conversation_dict(current)
+                _raise_initial_context_transition("accepted", "accepted")
+            if current["initial_context_state"] not in {"prepared", "unknown"}:
+                _raise_initial_context_transition(
+                    current["initial_context_state"], "accepted"
+                )
+            cursor = connection.execute(
+                """
+                UPDATE pursuit_conversations
+                SET initial_context_state = 'accepted',
+                    initial_context_accepted_turn_id = ?,
+                    updated_at = ?
+                WHERE conversation_id = ?
+                  AND initial_context_state IN ('prepared', 'unknown')
+                """,
+                (clean_turn_id, now, clean_id),
+            )
+            if cursor.rowcount != 1:
+                current = self._get_conversation_row(connection, clean_id)
+                if (
+                    current["initial_context_state"] == "accepted"
+                    and current["initial_context_accepted_turn_id"]
+                    == clean_turn_id
+                ):
+                    return _conversation_dict(current)
+                _raise_initial_context_transition(
+                    current["initial_context_state"], "accepted"
+                )
+            row = self._get_conversation_row(connection, clean_id)
+        return _conversation_dict(row)
+
+    def reset_initial_context_to_prepared(
+        self, conversation_id: str
+    ) -> dict[str, Any]:
+        """Retry an uncertain submission using the exact persisted context."""
+        clean_id = _id(conversation_id, "conversation_id")
+        now = _now_iso()
+        with self._connect() as connection:
+            current = self._get_conversation_row(connection, clean_id)
+            if current["initial_context_state"] == "prepared":
+                return _conversation_dict(current)
+            if current["initial_context_state"] != "unknown":
+                _raise_initial_context_transition(
+                    current["initial_context_state"], "prepared"
+                )
+            if current["initial_context_text"] is None:
+                raise ConversationError(
+                    "initial_context_unavailable",
+                    "The uncertain conversation has no prepared initial context to retry.",
+                    409,
+                )
+            cursor = connection.execute(
+                """
+                UPDATE pursuit_conversations
+                SET initial_context_state = 'prepared', updated_at = ?
+                WHERE conversation_id = ?
+                  AND initial_context_state = 'unknown'
+                  AND initial_context_text IS NOT NULL
+                """,
+                (now, clean_id),
+            )
+            if cursor.rowcount != 1:
+                current = self._get_conversation_row(connection, clean_id)
+                if current["initial_context_state"] == "prepared":
+                    return _conversation_dict(current)
+                _raise_initial_context_transition(
+                    current["initial_context_state"], "prepared"
+                )
+            row = self._get_conversation_row(connection, clean_id)
+        return _conversation_dict(row)
+
+    def reset_initial_context_to_eligible(
+        self, conversation_id: str
+    ) -> dict[str, Any]:
+        """Reopen an unprepared unknown context after verified empty history."""
+        clean_id = _id(conversation_id, "conversation_id")
+        now = _now_iso()
+        with self._connect() as connection:
+            current = self._get_conversation_row(connection, clean_id)
+            if current["initial_context_state"] == "eligible":
+                return _conversation_dict(current)
+            turn_evidence = connection.execute(
+                """
+                SELECT 1
+                FROM conversation_events
+                WHERE conversation_id = ?
+                  AND (turn_id IS NOT NULL OR kind GLOB 'turn.*')
+                LIMIT 1
+                """,
+                (clean_id,),
+            ).fetchone()
+            if (
+                current["initial_context_state"] != "unknown"
+                or current["initial_context_text"] is not None
+                or current["initial_context_accepted_turn_id"] is not None
+                or current["active_turn_id"] is not None
+                or turn_evidence is not None
+            ):
+                _raise_initial_context_transition(
+                    current["initial_context_state"], "eligible"
+                )
+            cursor = connection.execute(
+                """
+                UPDATE pursuit_conversations
+                SET initial_context_state = 'eligible', updated_at = ?
+                WHERE conversation_id = ?
+                  AND initial_context_state = 'unknown'
+                  AND initial_context_text IS NULL
+                  AND initial_context_accepted_turn_id IS NULL
+                  AND active_turn_id IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM conversation_events
+                      WHERE conversation_id = ?
+                        AND (turn_id IS NOT NULL OR kind GLOB 'turn.*')
+                  )
+                """,
+                (now, clean_id, clean_id),
+            )
+            if cursor.rowcount != 1:
+                current = self._get_conversation_row(connection, clean_id)
+                if current["initial_context_state"] == "eligible":
+                    return _conversation_dict(current)
+                _raise_initial_context_transition(
+                    current["initial_context_state"], "eligible"
+                )
+            row = self._get_conversation_row(connection, clean_id)
+        return _conversation_dict(row)
+
+    def mark_initial_context_skipped(
+        self, conversation_id: str
+    ) -> dict[str, Any]:
+        """Record that initial-context submission does not apply here."""
+        clean_id = _id(conversation_id, "conversation_id")
+        now = _now_iso()
+        with self._connect() as connection:
+            current = self._get_conversation_row(connection, clean_id)
+            if current["initial_context_state"] == "skipped":
+                return _conversation_dict(current)
+            if current["initial_context_state"] not in {
+                "eligible",
+                "prepared",
+                "unknown",
+            }:
+                _raise_initial_context_transition(
+                    current["initial_context_state"], "skipped"
+                )
+            cursor = connection.execute(
+                """
+                UPDATE pursuit_conversations
+                SET initial_context_state = 'skipped', updated_at = ?
+                WHERE conversation_id = ?
+                  AND initial_context_state IN ('eligible', 'prepared', 'unknown')
+                """,
+                (now, clean_id),
+            )
+            if cursor.rowcount != 1:
+                current = self._get_conversation_row(connection, clean_id)
+                if current["initial_context_state"] == "skipped":
+                    return _conversation_dict(current)
+                _raise_initial_context_transition(
+                    current["initial_context_state"], "skipped"
+                )
+            row = self._get_conversation_row(connection, clean_id)
         return _conversation_dict(row)
 
     def get_conversation(self, conversation_id: str) -> dict[str, Any] | None:
@@ -460,7 +846,7 @@ class ConversationStore:
         self,
         conversation_id: str,
         *,
-        pursuit_id: str | object = _UNSET,
+        pursuit_id: str | None | object = _UNSET,
         pursuit_title_snapshot: str | None | object = _UNSET,
         thread_title: str | None | object = _UNSET,
         model: str | None | object = _UNSET,
@@ -474,7 +860,7 @@ class ConversationStore:
         clean_id = _id(conversation_id, "conversation_id")
         updates: dict[str, Any] = {}
         if pursuit_id is not _UNSET:
-            updates["pursuit_id"] = _id(pursuit_id, "pursuit_id")
+            updates["pursuit_id"] = _optional_id(pursuit_id, "pursuit_id")
         if pursuit_title_snapshot is not _UNSET:
             updates["pursuit_title_snapshot"] = _optional_text(
                 pursuit_title_snapshot, "pursuit_title_snapshot", 500
@@ -501,8 +887,33 @@ class ConversationStore:
             updates["last_activity_at"] = now
         with self._connect() as connection:
             current = self._get_conversation_row(connection, clean_id)
-            _update_row(connection, "pursuit_conversations", "conversation_id", clean_id, updates)
             if "pursuit_id" in updates:
+                requested_pursuit_id = updates["pursuit_id"]
+                if current["kind"] == "manager":
+                    if requested_pursuit_id is not None:
+                        raise ConversationError(
+                            "invalid_conversation",
+                            "A manager conversation cannot be attached to a Pursuit.",
+                            422,
+                        )
+                elif requested_pursuit_id is None:
+                    raise ConversationError(
+                        "invalid_conversation",
+                        "Only a manager conversation can omit its Pursuit.",
+                        422,
+                    )
+                elif current["kind"] == "side_chat":
+                    parent = self._get_conversation_row(
+                        connection, current["parent_conversation_id"]
+                    )
+                    if parent["pursuit_id"] != requested_pursuit_id:
+                        raise ConversationError(
+                            "invalid_parent_conversation",
+                            "A side chat must retain its parent Pursuit.",
+                            422,
+                        )
+            _update_row(connection, "pursuit_conversations", "conversation_id", clean_id, updates)
+            if "pursuit_id" in updates and current["kind"] == "pursuit":
                 self._set_pursuit_default(
                     connection,
                     updates["pursuit_id"],
@@ -519,7 +930,10 @@ class ConversationStore:
         clean_id = _id(conversation_id, "conversation_id")
         with self._connect() as connection:
             current = self._get_conversation_row(connection, clean_id)
-            if current["active_turn_id"] is not None:
+            if (
+                current["active_turn_id"] is not None
+                or current["initial_context_accepted_turn_id"] is not None
+            ):
                 return True
             row = connection.execute(
                 """
@@ -532,6 +946,124 @@ class ConversationStore:
                 (clean_id,),
             ).fetchone()
         return row is not None
+
+    def provider_turn_fingerprint(self, conversation_id: str) -> dict[str, Any]:
+        """Return a bounded fingerprint of every durable provider turn id."""
+        clean_id = _id(conversation_id, "conversation_id")
+        with self._connect() as connection:
+            self._get_conversation_row(connection, clean_id)
+            rows = connection.execute(
+                """
+                WITH provider_turns(provider_turn_id) AS (
+                    SELECT turn_id
+                    FROM conversation_events
+                    WHERE conversation_id = ? AND turn_id IS NOT NULL
+                    UNION
+                    SELECT json_extract(payload_json, '$.latest_provider_turn_id')
+                    FROM conversation_events
+                    WHERE conversation_id = ?
+                      AND kind = 'thread.reconciled'
+                      AND typeof(
+                          json_extract(payload_json, '$.latest_provider_turn_id')
+                      ) = 'text'
+                    UNION
+                    SELECT initial_context_accepted_turn_id
+                    FROM pursuit_conversations
+                    WHERE conversation_id = ?
+                      AND initial_context_accepted_turn_id IS NOT NULL
+                )
+                SELECT provider_turn_id
+                FROM provider_turns
+                ORDER BY provider_turn_id
+                """,
+                (clean_id, clean_id, clean_id),
+            ).fetchall()
+        return provider_turn_id_fingerprint(
+            str(row["provider_turn_id"]) for row in rows
+        )
+
+    def has_provider_turn_id(self, conversation_id: str, turn_id: str) -> bool:
+        clean_id = _id(conversation_id, "conversation_id")
+        clean_turn_id = _id(turn_id, "turn_id")
+        with self._connect() as connection:
+            self._get_conversation_row(connection, clean_id)
+            row = connection.execute(
+                """
+                SELECT 1 FROM (
+                    SELECT turn_id AS provider_turn_id
+                    FROM conversation_events
+                    WHERE conversation_id = ? AND turn_id = ?
+                    UNION ALL
+                    SELECT json_extract(payload_json, '$.latest_provider_turn_id')
+                    FROM conversation_events
+                    WHERE conversation_id = ?
+                      AND kind = 'thread.reconciled'
+                      AND json_extract(
+                          payload_json, '$.latest_provider_turn_id'
+                      ) = ?
+                    UNION ALL
+                    SELECT initial_context_accepted_turn_id
+                    FROM pursuit_conversations
+                    WHERE conversation_id = ?
+                      AND initial_context_accepted_turn_id = ?
+                )
+                LIMIT 1
+                """,
+                (
+                    clean_id,
+                    clean_turn_id,
+                    clean_id,
+                    clean_turn_id,
+                    clean_id,
+                    clean_turn_id,
+                ),
+            ).fetchone()
+        return row is not None
+
+    def pending_user_message_event_id(self, conversation_id: str) -> int | None:
+        """Return the unsatisfied user event newer than all provider-turn evidence."""
+        clean_id = _id(conversation_id, "conversation_id")
+        with self._connect() as connection:
+            self._get_conversation_row(connection, clean_id)
+            row = connection.execute(
+                """
+                SELECT event.event_id
+                FROM conversation_events AS event
+                WHERE event.conversation_id = ?
+                  AND event.kind = 'user.message'
+                  AND event.event_id > COALESCE((
+                      SELECT MAX(turn_event.event_id)
+                      FROM conversation_events AS turn_event
+                      WHERE turn_event.conversation_id = ?
+                        AND turn_event.turn_id IS NOT NULL
+                  ), 0)
+                ORDER BY event.event_id DESC
+                LIMIT 1
+                """,
+                (clean_id, clean_id),
+            ).fetchone()
+        return int(row["event_id"]) if row is not None else None
+
+    def latest_turn_start_uncertainty(
+        self, conversation_id: str
+    ) -> dict[str, Any] | None:
+        """Return the newest durable turn/start uncertainty marker."""
+        clean_id = _id(conversation_id, "conversation_id")
+        with self._connect() as connection:
+            self._get_conversation_row(connection, clean_id)
+            row = connection.execute(
+                f"""
+                SELECT {_EVENT_COLUMNS}
+                FROM conversation_events
+                WHERE conversation_id = ?
+                  AND kind = 'protocol.error'
+                  AND json_extract(payload_json, '$.operation') = 'turn/start'
+                ORDER BY event_id DESC
+                LIMIT 1
+                """,
+                (clean_id,),
+            ).fetchone()
+        return _event_dict(row) if row is not None else None
 
     def rebind_unstarted_thread(
         self,
@@ -566,10 +1098,15 @@ class ConversationStore:
                 """,
                 (clean_id,),
             ).fetchone()
-            if current["active_turn_id"] is not None or turn_evidence is not None:
+            if (
+                current["initial_context_state"] not in {"eligible", "prepared"}
+                or current["active_turn_id"] is not None
+                or current["initial_context_accepted_turn_id"] is not None
+                or turn_evidence is not None
+            ):
                 raise ConversationError(
                     "conversation_has_turn_history",
-                    "A conversation with accepted turn history cannot change provider threads.",
+                    "A conversation that may have reached the provider cannot change provider threads.",
                     409,
                 )
             conflict = connection.execute(
@@ -592,7 +1129,9 @@ class ConversationStore:
                 SET thread_id = ?, thread_title = ?, updated_at = ?, last_activity_at = ?
                 WHERE conversation_id = ?
                   AND thread_id = ?
+                  AND initial_context_state IN ('eligible', 'prepared')
                   AND active_turn_id IS NULL
+                  AND initial_context_accepted_turn_id IS NULL
                   AND NOT EXISTS (
                       SELECT 1
                       FROM conversation_events
@@ -933,7 +1472,7 @@ class ConversationStore:
                 WHERE event.event_id > ?
                   AND (
                       event.conversation_id IS NULL
-                      OR conversation.kind = 'pursuit'
+                      OR conversation.kind IN ('pursuit', 'manager')
                       OR (
                           conversation.kind = 'side_chat'
                           AND conversation.owner_session_id = ?
@@ -1522,6 +2061,52 @@ class ConversationStore:
             ).fetchall()
         return [_pending_dict(row) for row in rows]
 
+    def list_pending_requests_for_session(
+        self,
+        owner_session_id: str,
+        *,
+        host_id: str | None = None,
+        conversation_id: str | None = None,
+        state: str | None = "pending",
+    ) -> list[dict[str, Any]]:
+        """Read global requests plus side-chat requests owned by one session."""
+        clean_owner_session_id = _id(owner_session_id, "owner_session_id")
+        clauses = [
+            "("
+            "request.conversation_id IS NULL "
+            "OR conversation.kind IN ('pursuit', 'manager') "
+            "OR (conversation.kind = 'side_chat' AND conversation.owner_session_id = ?)"
+            ")"
+        ]
+        values: list[Any] = [clean_owner_session_id]
+        if host_id is not None:
+            clauses.append("request.host_id = ?")
+            values.append(_id(host_id, "host_id"))
+        if conversation_id is not None:
+            clauses.append("request.conversation_id = ?")
+            values.append(_id(conversation_id, "conversation_id"))
+        if state is not None:
+            clauses.append("request.state = ?")
+            values.append(
+                _choice(state, "pending request state", PENDING_REQUEST_STATES)
+            )
+        pending_columns = ", ".join(
+            f"request.{column.strip()}" for column in _PENDING_COLUMNS.split(",")
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT {pending_columns}
+                FROM pending_server_requests AS request
+                LEFT JOIN pursuit_conversations AS conversation
+                  ON conversation.conversation_id = request.conversation_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY request.created_at, request.request_key
+                """,
+                values,
+            ).fetchall()
+        return [_pending_dict(row) for row in rows]
+
     # Connection and row helpers --------------------------------------------
 
     @contextmanager
@@ -1552,138 +2137,260 @@ class ConversationStore:
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         if version == 0:
-            connection.executescript(_SCHEMA_V6)
+            connection.executescript(_SCHEMA_V7)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.execute("PRAGMA journal_mode = WAL")
             return
-        if version in {1, 2, 3, 4, 5}:
+        if version in {1, 2, 3, 4, 5, 6}:
             # DDL does not implicitly open a sqlite3 transaction. Take the
             # write lock, then re-read the version so concurrent initializers
             # cannot partially or repeatedly apply this operational upgrade.
-            connection.execute("BEGIN IMMEDIATE")
-            locked_version = int(
-                connection.execute("PRAGMA user_version").fetchone()[0]
-            )
-            if locked_version == 1:
-                connection.execute(
-                    "ALTER TABLE pursuit_conversations ADD COLUMN model TEXT"
+            # The v6 parent-table rebuild must drop a table referenced by
+            # every durable child table. Foreign-key enforcement has to be
+            # disabled before BEGIN; validation runs before commit.
+            connection.execute("PRAGMA foreign_keys = OFF")
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                locked_version = int(
+                    connection.execute("PRAGMA user_version").fetchone()[0]
                 )
-                connection.execute(
-                    "ALTER TABLE pursuit_conversations ADD COLUMN reasoning_effort TEXT"
-                )
-                locked_version = 2
-            if locked_version == 2:
-                connection.execute(
-                    """
-                    ALTER TABLE pursuit_conversations
-                    ADD COLUMN kind TEXT NOT NULL DEFAULT 'pursuit'
-                        CHECK(kind IN ('pursuit', 'side_chat'))
-                    """
-                )
-                connection.execute(
-                    """
-                    ALTER TABLE pursuit_conversations
-                    ADD COLUMN parent_conversation_id TEXT
-                        REFERENCES pursuit_conversations(conversation_id)
-                        ON DELETE SET NULL
-                    """
-                )
-                connection.execute(
-                    """
-                    ALTER TABLE pursuit_conversations
-                    ADD COLUMN last_final_event_id INTEGER
-                        REFERENCES conversation_events(event_id)
-                        ON DELETE SET NULL
-                    """
-                )
-                connection.execute(
-                    """
-                    ALTER TABLE pursuit_conversations
-                    ADD COLUMN last_read_event_id INTEGER
-                        REFERENCES conversation_events(event_id)
-                        ON DELETE SET NULL
-                    """
-                )
-                connection.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS pursuit_conversations_by_kind
-                    ON pursuit_conversations(kind, last_activity_at DESC)
-                    """
-                )
-                connection.execute(_ATTACHMENT_TABLE_V5_SQL)
-                connection.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS conversation_attachments_by_conversation
-                    ON conversation_attachments(conversation_id, created_at, attachment_id)
-                    """
-                )
-                locked_version = 3
-            if locked_version == 3:
-                connection.execute(
-                    """
-                    ALTER TABLE pursuit_conversations
-                    ADD COLUMN owner_session_id TEXT
-                    """
-                )
-                connection.execute("PRAGMA user_version = 4")
-                locked_version = 4
-            if locked_version == 4:
-                connection.execute(
-                    """
-                    ALTER TABLE conversation_events
-                    ADD COLUMN marks_final INTEGER NOT NULL DEFAULT 0
-                        CHECK(marks_final IN (0, 1))
-                    """
-                )
-                # Version four knew only the latest final event for each
-                # conversation. Preserve every marker that can be recovered;
-                # subsequent final events retain their own durable flag.
-                connection.execute(
-                    """
-                    UPDATE conversation_events
-                    SET marks_final = 1
-                    WHERE event_id IN (
-                        SELECT last_final_event_id
-                        FROM pursuit_conversations
-                        WHERE last_final_event_id IS NOT NULL
+                if locked_version == 1:
+                    connection.execute(
+                        "ALTER TABLE pursuit_conversations ADD COLUMN model TEXT"
                     )
-                    """
-                )
-                connection.execute("PRAGMA user_version = 5")
-                locked_version = 5
-            if locked_version == 5:
-                # SQLite cannot widen a CHECK constraint in place. Rebuild
-                # only the attachment table inside the existing write
-                # transaction and copy every operational column byte-for-byte.
-                connection.execute(
-                    "ALTER TABLE conversation_attachments "
-                    "RENAME TO conversation_attachments_v5"
-                )
-                connection.execute(_ATTACHMENT_TABLE_V6_SQL)
-                connection.execute(
-                    f"""
-                    INSERT INTO conversation_attachments({_ATTACHMENT_COLUMNS})
-                    SELECT {_ATTACHMENT_COLUMNS}
-                    FROM conversation_attachments_v5
-                    """
-                )
-                connection.execute("DROP TABLE conversation_attachments_v5")
-                connection.execute(
-                    """
-                    CREATE INDEX conversation_attachments_by_conversation
-                    ON conversation_attachments(
-                        conversation_id, created_at, attachment_id
+                    connection.execute(
+                        "ALTER TABLE pursuit_conversations ADD COLUMN reasoning_effort TEXT"
                     )
-                    """
-                )
-                connection.execute("PRAGMA user_version = 6")
-                locked_version = 6
-            if locked_version != SCHEMA_VERSION:
-                raise ConversationError(
-                    "unsupported_schema",
-                    f"Unsupported conversation database schema version: {locked_version}.",
-                    500,
-                )
+                    locked_version = 2
+                if locked_version == 2:
+                    connection.execute(
+                        """
+                        ALTER TABLE pursuit_conversations
+                        ADD COLUMN kind TEXT NOT NULL DEFAULT 'pursuit'
+                            CHECK(kind IN ('pursuit', 'side_chat'))
+                        """
+                    )
+                    connection.execute(
+                        """
+                        ALTER TABLE pursuit_conversations
+                        ADD COLUMN parent_conversation_id TEXT
+                            REFERENCES pursuit_conversations(conversation_id)
+                            ON DELETE SET NULL
+                        """
+                    )
+                    connection.execute(
+                        """
+                        ALTER TABLE pursuit_conversations
+                        ADD COLUMN last_final_event_id INTEGER
+                            REFERENCES conversation_events(event_id)
+                            ON DELETE SET NULL
+                        """
+                    )
+                    connection.execute(
+                        """
+                        ALTER TABLE pursuit_conversations
+                        ADD COLUMN last_read_event_id INTEGER
+                            REFERENCES conversation_events(event_id)
+                            ON DELETE SET NULL
+                        """
+                    )
+                    connection.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS pursuit_conversations_by_kind
+                        ON pursuit_conversations(kind, last_activity_at DESC)
+                        """
+                    )
+                    connection.execute(_ATTACHMENT_TABLE_V5_SQL)
+                    connection.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS conversation_attachments_by_conversation
+                        ON conversation_attachments(conversation_id, created_at, attachment_id)
+                        """
+                    )
+                    locked_version = 3
+                if locked_version == 3:
+                    connection.execute(
+                        """
+                        ALTER TABLE pursuit_conversations
+                        ADD COLUMN owner_session_id TEXT
+                        """
+                    )
+                    connection.execute("PRAGMA user_version = 4")
+                    locked_version = 4
+                if locked_version == 4:
+                    connection.execute(
+                        """
+                        ALTER TABLE conversation_events
+                        ADD COLUMN marks_final INTEGER NOT NULL DEFAULT 0
+                            CHECK(marks_final IN (0, 1))
+                        """
+                    )
+                    # Version four knew only the latest final event for each
+                    # conversation. Preserve every marker that can be
+                    # recovered; later finals retain their own durable flag.
+                    connection.execute(
+                        """
+                        UPDATE conversation_events
+                        SET marks_final = 1
+                        WHERE event_id IN (
+                            SELECT last_final_event_id
+                            FROM pursuit_conversations
+                            WHERE last_final_event_id IS NOT NULL
+                        )
+                        """
+                    )
+                    connection.execute("PRAGMA user_version = 5")
+                    locked_version = 5
+                if locked_version == 5:
+                    # SQLite cannot widen a CHECK constraint in place.
+                    connection.execute(
+                        "ALTER TABLE conversation_attachments "
+                        "RENAME TO conversation_attachments_v5"
+                    )
+                    connection.execute(_ATTACHMENT_TABLE_V6_SQL)
+                    connection.execute(
+                        f"""
+                        INSERT INTO conversation_attachments({_ATTACHMENT_COLUMNS})
+                        SELECT {_ATTACHMENT_COLUMNS}
+                        FROM conversation_attachments_v5
+                        """
+                    )
+                    connection.execute("DROP TABLE conversation_attachments_v5")
+                    connection.execute(
+                        """
+                        CREATE INDEX conversation_attachments_by_conversation
+                        ON conversation_attachments(
+                            conversation_id, created_at, attachment_id
+                        )
+                        """
+                    )
+                    connection.execute("PRAGMA user_version = 6")
+                    locked_version = 6
+                if locked_version == 6:
+                    legacy_conversation_count = int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM pursuit_conversations"
+                        ).fetchone()[0]
+                    )
+                    connection.execute(_CONVERSATION_TABLE_V7_SQL)
+                    connection.execute(
+                        """
+                        WITH legacy AS (
+                            SELECT
+                                conversation.*,
+                                project.cwd AS execution_cwd_snapshot,
+                                COALESCE(
+                                    conversation.active_turn_id,
+                                    (
+                                        SELECT event.turn_id
+                                        FROM conversation_events AS event
+                                        WHERE event.conversation_id =
+                                                conversation.conversation_id
+                                          AND event.turn_id IS NOT NULL
+                                        ORDER BY event.event_id
+                                        LIMIT 1
+                                    )
+                                ) AS accepted_turn_id,
+                                EXISTS(
+                                    SELECT 1
+                                    FROM conversation_events AS event
+                                    WHERE event.conversation_id =
+                                            conversation.conversation_id
+                                      AND event.kind = 'user.message'
+                                ) AS has_user_message
+                            FROM pursuit_conversations AS conversation
+                            JOIN conversation_projects AS project
+                              ON project.project_id = conversation.project_id
+                             AND project.host_id = conversation.host_id
+                        )
+                        INSERT INTO pursuit_conversations_v7(
+                            conversation_id, kind, parent_conversation_id,
+                            owner_session_id, pursuit_id,
+                            pursuit_title_snapshot, host_id, project_id,
+                            execution_cwd, provider, thread_id, thread_title,
+                            model, reasoning_effort, lifecycle, status,
+                            active_turn_id, initial_context_state,
+                            initial_context_text,
+                            initial_context_accepted_turn_id,
+                            last_final_event_id, last_read_event_id,
+                            created_at, updated_at, last_activity_at
+                        )
+                        SELECT
+                            conversation_id, kind, parent_conversation_id,
+                            owner_session_id, pursuit_id,
+                            pursuit_title_snapshot, host_id, project_id,
+                            execution_cwd_snapshot, provider, thread_id,
+                            thread_title, model, reasoning_effort, lifecycle,
+                            status, active_turn_id,
+                            CASE
+                                WHEN accepted_turn_id IS NOT NULL THEN 'accepted'
+                                WHEN has_user_message THEN 'unknown'
+                                ELSE 'eligible'
+                            END,
+                            NULL, accepted_turn_id, last_final_event_id,
+                            last_read_event_id, created_at, updated_at,
+                            last_activity_at
+                        FROM legacy
+                        """
+                    )
+                    copied_conversation_count = int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM pursuit_conversations_v7"
+                        ).fetchone()[0]
+                    )
+                    if copied_conversation_count != legacy_conversation_count:
+                        raise ConversationError(
+                            "storage_corrupt",
+                            "The conversation database upgrade could not preserve every conversation.",
+                            500,
+                        )
+                    connection.execute("DROP TABLE pursuit_conversations")
+                    connection.execute(
+                        "ALTER TABLE pursuit_conversations_v7 "
+                        "RENAME TO pursuit_conversations"
+                    )
+                    connection.execute(
+                        """
+                        CREATE INDEX pursuit_conversations_by_pursuit
+                        ON pursuit_conversations(
+                            pursuit_id, last_activity_at DESC
+                        )
+                        """
+                    )
+                    connection.execute(
+                        """
+                        CREATE INDEX pursuit_conversations_by_host
+                        ON pursuit_conversations(host_id, last_activity_at DESC)
+                        """
+                    )
+                    connection.execute(
+                        """
+                        CREATE INDEX pursuit_conversations_by_kind
+                        ON pursuit_conversations(kind, last_activity_at DESC)
+                        """
+                    )
+                    connection.execute("PRAGMA user_version = 7")
+                    locked_version = 7
+                if locked_version != SCHEMA_VERSION:
+                    raise ConversationError(
+                        "unsupported_schema",
+                        f"Unsupported conversation database schema version: {locked_version}.",
+                        500,
+                    )
+                violations = connection.execute(
+                    "PRAGMA foreign_key_check"
+                ).fetchall()
+                if violations:
+                    raise ConversationError(
+                        "storage_corrupt",
+                        "The conversation database upgrade found invalid foreign keys.",
+                        500,
+                    )
+                connection.commit()
+            finally:
+                if connection.in_transaction:
+                    connection.rollback()
+                connection.execute("PRAGMA foreign_keys = ON")
             return
         if version != SCHEMA_VERSION:
             raise ConversationError(
@@ -1808,11 +2515,12 @@ class ConversationStore:
         connection: sqlite3.Connection,
         host_id: str,
         project_id: str,
-    ) -> None:
+    ) -> sqlite3.Row:
         self._get_host_row(connection, host_id)
         project = self._get_project_row(connection, project_id)
         if project["host_id"] != host_id:
             raise ConversationError("project_host_mismatch", "The project does not belong to that host.", 422)
+        return project
 
     def _set_pursuit_default(
         self,
@@ -1879,6 +2587,7 @@ def _conversation_dict(row: sqlite3.Row) -> dict[str, Any]:
         pursuit_title_snapshot=row["pursuit_title_snapshot"],
         host_id=row["host_id"],
         project_id=row["project_id"],
+        execution_cwd=row["execution_cwd"],
         provider=row["provider"],
         thread_id=row["thread_id"],
         thread_title=row["thread_title"],
@@ -1887,6 +2596,11 @@ def _conversation_dict(row: sqlite3.Row) -> dict[str, Any]:
         lifecycle=row["lifecycle"],
         status=row["status"],
         active_turn_id=row["active_turn_id"],
+        initial_context_state=row["initial_context_state"],
+        initial_context_text=row["initial_context_text"],
+        initial_context_accepted_turn_id=row[
+            "initial_context_accepted_turn_id"
+        ],
         last_final_event_id=(
             int(row["last_final_event_id"])
             if row["last_final_event_id"] is not None
@@ -1978,8 +2692,10 @@ def _insert_conversation_state_event(
     created_at: str,
 ) -> dict[str, Any]:
     """Publish a summary change in the same transaction as its mutation."""
+    conversation = _conversation_dict(row)
+    conversation.pop("initial_context_text", None)
     payload_json = _json_object(
-        {"conversation": _conversation_dict(row)},
+        {"conversation": conversation},
         "event payload",
         MAX_EVENT_PAYLOAD_BYTES,
     )
@@ -2120,6 +2836,34 @@ def _optional_log_text(value: object, field: str, maximum: int) -> str | None:
     return clean
 
 
+def _initial_context_text(value: object) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ConversationError(
+            "invalid_input", "initial context must be non-empty text.", 422
+        )
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ConversationError(
+            "invalid_input", "initial context must be valid UTF-8 text.", 422
+        ) from exc
+    if len(encoded) > MAX_INITIAL_CONTEXT_BYTES:
+        raise ConversationError(
+            "payload_too_large",
+            f"initial context exceeds the {MAX_INITIAL_CONTEXT_BYTES}-byte storage limit.",
+            413,
+        )
+    return value
+
+
+def _raise_initial_context_transition(current: str, requested: str) -> None:
+    raise ConversationError(
+        "initial_context_conflict",
+        f"Initial context cannot move from {current} to {requested}.",
+        409,
+    )
+
+
 def _choice(value: object, field: str, choices: frozenset[str]) -> str:
     if not isinstance(value, str) or value not in choices:
         raise ConversationError(
@@ -2178,6 +2922,17 @@ def _rpc_id_json(value: object) -> str:
 def _request_key(host_id: str, epoch: str, rpc_id_json: str) -> str:
     encoded = "\x00".join((host_id, epoch, rpc_id_json)).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def provider_turn_id_fingerprint(turn_ids: Iterable[str]) -> dict[str, Any]:
+    """Fingerprint one provider-turn membership set in deterministic order."""
+    clean_ids = sorted({_id(turn_id, "turn_id") for turn_id in turn_ids})
+    digest = hashlib.sha256()
+    for turn_id in clean_ids:
+        encoded = turn_id.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return {"count": len(clean_ids), "sha256": digest.hexdigest()}
 
 
 def _session_scope(owner_session_id: str) -> str:
@@ -2317,7 +3072,7 @@ def _stale_pending_rows(connection: sqlite3.Connection, resolved_at: str) -> int
     return int(cursor.rowcount)
 
 
-_SCHEMA_V6 = """
+_SCHEMA_V7 = """
 CREATE TABLE IF NOT EXISTS conversation_hosts(
     host_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK(kind IN ('local', 'ssh')),
@@ -2350,13 +3105,15 @@ CREATE TABLE IF NOT EXISTS conversation_projects(
 
 CREATE TABLE IF NOT EXISTS pursuit_conversations(
     conversation_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL DEFAULT 'pursuit' CHECK(kind IN ('pursuit', 'side_chat')),
+    kind TEXT NOT NULL DEFAULT 'pursuit'
+        CHECK(kind IN ('pursuit', 'side_chat', 'manager')),
     parent_conversation_id TEXT,
     owner_session_id TEXT,
-    pursuit_id TEXT NOT NULL,
+    pursuit_id TEXT,
     pursuit_title_snapshot TEXT,
     host_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
+    execution_cwd TEXT NOT NULL,
     provider TEXT NOT NULL DEFAULT 'codex' CHECK(provider = 'codex'),
     thread_id TEXT NOT NULL,
     thread_title TEXT,
@@ -2368,11 +3125,22 @@ CREATE TABLE IF NOT EXISTS pursuit_conversations(
         'completed', 'failed', 'interrupted', 'unknown'
     )),
     active_turn_id TEXT,
+    initial_context_state TEXT NOT NULL DEFAULT 'eligible' CHECK(
+        initial_context_state IN (
+            'eligible', 'prepared', 'unknown', 'accepted', 'skipped'
+        )
+    ),
+    initial_context_text TEXT,
+    initial_context_accepted_turn_id TEXT,
     last_final_event_id INTEGER,
     last_read_event_id INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_activity_at TEXT NOT NULL,
+    CHECK(
+        (kind = 'manager' AND pursuit_id IS NULL)
+        OR (kind IN ('pursuit', 'side_chat') AND pursuit_id IS NOT NULL)
+    ),
     UNIQUE(host_id, thread_id),
     FOREIGN KEY(host_id) REFERENCES conversation_hosts(host_id) ON DELETE RESTRICT,
     FOREIGN KEY(project_id, host_id)
@@ -2457,6 +3225,59 @@ CREATE TABLE IF NOT EXISTS pending_server_requests(
 
 CREATE INDEX IF NOT EXISTS pending_server_requests_by_state
     ON pending_server_requests(host_id, state, created_at);
+"""
+
+
+_CONVERSATION_TABLE_V7_SQL = """
+CREATE TABLE pursuit_conversations_v7(
+    conversation_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL DEFAULT 'pursuit'
+        CHECK(kind IN ('pursuit', 'side_chat', 'manager')),
+    parent_conversation_id TEXT,
+    owner_session_id TEXT,
+    pursuit_id TEXT,
+    pursuit_title_snapshot TEXT,
+    host_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    execution_cwd TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'codex' CHECK(provider = 'codex'),
+    thread_id TEXT NOT NULL,
+    thread_title TEXT,
+    model TEXT,
+    reasoning_effort TEXT,
+    lifecycle TEXT NOT NULL CHECK(lifecycle IN ('active', 'archived')),
+    status TEXT NOT NULL CHECK(status IN (
+        'idle', 'starting', 'running', 'waiting_approval', 'waiting_input',
+        'completed', 'failed', 'interrupted', 'unknown'
+    )),
+    active_turn_id TEXT,
+    initial_context_state TEXT NOT NULL DEFAULT 'eligible' CHECK(
+        initial_context_state IN (
+            'eligible', 'prepared', 'unknown', 'accepted', 'skipped'
+        )
+    ),
+    initial_context_text TEXT,
+    initial_context_accepted_turn_id TEXT,
+    last_final_event_id INTEGER,
+    last_read_event_id INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_activity_at TEXT NOT NULL,
+    CHECK(
+        (kind = 'manager' AND pursuit_id IS NULL)
+        OR (kind IN ('pursuit', 'side_chat') AND pursuit_id IS NOT NULL)
+    ),
+    UNIQUE(host_id, thread_id),
+    FOREIGN KEY(host_id) REFERENCES conversation_hosts(host_id) ON DELETE RESTRICT,
+    FOREIGN KEY(project_id, host_id)
+        REFERENCES conversation_projects(project_id, host_id) ON DELETE RESTRICT,
+    FOREIGN KEY(parent_conversation_id)
+        REFERENCES pursuit_conversations_v7(conversation_id) ON DELETE SET NULL,
+    FOREIGN KEY(last_final_event_id)
+        REFERENCES conversation_events(event_id) ON DELETE SET NULL,
+    FOREIGN KEY(last_read_event_id)
+        REFERENCES conversation_events(event_id) ON DELETE SET NULL
+)
 """
 
 
