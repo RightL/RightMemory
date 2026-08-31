@@ -38,6 +38,18 @@ App Server thread items are also the source for visible subagent activity. The b
 
 A Pursuit node may show the aggregate state of its attached conversations: active work, a waiting request, an unread final answer, or a completed turn. This is a navigation and attention aid. In particular, a completed conversation turn does not mean the Pursuit is semantically complete; only an explicit map edit changes what directions the user keeps visible.
 
+### Conversation context is a first-turn snapshot
+
+A new Pursuit conversation receives its graph location once, with its first actual user input. RightMemory derives that snapshot from the canonical graph index: the bound Pursuit, direct incoming and outgoing neighbors, and their logical heading ancestors. It persists the exact snapshot before crossing the provider boundary and records acceptance against a provider turn ID. An uncertain transport result remains fenced until provider history resolves whether that first turn exists. This keeps retries from either losing the snapshot or blindly duplicating it, without introducing a general exactly-once message framework.
+
+The snapshot is historical input, not a live view. Later graph edits, page selection changes, browser restarts, and model compaction do not regenerate it. Controller-relative graph sources and the immutable conversation execution-directory snapshot keep graph provenance distinct from local or SSH execution paths.
+
+### Manager is a root-local conversation kind
+
+Manager is a persistent conversation without a Pursuit attachment. It reuses the ordinary App Server, event, history, attachment, permission, and interruption paths, but is fixed to the controller's local root project and excluded from side-chat cleanup and Pursuit activity summaries. Per-message page references are resolved to stable identities when sent; they do not change the conversation's execution binding.
+
+Manager configuration operations use the running Web Studio's authenticated loopback API rather than a second service or direct database access. Registered project paths affect newly created conversations, while each existing conversation retains the working directory captured with its provider thread. A host identity with thread history likewise cannot be silently repointed by changing its SSH alias.
+
 ### Existing data remains readable
 
 Old Pursuit field blocks are retained as body text so existing roots can open before a separate, explicitly approved cleanup. Their old action labels have no current control semantics. This is a narrow reading accommodation, not a second schema or an automatic migration. Installing or opening the editor does not rewrite a user's root.

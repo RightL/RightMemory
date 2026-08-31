@@ -31,6 +31,8 @@ from .attachments import (
     write_upload,
 )
 from .models import DEFAULT_LOCAL_PROJECT_ID, LOCAL_HOST_ID, ConversationError
+from .manager_context import manager_initial_context
+from .opening_context import OpeningContextError, build_opening_context
 from .projection import (
     ProjectedNotification,
     bounded_json_object,
@@ -40,7 +42,11 @@ from .projection import (
     server_request_result,
     status_from_thread,
 )
-from .store import ConversationStore
+from .store import (
+    MAX_EVENT_PAYLOAD_BYTES,
+    ConversationStore,
+    provider_turn_id_fingerprint,
+)
 from .transport import (
     AttachmentStagingError,
     delete_ssh_attachment,
@@ -90,6 +96,10 @@ class AppServerAdapter(Protocol):
     ) -> dict[str, Any]: ...
 
     def resume_thread(self, thread_id: str) -> dict[str, Any]: ...
+
+    def read_thread(
+        self, thread_id: str, *, include_turns: bool = True
+    ) -> dict[str, Any]: ...
 
     def archive_thread(self, thread_id: str) -> dict[str, Any]: ...
 
@@ -220,6 +230,8 @@ class ConversationService:
             str, tuple[AppServerAdapter, str, set[str]]
         ] = {}
         self._adapter_lock = threading.RLock()
+        self._host_identity_locks: dict[str, threading.RLock] = {}
+        self._host_identity_locks_guard = threading.Lock()
         self._conversation_locks: dict[str, threading.RLock] = {}
         self._conversation_locks_guard = threading.Lock()
         self._broker = _EventBroker()
@@ -235,7 +247,8 @@ class ConversationService:
         items = self._pursuit_items()
         conversations = [
             self._decorate_conversation(row, items)
-            for row in self.store.list_conversations(kind="pursuit")
+            for kind in ("pursuit", "manager")
+            for row in self.store.list_conversations(kind=kind)
         ]
         conversation_ids = {
             conversation["conversation_id"] for conversation in conversations
@@ -356,6 +369,10 @@ class ConversationService:
 
     def model_catalog(self, host_id: str) -> dict[str, Any]:
         host = self._require_host(host_id)
+        with self._host_identity_operation(host["host_id"]):
+            return self._model_catalog_for_host(self._require_host(host_id))
+
+    def _model_catalog_for_host(self, host: dict[str, Any]) -> dict[str, Any]:
         adapter = self._adapter(host)
         raw_models: list[object] = []
         cursor: str | None = None
@@ -420,7 +437,81 @@ class ConversationService:
         reasoning_effort: object = None,
     ) -> dict[str, Any]:
         item = self._require_pursuit(pursuit_id)
+        # Validate before retaining a service-lifetime lock for a caller-provided
+        # id, then re-read under the lock so an SSH alias update cannot move the
+        # host between provider thread creation and durable attachment.
         host, project = self._require_host_project(host_id, project_id)
+        with self._host_identity_operation(host["host_id"]):
+            host, project = self._require_host_project(host_id, project_id)
+            clean_model = _optional_setting(model, "model")
+            clean_effort = _optional_setting(reasoning_effort, "reasoning_effort")
+            if clean_model is not None or clean_effort is not None:
+                clean_model, clean_effort = _validate_model_settings(
+                    clean_model,
+                    clean_effort,
+                    self._model_catalog_for_host(host),
+                )
+            cwd = self._validated_project_cwd(host, project["cwd"])
+            adapter = self._adapter(host)
+            thread_options = {"model": clean_model} if clean_model is not None else {}
+            try:
+                result = adapter.start_thread(cwd=cwd, **thread_options)
+            except Exception as exc:
+                self._record_provider_failure(host, "starting a thread", exc)
+            thread = _result_object(result, "thread", "thread/start")
+            thread_id = _provider_id(
+                thread.get("id"), "thread/start did not return a thread id"
+            )
+            if not self._mark_thread_resident(host["host_id"], adapter, thread_id):
+                raise ConversationError(
+                    "provider_unavailable",
+                    "The Codex connection changed while starting the thread.",
+                    502,
+                )
+            title = _optional_provider_title(thread.get("name") or thread.get("title"))
+            status = status_from_thread(thread.get("status"))
+            if status == "unknown":
+                status = "idle"
+            try:
+                conversation = self.store.create_conversation(
+                    pursuit_id=item["id"],
+                    pursuit_title_snapshot=plain_title(str(item.get("title", ""))),
+                    host_id=host["host_id"],
+                    project_id=project["project_id"],
+                    execution_cwd=cwd,
+                    thread_id=thread_id,
+                    thread_title=title,
+                    model=clean_model,
+                    reasoning_effort=clean_effort,
+                    status=status,
+                )
+            except Exception as exc:
+                raise ConversationError(
+                    "attachment_failed",
+                    f"Codex created thread {thread_id}, but RightMemory could not attach it: {exc}",
+                    500,
+                ) from exc
+            self._append_event(
+                "thread.started",
+                {"thread": bounded_json_object(thread)},
+                conversation_id=conversation["conversation_id"],
+            )
+            self._publish_conversation_state(conversation["conversation_id"])
+            return {
+                "conversation": self._decorate_conversation(
+                    conversation, {item["id"]: item}
+                )
+            }
+
+    def create_manager(
+        self,
+        model: object = None,
+        reasoning_effort: object = None,
+    ) -> dict[str, Any]:
+        """Create one persistent local Manager conversation for this root."""
+        host, project = self._require_host_project(
+            LOCAL_HOST_ID, DEFAULT_LOCAL_PROJECT_ID
+        )
         clean_model = _optional_setting(model, "model")
         clean_effort = _optional_setting(reasoning_effort, "reasoning_effort")
         if clean_model is not None or clean_effort is not None:
@@ -430,18 +521,26 @@ class ConversationService:
                 self.model_catalog(host["host_id"]),
             )
         cwd = self._validated_project_cwd(host, project["cwd"])
+        if Path(cwd).resolve() != self.root:
+            raise ConversationError(
+                "invalid_manager_project",
+                "The local Manager must run in the active RightMemory root.",
+                409,
+            )
         adapter = self._adapter(host)
         thread_options = {"model": clean_model} if clean_model is not None else {}
         try:
             result = adapter.start_thread(cwd=cwd, **thread_options)
         except Exception as exc:
-            self._record_provider_failure(host, "starting a thread", exc)
+            self._record_provider_failure(host, "starting a Manager thread", exc)
         thread = _result_object(result, "thread", "thread/start")
-        thread_id = _provider_id(thread.get("id"), "thread/start did not return a thread id")
+        thread_id = _provider_id(
+            thread.get("id"), "thread/start did not return a thread id"
+        )
         if not self._mark_thread_resident(host["host_id"], adapter, thread_id):
             raise ConversationError(
                 "provider_unavailable",
-                "The Codex connection changed while starting the thread.",
+                "The Codex connection changed while starting the Manager thread.",
                 502,
             )
         title = _optional_provider_title(thread.get("name") or thread.get("title"))
@@ -450,10 +549,12 @@ class ConversationService:
             status = "idle"
         try:
             conversation = self.store.create_conversation(
-                pursuit_id=item["id"],
-                pursuit_title_snapshot=plain_title(str(item.get("title", ""))),
+                kind="manager",
+                pursuit_id=None,
+                pursuit_title_snapshot=None,
                 host_id=host["host_id"],
                 project_id=project["project_id"],
+                execution_cwd=cwd,
                 thread_id=thread_id,
                 thread_title=title,
                 model=clean_model,
@@ -461,9 +562,14 @@ class ConversationService:
                 status=status,
             )
         except Exception as exc:
+            self._forget_thread_resident(host["host_id"], adapter, thread_id)
+            try:
+                adapter.archive_thread(thread_id)
+            except Exception:
+                pass
             raise ConversationError(
                 "attachment_failed",
-                f"Codex created thread {thread_id}, but RightMemory could not attach it: {exc}",
+                f"Codex created Manager thread {thread_id}, but RightMemory could not attach it: {exc}",
                 500,
             ) from exc
         self._append_event(
@@ -472,7 +578,11 @@ class ConversationService:
             conversation_id=conversation["conversation_id"],
         )
         self._publish_conversation_state(conversation["conversation_id"])
-        return {"conversation": self._decorate_conversation(conversation, {item["id"]: item})}
+        return {
+            "conversation": self._decorate_conversation(
+                conversation, self._pursuit_items()
+            )
+        }
 
     def create_side_chat(
         self, parent_conversation_id: str, owner_session_id: str
@@ -489,7 +599,7 @@ class ConversationService:
             host, project = self._require_host_project(
                 parent["host_id"], parent["project_id"]
             )
-            cwd = self._validated_project_cwd(host, project["cwd"])
+            cwd = self._validated_project_cwd(host, parent["execution_cwd"])
             adapter = self._adapter(host)
             thread_options: dict[str, Any] = {"ephemeral": True}
             if parent.get("model") is not None:
@@ -521,6 +631,7 @@ class ConversationService:
                     pursuit_title_snapshot=parent["pursuit_title_snapshot"],
                     host_id=host["host_id"],
                     project_id=project["project_id"],
+                    execution_cwd=cwd,
                     thread_id=thread_id,
                     thread_title=title,
                     model=parent["model"],
@@ -807,6 +918,7 @@ class ConversationService:
         text: object = None,
         attachment_ids: object = None,
         owner_session_id: str | None = None,
+        message_references: object = None,
     ) -> dict[str, Any]:
         with self._conversation_operation(conversation_id, owner_session_id):
             conversation = self._require_active_conversation(conversation_id)
@@ -814,6 +926,7 @@ class ConversationService:
             attachments = self._message_attachments(
                 conversation["conversation_id"], attachment_ids
             )
+            references = self._message_references(conversation, message_references)
             if message is None and not attachments:
                 raise ConversationError(
                     "invalid_message",
@@ -828,6 +941,25 @@ class ConversationService:
                     "conversation_busy", "This conversation already has an active turn.", 409
                 )
             host = self._require_host(conversation["host_id"])
+            opening_context = self._opening_context_for_message(conversation, host)
+            provider_message = self._provider_message(
+                message,
+                references,
+                opening_context=opening_context,
+            )
+            user_event_payload = {
+                "text": message or "",
+                "attachments": [
+                    public_attachment(attachment) for attachment in attachments
+                ],
+                "references": references,
+                "opening_context": opening_context,
+            }
+            self._validate_opening_context_payload(
+                provider_message,
+                user_event_payload,
+                has_opening_context=opening_context is not None,
+            )
             self.store.update_conversation(
                 conversation_id,
                 status="starting",
@@ -839,34 +971,25 @@ class ConversationService:
                 # Remote attachment transfer and provider startup can both take
                 # long enough to matter to the user. Publish the busy state before
                 # either operation so the Pursuit indicator reflects real work.
-                turn_inputs = self._turn_inputs(host, message, attachments)
+                turn_inputs = self._turn_inputs(host, provider_message, attachments)
                 adapter = self._adapter(host)
             except Exception:
-                current = self.store.get_conversation(conversation_id)
-                if (
-                    current is not None
-                    and current["status"] == "starting"
-                    and current["active_turn_id"] is None
-                ):
-                    self.store.update_conversation(
-                        conversation_id,
-                        status=conversation["status"],
-                        touch_activity=True,
-                        emit_state_event=True,
-                    )
-                    self._broker.notify()
+                self._restore_before_turn_start(conversation, opening_context)
                 raise
+            resident_thread: dict[str, Any] | None = None
             try:
-                self._ensure_thread_resident(
+                resident_thread = self._ensure_thread_resident(
                     host["host_id"], adapter, conversation["thread_id"]
                 )
             except Exception as exc:
                 if (
                     _is_missing_rollout_error(exc)
+                    and conversation["initial_context_state"]
+                    in {"eligible", "prepared"}
                     and not self.store.has_turn_evidence(conversation_id)
                 ):
                     try:
-                        conversation, _ = self._replace_unmaterialized_thread(
+                        conversation, resident_thread = self._replace_unmaterialized_thread(
                             host, adapter, conversation, exc
                         )
                     except Exception as replacement_exc:
@@ -894,41 +1017,71 @@ class ConversationService:
                         conversation_id=conversation_id,
                     )
                     self._record_provider_failure(host, "resuming the thread", exc)
-            self._append_event(
-                "user.message",
-                {
-                    "text": message or "",
-                    "attachments": [
-                        public_attachment(attachment) for attachment in attachments
-                    ],
-                },
-                conversation_id=conversation_id,
-            )
-            state_cursor = self.store.latest_event_id()
-            turn_options = {
-                key: conversation[key]
-                for key in ("model", "reasoning_effort")
-                if conversation.get(key) is not None
-            }
-            turn_options["summary"] = DEFAULT_REASONING_SUMMARY
+            try:
+                resumed_fingerprint = _provider_turn_fingerprint_from_thread(
+                    resident_thread
+                )
+                provider_turn_baseline = (
+                    resumed_fingerprint
+                    if resumed_fingerprint is not None
+                    else self.store.provider_turn_fingerprint(conversation_id)
+                )
+                user_message_event = self._append_or_reuse_user_message_event(
+                    conversation_id,
+                    user_event_payload,
+                    opening_context=opening_context,
+                )
+                state_cursor = self.store.latest_event_id()
+                turn_options = {
+                    key: conversation[key]
+                    for key in ("model", "reasoning_effort")
+                    if conversation.get(key) is not None
+                }
+                turn_options["summary"] = DEFAULT_REASONING_SUMMARY
+                if opening_context is not None:
+                    # Fence the request before crossing the provider boundary.
+                    # This retains the exact snapshot without treating it as
+                    # accepted until a provider turn id is durable.
+                    self.store.mark_initial_context_unknown(conversation_id)
+            except Exception:
+                self._restore_before_turn_start(conversation, opening_context)
+                raise
             try:
                 result = adapter.start_turn(
                     conversation["thread_id"], turn_inputs, **turn_options
                 )
+                turn = _result_object(result, "turn", "turn/start")
+                turn_id = _provider_id(
+                    turn.get("id"), "turn/start did not return a turn id"
+                )
+                if opening_context is not None:
+                    self.store.mark_initial_context_accepted(
+                        conversation_id, turn_id
+                    )
             except Exception as exc:
                 self.store.update_conversation(conversation_id, status="unknown", touch_activity=True)
                 self._append_event(
                     "protocol.error",
-                    {"operation": "turn/start", "message": _exception_text(exc)},
+                    {
+                        "operation": "turn/start",
+                        "message": _exception_text(exc),
+                        "user_event_id": user_message_event["event_id"],
+                        "provider_turn_baseline": provider_turn_baseline,
+                    },
                     conversation_id=conversation_id,
                 )
                 self._record_provider_failure(host, "starting a turn", exc)
-            turn = _result_object(result, "turn", "turn/start")
-            turn_id = _provider_id(turn.get("id"), "turn/start did not return a turn id")
             for attachment in attachments:
                 self.store.update_attachment(attachment["attachment_id"], state="sent")
             status = _status_from_returned_turn(turn)
-            terminal_status = self._terminal_turn_status(conversation_id, turn_id)
+            returned_terminal_status = (
+                status
+                if status in {"completed", "failed", "interrupted"}
+                else None
+            )
+            terminal_status = self._terminal_turn_status(
+                conversation_id, turn_id
+            ) or returned_terminal_status
             if terminal_status is not None:
                 updated, connection_current = self._update_after_rpc(
                     host["host_id"],
@@ -962,9 +1115,22 @@ class ConversationService:
                     status=status,
                     active_turn_id=turn_id if status == "running" else None,
                 )
-            # Production emits turn/started. This fallback makes the accepted turn
-            # durable even when an older provider omits that notification.
-            if connection_current and (
+            if (
+                connection_current
+                and returned_terminal_status is not None
+                and not self._has_terminal_turn_event(conversation_id, turn_id)
+            ):
+                self._append_event(
+                    "turn.completed",
+                    {"turn": bounded_json_object(turn)},
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                )
+                self._cleanup_remote_attachment_copies(updated)
+            # A nonterminal response still needs durable acceptance when an
+            # older provider omits turn/started. Terminal responses instead
+            # persist terminal evidence and never synthesize a started event.
+            if connection_current and returned_terminal_status is None and (
                 not self._has_turn_started_event(conversation_id, turn_id)
                 and not self._has_terminal_turn_event(conversation_id, turn_id)
             ):
@@ -974,7 +1140,12 @@ class ConversationService:
                     conversation_id=conversation_id,
                     turn_id=turn_id,
                 )
-            return {"conversation": updated, "turn": turn}
+            return {
+                "conversation": self._decorate_conversation(
+                    updated, self._pursuit_items()
+                ),
+                "turn": {"id": turn_id, "status": updated["status"]},
+            }
 
     def reconcile(
         self, conversation_id: str, owner_session_id: str | None = None
@@ -984,8 +1155,16 @@ class ConversationService:
             conversation = self._require_active_conversation(conversation_id)
             host = self._require_host(conversation["host_id"])
             adapter = self._adapter(host)
+            turn_start_uncertainty = self.store.latest_turn_start_uncertainty(
+                conversation_id
+            )
+            unprepared_unknown = (
+                conversation["initial_context_state"] == "unknown"
+                and conversation["initial_context_text"] is None
+            )
             if (
                 conversation["status"] == "idle"
+                and conversation["initial_context_state"] != "unknown"
                 and self._thread_is_resident(
                     host["host_id"], adapter, conversation["thread_id"]
                 )
@@ -997,19 +1176,19 @@ class ConversationService:
                 }
                 if conversation["thread_title"] is not None:
                     thread["name"] = conversation["thread_title"]
-                return {
-                    "conversation": self._decorate_conversation(
-                        conversation, self._pursuit_items()
-                    ),
-                    "thread": thread,
-                    "resolved": True,
-                }
+                return _reconciliation_result(
+                    self._decorate_conversation(conversation, self._pursuit_items()),
+                    thread,
+                    resolved=True,
+                )
             try:
                 state_cursor = self.store.latest_event_id()
                 result = adapter.resume_thread(conversation["thread_id"])
             except Exception as exc:
                 if (
                     _is_missing_rollout_error(exc)
+                    and conversation["initial_context_state"]
+                    in {"eligible", "prepared"}
                     and not self.store.has_turn_evidence(conversation_id)
                 ):
                     try:
@@ -1038,13 +1217,20 @@ class ConversationService:
                         status="idle",
                         active_turn_id=None,
                     )
-                    return {
-                        "conversation": self._decorate_conversation(
-                            updated, self._pursuit_items()
-                        ),
-                        "thread": thread,
-                        "resolved": connection_current,
-                    }
+                    if connection_current:
+                        updated = self._resolve_initial_context_after_reconcile(
+                            updated,
+                            status="idle",
+                            provider_turn_id=None,
+                            provider_history_checked=True,
+                            provider_history_nonempty=False,
+                            provider_history_inactive=True,
+                        )
+                    return _reconciliation_result(
+                        self._decorate_conversation(updated, self._pursuit_items()),
+                        thread,
+                        resolved=connection_current,
+                    )
                 self.store.update_conversation(
                     conversation_id, status="unknown", touch_activity=True
                 )
@@ -1068,6 +1254,63 @@ class ConversationService:
             self._mark_thread_resident(
                 host["host_id"], adapter, conversation["thread_id"]
             )
+
+            provider_history_checked = isinstance(thread.get("turns"), list)
+            provider_history_nonempty = bool(thread.get("turns"))
+            provider_history_inactive = status_from_thread(
+                thread.get("status")
+            ) in {"idle", "failed"}
+            if conversation["initial_context_state"] == "unknown":
+                if unprepared_unknown:
+                    # A migrated user message without local turn evidence needs
+                    # an explicit thread/read result before it can be classified.
+                    provider_history_checked = False
+                    provider_history_nonempty = False
+                    provider_history_inactive = False
+                read_thread = getattr(adapter, "read_thread", None)
+                if callable(read_thread):
+                    try:
+                        read_result = read_thread(
+                            conversation["thread_id"], include_turns=True
+                        )
+                        read_value = _result_object(
+                            read_result, "thread", "thread/read"
+                        )
+                        read_thread_id = _provider_id(
+                            read_value.get("id"),
+                            "thread/read did not return a thread id",
+                        )
+                        if read_thread_id != conversation["thread_id"]:
+                            raise ConversationError(
+                                "provider_protocol",
+                                "thread/read returned a different thread.",
+                                502,
+                            )
+                        turns = read_value.get("turns")
+                        if not isinstance(turns, list):
+                            raise ConversationError(
+                                "provider_protocol",
+                                "thread/read did not return turn history.",
+                                502,
+                            )
+                        thread = read_value
+                        provider_history_checked = True
+                        provider_history_nonempty = bool(turns)
+                        provider_history_inactive = status_from_thread(
+                            read_value.get("status")
+                        ) in {"idle", "failed"}
+                    except Exception:
+                        # A resume result can still carry complete turn history.
+                        # Migrated unknown rows specifically require thread/read;
+                        # a prepared snapshot may still use resume history.
+                        if not unprepared_unknown:
+                            provider_history_checked = isinstance(
+                                thread.get("turns"), list
+                            )
+                            provider_history_nonempty = bool(thread.get("turns"))
+                            provider_history_inactive = status_from_thread(
+                                thread.get("status")
+                            ) in {"idle", "failed"}
 
             callback_state_changed = self._state_changed_after(
                 conversation_id, state_cursor
@@ -1100,10 +1343,31 @@ class ConversationService:
             updated, connection_current = self._update_after_rpc(
                 host["host_id"], adapter, conversation_id, **updates
             )
+            latest_provider_turn_id = _latest_turn_id_from_thread(thread)
+            accepted_user_event_id = (
+                _accepted_uncertain_user_event_id(
+                    turn_start_uncertainty, thread
+                )
+                if connection_current
+                else None
+            )
             if connection_current:
+                updated = self._resolve_initial_context_after_reconcile(
+                    updated,
+                    status=status,
+                    provider_turn_id=latest_provider_turn_id,
+                    provider_history_checked=provider_history_checked,
+                    provider_history_nonempty=provider_history_nonempty,
+                    provider_history_inactive=provider_history_inactive,
+                )
                 self._append_event(
                     "thread.reconciled",
-                    {"thread": bounded_json_object(thread), "status": status},
+                    {
+                        "thread": bounded_json_object(thread),
+                        "status": status,
+                        "latest_provider_turn_id": latest_provider_turn_id,
+                        "accepted_user_event_id": accepted_user_event_id,
+                    },
                     conversation_id=conversation_id,
                     turn_id=active_turn_id,
                 )
@@ -1114,11 +1378,16 @@ class ConversationService:
                     "interrupted",
                 } and active_turn_id is None:
                     self._cleanup_remote_attachment_copies(updated)
-            return {
-                "conversation": self._decorate_conversation(updated, self._pursuit_items()),
-                "thread": thread,
-                "resolved": connection_current and updated["status"] != "unknown",
-            }
+            return _reconciliation_result(
+                self._decorate_conversation(updated, self._pursuit_items()),
+                thread,
+                resolved=(
+                    connection_current
+                    and updated["status"] != "unknown"
+                    and updated["initial_context_state"] != "unknown"
+                ),
+                accepted_user_event_id=accepted_user_event_id,
+            )
 
     def interrupt(
         self, conversation_id: str, owner_session_id: str | None = None
@@ -1156,7 +1425,11 @@ class ConversationService:
                     turn_id=turn_id,
                 )
                 self._cleanup_remote_attachment_copies(updated)
-            return {"conversation": updated}
+            return {
+                "conversation": self._decorate_conversation(
+                    updated, self._pursuit_items()
+                )
+            }
 
     def archive(
         self, conversation_id: str, owner_session_id: str | None = None
@@ -1182,7 +1455,11 @@ class ConversationService:
                 if purged:
                     self._publish_conversation_state(conversation_id)
                 self._cleanup_remote_attachment_copies(conversation)
-                return {"conversation": conversation}
+                return {
+                    "conversation": self._decorate_conversation(
+                        conversation, self._pursuit_items()
+                    )
+                }
             host = self._require_host(conversation["host_id"])
             adapter = self._adapter(host)
             try:
@@ -1206,7 +1483,11 @@ class ConversationService:
                     conversation_id=conversation_id,
                 )
                 self._cleanup_remote_attachment_copies(updated)
-            return {"conversation": updated}
+            return {
+                "conversation": self._decorate_conversation(
+                    updated, self._pursuit_items()
+                )
+            }
 
     def move(
         self,
@@ -1216,6 +1497,12 @@ class ConversationService:
     ) -> dict[str, Any]:
         with self._conversation_operation(conversation_id, owner_session_id):
             conversation = self._require_conversation(conversation_id)
+            if conversation["kind"] != "pursuit":
+                raise ConversationError(
+                    "conversation_not_movable",
+                    "Only a Pursuit conversation can move to another Pursuit.",
+                    409,
+                )
             item = self._require_pursuit(pursuit_id)
             previous = conversation["pursuit_id"]
             updated = self.store.update_conversation(
@@ -1263,14 +1550,99 @@ class ConversationService:
 
     def probe_host(self, host_id: str) -> dict[str, Any]:
         host = self._require_host(host_id)
-        self._adapter(host)
-        refreshed = self._require_host(host_id)
-        return {"host": refreshed, "connected": True}
+        with self._host_identity_operation(host["host_id"]):
+            refreshed = self._require_host(host_id)
+            self._adapter(refreshed)
+            return {"host": self._require_host(host_id), "connected": True}
 
     def add_project(self, host_id: str, label: str, cwd: str) -> dict[str, Any]:
         host = self._require_host(host_id)
         normalized = self._validated_project_cwd(host, cwd)
         return {"project": self.store.create_project(host_id=host_id, label=label, cwd=normalized)}
+
+    def update_host(
+        self,
+        host_id: str,
+        display_name: object = None,
+        ssh_alias: object = None,
+        platform_hint: object = None,
+        enabled: object = None,
+    ) -> dict[str, Any]:
+        host = self.store.get_host(host_id)
+        if host is None:
+            raise ConversationError("host_not_found", "The conversation host was not found.", 404)
+        with self._host_identity_operation(host["host_id"]):
+            refreshed = self.store.get_host(host["host_id"])
+            if refreshed is None:
+                raise ConversationError(
+                    "host_not_found", "The conversation host was not found.", 404
+                )
+            host = refreshed
+            updates: dict[str, Any] = {}
+            if display_name is not None:
+                updates["display_name"] = display_name
+            if platform_hint is not None:
+                updates["platform_hint"] = platform_hint
+            if enabled is not None:
+                updates["enabled"] = enabled
+            if ssh_alias is not None:
+                if host["kind"] != "ssh":
+                    raise ConversationError(
+                        "invalid_host", "The local host has no SSH alias.", 422
+                    )
+                try:
+                    from .transport import validate_ssh_alias
+
+                    safe_alias = validate_ssh_alias(ssh_alias)
+                except (TypeError, ValueError) as exc:
+                    raise ConversationError("invalid_host", str(exc), 422) from exc
+                if safe_alias != host.get("ssh_alias"):
+                    if self.store.host_has_conversations(host["host_id"]):
+                        raise ConversationError(
+                            "host_in_use",
+                            "An SSH target with conversation history keeps its identity. Add a new host for a different target.",
+                            409,
+                        )
+                    updates["ssh_alias"] = safe_alias
+            updated = self.store.update_host_config(host["host_id"], **updates)
+            if updates.get("ssh_alias") is not None:
+                adapter = self._existing_adapter(host["host_id"])
+                if adapter is not None:
+                    self._discard_adapter(host["host_id"], adapter)
+                    try:
+                        adapter.close()
+                    except Exception:
+                        pass
+            return {"host": updated}
+
+    def update_project(
+        self,
+        project_id: str,
+        label: object = None,
+        cwd: object = None,
+    ) -> dict[str, Any]:
+        project = self.store.get_project(project_id)
+        if project is None:
+            raise ConversationError(
+                "project_not_found", "The conversation project was not found.", 404
+            )
+        if project["project_id"] == DEFAULT_LOCAL_PROJECT_ID:
+            raise ConversationError(
+                "protected_project",
+                "The root-local Manager project always remains bound to this Memory root.",
+                409,
+            )
+        host = self._require_host(project["host_id"])
+        updates: dict[str, Any] = {}
+        if label is not None:
+            updates["label"] = label
+        if cwd is not None:
+            updates["cwd"] = self._validated_project_cwd(host, cwd)
+        return {
+            "project": self.store.update_project(
+                project["project_id"], **updates
+            )
+        }
 
     def respond_request(
         self,
@@ -1426,7 +1798,14 @@ class ConversationService:
             conversation_id=pending["conversation_id"],
             turn_id=_optional_provider_id(pending["payload"].get("turnId")),
         )
-        return {"request": resolved, "conversation": conversation}
+        return {
+            "request": resolved,
+            "conversation": (
+                self._decorate_conversation(conversation, self._pursuit_items())
+                if conversation is not None
+                else None
+            ),
+        }
 
     # Durable event stream --------------------------------------------------
 
@@ -1543,6 +1922,43 @@ class ConversationService:
                 )
                 if conversation is None:
                     return
+                if (
+                    projected.kind == "turn.started"
+                    and projected.turn_id is not None
+                    and self._has_terminal_turn_event(
+                        conversation["conversation_id"], projected.turn_id
+                    )
+                ):
+                    # A queued notification can arrive after turn/start already
+                    # returned a terminal turn. Its older running state must not
+                    # overwrite the durable terminal result.
+                    return
+                accepted_user_event_id = None
+                if (
+                    projected.turn_id is not None
+                    and not self.store.has_provider_turn_id(
+                        conversation["conversation_id"], projected.turn_id
+                    )
+                ):
+                    accepted_user_event_id = (
+                        self.store.pending_user_message_event_id(
+                            conversation["conversation_id"]
+                        )
+                    )
+                notification_payload = dict(projected.payload)
+                if accepted_user_event_id is not None:
+                    notification_payload["accepted_user_event_id"] = (
+                        accepted_user_event_id
+                    )
+                if (
+                    projected.turn_id is not None
+                    and conversation["initial_context_state"]
+                    in {"prepared", "unknown"}
+                    and conversation["initial_context_text"] is not None
+                ):
+                    conversation = self.store.mark_initial_context_accepted(
+                        conversation["conversation_id"], projected.turn_id
+                    )
                 updates: dict[str, Any] = {}
                 terminal_turn_matches = not (
                     projected.clears_active_turn
@@ -1586,15 +2002,30 @@ class ConversationService:
                     self._matching_notification_event(
                         conversation["conversation_id"],
                         projected,
+                        payload=notification_payload,
                         after_event_id=recover_after_event_id,
                     )
                     if recover_after_event_id is not None
                     else None
                 )
+                if recovered is None and projected.kind == "turn.started":
+                    recovered = next(
+                        (
+                            event
+                            for event in reversed(
+                                self.store.latest_events(
+                                    conversation["conversation_id"], limit=50
+                                )
+                            )
+                            if event["kind"] == "turn.started"
+                            and event["turn_id"] == projected.turn_id
+                        ),
+                        None,
+                    )
                 if recovered is None:
                     self._append_event(
                         projected.kind,
-                        projected.payload,
+                        notification_payload,
                         conversation_id=conversation["conversation_id"],
                         turn_id=projected.turn_id,
                         mark_final=projected.completed_final_answer,
@@ -1634,6 +2065,7 @@ class ConversationService:
         conversation_id: str,
         projected: ProjectedNotification,
         *,
+        payload: Mapping[str, Any],
         after_event_id: int,
     ) -> dict[str, Any] | None:
         return next(
@@ -1645,7 +2077,7 @@ class ConversationService:
                 if event["event_id"] > after_event_id
                 and event["kind"] == projected.kind
                 and event["turn_id"] == projected.turn_id
-                and event["payload"] == projected.payload
+                and event["payload"] == payload
             ),
             None,
         )
@@ -1895,6 +2327,331 @@ class ConversationService:
             raise ConversationError("attachment_limit", "A message has too many files.", 422)
         return attachments
 
+    def _message_references(
+        self, conversation: Mapping[str, Any], references: object
+    ) -> list[dict[str, Any]]:
+        if references is None:
+            return []
+        if conversation.get("kind") != "manager":
+            raise ConversationError(
+                "invalid_reference",
+                "Page references can be attached only to a Manager message.",
+                422,
+            )
+        if not isinstance(references, list) or len(references) > 16:
+            raise ConversationError(
+                "invalid_reference", "Message references must be a bounded list.", 422
+            )
+        resolved: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for raw in references:
+            if not isinstance(raw, Mapping) or raw.get("kind") != "pursuit":
+                raise ConversationError(
+                    "invalid_reference",
+                    "This Manager currently accepts Pursuit page references.",
+                    422,
+                )
+            item = self._require_pursuit(raw.get("id"))
+            key = ("pursuit", item["id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append(
+                {
+                    "kind": "pursuit",
+                    "id": item["id"],
+                    "title": plain_title(str(item.get("title", ""))),
+                    "root_key": self._pursuit_root_key(),
+                    "host_id": LOCAL_HOST_ID,
+                }
+            )
+        return resolved
+
+    def _opening_context_for_message(
+        self,
+        conversation: Mapping[str, Any],
+        host: Mapping[str, Any],
+    ) -> str | None:
+        state = conversation.get("initial_context_state")
+        if state in {"accepted", "skipped"}:
+            return None
+        if state == "unknown":
+            raise ConversationError(
+                "conversation_uncertain",
+                "Reconcile this conversation before retrying its first message.",
+                409,
+            )
+        if state == "prepared":
+            prepared = conversation.get("initial_context_text")
+            if not isinstance(prepared, str) or not prepared:
+                raise ConversationError(
+                    "initial_context_unavailable",
+                    "The prepared opening context is unavailable.",
+                    409,
+                )
+            return prepared
+        if state != "eligible":
+            raise ConversationError(
+                "initial_context_unavailable",
+                "The conversation has an invalid opening-context state.",
+                409,
+            )
+
+        kind = conversation.get("kind")
+        try:
+            if kind == "manager":
+                context = manager_initial_context(self.root)
+            elif kind in {"pursuit", "side_chat"}:
+                pursuit_id = conversation.get("pursuit_id")
+                item = self._require_pursuit(pursuit_id)
+                _, project = self._require_host_project(
+                    conversation["host_id"], conversation["project_id"]
+                )
+                context = build_opening_context(
+                    self.root,
+                    item,
+                    host_label=str(host["display_name"]),
+                    project_label=str(project["label"]),
+                    execution_cwd=str(conversation["execution_cwd"]),
+                ).text
+            else:
+                self.store.mark_initial_context_skipped(
+                    str(conversation["conversation_id"])
+                )
+                return None
+        except OpeningContextError as exc:
+            raise ConversationError(
+                "opening_context_unavailable",
+                f"Could not build the opening context: {exc}",
+                409,
+            ) from exc
+
+        try:
+            prepared = self.store.prepare_initial_context(
+                str(conversation["conversation_id"]), context
+            )
+        except ConversationError as exc:
+            if exc.code == "payload_too_large":
+                raise ConversationError(
+                    "opening_context_too_large",
+                    "The complete opening context exceeds the storage limit.",
+                    413,
+                ) from exc
+            raise
+        return str(prepared["initial_context_text"])
+
+    def _restore_before_turn_start(
+        self,
+        conversation: Mapping[str, Any],
+        opening_context: str | None,
+    ) -> None:
+        """Restore retryable state when local work fails before turn/start."""
+        conversation_id = str(conversation["conversation_id"])
+        current = self.store.get_conversation(conversation_id)
+        if (
+            current is None
+            or current["status"] != "starting"
+            or current["active_turn_id"] is not None
+        ):
+            return
+        if (
+            opening_context is not None
+            and current["initial_context_state"] == "unknown"
+        ):
+            self.store.reset_initial_context_to_prepared(conversation_id)
+        self.store.update_conversation(
+            conversation_id,
+            status=conversation["status"],
+            touch_activity=True,
+            emit_state_event=True,
+        )
+        self._broker.notify()
+
+    def _provider_message(
+        self,
+        message: str | None,
+        references: list[dict[str, Any]],
+        *,
+        opening_context: str | None,
+    ) -> str | None:
+        parts: list[str] = []
+        if opening_context is not None:
+            parts.append(opening_context)
+        if references:
+            lines = [
+                "[RightMemory page references attached to this user message]",
+                f"Controller root: {self.root}",
+            ]
+            for reference in references:
+                lines.append(
+                    "- Pursuit "
+                    + json.dumps(reference["title"], ensure_ascii=False)
+                    + " with stable id "
+                    + json.dumps(reference["id"], ensure_ascii=False)
+                )
+            parts.append("\n".join(lines))
+        if message is not None:
+            if not parts:
+                return message
+            parts.extend(("[User message]", message))
+        return "\n\n".join(parts) if parts else None
+
+    def _validate_opening_context_payload(
+        self,
+        provider_message: str | None,
+        event_payload: Mapping[str, Any],
+        *,
+        has_opening_context: bool,
+    ) -> None:
+        if provider_message is not None and len(provider_message) > MAX_MESSAGE_LENGTH:
+            if has_opening_context:
+                raise ConversationError(
+                    "opening_context_too_large",
+                    "The complete opening context and user message exceed the send limit.",
+                    413,
+                )
+            raise ConversationError(
+                "invalid_message", "The message exceeds the send limit.", 413
+            )
+        try:
+            encoded = json.dumps(
+                dict(event_payload),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ConversationError(
+                "invalid_message", "The message is not JSON-safe.", 422
+            ) from exc
+        if len(encoded) > MAX_EVENT_PAYLOAD_BYTES:
+            code = "opening_context_too_large" if has_opening_context else "payload_too_large"
+            message = (
+                "The complete opening context exceeds the event storage limit."
+                if has_opening_context
+                else "The message exceeds the event storage limit."
+            )
+            raise ConversationError(code, message, 413)
+
+    def _append_or_reuse_user_message_event(
+        self,
+        conversation_id: str,
+        payload: dict[str, Any],
+        *,
+        opening_context: str | None,
+    ) -> dict[str, Any]:
+        if opening_context is not None and not self.store.has_turn_evidence(
+            conversation_id
+        ):
+            for event in reversed(
+                self.store.latest_events(conversation_id, limit=100)
+            ):
+                if event["kind"] != "user.message":
+                    continue
+                if event["turn_id"] is None and event["payload"] == payload:
+                    return event
+                break
+        return self._append_event(
+            "user.message", payload, conversation_id=conversation_id
+        )
+
+    def _resolve_initial_context_after_reconcile(
+        self,
+        conversation: Mapping[str, Any],
+        *,
+        status: str,
+        provider_turn_id: str | None,
+        provider_history_checked: bool,
+        provider_history_nonempty: bool,
+        provider_history_inactive: bool,
+    ) -> dict[str, Any]:
+        current = self._require_conversation(str(conversation["conversation_id"]))
+        if current["initial_context_state"] != "unknown":
+            if current["initial_context_state"] == "accepted":
+                self._mark_accepted_opening_message_attachments_sent(current)
+            return current
+        if current["initial_context_text"] is None:
+            if not provider_history_checked:
+                return current
+            if provider_history_nonempty:
+                return self.store.mark_initial_context_skipped(
+                    current["conversation_id"]
+                )
+            if provider_history_inactive:
+                if self.store.has_turn_evidence(current["conversation_id"]):
+                    return current
+                return self.store.reset_initial_context_to_eligible(
+                    current["conversation_id"]
+                )
+            return current
+
+        accepted_turn_id = provider_turn_id or current.get("active_turn_id")
+        if accepted_turn_id is None:
+            for event in reversed(
+                self.store.latest_events(current["conversation_id"], limit=200)
+            ):
+                candidate = event.get("turn_id")
+                if isinstance(candidate, str) and candidate:
+                    accepted_turn_id = candidate
+                    break
+        if accepted_turn_id is not None:
+            self._mark_accepted_opening_message_attachments_sent(current)
+            return self.store.mark_initial_context_accepted(
+                current["conversation_id"], accepted_turn_id
+            )
+        if (
+            provider_history_checked
+            and not provider_history_nonempty
+            and provider_history_inactive
+        ):
+            return self.store.reset_initial_context_to_prepared(
+                current["conversation_id"]
+            )
+        return current
+
+    def _mark_accepted_opening_message_attachments_sent(
+        self, conversation: Mapping[str, Any]
+    ) -> None:
+        """Repair attachment state after an uncertain first turn was accepted."""
+        opening_context = conversation.get("initial_context_text")
+        if not isinstance(opening_context, str) or not opening_context:
+            return
+        conversation_id = str(conversation["conversation_id"])
+        message_event = next(
+            (
+                event
+                for event in self.store.read_events(
+                    conversation_id=conversation_id,
+                    after_event_id=0,
+                    limit=EVENT_PAGE_SIZE,
+                )
+                if event["kind"] == "user.message"
+                and event["payload"].get("opening_context") == opening_context
+            ),
+            None,
+        )
+        if message_event is None:
+            return
+        attachments = message_event["payload"].get("attachments")
+        if not isinstance(attachments, list):
+            return
+        seen: set[str] = set()
+        for value in attachments:
+            if not isinstance(value, Mapping):
+                continue
+            attachment_id = value.get("attachment_id")
+            if not isinstance(attachment_id, str) or attachment_id in seen:
+                continue
+            seen.add(attachment_id)
+            attachment = self.store.get_attachment(attachment_id)
+            if (
+                attachment is not None
+                and attachment.get("conversation_id") == conversation_id
+                and attachment.get("state") == "staged"
+            ):
+                self.store.update_attachment(attachment_id, state="sent")
+
     def _turn_inputs(
         self,
         host: Mapping[str, Any],
@@ -2122,9 +2879,9 @@ class ConversationService:
         host_id: str,
         adapter: AppServerAdapter,
         thread_id: str,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         if self._thread_is_resident(host_id, adapter, thread_id):
-            return
+            return None
         result = adapter.resume_thread(thread_id)
         thread = _result_object(result, "thread", "thread/resume")
         returned_thread_id = _provider_id(
@@ -2142,6 +2899,7 @@ class ConversationService:
                 "The Codex connection changed while resuming the thread.",
                 502,
             )
+        return thread
 
     def _replace_unmaterialized_thread(
         self,
@@ -2150,10 +2908,10 @@ class ConversationService:
         conversation: Mapping[str, Any],
         resume_error: JsonRpcRemoteError,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        _, project = self._require_host_project(
+        self._require_host_project(
             conversation["host_id"], conversation["project_id"]
         )
-        cwd = self._validated_project_cwd(host, project["cwd"])
+        cwd = self._validated_project_cwd(host, conversation["execution_cwd"])
         thread_options: dict[str, Any] = {}
         if conversation.get("kind") == "side_chat":
             thread_options["ephemeral"] = True
@@ -2363,6 +3121,16 @@ class ConversationService:
         return conversation
 
     @contextmanager
+    def _host_identity_operation(self, host_id: str) -> Iterator[None]:
+        """Serialize target-identity changes with first durable thread attachment."""
+        with self._host_identity_locks_guard:
+            lock = self._host_identity_locks.setdefault(host_id, threading.RLock())
+        # This lock may be held while taking the adapter registry lock. No code
+        # may acquire host-identity locks while already holding that registry.
+        with lock:
+            yield
+
+    @contextmanager
     def _conversation_operation(
         self,
         conversation_id: str,
@@ -2424,9 +3192,12 @@ class ConversationService:
         conversation: dict[str, Any],
         items: Mapping[str, Mapping[str, Any]],
     ) -> dict[str, Any]:
-        item = items.get(conversation["pursuit_id"])
+        public = dict(conversation)
+        public.pop("initial_context_text", None)
+        pursuit_id = conversation.get("pursuit_id")
+        item = items.get(pursuit_id) if isinstance(pursuit_id, str) else None
         return {
-            **conversation,
+            **public,
             "pursuit_available": item is not None,
             "pursuit_title": plain_title(str(item.get("title", ""))) if item else None,
         }
@@ -3093,6 +3864,93 @@ def _active_turn_id_from_thread(thread: Mapping[str, Any]) -> str | None:
             if candidate is not None:
                 return candidate
     return None
+
+
+def _latest_turn_id_from_thread(thread: Mapping[str, Any]) -> str | None:
+    active = _active_turn_id_from_thread(thread)
+    if active is not None:
+        return active
+    turns = thread.get("turns")
+    if isinstance(turns, list):
+        for turn in reversed(turns):
+            if not isinstance(turn, Mapping):
+                continue
+            candidate = _optional_provider_id(turn.get("id"))
+            if candidate is not None:
+                return candidate
+    return None
+
+
+def _provider_turn_fingerprint_from_thread(
+    thread: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(thread, Mapping):
+        return None
+    turns = thread.get("turns")
+    if not isinstance(turns, list):
+        return None
+    turn_ids: set[str] = set()
+    for turn in turns:
+        if not isinstance(turn, Mapping):
+            continue
+        turn_id = _optional_provider_id(turn.get("id"))
+        if turn_id is not None:
+            turn_ids.add(turn_id)
+    active_turn_id = _active_turn_id_from_thread(thread)
+    if active_turn_id is not None:
+        turn_ids.add(active_turn_id)
+    return provider_turn_id_fingerprint(turn_ids)
+
+
+def _accepted_uncertain_user_event_id(
+    uncertainty: Mapping[str, Any] | None,
+    thread: Mapping[str, Any],
+) -> int | None:
+    if uncertainty is None:
+        return None
+    payload = uncertainty.get("payload")
+    if not isinstance(payload, Mapping):
+        return None
+    baseline = payload.get("provider_turn_baseline")
+    if not isinstance(baseline, Mapping):
+        return None
+    baseline_count = baseline.get("count")
+    baseline_sha256 = baseline.get("sha256")
+    if (
+        isinstance(baseline_count, bool)
+        or not isinstance(baseline_count, int)
+        or baseline_count < 0
+        or not isinstance(baseline_sha256, str)
+        or len(baseline_sha256) != 64
+    ):
+        return None
+    provider_fingerprint = _provider_turn_fingerprint_from_thread(thread)
+    if provider_fingerprint is None:
+        return None
+    if provider_fingerprint["count"] != baseline_count + 1:
+        return None
+    if provider_fingerprint["sha256"] == baseline_sha256:
+        return None
+    user_event_id = payload.get("user_event_id")
+    return user_event_id if isinstance(user_event_id, int) and user_event_id > 0 else None
+
+
+def _reconciliation_result(
+    conversation: Mapping[str, Any],
+    thread: Mapping[str, Any],
+    *,
+    resolved: bool,
+    accepted_user_event_id: int | None = None,
+) -> dict[str, Any]:
+    """Return bounded reconciliation evidence without provider turn history."""
+    return {
+        "conversation": dict(conversation),
+        "resolved": bool(resolved),
+        "provider_thread_id": _optional_provider_id(thread.get("id")),
+        "provider_status": status_from_thread(thread.get("status")),
+        "latest_provider_turn_id": _latest_turn_id_from_thread(thread),
+        "accepted_user_event_id": accepted_user_event_id,
+    }
 
 
 def _message_value(message: object, name: str, default: Any = None) -> Any:

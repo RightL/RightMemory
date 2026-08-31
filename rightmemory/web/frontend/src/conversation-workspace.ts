@@ -11,6 +11,8 @@ import {
   type ConversationAction,
   type ConversationEvent,
   type ConversationModelCatalog,
+  type ConversationReference,
+  type ConversationSummary,
   type ConversationState,
   type PendingRequest,
   type WorkspaceSnapshot,
@@ -44,6 +46,138 @@ function isCompletedFinalAnswer(event: ConversationEvent): boolean {
     && (phase === 'final_answer' || phase === 'finalanswer');
 }
 
+function isTerminalTurnEvent(event: ConversationEvent): boolean {
+  const kind = event.kind.toLowerCase().replace(/[.\s/-]+/g, '_');
+  if (kind.includes('turn_failed') || kind.includes('turn_interrupted')) return true;
+  if (kind.includes('turn_completed') || kind.includes('turn_complete')) return true;
+  const payload = recordValue(event.payload);
+  return kind === 'protocol_error' && payload.willRetry === false && !!event.turnId;
+}
+
+export type ManagerTerminalStatus = 'completed' | 'failed' | 'interrupted';
+
+export function managerTerminalStatus(value: string): ManagerTerminalStatus | null {
+  const status = value.toLowerCase().replace(/[.\s/-]+/g, '_');
+  if (status === 'completed') return 'completed';
+  if (status === 'failed') return 'failed';
+  if (status === 'interrupted' || status === 'cancelled' || status === 'canceled') return 'interrupted';
+  return null;
+}
+
+export function managerTerminalSignalFromEvent(
+  event: ConversationEvent,
+  previousStatus: string,
+  nextStatus: string,
+): { status: ManagerTerminalStatus; turnId: string | null } | null {
+  const status = managerTerminalStatus(nextStatus);
+  if (!status) return null;
+  const kind = event.kind.toLowerCase().replace(/[.\s/-]+/g, '_');
+  const fallbackTerminal = kind === 'conversation_state'
+    && managerTerminalStatus(previousStatus) === null;
+  return isTerminalTurnEvent(event) || fallbackTerminal
+    ? { status, turnId: event.turnId }
+    : null;
+}
+
+export function managerTerminalTransitions(
+  previousConversations: readonly ConversationSummary[],
+  nextConversations: readonly ConversationSummary[],
+): { conversationId: string; status: ManagerTerminalStatus }[] {
+  const previousById = new Map(previousConversations.map((conversation) => [conversation.conversationId, conversation]));
+  const transitions: { conversationId: string; status: ManagerTerminalStatus }[] = [];
+  for (const conversation of nextConversations) {
+    if (conversation.kind !== 'manager') continue;
+    const previous = previousById.get(conversation.conversationId);
+    const status = managerTerminalStatus(conversation.status);
+    if (previous?.kind === 'manager' && managerTerminalStatus(previous.status) === null && status) {
+      transitions.push({ conversationId: conversation.conversationId, status });
+    }
+  }
+  return transitions;
+}
+
+export function managerReconcileRefreshStatus(
+  previousStatus: string,
+  nextStatus: string,
+  resolved: boolean,
+): ManagerTerminalStatus | null {
+  const terminal = managerTerminalStatus(nextStatus);
+  if (terminal) return terminal;
+  const previous = previousStatus.toLowerCase().replace(/[.\s/-]+/g, '_');
+  const next = nextStatus.toLowerCase().replace(/[.\s/-]+/g, '_');
+  return resolved && previous === 'unknown' && next === 'idle' ? 'completed' : null;
+}
+
+export function managerAcceptedPendingSend(
+  eventCursor: string | null,
+  acceptedUserEventId: string | null,
+): boolean {
+  if (!acceptedUserEventId) return false;
+  if (eventCursor === null) return true;
+  if (!/^\d+$/.test(eventCursor) || !/^\d+$/.test(acceptedUserEventId)) return false;
+  return Number(acceptedUserEventId) > Number(eventCursor);
+}
+
+export function managerProviderEventAcceptsPendingSend(
+  eventCursor: string | null,
+  event: ConversationEvent,
+): boolean {
+  const payload = recordValue(event.payload);
+  const acceptedValue = payload.accepted_user_event_id ?? payload.acceptedUserEventId;
+  const acceptedUserEventId = typeof acceptedValue === 'number' && Number.isSafeInteger(acceptedValue)
+    ? String(acceptedValue)
+    : textValue(acceptedValue);
+  if (acceptedUserEventId) {
+    if (eventCursor === null) return true;
+    return /^\d+$/.test(eventCursor)
+      && /^\d+$/.test(acceptedUserEventId)
+      && Number(acceptedUserEventId) > Number(eventCursor);
+  }
+  return false;
+}
+
+type PendingManagerSend = {
+  text: string;
+  attachmentIds: string[];
+  referenceVersion: number;
+  hadReference: boolean;
+  eventCursor: string | null;
+};
+
+/** Coalesces the terminal signals that can describe the same Manager turn. */
+export class ManagerTerminalRefreshGate {
+  private terminalByConversation = new Map<string, { status: ManagerTerminalStatus; turnId: string | null }>();
+
+  beginTurn(conversationId: string): void {
+    this.terminalByConversation.delete(conversationId);
+  }
+
+  observeStatus(conversationId: string, status: string): void {
+    const normalized = status.toLowerCase().replace(/[.\s/-]+/g, '_');
+    if (['starting', 'running', 'in_progress', 'waiting_approval', 'waiting_input'].includes(normalized)) {
+      this.beginTurn(conversationId);
+    }
+  }
+
+  acceptTerminal(conversationId: string, status: string, turnId: string | null): boolean {
+    const terminal = managerTerminalStatus(status);
+    if (!terminal) return false;
+    const previous = this.terminalByConversation.get(conversationId);
+    if (!previous) {
+      this.terminalByConversation.set(conversationId, { status: terminal, turnId });
+      return true;
+    }
+    if (turnId && previous.turnId && turnId !== previous.turnId) {
+      this.terminalByConversation.set(conversationId, { status: terminal, turnId });
+      return true;
+    }
+    if (turnId && !previous.turnId) {
+      this.terminalByConversation.set(conversationId, { status: terminal, turnId });
+    }
+    return false;
+  }
+}
+
 export class ConversationWorkspace implements ConversationRendererActions {
   private state: ConversationState = initialConversationState();
   private renderer: ConversationRenderer;
@@ -65,6 +199,11 @@ export class ConversationWorkspace implements ConversationRendererActions {
   private sideChatMutation = 0;
   private archivingConversations = new Set<string>();
   private indicatorSignature = '';
+  private managerTerminalRefreshGate = new ManagerTerminalRefreshGate();
+  private managerRefreshConversationIds = new Set<string>();
+  private managerRefreshScheduled = false;
+  private managerRefreshInFlight: Promise<void> | null = null;
+  private pendingManagerSends = new Map<string, PendingManagerSend>();
   private indicatorSink: (items: readonly OperationalConversationIndicatorInput[]) => void;
   private readonly viewId: string;
   private readonly pageId = opaqueViewId();
@@ -87,6 +226,7 @@ export class ConversationWorkspace implements ConversationRendererActions {
     private reloadPage: () => void = () => location.reload(),
     eventSourceFactory?: EventSourceFactory,
     indicatorSink: (items: readonly OperationalConversationIndicatorInput[]) => void = () => undefined,
+    private canonicalRefresh: () => void | Promise<void> = () => undefined,
   ) {
     this.indicatorSink = indicatorSink;
     this.api = new ConversationApi(fetchJson, eventSourceFactory);
@@ -143,7 +283,9 @@ export class ConversationWorkspace implements ConversationRendererActions {
   private dispatch(action: ConversationAction): void {
     this.state = reduceConversationState(this.state, action);
     this.renderer.render(this.state);
-    const indicatorInputs = this.state.conversations.map((conversation) => ({
+    const indicatorInputs = this.state.conversations
+      .filter((conversation) => conversation.kind !== 'manager')
+      .map((conversation) => ({
       pursuitId: conversation.pursuitId,
       status: conversation.status,
       unreadFinal: conversation.lastFinalEventId !== null
@@ -158,6 +300,60 @@ export class ConversationWorkspace implements ConversationRendererActions {
     if (signature !== this.indicatorSignature) {
       this.indicatorSignature = signature;
       this.indicatorSink(indicatorInputs);
+    }
+  }
+
+  private dispatchWorkspaceSnapshot(snapshot: WorkspaceSnapshot): void {
+    const previousConversations = this.state.conversations;
+    this.dispatch({ type: 'workspace-loaded', snapshot });
+    for (const conversation of this.state.conversations) {
+      if (conversation.kind === 'manager') {
+        this.managerTerminalRefreshGate.observeStatus(conversation.conversationId, conversation.status);
+        this.resolvePendingManagerSend(conversation, null);
+      }
+    }
+    for (const transition of managerTerminalTransitions(previousConversations, this.state.conversations)) {
+      this.requestManagerTerminalRefresh(transition.conversationId, transition.status, null);
+    }
+  }
+
+  private resolvePendingManagerSend(
+    conversation: ConversationSummary,
+    acceptedUserEventId: string | null,
+  ): void {
+    const pending = this.pendingManagerSends.get(conversation.conversationId);
+    if (!pending || !managerAcceptedPendingSend(
+      pending.eventCursor,
+      acceptedUserEventId,
+    )) return;
+    this.pendingManagerSends.delete(conversation.conversationId);
+    this.renderer.clearComposerIfUnchanged(
+      pending.text,
+      pending.attachmentIds,
+      conversation.conversationId,
+    );
+    if (pending.hadReference) {
+      this.dispatch({ type: 'manager-reference-sent', version: pending.referenceVersion });
+    }
+  }
+
+  private resolvePendingManagerSendFromEvents(
+    conversation: ConversationSummary,
+    events: readonly ConversationEvent[],
+  ): void {
+    const pending = this.pendingManagerSends.get(conversation.conversationId);
+    if (!pending || !events.some((event) => managerProviderEventAcceptsPendingSend(
+      pending.eventCursor,
+      event,
+    ))) return;
+    this.pendingManagerSends.delete(conversation.conversationId);
+    this.renderer.clearComposerIfUnchanged(
+      pending.text,
+      pending.attachmentIds,
+      conversation.conversationId,
+    );
+    if (pending.hadReference) {
+      this.dispatch({ type: 'manager-reference-sent', version: pending.referenceVersion });
     }
   }
 
@@ -249,7 +445,7 @@ export class ConversationWorkspace implements ConversationRendererActions {
       const snapshot = await this.api.workspace();
       if (this.destroyed) return;
       if (!this.acceptSnapshot(snapshot)) return;
-      this.dispatch({ type: 'workspace-loaded', snapshot });
+      this.dispatchWorkspaceSnapshot(snapshot);
     } catch (error) {
       if (!this.destroyed) this.dispatch({ type: 'error', message: errorMessage(error) });
     }
@@ -257,9 +453,21 @@ export class ConversationWorkspace implements ConversationRendererActions {
 
   selectPursuit(id: string | null): void {
     const pursuitId = stablePursuitId(id);
-    if (pursuitId === this.state.selectedPursuitId) return;
+    if (pursuitId === this.state.selectedPursuitId && !this.state.managerOpen) return;
     this.dispatch({ type: 'pursuit-selected', pursuitId });
     if (pursuitId) void this.loadPursuit(pursuitId);
+  }
+
+  openManager(): void {
+    this.conversationLoad++;
+    this.dispatch({
+      type: 'manager-opened',
+      pursuitId: stablePursuitId(this.state.selectedPursuitId),
+    });
+  }
+
+  removeManagerReference(): void {
+    this.dispatch({ type: 'manager-reference-removed' });
   }
 
   private async loadPursuit(pursuitId: string): Promise<void> {
@@ -306,6 +514,10 @@ export class ConversationWorkspace implements ConversationRendererActions {
       const detail = await this.api.conversation(conversationId);
       if (!this.destroyed && generation === this.conversationLoad) {
         this.dispatch({ type: 'conversation-loaded', detail });
+        if (detail.conversation.kind === 'manager') {
+          this.resolvePendingManagerSend(detail.conversation, null);
+          this.resolvePendingManagerSendFromEvents(detail.conversation, detail.events);
+        }
         void this.acknowledgeReadIfNeeded(conversationId);
       }
     } catch (error) {
@@ -337,9 +549,27 @@ export class ConversationWorkspace implements ConversationRendererActions {
     finally { if (!this.destroyed) this.dispatch({ type: 'create-in-flight', active: false }); }
   }
 
+  async createManager(model: string, reasoningEffort: string): Promise<void> {
+    if (!this.state.managerOpen || this.state.creatingManager || !model || !reasoningEffort) return;
+    const navigation = this.conversationLoad;
+    const currentConversationId = this.state.currentConversationId;
+    this.dispatch({ type: 'manager-create-in-flight', active: true });
+    this.dispatch({ type: 'error', message: null });
+    try {
+      const conversation = await this.api.createManager(model, reasoningEffort);
+      if (this.destroyed) return;
+      const select = this.conversationLoad === navigation
+        && this.state.managerOpen
+        && this.state.currentConversationId === currentConversationId;
+      this.dispatch({ type: 'conversation-created', conversation, select });
+      if (select) await this.loadConversation(conversation.conversationId);
+    } catch (error) { if (!this.destroyed) this.dispatch({ type: 'error', message: errorMessage(error) }); }
+    finally { if (!this.destroyed) this.dispatch({ type: 'manager-create-in-flight', active: false }); }
+  }
+
   async createSideChat(parentConversationId: string): Promise<void> {
     const parent = this.state.conversations.find((conversation) => conversation.conversationId === parentConversationId);
-    if (!parent || parent.kind === 'side_chat' || parent.archived || this.state.creatingSideChat || this.archivingConversations.has(parentConversationId)) return;
+    if (!parent || parent.kind === 'side_chat' || parent.kind === 'manager' || parent.archived || this.state.creatingSideChat || this.archivingConversations.has(parentConversationId)) return;
     this.dispatch({ type: 'side-chat-create-in-flight', active: true });
     this.dispatch({ type: 'error', message: null });
     const navigation = this.conversationLoad;
@@ -476,6 +706,11 @@ export class ConversationWorkspace implements ConversationRendererActions {
     const conversationId = this.state.currentConversationId;
     const conversation = currentConversation(this.state);
     if (!conversationId || !conversation || !conversationCanSend(this.state, conversation)) return false;
+    const referenceVersion = this.state.managerReferenceVersion;
+    const references: ConversationReference[] = conversation.kind === 'manager' && this.state.managerReferencePursuitId
+      ? [{ kind: 'pursuit', id: this.state.managerReferencePursuitId }]
+      : [];
+    if (conversation.kind === 'manager') this.managerTerminalRefreshGate.beginTurn(conversationId);
     this.dispatch({ type: 'send-in-flight', conversationId, active: true });
     this.dispatch({ type: 'error', message: null });
     try {
@@ -491,9 +726,26 @@ export class ConversationWorkspace implements ConversationRendererActions {
       // still need these completed intent results.
       this.failedSettingsIntents.delete(conversationId);
       if (awaitedIntentFailed) return false;
-      const updated = await this.api.sendMessage(conversationId, text, attachmentIds);
-      if (!this.destroyed && updated) this.dispatch({ type: 'conversation-updated', conversation: updated });
+      const pendingManagerSend: PendingManagerSend | null = conversation.kind === 'manager'
+        ? {
+            text,
+            attachmentIds: [...attachmentIds],
+            referenceVersion,
+            hadReference: references.length > 0,
+            eventCursor: this.state.cursor,
+          }
+        : null;
+      if (pendingManagerSend) this.pendingManagerSends.set(conversationId, pendingManagerSend);
+      const updated = await this.api.sendMessage(conversationId, text, attachmentIds, references);
+      if (pendingManagerSend) this.pendingManagerSends.delete(conversationId);
+      if (!this.destroyed && updated) {
+        this.dispatch({ type: 'conversation-updated', conversation: updated });
+        if (conversation.kind === 'manager') {
+          this.requestManagerTerminalRefresh(updated.conversationId, updated.status, null);
+        }
+      }
       if (!this.destroyed) this.renderer.clearComposerIfUnchanged(text, attachmentIds, conversationId);
+      if (!this.destroyed && references.length) this.dispatch({ type: 'manager-reference-sent', version: referenceVersion });
       return true;
     } catch (error) {
       if (!this.destroyed) this.dispatch({ type: 'error', message: errorMessage(error) });
@@ -508,7 +760,12 @@ export class ConversationWorkspace implements ConversationRendererActions {
     this.dispatch({ type: 'interrupt-in-flight', conversationId, active: true });
     try {
       const updated = await this.api.interrupt(conversationId);
-      if (!this.destroyed && updated) this.dispatch({ type: 'conversation-updated', conversation: updated });
+      if (!this.destroyed && updated) {
+        this.dispatch({ type: 'conversation-updated', conversation: updated });
+        if (updated.kind === 'manager') {
+          this.requestManagerTerminalRefresh(updated.conversationId, updated.status, null);
+        }
+      }
     } catch (error) { if (!this.destroyed) this.dispatch({ type: 'error', message: errorMessage(error) }); }
     finally { if (!this.destroyed) this.dispatch({ type: 'interrupt-in-flight', conversationId, active: false }); }
   }
@@ -523,7 +780,7 @@ export class ConversationWorkspace implements ConversationRendererActions {
     const hasChild = sessionSideChats.some((sideChat) => sideChat?.kind === 'side_chat'
       && sideChat.parentConversationId === conversationId);
     const hasUnresolved = sessionSideChats.some((sideChat) => !sideChat);
-    if (this.state.creatingSideChat || hasChild || hasUnresolved) {
+    if (conversation.kind !== 'manager' && (this.state.creatingSideChat || hasChild || hasUnresolved)) {
       this.dispatch({ type: 'error', message: this.state.creatingSideChat
         ? 'Wait for the side chat to finish opening before archiving.'
         : 'Close side chats before archiving this conversation.' });
@@ -552,9 +809,21 @@ export class ConversationWorkspace implements ConversationRendererActions {
     this.dispatch({ type: 'reconcile-in-flight', conversationId, active: true });
     this.dispatch({ type: 'error', message: null });
     try {
-      const updated = await this.api.reconcile(conversationId);
+      const reconciliation = await this.api.reconcile(conversationId);
       if (this.destroyed) return;
+      const updated = reconciliation.conversation;
       this.dispatch({ type: 'conversation-updated', conversation: updated });
+      if (updated.kind === 'manager') {
+        this.resolvePendingManagerSend(updated, reconciliation.acceptedUserEventId);
+        const refreshStatus = managerReconcileRefreshStatus(
+          conversation.status,
+          updated.status,
+          reconciliation.resolved,
+        );
+        if (refreshStatus) {
+          this.requestManagerTerminalRefresh(updated.conversationId, refreshStatus, null);
+        }
+      }
       const host = this.state.hosts.find((item) => item.hostId === updated.hostId);
       if (host) this.dispatch({ type: 'host-updated', host: { ...host, status: 'online' } });
       if (this.state.currentConversationId === conversationId) await this.loadConversation(conversationId);
@@ -635,10 +904,12 @@ export class ConversationWorkspace implements ConversationRendererActions {
       snapshot: (snapshot) => {
         if (this.destroyed) return;
         if (!this.acceptSnapshot(snapshot)) return;
-        this.dispatch({ type: 'workspace-loaded', snapshot });
+        this.dispatchWorkspaceSnapshot(snapshot);
       },
       event: (event) => {
         if (this.destroyed) return;
+        const previousConversation = this.state.conversations.find((conversation) =>
+          conversation.conversationId === event.conversationId);
         const eventKind = event.kind.toLowerCase().replace(/[.\s/-]+/g, '_');
         const closedSideChatId = eventKind === 'side_chat_closed'
           ? textValue(recordValue(event.payload).conversation_id ?? recordValue(event.payload).conversationId)
@@ -649,6 +920,25 @@ export class ConversationWorkspace implements ConversationRendererActions {
         const returnToParent = Boolean(closedSideChatId && closedSideChat?.parentConversationId
           && this.state.currentConversationId === closedSideChatId);
         this.dispatch({ type: 'event', event });
+        const nextConversation = this.state.conversations.find((conversation) =>
+          conversation.conversationId === event.conversationId);
+        if (nextConversation?.kind === 'manager') {
+          this.managerTerminalRefreshGate.observeStatus(nextConversation.conversationId, nextConversation.status);
+          this.resolvePendingManagerSend(nextConversation, null);
+          this.resolvePendingManagerSendFromEvents(nextConversation, [event]);
+          const terminalSignal = managerTerminalSignalFromEvent(
+            event,
+            previousConversation?.status ?? '',
+            nextConversation.status,
+          );
+          if (terminalSignal) {
+            this.requestManagerTerminalRefresh(
+              nextConversation.conversationId,
+              terminalSignal.status,
+              terminalSignal.turnId,
+            );
+          }
+        }
         if (closedSideChatId) {
           this.sideChatMutation += 1;
           this.rememberSideChatIds(this.state.sessionSideChatIds.filter((id) => id !== closedSideChatId));
@@ -670,6 +960,47 @@ export class ConversationWorkspace implements ConversationRendererActions {
       open: () => { if (this.active && !this.destroyed) this.dispatch({ type: 'connection', connection: 'open' }); },
       error: () => { if (this.active && !this.destroyed) this.dispatch({ type: 'connection', connection: 'retrying' }); },
     });
+  }
+
+  private requestManagerTerminalRefresh(
+    conversationId: string,
+    status: string,
+    turnId: string | null,
+  ): void {
+    if (!this.managerTerminalRefreshGate.acceptTerminal(conversationId, status, turnId)) return;
+    this.managerRefreshConversationIds.add(conversationId);
+    if (this.managerRefreshScheduled || this.managerRefreshInFlight) return;
+    this.managerRefreshScheduled = true;
+    queueMicrotask(() => {
+      this.managerRefreshScheduled = false;
+      this.flushManagerTerminalRefresh();
+    });
+  }
+
+  private flushManagerTerminalRefresh(): void {
+    if (this.destroyed || this.managerRefreshInFlight || !this.managerRefreshConversationIds.size) return;
+    const conversationIds = new Set(this.managerRefreshConversationIds);
+    this.managerRefreshConversationIds.clear();
+    const refresh = (async () => {
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => this.canonicalRefresh()),
+        this.loadWorkspace(),
+      ]);
+      if (this.destroyed) return;
+      const currentConversationId = this.state.currentConversationId;
+      if (currentConversationId && conversationIds.has(currentConversationId)) {
+        await this.loadConversation(currentConversationId);
+      }
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failure && !this.destroyed) this.dispatch({ type: 'error', message: errorMessage(failure.reason) });
+    })();
+    const tracked = refresh.finally(() => {
+      if (this.managerRefreshInFlight === tracked) this.managerRefreshInFlight = null;
+      if (!this.destroyed && this.managerRefreshConversationIds.size) {
+        this.flushManagerTerminalRefresh();
+      }
+    });
+    this.managerRefreshInFlight = tracked;
   }
 
   async refresh(): Promise<void> {

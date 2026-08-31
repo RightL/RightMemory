@@ -3,7 +3,7 @@ import { applyOperation, indexTree, type Operation, type Snapshot } from '../src
 import { ApiError, type Transport } from '../src/queue.ts';
 import { forestFixture } from './fixtures.ts';
 import { ConversationRenderer, type ConversationRendererActions } from '../src/conversation-renderer.ts';
-import { initialConversationState, normalizeConversationDetail, normalizeEvent, normalizeWorkspace, reduceConversationState } from '../src/conversation-state.ts';
+import { initialConversationState, normalizeConversationDetail, normalizeEvent, normalizeWorkspace, reduceConversationState, type ConversationState } from '../src/conversation-state.ts';
 import { ConversationWorkspace } from '../src/conversation-workspace.ts';
 
 function check(value: unknown, message: string): asserts value { if (!value) throw new Error(message); }
@@ -347,8 +347,10 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     const modelCatalogLoads: string[] = [];
     const settingsUpdates: Array<{ model: string; reasoningEffort: string }> = [];
     const earlierLoads: string[] = [];
+    let managerOpenRequests = 0;
+    let managerReferenceRemovals = 0;
     const actions: ConversationRendererActions = {
-      toggleCollapsed() {}, openConversation(conversationId) { openedConversations.push(conversationId); }, loadEarlier(conversationId) { earlierLoads.push(conversationId); }, closeConversation() {}, createConversation() {}, interrupt() { interrupts++; }, archive() {}, reload() {},
+      toggleCollapsed() {}, openManager() { managerOpenRequests++; }, openConversation(conversationId) { openedConversations.push(conversationId); }, loadEarlier(conversationId) { earlierLoads.push(conversationId); }, closeConversation() {}, createConversation() {}, createManager() {}, removeManagerReference() { managerReferenceRemovals++; }, interrupt() { interrupts++; }, archive() {}, reload() {},
       createSideChat(parentConversationId) { createdSideChats.push(parentConversationId); },
       closeSideChat(sideChatId) { closedSideChats.push(sideChatId); },
       acknowledgeRead() {},
@@ -1029,6 +1031,57 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     conversationRenderer.forgetConversation('side-chat-1');
     check(sessionStorage.getItem(sideDraftKey) === null, 'Successful side-chat close removes its session draft');
     window.confirm = nativeConfirm;
+
+    const managerHost = document.createElement('aside');
+    selectionBoundary.append(managerHost);
+    const managerRenderer = new ConversationRenderer(managerHost, draftRoot, actions);
+    managerRenderer.setModelCatalog({
+      hostId: 'local', defaultModel: 'gpt-5.6', defaultReasoningEffort: 'medium',
+      models: [{ id: 'gpt-5.6', displayName: 'GPT-5.6', defaultReasoningEffort: 'medium', isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: '' }] }],
+    });
+    const managerSummary = normalizeWorkspace({ conversations: [{
+      conversation_id: 'manager-1', pursuit_id: null, kind: 'manager', host_id: 'local', project_id: 'local-root',
+      execution_cwd: 'C:\\fixture', model: 'gpt-5.6', reasoning_effort: 'medium', thread_title: 'Manager fixture', status: 'idle',
+    }] }).conversations[0];
+    let managerState: ConversationState = {
+      ...conversationState,
+      managerOpen: true,
+      managerReferencePursuitId: 'design',
+      currentConversationId: null,
+      conversations: [...conversationState.conversations, managerSummary],
+    };
+    managerRenderer.render(managerState);
+    check(!managerHost.querySelector<HTMLElement>('.cw-manager-view')!.hidden
+      && managerHost.querySelector<HTMLElement>('.cw-list-view')!.hidden
+      && managerHost.querySelectorAll('.cw-manager-list .cw-conversation').length === 1,
+    'The fixed Manager mode has its own persistent list without exposing the Pursuit host/project picker');
+    managerHost.querySelector<HTMLButtonElement>('.cw-manager-entry')!.click();
+    check(managerOpenRequests === 1, 'The Manager entry uses an explicit pane mode instead of clearing the map selection');
+    const longOpeningContext = 'opaque-context-segment-'.repeat(3_500);
+    const projectedManagerEcho = `${longOpeningContext.slice(0, 65_536 - 14)}...[truncated]`;
+    const managerDetail = normalizeConversationDetail({
+      conversation: managerSummary.raw,
+      events: [
+        { event_id: 80, conversation_id: 'manager-1', kind: 'user.message', payload: { text: 'Visible Manager request', opening_context: longOpeningContext, references: [{ kind: 'pursuit', id: 'design', title: 'Design' }] } },
+        { event_id: 81, conversation_id: 'manager-1', turn_id: 'manager-turn', kind: 'item.completed', payload: { item: { id: 'manager-user-echo', type: 'userMessage', role: 'user', content: [{ type: 'text', text: projectedManagerEcho }] } } },
+      ],
+      pending_requests: [], cursor: 81,
+    });
+    check(managerDetail, 'Manager fixture must normalize');
+    managerState = reduceConversationState(managerState, { type: 'conversation-loading', conversationId: 'manager-1' });
+    managerState = reduceConversationState(managerState, { type: 'conversation-loaded', detail: managerDetail });
+    managerRenderer.render(managerState);
+    const openingContext = managerHost.querySelector<HTMLDetailsElement>('.cw-opening-context');
+    check(openingContext && !openingContext.open
+      && managerHost.querySelectorAll('.cw-user').length === 1
+      && managerHost.querySelectorAll('.cw-sent-reference').length === 1,
+    'Stored oversized opening context is collapsed in the local user bubble, its explicitly truncated provider echo is suppressed, and sent references remain visible');
+    check(!managerHost.querySelector('.cw-new-side-chat')
+      && managerHost.querySelector('.cw-staged-references .cw-reference-chip'),
+    'Manager conversations keep the captured per-message Pursuit reference and omit side-chat controls');
+    managerHost.querySelector<HTMLButtonElement>('.cw-reference-remove')!.click();
+    check(managerReferenceRemovals === 1, 'The captured Manager reference is removable before send');
+    managerRenderer.destroy(); managerHost.remove();
     const conversationPreview = conversationHost.cloneNode(true) as HTMLElement;
     conversationRenderer.destroy(); conversationHost.remove();
     localStorage.removeItem(`rightmemory:conversation-draft:${encodeURIComponent(draftRoot)}:conversation-1`);
@@ -1125,6 +1178,189 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     sessionStorage.removeItem(`rightmemory:conversation-view:${encodeURIComponent('root-destroy')}`);
     boundaryHost.remove(); boundaryPane.remove();
     report('PASS conversation root boundary and REST-to-SSE cursor replay');
+
+    const managerRecoveryHost = document.createElement('section');
+    const managerRecoveryPane = document.createElement('aside');
+    document.body.append(managerRecoveryHost, managerRecoveryPane);
+    let managerRecoveryStatus = 'idle';
+    let managerInitialContextState = 'eligible';
+    let managerRecoveryCursor = 1;
+    let managerWorkspaceLoads = 0;
+    let managerDetailLoads = 0;
+    let managerCanonicalRefreshes = 0;
+    let managerMessageAttempts = 0;
+    let managerMessageShouldFail = true;
+    let managerPendingUserEventId: number | null = null;
+    const managerRecoveryListeners = new Map<string, EventListener[]>();
+    const managerRecoveryStream = {
+      close() {},
+      addEventListener(type: string, listener: EventListener) {
+        managerRecoveryListeners.set(type, [...(managerRecoveryListeners.get(type) ?? []), listener]);
+      },
+      onopen: null,
+      onerror: null,
+      onmessage: null,
+    };
+    const managerRecoveryConversation = () => ({
+      conversation_id: 'manager-recovery', pursuit_id: null, kind: 'manager', host_id: 'local', project_id: 'local-root',
+      execution_cwd: 'C:\\fixture', model: 'gpt-5.6', reasoning_effort: 'medium', thread_title: 'Manager recovery',
+      status: managerRecoveryStatus, initial_context_state: managerInitialContextState,
+      updated_at: `2026-01-01T00:00:0${managerRecoveryCursor}Z`,
+    });
+    const managerRecoveryWorkspace = new ConversationWorkspace(
+      managerRecoveryHost,
+      managerRecoveryPane,
+      async (path, options) => {
+        if (path === '/api/conversation-workspace') {
+          managerWorkspaceLoads++;
+          return { data: {
+            root_key: 'manager-recovery-root',
+            hosts: [{ host_id: 'local', kind: 'local', display_name: 'This computer' }],
+            projects: [{ project_id: 'local-root', host_id: 'local', label: 'Fixture', cwd: 'C:\\fixture' }],
+            conversations: [managerRecoveryConversation()], pending_requests: [], cursor: managerRecoveryCursor,
+          } };
+        }
+        if (path === '/api/conversation-models?host_id=local') return { data: {
+          host_id: 'local', default_model: 'gpt-5.6', default_reasoning_effort: 'medium',
+          models: [{ id: 'gpt-5.6', display_name: 'GPT-5.6', default_reasoning_effort: 'medium', supported_reasoning_efforts: [{ reasoning_effort: 'medium' }] }],
+        } };
+        if (path.startsWith('/api/pursuit-conversations?')) return { data: { conversations: [], default: null } };
+        if (path === '/api/conversations/manager-recovery') {
+          managerDetailLoads++;
+          return { data: { conversation: managerRecoveryConversation(), events: [], attachments: [], pending_requests: [], cursor: managerRecoveryCursor } };
+        }
+        if (path === '/api/conversations/manager-recovery/messages' && options?.method === 'POST') {
+          managerMessageAttempts++;
+          managerRecoveryCursor++;
+          if (managerMessageShouldFail) {
+            managerRecoveryStatus = 'unknown';
+            managerInitialContextState = 'unknown';
+            managerPendingUserEventId = managerRecoveryCursor;
+            throw new Error('turn/start response lost');
+          }
+          managerRecoveryStatus = 'completed';
+          managerInitialContextState = 'accepted';
+          return { data: { conversation: managerRecoveryConversation() } };
+        }
+        if (path === '/api/conversations/manager-recovery/reconcile' && options?.method === 'POST') {
+          managerRecoveryStatus = 'idle';
+          managerInitialContextState = 'accepted';
+          managerRecoveryCursor++;
+          return { data: {
+            conversation: managerRecoveryConversation(), resolved: true,
+            accepted_user_event_id: managerPendingUserEventId,
+          } };
+        }
+        if (path === '/api/conversation-session/release') return { data: { released: true } };
+        throw new Error(`Unexpected Manager recovery request: ${path}`);
+      },
+      'manager-recovery-root',
+      () => undefined,
+      () => managerRecoveryStream,
+      () => undefined,
+      () => { managerCanonicalRefreshes++; },
+    );
+    await managerRecoveryWorkspace.start();
+    (managerRecoveryStream.onopen as ((event: Event) => void) | null)?.(new Event('open'));
+    managerRecoveryWorkspace.selectPursuit('design');
+    managerRecoveryWorkspace.openManager();
+    managerRecoveryWorkspace.openConversation('manager-recovery');
+    await until(() => managerDetailLoads === 1, 'The Manager recovery fixture should load its conversation');
+    const managerDraft = managerRecoveryPane.querySelector<HTMLTextAreaElement>('.cw-composer textarea')!;
+    managerDraft.value = 'Uncertain Manager request';
+    managerDraft.dispatchEvent(new Event('input', { bubbles: true }));
+    check(!await managerRecoveryWorkspace.sendMessage('Uncertain Manager request', []) && managerMessageAttempts === 1,
+      'A lost Manager turn/start response leaves the exact submitted message pending for reconciliation');
+    const unknownAfterSend = new MessageEvent('conversation', { data: JSON.stringify({
+      event_id: managerRecoveryCursor, conversation_id: 'manager-recovery', kind: 'conversation.state',
+      payload: { conversation: managerRecoveryConversation() },
+    }) });
+    for (const listener of managerRecoveryListeners.get('conversation') ?? []) listener(unknownAfterSend);
+    managerDraft.value = 'Later Manager draft';
+    managerDraft.dispatchEvent(new Event('input', { bubbles: true }));
+    managerRecoveryWorkspace.selectPursuit('research');
+    managerRecoveryWorkspace.openManager();
+    managerRecoveryWorkspace.openConversation('manager-recovery');
+    await until(() => managerDetailLoads >= 2, 'The Manager recovery fixture should restore after a later reference selection');
+    await managerRecoveryWorkspace.reconnect('manager-recovery');
+    await until(() => managerCanonicalRefreshes === 1 && managerWorkspaceLoads >= 2,
+      'A resolved unknown-to-idle reconciliation should refresh canonical Manager state and the workspace');
+    check(managerDraft.value === 'Later Manager draft'
+      && managerRecoveryPane.querySelector<HTMLElement>('.cw-reference-chip')?.textContent?.includes('research'),
+    'Accepted reconciliation clears only the submitted Manager draft/reference version and preserves later edits and selection');
+
+    managerRecoveryStatus = 'running';
+    managerRecoveryCursor++;
+    const runningFallback = new MessageEvent('conversation', { data: JSON.stringify({
+      event_id: managerRecoveryCursor, conversation_id: 'manager-recovery', turn_id: 'manager-turn-2', kind: 'conversation.state',
+      payload: { conversation: managerRecoveryConversation() },
+    }) });
+    for (const listener of managerRecoveryListeners.get('conversation') ?? []) listener(runningFallback);
+    managerRecoveryStatus = 'completed';
+    managerRecoveryCursor++;
+    const terminalFallback = new MessageEvent('conversation', { data: JSON.stringify({
+      event_id: managerRecoveryCursor, conversation_id: 'manager-recovery', turn_id: 'manager-turn-2', kind: 'conversation.state',
+      payload: { conversation: managerRecoveryConversation() },
+    }) });
+    for (const listener of managerRecoveryListeners.get('conversation') ?? []) listener(terminalFallback);
+    managerRecoveryCursor++;
+    const lateTerminal = new MessageEvent('conversation', { data: JSON.stringify({
+      event_id: managerRecoveryCursor, conversation_id: 'manager-recovery', turn_id: 'manager-turn-2', kind: 'turn.completed',
+      payload: { turn: { id: 'manager-turn-2', status: 'completed' } },
+    }) });
+    for (const listener of managerRecoveryListeners.get('conversation') ?? []) listener(lateTerminal);
+    await until(() => managerCanonicalRefreshes === 2,
+      'A fallback terminal conversation state should recover a missed Manager turn notification');
+    await pause();
+    check(managerCanonicalRefreshes === 2 && managerDraft.value === 'Later Manager draft',
+      'The later duplicate turn event does not cause another refresh or erase the Manager draft');
+
+    managerRecoveryStatus = 'running';
+    managerRecoveryCursor++;
+    const snapshotTurnRunning = new MessageEvent('conversation', { data: JSON.stringify({
+      event_id: managerRecoveryCursor, conversation_id: 'manager-recovery', turn_id: 'manager-turn-3', kind: 'conversation.state',
+      payload: { conversation: managerRecoveryConversation() },
+    }) });
+    for (const listener of managerRecoveryListeners.get('conversation') ?? []) listener(snapshotTurnRunning);
+    managerRecoveryStatus = 'completed';
+    managerRecoveryCursor++;
+    const reconnectTerminalSnapshot = new MessageEvent('snapshot', { data: JSON.stringify({
+      root_key: 'manager-recovery-root',
+      hosts: [{ host_id: 'local', kind: 'local', display_name: 'This computer' }],
+      projects: [{ project_id: 'local-root', host_id: 'local', label: 'Fixture', cwd: 'C:\\fixture' }],
+      conversations: [managerRecoveryConversation()], pending_requests: [], cursor: managerRecoveryCursor,
+    }) });
+    for (const listener of managerRecoveryListeners.get('snapshot') ?? []) listener(reconnectTerminalSnapshot);
+    const replayedTerminalState = new MessageEvent('conversation', { data: JSON.stringify({
+      event_id: managerRecoveryCursor, conversation_id: 'manager-recovery', turn_id: 'manager-turn-3', kind: 'conversation.state',
+      payload: { conversation: managerRecoveryConversation() },
+    }) });
+    for (const listener of managerRecoveryListeners.get('conversation') ?? []) listener(replayedTerminalState);
+    managerRecoveryCursor++;
+    const replayedTerminalTurn = new MessageEvent('conversation', { data: JSON.stringify({
+      event_id: managerRecoveryCursor, conversation_id: 'manager-recovery', turn_id: 'manager-turn-3', kind: 'turn.completed',
+      payload: { turn: { id: 'manager-turn-3', status: 'completed' } },
+    }) });
+    for (const listener of managerRecoveryListeners.get('conversation') ?? []) listener(replayedTerminalTurn);
+    await until(() => managerCanonicalRefreshes === 3,
+      'A reconnect snapshot that arrives before replayed terminal events should recover the Manager refresh');
+    await pause();
+    check(Number(managerCanonicalRefreshes) === 3,
+      'Replayed state and turn events remain coalesced with the authoritative terminal snapshot');
+
+    managerMessageShouldFail = false;
+    managerDraft.value = 'Terminal HTTP Manager request';
+    managerDraft.dispatchEvent(new Event('input', { bubbles: true }));
+    check(await managerRecoveryWorkspace.sendMessage('Terminal HTTP Manager request', []) && Number(managerMessageAttempts) === 2,
+      'A Manager send can return an already-terminal conversation summary');
+    await until(() => managerCanonicalRefreshes === 4,
+      'A terminal Manager send HTTP result should refresh canonical state without waiting for SSE');
+    check(managerDraft.value === '' && !managerRecoveryPane.querySelector('.cw-reference-chip'),
+      'The successful terminal HTTP send clears the matching draft and captured reference');
+    managerRecoveryWorkspace.destroy();
+    localStorage.removeItem(`rightmemory:conversation-draft:${encodeURIComponent('manager-recovery-root')}:manager-recovery`);
+    managerRecoveryHost.remove(); managerRecoveryPane.remove();
+    report('PASS Manager terminal refresh recovery across reconcile, snapshots, HTTP results, and draft/reference preservation');
 
     const settingsHost = document.createElement('section');
     const settingsPane = document.createElement('aside');

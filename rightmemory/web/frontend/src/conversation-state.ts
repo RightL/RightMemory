@@ -24,6 +24,7 @@ export interface ConversationSummary {
   parentConversationId: string | null;
   hostId: string;
   projectId: string;
+  executionCwd: string;
   model: string;
   reasoningEffort: string;
   title: string;
@@ -78,6 +79,12 @@ export interface ConversationEvent {
   marksFinal: boolean;
 }
 
+export interface ConversationReference {
+  kind: 'pursuit';
+  id: string;
+  title?: string;
+}
+
 export interface PendingRequest {
   key: string;
   conversationId: string;
@@ -128,6 +135,9 @@ export type ConnectionState = 'closed' | 'connecting' | 'open' | 'retrying';
 
 export interface ConversationState extends WorkspaceSnapshot {
   selectedPursuitId: string | null;
+  managerOpen: boolean;
+  managerReferencePursuitId: string | null;
+  managerReferenceVersion: number;
   currentConversationId: string | null;
   sessionSideChatIds: string[];
   eventsByConversation: Record<string, ConversationEvent[]>;
@@ -138,6 +148,7 @@ export interface ConversationState extends WorkspaceSnapshot {
   loadingPursuit: boolean;
   loadingConversation: boolean;
   creatingConversation: boolean;
+  creatingManager: boolean;
   creatingSideChat: boolean;
   sendingConversationIds: string[];
   interruptingConversationIds: string[];
@@ -153,6 +164,9 @@ export type ConversationAction =
   | { type: 'workspace-loading' }
   | { type: 'workspace-loaded'; snapshot: WorkspaceSnapshot }
   | { type: 'pursuit-selected'; pursuitId: string | null }
+  | { type: 'manager-opened'; pursuitId: string | null }
+  | { type: 'manager-reference-removed' }
+  | { type: 'manager-reference-sent'; version: number }
   | { type: 'pursuit-loading'; pursuitId: string }
   | { type: 'pursuit-loaded'; pursuitId: string; conversations: ConversationSummary[]; default: PursuitConversationDefault | null }
   | { type: 'conversation-loading'; conversationId: string }
@@ -173,6 +187,7 @@ export type ConversationAction =
   | { type: 'event'; event: ConversationEvent }
   | { type: 'pending-resolved'; conversationId: string; key: string }
   | { type: 'create-in-flight'; active: boolean }
+  | { type: 'manager-create-in-flight'; active: boolean }
   | { type: 'side-chat-create-in-flight'; active: boolean }
   | { type: 'send-in-flight'; conversationId: string; active: boolean }
   | { type: 'interrupt-in-flight'; conversationId: string; active: boolean }
@@ -186,10 +201,12 @@ export type ConversationAction =
 export function initialConversationState(): ConversationState {
   return {
     rootKey: '', hosts: [], projects: [], conversations: [], pendingRequests: [], pursuitDefaults: {}, cursor: null,
-    selectedPursuitId: null, currentConversationId: null, sessionSideChatIds: [], eventsByConversation: {}, attachmentsByConversation: {},
+    selectedPursuitId: null, managerOpen: false, managerReferencePursuitId: null, managerReferenceVersion: 0,
+    currentConversationId: null, sessionSideChatIds: [], eventsByConversation: {}, attachmentsByConversation: {},
     hasEarlierEventsByConversation: {}, loadingEarlierConversationIds: [],
     loadingWorkspace: true, loadingPursuit: false, loadingConversation: false,
-    creatingConversation: false, creatingSideChat: false, sendingConversationIds: [], interruptingConversationIds: [], reconcilingConversationIds: [],
+    creatingConversation: false, creatingManager: false, creatingSideChat: false,
+    sendingConversationIds: [], interruptingConversationIds: [], reconcilingConversationIds: [],
     creatingHost: false, creatingProject: false, respondingRequestKeys: [],
     connection: 'closed', error: null,
   };
@@ -262,6 +279,7 @@ export function normalizeConversation(value: unknown): ConversationSummary | nul
     parentConversationId: stringValue(raw.parent_conversation_id ?? raw.parentConversationId) || null,
     hostId: stringValue(raw.host_id),
     projectId: stringValue(raw.project_id),
+    executionCwd: stringValue(raw.execution_cwd),
     model: stringValue(raw.model),
     reasoningEffort: stringValue(raw.reasoning_effort ?? raw.effort),
     title: stringValue(raw.thread_title ?? raw.title ?? raw.name ?? raw.label, 'Untitled conversation'),
@@ -601,11 +619,30 @@ export function reduceConversationState(state: ConversationState, action: Conver
       return {
         ...state,
         selectedPursuitId: action.pursuitId,
+        managerOpen: false,
+        managerReferencePursuitId: null,
         currentConversationId: null,
         loadingPursuit: !!action.pursuitId,
         loadingConversation: false,
         error: null,
       };
+    case 'manager-opened':
+      return {
+        ...state,
+        managerOpen: true,
+        managerReferencePursuitId: action.pursuitId,
+        managerReferenceVersion: state.managerReferenceVersion + 1,
+        currentConversationId: null,
+        loadingPursuit: false,
+        loadingConversation: false,
+        error: null,
+      };
+    case 'manager-reference-removed':
+      return { ...state, managerReferencePursuitId: null };
+    case 'manager-reference-sent':
+      return action.version === state.managerReferenceVersion
+        ? { ...state, managerReferencePursuitId: null }
+        : state;
     case 'pursuit-loading':
       return state.selectedPursuitId === action.pursuitId ? { ...state, loadingPursuit: true, error: null } : state;
     case 'pursuit-loaded': {
@@ -641,6 +678,7 @@ export function reduceConversationState(state: ConversationState, action: Conver
       const streamCursor = state.cursor;
       let loaded: ConversationState = {
         ...state,
+        managerOpen: conversation.kind === 'manager' ? true : state.managerOpen,
         conversations: upsert(state.conversations, summary, (item) => item.conversationId),
         eventsByConversation: {
           ...state.eventsByConversation,
@@ -701,6 +739,7 @@ export function reduceConversationState(state: ConversationState, action: Conver
     case 'conversation-created':
       return {
         ...state,
+        managerOpen: action.conversation.kind === 'manager' && action.select !== false ? true : state.managerOpen,
         conversations: upsert(state.conversations, action.conversation, (item) => item.conversationId),
         pursuitDefaults: action.conversation.kind !== 'side_chat' && action.conversation.pursuitId ? {
           ...state.pursuitDefaults,
@@ -926,6 +965,8 @@ export function reduceConversationState(state: ConversationState, action: Conver
       return { ...state, pendingRequests: state.pendingRequests.filter((item) => item.conversationId !== action.conversationId || item.key !== action.key) };
     case 'create-in-flight':
       return { ...state, creatingConversation: action.active };
+    case 'manager-create-in-flight':
+      return { ...state, creatingManager: action.active };
     case 'side-chat-create-in-flight':
       return { ...state, creatingSideChat: action.active };
     case 'send-in-flight':
@@ -983,6 +1024,12 @@ export function conversationsForPursuit(state: ConversationState): ConversationS
   if (!state.selectedPursuitId) return [];
   return state.conversations
     .filter((conversation) => conversation.pursuitId === state.selectedPursuitId && conversation.kind !== 'side_chat' && !conversation.archived)
+    .sort((left, right) => (right.updatedAt || right.createdAt).localeCompare(left.updatedAt || left.createdAt));
+}
+
+export function managerConversations(state: ConversationState): ConversationSummary[] {
+  return state.conversations
+    .filter((conversation) => conversation.kind === 'manager' && !conversation.archived)
     .sort((left, right) => (right.updatedAt || right.createdAt).localeCompare(left.updatedAt || left.createdAt));
 }
 

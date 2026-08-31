@@ -2,6 +2,7 @@ import {
   conversationCanSend,
   conversationsForPursuit,
   currentConversation,
+  managerConversations,
   normalizeAttachment,
   recordValue,
   textValue,
@@ -9,6 +10,7 @@ import {
   type ConversationEvent,
   type ConversationModel,
   type ConversationModelCatalog,
+  type ConversationReference,
   type ConversationState,
   type PendingRequest,
 } from './conversation-state.ts';
@@ -16,10 +18,13 @@ import { RICH_TEXT_CACHE_LIMIT, renderRichText } from './rich-text.ts';
 
 export interface ConversationRendererActions {
   toggleCollapsed(): void;
+  openManager(): void;
   openConversation(conversationId: string): void;
   loadEarlier(conversationId: string): void;
   closeConversation(): void;
   createConversation(hostId: string, projectId: string, model: string, reasoningEffort: string): void;
+  createManager(model: string, reasoningEffort: string): void;
+  removeManagerReference(): void;
   createSideChat(parentConversationId: string): void;
   closeSideChat(sideChatId: string): void;
   acknowledgeRead(conversationId: string): void;
@@ -42,7 +47,7 @@ export interface ConversationRendererActions {
 const shell = `
   <header class="cw-rail-header">
     <div class="cw-rail-title"><strong>Conversations</strong><span class="cw-connection" aria-label="Event connection"></span></div>
-    <button type="button" class="cw-collapse" aria-label="Collapse conversation pane" title="Collapse conversation pane">›</button>
+    <div class="cw-rail-actions"><button type="button" class="cw-manager-entry" aria-pressed="false">Manager</button><button type="button" class="cw-collapse" aria-label="Collapse conversation pane" title="Collapse conversation pane">›</button></div>
   </header>
   <div class="cw-pane-body">
     <div class="cw-error" role="alert" hidden><span></span><button type="button">Retry</button></div>
@@ -69,6 +74,18 @@ const shell = `
         </details>
       </div>
     </section>
+    <section class="cw-manager-view" hidden>
+      <header class="cw-list-header"><div><small>LOCAL ROOT</small><strong>Manager</strong></div></header>
+      <form class="cw-manager-form">
+        <div class="cw-new-models">
+          <label><span>Model</span><select name="model" aria-label="Manager model"></select></label>
+          <label><span>Reasoning</span><select name="effort" aria-label="Manager reasoning effort"></select></label>
+        </div>
+        <button type="submit" class="cw-primary">New Manager conversation</button>
+      </form>
+      <div class="cw-manager-status" role="status"></div>
+      <div class="cw-manager-list cw-conversation-list"></div>
+    </section>
     <section class="cw-detail-view" hidden>
       <nav class="cw-conversation-tabs" role="tablist" aria-label="Conversation tabs"></nav>
       <header class="cw-detail-header">
@@ -83,6 +100,7 @@ const shell = `
       <button type="button" class="cw-unread" hidden>New activity ↓</button>
       <div class="cw-pending"></div>
       <form class="cw-composer">
+        <div class="cw-staged-references" aria-label="References for the next message" aria-live="polite" hidden></div>
         <div class="cw-staged-attachments" aria-label="Attachments for the next message" aria-live="polite"></div>
         <div class="cw-composer-input">
           <button type="button" class="cw-attach" aria-label="Attach files" title="Attach files">📎</button>
@@ -112,6 +130,31 @@ export const MAX_STAGED_IMAGE_COUNT = 4;
 export const MAX_STAGED_TEXT_COUNT = 4;
 export const MAX_STAGED_FILE_COUNT = 8;
 export const MAX_STAGED_ATTACHMENT_COUNT = 8;
+
+const PROJECTED_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
+
+/** Match the provider copy paired with a structured local user event.
+ *
+ * Projection preserves an oversized string as an exact prefix followed by the
+ * explicit truncation suffix. Opening context is the first part of a Manager
+ * provider message, so that prefix remains a durable pairing signal even when
+ * projection removes the later user-message portion.
+ */
+export function isPairedProviderUserEcho(
+  providerText: string,
+  localSource: string,
+  openingContext: string,
+): boolean {
+  if (!openingContext) return true;
+  if (providerText.includes(openingContext) && (!localSource || providerText.includes(localSource))) return true;
+  if (!providerText.endsWith(PROJECTED_TEXT_TRUNCATION_SUFFIX)) return false;
+
+  const projectedPrefix = providerText.slice(0, -PROJECTED_TEXT_TRUNCATION_SUFFIX.length);
+  if (!projectedPrefix) return false;
+  return openingContext.startsWith(projectedPrefix)
+    || projectedPrefix === `${openingContext}\n`
+    || projectedPrefix.startsWith(`${openingContext}\n\n`);
+}
 
 const PASTED_IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg']);
 
@@ -175,6 +218,21 @@ function visibleText(value: unknown): string {
   }).filter(Boolean).join('');
   const record = recordValue(value);
   return textValue(record.text ?? record.message ?? record.content ?? record.delta ?? record.output ?? record.reason);
+}
+
+function messageReferences(value: unknown): ConversationReference[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const references: ConversationReference[] = [];
+  for (const entry of value) {
+    const record = recordValue(entry);
+    const kind = textValue(record.kind);
+    const id = textValue(record.id ?? record.pursuit_id);
+    if (kind !== 'pursuit' || !id || seen.has(id)) continue;
+    seen.add(id);
+    references.push({ kind: 'pursuit', id, title: textValue(record.title) || undefined });
+  }
+  return references;
 }
 
 function canonicalKind(value: string): string {
@@ -508,6 +566,10 @@ function activityNodes(
     content: HTMLElement;
     attachments: Map<string, ConversationAttachment>;
     attachmentList: HTMLElement;
+    openingContext: string;
+    openingContextDetails: HTMLDetailsElement;
+    referenceList: HTMLElement;
+    references: ConversationReference[];
     node: HTMLElement;
   };
   type CommentaryGroup = { node: HTMLDetailsElement; body: HTMLElement; summary: HTMLElement };
@@ -639,8 +701,18 @@ function activityNodes(
         : message.phase === 'final_answer'
           ? 'ANSWER'
           : 'AGENT';
-    message.node.hidden = !message.source && message.attachments.size === 0;
+    message.node.hidden = !message.source && message.attachments.size === 0 && !message.openingContext && message.references.length === 0;
     renderSentAttachments(message.attachmentList, [...message.attachments.values()], reusableImages);
+    message.openingContextDetails.hidden = !message.openingContext;
+    const contextBody = message.openingContextDetails.querySelector('pre');
+    if (contextBody) contextBody.textContent = message.openingContext;
+    message.referenceList.replaceChildren(...message.references.map((reference) => {
+      const chip = element('span', 'cw-reference-chip cw-sent-reference');
+      chip.textContent = `Pursuit · ${reference.title || reference.id}`;
+      chip.title = reference.title && reference.title !== reference.id ? reference.id : '';
+      return chip;
+    }));
+    message.referenceList.hidden = message.references.length === 0;
   };
 
   const createMessage = (
@@ -652,17 +724,26 @@ function activityNodes(
     completed: boolean,
     attachments: ConversationAttachment[],
     activityKey: string,
+    openingContext = '',
+    references: ConversationReference[] = [],
   ): MessageNode => {
     const node = element('article', `cw-message cw-${role}`);
     node.dataset.activityKey = activityKey;
     const label = appendText(node, 'small', '');
     const content = element('div', 'cw-message-text');
+    const openingContextDetails = element('details', 'cw-opening-context');
+    openingContextDetails.open = false;
+    const openingContextSummary = element('summary');
+    openingContextSummary.textContent = 'Opening context';
+    const openingContextBody = element('pre');
+    openingContextDetails.append(openingContextSummary, openingContextBody);
+    const referenceList = element('div', 'cw-sent-references');
     const attachmentList = element('div', 'cw-sent-attachments');
-    node.append(content, attachmentList);
+    node.append(content, openingContextDetails, referenceList, attachmentList);
     const message = {
       role, turnId, itemId, phase, source, completed, label, content,
       attachments: new Map(attachments.map((attachment) => [attachment.attachmentId, attachment])),
-      attachmentList,
+      attachmentList, openingContext, openingContextDetails, referenceList, references,
       node,
     };
     messageNodes.add(message);
@@ -679,12 +760,16 @@ function activityNodes(
     phase: AgentMessagePhase,
     completed: boolean,
     attachments: ConversationAttachment[],
+    openingContext = '',
+    references: ConversationReference[] = [],
   ): void => {
     const previousPhase = message.phase;
     if (message.role === 'agent' && phase !== 'unknown') message.phase = phase;
     if (completed) message.completed = true;
     if (text) message.source = delta ? `${message.source}${text}` : text;
     for (const attachment of attachments) message.attachments.set(attachment.attachmentId, attachment);
+    if (openingContext) message.openingContext = openingContext;
+    if (references.length) message.references = references;
     presentMessage(message);
     if (message.phase !== previousPhase) placeMessage(message);
     if (message.role === 'agent' && message.phase === 'final_answer' && completed) markFinalAnswer(message.turnId);
@@ -721,12 +806,17 @@ function activityNodes(
       if (role === 'agent') pendingLocalUserMessage = null;
       const localUserEvent = role === 'user' && canonicalKind(event.kind) === 'user_message';
       const text = eventText(payload, item);
+      const openingContext = localUserEvent ? textValue(payload.opening_context) : '';
+      const references = localUserEvent ? messageReferences(payload.references) : [];
       const delta = kind.includes('delta');
       const completed = !delta && kind.includes('completed');
       const phase = role === 'agent' ? agentMessagePhase(payload, item) : 'unknown';
       const messageAttachments = role === 'user' ? attachmentCandidates(event, payload, item, knownAttachments) : [];
       const identified = itemId ? messagesByItemId.get(itemId) : null;
-      if (role === 'user' && !localUserEvent && pendingLocalUserMessage) {
+      const pairedStructuredEcho = pendingLocalUserMessage
+        ? isPairedProviderUserEcho(text, pendingLocalUserMessage.source, pendingLocalUserMessage.openingContext)
+        : false;
+      if (role === 'user' && !localUserEvent && pendingLocalUserMessage && pairedStructuredEcho) {
         pendingLocalUserMessage.turnId = event.turnId ?? pendingLocalUserMessage.turnId;
         if (completed) pendingLocalUserMessage.completed = true;
         if (itemId) {
@@ -740,6 +830,7 @@ function activityNodes(
         pendingLocalUserMessage = null;
         continue;
       }
+      if (role === 'user' && !localUserEvent) pendingLocalUserMessage = null;
       if (identified && identified.role === role) {
         updateMessage(
           identified,
@@ -748,6 +839,8 @@ function activityNodes(
           phase,
           completed,
           messageAttachments,
+          openingContext,
+          references,
         );
         merge = identified;
         if (localUserEvent) pendingLocalUserMessage = identified;
@@ -766,24 +859,24 @@ function activityNodes(
         continue;
       }
       if (itemId) {
-        merge = createMessage(role, event.turnId, itemId, phase, text, completed, messageAttachments, `message:${itemId || event.eventId}`);
+        merge = createMessage(role, event.turnId, itemId, phase, text, completed, messageAttachments, `message:${itemId || event.eventId}`, openingContext, references);
         messagesByItemId.set(itemId, merge);
         if (localUserEvent) pendingLocalUserMessage = merge;
         continue;
       }
       const phaseCompatible = role !== 'agent' || phase === 'unknown' || merge?.phase === 'unknown' || merge?.phase === phase;
       if (merge && merge.role === role && merge.turnId === event.turnId && phaseCompatible && delta) {
-        updateMessage(merge, text, true, phase, false, messageAttachments);
+        updateMessage(merge, text, true, phase, false, messageAttachments, openingContext, references);
         if (localUserEvent) pendingLocalUserMessage = merge;
         continue;
       }
       if (merge && merge.role === role && merge.turnId === event.turnId && phaseCompatible && !delta && text && text.startsWith(merge.source)) {
-        updateMessage(merge, text, false, phase, completed, messageAttachments);
+        updateMessage(merge, text, false, phase, completed, messageAttachments, openingContext, references);
         if (localUserEvent) pendingLocalUserMessage = merge;
         continue;
       }
-      if (!text && !messageAttachments.length) continue;
-      merge = createMessage(role, event.turnId, '', phase, text, completed, messageAttachments, `message:${event.eventId}`);
+      if (!text && !messageAttachments.length && !openingContext && !references.length) continue;
+      merge = createMessage(role, event.turnId, '', phase, text, completed, messageAttachments, `message:${event.eventId}`, openingContext, references);
       if (localUserEvent) pendingLocalUserMessage = merge;
       continue;
     }
@@ -1116,6 +1209,7 @@ export class ConversationRenderer {
     host.className = 'cw-pane';
     host.innerHTML = shell;
     this.$('.cw-collapse').addEventListener('click', () => actions.toggleCollapsed(), { signal: this.abort.signal });
+    this.$('.cw-manager-entry').addEventListener('click', () => actions.openManager(), { signal: this.abort.signal });
     this.$('.cw-error button').addEventListener('click', () => actions.retry(), { signal: this.abort.signal });
     this.$('.cw-back').addEventListener('click', () => actions.closeConversation(), { signal: this.abort.signal });
     this.$('.cw-reload').addEventListener('click', () => actions.reload(), { signal: this.abort.signal });
@@ -1186,6 +1280,16 @@ export class ConversationRenderer {
       const reasoningEffort = this.$<HTMLSelectElement>('.cw-new-form [name="effort"]').value;
       if (hostId && projectId && model && reasoningEffort) actions.createConversation(hostId, projectId, model, reasoningEffort);
     }, { signal: this.abort.signal });
+    this.$<HTMLSelectElement>('.cw-manager-form [name="model"]').addEventListener('change', () => this.renderManagerEffortOptions(), { signal: this.abort.signal });
+    this.$<HTMLFormElement>('.cw-manager-form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      const model = this.$<HTMLSelectElement>('.cw-manager-form [name="model"]').value;
+      const reasoningEffort = this.$<HTMLSelectElement>('.cw-manager-form [name="effort"]').value;
+      if (model && reasoningEffort) actions.createManager(model, reasoningEffort);
+    }, { signal: this.abort.signal });
+    this.$('.cw-staged-references').addEventListener('click', (event) => {
+      if ((event.target as Element | null)?.closest('[data-remove-manager-reference]')) actions.removeManagerReference();
+    }, { signal: this.abort.signal });
     this.$<HTMLFormElement>('.cw-add-host form').addEventListener('submit', (event) => {
       event.preventDefault();
       const form = event.currentTarget as HTMLFormElement;
@@ -1251,13 +1355,19 @@ export class ConversationRenderer {
     }
     const current = currentConversation(state);
     const hasPursuit = !!state.selectedPursuitId;
-    this.$('.cw-no-pursuit').hidden = hasPursuit || !!current;
-    this.$('.cw-list-view').hidden = !hasPursuit || !!current;
+    this.$('.cw-no-pursuit').hidden = state.managerOpen || hasPursuit || !!current;
+    this.$('.cw-list-view').hidden = state.managerOpen || !hasPursuit || !!current;
+    this.$('.cw-manager-view').hidden = !state.managerOpen || !!current;
     this.$('.cw-detail-view').hidden = !current;
+    const managerEntry = this.$<HTMLButtonElement>('.cw-manager-entry');
+    managerEntry.setAttribute('aria-pressed', String(state.managerOpen));
+    managerEntry.classList.toggle('cw-active', state.managerOpen);
     this.renderError(state.error);
     this.renderConnection(state.connection);
-    this.renderPicker(state);
+    if (!state.managerOpen) this.renderPicker(state);
     this.renderList(state);
+    if (state.managerOpen) this.renderManagerPicker(state);
+    this.renderManagerList(state);
     this.renderTabs(state, current);
     this.renderDetail(state, current);
   }
@@ -1307,6 +1417,10 @@ export class ConversationRenderer {
       nodes.push(wrapper);
     };
     addTab(parent, parent.title.trim() || 'Conversation', false);
+    if (parent.kind === 'manager') {
+      tabs.replaceChildren(...nodes);
+      return;
+    }
     for (const conversationId of state.sessionSideChatIds) {
       const sideChat = state.conversations.find((item) => item.conversationId === conversationId);
       if (!sideChat || sideChat.kind !== 'side_chat' || sideChat.parentConversationId !== parent.conversationId) continue;
@@ -1506,6 +1620,56 @@ export class ConversationRenderer {
       || !this.state.selectedPursuitId || !hostId || !projectId || model.disabled || effort.disabled || !model.value || !effort.value;
   }
 
+  private renderManagerPicker(state: ConversationState): void {
+    const localHost = state.hosts.find((host) => host.kind === 'local');
+    const modelSelect = this.$<HTMLSelectElement>('.cw-manager-form [name="model"]');
+    const effortSelect = this.$<HTMLSelectElement>('.cw-manager-form [name="effort"]');
+    if (!localHost) {
+      this.showUnavailableSelect(modelSelect, 'Local host unavailable');
+      this.showUnavailableSelect(effortSelect, 'Reasoning unavailable');
+      this.updateManagerConversationButton();
+      return;
+    }
+    const catalog = this.ensureModelCatalog(localHost.hostId);
+    if (!catalog) {
+      this.showUnavailableSelect(modelSelect, 'Loading models…');
+      this.showUnavailableSelect(effortSelect, 'Loading…');
+      this.updateManagerConversationButton();
+      return;
+    }
+    const previousModel = modelSelect.value;
+    this.populateModelSelect(modelSelect, catalog, previousModel);
+    modelSelect.disabled = catalog.models.length === 0;
+    this.renderManagerEffortOptions();
+  }
+
+  private renderManagerEffortOptions(): void {
+    if (!this.state) return;
+    const localHost = this.state.hosts.find((host) => host.kind === 'local');
+    const modelId = this.$<HTMLSelectElement>('.cw-manager-form [name="model"]').value;
+    const effortSelect = this.$<HTMLSelectElement>('.cw-manager-form [name="effort"]');
+    const catalog = localHost ? this.modelCatalogs.get(localHost.hostId) : undefined;
+    const model = catalog?.models.find((entry) => entry.id === modelId);
+    if (!catalog || !model) {
+      this.showUnavailableSelect(effortSelect, catalog ? 'Reasoning unavailable' : 'Loading…');
+      this.updateManagerConversationButton();
+      return;
+    }
+    this.populateEffortSelect(effortSelect, catalog, model, effortSelect.value);
+    effortSelect.disabled = model.supportedReasoningEfforts.length === 0;
+    this.updateManagerConversationButton();
+  }
+
+  private updateManagerConversationButton(): void {
+    if (!this.state) return;
+    const form = this.$<HTMLFormElement>('.cw-manager-form');
+    const model = form.querySelector<HTMLSelectElement>('[name="model"]')!;
+    const effort = form.querySelector<HTMLSelectElement>('[name="effort"]')!;
+    const button = form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    button.disabled = this.state.creatingManager || model.disabled || effort.disabled || !model.value || !effort.value;
+    button.textContent = this.state.creatingManager ? 'Creating…' : 'New Manager conversation';
+  }
+
   private renderList(state: ConversationState): void {
     this.$('.cw-pursuit-label').textContent = state.selectedPursuitId ?? '';
     const status = this.$('.cw-list-status');
@@ -1546,6 +1710,43 @@ export class ConversationRenderer {
     }
   }
 
+  private renderManagerList(state: ConversationState): void {
+    const status = this.$('.cw-manager-status');
+    status.textContent = state.loadingWorkspace ? 'Loading Manager conversations…' : '';
+    const list = this.$('.cw-manager-list');
+    const focusedId = list.contains(document.activeElement)
+      ? (document.activeElement as HTMLElement).dataset.conversationId
+      : undefined;
+    list.replaceChildren();
+    const conversations = managerConversations(state);
+    if (!conversations.length && !state.loadingWorkspace) {
+      appendText(list, 'p', 'No Manager conversations yet.', 'cw-empty-copy');
+      return;
+    }
+    for (const conversation of conversations) {
+      const button = element('button', 'cw-conversation');
+      button.type = 'button';
+      button.dataset.conversationId = conversation.conversationId;
+      const heading = element('span', 'cw-conversation-heading');
+      const title = appendText(heading, 'span', conversation.title || 'Manager');
+      title.className = 'cw-conversation-title';
+      const unreadFinal = conversation.lastFinalEventId !== null
+        && conversation.lastFinalEventId > (conversation.lastReadEventId ?? 0);
+      if (unreadFinal) {
+        appendText(heading, 'span', 'NEW', 'cw-conversation-new');
+        button.classList.add('cw-has-unread-final');
+      }
+      button.append(heading);
+      appendText(button, 'small', ['Local', conversation.status].filter(Boolean).join(' · '));
+      button.addEventListener('click', () => this.actions.openConversation(conversation.conversationId), { signal: this.abort.signal });
+      list.append(button);
+    }
+    if (focusedId) {
+      const buttons = [...list.querySelectorAll<HTMLButtonElement>('.cw-conversation')];
+      (buttons.find((button) => button.dataset.conversationId === focusedId) ?? buttons[0])?.focus();
+    }
+  }
+
   private renderDetail(state: ConversationState, conversation: ReturnType<typeof currentConversation>): void {
     if (!conversation) {
       if (this.lastConversationId) this.saveDraft(this.lastConversationId);
@@ -1561,10 +1762,14 @@ export class ConversationRenderer {
       this.activitySignature = '\u0000';
       this.activityFirstEventId = null;
     }
-    this.$('.cw-detail-title').textContent = conversation.kind === 'side_chat' ? sideChatTitle(conversation.title) : conversation.title;
+    this.$('.cw-detail-title').textContent = conversation.kind === 'side_chat'
+      ? sideChatTitle(conversation.title)
+      : conversation.kind === 'manager' && !conversation.title.trim()
+        ? 'Manager'
+        : conversation.title;
     const host = state.hosts.find((item) => item.hostId === conversation.hostId)?.displayName || conversation.hostId;
     const project = state.projects.find((item) => item.projectId === conversation.projectId);
-    this.$('.cw-detail-location').textContent = [host, project?.cwd || project?.label || conversation.projectId].filter(Boolean).join(' · ');
+    this.$('.cw-detail-location').textContent = [host, conversation.executionCwd || project?.cwd || project?.label || conversation.projectId].filter(Boolean).join(' · ');
     const sending = state.sendingConversationIds.includes(conversation.conversationId);
     const interruptible = turnCanInterrupt(conversation.status);
     const interrupting = state.interruptingConversationIds.includes(conversation.conversationId);
@@ -1618,6 +1823,7 @@ export class ConversationRenderer {
       state.attachmentsByConversation[conversation.conversationId] ?? [],
     );
     this.renderStagedAttachments(conversation.conversationId);
+    this.renderManagerReference(state, conversation.kind === 'manager');
     this.updateComposerControls();
     this.renderConversationModelOptions(conversation);
     const reconnect = this.$<HTMLButtonElement>('.cw-reconnect');
@@ -1628,7 +1834,7 @@ export class ConversationRenderer {
     const archive = this.$<HTMLButtonElement>('.cw-archive');
     const sessionSideChats = state.sessionSideChatIds.map((conversationId) =>
       state.conversations.find((item) => item.conversationId === conversationId));
-    const hasSessionSideChat = conversation.kind !== 'side_chat' && (
+    const hasSessionSideChat = conversation.kind !== 'side_chat' && conversation.kind !== 'manager' && (
       state.creatingSideChat
       || sessionSideChats.some((sideChat) => !sideChat)
       || sessionSideChats.some((sideChat) => sideChat?.kind === 'side_chat'
@@ -1653,6 +1859,23 @@ export class ConversationRenderer {
       state.pendingRequests.filter((request) => request.conversationId === conversation.conversationId),
       new Set(state.respondingRequestKeys),
     );
+  }
+
+  private renderManagerReference(state: ConversationState, isManager: boolean): void {
+    const container = this.$('.cw-staged-references');
+    container.replaceChildren();
+    const pursuitId = isManager ? state.managerReferencePursuitId : null;
+    container.hidden = !pursuitId;
+    if (!pursuitId) return;
+    const chip = element('span', 'cw-reference-chip');
+    appendText(chip, 'span', `Pursuit · ${pursuitId}`);
+    const remove = element('button', 'cw-reference-remove');
+    remove.type = 'button';
+    remove.dataset.removeManagerReference = 'true';
+    remove.textContent = '×';
+    remove.setAttribute('aria-label', `Remove Pursuit reference ${pursuitId}`);
+    chip.append(remove);
+    container.append(chip);
   }
 
   private renderConversationModelOptions(conversation: NonNullable<ReturnType<typeof currentConversation>>): void {

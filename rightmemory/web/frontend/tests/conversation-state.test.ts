@@ -4,6 +4,7 @@ import {
   conversationCanSend,
   conversationsForPursuit,
   initialConversationState,
+  managerConversations,
   normalizeConversationDetail,
   normalizeEvent,
   normalizeModelCatalog,
@@ -141,6 +142,34 @@ test('selection and pursuit loads remain scoped when responses arrive out of ord
   assert.deepEqual(conversationsForPursuit(state).map((item) => item.conversationId), ['c-new', 'c-old']);
   state = reduceConversationState(state, { type: 'pursuit-loaded', pursuitId: 'design', conversations: normalizeWorkspace(workspacePayload).conversations.slice(0, 2), default: normalizeWorkspace(workspacePayload).pursuitDefaults.design });
   assert.equal(state.loadingPursuit, false);
+});
+
+test('Manager mode preserves the selected Pursuit and keeps root-local conversations out of Pursuit lists', () => {
+  const snapshot = normalizeWorkspace({
+    ...workspacePayload,
+    conversations: [...workspacePayload.conversations, {
+      conversation_id: 'manager-1', pursuit_id: null, kind: 'manager', host_id: 'local', project_id: 'active-root',
+      execution_cwd: 'C:\\captured-root', title: 'Manager', status: 'idle', updated_at: '2026-01-03',
+    }],
+  });
+  let state = reduceConversationState(initialConversationState(), { type: 'workspace-loaded', snapshot });
+  state = reduceConversationState(state, { type: 'pursuit-selected', pursuitId: 'design' });
+  state = reduceConversationState(state, { type: 'manager-opened', pursuitId: 'design' });
+  assert.equal(state.selectedPursuitId, 'design');
+  assert.equal(state.managerOpen, true);
+  assert.equal(state.managerReferencePursuitId, 'design');
+  const firstReferenceVersion = state.managerReferenceVersion;
+  assert.deepEqual(managerConversations(state).map((item) => item.conversationId), ['manager-1']);
+  assert.equal(managerConversations(state)[0].executionCwd, 'C:\\captured-root');
+  assert.deepEqual(conversationsForPursuit(state).map((item) => item.conversationId), ['c-new', 'c-old']);
+  state = reduceConversationState(state, { type: 'manager-reference-removed' });
+  assert.equal(state.managerReferencePursuitId, null);
+  state = reduceConversationState(state, { type: 'manager-opened', pursuitId: 'research' });
+  state = reduceConversationState(state, { type: 'manager-reference-sent', version: firstReferenceVersion });
+  assert.equal(state.managerReferencePursuitId, 'research');
+  state = reduceConversationState(state, { type: 'pursuit-selected', pursuitId: 'design' });
+  assert.equal(state.managerOpen, false);
+  assert.equal(state.selectedPursuitId, 'design');
 });
 
 test('session side chats stay out of Pursuit lists and defaults while their detail state can be restored and removed', () => {

@@ -132,6 +132,7 @@ export async function mountPursuitMap(host: HTMLElement, fetchJson: FetchJson): 
     () => location.reload(),
     undefined,
     (items) => map.setConversationIndicators(items),
+    () => map.refresh(),
   );
   const unsubscribeSelection = map.subscribeSelection((id) => conversations.selectPursuit(id));
   await conversations.start();

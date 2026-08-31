@@ -32,6 +32,7 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
       default_reasoning_effort: 'medium',
     } };
     if (path === '/api/pursuit-conversations') return { data: { conversation: { conversation_id: 'c1', pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', model: 'gpt-5.6', reasoning_effort: 'medium' } } };
+    if (path === '/api/manager-conversations') return { data: { conversation: { conversation_id: 'manager/one', pursuit_id: null, kind: 'manager', host_id: 'local', project_id: 'local-root', execution_cwd: 'C:\\memory', model: 'gpt-5.6', reasoning_effort: 'high' } } };
     if (path.endsWith('/side-chats') && options?.method === 'POST') return { data: { conversation: { conversation_id: 'side/one', pursuit_id: 'p/one', kind: 'side_chat', parent_conversation_id: 'c/one', host_id: 'h1', project_id: 'project one' } } };
     if (path.includes('/history?')) return { data: {
       conversation_id: 'c/one',
@@ -55,7 +56,12 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
     }
     if (path === '/api/conversation-hosts') return { data: { host: { host_id: 'h2', kind: 'ssh', display_name: 'GPU', ssh_alias: 'gpu' } } };
     if (path === '/api/conversation-projects') return { data: { project: { project_id: 'p2', host_id: 'h2', label: 'Repo', cwd: '/repo' } } };
-    if (path.endsWith('/reconcile')) return { data: { conversation: { conversation_id: 'c/one', pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', status: 'idle' } } };
+    if (path.endsWith('/reconcile')) return { data: {
+      conversation: { conversation_id: 'c/one', pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', status: 'idle' },
+      resolved: true,
+      accepted_user_event_id: 52,
+      thread: { turns: [{ id: 'turn-2' }] },
+    } };
     return { data: {} };
   };
   const api = new ConversationApi(fetchJson);
@@ -63,6 +69,7 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
   const pursuit = await api.pursuitConversations('p/one');
   const catalog = await api.modelCatalog('h/one');
   const created = await api.createConversation('p/one', 'h1', 'project one', 'gpt-5.6', 'medium');
+  const manager = await api.createManager('gpt-5.6', 'high');
   const updated = await api.updateSettings('c/one', 'gpt-5.6-mini', 'low');
   const sideChat = await api.createSideChat('c/one');
   const earlier = await api.earlierConversation('c/one', '40');
@@ -73,6 +80,7 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
   const fileUploadId = 'fedcba9876543210fedcba9876543210';
   const uploadedFile = await api.uploadAttachment('c/one', new File(['notes'], 'notes.txt', { type: 'text/plain' }), fileUploadId, 'file');
   await api.sendMessage('c/one', 'hello', ['a/one']);
+  await api.sendMessage('manager/one', 'Inspect this.', [], [{ kind: 'pursuit', id: 'p/one' }]);
   await api.deleteAttachment('c/one', 'a/one');
   await api.interrupt('c/one');
   const reconciled = await api.reconcile('c/one');
@@ -93,8 +101,14 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
   assert.equal(catalog.models[0].supportedReasoningEfforts[0].reasoningEffort, 'low');
   assert.equal(catalog.defaultReasoningEffort, 'medium');
   assert.equal(created.model, 'gpt-5.6');
+  assert.equal(manager.kind, 'manager');
+  assert.equal(manager.pursuitId, null);
+  assert.equal(manager.executionCwd, 'C:\\memory');
   assert.deepEqual(JSON.parse(String(request('/api/pursuit-conversations').options?.body)), {
     pursuit_id: 'p/one', host_id: 'h1', project_id: 'project one', model: 'gpt-5.6', reasoning_effort: 'medium',
+  });
+  assert.deepEqual(JSON.parse(String(request('/api/manager-conversations').options?.body)), {
+    model: 'gpt-5.6', reasoning_effort: 'high',
   });
   assert.equal(updated.reasoningEffort, 'low');
   assert.equal(sideChat.parentConversationId, 'c/one');
@@ -124,9 +138,14 @@ test('conversation API uses the controller HTTP boundary and exact snake-case re
   assert.equal((fileUploadRequest.options?.headers as Record<string, string>)['x-attachment-kind'], 'file');
   assert.equal(uploadedFile.kind, 'file');
   assert.deepEqual(JSON.parse(String(request('/api/conversations/c%2Fone/messages').options?.body)), { text: 'hello', attachment_ids: ['a/one'] });
+  assert.deepEqual(JSON.parse(String(request('/api/conversations/manager%2Fone/messages').options?.body)), {
+    text: 'Inspect this.', attachment_ids: [], references: [{ kind: 'pursuit', id: 'p/one' }],
+  });
   assert.equal(request('/api/conversations/c%2Fone/attachments/a%2Fone').options?.method, 'DELETE');
   assert.equal(request('/api/conversations/c%2Fone/reconcile').path, '/api/conversations/c%2Fone/reconcile');
-  assert.equal(reconciled.status, 'idle');
+  assert.equal(reconciled.conversation.status, 'idle');
+  assert.equal(reconciled.resolved, true);
+  assert.equal(reconciled.acceptedUserEventId, '52');
   assert.equal(request('/api/conversations/c%2Fone/server-requests/request%2F1/respond').path, '/api/conversations/c%2Fone/server-requests/request%2F1/respond');
   const inputResponse = requests.find((entry) => entry.path.endsWith('/input%2F2/respond'))!;
   assert.deepEqual(JSON.parse(String(inputResponse.options?.body)), { response: { scope: { answers: ['Current branch'] }, mode: { answers: ['Review'] } } });
