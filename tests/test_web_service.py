@@ -155,6 +155,14 @@ class WebStudioStaticTests(unittest.TestCase):
 
 
 class WebStudioStaticSourceTests(unittest.TestCase):
+    def test_pursuit_map_load_failure_has_a_full_page_recovery(self):
+        static_root = Path(__file__).resolve().parents[1] / "rightmemory" / "web" / "static"
+        script = (static_root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("function panelLoadErrorMessage", script)
+        self.assertIn('state.panel === "pursuit-map" && !state.pursuitMap', script)
+        self.assertIn("location.reload();", script)
+
     def test_share_first_static_source_contains_relationship_ui(self):
         static_root = Path(__file__).resolve().parents[1] / "rightmemory" / "web" / "static"
         script = (static_root / "app.js").read_text(encoding="utf-8")

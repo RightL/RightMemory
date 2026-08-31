@@ -75,6 +75,17 @@ function setMessage(text) {
   document.querySelector("#message").textContent = text || "";
 }
 
+function panelLoadErrorMessage(error) {
+  const message = error instanceof Error ? error.message : String(error || "Unknown error");
+  if (/failed to fetch dynamically imported module|importing a module script failed/i.test(message)) {
+    return "Pursuit Map assets could not load. Start Web Studio again with rightmemory pursuit, then click Refresh.";
+  }
+  if (/failed to fetch/i.test(message)) {
+    return "Web Studio is offline. Start it again with rightmemory pursuit, then click Refresh.";
+  }
+  return message;
+}
+
 function renderOverview(data) {
   const issues = data.issues || [];
   const watches = data.watches || [];
@@ -1131,11 +1142,15 @@ function escapeHtml(value) {
 }
 
 document.querySelector("#refresh-button").addEventListener("click", async () => {
+  if (state.panel === "pursuit-map" && !state.pursuitMap) {
+    location.reload();
+    return;
+  }
   try {
     await loadPanel();
     setMessage("Refreshed.");
   } catch (error) {
-    setMessage(error.message);
+    setMessage(panelLoadErrorMessage(error));
   }
 });
 
@@ -1148,7 +1163,7 @@ document.querySelectorAll(".nav-item").forEach((button) => {
     try {
       await loadPanel();
     } catch (error) {
-      setMessage(error.message);
+      setMessage(panelLoadErrorMessage(error));
     }
   });
 });
@@ -1157,7 +1172,7 @@ window.addEventListener("hashchange", () => {
   const panel = location.hash.slice(1);
   if (titleByPanel[panel] && panel !== state.panel) {
     state.panel = panel;
-    loadPanel().catch((error) => setMessage(error.message));
+    loadPanel().catch((error) => setMessage(panelLoadErrorMessage(error)));
   }
 });
 
@@ -1705,5 +1720,5 @@ function showSharedViewResult(text) {
 }
 
 loadSession().catch((error) => {
-  setMessage(error.message);
+  setMessage(panelLoadErrorMessage(error));
 });
