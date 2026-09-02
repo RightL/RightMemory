@@ -1436,10 +1436,12 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     managerRecoveryWorkspace.selectPursuit('design');
     managerRecoveryWorkspace.openManager();
     managerRecoveryWorkspace.openConversation('manager-recovery');
-    await until(() => managerDetailLoads === 1, 'The Manager recovery fixture should load its conversation');
     const managerDraft = managerRecoveryPane.querySelector<HTMLTextAreaElement>('.cw-composer textarea')!;
     managerDraft.value = 'Uncertain Manager request';
     managerDraft.dispatchEvent(new Event('input', { bubbles: true }));
+    await until(() => managerDetailLoads === 1
+      && !managerRecoveryPane.querySelector<HTMLButtonElement>('.cw-send-stop')!.disabled,
+    'The Manager recovery fixture should finish loading and become sendable');
     check(!await managerRecoveryWorkspace.sendMessage('Uncertain Manager request', []) && managerMessageAttempts === 1,
       'A lost Manager turn/start response leaves the exact submitted message pending for reconciliation');
     const unknownAfterSend = new MessageEvent('conversation', { data: JSON.stringify({
@@ -1452,7 +1454,10 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     managerRecoveryWorkspace.selectPursuit('research');
     managerRecoveryWorkspace.openManager();
     managerRecoveryWorkspace.openConversation('manager-recovery');
-    await until(() => managerDetailLoads >= 2, 'The Manager recovery fixture should restore after a later reference selection');
+    await until(() => managerDetailLoads >= 2
+      && !managerRecoveryPane.querySelector<HTMLButtonElement>('.cw-reconnect')!.hidden
+      && !managerRecoveryPane.querySelector<HTMLButtonElement>('.cw-reconnect')!.disabled,
+    'The Manager recovery fixture should restore and become ready to reconcile after a later reference selection');
     await managerRecoveryWorkspace.reconnect('manager-recovery');
     await until(() => managerCanonicalRefreshes === 1 && managerWorkspaceLoads >= 2,
       'A resolved unknown-to-idle reconciliation should refresh canonical Manager state and the workspace');
