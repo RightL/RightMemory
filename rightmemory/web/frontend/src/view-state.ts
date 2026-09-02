@@ -2,6 +2,7 @@ import { indexTree, type Snapshot } from './tree.ts';
 
 export interface ViewState {
   selected: string | null;
+  selectedIds: string[];
   collapsed: string[];
   viewport?: { x: number; y: number; scale: number };
 }
@@ -22,14 +23,36 @@ export function visibleNodes(snapshot: Snapshot, collapsed: Iterable<string>): s
 export function reconcileView(snapshot: Snapshot, view: ViewState): ViewState {
   const items = indexTree(snapshot);
   const collapsed = view.collapsed.filter((id) => items.get(id)?.child_ids.length);
-  let selected = view.selected;
-  if (selected !== null && !items.has(selected)) selected = snapshot.root_ids[0] ?? null;
-  let parent = selected ? items.get(selected)?.parent_id : null;
-  while (parent) {
-    if (collapsed.includes(parent)) selected = parent;
-    parent = items.get(parent)?.parent_id;
+  if (view.selected === null) return { ...view, selected: null, selectedIds: [], collapsed };
+
+  const folded = new Set(collapsed);
+  const visibleId = (id: string): string | null => {
+    if (!items.has(id)) return null;
+    let visible = id;
+    let parent = items.get(id)?.parent_id ?? null;
+    while (parent) {
+      if (folded.has(parent)) visible = parent;
+      parent = items.get(parent)?.parent_id ?? null;
+    }
+    return visible;
+  };
+
+  const candidates = Array.isArray(view.selectedIds) ? [...view.selectedIds] : [view.selected];
+  if (!candidates.includes(view.selected)) candidates.push(view.selected);
+  const selectedIds: string[] = [];
+  const seen = new Set<string>();
+  for (const id of candidates) {
+    const visible = visibleId(id);
+    if (visible !== null && !seen.has(visible)) {
+      selectedIds.push(visible);
+      seen.add(visible);
+    }
   }
-  return { ...view, selected, collapsed };
+
+  let selected = visibleId(view.selected);
+  if (selected === null) selected = selectedIds[0] ?? snapshot.root_ids[0] ?? null;
+  if (selected !== null && !seen.has(selected)) selectedIds.push(selected);
+  return { ...view, selected, selectedIds: selected === null ? [] : selectedIds, collapsed };
 }
 
 export function rootBranchSide(index: number, count: number): 'left' | 'right' {
@@ -41,6 +64,7 @@ export function navigate(snapshot: Snapshot, view: ViewState, key: string): View
   const selected = state.selected;
   if (!selected) {
     state.selected = key === 'End' ? visibleNodes(snapshot, state.collapsed).at(-1) ?? null : snapshot.root_ids[0] ?? null;
+    state.selectedIds = state.selected === null ? [] : [state.selected];
     return state;
   }
   const items = indexTree(snapshot);
@@ -69,7 +93,7 @@ export function navigate(snapshot: Snapshot, view: ViewState, key: string): View
     }
   } else if (key === 'Home') state.selected = snapshot.root_ids[0] ?? null;
   else if (key === 'End') state.selected = visible.at(-1) ?? selected;
-  return { ...state, collapsed: [...collapsed] };
+  return { ...state, selectedIds: state.selected === null ? [] : [state.selected], collapsed: [...collapsed] };
 }
 
 export type Command = 'rename' | 'sibling' | 'child' | 'promote' | 'delete' | 'collapse' | 'search' |
@@ -116,20 +140,27 @@ export function reveal(snapshot: Snapshot, view: ViewState, id: string): ViewSta
     folded.delete(parent);
     parent = items.get(parent)?.parent_id;
   }
-  return { ...view, selected: id, collapsed: [...folded] };
+  return { ...view, selected: id, selectedIds: [id], collapsed: [...folded] };
 }
 
 export function readView(storage: Pick<Storage, 'getItem'>, rootKey: string): ViewState {
   try {
     const saved = JSON.parse(storage.getItem(`rightmemory:pursuit-map:${rootKey}`) ?? 'null');
     const viewport = saved?.viewport;
+    const selected = typeof saved?.selected === 'string' ? saved.selected : null;
+    const restoredIds: string[] = Array.isArray(saved?.selectedIds)
+      ? saved.selectedIds.filter((id: unknown): id is string => typeof id === 'string')
+      : selected === null ? [] : [selected];
+    const selectedIds = selected === null ? [] : [...new Set(restoredIds)];
+    if (selected !== null && !selectedIds.includes(selected)) selectedIds.push(selected);
     return {
-      selected: typeof saved?.selected === 'string' ? saved.selected : null,
+      selected,
+      selectedIds,
       collapsed: Array.isArray(saved?.collapsed) ? saved.collapsed.filter((id: unknown) => typeof id === 'string') : [],
       ...(saved?.layout === 'independent-roots' && viewport && [viewport.x, viewport.y, viewport.scale].every(Number.isFinite) && viewport.scale >= 0.1 && viewport.scale <= 2
         ? { viewport } : {}),
     };
-  } catch { return { selected: null, collapsed: [] }; }
+  } catch { return { selected: null, selectedIds: [], collapsed: [] }; }
 }
 
 export function writeView(storage: Pick<Storage, 'setItem'>, rootKey: string, view: ViewState): void {

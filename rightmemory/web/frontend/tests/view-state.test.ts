@@ -9,6 +9,7 @@ import { fixture, forestFixture } from './fixtures.ts';
 
 const key = (key: string, changes: Partial<KeyboardEvent> = {}) => ({ key, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, isComposing: false, ...changes });
 const pointer = (pointerType: string, changes: Partial<PointerSample> = {}): PointerSample => ({ pointerId: 1, pointerType, button: 0, buttons: 1, x: 100, y: 100, ...changes });
+const singleView = (selected: string | null, collapsed: string[] = []): ViewState => ({ selected, selectedIds: selected === null ? [] : [selected], collapsed });
 
 test('edge pan is smooth, bounded, supports corners, and stops outside the stage or edge band', () => {
   assert.deepEqual(edgePanVelocity(0, 0, 800, 600), { x: 18, y: 18 });
@@ -115,7 +116,7 @@ test('keyboard mapping covers direct editing and respects input composition', ()
 
 test('arrow navigation folds branches and selects visible neighbors', () => {
   const snapshot = fixture();
-  let view: ViewState = { selected: 'research', collapsed: [] };
+  let view = singleView('research');
   view = navigate(snapshot, view, 'ArrowRight');
   assert.deepEqual(view.collapsed, ['research']);
   assert(!visibleNodes(snapshot, view.collapsed).includes('level-7'));
@@ -129,22 +130,22 @@ test('arrow navigation folds branches and selects visible neighbors', () => {
 
 test('horizontal navigation follows both sides of each independent map', () => {
   const snapshot = forestFixture();
-  const root: ViewState = { selected: 'directions', collapsed: [] };
+  const root = singleView('directions');
   assert.equal(navigate(snapshot, root, 'ArrowLeft').selected, 'research');
   assert.equal(navigate(snapshot, root, 'ArrowRight').selected, 'design');
-  assert.equal(navigate(snapshot, { ...root, selected: 'research' }, 'ArrowLeft').selected, 'level-1');
-  assert.equal(navigate(snapshot, { ...root, selected: 'practice' }, 'ArrowLeft').selected, 'practice');
-  assert.equal(navigate(snapshot, { ...root, selected: 'practice' }, 'ArrowRight').selected, 'sessions');
-  assert.equal(navigate(snapshot, { ...root, selected: 'drafts' }, 'ArrowDown').selected, 'practice');
-  assert.equal(navigate(snapshot, { ...root, selected: 'practice' }, 'ArrowUp').selected, 'drafts');
-  assert.equal(navigate(snapshot, { ...root, selected: 'practice' }, 'Home').selected, 'directions');
+  assert.equal(navigate(snapshot, singleView('research'), 'ArrowLeft').selected, 'level-1');
+  assert.equal(navigate(snapshot, singleView('practice'), 'ArrowLeft').selected, 'practice');
+  assert.equal(navigate(snapshot, singleView('practice'), 'ArrowRight').selected, 'sessions');
+  assert.equal(navigate(snapshot, singleView('drafts'), 'ArrowDown').selected, 'practice');
+  assert.equal(navigate(snapshot, singleView('practice'), 'ArrowUp').selected, 'drafts');
+  assert.equal(navigate(snapshot, singleView('practice'), 'Home').selected, 'directions');
   assert.equal(navigate(snapshot, root, 'End').selected, 'caption');
 });
 
 test('an empty map has no selectable placeholder and remains keyboard safe', () => {
   const snapshot = applyOperation(fixture(), { type: 'delete', id: 'directions' });
-  const view = reconcileView(snapshot, { selected: 'directions', collapsed: ['research'] });
-  assert.deepEqual(view, { selected: null, collapsed: [] });
+  const view = reconcileView(snapshot, singleView('directions', ['research']));
+  assert.deepEqual(view, { selected: null, selectedIds: [], collapsed: [] });
   assert.deepEqual(visibleNodes(snapshot, []), []);
   for (const key of ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End']) assert.deepEqual(navigate(snapshot, view, key), view);
 });
@@ -163,40 +164,56 @@ test('independent map placement aligns roots and reserves nonoverlapping rows', 
   assert.deepEqual(stackMaps([]), { maps: [], width: 0, height: 0 });
 });
 
-test('selection reconciliation never leaves a hidden or deleted node selected', () => {
+test('multi-selection reconciliation prunes, reveals, deduplicates, and preserves its primary', () => {
   const snapshot = fixture();
-  const view = reconcileView(snapshot, { selected: 'level-7', collapsed: ['research', 'missing'] });
+  const view = reconcileView(snapshot, {
+    selected: 'level-7',
+    selectedIds: ['alternative-1', 'missing', 'level-7', 'interaction', 'alternative-1'],
+    collapsed: ['research', 'missing'],
+  });
   assert.equal(view.selected, 'research');
+  assert.deepEqual(view.selectedIds, ['research', 'interaction']);
   assert.deepEqual(view.collapsed, ['research']);
   const removed = applyOperation(snapshot, { type: 'delete', id: 'research' });
-  assert.equal(reconcileView(removed, view).selected, 'directions');
-  assert.deepEqual(reveal(snapshot, view, 'level-7').collapsed, []);
+  assert.deepEqual(reconcileView(removed, view), { selected: 'interaction', selectedIds: ['interaction'], collapsed: [] });
+  assert.deepEqual(reconcileView(removed, singleView('research')), { selected: 'directions', selectedIds: ['directions'], collapsed: [] });
+  assert.deepEqual(reveal(snapshot, view, 'level-7'), { selected: 'level-7', selectedIds: ['level-7'], collapsed: [] });
+});
+
+test('keyboard navigation and reveal collapse a multi-selection to their target', () => {
+  const snapshot = fixture();
+  const view: ViewState = { selected: 'research', selectedIds: ['design', 'research'], collapsed: [] };
+  assert.deepEqual(navigate(snapshot, view, 'ArrowDown').selectedIds, ['level-1']);
+  assert.deepEqual(navigate(snapshot, view, 'ArrowRight').selectedIds, ['research']);
+  assert.deepEqual(reveal(snapshot, { ...view, collapsed: ['design'] }, 'interaction').selectedIds, ['interaction']);
 });
 
 test('a cleared selection survives refresh and keyboard navigation can select again', () => {
   const snapshot = forestFixture();
-  const view: ViewState = { selected: null, collapsed: ['research'] };
+  const view = singleView(null, ['research']);
   assert.deepEqual(reconcileView(snapshot, view), view);
   for (const key of ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home']) {
-    assert.deepEqual(navigate(snapshot, view, key), { ...view, selected: 'directions' });
+    assert.deepEqual(navigate(snapshot, view, key), { ...view, selected: 'directions', selectedIds: ['directions'] });
   }
-  assert.deepEqual(navigate(snapshot, view, 'End'), { ...view, selected: 'caption' });
+  assert.deepEqual(navigate(snapshot, view, 'End'), { ...view, selected: 'caption', selectedIds: ['caption'] });
 });
 
-test('browser view state is isolated by root', () => {
+test('browser view state persists ordered selections and upgrades prior single-selection state', () => {
   const values = new Map<string, string>();
   const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
-  const view = { selected: 'research', collapsed: ['design'], viewport: { x: 10, y: 20, scale: 0.8 } };
+  const view: ViewState = { selected: 'research', selectedIds: ['design', 'research'], collapsed: ['design'], viewport: { x: 10, y: 20, scale: 0.8 } };
   writeView(storage, 'root-a', view);
   assert.deepEqual(readView(storage, 'root-a'), view);
-  assert.deepEqual(readView(storage, 'root-b'), { selected: null, collapsed: [] });
-  writeView(storage, 'root-a', { ...view, selected: null });
-  assert.deepEqual(reconcileView(fixture(), readView(storage, 'root-a')), { ...view, selected: null });
+  assert.deepEqual(readView(storage, 'root-b'), { selected: null, selectedIds: [], collapsed: [] });
+  writeView(storage, 'root-a', { ...view, selected: null, selectedIds: [] });
+  assert.deepEqual(reconcileView(fixture(), readView(storage, 'root-a')), { ...view, selected: null, selectedIds: [] });
+  storage.setItem('rightmemory:pursuit-map:prior', JSON.stringify({ selected: 'research', collapsed: ['design'], layout: 'independent-roots' }));
+  assert.deepEqual(readView(storage, 'prior'), { selected: 'research', selectedIds: ['research'], collapsed: ['design'] });
   storage.setItem('rightmemory:pursuit-map:broken', '{bad');
-  assert.deepEqual(readView(storage, 'broken'), { selected: null, collapsed: [] });
-  storage.setItem('rightmemory:pursuit-map:old-layout', JSON.stringify({ ...view, selected: '__pursuit_virtual_root__' }));
+  assert.deepEqual(readView(storage, 'broken'), { selected: null, selectedIds: [], collapsed: [] });
+  storage.setItem('rightmemory:pursuit-map:old-layout', JSON.stringify({ selected: '__pursuit_virtual_root__', collapsed: ['design'], viewport: view.viewport }));
   const old = reconcileView(forestFixture(), readView(storage, 'old-layout'));
-  assert.deepEqual(old, { selected: 'directions', collapsed: ['design'] });
+  assert.deepEqual(old, { selected: 'directions', selectedIds: ['directions'], collapsed: ['design'] });
 });
 
 test('note conflict keeps unsaved text even when an authoritative snapshot changes its body', () => {

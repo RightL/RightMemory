@@ -86,6 +86,109 @@ class PursuitStoreTests(IsolatedWriteTestBase):
         self.assertEqual(self._git("status", "--porcelain"), "")
         self._assert_isolated_cleanup()
 
+    def test_rename_many_lands_one_commit_and_one_undo_restores_every_title(self):
+        before = self._bytes()
+        previous = self.store.snapshot()
+
+        result = self._apply(
+            {
+                "type": "rename_many",
+                "renames": [
+                    {"id": "alpha", "title": "Alpha renamed"},
+                    {"id": "beta", "title": "Beta renamed"},
+                ],
+            },
+            revision=previous["revision"],
+        )
+
+        self.assertEqual(result["selected_id"], "alpha")
+        self.assertEqual(result["id_remaps"], [])
+        self.assertEqual(self._git("rev-list", "--count", f"{self.initial_head}..HEAD"), "1")
+        items = {item["id"]: item for item in result["snapshot"]["items"]}
+        self.assertEqual(items["alpha"]["title"], "Alpha renamed")
+        self.assertEqual(items["beta"]["title"], "Beta renamed")
+
+        undone = self._undo(result)
+        self.assertEqual(self._bytes(), before)
+        self.assertEqual(self._git("rev-list", "--count", f"{self.initial_head}..HEAD"), "2")
+        self.assertEqual(undone["id_remaps"], [])
+        self.assertEqual(self._git("status", "--porcelain"), "")
+        self._assert_isolated_cleanup()
+
+    def test_rename_many_history_returns_ordered_id_remaps_in_both_directions(self):
+        pursuits = self.root / "PURSUITS.md"
+        pursuits.write_bytes(
+            pursuits.read_bytes()
+            + b"\n## First plain\n\nFirst body.\n\n## Second plain\n\nSecond body.\n"
+        )
+        self._git("add", "PURSUITS.md")
+        self._git("commit", "-m", "seed plain headings")
+        self.initial_head = self._git("rev-parse", "HEAD")
+        plain = {
+            item["title"]: item["id"]
+            for item in self.store.snapshot()["items"]
+            if item["title"] in {"First plain", "Second plain"}
+        }
+
+        renamed = self._apply(
+            {
+                "type": "rename_many",
+                "renames": [
+                    {"id": plain["Second plain"], "title": "Second renamed"},
+                    {"id": plain["First plain"], "title": "First renamed"},
+                ],
+            }
+        )
+        forward = [
+            {"from": plain["Second plain"], "to": "second-renamed"},
+            {"from": plain["First plain"], "to": "first-renamed"},
+        ]
+        self.assertEqual(renamed["id_remaps"], forward)
+        self.assertEqual(renamed["selected_id"], "second-renamed")
+        renamed_bytes = self._bytes()
+
+        undone = self._undo(renamed)
+        inverse = [
+            {"from": mapping["to"], "to": mapping["from"]}
+            for mapping in forward
+        ]
+        self.assertEqual(undone["id_remaps"], inverse)
+        self.assertEqual(
+            {item["title"]: item["id"] for item in undone["snapshot"]["items"] if item["title"].endswith("plain")},
+            plain,
+        )
+
+        redone = self._redo(undone)
+        self.assertEqual(redone["id_remaps"], forward)
+        self.assertEqual(self._bytes(), renamed_bytes)
+        self.assertEqual(self._git("rev-list", "--count", f"{self.initial_head}..HEAD"), "3")
+        self.assertEqual(self._git("status", "--porcelain"), "")
+        self._assert_isolated_cleanup()
+
+    def test_rename_many_rejects_invalid_or_duplicate_entries_without_partial_write(self):
+        before = self._bytes()
+        operations = (
+            {
+                "type": "rename_many",
+                "renames": [
+                    {"id": "alpha", "title": "Changed"},
+                    {"id": "beta", "title": "Bad\nheading"},
+                ],
+            },
+            {
+                "type": "rename_many",
+                "renames": [
+                    {"id": "alpha", "title": "Changed"},
+                    {"id": "alpha", "title": "Changed again"},
+                ],
+            },
+        )
+        for operation in operations:
+            with self.subTest(operation=operation), self.assertRaises(PursuitStoreError) as caught:
+                self._apply(operation)
+            self.assertEqual(caught.exception.code, "invalid_operation")
+            self._assert_unchanged(before)
+
     def test_git_line_ending_conversion_is_rejected_before_publication(self):
         before = self._bytes()
         self._git("config", "core.autocrlf", "true")

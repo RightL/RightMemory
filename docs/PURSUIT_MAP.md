@@ -30,7 +30,7 @@ Each conversation has one primary Pursuit attachment and runs in one registered 
 
 The execution working directory is captured when a conversation is created. Editing a registered project path changes future conversations only; existing conversations and their replacement or side-chat threads retain the captured path. Similarly, an SSH alias that already owns conversation history cannot be repointed to another target in place. Register the new execution identity as another host so old provider thread IDs keep their original meaning.
 
-The fixed **Manager** entry opens persistent Codex conversations that belong to the active Memory root rather than a Pursuit. Manager always executes locally on the Web Studio controller with the active root as its working directory. It reuses ordinary history, models, Stop, approvals, input requests, and attachments, but does not use side-chat cleanup or appear in Pursuit indicators. Opening Manager preserves the current map selection and stages its stable Pursuit ID as a removable reference for the next message. That reference is fixed when sent; later selection changes cannot retarget the running request.
+The fixed **Manager** entry opens persistent Codex conversations that belong to the active Memory root rather than a Pursuit. Manager always executes locally on the Web Studio controller with the active root as its working directory. It reuses ordinary history, models, Stop, approvals, input requests, and attachments, but does not use side-chat cleanup or appear in Pursuit indicators. Opening Manager preserves the current map selection and stages the active selection's stable Pursuit ID as a removable reference for the next message. Adding or removing secondary selections does not retarget that reference. The reference is fixed when sent; later selection changes cannot retarget the running request.
 
 Manager handles an explicit maintenance request directly. It can edit Memory or Pursuit through their existing validated workflows and can register or update hosts and project paths through the running Web Studio. The `rightmemory manager` command is an authenticated loopback client for those map and execution-configuration APIs; it does not open the conversation database or start a second service. Manager does not add a fixed confirmation ceremony, automatically reorganize Pursuit from conversation status, or provide a new remote-tool framework. When a Manager turn ends, the page reloads canonical map and execution configuration while preserving unsent drafts.
 
@@ -49,16 +49,19 @@ Long titles wrap within their nodes. Titles support bold (`**Important**`), unde
 | Action | Interaction |
 | --- | --- |
 | Select a node | Click its title. |
+| Select several enclosed nodes | Hold `Shift` and drag a rectangle from empty canvas space. |
+| Add enclosed nodes to the selection | Hold `Ctrl/Cmd+Shift` and drag from empty canvas space. |
+| Add or remove one node | Hold `Ctrl/Cmd` and click its title. |
 | Rename | Double-click the title or press `F2`; edit in place. |
 | Create a sibling | Press `Enter` and type the title. |
 | Insert a sibling before | Press `Shift+Enter` and type the title. |
 | Reorder siblings | Press `Alt+ArrowUp` or `Alt+ArrowDown`; this also works for top-level directions. |
 | Create a child | Press `Tab` and type the title. |
-| Bold, underline, or strike a topic | Use **B**, **U**, or **S** beside the selected node, or `Ctrl/Cmd+B`, `Ctrl/Cmd+U`, or `Ctrl/Cmd+Shift+X`. |
+| Bold, underline, or strike selected topics | Use **B**, **U**, or **S** beside the active node, or `Ctrl/Cmd+B`, `Ctrl/Cmd+U`, or `Ctrl/Cmd+Shift+X`. One action and one Undo apply to the complete selection. |
 | Promote a branch | Press `Shift+Tab`. |
-| Move or reorder a branch | Drag it to the indicated insertion position, including across independent maps. |
+| Move or reorder a branch | Drag it to the indicated insertion position, including across independent maps. Dragging moves that branch only, even when several nodes were selected. |
 | Make a branch top-level | Drop it on empty canvas space. |
-| Delete a branch | Press `Delete` or `Backspace`; undo is available after deletion. |
+| Delete a branch | Press `Delete` or `Backspace`; only the active branch is deleted, and undo is available after deletion. |
 | Fold a branch | Use its small branch control or press `Space`. |
 | Navigate the tree | Left/right follow the branch's side; up/down traverse visible nodes across maps. `Home` selects the first root; `End` selects the last visible node. |
 | Search titles and notes | Press `Ctrl/Cmd+F`; `Enter` and `Shift+Enter` move through results. |
@@ -67,9 +70,9 @@ Long titles wrap within their nodes. Titles support bold (`**Important**`), unde
 | Edit a note | Open its note control or press `N`. |
 | Mark current attention | Toggle its Focus marker or press `F`. |
 
-New nodes receive stable ids automatically. Renaming or moving a node preserves its id. Physical files, heading depth, and graph syntax stay out of the normal editing controls.
+New nodes receive stable ids automatically. Renaming or moving an anchored node preserves its id. Formatting an editable plain heading assigns it a stable id in the same transaction. Physical files, heading depth, and graph syntax stay out of the normal editing controls.
 
-The selected node has a nearby toolbar for whole-topic formatting, Note, Focus, and **More**. Click blank canvas space or outside the map to clear the selection and hide this toolbar; dragging blank space still pans without clearing the selection. Selecting a node again shows its tools. Formatting buttons show the marks that wrap the entire title; a mark on part of a manually authored title does not activate the whole-topic button. Applying a mark preserves partial formatting inside the title. Finish raw title editing before using formatting shortcuts: they are suppressed while the title editor is open so the browser cannot insert rich-text HTML into it.
+Every selected node has a visible selection state; the active node has the nearby toolbar for whole-topic formatting, Note, Focus, and **More**. Click blank canvas space or outside the map to clear the selection and hide this toolbar; dragging blank space still pans without clearing the selection. A normal node click returns to a single selection. Formatting buttons show whether a mark wraps every selected title, none of them, or a mixture. Applying a mark to a mixed selection adds it to all selected titles while preserving partial formatting inside each title. Finish raw title editing before using formatting shortcuts: they are suppressed while the title editor is open so the browser cannot insert rich-text HTML into it.
 
 Right-click a node or choose its **More** button for structural actions, formatting, notes, Focus, folding, promotion, and deletion. Right-click empty canvas space for top-level creation or Fit. Menus support arrow keys and close with Escape or an outside click. The fixed toolbar retains broad map operations; its **More** also includes the read-only relation summary. An empty map offers an **Add a direction** button.
 
@@ -113,9 +116,9 @@ Start from the repository's current design document.
 
 `PURSUITS.md` and reachable `PURSUIT_<id>.md` files are the source of truth. The editor reads the canonical graph index instead of maintaining a separate database. Deep logical branches continue through `F#` detail files so each physical file can obey the shared heading rules. The renderer creates required boundaries automatically and preserves existing boundaries where possible.
 
-Pan, zoom, folding, and selection are browser-local view state. They are not stored in Markdown and do not affect retrieval.
+Pan, zoom, folding, and single or multiple selection are browser-local view state. They are not stored in Markdown and do not affect retrieval.
 
-Whole-topic formatting stays in the title string, with no style fields or separate metadata. Combined marks use a fixed order: bold outside underline outside strikethrough, such as `**<u>~~Important direction~~</u>**`. Formatting uses the existing rename transaction and preserves the node's id, body, edges, Focus, backing files, and sibling order. New ids use the visible title text; creating or renaming a title with no visible text is rejected. Existing unusual titles remain readable.
+Whole-topic formatting stays in the title string, with no style fields or separate metadata. Combined marks use a fixed order: bold outside underline outside strikethrough, such as `**<u>~~Important direction~~</u>**`. One formatting action sends the selected titles through one compound rename transaction, so the group is one Undo step. It preserves body, edges, Focus, backing files, and sibling order; anchored node ids also remain unchanged. New stable ids use visible title text, and a title with no visible text is rejected. Existing unusual titles remain readable.
 
 Existing old field blocks remain readable as body text until the user explicitly requests cleanup. Their former `do`, `ask`, and `wait` labels do not control agent actions. Existing plain structural headings and graph-node bullets are preserved; content that cannot be safely edited through the normal map controls is surfaced as a read-only item or diagnostic. Opening the map is not a migration.
 

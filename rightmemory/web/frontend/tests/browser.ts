@@ -20,7 +20,7 @@ const result = (before: Snapshot, next: Snapshot, selected_id: string | null): M
   serial++;
   current = { ...next, revision: `r${serial}`, git_head: `c${serial}` };
   commits.set(current.git_head, { before: clone(before), after: clone(current) });
-  return { snapshot: clone(current), commit: current.git_head, operation_id: `operation-${serial}`, repaired_references: [], undoable: true, selected_id };
+  return { snapshot: clone(current), commit: current.git_head, operation_id: `operation-${serial}`, repaired_references: [], undoable: true, selected_id, id_remaps: [] };
 };
 const transport: Transport = {
   load: async () => clone(current),
@@ -32,14 +32,15 @@ const transport: Transport = {
       throw new ApiError('The map changed in another window.', 409, clone(current));
     }
     if (revision !== current.revision) throw new ApiError('The map changed in another window.', 409, clone(current));
-    const id = operation.type === 'create' ? `created-${serial + 1}` : operation.id;
+    const id = operation.type === 'create' ? `created-${serial + 1}`
+      : operation.type === 'rename_many' ? operation.renames[0]?.id ?? null : operation.id;
     return result(current, applyOperation(current, operation, id), operation.type === 'delete' ? null : id);
   },
   history: async (_kind, revision, commit) => {
     await latency();
     const entry = commits.get(commit);
     if (!entry || revision !== current.revision) throw new ApiError('History changed elsewhere.', 409, clone(current));
-    return result(current, entry.before, entry.before.root_ids[0] ?? null);
+    return result(current, entry.before, null);
   },
 };
 const host = document.querySelector<HTMLElement>('#fixture')!;
