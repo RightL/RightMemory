@@ -26,29 +26,19 @@ Typing and pointer movement are local editing activity. Confirming a rename, str
 
 This allows immediate canvas editing while preserving an inspectable Git change. Undo and redo create compensating commits and reject stale history; they do not reset the shared branch. Deletion can repair incoming typed edges in Memory, but that mechanical repair is not authority to rewrite Memory meaning.
 
-### Conversation attachments are operational state
+### Context connects the map to Codex App
 
-A Codex conversation can be displayed beside one Pursuit without becoming part of the Pursuit graph. RightMemory stores the attachment, host, and working-directory project below the active root's `.runtime` directory. Codex App Server remains authoritative for the thread and turn protocol. Deleting a Pursuit does not delete its conversation, and conversation events do not infer completion, Focus, or map edits.
+The map organizes the user's directions and their background. Codex App owns projects, tasks, conversations, and execution. Copying context is enough to carry a direction into an ordinary Codex App conversation without requiring a second conversation client, a host or project registry, or persistent links between tasks and Pursuit.
 
-RightMemory opens its own App Server process locally or through a named SSH host. The conversation workspace speaks that protocol directly rather than routing turns through the Codex SDK, and it does not share live ownership with a task currently open in the Codex desktop app. Registered working directories form RightMemory's project layer because the stable protocol needed for conversation control is available across Codex versions while native desktop Project methods are experimental and version-specific.
+**Copy context** uses the canonical graph index through one opening-context builder. It selects the current direction, direct incoming and outgoing neighbors, and their logical heading ancestors in the established order, with the direction's direct connections. The output presents their titles, prose, and readable relationships as background. Internal identifiers, source locations, and runtime metadata are unnecessary for this handoff. Generating that text is read-only and creates no Git commit or stored conversation association.
 
-Composer inputs follow the same boundary. Pasted PNG and JPEG images, large text pastes, and user-selected files are staged in root-local runtime state, not embedded in Pursuit Markdown. Validated PNG and JPEG files use App Server's image input. Every other file remains untrusted bytes under an internally generated name and is presented to Codex as a managed absolute-path reference; RightMemory does not execute, unpack, or promise that the available tools can interpret it. Before a remote turn starts, RightMemory copies staged inputs to the conversation's SSH host so App Server and its tools receive paths that exist in their own environment. These files support a conversation turn; they are not graph resources or durable semantic evidence by themselves.
+The pasted text describes the graph when copied. The user's accompanying request establishes what work to perform; context alone does not authorize a task. Later task progress, failure, or completion does not synchronize back into Pursuit or establish that a direction should be removed.
 
-App Server thread items are also the source for visible subagent activity. The browser presents those items with the turn's other work details instead of guessing agent activity from prose. Side chats use separate App Server threads but remain scoped to the current browser/app session. They are not saved as durable Pursuit attachments and do not enter the map's conversation summaries.
+### Manager uses the existing ownership boundaries
 
-A Pursuit node may show the aggregate state of its attached conversations: active work, a waiting request, an unread final answer, or a completed turn. This is a navigation and attention aid. In particular, a completed conversation turn does not mean the Pursuit is semantically complete; only an explicit map edit changes what directions the user keeps visible.
+Manager is the package-owned `rightmemory-manager` skill in Codex App. It handles explicit RightMemory management through `maintain-rightmemory` and `maintain-pursuit-map`, keeping their validated editing workflows and ownership boundaries. An explicit request authorizes the requested change, so Manager asks when a target or meaning cannot be resolved safely rather than adding a routine approval step. It refreshes and verifies canonical state after requested changes.
 
-### Conversation context is a first-turn snapshot
-
-A new Pursuit conversation receives its graph location once, with its first actual user input. RightMemory derives that snapshot from the canonical graph index: the bound Pursuit, direct incoming and outgoing neighbors, and their logical heading ancestors. It persists the exact snapshot before crossing the provider boundary and records acceptance against a provider turn ID. An uncertain transport result remains fenced until provider history resolves whether that first turn exists. This keeps retries from either losing the snapshot or blindly duplicating it, without introducing a general exactly-once message framework.
-
-The snapshot is historical input, not a live view. Later graph edits, page selection changes, browser restarts, and model compaction do not regenerate it. Controller-relative graph sources and the immutable conversation execution-directory snapshot keep graph provenance distinct from local or SSH execution paths.
-
-### Manager is a root-local conversation kind
-
-Manager is a persistent conversation without a Pursuit attachment. It reuses the ordinary App Server, event, history, attachment, permission, and interruption paths, but is fixed to the controller's local root project and excluded from side-chat cleanup and Pursuit activity summaries. Per-message page references are resolved to stable identities when sent; they do not change the conversation's execution binding.
-
-Manager configuration operations use the running Web Studio's authenticated loopback API rather than a second service or direct database access. Registered project paths affect newly created conversations, while each existing conversation retains the working directory captured with its provider thread. A host identity with thread history likewise cannot be silently repointed by changing its SSH alias.
+Manager also coordinates work through Codex App's native project and task tools when asked. Creating a separate task requires an explicit request or confirmation of a concrete proposal. The receiving task retains the user's objective and relevant context, with implementation choices left for its inspection of the project. This gives Manager both management and coordination responsibilities without a dedicated service, database, or runtime.
 
 ### Existing data remains readable
 

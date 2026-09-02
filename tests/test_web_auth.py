@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from rightmemory.web.app import create_web_app
-from rightmemory.web.auth import SESSION_COOKIE, create_session_cookie
+from rightmemory.web.auth import SESSION_COOKIE, create_session_cookie, read_session_cookie
 from tests.asgi_client import ASGITestClient as TestClient
 
 
@@ -183,6 +183,30 @@ class WebStudioAuthTests(unittest.TestCase):
 
         self.assertEqual(logout.status_code, 200)
         self.assertEqual(response.status_code, 401)
+
+    def test_logout_revokes_and_clears_when_the_active_root_was_deleted(self):
+        other_root = self.root / "other"
+        other_root.mkdir()
+        memory_file = other_root / "MEMORY.md"
+        memory_file.write_text("# Other {#other}\n", encoding="utf-8")
+        csrf = self._bootstrap().json()["csrf_token"]
+        switched = self.client.post(
+            "/api/active-root", json={"root": str(other_root)}, headers={"x-csrf-token": csrf},
+        )
+        self.assertEqual(switched.status_code, 200)
+        signed_cookie = self.client.cookies.get(SESSION_COOKIE)
+        memory_file.unlink()
+        other_root.rmdir()
+
+        response = self.client.post(
+            "/api/logout", headers={"x-csrf-token": switched.json()["data"]["csrf_token"]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(read_session_cookie(self.root, signed_cookie))
+        replacement = self._bootstrap()
+        self.assertEqual(replacement.json()["active_root"], str(self.root.resolve()))
+        self.assertNotEqual(self.client.cookies.get(SESSION_COOKIE), signed_cookie)
 
     def test_cors_headers_are_closed_by_default(self):
         response = self._bootstrap()

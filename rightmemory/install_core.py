@@ -647,6 +647,7 @@ class Installer:
                 ("maintain-rightmemory", "maintain-rightmemory"),
                 ("review-agent-guidance-inbox", "review-agent-guidance-inbox"),
                 ("maintain-pursuit-map", "maintain-pursuit-map"),
+                ("rightmemory-manager", "rightmemory-manager"),
             ):
                 self._install_skill(
                     self.repo_root / "skills" / source_directory / "SKILL.md",
@@ -819,9 +820,10 @@ class Installer:
             "qualifying evidence automatically according to its instructions."
         )
         print(
-            "  4. Open the Pursuit map with rightmemory pursuit, or explicitly use "
-            "maintain-pursuit-map. Memory maintenance and pending-guidance review "
-            "are installed as separate explicit skills."
+            "  4. Open the Pursuit map with rightmemory pursuit and copy node context "
+            "into Codex App. Use rightmemory-manager there for requested RightMemory "
+            "management or task coordination. Maintenance and pending-guidance review "
+            "are also installed as separate explicit skills."
         )
         print(
             "  5. Optional background transcript review, dreamer, pruning, insight, and sync: "
