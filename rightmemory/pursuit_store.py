@@ -30,7 +30,7 @@ from .tools import CORRECTIONS_PATH, MemoryTools
 
 
 EDITOR_ROLE = "pursuit-map"
-_ACTIONS = frozenset({"create", "rename", "move", "delete", "edit_body", "set_focus"})
+_ACTIONS = frozenset({"create", "rename", "rename_many", "move", "delete", "edit_body", "set_focus"})
 _HISTORY_ACTIONS = frozenset({"undo", "redo"})
 _COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -40,6 +40,7 @@ _TRAILERS = {
     "session": "RightMemory-Pursuit-Session",
     "action": "RightMemory-Pursuit-Action",
     "target": "RightMemory-Pursuit-Target",
+    "id_remaps": "RightMemory-Pursuit-ID-Remaps",
     "signature": "RightMemory-Pursuit-Signature",
 }
 
@@ -159,7 +160,7 @@ class PursuitStore:
             raise PursuitStoreError("history_forbidden", "History requires an exact editor commit id.", 403)
 
         def edit(candidate: Path, supervisor: _PursuitSupervisor) -> PursuitEdit:
-            self._verify_history(commit, supervisor.expected_head, session_id, action)
+            metadata = self._verify_history(commit, supervisor.expected_head, session_id, action)
             before = build_graph_manifest(candidate)
             result = supervisor._run_git(candidate, "revert", "--no-commit", commit, check=False)
             if result.returncode:
@@ -175,6 +176,10 @@ class PursuitStore:
                 repaired_references=tuple(_reference_changes(before, after)),
                 selected_id=None,
                 description=f"pursuit: {action} {commit[:12]}",
+                id_remaps=tuple(
+                    {"from": mapping["to"], "to": mapping["from"]}
+                    for mapping in _decode_id_remaps(metadata["id_remaps"])
+                ),
             )
 
         return self._transact(
@@ -262,6 +267,7 @@ class PursuitStore:
                 "session": _session_hash(session_id),
                 "action": action,
                 "target": target,
+                "id_remaps": _encode_id_remaps(result.id_remaps),
             }
             metadata["signature"] = self._signature(metadata, parent, tree, session_id)
             subject = result.description.strip().splitlines()[0] if result.description.strip() else f"pursuit: {action}"
@@ -310,9 +316,10 @@ class PursuitStore:
             "repaired_references": list(output.repaired_references),
             "undoable": bool(result.commits_landed),
             "selected_id": output.selected_id,
+            "id_remaps": list(output.id_remaps),
         }
 
-    def _verify_history(self, commit: str, head: str, session_id: str, action: str) -> None:
+    def _verify_history(self, commit: str, head: str, session_id: str, action: str) -> dict[str, str]:
         metadata = self._authenticate_commit(commit, session_id)
         permitted = _ACTIONS | {"redo"} if action == "undo" else {"undo"}
         if metadata["action"] not in permitted:
@@ -332,6 +339,7 @@ class PursuitStore:
                 raise PursuitStoreError("history_conflict", "History changed outside this editor session. Reload the map.", 409) from exc
             if current["target"] == commit:
                 raise PursuitStoreError("history_conflict", "This history change has already been applied.", 409)
+        return metadata
 
     def _authenticate_commit(self, commit: str, session_id: str) -> dict[str, str]:
         result = self._reader._run_git(
@@ -370,6 +378,7 @@ class PursuitStore:
                 raise ValueError("invalid operation identity")
             if _DIGEST_RE.fullmatch(values["signature"]) is None:
                 raise ValueError("invalid signature encoding")
+            _decode_id_remaps(values["id_remaps"])
             if (values["action"] in _HISTORY_ACTIONS and _COMMIT_RE.fullmatch(values["target"]) is None) or (
                 values["action"] in _ACTIONS and values["target"] != "-"
             ):
@@ -549,6 +558,35 @@ def _validate_request_identity(expected_revision: str, session_id: str) -> None:
 
 def _session_hash(session_id: str) -> str:
     return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+
+
+def _encode_id_remaps(remaps: Iterable[Mapping[str, str]]) -> str:
+    return json.dumps(list(remaps), ensure_ascii=True, separators=(",", ":"))
+
+
+def _decode_id_remaps(encoded: str) -> tuple[dict[str, str], ...]:
+    value = json.loads(encoded)
+    if not isinstance(value, list):
+        raise ValueError("invalid id remaps")
+    result: list[dict[str, str]] = []
+    sources: set[str] = set()
+    for mapping in value:
+        if not isinstance(mapping, dict) or set(mapping) != {"from", "to"}:
+            raise ValueError("invalid id remap")
+        source = mapping["from"]
+        target = mapping["to"]
+        if (
+            not isinstance(source, str)
+            or not isinstance(target, str)
+            or not source
+            or not target
+            or source == target
+            or source in sources
+        ):
+            raise ValueError("invalid id remap")
+        sources.add(source)
+        result.append({"from": source, "to": target})
+    return tuple(result)
 
 
 def _validation_errors(root: Path) -> list[str]:

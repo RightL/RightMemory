@@ -32,7 +32,24 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
   let loads = 0;
   let failNext = false;
   const operations: Operation[] = [];
-  const history = new Map<string, Snapshot>();
+  type IdRemap = { from: string; to: string };
+  const history = new Map<string, { snapshot: Snapshot; remaps: IdRemap[] }>();
+  const remapSnapshot = (snapshot: Snapshot, remaps: readonly IdRemap[]): Snapshot => {
+    const ids = new Map(remaps.map(({ from, to }) => [from, to]));
+    const mapped = (id: string) => ids.get(id) ?? id;
+    return {
+      ...snapshot,
+      items: snapshot.items.map((item) => ({
+        ...item,
+        id: mapped(item.id),
+        parent_id: item.parent_id === null ? null : mapped(item.parent_id),
+        child_ids: item.child_ids.map(mapped),
+        edges: item.edges.map(([kind, target]) => [kind, mapped(target)]),
+      })),
+      root_ids: snapshot.root_ids.map(mapped),
+      focus_ids: snapshot.focus_ids.map(mapped),
+    };
+  };
   let controller: PursuitMapController | undefined;
   const captured = new Map<number, Element>();
   const names = ['setPointerCapture', 'releasePointerCapture', 'hasPointerCapture'] as const;
@@ -49,36 +66,51 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
       await pause();
       if (failNext) { failNext = false; throw new ApiError('Fixture conflict', 409, structuredClone(current)); }
       check(revision === current.revision, 'Mutation revision must follow the last response');
-      const id = operation.type === 'create' ? `created-${serial}` : operation.id;
+      const id = operation.type === 'create' ? `created-${serial}`
+        : operation.type === 'rename_many' ? operation.renames[0]?.id ?? null : operation.id;
       const before = current;
-      current = { ...applyOperation(current, operation, id), revision: `r${++serial}`, git_head: `c${serial}` };
-      history.set(current.git_head, before);
-      return { snapshot: structuredClone(current), commit: current.git_head, operation_id: current.git_head, repaired_references: [], undoable: true, selected_id: id };
+      const remaps = operation.type === 'rename_many'
+        ? operation.renames.filter((rename) => rename.id.startsWith('plain:'))
+          .map((rename, index) => ({ from: rename.id, to: `promoted-${serial + 1}-${index}` }))
+        : [];
+      current = { ...remapSnapshot(applyOperation(current, operation, id), remaps), revision: `r${++serial}`, git_head: `c${serial}` };
+      history.set(current.git_head, { snapshot: before, remaps: remaps.map(({ from, to }) => ({ from: to, to: from })) });
+      const selected = remaps.find((mapping) => mapping.from === id)?.to ?? id;
+      return { snapshot: structuredClone(current), commit: current.git_head, operation_id: current.git_head, repaired_references: [], undoable: true, selected_id: selected, id_remaps: remaps };
     },
     history: async (_kind, _revision, commit) => {
       const restored = history.get(commit);
       check(restored, 'Undo must reference a saved interaction');
       const before = current;
-      current = { ...restored, revision: `r${++serial}`, git_head: `c${serial}` };
-      history.set(current.git_head, before);
-      return { snapshot: structuredClone(current), commit: current.git_head, operation_id: current.git_head, repaired_references: [], undoable: true, selected_id: current.root_ids[0] };
+      current = { ...restored.snapshot, revision: `r${++serial}`, git_head: `c${serial}` };
+      history.set(current.git_head, { snapshot: before, remaps: restored.remaps.map(({ from, to }) => ({ from: to, to: from })) });
+      return { snapshot: structuredClone(current), commit: current.git_head, operation_id: current.git_head, repaired_references: [], undoable: true, selected_id: null, id_remaps: restored.remaps };
     },
   };
   const $ = <T extends HTMLElement = HTMLElement>(selector: string): T => {
     const element = host.querySelector<T>(selector); check(element, `Missing ${selector}`); return element;
   };
-  const topic = (id: string) => $(`#pm-node-${id}`);
+  const topic = (id: string): HTMLElement => {
+    const element = document.getElementById(`pm-node-${id}`);
+    check(element && host.contains(element), `Missing topic ${id}`);
+    return element;
+  };
+  const selectedIds = () => [...host.querySelectorAll<HTMLElement>('me-tpc[aria-selected="true"]')]
+    .map((node) => node.id.slice('pm-node-'.length));
+  const checkSelected = (expected: string[], message: string) => {
+    check(JSON.stringify(selectedIds().sort()) === JSON.stringify([...expected].sort()), message);
+  };
   const button = (command: string, scope = '.pm-toolbar') => $<HTMLButtonElement>(`${scope} [data-command="${command}"]`);
   const key = (name: string, options: KeyboardEventInit = {}, target = $('.pm-canvas')) => {
     target.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true, ...options }));
   };
-  const pointer = (target: HTMLElement, type: string, x: number, y: number, buttons = 1) => {
-    target.dispatchEvent(new PointerEvent(type, { pointerId: 1, pointerType: 'mouse', button: 0, buttons, clientX: x, clientY: y, bubbles: true, cancelable: true }));
+  const pointer = (target: HTMLElement, type: string, x: number, y: number, buttons = 1, options: PointerEventInit = {}) => {
+    target.dispatchEvent(new PointerEvent(type, { pointerId: 1, pointerType: 'mouse', button: 0, buttons, clientX: x, clientY: y, bubbles: true, cancelable: true, ...options }));
   };
-  const select = (id: string) => {
+  const select = (id: string, options: PointerEventInit = {}) => {
     const node = topic(id); const rect = node.getBoundingClientRect();
-    pointer(node, 'pointerdown', rect.x + rect.width / 2, rect.y + rect.height / 2);
-    pointer(node, 'pointerup', rect.x + rect.width / 2, rect.y + rect.height / 2, 0);
+    pointer(node, 'pointerdown', rect.x + rect.width / 2, rect.y + rect.height / 2, 1, options);
+    pointer(node, 'pointerup', rect.x + rect.width / 2, rect.y + rect.height / 2, 0, options);
   };
   const click = (target: HTMLElement) => {
     const rect = target.getBoundingClientRect();
@@ -87,9 +119,10 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     target.click();
   };
   const settled = () => until(() => !controller!.hasUnsavedChanges, 'The save queue did not settle');
-  const reset = async (count = 22) => {
+  const reset = async (count = 22, prepare?: (snapshot: Snapshot) => Snapshot) => {
     controller?.destroy();
-    current = { ...forestFixture(count), root_key: `interaction-check-${crypto.randomUUID()}` };
+    const fixture = { ...forestFixture(count), root_key: `interaction-check-${crypto.randomUUID()}` };
+    current = prepare ? prepare(fixture) : fixture;
     operations.length = 0;
     controller = await mountMap(host, transport, { selectionBoundary });
     await pause();
@@ -123,6 +156,94 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     check(topic('design').getAttribute('aria-selected') === 'true' && !$('.pm-topic-toolbar').hidden, 'A click emitted after panning must keep the selection');
     click(document.body);
     check($('.pm-topic-toolbar').hidden && !host.querySelector('[aria-selected="true"]'), 'Clicks outside the map dismiss the toolbar');
+
+    await reset();
+    const marquee = async (ids: string[], additive = false, reverse = false) => {
+      const rects = ids.map((id) => topic(id).getBoundingClientRect());
+      const bounds = {
+        left: Math.min(...rects.map((rect) => rect.left)) - 8,
+        top: Math.min(...rects.map((rect) => rect.top)) - 8,
+        right: Math.max(...rects.map((rect) => rect.right)) + 8,
+        bottom: Math.max(...rects.map((rect) => rect.bottom)) + 8,
+      };
+      const start = reverse ? { x: bounds.right, y: bounds.bottom } : { x: bounds.left, y: bounds.top };
+      const end = reverse ? { x: bounds.left, y: bounds.top } : { x: bounds.right, y: bounds.bottom };
+      const modifiers = { shiftKey: true, ctrlKey: additive };
+      const canvas = $('.pm-canvas');
+      pointer(canvas, 'pointerdown', start.x, start.y, 1, modifiers);
+      pointer(canvas, 'pointermove', end.x, end.y, 1, modifiers);
+      await pause();
+      const rectangle = host.querySelector<HTMLElement>('.pm-selection-rectangle');
+      check(rectangle, 'Shift-drag shows a marquee rectangle while selecting');
+      const rectangleBox = rectangle.getBoundingClientRect();
+      const rectangleStyle = getComputedStyle(rectangle);
+      check(rectangleBox.width > 8 && rectangleBox.height > 8 && rectangleStyle.visibility !== 'hidden'
+        && rectangleStyle.display !== 'none' && parseFloat(rectangleStyle.borderTopWidth) > 0,
+      'The marquee has visible, nonzero geometry');
+      pointer(canvas, 'pointerup', end.x, end.y, 0, modifiers);
+      check(!host.querySelector('.pm-selection-rectangle'), 'The marquee rectangle is removed after selection');
+    };
+    select('design');
+    const primaryUpdates: Array<string | null> = [];
+    const unsubscribePrimary = controller!.subscribeSelection((id) => primaryUpdates.push(id));
+    select('research', { ctrlKey: true });
+    checkSelected(['design', 'research'], 'Ctrl-click adds a secondary direction to the selection');
+    check(controller!.getSelectedId() === 'design' && primaryUpdates.length === 1, 'Adding a secondary direction preserves the primary Manager reference');
+    select('research', { ctrlKey: true });
+    checkSelected(['design'], 'Ctrl-click removes a secondary direction without disturbing the primary selection');
+    check(primaryUpdates.length === 1, 'Toggling a secondary direction does not notify the singular selection facade');
+    unsubscribePrimary();
+    select('writing');
+    await marquee(['design', 'interaction']);
+    checkSelected(['design', 'interaction'], 'Shift-drag selects exactly the fully enclosed directions');
+    check(topic('visual').getAttribute('aria-selected') === 'false', 'A partially intersecting direction is excluded from the marquee');
+    check(topic('writing').getAttribute('aria-selected') === 'false', 'Replacement marquee drops the previous selection');
+    const firstMarqueeIds = [...host.querySelectorAll<HTMLElement>('me-tpc[aria-selected="true"]')].map((node) => node.id.slice('pm-node-'.length));
+    await marquee(['research'], true, true);
+    check(firstMarqueeIds.every((id) => topic(id).getAttribute('aria-selected') === 'true') && topic('research').getAttribute('aria-selected') === 'true', 'Ctrl+Shift reverse-drag adds without clearing the existing selection');
+    check([...host.querySelectorAll<HTMLElement>('me-tpc[aria-selected="true"]')].every((node) => node.classList.contains('pm-selected')), 'Every selected direction has the app-owned visual state');
+    select('design', { ctrlKey: true });
+    check(topic('design').getAttribute('aria-selected') === 'false' && topic('research').getAttribute('aria-selected') === 'true', 'Ctrl-click toggles one member without clearing the group');
+    select('writing');
+    check(host.querySelectorAll('me-tpc[aria-selected="true"]').length === 1 && topic('writing').getAttribute('aria-selected') === 'true', 'A normal click returns to ordinary single selection');
+    select('research'); key(' '); await pause();
+    await marquee(['research']);
+    checkSelected(['research'], 'A marquee does not select descendants hidden by a collapsed branch');
+    check(!host.querySelector('#pm-node-level-1'), 'Collapsed descendants stay absent from marquee hit testing');
+    select('design');
+    const researchRect = topic('research').getBoundingClientRect();
+    pointer($('.pm-canvas'), 'pointerdown', researchRect.left - 8, researchRect.top - 8, 1, { shiftKey: true });
+    pointer($('.pm-canvas'), 'pointermove', researchRect.right + 8, researchRect.bottom + 8, 1, { shiftKey: true });
+    await pause(); key('Escape');
+    check(!host.querySelector('.pm-selection-rectangle') && captured.size === 0 && topic('design').getAttribute('aria-selected') === 'true', 'Escape cancels marquee preview and restores the committed selection');
+    check(operations.length === 0, 'Marquee and modifier selection remain local view state');
+    report('PASS marquee replace/add, reverse drag, modifier toggle, normal click, visual state, and cancellation');
+
+    await reset();
+    select('design'); select('research', { ctrlKey: true });
+    const moveSource = topic('design').getBoundingClientRect();
+    const moveTarget = topic('writing').getBoundingClientRect();
+    pointer(topic('design'), 'pointerdown', moveSource.x + moveSource.width / 2, moveSource.y + moveSource.height / 2);
+    checkSelected(['design'], 'Starting a structural drag collapses a group to the dragged direction');
+    pointer($('.pm-canvas'), 'pointermove', moveTarget.x + moveTarget.width / 2, moveTarget.y + moveTarget.height / 2);
+    pointer($('.pm-canvas'), 'pointerup', moveTarget.x + moveTarget.width / 2, moveTarget.y + moveTarget.height / 2, 0);
+    await settled();
+    const moved = operations.at(-1);
+    check(operations.slice().length === 1 && moved?.type === 'move' && moved.id === 'design'
+      && indexTree(current!).get('design')?.parent_id === 'writing'
+      && indexTree(current!).get('research')?.parent_id === 'directions',
+    'Dragging a selected member moves only that direction');
+
+    await reset();
+    select('design'); select('research', { ctrlKey: true });
+    key('Delete'); await settled();
+    const deleted = operations.at(-1);
+    check(operations.slice().length === 1 && deleted?.type === 'delete' && deleted.id === 'design'
+      && !indexTree(current!).has('design') && indexTree(current!).has('research'),
+    'Deleting a multi-selection removes only its primary direction');
+    report('PASS multi-selection does not introduce bulk move or delete behavior');
+
+    await reset();
     select('design');
     click(button('note', '.pm-toolbar'));
     check(!$('.pm-note').hidden && topic('design').getAttribute('aria-selected') === 'true', 'Fixed toolbar actions retain their selected target');
@@ -177,12 +298,60 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     report('PASS readable non-color conversation state cues and accessible labels');
 
     await reset();
+    select('design'); select('research', { ctrlKey: true });
+    click(button('bold', '.pm-topic-toolbar')); await settled();
+    check(topic('design').querySelector('strong') && topic('research').querySelector('strong'), 'One formatting action applies to every selected direction');
+    const grouped = operations.at(-1);
+    check(operations.slice().length === 1 && grouped?.type === 'rename_many' && grouped.renames.length === 2, 'Multi-selection formatting sends one narrow compound operation');
+    button('undo').click(); await settled();
+    check(!topic('design').querySelector('strong') && !topic('research').querySelector('strong'), 'One Undo restores every title in the grouped format action');
+    button('redo').click(); await settled();
+    check(topic('design').querySelector('strong') && topic('research').querySelector('strong'), 'One Redo reapplies every grouped title');
+    report('PASS multi-selection formatting uses one operation and one undo/redo step');
+
+    await reset();
+    select('design'); click(button('underline', '.pm-topic-toolbar')); await settled();
+    select('research', { ctrlKey: true });
+    check(button('underline', '.pm-topic-toolbar').getAttribute('aria-pressed') === 'mixed', 'A partially marked selection exposes the mixed formatting state');
+    const beforeMixedFormat = operations.length;
+    click(button('underline', '.pm-topic-toolbar')); await settled();
+    const groupedUnderline = operations.at(-1);
+    check(topic('design').querySelector('u') && topic('research').querySelector('u')
+      && operations.length === beforeMixedFormat + 1 && groupedUnderline?.type === 'rename_many'
+      && groupedUnderline.renames.length === 1 && groupedUnderline.renames[0].id === 'research',
+    'Applying a mixed underline state marks every selected direction in one operation');
+    click(button('strike', '.pm-topic-toolbar')); await settled();
+    const groupedStrike = operations.at(-1);
+    check(topic('design').querySelector('s') && topic('research').querySelector('s')
+      && groupedStrike?.type === 'rename_many' && groupedStrike.renames.length === 2,
+    'Strikethrough also applies to the complete selection in one operation');
+    report('PASS mixed underline and grouped strikethrough formatting');
+
+    const plainId = 'plain:PURSUITS.md:19';
+    await reset(22, (snapshot) => remapSnapshot(snapshot, [{ from: 'design', to: plainId }]));
+    select(plainId); key(' '); select('research', { ctrlKey: true });
+    click(button('bold', '.pm-topic-toolbar')); await settled();
+    const promoted = current!.items.find((item) => item.title === '**Design 设计**')?.id;
+    check(promoted && promoted !== plainId && controller!.getSelectedId() === promoted
+      && topic(promoted).getAttribute('aria-expanded') === 'false' && topic('research').getAttribute('aria-selected') === 'true',
+    'Grouped formatting remaps a promoted primary while preserving selection and collapsed view state');
+    button('undo').click(); await settled();
+    check(controller!.getSelectedId() === plainId && topic(plainId).getAttribute('aria-expanded') === 'false'
+      && topic('research').getAttribute('aria-selected') === 'true',
+    'Undo applies the inverse ID remap to multi-selection view state');
+    button('redo').click(); await settled();
+    check(controller!.getSelectedId() === promoted && topic(promoted).getAttribute('aria-expanded') === 'false'
+      && topic('research').getAttribute('aria-selected') === 'true',
+    'Redo reapplies the forward ID remap to multi-selection view state');
+    report('PASS plural ID remaps survive grouped formatting and undo/redo');
+
+    await reset();
     select('design');
     check(!$('.pm-topic-toolbar').hidden, 'Selecting a real node shows its toolbar');
     for (const command of ['bold', 'underline', 'strike']) { click(button(command, '.pm-topic-toolbar')); await settled(); }
     check(indexTree(current!).get('design')!.title === '**<u>~~Design 设计~~</u>**', 'B/U/S must use canonical rename titles');
     check(topic('design').querySelector('strong > u > s'), 'All three marks must be rendered');
-    check(operations.every((operation) => operation.type === 'rename' && operation.id === 'design'), 'Formatting reuses rename and keeps the selected id');
+    check(operations.every((operation) => operation.type === 'rename_many' && operation.renames.length === 1 && operation.renames[0].id === 'design'), 'Formatting uses the atomic title operation and keeps the selected id');
     check(document.activeElement === $('.pm-canvas'), 'Formatting keeps canvas keyboard focus');
     for (const [name, options] of [['b', { ctrlKey: true }], ['u', { metaKey: true }], ['X', { ctrlKey: true, shiftKey: true }]] as const) {
       key(name, options); await settled(); key(name, options); await settled();
@@ -294,11 +463,13 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     for (const command of ['bold', 'underline', 'strike', 'focus']) check(button(command, '.pm-topic-toolbar').disabled, 'Read-only formatting and Focus writes must be disabled');
     report('PASS HTML injection regression checks and read-only controls');
 
-    await reset(); select('design'); failNext = true;
+    await reset(); select('design'); select('research', { ctrlKey: true }); failNext = true;
     button('bold', '.pm-topic-toolbar').click(); await settled();
-    check(indexTree(current!).get('design')!.title === 'Design 设计' && !topic('design').querySelector('strong'), 'A failed format operation restores authoritative text');
-    check(topic('design').getAttribute('aria-selected') === 'true', 'Failed formatting preserves selection');
-    report('PASS formatting conflict recovery');
+    check(indexTree(current!).get('design')!.title === 'Design 设计' && indexTree(current!).get('research')!.title === 'Research 研究'
+      && !topic('design').querySelector('strong') && !topic('research').querySelector('strong'), 'A failed grouped format operation restores every authoritative title');
+    check(topic('design').getAttribute('aria-selected') === 'true' && topic('research').getAttribute('aria-selected') === 'true', 'Failed formatting preserves the multi-selection');
+    check(operations.slice().length === 1 && operations[0].type === 'rename_many', 'A failed grouped format is still one atomic request');
+    report('PASS grouped formatting conflict recovery');
 
     current = applyOperation(current!, { type: 'rename', id: 'design', title: 'A **bold** label' });
     indexTree(current).get('research')!.edges = [['rel', 'design']];

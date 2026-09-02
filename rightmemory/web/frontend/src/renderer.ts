@@ -11,7 +11,7 @@ import {
 } from './conversation-indicators.ts';
 
 interface Callbacks {
-  select(id: string | null): void;
+  select(ids: string[], primary: string | null): void;
   collapse(id: string, collapsed: boolean, preserveDrag?: boolean): void;
   move(operation: Operation): void;
   editStart(id: string, title: string): void;
@@ -56,16 +56,30 @@ export class MapRenderer {
   private hoverId: string | null = null;
   private hoverTimer: ReturnType<typeof setTimeout> | undefined;
   private conversationIndicators: ReadonlyMap<string, PursuitConversationIndicator> = new Map();
+  private marquee: {
+    pointer: number;
+    start: { x: number; y: number };
+    current: { x: number; y: number };
+    additive: boolean;
+    baseIds: string[];
+    basePrimary: string | null;
+    previewIds: string[];
+    previewPrimary: string | null;
+    moved: boolean;
+    element: HTMLDivElement | null;
+  } | null = null;
+  private marqueeFrame: number | null = null;
 
   constructor(private host: HTMLElement, snapshot: Snapshot, view: ViewState, private callbacks: Callbacks) {
     this.snapshot = snapshot;
-    this.view = view;
+    this.view = { ...view, collapsed: [...view.collapsed], selectedIds: [...view.selectedIds] };
     this.viewport = { ...(view.viewport ?? { x: 0, y: 0, scale: 1 }) };
     this.needsFit = !view.viewport;
     this.forest.className = 'pm-forest';
     host.append(this.forest);
     host.tabIndex = 0;
     host.setAttribute('role', 'tree');
+    host.setAttribute('aria-multiselectable', 'true');
     host.setAttribute('aria-label', 'Pursuit directions. Enter adds a sibling; Tab adds a child.');
     host.setAttribute('aria-describedby', 'pm-keyboard-hint');
     const events = { signal: this.abort.signal };
@@ -74,8 +88,7 @@ export class MapRenderer {
       const target = clicked.closest<HTMLElement>('[data-map-marker], me-epd');
       if (!target) {
         if (!this.suppressCanvasClick && !clicked.closest('me-tpc, #input-box')) {
-          this.select(null);
-          this.callbacks.select(null);
+          this.commitSelection([], null);
         }
         return;
       }
@@ -93,9 +106,11 @@ export class MapRenderer {
       const topic = (event.target as HTMLElement).closest<Topic>('me-tpc');
       if (topic) { event.preventDefault(); void this.beginEdit(topic.nodeObj.id); }
     }, events);
-    host.addEventListener('pointerdown', (event) => this.pointerDown(event), events);
-    host.addEventListener('pointermove', (event) => this.pointerMove(event), events);
-    host.addEventListener('pointerup', (event) => this.pointerUp(event), events);
+    // The app owns cross-root selection and gestures. Capture prevents Mind
+    // Elixir's per-tree selection and box-selection handlers from racing it.
+    host.addEventListener('pointerdown', (event) => this.pointerDown(event), { ...events, capture: true });
+    host.addEventListener('pointermove', (event) => this.pointerMove(event), { ...events, capture: true });
+    host.addEventListener('pointerup', (event) => this.pointerUp(event), { ...events, capture: true });
     host.addEventListener('pointercancel', () => this.cancelGesture(), events);
     host.addEventListener('lostpointercapture', (event) => {
       if (this.captures.get(event.pointerId) === event.target) this.cancelGesture();
@@ -108,7 +123,7 @@ export class MapRenderer {
       event.preventDefault();
       this.cancelGesture();
       const id = target.closest<Topic>('me-tpc')?.nodeObj.id ?? null;
-      if (id) { this.select(id); this.callbacks.select(id); }
+      if (id) this.commitSelection([id], id);
       this.callbacks.contextMenu(id, event.clientX, event.clientY);
     }, events);
     host.addEventListener('wheel', (event) => {
@@ -204,9 +219,13 @@ export class MapRenderer {
 
   render(snapshot: Snapshot, view: ViewState, preserveDrag = false): void {
     this.snapshot = snapshot;
-    this.view = view;
-    if (this.editing) { this.renderDeferred = true; return; }
+    if (this.editing) {
+      this.view = { ...view, collapsed: [...view.collapsed], selectedIds: [...view.selectedIds] };
+      this.renderDeferred = true;
+      return;
+    }
     if (!preserveDrag) this.cancelGesture();
+    this.view = { ...view, collapsed: [...view.collapsed], selectedIds: [...view.selectedIds] };
     const anchor = this.topic(view.selected)?.getBoundingClientRect();
     const roots = new Set(snapshot.root_ids);
     for (const [id, map] of this.maps) {
@@ -228,7 +247,7 @@ export class MapRenderer {
     }
     if (this.needsFit) this.fit();
     else this.applyViewport();
-    this.select(view.selected);
+    this.selectMany(view.selectedIds, view.selected);
   }
 
   private layoutMaps(): void {
@@ -255,12 +274,14 @@ export class MapRenderer {
 
   private decorate(): void {
     const items = indexTree(this.snapshot);
+    const selected = new Set(this.view.selectedIds);
     for (const topic of this.host.querySelectorAll<Topic>('me-tpc')) {
       const id = topic.nodeObj.id;
       const item = items.get(id)!;
       topic.setAttribute('role', 'treeitem');
       topic.setAttribute('aria-label', titleText(item.title));
-      topic.setAttribute('aria-selected', String(this.view.selected === id));
+      topic.classList.remove('selected');
+      topic.setAttribute('aria-selected', String(selected.has(id)));
       topic.id = `pm-node-${id}`;
       topic.tabIndex = -1;
       topic.classList.toggle('pm-readonly', !item.editable);
@@ -331,17 +352,34 @@ export class MapRenderer {
   }
 
   select(id: string | null, center = false): void {
-    this.view.selected = id;
-    this.host.querySelectorAll('[aria-selected="true"], me-tpc.selected').forEach((entry) => {
-      entry.setAttribute('aria-selected', 'false'); entry.classList.remove('selected');
-    });
-    const topic = this.topic(id);
-    if (!topic) { this.host.removeAttribute('aria-activedescendant'); this.notifyGeometry(); return; }
-    topic.classList.add('selected');
-    topic.setAttribute('aria-selected', 'true');
-    this.host.setAttribute('aria-activedescendant', topic.id);
-    if (center) this.centerReadableNode(topic);
+    this.selectMany(id ? [id] : [], id, center);
+  }
+
+  selectMany(ids: readonly string[], primary: string | null, center = false): void {
+    const selected = [...new Set(ids)];
+    const selectedIds = new Set(selected);
+    if (!primary || !selectedIds.has(primary)) primary = selected[0] ?? null;
+    this.view.selectedIds = selected;
+    this.view.selected = primary;
+    let activeTopic: Topic | undefined;
+    for (const topic of this.host.querySelectorAll<Topic>('me-tpc')) {
+      const id = topic.nodeObj.id;
+      const isSelected = selectedIds.has(id);
+      topic.setAttribute('aria-selected', String(isSelected));
+      topic.classList.remove('selected');
+      topic.classList.toggle('pm-selected', isSelected);
+      topic.classList.toggle('pm-active', id === primary);
+      if (!activeTopic && id === primary) activeTopic = topic;
+    }
+    if (!activeTopic) { this.host.removeAttribute('aria-activedescendant'); this.notifyGeometry(); return; }
+    this.host.setAttribute('aria-activedescendant', activeTopic.id);
+    if (center) this.centerReadableNode(activeTopic);
     this.notifyGeometry();
+  }
+
+  private commitSelection(ids: readonly string[], primary: string | null, center = false): void {
+    this.selectMany(ids, primary, center);
+    this.callbacks.select([...this.view.selectedIds], this.view.selected);
   }
 
   ensureVisible(id: string): void {
@@ -369,7 +407,7 @@ export class MapRenderer {
     const root = topic?.closest<HTMLElement>('.pm-root-map')?.dataset.rootId;
     if (!topic || !root) return;
     this.editText = text;
-    this.select(id, true);
+    this.commitSelection([id], id, true);
     await this.maps.get(root)!.mind.beginEdit(topic);
   }
 
@@ -412,16 +450,48 @@ export class MapRenderer {
   }
 
   private pointerDown(event: PointerEvent): void {
-    this.suppressCanvasClick = this.gestures.active;
+    this.suppressCanvasClick = this.gestures.active || !!this.marquee;
     const target = event.target as HTMLElement;
     if (this.editing || target.closest('[data-map-marker], me-epd, #input-box')) return;
     const topic = target.closest<Topic>('me-tpc');
     const id = event.button === 0 ? topic?.nodeObj.id ?? null : null;
     if (this.gestures.has(event.pointerId)) this.cancelGesture();
+    if (this.marquee) this.cancelGesture();
     if (event.pointerType === 'touch' && !this.gestures.touching) this.cancelGesture();
-    if (event.pointerType !== 'touch' && this.gestures.active) return;
-    if (id) { this.select(id); this.callbacks.select(id); }
+    if (event.pointerType !== 'touch' && this.gestures.active) { event.stopPropagation(); return; }
+    event.stopPropagation();
+    if (id) {
+      const modified = event.pointerType !== 'touch' && (event.ctrlKey || event.metaKey);
+      if (modified) {
+        const ids = [...this.view.selectedIds];
+        const index = ids.indexOf(id);
+        if (index < 0) this.commitSelection([...ids, id], this.view.selected ?? id);
+        else {
+          ids.splice(index, 1);
+          this.commitSelection(ids, this.view.selected === id ? ids.at(-1) ?? null : this.view.selected);
+        }
+      } else this.commitSelection([id], id);
+    }
     this.focus();
+    if (!id && event.pointerType !== 'touch' && event.button === 0 && event.shiftKey) {
+      const sample = this.pointerSample(event);
+      this.marquee = {
+        pointer: event.pointerId,
+        start: { x: sample.x, y: sample.y },
+        current: { x: sample.x, y: sample.y },
+        additive: event.ctrlKey || event.metaKey,
+        baseIds: [...this.view.selectedIds],
+        basePrimary: this.view.selected,
+        previewIds: [...this.view.selectedIds],
+        previewPrimary: this.view.selected,
+        moved: false,
+        element: null,
+      };
+      this.host.setPointerCapture(event.pointerId);
+      this.captures.set(event.pointerId, this.host);
+      event.preventDefault();
+      return;
+    }
     if (event.pointerType !== 'touch' && id && !this.canEdit(id)) return;
     if (!this.gestures.start(this.pointerSample(event), id, this.viewport)) return;
     if (event.pointerType === 'touch') this.beginViewMotion();
@@ -434,6 +504,29 @@ export class MapRenderer {
   }
 
   private pointerMove(event: PointerEvent): void {
+    if (this.marquee?.pointer === event.pointerId) {
+      event.stopPropagation();
+      const sample = this.pointerSample(event);
+      this.marquee.current = { x: sample.x, y: sample.y };
+      if (!event.buttons) { this.cancelGesture(); return; }
+      if (!this.marquee.moved && Math.hypot(sample.x - this.marquee.start.x, sample.y - this.marquee.start.y) < 5) return;
+      if (!this.marquee.moved) {
+        this.marquee.moved = true;
+        this.suppressCanvasClick = true;
+        this.marquee.element = document.createElement('div');
+        this.marquee.element.className = 'pm-selection-rectangle';
+        this.host.append(this.marquee.element);
+        this.beginViewMotion();
+      }
+      event.preventDefault();
+      if (this.marqueeFrame === null) this.marqueeFrame = requestAnimationFrame(() => {
+        this.marqueeFrame = null;
+        this.updateMarquee();
+      });
+      return;
+    }
+    if (!this.gestures.has(event.pointerId)) return;
+    event.stopPropagation();
     const motion = this.gestures.move(this.pointerSample(event));
     if (motion.kind === 'idle') return;
     // A drag can end in a browser click event; it must not clear the selection.
@@ -448,9 +541,40 @@ export class MapRenderer {
       return;
     }
     const id = motion.id;
+    if (this.view.selected !== id || this.view.selectedIds.length !== 1) this.commitSelection([id], id);
     this.dragPointer = { id, x: event.clientX, y: event.clientY };
     this.updateDrop();
     this.updateAutoPan();
+  }
+
+  private updateMarquee(): void {
+    const marquee = this.marquee;
+    if (!marquee?.moved || !marquee.element) return;
+    const left = Math.min(marquee.start.x, marquee.current.x);
+    const top = Math.min(marquee.start.y, marquee.current.y);
+    const right = Math.max(marquee.start.x, marquee.current.x);
+    const bottom = Math.max(marquee.start.y, marquee.current.y);
+    marquee.element.style.left = `${left}px`;
+    marquee.element.style.top = `${top}px`;
+    marquee.element.style.width = `${right - left}px`;
+    marquee.element.style.height = `${bottom - top}px`;
+    const canvas = this.host.getBoundingClientRect();
+    const selection = { left: canvas.left + left, top: canvas.top + top, right: canvas.left + right, bottom: canvas.top + bottom };
+    const hits: string[] = [];
+    for (const topic of this.host.querySelectorAll<Topic>('me-tpc')) {
+      const rect = topic.getBoundingClientRect();
+      if (rect.width && rect.height && rect.left >= selection.left && rect.right <= selection.right
+        && rect.top >= selection.top && rect.bottom <= selection.bottom) hits.push(topic.nodeObj.id);
+    }
+    const baseIds = new Set(marquee.baseIds);
+    const hitIds = new Set(hits);
+    const ids = marquee.additive ? [...marquee.baseIds, ...hits.filter((id) => !baseIds.has(id))] : hits;
+    const primary = marquee.additive && marquee.basePrimary && baseIds.has(marquee.basePrimary)
+      ? marquee.basePrimary
+      : marquee.basePrimary && hitIds.has(marquee.basePrimary) ? marquee.basePrimary : ids[0] ?? null;
+    marquee.previewIds = ids;
+    marquee.previewPrimary = primary;
+    this.selectMany(ids, primary);
   }
 
   private updateDrop(): void {
@@ -532,7 +656,25 @@ export class MapRenderer {
   }
 
   private pointerUp(event: PointerEvent): void {
+    if (this.marquee?.pointer === event.pointerId) {
+      event.stopPropagation();
+      const marquee = this.marquee;
+      const sample = this.pointerSample(event);
+      marquee.current = { x: sample.x, y: sample.y };
+      if (this.marqueeFrame !== null) cancelAnimationFrame(this.marqueeFrame);
+      this.marqueeFrame = null;
+      if (marquee.moved) this.updateMarquee();
+      this.marquee = null;
+      marquee.element?.remove();
+      this.releasePointer(event.pointerId);
+      this.moving = !!this.wheelTimer;
+      if (marquee.moved) this.callbacks.select([...marquee.previewIds], marquee.previewPrimary);
+      else this.selectMany(marquee.baseIds, marquee.basePrimary);
+      this.notifyGeometry();
+      return;
+    }
     if (!this.gestures.has(event.pointerId)) return;
+    event.stopPropagation();
     if (this.dragPointer) { this.dragPointer.x = event.clientX; this.dragPointer.y = event.clientY; this.updateDrop(); }
     const moved = this.gestures.end(event.pointerId, this.viewport);
     const operation = moved ? this.drop : null;
@@ -562,7 +704,12 @@ export class MapRenderer {
 
   cancelGesture(): void {
     if (this.panFrame !== null) cancelAnimationFrame(this.panFrame);
-    this.panFrame = null; this.panTime = null; this.dragPointer = null;
+    if (this.marqueeFrame !== null) cancelAnimationFrame(this.marqueeFrame);
+    this.panFrame = null; this.panTime = null; this.marqueeFrame = null; this.dragPointer = null;
+    const marquee = this.marquee;
+    this.marquee = null;
+    marquee?.element?.remove();
+    if (marquee) this.selectMany(marquee.baseIds, marquee.basePrimary);
     this.updateHover(null);
     this.gestures.cancel();
     for (const pointer of this.captures.keys()) this.releasePointer(pointer);

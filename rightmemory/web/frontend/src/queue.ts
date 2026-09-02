@@ -21,7 +21,7 @@ export interface QueueChange {
   snapshot: Snapshot;
   pending: number;
   error?: Error;
-  remapped?: { from: string; to: string };
+  remapped?: Array<{ from: string; to: string }>;
   result?: MutationResult;
 }
 
@@ -89,24 +89,29 @@ export class MutationQueue {
         try {
           const result = await this.transport.mutate(this.confirmed.revision, entry.operation);
           if (result.snapshot.root_key !== this.confirmed.root_key) throw new Error('The active root changed. Reopen the Pursuit Map before editing.');
-          let remapped: QueueChange['remapped'];
+          const remapped = [...(result.id_remaps ?? [])];
+          const addFallbackRemap = (from: string, to: string) => {
+            if (from !== to && !remapped.some((mapping) => mapping.from === from)) remapped.push({ from, to });
+          };
           if (entry.operation.type === 'create' && entry.temporaryId) {
             const created = result.selected_id ?? result.snapshot.items.find((item) => !this.confirmed.items.some((old) => old.id === item.id))?.id;
             if (!created) throw new Error('The saved direction was not returned by the server. Reload before continuing.');
-            remapped = { from: entry.temporaryId, to: created };
-          } else if ('id' in entry.operation) {
+            addFallbackRemap(entry.temporaryId, created);
+          } else if (entry.operation.type !== 'delete' && 'id' in entry.operation) {
             const previousId = entry.operation.id;
             if (result.selected_id && result.selected_id !== previousId && !result.snapshot.items.some((item) => item.id === previousId)) {
-              remapped = { from: previousId, to: result.selected_id };
+              addFallbackRemap(previousId, result.selected_id);
             }
           }
           this.pending.shift();
           this.confirmed = result.snapshot;
-          if (remapped) this.pending.forEach((pending) => { pending.operation = remapOperation(pending.operation, remapped!.from, remapped!.to); });
+          for (const mapping of remapped) {
+            this.pending.forEach((pending) => { pending.operation = remapOperation(pending.operation, mapping.from, mapping.to); });
+          }
           if (result.undoable && result.commit) this.undoStack.push(result.commit);
           if (result.commit) this.redoStack = [];
           entry.resolve(result);
-          this.emit({ result, remapped });
+          this.emit({ result, remapped: remapped.length ? remapped : undefined });
         } catch (cause) {
           const error = cause instanceof Error ? cause : new Error(String(cause));
           const abandoned = this.pending.splice(0);
@@ -145,7 +150,8 @@ export class MutationQueue {
       if (result.commit) destination.push(result.commit);
       this.confirmed = result.snapshot;
       this.historyBusy = false;
-      this.emit({ result });
+      const remapped = result.id_remaps?.length ? [...result.id_remaps] : undefined;
+      this.emit({ result, remapped });
       return result;
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
