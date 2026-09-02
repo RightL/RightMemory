@@ -4,12 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rightmemory.conversations.opening_context import OpeningContextError, build_opening_context
+from rightmemory.opening_context import OpeningContextError, build_opening_context
 from rightmemory.graph import build_graph_manifest
 from rightmemory.pursuit_tree import load_pursuit_tree
 
 
-class ConversationOpeningContextTests(unittest.TestCase):
+class OpeningContextTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -26,9 +26,6 @@ class ConversationOpeningContextTests(unittest.TestCase):
         return build_opening_context(
             self.root,
             self.snapshot(item_id),
-            host_label="Remote host",
-            project_label="Execution project",
-            execution_cwd="/srv/execution-project",
         )
 
     def test_selects_only_current_direct_neighbors_and_logical_heading_ancestors(self) -> None:
@@ -85,7 +82,6 @@ Unrelated secret.
 
         context = self.build("current")
 
-        self.assertEqual(context.controller_memory_root, str(self.root))
         self.assertEqual(context.current.selection_id, "current")
         self.assertEqual(
             [section.selection_id for section in context.neighbors],
@@ -152,7 +148,6 @@ Unrelated secret.
         )
         self.assertNotIn(("outgoing", "doc", "two-hop"), context.edge_triples)
         self.assertTrue(all("\\" not in section.source_path for section in context.sections))
-        self.assertEqual(context.execution.execution_cwd, "/srv/execution-project")
 
     def test_rejects_stale_or_non_root_relative_snapshot_locations(self) -> None:
         self.write("MEMORY.md", "# Memory\n")
@@ -169,9 +164,6 @@ Unrelated secret.
                 build_opening_context(
                     self.root,
                     invalid,
-                    host_label="Host",
-                    project_label="Project",
-                    execution_cwd="/srv/project",
                 )
 
     def test_plain_snapshot_id_resolves_through_nested_f_logical_ancestry(self) -> None:

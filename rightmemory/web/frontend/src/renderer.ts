@@ -4,11 +4,6 @@ import { assertMove, dropOperation, indexTree, type Operation, type Snapshot } f
 import { forestData, palette, stackMaps, titleMarkup, titleText } from './canvas-data.ts';
 import { CanvasGestures, edgePanVelocity, type PointerSample } from './gestures.ts';
 import { type ViewState } from './view-state.ts';
-import {
-  conversationIndicatorLabel,
-  conversationIndicatorStates,
-  type PursuitConversationIndicator,
-} from './conversation-indicators.ts';
 
 interface Callbacks {
   select(ids: string[], primary: string | null): void;
@@ -55,7 +50,6 @@ export class MapRenderer {
   private panTime: number | null = null;
   private hoverId: string | null = null;
   private hoverTimer: ReturnType<typeof setTimeout> | undefined;
-  private conversationIndicators: ReadonlyMap<string, PursuitConversationIndicator> = new Map();
   private marquee: {
     pointer: number;
     start: { x: number; y: number };
@@ -150,11 +144,6 @@ export class MapRenderer {
   }
 
   get editing(): boolean { return this.editingId !== null; }
-
-  setConversationIndicators(indicators: ReadonlyMap<string, PursuitConversationIndicator>): void {
-    this.conversationIndicators = new Map(indicators);
-    this.applyConversationIndicators();
-  }
 
   selectedTopicRect(): DOMRect | null {
     if (this.editing || this.moving) return null;
@@ -317,37 +306,6 @@ export class MapRenderer {
         control.setAttribute('aria-label', `${this.view.collapsed.includes(id) ? 'Expand' : 'Collapse'} ${titleText(item.title)}`);
         control.setAttribute('aria-expanded', String(!this.view.collapsed.includes(id)));
       }
-    }
-    this.applyConversationIndicators();
-  }
-
-  private applyConversationIndicators(): void {
-    const items = indexTree(this.snapshot);
-    for (const topic of this.host.querySelectorAll<Topic>('me-tpc')) {
-      const id = topic.nodeObj.id;
-      const item = items.get(id);
-      topic.querySelectorAll(':scope > .pm-conversation-indicator').forEach((indicator) => indicator.remove());
-      topic.classList.remove('pm-has-conversation-indicator');
-      for (const state of conversationIndicatorStates) topic.classList.remove(`pm-conversation-${state}`);
-      delete topic.dataset.conversationState;
-      topic.removeAttribute('title');
-      if (item) topic.setAttribute('aria-label', titleText(item.title));
-
-      const indicator = this.conversationIndicators.get(id);
-      if (!indicator || !item) continue;
-      const label = conversationIndicatorLabel(indicator);
-      const marker = document.createElement('span');
-      marker.className = `pm-conversation-indicator pm-conversation-indicator-${indicator.state}`;
-      marker.dataset.conversationState = indicator.state;
-      marker.dataset.conversationCount = String(indicator.conversationCount);
-      marker.dataset.stateCount = String(indicator.stateCount);
-      marker.setAttribute('aria-hidden', 'true');
-      marker.title = label;
-      topic.classList.add('pm-has-conversation-indicator', `pm-conversation-${indicator.state}`);
-      topic.dataset.conversationState = indicator.state;
-      topic.setAttribute('aria-label', `${titleText(item.title)}. ${label}`);
-      topic.title = label;
-      topic.append(marker);
     }
   }
 

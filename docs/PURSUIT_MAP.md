@@ -10,35 +10,21 @@ rightmemory pursuit
 
 This starts or reuses the existing Web Studio and opens its Pursuit Map view. Use `rightmemory pursuit --no-open` to print the address without opening a browser, or `rightmemory --profile <name> pursuit` for a named profile. The command does not create a separate service.
 
-Web Studio accepts loopback hosts only, so another device cannot reach it directly. Opening the page automatically creates a signed local browser session and enables request protection without asking for a credential. The session keeps active-root selection and temporary conversation ownership separate between browsers; it is not remote-access authentication.
+Web Studio accepts loopback hosts only, so another device cannot reach it directly. Opening the page automatically creates a signed local browser session and enables request protection without asking for a credential. Each browser session has its own active-root selection; the session is not remote-access authentication.
 
 Check the active root before editing. The map uses the current browser session's selected root. Starting the service or opening the map does not rewrite Pursuit files.
 
-## Work Beside A Direction
+## Use A Direction In Codex App
 
-Selecting a direction also opens its conversation workspace. You can create a Codex conversation for that Pursuit, choose the model and reasoning effort for later messages, send messages, follow streamed replies, tool use, and subagent activity, answer approval or input requests, interrupt the current turn, and resume the conversation after reopening the browser. Subagent activity comes from App Server thread items and appears with the turn's other work details. Commentary remains expanded while a turn is working, then folds into an expandable work-details section when the final answer arrives. Message bodies render sanitized Markdown and TeX.
+Right-click a direction or open its **More** menu and choose **Copy context**. Paste the Markdown into an ordinary Codex App task or conversation alongside the work you want done. The copied text is background from the map; it does not ask the agent to perform a task by itself.
 
-The first actual send in each new Pursuit conversation includes a one-time opening snapshot in that same user turn. It selects the bound Pursuit, direct incoming and outgoing graph neighbors, and those blocks' logical heading ancestors from the canonical graph at send time. It includes each selected block's own Markdown and Controller-relative source, plus the stored execution host, project, and working directory. It does not expand second-hop edges, resource backings, Focus, sibling nodes, or child subtrees. The snapshot is saved before provider submission, shown collapsed with the user's first message, and is never dynamically refreshed on later turns. A new side chat gets its own snapshot; a conversation with accepted history does not get one retroactively.
+Context comes from the current canonical graph. It contains the selected direction's title and prose, its direct incoming and outgoing neighbors, those blocks' logical heading ancestors, and readable direct connections. Selection and ordering use the shared opening-context builder. It does not expand second-hop edges, resource backings, Focus, sibling nodes, or child subtrees. The text has no generated block identifiers, roles, source locations, revision, Memory-root path, or execution metadata. Copying does not edit Pursuit, create a Git commit, or record a conversation association.
 
-Paste a PNG or JPEG into the composer, or use the paperclip to select general files for the next message. A large text paste becomes a staged text attachment instead of filling the editor with thousands of lines. Up to eight inputs, including up to four images, can be staged for one message; images and general files may be up to 20 MiB each, and a managed text paste may be up to 5 MiB. RightMemory keeps these inputs in root-local runtime state. PNG and JPEG files use Codex's image input; other files are supplied as managed absolute paths and can be inspected only when the conversation's sandbox and tools support their format. For an SSH conversation, the backend copies them to the conversation host before starting the turn. Staged inputs are conversation workspace files, not Pursuit notes or graph resources.
+Use **Manager**, the installed `rightmemory-manager` skill in Codex App, for explicit RightMemory management or task coordination. Manager follows `maintain-rightmemory` for Memory and correction surfaces and `maintain-pursuit-map` for Pursuit, preserving their ownership and validated editing workflows. It carries out an explicit request directly, asking when the target or intended meaning cannot be resolved safely, and refreshes and verifies canonical state after requested changes.
 
-Side chats provide a temporary place to explore without extending the attached conversation. Each side chat is a separate App Server thread scoped to the current browser/app session; closing that session discards it. Side chats are not durable Pursuit conversations and do not appear as attached work on the map.
+When you ask to create or coordinate Codex work, Manager uses Codex App's native project and task tools. It preserves your objective and relevant context without inventing requirements or prescribing implementation before the receiving task inspects its project. A separate task requires your explicit request or confirmation of a concrete proposal.
 
-Conversation indicators on a node summarize attached work that is running, waiting for input, finished with an unread final answer, or completed. They help you find activity without turning the map into a task tracker. A completed turn never marks a Pursuit complete, changes Focus, or writes progress into its note.
-
-Each conversation has one primary Pursuit attachment and runs in one registered project on one host. A project is the working directory passed to Codex, not a second copy of the Pursuit tree. The built-in local project uses the active RightMemory root. Additional local or SSH projects can point at the repositories where the work actually happens.
-
-The execution working directory is captured when a conversation is created. Editing a registered project path changes future conversations only; existing conversations and their replacement or side-chat threads retain the captured path. Similarly, an SSH alias that already owns conversation history cannot be repointed to another target in place. Register the new execution identity as another host so old provider thread IDs keep their original meaning.
-
-The fixed **Manager** entry opens persistent Codex conversations that belong to the active Memory root rather than a Pursuit. Manager always executes locally on the Web Studio controller with the active root as its working directory. It reuses ordinary history, models, Stop, approvals, input requests, and attachments, but does not use side-chat cleanup or appear in Pursuit indicators. Opening Manager preserves the current map selection and stages the active selection's stable Pursuit ID as a removable reference for the next message. Adding or removing secondary selections does not retarget that reference. The reference is fixed when sent; later selection changes cannot retarget the running request.
-
-Manager handles an explicit maintenance request directly. It can edit Memory or Pursuit through their existing validated workflows and can register or update hosts and project paths through the running Web Studio. The `rightmemory manager` command is an authenticated loopback client for those map and execution-configuration APIs; it does not open the conversation database or start a second service. Manager does not add a fixed confirmation ceremony, automatically reorganize Pursuit from conversation status, or provide a new remote-tool framework. When a Manager turn ends, the page reloads canonical map and execution configuration while preserving unsent drafts.
-
-RightMemory starts its own Codex App Server connection and keeps the Pursuit, host, and project association in root-local operational storage. The conversation workspace uses App Server directly rather than the Codex SDK. It does not take control of a task that is currently open in the Codex desktop app. The stable App Server protocol provides threads, turns, streaming events, interruption, and approvals; RightMemory's registered projects provide the stable cross-version project layer because native Codex Project methods are not available in every Codex release.
-
-Live conversation continuity across browsers or devices means that they are connected to the same Web Studio process and active root. A separately running Web Studio on another Git-synchronized device has its own root-local `.runtime` conversation database and attachment files; Git synchronization does not merge those operational conversations.
-
-SSH hosts are saved by their configured alias. The remote machine must already be reachable through non-interactive OpenSSH and provide `codex app-server` on the remote command path. Attachment transfer additionally requires `python3` on that path; without it, messages that have no attachments still work, while an attached send fails before its turn starts and leaves the local staged input available to retry or remove. Remote-file cleanup is best effort, so an unreachable host or missing `python3` can leave a file in `~/.cache/rightmemory/attachments/`. The browser never opens a direct Codex or SSH connection; the local Web Studio backend owns those processes.
+Codex App manages projects, tasks, conversations, and execution. The Web Studio remains the map and editor, without persistent Pursuit-to-task links or status synchronization. Progress, failure, and completion in Codex do not change the map; a Pursuit change remains an explicit user decision.
 
 ## Edit On The Canvas
 
@@ -49,6 +35,7 @@ Long titles wrap within their nodes. Titles support bold (`**Important**`), unde
 | Action | Interaction |
 | --- | --- |
 | Select a node | Click its title. |
+| Copy a direction's context | Right-click its node or open **More**, then choose **Copy context**. |
 | Select several enclosed nodes | Hold `Shift` and drag a rectangle from empty canvas space. |
 | Add enclosed nodes to the selection | Hold `Ctrl/Cmd+Shift` and drag from empty canvas space. |
 | Add or remove one node | Hold `Ctrl/Cmd` and click its title. |
@@ -74,7 +61,7 @@ New nodes receive stable ids automatically. Renaming or moving an anchored node 
 
 Every selected node has a visible selection state; the active node has the nearby toolbar for whole-topic formatting, Note, Focus, and **More**. Click blank canvas space or outside the map to clear the selection and hide this toolbar; dragging blank space still pans without clearing the selection. A normal node click returns to a single selection. Formatting buttons show whether a mark wraps every selected title, none of them, or a mixture. Applying a mark to a mixed selection adds it to all selected titles while preserving partial formatting inside each title. Finish raw title editing before using formatting shortcuts: they are suppressed while the title editor is open so the browser cannot insert rich-text HTML into it.
 
-Right-click a node or choose its **More** button for structural actions, formatting, notes, Focus, folding, promotion, and deletion. Right-click empty canvas space for top-level creation or Fit. Menus support arrow keys and close with Escape or an outside click. The fixed toolbar retains broad map operations; its **More** also includes the read-only relation summary. An empty map offers an **Add a direction** button.
+Right-click a node or choose its **More** button for **Copy context**, structural actions, formatting, notes, Focus, folding, promotion, and deletion. Right-click empty canvas space for top-level creation or Fit. Menus support arrow keys and close with Escape or an outside click. The fixed toolbar retains broad map operations; its **More** also includes the read-only relation summary. An empty map offers an **Add a direction** button.
 
 Drag empty canvas space or use the wheel/trackpad to pan; use the zoom buttons or `Ctrl/Cmd` with the wheel to zoom. Dragging a branch near a canvas edge pans the view; hovering over the middle of a collapsed destination for about two-thirds of a second expands it. Hover expansion changes only the browser view and creates no Git commit. Escape cancels a drag. Touch pans even when it starts on a label; two fingers pinch to zoom. Touch gestures do not move directions; structural dragging uses a mouse or pen. Fit includes every independent map.
 
@@ -130,7 +117,7 @@ The human editor and an explicit `maintain-pursuit-map` request are the two norm
 
 Update, ordinary orchestration, transcript review, and Memory maintenance may read Pursuit. They do not infer, submit, or apply map changes from progress, unfinished work, new ideas, or completion. Update can retain independently durable evidence from a mixed candidate while reporting its Pursuit portion as skipped. Sync repair can reconcile already-authorized map state within its existing bounded repair workflow.
 
-Both install modes include `maintain-pursuit-map` alongside `maintain-rightmemory` and `review-agent-guidance-inbox`. These are independent skills, not alternatives to ordinary orchestration. They do not invoke one another or exchange queued map work.
+Both install modes include five skills: `rightmemory-auto-orchestrator`, `maintain-pursuit-map`, `maintain-rightmemory`, `review-agent-guidance-inbox`, and `rightmemory-manager`. The three maintenance skills and Manager are available alongside ordinary orchestration. The maintenance skills do not invoke one another or exchange queued map work; Manager uses the workflow that owns the requested surface.
 
 ## Implementation Entry Points
 
@@ -142,11 +129,11 @@ Both install modes include `maintain-pursuit-map` alongside `maintain-rightmemor
 | Transactions, revisions, and history | [pursuit_store.py](../rightmemory/pursuit_store.py) |
 | Existing Web service and map routes | [web/app.py](../rightmemory/web/app.py), [web/service.py](../rightmemory/web/service.py) |
 | Browser source and static build | [web/frontend](../rightmemory/web/frontend/), [web/static](../rightmemory/web/static/) |
-| Conversation runtime and operational store | [conversations](../rightmemory/conversations/) |
-| Session-scoped conversation routes | [conversation_routes.py](../rightmemory/web/conversation_routes.py) |
+| Context selection and Markdown output | [opening_context.py](../rightmemory/opening_context.py) |
+| Manager in Codex App | [rightmemory-manager](../skills/rightmemory-manager/SKILL.md) |
 | Direct agent editing | [maintain-pursuit-map](../skills/maintain-pursuit-map/SKILL.md) |
 
-The internal API is `GET /api/pursuit-map`, `POST /api/pursuit-map/operations`, and the corresponding `/undo` and `/redo` endpoints. Mutations use the current browser session, active-root selection, and CSRF protection. A revision conflict returns HTTP `409` with a fresh snapshot. These routes serve the editor; there is no public create/edit/move command family or task-execution API.
+The internal API is `GET /api/pursuit-map`, `GET /api/pursuit-map/context?item_id=...&expected_revision=...`, `POST /api/pursuit-map/operations`, and the corresponding `/undo` and `/redo` endpoints. The context endpoint returns generated Markdown without writing state. Mutations use the current browser session, active-root selection, and CSRF protection. A revision conflict returns HTTP `409` with a fresh snapshot. These routes serve the editor; there is no public create/edit/move command family or task-execution API.
 
 For frontend changes, install locked dependencies and run the focused checks from `rightmemory/web/frontend`:
 
@@ -164,6 +151,6 @@ python -m tests
 python -m compileall -q rightmemory tests
 ```
 
-Use disposable roots for browser and destructive transaction checks. Agent-facing rules, prompts, and skill wording are reviewed directly rather than asserted by tests. `.xmind` interchange, typed-edge editing controls, and task reconciliation remain outside the map. Conversation execution is operational workspace state and does not expand the Pursuit grammar or its Git transaction surface.
+Use disposable roots for browser and destructive transaction checks. Agent-facing rules, prompts, skill wording, and copied context text are reviewed directly rather than asserted by tests; context tests cover structured selection and the surrounding read-only behavior. `.xmind` interchange, typed-edge editing controls, and task reconciliation remain outside the map.
 
 For visible browser checks, run `npm run dev` from the frontend directory and open the printed loopback address. **Run interaction checks** exercises the bundled UI with disposable in-memory data, including formatting payloads and history, menus, keyboard operations, hover expansion, auto-pan cancellation, HTML escaping, read-only controls, and a 500-direction fixture. The synthetic pointer checks replace only pointer-capture ownership; check a real mouse/pen drag as well. No real Memory root is used.
