@@ -3,7 +3,7 @@ import { applyOperation, childrenOf, createSiblingBeforeOperation, deletionSelec
   type MutationResult, type Operation, type Snapshot } from './tree.ts';
 import { DraftBook, type TitleDraft } from './drafts.ts';
 import { MapRenderer } from './renderer.ts';
-import { parseWholeTitleFormat, titleText, toggleWholeTitleMark, type TopicMark } from './title-format.ts';
+import { parseWholeTitleFormat, setWholeTitleMark, titleText, type TopicMark } from './title-format.ts';
 import { keyboardCommand, navigate, readView, reconcileView, reveal, writeView, type ViewState } from './view-state.ts';
 import { ConversationWorkspace } from './conversation-workspace.ts';
 import type { FetchJson } from './conversation-api.ts';
@@ -60,6 +60,7 @@ const markup = `
         <strong>On the canvas</strong>
         <p>Double-click or F2 to rename. Enter adds a sibling after; Shift+Enter adds one before. Tab adds a child. Shift+Tab promotes. Alt+Up/Down reorders siblings.</p>
         <p>Ctrl/⌘ B toggles bold, Ctrl/⌘ U underline, Ctrl/⌘ Shift X strikethrough. Finish title editing before applying these whole-topic marks.</p>
+        <p>Shift-drag empty space to select several directions. Ctrl/⌘+Shift-drag adds to the selection; Ctrl/⌘-click toggles one direction.</p>
         <p>Arrows move between directions. Space folds a branch. Delete removes a subtree. N opens its note; F toggles Focus.</p>
         <p>Ctrl/⌘ F finds, Ctrl/⌘ 0 fits, Ctrl/⌘ Z undoes, Ctrl/⌘ Shift Z redoes.</p>
         <p>Drag a label onto a direction to nest it; drag above or below a label to reorder. Drop on empty space to make an independent top-level direction.</p>
@@ -183,7 +184,12 @@ class PursuitMap implements PursuitMapController {
     this.view = reconcileView(snapshot, readView(localStorage, snapshot.root_key));
     this.lastNotifiedSelection = this.view.selected ?? null;
     this.renderer = new MapRenderer(this.$('.pm-canvas'), snapshot, this.view, {
-      select: (id) => { this.closeContextMenu(); this.view.selected = id; this.saveView(); this.updateTools(); this.notifySelection(); },
+      select: (ids, primary) => {
+        this.closeContextMenu();
+        this.view.selectedIds = [...ids];
+        this.view.selected = primary;
+        this.saveView(); this.updateTools(); this.notifySelection();
+      },
       collapse: (id, collapsed, preserveDrag) => this.setCollapsed(id, collapsed, preserveDrag),
       move: (operation) => { void this.mutate(operation); },
       editStart: (id, title) => this.editStarted(id, title),
@@ -243,6 +249,10 @@ class PursuitMap implements PursuitMapController {
   private saveView(): void { writeView(localStorage, this.queue.snapshot.root_key, this.view); }
   private get snapshot(): Snapshot { return this.queue.snapshot; }
   private get selected() { return indexTree(this.snapshot).get(this.view.selected ?? ''); }
+  private get selectedItems() {
+    const items = indexTree(this.snapshot);
+    return this.view.selectedIds.map((id) => items.get(id)).filter((item) => item !== undefined);
+  }
 
   setConversationIndicators(conversations: readonly OperationalConversationIndicatorInput[]): void {
     this.renderer.setConversationIndicators(aggregateConversationIndicators(conversations));
@@ -276,9 +286,9 @@ class PursuitMap implements PursuitMapController {
 
   private changed(change: QueueChange): void {
     this.closeContextMenu();
-    if (change.remapped) {
-      const { from, to } = change.remapped;
+    for (const { from, to } of change.remapped ?? []) {
       if (this.view.selected === from) this.view.selected = to;
+      this.view.selectedIds = this.view.selectedIds.map((id) => id === from ? to : id);
       this.view.collapsed = this.view.collapsed.map((id) => id === from ? to : id);
       this.drafts.remap(from, to);
     }
@@ -291,20 +301,25 @@ class PursuitMap implements PursuitMapController {
 
   private updateTools(): void {
     const item = this.selected;
+    const selectedItems = this.selectedItems;
     const writable = this.snapshot.writable;
     this.$<HTMLButtonElement>('[data-command="undo"]').disabled = !this.queue.canUndo;
     this.$<HTMLButtonElement>('[data-command="redo"]').disabled = !this.queue.canRedo;
-    const marks = parseWholeTitleFormat(item?.title ?? '').marks;
     for (const button of this.host.querySelectorAll<HTMLButtonElement>('button[data-command]')) {
       const command = button.dataset.command!;
-      if (['rename', 'delete', 'focus', 'bold', 'underline', 'strike'].includes(command)) button.disabled = !writable || !item?.editable;
+      if (['rename', 'delete', 'focus'].includes(command)) button.disabled = !writable || !item?.editable;
+      if (['bold', 'underline', 'strike'].includes(command)) button.disabled = !writable || !selectedItems.length || selectedItems.some((entry) => !entry.editable);
       if (command === 'promote') button.disabled = !writable || !item?.editable || !item.parent_id;
       if (command === 'note' || command === 'context-menu') button.disabled = !item;
       if (command === 'child') button.disabled = !writable || !!item && !item.editable;
       if (['root', 'sibling', 'sibling-before'].includes(command)) button.disabled = !writable || command !== 'root' && !!item?.parent_id && !indexTree(this.snapshot).get(item.parent_id)?.editable;
       if (command === 'collapse') button.disabled = !item?.child_ids.length;
       if (['bold', 'underline', 'strike', 'focus'].includes(command)) {
-        const pressed = command === 'focus' ? !!item?.focused : marks.has(command as TopicMark);
+        let pressed: boolean | 'mixed' = !!item?.focused;
+        if (command !== 'focus') {
+          const states = selectedItems.map((entry) => parseWholeTitleFormat(entry.title).marks.has(command as TopicMark));
+          pressed = states.length > 0 && states.every(Boolean) ? true : states.some(Boolean) ? 'mixed' : false;
+        }
         button.setAttribute(button.getAttribute('role') === 'menuitemcheckbox' ? 'aria-checked' : 'aria-pressed', String(pressed));
       }
     }
@@ -400,11 +415,11 @@ class PursuitMap implements PursuitMapController {
 
   private select(id: string | null, center = false): void {
     this.closeContextMenu();
-    const next = id === null ? { ...this.view, selected: null } : reveal(this.displaySnapshot(), this.view, id);
+    const next = id === null ? { ...this.view, selected: null, selectedIds: [] } : reveal(this.displaySnapshot(), this.view, id);
     const unfolded = next.collapsed.length !== this.view.collapsed.length;
     this.view = next;
     if (unfolded) this.render();
-    this.renderer.select(id, center);
+    this.renderer.selectMany(next.selectedIds, next.selected, center);
     this.updateTools();
     this.saveView();
     this.notifySelection();
@@ -497,7 +512,7 @@ class PursuitMap implements PursuitMapController {
       const folded = next.collapsed.join('\n') !== this.view.collapsed.join('\n');
       this.view = next;
       if (folded) this.render();
-      this.renderer.select(this.view.selected, true);
+      this.renderer.selectMany(this.view.selectedIds, this.view.selected, true);
       this.updateTools(); this.saveView(); this.notifySelection();
     } else if (command === 'escape') {
       this.renderer.cancelGesture();
@@ -522,6 +537,7 @@ class PursuitMap implements PursuitMapController {
     if (operation.parent_id) this.view = reveal(this.snapshot, this.view, operation.parent_id);
     this.view.collapsed = this.view.collapsed.filter((entry) => entry !== operation.parent_id);
     this.view.selected = id;
+    this.view.selectedIds = [id];
     this.render();
     void this.renderer.beginEdit(id, this.drafts.title.text);
   }
@@ -584,11 +600,15 @@ class PursuitMap implements PursuitMapController {
   }
 
   private async format(mark: TopicMark): Promise<void> {
-    const item = this.selected;
-    if (!item?.editable || !this.snapshot.writable || this.renderer.editing) return;
-    const title = toggleWholeTitleMark(item.title, mark);
+    const selected = this.selectedItems;
+    if (!selected.length || selected.some((item) => !item.editable) || !this.snapshot.writable || this.renderer.editing) return;
+    const enabled = !selected.every((item) => parseWholeTitleFormat(item.title).marks.has(mark));
+    const primary = this.selected;
+    const ordered = primary ? [primary, ...selected.filter((item) => item.id !== primary.id)] : selected;
+    const renames = ordered.map((item) => ({ id: item.id, title: setWholeTitleMark(item.title, mark, enabled) }))
+      .filter((rename, index) => rename.title !== ordered[index].title);
     this.renderer.focus();
-    if (title !== item.title) await this.mutate({ type: 'rename', id: item.id, title });
+    if (renames.length) await this.mutate({ type: 'rename_many', renames });
   }
 
   private async mutate(operation: Operation): Promise<MutationResult | null> {
@@ -601,6 +621,7 @@ class PursuitMap implements PursuitMapController {
     const item = this.selected;
     if (!item?.editable || !this.snapshot.writable) return;
     this.view.selected = deletionSelection(this.snapshot, item.id);
+    this.view.selectedIds = this.view.selected ? [this.view.selected] : [];
     const promise = this.queue.enqueue({ type: 'delete', id: item.id });
     const undo = async () => {
       try {

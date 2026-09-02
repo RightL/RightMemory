@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseWholeTitleFormat, serializeWholeTitleFormat, titleMarkup, titleText, toggleWholeTitleMark, type TopicMark } from '../src/title-format.ts';
+import { parseWholeTitleFormat, serializeWholeTitleFormat, setWholeTitleMark, titleMarkup, titleText, toggleWholeTitleMark, type TopicMark } from '../src/title-format.ts';
 
 test('every whole-title mark combination has deterministic order and toggles independently', () => {
   const marks: TopicMark[] = ['bold', 'underline', 'strike'];
@@ -30,6 +30,29 @@ test('partial marks survive whole-title wrapping, including the same mark', () =
     }
   }
   assert.equal(titleMarkup('A **bold <u>under ~~old~~</u>** branch'), 'A <strong>bold <u>under <s>old</s></u></strong> branch');
+});
+
+test('setWholeTitleMark makes mixed title states uniformly enabled or disabled', () => {
+  const mixed = ['Direction', '**Already bold**', 'A **partly bold** direction'];
+  const enabled = mixed.map((raw) => setWholeTitleMark(raw, 'bold', true));
+  assert.deepEqual(enabled, ['**Direction**', '**Already bold**', '**A **partly bold** direction**']);
+  assert(enabled.every((raw) => parseWholeTitleFormat(raw).marks.has('bold')));
+  assert.deepEqual(enabled.map((raw) => setWholeTitleMark(raw, 'bold', true)), enabled);
+
+  const disabled = enabled.map((raw) => setWholeTitleMark(raw, 'bold', false));
+  assert.deepEqual(disabled, ['Direction', 'Already bold', 'A **partly bold** direction']);
+  assert(disabled.every((raw) => !parseWholeTitleFormat(raw).marks.has('bold')));
+  assert.deepEqual(disabled.map((raw) => setWholeTitleMark(raw, 'bold', false)), disabled);
+
+  for (const mark of ['underline', 'strike'] as const) {
+    const marked = setWholeTitleMark('Already marked', mark, true);
+    const uniformlyEnabled = ['Direction', marked].map((raw) => setWholeTitleMark(raw, mark, true));
+    assert(uniformlyEnabled.every((raw) => parseWholeTitleFormat(raw).marks.has(mark)));
+    assert.deepEqual(uniformlyEnabled.map((raw) => setWholeTitleMark(raw, mark, true)), uniformlyEnabled);
+    const uniformlyDisabled = uniformlyEnabled.map((raw) => setWholeTitleMark(raw, mark, false));
+    assert(uniformlyDisabled.every((raw) => !parseWholeTitleFormat(raw).marks.has(mark)));
+    assert.deepEqual(uniformlyDisabled.map((raw) => setWholeTitleMark(raw, mark, false)), uniformlyDisabled);
+  }
 });
 
 test('unmatched and crossed delimiters stay literal; only exact allowed tags render', () => {
