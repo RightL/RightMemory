@@ -107,6 +107,8 @@ Read-only retrieval and approval-gated orchestration remain optional source skil
 
 Open the visual map with `rightmemory pursuit`. It starts or reuses the existing Web Studio and opens an automatic local browser session; check the intended root before editing. See [Pursuit Map](docs/PURSUIT_MAP.md) for the editor and its safety boundaries.
 
+Web Studio starts on demand and keeps running after its launching command or browser closes. Use `rightmemory web stop` to stop it; starting it does not register Windows sign-in or boot tasks. On Windows the background process requests separation from the launcher's process job; the host must permit that separation for the server to outlive the host.
+
 The same view can attach a Codex conversation to the selected Pursuit. This workspace connects directly to Codex App Server; it does not run conversation turns through the Codex SDK. RightMemory owns the attachment plus its local or SSH host and working-directory project, while App Server owns the thread, turns, streamed items, approvals, and interruption.
 
 On the first actual send in a new Pursuit conversation, RightMemory adds one persisted opening snapshot to the same user turn. The snapshot contains the bound Pursuit, its direct incoming and outgoing graph neighbors, their logical heading ancestors, Controller-relative sources, and the conversation's execution host, project, and working directory. Later turns never refresh or repeat it. Side chats receive their own first-turn snapshot; existing conversations with accepted history do not. The browser keeps the user's original message as the visible bubble and exposes the exact saved snapshot in a collapsed section.
