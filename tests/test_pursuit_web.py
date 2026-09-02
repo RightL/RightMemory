@@ -145,6 +145,38 @@ class PursuitWebTests(unittest.TestCase):
         self.assertEqual((self.root / "PURSUITS.md").read_bytes(), before)
         self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), current["git_head"])
 
+    def test_rename_many_response_shape_and_stale_revision_conflict(self):
+        stale = self._snapshot()
+        operation = {
+            "type": "rename_many",
+            "renames": [
+                {"id": "alpha", "title": "Alpha renamed"},
+                {"id": "beta", "title": "Beta renamed"},
+            ],
+        }
+
+        response = self._operation(operation, snapshot=stale)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["data"]
+        self.assertEqual(result["selected_id"], "alpha")
+        self.assertEqual(result["id_remaps"], [])
+        self.assertTrue(result["undoable"])
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), stale["git_head"])
+        items = {item["id"]: item for item in result["snapshot"]["items"]}
+        self.assertEqual(items["alpha"]["title"], "Alpha renamed")
+        self.assertEqual(items["beta"]["title"], "Beta renamed")
+        changed = (self.root / "PURSUITS.md").read_bytes()
+
+        conflict = self._operation(operation, snapshot=stale)
+
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        detail = conflict.json()["detail"]
+        self.assertEqual(detail["code"], "conflict")
+        self.assertEqual(detail["snapshot"]["revision"], result["snapshot"]["revision"])
+        self.assertEqual((self.root / "PURSUITS.md").read_bytes(), changed)
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), result["commit"])
+
     def test_undo_and_redo_add_commits_in_the_same_session(self):
         original = (self.root / "PURSUITS.md").read_bytes()
         applied = self._operation({"type": "rename", "id": "alpha", "title": "Renamed"})

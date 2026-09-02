@@ -24,6 +24,40 @@ test('rename, note, and Focus preserve identity and subtree order', () => {
   assert.deepEqual(focused.focus_ids, ['essays', 'design']);
 });
 
+test('rename_many applies every title atomically without mutating the source tree', () => {
+  const original = fixture();
+  const before = structuredClone(original);
+  const renamed = applyOperation(original, {
+    type: 'rename_many',
+    renames: [{ id: 'design', title: '**Design system**' }, { id: 'visual', title: '<u>Visual language</u>' }],
+  });
+  assert.equal(indexTree(renamed).get('design')!.title, '**Design system**');
+  assert.equal(indexTree(renamed).get('visual')!.title, '<u>Visual language</u>');
+  assert.deepEqual(original, before);
+
+  const unavailable = structuredClone(original);
+  indexTree(unavailable).get('visual')!.editable = false;
+  assert.throws(() => applyOperation(unavailable, {
+    type: 'rename_many',
+    renames: [{ id: 'design', title: 'Would change first' }, { id: 'visual', title: 'Unavailable' }],
+  }), /selected direction is no longer editable/);
+  assert.equal(indexTree(unavailable).get('design')!.title, 'Design 设计');
+});
+
+test('rename_many requires a nonempty set of unique, visible-title targets', () => {
+  const original = fixture();
+  assert.throws(() => applyOperation(original, { type: 'rename_many', renames: [] }), /at least one direction/);
+  assert.throws(() => applyOperation(original, {
+    type: 'rename_many', renames: [{ id: 'design', title: 'First' }, { id: 'design', title: 'Second' }],
+  }), /only once/);
+  assert.throws(() => applyOperation(original, {
+    type: 'rename_many', renames: [{ id: '', title: 'No target' }],
+  }), /needs an identity/);
+  assert.throws(() => applyOperation(original, {
+    type: 'rename_many', renames: [{ id: 'design', title: '**<u>~~ ~~</u>**' }],
+  }), /visible title/);
+});
+
 test('move and promote keep a deep subtree intact while changing sibling order', () => {
   const original = fixture();
   const subtree = descendants(original, 'level-1');
@@ -50,7 +84,7 @@ test('delete removes logical descendants, Focus, and inbound edges; a real visua
   assert.deepEqual(removed.focus_ids, []);
   assert.deepEqual(indexTree(removed).get('research')!.edges, [['ref', 'interaction']]);
   const empty = applyOperation(removed, { type: 'delete', id: 'directions' });
-  assert.deepEqual(forestData(empty, { selected: null, collapsed: [] }), []);
+  assert.deepEqual(forestData(empty, { selected: null, selectedIds: [], collapsed: [] }), []);
   assert.equal(deletionSelection(removed, 'directions'), null);
   assert.deepEqual(empty.items, []);
 });
@@ -58,7 +92,7 @@ test('delete removes logical descendants, Focus, and inbound edges; a real visua
 test('each top-level direction remains its own canvas root', () => {
   const original = fixture();
   const plural = applyOperation(original, { type: 'create', parent_id: null, after_id: 'directions', title: 'Another direction' }, 'second');
-  const data = forestData(plural, { selected: 'second', collapsed: [] });
+  const data = forestData(plural, { selected: 'second', selectedIds: ['second'], collapsed: [] });
   assert.deepEqual(data.map((map) => map.nodeData.id), ['directions', 'second']);
   assert.deepEqual(data[0].nodeData.children!.map((node) => node.direction), [0, 1, 0]);
   assert.equal(data[1].nodeData.topic, 'Another direction');
@@ -67,7 +101,7 @@ test('each top-level direction remains its own canvas root', () => {
 });
 
 test('independent roots collapse separately and a single child extends right', () => {
-  const data = forestData(forestFixture(), { selected: 'directions', collapsed: ['directions'] });
+  const data = forestData(forestFixture(), { selected: 'directions', selectedIds: ['directions'], collapsed: ['directions'] });
   assert.deepEqual(data[0].nodeData.children, []);
   assert.equal(data[1].direction, 1);
   assert.equal(data[1].nodeData.children![0].direction, 1);
@@ -91,7 +125,7 @@ test('cross-map drops preserve subtrees and support top-level ordering', () => {
 test('strikethrough display escapes HTML and preserves the raw title for editing', () => {
   const raw = '~~Earlier <img src=x onerror="alert(1)">~~ & Current';
   const snapshot = applyOperation(fixture(), { type: 'rename', id: 'research', title: raw });
-  const data = forestData(snapshot, { selected: 'research', collapsed: [] });
+  const data = forestData(snapshot, { selected: 'research', selectedIds: ['research'], collapsed: [] });
   assert.equal(data[0].nodeData.children![0].topic, raw);
   assert.equal(titleMarkup(raw), '<s>Earlier &lt;img src=x onerror=&quot;alert(1)&quot;&gt;</s> &amp; Current');
   assert.equal(titleText(raw), 'Earlier <img src=x onerror="alert(1)"> & Current');

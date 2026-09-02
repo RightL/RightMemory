@@ -58,6 +58,63 @@ class PursuitTreeTests(unittest.TestCase):
         self.assertEqual(tree.items["parent"].child_ids, ("child",))
         self.assertEqual(tree.items["parent"].edges, (("doc", "entry"),))
 
+    def test_rename_many_applies_atomically_and_reports_plain_heading_id_remaps(self):
+        self.write(
+            "PURSUITS.md",
+            "# Pursuits\n\n## First plain\n\n### Child {#child}\n\n"
+            "## Existing {#existing}\n\n## Second plain\n",
+        )
+        tree = load_pursuit_tree(self.root)
+        first_plain, existing, second_plain = tree.root_ids
+
+        edit = self.apply(
+            type="rename_many",
+            renames=[
+                {"id": first_plain, "title": "Named first"},
+                {"id": existing, "title": "Existing renamed"},
+                {"id": second_plain, "title": "Named second"},
+            ],
+        )
+
+        self.assertEqual(edit.selected_id, "named-first")
+        self.assertEqual(
+            edit.id_remaps,
+            (
+                {"from": first_plain, "to": "named-first"},
+                {"from": second_plain, "to": "named-second"},
+            ),
+        )
+        renamed = load_pursuit_tree(self.root)
+        self.assertEqual(renamed.root_ids, ("named-first", "existing", "named-second"))
+        self.assertEqual(renamed.items["named-first"].child_ids, ("child",))
+        self.assertEqual(renamed.items["existing"].title, "Existing renamed")
+
+    def test_rename_many_validates_every_entry_before_mutating(self):
+        self.write(
+            "PURSUITS.md",
+            "# Pursuits\n\n## A {#a}\n\n- `legacy` Read only. → []\n\n## B {#b}\n",
+        )
+        before = self.files()
+        invalid_operations = (
+            {"type": "rename_many", "renames": []},
+            {
+                "type": "rename_many",
+                "renames": [{"id": "a", "title": "Changed"}, {"id": "a", "title": "Again"}],
+            },
+            {
+                "type": "rename_many",
+                "renames": [{"id": "a", "title": "Changed"}, {"id": "b", "title": "Bad\nheading"}],
+            },
+            {
+                "type": "rename_many",
+                "renames": [{"id": "a", "title": "Changed"}, {"id": "legacy", "title": "Blocked"}],
+            },
+        )
+        for operation in invalid_operations:
+            with self.subTest(operation=operation), self.assertRaises(PursuitOperationError):
+                apply_operation(self.root, operation)
+            self.assertEqual(self.files(), before)
+
     def test_body_edit_keeps_other_sections_and_newline_style(self):
         source = "# Pursuits\r\n\r\n## Parent {#parent}\r\n\r\nOld note.\r\n\r\n### Child {#child}\r\n\r\n  Child body.  \r\n\r\n## Other {#other}\r\n"
         self.write("PURSUITS.md", source)
