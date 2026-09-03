@@ -3,8 +3,10 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from urllib.parse import urlencode
 from unittest.mock import patch
 
+from rightmemory.opening_context import build_opening_context
 from rightmemory.web.app import create_web_app
 from tests.asgi_client import ASGITestClient as TestClient
 
@@ -62,9 +64,17 @@ class PursuitWebTests(unittest.TestCase):
             headers={"x-csrf-token": csrf or self.csrf},
         )
 
+    def _context(self, item_id="alpha", *, snapshot=None, client=None):
+        snapshot = snapshot or self._snapshot(client)
+        query = urlencode({"item_id": item_id, "expected_revision": snapshot["revision"]})
+        return (client or self.client).get(f"/api/pursuit-map/context?{query}")
+
     def test_reads_and_mutations_require_a_bootstrapped_session(self):
         client = TestClient(self.app, request_timeout_seconds=30)
-        responses = [client.get("/api/pursuit-map")]
+        responses = [
+            client.get("/api/pursuit-map"),
+            client.get("/api/pursuit-map/context?item_id=alpha&expected_revision=revision"),
+        ]
         for endpoint in ("operations", "undo", "redo"):
             responses.append(client.post(f"/api/pursuit-map/{endpoint}", json={}))
         for response in responses:
@@ -94,6 +104,144 @@ class PursuitWebTests(unittest.TestCase):
         self.assertTrue(snapshot["valid"])
         self.assertTrue(snapshot["writable"], snapshot["diagnostics"])
         self.assertEqual(snapshot["git_head"], self._git(self.root, "rev-parse", "HEAD"))
+
+    def test_copy_context_uses_the_current_item_and_single_builder_without_writing(self):
+        snapshot = self._snapshot()
+        before = {
+            path.relative_to(self.root): path.read_bytes()
+            for path in self.root.rglob("*")
+            if path.is_file() and ".git" not in path.relative_to(self.root).parts
+        }
+        with patch("rightmemory.web.service.build_opening_context", wraps=build_opening_context) as builder:
+            response = self._context(snapshot=snapshot)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(set(response.json()["data"]), {"text"})
+        self.assertIsInstance(response.json()["data"]["text"], str)
+        builder.assert_called_once()
+        actual_root, actual_item = builder.call_args.args
+        self.assertEqual(actual_root, self.root.resolve())
+        self.assertEqual(actual_item["id"], "alpha")
+        self.assertEqual(actual_item["source_path"], "PURSUITS.md")
+        self.assertEqual(actual_item["source_line"], 7)
+        self.assertEqual(builder.call_args.kwargs, {})
+        after = {
+            path.relative_to(self.root): path.read_bytes()
+            for path in self.root.rglob("*")
+            if path.is_file() and ".git" not in path.relative_to(self.root).parts
+        }
+        self.assertEqual(after, before)
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), snapshot["git_head"])
+        self.assertEqual(self._git(self.root, "status", "--porcelain"), "")
+
+    def test_copy_context_rejects_stale_revision_before_calling_builder(self):
+        stale = self._snapshot()
+        self._operation({"type": "rename", "id": "alpha", "title": "Changed"}, snapshot=stale)
+        current = self._snapshot()
+        with patch("rightmemory.web.service.build_opening_context") as builder:
+            response = self._context(snapshot=stale)
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "conflict")
+        self.assertEqual(response.json()["detail"]["snapshot"]["revision"], current["revision"])
+        builder.assert_not_called()
+
+    def test_copy_context_rejects_a_change_during_the_build(self):
+        snapshot = self._snapshot()
+
+        def build_then_change(root, item):
+            result = build_opening_context(root, item)
+            path = root / "MEMORY.md"
+            path.write_text(path.read_text(encoding="utf-8") + "\nConcurrent update.\n", encoding="utf-8")
+            return result
+
+        with patch("rightmemory.web.service.build_opening_context", side_effect=build_then_change):
+            response = self._context(snapshot=snapshot)
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "conflict")
+        self.assertNotEqual(response.json()["detail"]["snapshot"]["revision"], snapshot["revision"])
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), snapshot["git_head"])
+
+    def test_copy_context_rejects_unknown_item_and_missing_parameters(self):
+        with patch("rightmemory.web.service.build_opening_context") as builder:
+            response = self._context("missing")
+            self.assertEqual(response.status_code, 404, response.text)
+            self.assertEqual(response.json()["detail"]["code"], "not_found")
+            for query in ("", "item_id=alpha", "expected_revision=revision"):
+                with self.subTest(query=query):
+                    invalid = self.client.get(f"/api/pursuit-map/context?{query}")
+                    self.assertEqual(invalid.status_code, 422)
+        builder.assert_not_called()
+
+    def test_copy_context_accepts_a_valid_read_only_root(self):
+        unrelated = self.root / "unrelated.txt"
+        unrelated.write_bytes(b"uncommitted work")
+        snapshot = self._snapshot()
+        self.assertFalse(snapshot["writable"])
+
+        response = self._context(snapshot=snapshot)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(unrelated.read_bytes(), b"uncommitted work")
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), snapshot["git_head"])
+
+    def test_copy_context_rejects_invalid_graph_without_calling_builder(self):
+        (self.root / "PURSUITS.md").write_text(
+            "# Pursuits\n\n## One {#same}\n\n## Two {#same}\n", encoding="utf-8",
+        )
+        with patch("rightmemory.web.service.build_opening_context") as builder:
+            response = self._context("same")
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "invalid_root")
+        self.assertFalse(response.json()["detail"]["snapshot"]["valid"])
+        builder.assert_not_called()
+
+    def test_copy_context_uses_the_session_active_root(self):
+        other_root = self.root / "other"
+        self._seed_root(other_root)
+        original = self._snapshot()
+        selected = self.client.post(
+            "/api/active-root", json={"root": str(other_root)}, headers={"x-csrf-token": self.csrf},
+        )
+        self.assertEqual(selected.status_code, 200, selected.text)
+        with patch("rightmemory.web.service.build_opening_context", wraps=build_opening_context) as builder:
+            response = self._context()
+            conflict = self._context(snapshot=original)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        builder.assert_called_once()
+        self.assertEqual(builder.call_args.args[0], other_root.resolve())
+
+    def test_web_studio_preserves_unused_conversation_runtime_state(self):
+        database = self.root / ".runtime" / "web" / "conversations.sqlite3"
+        self.assertFalse(database.exists())
+        database.write_bytes(b"existing conversation state")
+        client = TestClient(create_web_app(self.root), request_timeout_seconds=30)
+        client.get("/api/session")
+
+        response = self._context(client=client)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(database.read_bytes(), b"existing conversation state")
+        self.assertFalse(database.with_name(database.name + "-wal").exists())
+
+    def test_conversation_workspace_and_manager_endpoints_are_removed(self):
+        for method, path in (
+            ("GET", "/api/conversation-workspace"),
+            ("GET", "/api/pursuit-conversations?pursuit_id=alpha"),
+            ("POST", "/api/pursuit-conversations"),
+            ("POST", "/api/manager-conversations"),
+            ("GET", "/api/conversations/previous"),
+            ("GET", "/api/conversation-hosts"),
+            ("GET", "/api/conversation-projects"),
+            ("GET", "/api/conversation-events"),
+        ):
+            with self.subTest(method=method, path=path):
+                response = self.client.request(method, path)
+                self.assertEqual(response.status_code, 404)
 
     def test_each_operation_lands_one_commit_and_new_revision(self):
         snapshot = self._snapshot()
