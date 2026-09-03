@@ -34,11 +34,13 @@ The map organizes the user's directions and their background. Codex App owns pro
 
 The pasted text describes the graph when copied. The user's accompanying request establishes what work to perform; context alone does not authorize a task. Later task progress, failure, or completion does not synchronize back into Pursuit or establish that a direction should be removed.
 
-### Manager uses the existing ownership boundaries
+### Manager coordinates a Pursuit direction without owning execution
 
-Manager is the package-owned `rightmemory-manager` skill in Codex App. It handles explicit RightMemory management through `maintain-rightmemory` and `maintain-pursuit-map`, keeping their validated editing workflows and ownership boundaries. An explicit request authorizes the requested change, so Manager asks when a target or meaning cannot be resolved safely rather than adding a routine approval step. It refreshes and verifies canonical state after requested changes.
+Pursuit items are coarse and often span several conversations or tasks. Rather than turning Pursuit into an execution backlog or adding a dedicated coordination runtime, the user can create one long-lived Manager conversation in Codex App for a direction, pin it manually in Codex App, and return to it as the stable coordination point.
 
-Manager also coordinates work through Codex App's native project and task tools when asked. Creating a separate task requires an explicit request or confirmation of a concrete proposal. The receiving task retains the user's objective and relevant context, with implementation choices left for its inspection of the project. This gives Manager both management and coordination responsibilities without a dedicated service, database, or runtime.
+Manager keeps the broader picture, synthesizes outcomes, helps decide what happens next, and creates or coordinates separate temporary worker tasks. Light inspection needed for accurate coordination is natural, but substantive investigation, implementation, experimentation, and debugging belong in those separate worker tasks.
+
+Codex App owns conversations, tasks, and pinning. RightMemory stores no Manager conversation association or task status. Worker task progress, failure, or completion does not automatically change Pursuit or Memory. The Manager conversation invokes `maintain-rightmemory` or `maintain-pursuit-map` only when the user explicitly asks to change RightMemory.
 
 ### Existing data remains readable
 
