@@ -8,6 +8,9 @@ import { keyboardCommand, navigate, readView, reconcileView, reveal, writeView, 
 import { apiContext, apiTransport, type FetchJson } from './pursuit-api.ts';
 import './pursuit-map.css';
 
+const EDIT_IDLE_MS = 3000;
+const ACTIVITY_INTERVAL_MS = 1000;
+
 const markup = `
   <div class="pm-toolbar" role="toolbar" aria-label="Pursuit Map tools">
     <div class="pm-tool-group">
@@ -83,11 +86,12 @@ const markup = `
 
 export interface PursuitMapController {
   refresh(): Promise<void>;
+  flush(): Promise<void>;
   setActive(active: boolean): void;
   getSelectedId(): string | null;
   subscribeSelection(listener: (id: string | null) => void): () => void;
   readonly hasUnsavedChanges: boolean;
-  destroy(): void;
+  destroy(): Promise<void>;
 }
 
 export async function mountPursuitMap(host: HTMLElement, fetchJson: FetchJson): Promise<PursuitMapController> {
@@ -116,6 +120,9 @@ class PursuitMap implements PursuitMapController {
   private matches: string[] = [];
   private matchIndex = -1;
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
+  private idleTimer: ReturnType<typeof setTimeout> | undefined;
+  private activityTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastActivitySent = 0;
   private unsubscribe: () => void;
   private selectionListeners = new Set<(id: string | null) => void>();
   private lastNotifiedSelection: string | null;
@@ -146,6 +153,12 @@ class PursuitMap implements PursuitMapController {
       contextMenu: (id, x, y) => this.openContextMenu(id, x, y),
     });
     this.unsubscribe = this.queue.subscribe((change) => this.changed(change));
+    for (const type of ['input', 'keydown', 'pointerdown', 'pointerup', 'wheel', 'compositionupdate']) {
+      host.addEventListener(type, () => this.recordActivity(), { capture: true, passive: true, signal: this.abort.signal });
+    }
+    host.addEventListener('pointermove', (event) => {
+      if (event.buttons) this.recordActivity();
+    }, { capture: true, passive: true, signal: this.abort.signal });
     host.addEventListener('click', (event) => {
       const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-command]');
       if (button?.disabled) return;
@@ -183,6 +196,10 @@ class PursuitMap implements PursuitMapController {
     window.addEventListener('beforeunload', (event) => {
       if (this.queue.pendingCount || this.drafts.dirty) { event.preventDefault(); event.returnValue = ''; }
     }, { signal: this.abort.signal });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this.flushInBackground();
+    }, { signal: this.abort.signal });
+    window.addEventListener('pagehide', () => this.flushInBackground(), { signal: this.abort.signal });
     window.addEventListener('focus', () => {
       if (this.active && !this.renderer.editing) void this.refresh().catch((error) => this.toast(error.message));
     }, { signal: this.abort.signal });
@@ -239,7 +256,43 @@ class PursuitMap implements PursuitMapController {
     this.render();
     this.updateNote();
     this.renderDiagnostics(change.snapshot);
-    if (change.error) this.toast(`${change.error.message} The map was reloaded; unsaved text is kept.`, undefined, 0);
+    if (change.error) this.toast(`${change.error.message} Unsaved text is kept.`, undefined, 0);
+    else if (change.snapshot.pending && change.snapshot.writable && !change.flushing && !this.idleTimer) this.scheduleFlush();
+  }
+
+  private scheduleFlush(): void {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = undefined;
+      void this.queue.flush().catch(() => { /* The queue exposes checkpoint failures in the map. */ });
+    }, EDIT_IDLE_MS);
+  }
+
+  private recordActivity(): void {
+    if (!this.active || this.abort.signal.aborted) return;
+    if (this.snapshot.writable) this.scheduleFlush();
+    const delay = ACTIVITY_INTERVAL_MS - (Date.now() - this.lastActivitySent);
+    if (delay <= 0) void this.sendActivity();
+    else if (!this.activityTimer) this.activityTimer = setTimeout(() => { void this.sendActivity(); }, delay);
+  }
+
+  private async sendActivity(): Promise<void> {
+    clearTimeout(this.activityTimer);
+    this.activityTimer = undefined;
+    if (!this.active || this.abort.signal.aborted) return;
+    this.lastActivitySent = Date.now();
+    try { await this.queue.activity(); }
+    catch (error) {
+      if (this.abort.signal.aborted) return;
+      this.toast((error as Error).message, undefined, 0);
+      try { await this.refresh(); } catch { /* Preserve the last safely acknowledged map. */ }
+    }
+  }
+
+  private flushInBackground(): void {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = undefined;
+    void this.queue.flush(true).catch(() => { /* The server retains saved edits if closing cannot flush. */ });
   }
 
   private updateTools(): void {
@@ -269,8 +322,8 @@ class PursuitMap implements PursuitMapController {
     }
     this.$('.pm-empty').hidden = this.displaySnapshot().root_ids.length > 0;
     const status = this.$('.pm-save-status');
-    status.textContent = this.queue.pendingCount ? `Saving${this.queue.pendingCount > 1 ? ` (${this.queue.pendingCount})` : '…'}` : writable ? 'Saved' : 'Read-only';
-    status.classList.toggle('pm-saving', !!this.queue.pendingCount);
+    status.textContent = this.queue.pendingCount || this.queue.flushing ? 'Saving…' : writable ? 'Saved' : this.snapshot.pending ? 'Needs attention' : 'Read-only';
+    status.classList.toggle('pm-saving', !!this.queue.pendingCount || this.queue.flushing);
     this.positionTopicToolbar(this.renderer?.selectedTopicRect() ?? null);
   }
 
@@ -343,18 +396,25 @@ class PursuitMap implements PursuitMapController {
     banner.hidden = snapshot.writable && !snapshot.diagnostics.length;
     if (banner.hidden) return;
     const title = document.createElement('strong');
-    title.textContent = snapshot.writable ? 'Map notices' : 'This map is read-only';
+    title.textContent = snapshot.writable ? 'Map notices' : snapshot.pending ? 'Saved edits need attention' : 'This map is read-only';
     banner.append(title);
     const details = document.createElement('details');
     const summary = document.createElement('summary');
     summary.textContent = 'Show diagnostics';
     details.append(summary);
+    details.open = snapshot.pending && !snapshot.writable;
     for (const diagnostic of snapshot.diagnostics) {
       const paragraph = document.createElement('p');
       paragraph.textContent = typeof diagnostic === 'string' ? diagnostic : diagnostic.message ?? JSON.stringify(diagnostic);
       details.append(paragraph);
     }
     banner.append(details);
+    if (!snapshot.writable) {
+      const refresh = document.createElement('button');
+      refresh.type = 'button'; refresh.textContent = 'Refresh';
+      refresh.addEventListener('click', () => { void this.refresh().catch((error) => this.toast(error.message, undefined, 0)); });
+      banner.append(refresh);
+    }
   }
 
   private select(id: string | null, center = false): void {
@@ -571,7 +631,7 @@ class PursuitMap implements PursuitMapController {
     const undo = async () => {
       try {
         const result = await promise;
-        if (this.queue.canUndo && this.snapshot.git_head === result.commit) await this.command('undo');
+        if (this.queue.canUndo && this.queue.lastUndoId === result.operation_id) await this.command('undo');
         else this.toast('Newer edits exist. Use the toolbar Undo to undo them in order.');
       } catch { /* Failure already restored the deleted direction. */ }
     };
@@ -589,11 +649,12 @@ class PursuitMap implements PursuitMapController {
     if (this.queue.pendingCount) { this.toast('Wait for the current save to finish, then copy context.'); return; }
     if (this.drafts.dirty) { this.toast('Save or discard unsaved edits before copying context.'); return; }
     if (!this.options.context) { this.toast('Context copying is unavailable in this view.'); return; }
-    const revision = this.snapshot.revision;
     this.copyingContext = true;
     this.updateTools();
     this.toast('Preparing context…', undefined, 0);
     try {
+      await this.flush();
+      const revision = this.snapshot.revision;
       const text = await this.options.context(item.id, revision);
       if (this.abort.signal.aborted) return;
       if (this.hasUnsavedChanges || this.snapshot.revision !== revision || !indexTree(this.snapshot).has(item.id)) {
@@ -730,6 +791,10 @@ class PursuitMap implements PursuitMapController {
   }
 
   async refresh(): Promise<void> { await this.queue.reload(); }
+  async flush(): Promise<void> {
+    do { await this.queue.flush(); }
+    while (this.queue.pendingCount || this.snapshot.pending);
+  }
   getSelectedId(): string | null { return this.view.selected ?? null; }
   subscribeSelection(listener: (id: string | null) => void): () => void {
     this.selectionListeners.add(listener);
@@ -739,13 +804,19 @@ class PursuitMap implements PursuitMapController {
   get hasUnsavedChanges(): boolean { return this.queue.pendingCount > 0 || this.drafts.dirty; }
   setActive(active: boolean): void {
     this.active = active;
+    this.queue.setActive(active);
     if (active) { this.render(); this.renderer.focus(); }
-    else { this.closeContextMenu(); this.renderer.cancelGesture(); this.saveView(); }
+    else { this.closeContextMenu(); this.renderer.cancelGesture(); this.saveView(); this.flushInBackground(); }
   }
-  destroy(): void {
+  async destroy(): Promise<void> {
+    this.queue.setActive(false);
+    try { await this.flush(); }
+    catch (error) { this.queue.setActive(this.active); throw error; }
     this.unsubscribe();
     this.selectionListeners.clear();
     clearTimeout(this.toastTimer);
+    clearTimeout(this.idleTimer);
+    clearTimeout(this.activityTimer);
     this.abort.abort();
     this.renderer.destroy();
   }

@@ -3,9 +3,9 @@ import type { MutationResult, Snapshot } from './tree.ts';
 
 export type FetchJson = (path: string, options?: RequestInit) => Promise<{ data: unknown }>;
 
-async function request<T>(fetchJson: FetchJson, path: string, body?: unknown): Promise<T> {
+async function request<T>(fetchJson: FetchJson, path: string, body?: unknown, keepalive = false): Promise<T> {
   try {
-    const response = await fetchJson(`/api/pursuit-map${path}`, body === undefined ? undefined : { method: 'POST', body: JSON.stringify(body) });
+    const response = await fetchJson(`/api/pursuit-map${path}`, body === undefined ? undefined : { method: 'POST', body: JSON.stringify(body), ...(keepalive ? { keepalive: true } : {}) });
     return response.data as T;
   } catch (cause) {
     const error = cause as Error & { status?: number; detail?: { snapshot?: Snapshot } };
@@ -17,7 +17,9 @@ export function apiTransport(fetchJson: FetchJson): Transport {
   return {
     load: () => request<Snapshot>(fetchJson, ''),
     mutate: (expected_revision, operation) => request<MutationResult>(fetchJson, '/operations', { expected_revision, operation }),
-    history: (kind, expected_revision, commit) => request<MutationResult>(fetchJson, `/${kind}`, { expected_revision, commit }),
+    history: (kind, expected_revision, operation_id) => request<MutationResult>(fetchJson, `/${kind}`, { expected_revision, operation_id }),
+    flush: (expected_revision, keepalive = false) => request<MutationResult>(fetchJson, '/flush', { expected_revision }, keepalive),
+    activity: async () => { await request(fetchJson, '/activity', {}); },
   };
 }
 
