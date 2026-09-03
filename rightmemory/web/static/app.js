@@ -1,9 +1,10 @@
 const state = {
   csrfToken: null,
-  authenticated: false,
   panel: location.hash === "#pursuit-map" ? "pursuit-map" : "overview",
   pursuitMap: null,
 };
+
+let sessionRefreshPromise = null;
 
 const titleByPanel = {
   overview: "Overview",
@@ -16,7 +17,44 @@ const titleByPanel = {
   settings: "Settings",
 };
 
-async function fetchJson(path, options = {}) {
+async function parseJsonResponse(response) {
+  const responseText = await response.text();
+  let payload = {};
+  if (responseText) {
+    try {
+      payload = JSON.parse(responseText);
+    } catch {
+      if (response.ok) throw new Error("The server returned an unreadable response.");
+      payload = { message: responseText.trim().slice(0, 500) };
+    }
+  }
+  if (!response.ok) {
+    const record = payload && typeof payload === "object" ? payload : {};
+    const detail = record.detail && typeof record.detail === "object" ? record.detail : {};
+    const error = new Error(detail.message || record.message || `Request failed: ${response.status}`);
+    error.status = response.status;
+    error.detail = detail;
+    throw error;
+  }
+  return payload;
+}
+
+async function bootstrapSession() {
+  if (!sessionRefreshPromise) {
+    sessionRefreshPromise = (async () => {
+      const response = await fetch("/api/session", { headers: { accept: "application/json" } });
+      const session = await parseJsonResponse(response);
+      state.csrfToken = session.csrf_token || null;
+      document.querySelector("#active-root").textContent = session.active_root || "";
+      return session;
+    })().finally(() => {
+      sessionRefreshPromise = null;
+    });
+  }
+  return sessionRefreshPromise;
+}
+
+async function fetchJson(path, options = {}, retrySession = true) {
   const headers = {
     "content-type": "application/json",
     ...(options.headers || {}),
@@ -25,25 +63,27 @@ async function fetchJson(path, options = {}) {
     headers["x-csrf-token"] = state.csrfToken;
   }
   const response = await fetch(path, { ...options, headers });
-  const payload = await response.json();
-  if (!response.ok) {
-    const detail = payload.detail || {};
-    const error = new Error(detail.message || payload.message || `Request failed: ${response.status}`);
-    error.status = response.status;
-    error.detail = detail;
-    throw error;
+  if (response.status === 401 && retrySession && path !== "/api/session") {
+    await response.text();
+    await bootstrapSession();
+    return fetchJson(path, options, false);
   }
-  return payload;
+  return parseJsonResponse(response);
 }
 
 function setMessage(text) {
   document.querySelector("#message").textContent = text || "";
 }
 
-function setAuthenticated(authenticated) {
-  state.authenticated = authenticated;
-  document.querySelector("#login-panel").hidden = authenticated;
-  document.querySelector("#app-panel").hidden = !authenticated;
+function panelLoadErrorMessage(error) {
+  const message = error instanceof Error ? error.message : String(error || "Unknown error");
+  if (/failed to fetch dynamically imported module|importing a module script failed/i.test(message)) {
+    return "Pursuit Map assets could not load. Start Web Studio again with rightmemory pursuit, then click Refresh.";
+  }
+  if (/failed to fetch/i.test(message)) {
+    return "Web Studio is offline. Start it again with rightmemory pursuit, then click Refresh.";
+  }
+  return message;
 }
 
 function renderOverview(data) {
@@ -1087,13 +1127,8 @@ async function loadPanel() {
 }
 
 async function loadSession() {
-  const session = await fetchJson("/api/session");
-  state.csrfToken = session.csrf_token || null;
-  setAuthenticated(session.authenticated);
-  document.querySelector("#active-root").textContent = session.active_root || "";
-  if (session.authenticated) {
-    await loadPanel();
-  }
+  await bootstrapSession();
+  await loadPanel();
 }
 
 function escapeHtml(value) {
@@ -1106,29 +1141,16 @@ function escapeHtml(value) {
   }[char]));
 }
 
-document.querySelector("#login-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  try {
-    const token = new FormData(event.currentTarget).get("token");
-    const payload = await fetchJson("/api/login", {
-      method: "POST",
-      body: JSON.stringify({ token }),
-    });
-    state.csrfToken = payload.data.csrf_token;
-    setAuthenticated(true);
-    setMessage(payload.message);
-    await loadPanel();
-  } catch (error) {
-    setMessage(error.message);
-  }
-});
-
 document.querySelector("#refresh-button").addEventListener("click", async () => {
+  if (state.panel === "pursuit-map" && !state.pursuitMap) {
+    location.reload();
+    return;
+  }
   try {
     await loadPanel();
     setMessage("Refreshed.");
   } catch (error) {
-    setMessage(error.message);
+    setMessage(panelLoadErrorMessage(error));
   }
 });
 
@@ -1141,7 +1163,7 @@ document.querySelectorAll(".nav-item").forEach((button) => {
     try {
       await loadPanel();
     } catch (error) {
-      setMessage(error.message);
+      setMessage(panelLoadErrorMessage(error));
     }
   });
 });
@@ -1150,7 +1172,7 @@ window.addEventListener("hashchange", () => {
   const panel = location.hash.slice(1);
   if (titleByPanel[panel] && panel !== state.panel) {
     state.panel = panel;
-    if (state.authenticated) loadPanel().catch((error) => setMessage(error.message));
+    loadPanel().catch((error) => setMessage(panelLoadErrorMessage(error)));
   }
 });
 
@@ -1623,13 +1645,15 @@ function attachSettingsHandlers() {
           setMessage("Save or discard unsaved Pursuit Map edits before changing the active root.");
           return;
         }
+        state.pursuitMap?.setActive(false);
+        await state.pursuitMap?.flush();
         const payload = await fetchJson("/api/active-root", {
           method: "POST",
           body: JSON.stringify({ root }),
         });
         state.csrfToken = payload.data.csrf_token || state.csrfToken;
         document.querySelector("#active-root").textContent = payload.data.active_root || "";
-        state.pursuitMap?.destroy();
+        await state.pursuitMap?.destroy();
         state.pursuitMap = null;
         setMessage(payload.message);
         await loadPanel();
@@ -1698,6 +1722,5 @@ function showSharedViewResult(text) {
 }
 
 loadSession().catch((error) => {
-  setAuthenticated(false);
-  setMessage(error.message);
+  setMessage(panelLoadErrorMessage(error));
 });

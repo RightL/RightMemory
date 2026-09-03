@@ -20,11 +20,31 @@ Completion is a user decision to remove a direction after considering any indepe
 
 The canvas hides physical heading depth. When a deeper logical branch needs a file boundary, `F#` continues that hierarchy in a detail file. Existing boundaries stay stable to avoid unrelated rewrites. Pan, zoom, folding, and selection belong to browser-local view state and do not alter semantic Markdown.
 
-### A confirmed interaction is the transaction boundary
+### Confirmed actions are saved; editing batches become Git transactions
 
-Typing and pointer movement are local editing activity. Confirming a rename, structural move, note, deletion, or Focus change creates the candidate state. The store checks the expected revision, validates the complete candidate graph, and lands it only while the active root still matches the captured state. Failure leaves the active root unchanged.
+The canvas shows changes immediately. Each confirmed action is checked against the session's current editing state, validated in an isolated candidate, and durably recorded before the server acknowledges it. This recovery record belongs to operational editor state in `.runtime`; Markdown and Git remain the canonical Pursuit store. The active root stays clean while the user continues editing.
 
-This allows immediate canvas editing while preserving an inspectable Git change. Undo and redo create compensating commits and reject stale history; they do not reset the shared branch. Deletion can repair incoming typed edges in Memory, but that mechanical repair is not authority to rewrite Memory meaning.
+A short editing batch is the Git transaction boundary. Actual editing activity keeps the batch open, while an internal duration limit bounds its size. A pause or a boundary that needs canonical state flushes the batch: the store constructs the exact candidate from the captured base, validates the complete Memory/Pursuit graph, and publishes one commit while the active root still matches that base. A batch with no net file change creates no commit. Copy context, root changes, leaving the map, and normal service shutdown finish saved edits before proceeding.
+
+Undo and redo follow user actions across these checkpoints. The session history keeps stable action identities and exact file states, so undoing a deletion can restore the subtree, backing files, Focus, and repaired typed edges together. Undoing an already published action becomes a later compensating checkpoint; shared Git history is never reset or rewritten. Deletion's mechanical reference repair remains distinct from authority to rewrite Memory meaning.
+
+Recovery continues saved edits when the captured base is unchanged. If an external writer changes that base, the editor retains the recovery record and reports a conflict without replaying the actions or overwriting the newer root. A second browser session is refused write access while another session owns pending edits. This keeps acknowledged work recoverable without creating independently writable versions of the map.
+
+### Context connects the map to Codex App
+
+The map organizes the user's directions and their background. Codex App owns projects, tasks, conversations, and execution. Copying context is enough to carry a direction into an ordinary Codex App conversation without requiring a second conversation client, a host or project registry, or persistent links between tasks and Pursuit.
+
+**Copy context** finishes pending edits, then uses the canonical graph index through one opening-context builder. It selects the current direction, direct incoming and outgoing neighbors, and their logical heading ancestors in the established order, with the direction's direct connections. The output presents their titles, prose, and readable relationships as background. Internal identifiers, source locations, and runtime metadata are unnecessary for this handoff. Generating that text is read-only and stores no conversation association; finishing pending edits may first create their Git checkpoint.
+
+The pasted text describes the graph when copied. The user's accompanying request establishes what work to perform; context alone does not authorize a task. Later task progress, failure, or completion does not synchronize back into Pursuit or establish that a direction should be removed.
+
+### Manager coordinates a Pursuit direction without owning execution
+
+Pursuit items are coarse and often span several conversations or tasks. Rather than turning Pursuit into an execution backlog or adding a dedicated coordination runtime, the user can create one long-lived Manager conversation in Codex App for a direction, pin it manually in Codex App, and return to it as the stable coordination point.
+
+Manager keeps the broader picture, synthesizes outcomes, helps decide what happens next, and creates or coordinates separate temporary worker tasks. Light inspection needed for accurate coordination is natural, but substantive investigation, implementation, experimentation, and debugging belong in those separate worker tasks.
+
+Codex App owns conversations, tasks, and pinning. RightMemory stores no Manager conversation association or task status. Worker task progress, failure, or completion does not automatically change Pursuit or Memory. The Manager conversation invokes `maintain-rightmemory` or `maintain-pursuit-map` only when the user explicitly asks to change RightMemory.
 
 ### Existing data remains readable
 

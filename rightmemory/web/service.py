@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import threading
+import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -16,7 +20,8 @@ from ..config import (
     load_review_config,
     load_sync_config,
 )
-from ..pursuit_store import PursuitStore
+from ..opening_context import OpeningContextError, build_opening_context
+from ..pursuit_store import PursuitStore, PursuitStoreError
 from ..session import MemoryWriteLock
 from ..share_models import ShareRelationship, load_shares
 from ..share_results import capability_from_parts
@@ -54,18 +59,16 @@ from .readers import (
 
 
 class WebStudioService:
-    def __init__(self, memory_root: Path, *, allowed_root: Path | None = None):
+    def __init__(self, memory_root: Path, *, allowed_root: Path | None = None, pursuit_batches=None):
         self.memory_root = Path(memory_root).expanduser().resolve()
         self.allowed_root = Path(allowed_root).expanduser().resolve() if allowed_root is not None else self.memory_root
+        self.pursuit_batches = pursuit_batches
 
-    def session_data(self, *, authenticated: bool, csrf_token: str | None = None) -> dict[str, Any]:
+    def session_data(self, *, csrf_token: str) -> dict[str, Any]:
         data: dict[str, Any] = {
-            "authenticated": authenticated,
+            "active_root": str(self.memory_root),
+            "csrf_token": csrf_token,
         }
-        if authenticated:
-            data["active_root"] = str(self.memory_root)
-        if csrf_token:
-            data["csrf_token"] = csrf_token
         return data
 
     def overview(self) -> dict[str, Any]:
@@ -93,8 +96,38 @@ class WebStudioService:
         status = collect_status(self.memory_root)
         return _json_safe(status)
 
-    def pursuit_map(self) -> dict[str, Any]:
-        return PursuitStore(self.memory_root).snapshot()
+    def pursuit_map(self, session_id: str | None = None) -> dict[str, Any]:
+        snapshot = PursuitStore(self.memory_root).snapshot(session_id=session_id)
+        failure = self.pursuit_batches.failure(self.memory_root) if self.pursuit_batches else None
+        if failure:
+            snapshot["diagnostics"] = [*snapshot["diagnostics"], failure]
+            snapshot["writable"] = False
+            snapshot["recovery"] = True
+        return snapshot
+
+    def pursuit_context(self, item_id: str, expected_revision: str, session_id: str) -> dict[str, str]:
+        snapshot = self.pursuit_map(session_id)
+        if snapshot["revision"] != expected_revision:
+            raise PursuitStoreError("conflict", "The map changed. Reload it before copying context.", 409)
+        store = PursuitStore(self.memory_root)
+        if store.pending_state().get("pending"):
+            self.flush_pursuit_batch({"expected_revision": expected_revision}, session_id)
+            snapshot = self.pursuit_map(session_id)
+        if not snapshot["valid"]:
+            raise PursuitStoreError(
+                "invalid_root", "The map has validation errors.", 422,
+                diagnostics=snapshot["diagnostics"],
+            )
+        item = next((item for item in snapshot["items"] if item["id"] == item_id), None)
+        if item is None:
+            raise PursuitStoreError("not_found", "The selected Pursuit no longer exists.", 404)
+        try:
+            context = build_opening_context(self.memory_root, item)
+        except OpeningContextError as exc:
+            raise PursuitStoreError("conflict", "The map changed. Reload it before copying context.", 409) from exc
+        if self.pursuit_map(session_id)["revision"] != snapshot["revision"]:
+            raise PursuitStoreError("conflict", "The map changed. Reload it before copying context.", 409)
+        return {"text": context.text}
 
     def apply_pursuit_operation(self, payload: dict[str, Any], session_id: str) -> dict[str, Any]:
         expected_revision = _required_payload_str(payload, "expected_revision")
@@ -107,17 +140,41 @@ class WebStudioService:
 
     def undo_pursuit_operation(self, payload: dict[str, Any], session_id: str) -> dict[str, Any]:
         return PursuitStore(self.memory_root).undo(
-            _required_payload_str(payload, "commit"),
+            _required_payload_str(payload, "operation_id"),
             expected_revision=_required_payload_str(payload, "expected_revision"),
             session_id=session_id,
         )
 
     def redo_pursuit_operation(self, payload: dict[str, Any], session_id: str) -> dict[str, Any]:
         return PursuitStore(self.memory_root).redo(
-            _required_payload_str(payload, "commit"),
+            _required_payload_str(payload, "operation_id"),
             expected_revision=_required_payload_str(payload, "expected_revision"),
             session_id=session_id,
         )
+
+    def flush_pursuit_batch(self, payload: dict[str, Any], session_id: str) -> dict[str, Any]:
+        result = PursuitStore(self.memory_root).flush(
+            session_id=session_id,
+            expected_revision=_optional_payload_str(payload, "expected_revision"),
+        )
+        if self.pursuit_batches:
+            self.pursuit_batches.clear_failure(self.memory_root)
+        return result
+
+    def pursuit_activity(self, session_id: str) -> dict[str, bool]:
+        store = PursuitStore(self.memory_root)
+        if store.pending_state().get("pending"):
+            if not store.owns_pending(session_id):
+                raise PursuitStoreError(
+                    "session_conflict", "Another browser is editing this map. Finish its saved edits before editing here.", 409,
+                )
+            if self.pursuit_batches:
+                self.pursuit_batches.activity(self.memory_root)
+        return {"ok": True}
+
+    def finish_pursuit_session(self, session_id: str) -> None:
+        if PursuitStore(self.memory_root).owns_pending(session_id):
+            self.flush_pursuit_batch({}, session_id)
 
     def settings(self) -> dict[str, Any]:
         config_path = self.memory_root / "rightmemory.toml"
@@ -381,6 +438,93 @@ class WebStudioService:
     def set_active_root(self, root: Path) -> dict[str, Any]:
         resolved = resolve_allowed_memory_root(self.allowed_root, root)
         return {"active_root": str(resolved)}
+
+
+class PursuitBatchLifecycle:
+    """Finish durable editor batches even when a browser disappears."""
+
+    IDLE_SECONDS = 5.0
+    MAX_SECONDS = 60.0
+
+    def __init__(self, allowed_root: Path):
+        self.allowed_root = Path(allowed_root).resolve()
+        self._roots = {self.allowed_root}
+        self._activity: dict[Path, float] = {}
+        self._failures: dict[Path, str] = {}
+        self._retry_after: dict[Path, float] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def register(self, root: Path) -> None:
+        with self._lock:
+            self._roots.add(root)
+
+    def activity(self, root: Path) -> None:
+        with self._lock:
+            self._activity[root] = time.time()
+
+    def failure(self, root: Path) -> str | None:
+        with self._lock:
+            return self._failures.get(root)
+
+    def clear_failure(self, root: Path) -> None:
+        with self._lock:
+            self._failures.pop(root, None)
+            self._retry_after.pop(root, None)
+
+    def start(self) -> None:
+        # Discover nested roots once on startup, including journals left by expired sessions.
+        for directory, children, files in os.walk(self.allowed_root):
+            children[:] = [name for name in children if name not in {
+                ".git", ".runtime", ".worktree", ".worktrees", "node_modules", ".venv",
+            }]
+            if "MEMORY.md" in files:
+                self.register(resolve_allowed_memory_root(self.allowed_root, directory))
+        self.flush_due(force=True)
+        self._thread = threading.Thread(target=self._run, name="pursuit-autosave", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join()
+        self.flush_due(force=True)
+
+    def _run(self) -> None:
+        while not self._stop.wait(1.0):
+            self.flush_due()
+
+    def flush_due(self, *, now: float | None = None, force: bool = False) -> None:
+        now = time.time() if now is None else now
+        with self._lock:
+            roots = list(self._roots)
+        for root in roots:
+            with self._lock:
+                activity = self._activity.get(root, 0.0)
+                retry_after = self._retry_after.get(root, 0.0)
+            if not force and now < retry_after:
+                continue
+            try:
+                store = PursuitStore(root)
+                pending = store.pending_state()
+                if not pending.get("pending"):
+                    self.clear_failure(root)
+                    continue
+                idle = now - max(float(pending["updated_at"]), activity)
+                duration = now - float(pending["started_at"])
+                if not force and idle < self.IDLE_SECONDS and duration < self.MAX_SECONDS:
+                    continue
+                store.flush_pending()
+                self.clear_failure(root)
+            except (PursuitStoreError, OSError, ValueError, RuntimeError) as exc:
+                message = f"Saved edits could not be committed: {exc} Recovery data is retained; resolve the reported condition and retry."
+                with self._lock:
+                    previous = self._failures.get(root)
+                    self._failures[root] = message
+                    self._retry_after[root] = now + self.MAX_SECONDS
+                if previous != message:
+                    logging.getLogger(__name__).warning("Pursuit autosave for %s: %s", root, message)
 
 
 def resolve_allowed_memory_root(allowed_root: Path, candidate: Path | str) -> Path:

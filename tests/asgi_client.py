@@ -124,7 +124,7 @@ class ASGITestClient:
         cookie_header = self.cookies.header_value()
         if cookie_header and "cookie" not in request_headers:
             request_headers["cookie"] = cookie_header
-        request_headers.setdefault("host", parsed.netloc or "testserver")
+        request_headers.setdefault("host", parsed.netloc or "127.0.0.1")
         raw_headers = [(key.encode("latin-1"), value.encode("latin-1")) for key, value in request_headers.items()]
         scope = {
             "type": "http",
@@ -138,7 +138,7 @@ class ASGITestClient:
             "root_path": "",
             "headers": raw_headers,
             "client": ("testclient", 50000),
-            "server": (parsed.netloc or "testserver", 80),
+            "server": (parsed.netloc or "127.0.0.1", 80),
             "state": {},
         }
         response_complete = asyncio.Event()
@@ -175,6 +175,12 @@ class ASGITestClient:
             with suppress(asyncio.CancelledError):
                 await task
             raise TimeoutError("ASGI app did not send a complete response") from exc
+        if not task.done():
+            # A response can publish its final body just before the app exits
+            # its file/stream context. Give that cleanup a brief chance to
+            # finish before cancellation so test downloads do not leak handles.
+            with suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.01)
         if task.done():
             await task
         else:

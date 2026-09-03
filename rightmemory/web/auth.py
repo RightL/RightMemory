@@ -35,38 +35,17 @@ def web_runtime_dir(memory_root: Path) -> Path:
     return Path(memory_root) / WEB_RUNTIME_DIR
 
 
-def operator_token_hash_path(memory_root: Path) -> Path:
-    return web_runtime_dir(memory_root) / "operator-token.sha256"
-
-
 def session_secret_path(memory_root: Path) -> Path:
     return web_runtime_dir(memory_root) / "session-secret"
 
 
-def ensure_web_auth_files(memory_root: Path, *, operator_token: str | None = None) -> str | None:
+def ensure_web_session_secret(memory_root: Path) -> None:
     runtime = web_runtime_dir(memory_root)
     _ensure_runtime_gitignore(Path(memory_root) / ".runtime")
     runtime.mkdir(parents=True, exist_ok=True)
-    generated_token: str | None = None
-    token_path = operator_token_hash_path(memory_root)
-    if operator_token is not None:
-        _atomic_write_secret(token_path, _hash_token(operator_token) + "\n")
-    elif not token_path.exists():
-        generated_token = secrets.token_urlsafe(24)
-        _atomic_write_secret(token_path, _hash_token(generated_token) + "\n")
     secret_path = session_secret_path(memory_root)
     if not secret_path.exists():
         _atomic_write_secret(secret_path, secrets.token_urlsafe(48) + "\n")
-    return generated_token
-
-
-def verify_operator_token(memory_root: Path, token: str) -> bool:
-    ensure_web_auth_files(memory_root)
-    try:
-        expected = operator_token_hash_path(memory_root).read_text(encoding="utf-8").strip()
-    except OSError:
-        return False
-    return hmac.compare_digest(expected, _hash_token(token))
 
 
 def create_session_cookie(
@@ -77,7 +56,7 @@ def create_session_cookie(
     csrf_token: str | None = None,
     created_at: str | None = None,
 ) -> tuple[str, WebSession]:
-    ensure_web_auth_files(memory_root)
+    ensure_web_session_secret(memory_root)
     session = WebSession(
         session_id=session_id or secrets.token_urlsafe(24),
         csrf_token=csrf_token or secrets.token_urlsafe(24),
@@ -109,7 +88,12 @@ def clear_session_cookie(response: Response) -> None:
 
 
 def read_session(memory_root: Path, request: Request) -> WebSession | None:
-    cookie = request.cookies.get(SESSION_COOKIE)
+    return read_session_cookie(memory_root, request.cookies.get(SESSION_COOKIE))
+
+
+def read_session_cookie(memory_root: Path, cookie: str | None) -> WebSession | None:
+    """Validate one signed session cookie against current expiry and revocation state."""
+
     if not cookie:
         return None
     try:
@@ -133,7 +117,7 @@ def read_session(memory_root: Path, request: Request) -> WebSession | None:
 def require_session(memory_root: Path, request: Request) -> WebSession:
     session = read_session(memory_root, request)
     if session is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=error_detail("login required"))
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=error_detail("session required"))
     return session
 
 
@@ -167,10 +151,6 @@ def revoke_session(memory_root: Path, session_id: str) -> None:
     _atomic_write_secret(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
-def _hash_token(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
 def _session_is_expired(created_at: str) -> bool:
     try:
         parsed = _parse_session_datetime(created_at)
@@ -202,7 +182,7 @@ def _parse_session_datetime(value: str) -> datetime:
 
 
 def _secret(memory_root: Path) -> bytes:
-    ensure_web_auth_files(memory_root)
+    ensure_web_session_secret(memory_root)
     return session_secret_path(memory_root).read_text(encoding="utf-8").strip().encode("utf-8")
 
 

@@ -30,9 +30,9 @@ class WebStudioReadApiTests(unittest.TestCase):
         log = self.root / ".runtime" / "watch" / "review.log"
         log.parent.mkdir(parents=True)
         log.write_text("old\nrecent review message\n", encoding="utf-8")
-        self.client = TestClient(create_web_app(self.root, operator_token="secret-token"))
-        login = self.client.post("/api/login", json={"token": "secret-token"})
-        self.csrf = login.json()["data"]["csrf_token"]
+        self.client = TestClient(create_web_app(self.root))
+        session = self.client.get("/api/session")
+        self.csrf = session.json()["csrf_token"]
 
     def test_overview_and_status_return_structured_data(self):
         overview = self.client.get("/api/overview")
@@ -123,7 +123,7 @@ class WebStudioStaticTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             (root / "MEMORY.md").write_text("# Project {#project}\n", encoding="utf-8")
-            client = TestClient(create_web_app(root, operator_token="secret-token"))
+            client = TestClient(create_web_app(root))
 
             index = client.get("/")
             script = client.get("/static/app.js")
@@ -134,6 +134,9 @@ class WebStudioStaticTests(unittest.TestCase):
         self.assertEqual(style.status_code, 200)
         self.assertIn("/static/app.js", index.text)
         self.assertIn("/static/styles.css", index.text)
+        self.assertNotIn("operator-token", index.text)
+        self.assertNotIn("operator token", index.text.lower())
+        self.assertNotIn("/api/login", script.text)
         self.assertNotIn("ready for the next Web Studio API slice", script.text)
         self.assertIn("build-file-view-form", script.text)
         self.assertIn("build-question-view-form", script.text)
@@ -152,6 +155,14 @@ class WebStudioStaticTests(unittest.TestCase):
 
 
 class WebStudioStaticSourceTests(unittest.TestCase):
+    def test_pursuit_map_load_failure_has_a_full_page_recovery(self):
+        static_root = Path(__file__).resolve().parents[1] / "rightmemory" / "web" / "static"
+        script = (static_root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("function panelLoadErrorMessage", script)
+        self.assertIn('state.panel === "pursuit-map" && !state.pursuitMap', script)
+        self.assertIn("location.reload();", script)
+
     def test_share_first_static_source_contains_relationship_ui(self):
         static_root = Path(__file__).resolve().parents[1] / "rightmemory" / "web" / "static"
         script = (static_root / "app.js").read_text(encoding="utf-8")
@@ -334,9 +345,9 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
             "# Provider {#provider}\n\nAuth API accepts signed tokens.\nPrivate payroll note.\n",
             encoding="utf-8",
         )
-        self.client = TestClient(create_web_app(self.root, operator_token="secret-token"))
-        login = self.client.post("/api/login", json={"token": "secret-token"})
-        self.csrf = login.json()["data"]["csrf_token"]
+        self.client = TestClient(create_web_app(self.root))
+        session = self.client.get("/api/session")
+        self.csrf = session.json()["csrf_token"]
 
     def test_provider_build_file_question_and_approve(self):
         with patch("rightmemory.web.service.run_file_view_builder", return_value="built file view auth-api-files") as build_file:
@@ -684,7 +695,7 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
             calls.append((view_id, payload["question"]))
             return "Shared question: auth-api-ask\nStatus: answered\nAnswer: Use token_expires_at.\n"
 
-        remote_client = TestClient(create_web_app(self.root, operator_token="secret-token"))
+        remote_client = TestClient(create_web_app(self.root))
         with patch("rightmemory.web.service.WebStudioService.answer_question_view", new=fake_answer):
             response = remote_client.post(
                 "/api/share/questions/auth-api-ask/ask",
@@ -708,7 +719,7 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
             access_tokens=["connection-token"],
         )
 
-        remote_client = TestClient(create_web_app(self.root, operator_token="secret-token"))
+        remote_client = TestClient(create_web_app(self.root))
         with patch("rightmemory.web.service.WebStudioService.answer_question_view") as answer:
             response = remote_client.post(
                 "/api/share/questions/auth-api-ask/ask",
@@ -730,7 +741,7 @@ class WebStudioSharedViewApiTests(unittest.TestCase):
             access_tokens=["connection-token"],
         )
 
-        remote_client = TestClient(create_web_app(self.root, operator_token="secret-token"))
+        remote_client = TestClient(create_web_app(self.root))
         with patch("rightmemory.web.service.WebStudioService.answer_question_view") as answer:
             wrong = remote_client.get(
                 "/api/share/questions/auth-api-ask/ready",
