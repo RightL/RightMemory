@@ -96,9 +96,13 @@ export function serializeWholeTitleFormat(value: WholeTitleFormat): string {
   return order.reduceRight((text, mark) => value.marks.has(mark) ? wrappers[mark][0] + text + wrappers[mark][1] : text, value.inner);
 }
 
-export function toggleWholeTitleMark(raw: string, mark: TopicMark): string {
+export function setWholeTitleMark(raw: string, mark: TopicMark, enabled: boolean): string {
   const value = parseWholeTitleFormat(raw);
-  if (value.marks.has(mark)) value.marks.delete(mark);
-  else value.marks.add(mark);
+  if (enabled) value.marks.add(mark);
+  else value.marks.delete(mark);
   return serializeWholeTitleFormat(value);
+}
+
+export function toggleWholeTitleMark(raw: string, mark: TopicMark): string {
+  return setWholeTitleMark(raw, mark, !parseWholeTitleFormat(raw).marks.has(mark));
 }

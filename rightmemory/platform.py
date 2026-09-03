@@ -98,6 +98,9 @@ def detached_process_kwargs() -> dict[str, object]:
     flags = 0
     flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # A hidden process still inherits a terminal/task host's Windows job.
+    # Ask to leave that job so its kill-on-close cleanup cannot stop a daemon.
+    flags |= getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
     kwargs: dict[str, object] = {"close_fds": True}
     if flags:
         kwargs["creationflags"] = flags

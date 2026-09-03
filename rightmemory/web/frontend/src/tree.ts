@@ -25,11 +25,14 @@ export interface Snapshot {
   valid: boolean;
   writable: boolean;
   diagnostics: (string | { message?: string; [key: string]: unknown })[];
+  pending: boolean;
+  history: { undo: string[]; redo: string[] };
 }
 
 export type Operation =
   | { type: 'create'; parent_id: string | null; after_id: string | null; title: string }
   | { type: 'rename'; id: string; title: string }
+  | { type: 'rename_many'; renames: Array<{ id: string; title: string }> }
   | { type: 'move'; id: string; parent_id: string | null; after_id: string | null }
   | { type: 'delete'; id: string }
   | { type: 'edit_body'; id: string; body: string }
@@ -42,6 +45,7 @@ export interface MutationResult {
   repaired_references: unknown[];
   undoable: boolean;
   selected_id: string | null;
+  id_remaps?: Array<{ from: string; to: string }>;
 }
 
 export const DRAFT_PREFIX = '__pursuit_draft_';
@@ -95,6 +99,16 @@ export function applyOperation(snapshot: Snapshot, operation: Operation, tempora
   if ((operation.type === 'create' || operation.type === 'rename') && !titleText(operation.title).trim()) {
     throw new Error('A direction needs a visible title.');
   }
+  if (operation.type === 'rename_many') {
+    if (!operation.renames.length) throw new Error('Choose at least one direction to rename.');
+    const targets = new Set<string>();
+    for (const rename of operation.renames) {
+      if (!rename.id.trim()) throw new Error('A rename target needs an identity.');
+      if (targets.has(rename.id)) throw new Error('Each direction can be renamed only once.');
+      if (!titleText(rename.title).trim()) throw new Error('A direction needs a visible title.');
+      targets.add(rename.id);
+    }
+  }
   const next: Snapshot = {
     ...snapshot,
     items: snapshot.items.map((item) => ({ ...item, child_ids: [...item.child_ids], edges: item.edges.map((edge) => [...edge]) })),
@@ -118,6 +132,15 @@ export function applyOperation(snapshot: Snapshot, operation: Operation, tempora
     next.items.push(item);
     items.set(item.id, item);
     insert(item.id, item.parent_id, operation.after_id);
+    return next;
+  }
+  if (operation.type === 'rename_many') {
+    const targets = operation.renames.map((rename) => {
+      const item = items.get(rename.id);
+      if (!item?.editable) throw new Error('A selected direction is no longer editable. Reload the map.');
+      return { item, title: rename.title };
+    });
+    targets.forEach(({ item, title }) => { item.title = title; });
     return next;
   }
   const item = items.get(operation.id);
@@ -152,6 +175,12 @@ export function applyOperation(snapshot: Snapshot, operation: Operation, tempora
 }
 
 export function remapOperation(operation: Operation, temporaryId: string, id: string): Operation {
+  if (operation.type === 'rename_many') {
+    return {
+      ...operation,
+      renames: operation.renames.map((rename) => rename.id === temporaryId ? { ...rename, id } : { ...rename }),
+    };
+  }
   const mapped = { ...operation };
   if ('id' in mapped && mapped.id === temporaryId) mapped.id = id;
   if ('parent_id' in mapped && mapped.parent_id === temporaryId) mapped.parent_id = id;

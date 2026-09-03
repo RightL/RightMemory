@@ -158,11 +158,16 @@ class PlatformHelperTests(unittest.TestCase):
             patch.object(rm_platform, "IS_WINDOWS", True),
             patch.object(rm_platform.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True),
             patch.object(rm_platform.subprocess, "CREATE_NO_WINDOW", 0x8000000, create=True),
+            patch.object(rm_platform.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x1000000, create=True),
         ):
             kwargs = rm_platform.detached_process_kwargs()
 
         self.assertTrue(kwargs["close_fds"])
-        self.assertEqual(kwargs["creationflags"], 0x8000200)
+        self.assertEqual(kwargs["creationflags"], 0x9000200)
+
+    def test_posix_detached_process_starts_a_new_session(self):
+        with patch.object(rm_platform, "IS_WINDOWS", False):
+            self.assertEqual(rm_platform.detached_process_kwargs(), {"start_new_session": True, "close_fds": True})
 
     def test_windows_restart_spawns_replacement_and_exits_current_process(self):
         with (

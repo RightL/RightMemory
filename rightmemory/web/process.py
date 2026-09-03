@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import secrets
@@ -19,7 +20,7 @@ from ..platform import (
     python_module_child_env,
 )
 from ..session import _ensure_runtime_gitignore, _fsync_directory
-from .auth import WEB_RUNTIME_DIR, ensure_web_auth_files
+from .auth import WEB_RUNTIME_DIR, ensure_web_session_secret
 
 
 MANAGED_WEB_ENV = "RIGHTMEMORY_MANAGED_WEB"
@@ -35,7 +36,6 @@ class WebServiceStatus:
     host: str | None
     port: int | None
     log_path: Path
-    generated_operator_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +93,7 @@ def start_web_service(
     python_executable: str | None = None,
 ) -> WebServiceStatus:
     root = Path(memory_root)
+    validate_web_host(host)
     if port < 0 or port > 65535:
         raise ValueError("port must be between 0 and 65535")
     status = web_service_status(root)
@@ -107,7 +108,7 @@ def start_web_service(
     web_ready_path(root).unlink(missing_ok=True)
     web_launch_path(root).unlink(missing_ok=True)
     web_stop_path(root).unlink(missing_ok=True)
-    generated_operator_token = ensure_web_auth_files(root)
+    ensure_web_session_secret(root)
     runtime_dir = root / WEB_RUNTIME_DIR
     _ensure_runtime_gitignore(root / ".runtime")
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -138,7 +139,7 @@ def start_web_service(
             **detached_process_kwargs(),
         )
     pid = _wait_for_web_registration(root, process, launch_id=launch_id)
-    return WebServiceStatus("running", pid, host, port, log_path, generated_operator_token)
+    return WebServiceStatus("running", pid, host, port, log_path)
 
 
 def stop_web_service(memory_root: Path, timeout_seconds: int = 30) -> StopWebResult:
@@ -180,10 +181,7 @@ def clear_web_process_files(memory_root: Path, pid: int) -> None:
 
 def format_web_status(status: WebServiceStatus) -> str:
     if status.state == "running" and status.pid is not None:
-        message = f"web: running pid {status.pid}, url http://{status.host}:{status.port}/, log {status.log_path}"
-        if status.generated_operator_token:
-            message += f", operator token {status.generated_operator_token}"
-        return message
+        return f"web: running pid {status.pid}, url http://{status.host}:{status.port}/, log {status.log_path}"
     if status.state == "stale" and status.pid is not None:
         return f"web: stale pid {status.pid}"
     return "web: stopped"
@@ -197,6 +195,18 @@ def format_stop_result(result: StopWebResult) -> str:
     if result.state == "stale-removed" and result.pid is not None:
         return f"web: removed stale pid {result.pid}"
     return "web: stopped"
+
+
+def validate_web_host(host: str) -> None:
+    clean = host.strip().lower()
+    if clean == "localhost":
+        return
+    try:
+        address = ipaddress.ip_address(clean)
+    except ValueError as exc:
+        raise ValueError("Web Studio host must be a loopback address") from exc
+    if not address.is_loopback:
+        raise ValueError("Web Studio host must be a loopback address")
 
 
 def _web_child_env(memory_root: Path) -> dict[str, str]:

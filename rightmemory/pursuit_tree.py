@@ -15,7 +15,6 @@ from typing import Mapping
 from .graph import (
     ANCHOR_RE,
     FOCUS_HEADING_RE,
-    NODE_RE,
     BlockKey,
     DocumentBlock,
     GraphManifest,
@@ -124,6 +123,7 @@ class PursuitEdit:
     repaired_references: tuple[dict[str, object], ...]
     selected_id: str | None
     description: str
+    id_remaps: tuple[dict[str, str], ...] = ()
 
 
 def _block_id(manifest: GraphManifest, block: DocumentBlock) -> str:
@@ -144,20 +144,6 @@ def _reserved(manifest: GraphManifest, block: DocumentBlock) -> bool:
         and block.item_id is None
         and heading_title(block.line).casefold() == "pursuits"
     )
-
-
-def _node_title(block: DocumentBlock) -> str:
-    match = NODE_RE.match(block.line)
-    if match is None:
-        return block.line.strip()
-    start = block.line.index("`", block.line.index("`") + 1) + 1
-    end = match.start(2) - 1
-    suffix = block.line[start:end].rstrip()
-    for arrow in ("\u2192", "->"):
-        if suffix.endswith(arrow):
-            suffix = suffix[:-len(arrow)].rstrip()
-            break
-    return suffix.strip() or block.item_id or "Legacy item"
 
 
 def load_pursuit_tree(root: Path) -> PursuitTree:
@@ -185,7 +171,7 @@ def _project(manifest: GraphManifest) -> PursuitTree:
             legacy = block.kind == "node"
             item_data[item_id] = {
                 "id": item_id,
-                "title": _node_title(block) if legacy else heading_title(block.line),
+                "title": block.title,
                 "body": block_body_text(manifest, block).strip("\r\n"),
                 "parent_id": parent_id,
                 "edges": graph_item.edges if graph_item is not None else (),
@@ -273,6 +259,7 @@ class _Editor:
         self.used_paths = {path.name.casefold() for path in self.root.iterdir()}
         self.memory_changes: dict[Path, str] = {}
         self.repairs: list[dict[str, object]] = []
+        self.id_remaps: list[dict[str, str]] = []
         for source in manifest.documents.values():
             if source.family != "pursuit":
                 continue
@@ -342,6 +329,8 @@ class _Editor:
         if old_id is not None:
             self.items.pop(old_id, None)
         self.items[entry.id] = entry
+        if old_id is not None and old_id != entry.id:
+            self.id_remaps.append({"from": old_id, "to": entry.id})
 
     def anchor(self, entry: _Entry, kind: str) -> None:
         self.address(entry)
@@ -550,6 +539,37 @@ def _title(operation: Mapping[str, object]) -> str:
         raise PursuitOperationError(str(exc)) from exc
 
 
+def _rename_many(
+    editor: _Editor, operation: Mapping[str, object]
+) -> tuple[str, str]:
+    values = operation.get("renames")
+    if not isinstance(values, list) or not values:
+        raise PursuitOperationError("renames must be a nonempty list")
+
+    requested: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, Mapping):
+            raise PursuitOperationError("each rename must be an object")
+        item_id = _string(value, "id")
+        if item_id in seen:
+            raise PursuitOperationError("rename ids must be unique")
+        seen.add(item_id)
+        requested.append((item_id, _title(value)))
+
+    prepared = [
+        (item_id, title, editor.item(item_id))
+        for item_id, title in requested
+    ]
+    resulting_ids: list[str] = []
+    for item_id, title, entry in prepared:
+        editor.address(entry, title=title)
+        entry.header = replace_heading_title(entry.header, title)
+        entry.title = title
+        resulting_ids.append(entry.id or item_id)
+    return resulting_ids[0], f"Rename {len(resulting_ids)} Pursuits"
+
+
 def _apply(editor: _Editor, operation: Mapping[str, object]) -> tuple[str | None, str]:
     kind = operation.get("type")
     if kind == "create":
@@ -568,6 +588,9 @@ def _apply(editor: _Editor, operation: Mapping[str, object]) -> tuple[str | None
         editor.items[item_id] = entry
         editor.insert(entry, container, after, first="after_id" in operation and after is None)
         return item_id, f"Create Pursuit: {title}"
+
+    if kind == "rename_many":
+        return _rename_many(editor, operation)
 
     if kind not in {"rename", "move", "reorder", "delete", "edit_body", "set_focus"}:
         raise PursuitOperationError("unknown Pursuit operation")
@@ -712,4 +735,5 @@ def apply_operation(root: Path, operation: Mapping[str, object]) -> PursuitEdit:
         repaired_references=tuple(editor.repairs),
         selected_id=selected_id,
         description=description,
+        id_remaps=tuple(editor.id_remaps),
     )

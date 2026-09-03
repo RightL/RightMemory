@@ -3,28 +3,13 @@ import { applyOperation, childrenOf, createSiblingBeforeOperation, deletionSelec
   type MutationResult, type Operation, type Snapshot } from './tree.ts';
 import { DraftBook, type TitleDraft } from './drafts.ts';
 import { MapRenderer } from './renderer.ts';
-import { parseWholeTitleFormat, titleText, toggleWholeTitleMark, type TopicMark } from './title-format.ts';
+import { parseWholeTitleFormat, setWholeTitleMark, titleText, type TopicMark } from './title-format.ts';
 import { keyboardCommand, navigate, readView, reconcileView, reveal, writeView, type ViewState } from './view-state.ts';
+import { apiContext, apiTransport, type FetchJson } from './pursuit-api.ts';
 import './pursuit-map.css';
 
-type FetchJson = (path: string, options?: RequestInit) => Promise<{ data: unknown }>;
-
-export function apiTransport(fetchJson: FetchJson): Transport {
-  const request = async <T>(path: string, body?: unknown): Promise<T> => {
-    try {
-      const response = await fetchJson(`/api/pursuit-map${path}`, body === undefined ? undefined : { method: 'POST', body: JSON.stringify(body) });
-      return response.data as T;
-    } catch (cause) {
-      const error = cause as Error & { status?: number; detail?: { snapshot?: Snapshot } };
-      throw new ApiError(error.message, error.status ?? 0, error.detail?.snapshot);
-    }
-  };
-  return {
-    load: () => request<Snapshot>(''),
-    mutate: (expected_revision, operation) => request<MutationResult>('/operations', { expected_revision, operation }),
-    history: (kind, expected_revision, commit) => request<MutationResult>(`/${kind}`, { expected_revision, commit }),
-  };
-}
+const EDIT_IDLE_MS = 3000;
+const ACTIVITY_INTERVAL_MS = 1000;
 
 const markup = `
   <div class="pm-toolbar" role="toolbar" aria-label="Pursuit Map tools">
@@ -40,6 +25,7 @@ const markup = `
       <button type="button" data-command="focus" title="Toggle Focus (F)" aria-pressed="false">✦ <span>Focus</span></button>
       <button type="button" data-command="collapse" title="Expand or collapse (Space)" aria-label="Expand or collapse selected direction">⊟</button>
       <details class="pm-more"><summary aria-label="More node actions" title="More actions">···</summary><div class="pm-menu">
+        <button type="button" data-command="copy-context">Copy context</button>
         <button type="button" data-command="rename">Rename <kbd>F2</kbd></button>
         <button type="button" data-command="promote">Promote <kbd>Shift Tab</kbd></button>
         <button type="button" data-command="root">New top-level direction</button>
@@ -55,6 +41,7 @@ const markup = `
         <strong>On the canvas</strong>
         <p>Double-click or F2 to rename. Enter adds a sibling after; Shift+Enter adds one before. Tab adds a child. Shift+Tab promotes. Alt+Up/Down reorders siblings.</p>
         <p>Ctrl/⌘ B toggles bold, Ctrl/⌘ U underline, Ctrl/⌘ Shift X strikethrough. Finish title editing before applying these whole-topic marks.</p>
+        <p>Shift-drag empty space to select several directions. Ctrl/⌘+Shift-drag adds to the selection; Ctrl/⌘-click toggles one direction.</p>
         <p>Arrows move between directions. Space folds a branch. Delete removes a subtree. N opens its note; F toggles Focus.</p>
         <p>Ctrl/⌘ F finds, Ctrl/⌘ 0 fits, Ctrl/⌘ Z undoes, Ctrl/⌘ Shift Z redoes.</p>
         <p>Drag a label onto a direction to nest it; drag above or below a label to reorder. Drop on empty space to make an independent top-level direction.</p>
@@ -99,19 +86,27 @@ const markup = `
 
 export interface PursuitMapController {
   refresh(): Promise<void>;
+  flush(): Promise<void>;
   setActive(active: boolean): void;
+  getSelectedId(): string | null;
+  subscribeSelection(listener: (id: string | null) => void): () => void;
   readonly hasUnsavedChanges: boolean;
-  destroy(): void;
+  destroy(): Promise<void>;
 }
 
 export async function mountPursuitMap(host: HTMLElement, fetchJson: FetchJson): Promise<PursuitMapController> {
-  return mountMap(host, apiTransport(fetchJson));
+  return mountMap(host, apiTransport(fetchJson), { context: apiContext(fetchJson) });
+}
+
+export interface MountMapOptions {
+  context?(itemId: string, revision: string): Promise<string>;
+  writeClipboard?(text: string): Promise<void>;
 }
 
 /** Exported separately so the browser fixture exercises the complete UI with disposable state. */
-export async function mountMap(host: HTMLElement, transport: Transport): Promise<PursuitMapController> {
+export async function mountMap(host: HTMLElement, transport: Transport, options: MountMapOptions = {}): Promise<PursuitMapController> {
   const snapshot = await transport.load();
-  return new PursuitMap(host, snapshot, transport);
+  return new PursuitMap(host, snapshot, transport, options);
 }
 
 class PursuitMap implements PursuitMapController {
@@ -121,18 +116,30 @@ class PursuitMap implements PursuitMapController {
   private drafts = new DraftBook();
   private abort = new AbortController();
   private active = true;
+  private copyingContext = false;
   private matches: string[] = [];
   private matchIndex = -1;
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
+  private idleTimer: ReturnType<typeof setTimeout> | undefined;
+  private activityTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastActivitySent = 0;
   private unsubscribe: () => void;
+  private selectionListeners = new Set<(id: string | null) => void>();
+  private lastNotifiedSelection: string | null;
 
-  constructor(private host: HTMLElement, snapshot: Snapshot, transport: Transport) {
+  constructor(private host: HTMLElement, snapshot: Snapshot, transport: Transport, private options: MountMapOptions = {}) {
     host.className = 'pursuit-map';
     host.innerHTML = markup;
     this.queue = new MutationQueue(snapshot, transport);
     this.view = reconcileView(snapshot, readView(localStorage, snapshot.root_key));
+    this.lastNotifiedSelection = this.view.selected ?? null;
     this.renderer = new MapRenderer(this.$('.pm-canvas'), snapshot, this.view, {
-      select: (id) => { this.closeContextMenu(); this.view.selected = id; this.saveView(); this.updateTools(); },
+      select: (ids, primary) => {
+        this.closeContextMenu();
+        this.view.selectedIds = [...ids];
+        this.view.selected = primary;
+        this.saveView(); this.updateTools(); this.notifySelection();
+      },
       collapse: (id, collapsed, preserveDrag) => this.setCollapsed(id, collapsed, preserveDrag),
       move: (operation) => { void this.mutate(operation); },
       editStart: (id, title) => this.editStarted(id, title),
@@ -146,17 +153,28 @@ class PursuitMap implements PursuitMapController {
       contextMenu: (id, x, y) => this.openContextMenu(id, x, y),
     });
     this.unsubscribe = this.queue.subscribe((change) => this.changed(change));
+    for (const type of ['input', 'keydown', 'pointerdown', 'pointerup', 'wheel', 'compositionupdate']) {
+      host.addEventListener(type, () => this.recordActivity(), { capture: true, passive: true, signal: this.abort.signal });
+    }
+    host.addEventListener('pointermove', (event) => {
+      if (event.buttons) this.recordActivity();
+    }, { capture: true, passive: true, signal: this.abort.signal });
     host.addEventListener('click', (event) => {
       const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-command]');
       if (button?.disabled) return;
       if (button) { this.$<HTMLDetailsElement>('.pm-more').open = false; void this.command(button.dataset.command!); }
+    }, { signal: this.abort.signal });
+    // Opening Copy context must not blur and silently save an unfinished title.
+    this.$('.pm-more').addEventListener('pointerdown', (event) => {
+      if (this.renderer.editing && event.button === 0) event.preventDefault();
     }, { signal: this.abort.signal });
     this.$('.pm-topic-toolbar').addEventListener('pointerdown', (event) => {
       if (event.button === 0) event.preventDefault(); // Retain canvas keyboard focus after formatting.
     }, { signal: this.abort.signal });
     document.addEventListener('pointerdown', (event) => {
       if (!this.active) return;
-      if (!this.host.contains(event.target as Node)) this.select(null);
+      const target = event.target as Node;
+      if (!this.host.contains(target)) this.select(null);
       if (!(event.target as HTMLElement).closest('.pm-context-menu, [data-command="context-menu"]')) this.closeContextMenu();
     }, { signal: this.abort.signal });
     host.addEventListener('contextmenu', (event) => {
@@ -178,6 +196,10 @@ class PursuitMap implements PursuitMapController {
     window.addEventListener('beforeunload', (event) => {
       if (this.queue.pendingCount || this.drafts.dirty) { event.preventDefault(); event.returnValue = ''; }
     }, { signal: this.abort.signal });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this.flushInBackground();
+    }, { signal: this.abort.signal });
+    window.addEventListener('pagehide', () => this.flushInBackground(), { signal: this.abort.signal });
     window.addEventListener('focus', () => {
       if (this.active && !this.renderer.editing) void this.refresh().catch((error) => this.toast(error.message));
     }, { signal: this.abort.signal });
@@ -191,6 +213,10 @@ class PursuitMap implements PursuitMapController {
   private saveView(): void { writeView(localStorage, this.queue.snapshot.root_key, this.view); }
   private get snapshot(): Snapshot { return this.queue.snapshot; }
   private get selected() { return indexTree(this.snapshot).get(this.view.selected ?? ''); }
+  private get selectedItems() {
+    const items = indexTree(this.snapshot);
+    return this.view.selectedIds.map((id) => items.get(id)).filter((item) => item !== undefined);
+  }
 
   private displaySnapshot(): Snapshot {
     const draft = this.drafts.title;
@@ -208,13 +234,21 @@ class PursuitMap implements PursuitMapController {
     this.renderer.highlight(new Set(this.matches));
     this.updateTools();
     this.saveView();
+    this.notifySelection();
+  }
+
+  private notifySelection(): void {
+    const selected = this.view.selected ?? null;
+    if (selected === this.lastNotifiedSelection) return;
+    this.lastNotifiedSelection = selected;
+    for (const listener of this.selectionListeners) listener(selected);
   }
 
   private changed(change: QueueChange): void {
     this.closeContextMenu();
-    if (change.remapped) {
-      const { from, to } = change.remapped;
+    for (const { from, to } of change.remapped ?? []) {
       if (this.view.selected === from) this.view.selected = to;
+      this.view.selectedIds = this.view.selectedIds.map((id) => id === from ? to : id);
       this.view.collapsed = this.view.collapsed.map((id) => id === from ? to : id);
       this.drafts.remap(from, to);
     }
@@ -222,32 +256,74 @@ class PursuitMap implements PursuitMapController {
     this.render();
     this.updateNote();
     this.renderDiagnostics(change.snapshot);
-    if (change.error) this.toast(`${change.error.message} The map was reloaded; unsaved text is kept.`, undefined, 0);
+    if (change.error) this.toast(`${change.error.message} Unsaved text is kept.`, undefined, 0);
+    else if (change.snapshot.pending && change.snapshot.writable && !change.flushing && !this.idleTimer) this.scheduleFlush();
+  }
+
+  private scheduleFlush(): void {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = undefined;
+      void this.queue.flush().catch(() => { /* The queue exposes checkpoint failures in the map. */ });
+    }, EDIT_IDLE_MS);
+  }
+
+  private recordActivity(): void {
+    if (!this.active || this.abort.signal.aborted) return;
+    if (this.snapshot.writable) this.scheduleFlush();
+    const delay = ACTIVITY_INTERVAL_MS - (Date.now() - this.lastActivitySent);
+    if (delay <= 0) void this.sendActivity();
+    else if (!this.activityTimer) this.activityTimer = setTimeout(() => { void this.sendActivity(); }, delay);
+  }
+
+  private async sendActivity(): Promise<void> {
+    clearTimeout(this.activityTimer);
+    this.activityTimer = undefined;
+    if (!this.active || this.abort.signal.aborted) return;
+    this.lastActivitySent = Date.now();
+    try { await this.queue.activity(); }
+    catch (error) {
+      if (this.abort.signal.aborted) return;
+      this.toast((error as Error).message, undefined, 0);
+      try { await this.refresh(); } catch { /* Preserve the last safely acknowledged map. */ }
+    }
+  }
+
+  private flushInBackground(): void {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = undefined;
+    void this.queue.flush(true).catch(() => { /* The server retains saved edits if closing cannot flush. */ });
   }
 
   private updateTools(): void {
     const item = this.selected;
+    const selectedItems = this.selectedItems;
     const writable = this.snapshot.writable;
     this.$<HTMLButtonElement>('[data-command="undo"]').disabled = !this.queue.canUndo;
     this.$<HTMLButtonElement>('[data-command="redo"]').disabled = !this.queue.canRedo;
-    const marks = parseWholeTitleFormat(item?.title ?? '').marks;
     for (const button of this.host.querySelectorAll<HTMLButtonElement>('button[data-command]')) {
       const command = button.dataset.command!;
-      if (['rename', 'delete', 'focus', 'bold', 'underline', 'strike'].includes(command)) button.disabled = !writable || !item?.editable;
+      if (['rename', 'delete', 'focus'].includes(command)) button.disabled = !writable || !item?.editable;
+      if (['bold', 'underline', 'strike'].includes(command)) button.disabled = !writable || !selectedItems.length || selectedItems.some((entry) => !entry.editable);
       if (command === 'promote') button.disabled = !writable || !item?.editable || !item.parent_id;
       if (command === 'note' || command === 'context-menu') button.disabled = !item;
+      if (command === 'copy-context') button.disabled = !item || this.copyingContext;
       if (command === 'child') button.disabled = !writable || !!item && !item.editable;
       if (['root', 'sibling', 'sibling-before'].includes(command)) button.disabled = !writable || command !== 'root' && !!item?.parent_id && !indexTree(this.snapshot).get(item.parent_id)?.editable;
       if (command === 'collapse') button.disabled = !item?.child_ids.length;
       if (['bold', 'underline', 'strike', 'focus'].includes(command)) {
-        const pressed = command === 'focus' ? !!item?.focused : marks.has(command as TopicMark);
+        let pressed: boolean | 'mixed' = !!item?.focused;
+        if (command !== 'focus') {
+          const states = selectedItems.map((entry) => parseWholeTitleFormat(entry.title).marks.has(command as TopicMark));
+          pressed = states.length > 0 && states.every(Boolean) ? true : states.some(Boolean) ? 'mixed' : false;
+        }
         button.setAttribute(button.getAttribute('role') === 'menuitemcheckbox' ? 'aria-checked' : 'aria-pressed', String(pressed));
       }
     }
     this.$('.pm-empty').hidden = this.displaySnapshot().root_ids.length > 0;
     const status = this.$('.pm-save-status');
-    status.textContent = this.queue.pendingCount ? `Saving${this.queue.pendingCount > 1 ? ` (${this.queue.pendingCount})` : '…'}` : writable ? 'Saved' : 'Read-only';
-    status.classList.toggle('pm-saving', !!this.queue.pendingCount);
+    status.textContent = this.queue.pendingCount || this.queue.flushing ? 'Saving…' : writable ? 'Saved' : this.snapshot.pending ? 'Needs attention' : 'Read-only';
+    status.classList.toggle('pm-saving', !!this.queue.pendingCount || this.queue.flushing);
     this.positionTopicToolbar(this.renderer?.selectedTopicRect() ?? null);
   }
 
@@ -277,7 +353,7 @@ class PursuitMap implements PursuitMapController {
     const entries: Array<[string, string] | null> = item ? [
       ['child', 'Add child'], ['sibling', 'Add sibling after'], ['sibling-before', 'Add sibling before'], ['rename', 'Rename'], null,
       ['bold', 'Bold'], ['underline', 'Underline'], ['strike', 'Strikethrough'], null,
-      ['note', 'Note'], ['focus', 'Toggle Focus'],
+      ['copy-context', 'Copy context'], ['note', 'Note'], ['focus', 'Toggle Focus'],
       ...(item.child_ids.length ? [['collapse', this.view.collapsed.includes(item.id) ? 'Expand' : 'Collapse'] as [string, string]] : []),
       ...(item.parent_id ? [['promote', 'Promote'] as [string, string]] : []), null, ['delete', 'Delete subtree'],
     ] : [['root', 'Add top-level direction'], ['fit', 'Fit map']];
@@ -320,29 +396,37 @@ class PursuitMap implements PursuitMapController {
     banner.hidden = snapshot.writable && !snapshot.diagnostics.length;
     if (banner.hidden) return;
     const title = document.createElement('strong');
-    title.textContent = snapshot.writable ? 'Map notices' : 'This map is read-only';
+    title.textContent = snapshot.writable ? 'Map notices' : snapshot.pending ? 'Saved edits need attention' : 'This map is read-only';
     banner.append(title);
     const details = document.createElement('details');
     const summary = document.createElement('summary');
     summary.textContent = 'Show diagnostics';
     details.append(summary);
+    details.open = snapshot.pending && !snapshot.writable;
     for (const diagnostic of snapshot.diagnostics) {
       const paragraph = document.createElement('p');
       paragraph.textContent = typeof diagnostic === 'string' ? diagnostic : diagnostic.message ?? JSON.stringify(diagnostic);
       details.append(paragraph);
     }
     banner.append(details);
+    if (!snapshot.writable) {
+      const refresh = document.createElement('button');
+      refresh.type = 'button'; refresh.textContent = 'Refresh';
+      refresh.addEventListener('click', () => { void this.refresh().catch((error) => this.toast(error.message, undefined, 0)); });
+      banner.append(refresh);
+    }
   }
 
   private select(id: string | null, center = false): void {
     this.closeContextMenu();
-    const next = id === null ? { ...this.view, selected: null } : reveal(this.displaySnapshot(), this.view, id);
+    const next = id === null ? { ...this.view, selected: null, selectedIds: [] } : reveal(this.displaySnapshot(), this.view, id);
     const unfolded = next.collapsed.length !== this.view.collapsed.length;
     this.view = next;
     if (unfolded) this.render();
-    this.renderer.select(id, center);
+    this.renderer.selectMany(next.selectedIds, next.selected, center);
     this.updateTools();
     this.saveView();
+    this.notifySelection();
   }
 
   private setCollapsed(id: string, collapsed: boolean, preserveDrag = false): void {
@@ -385,6 +469,7 @@ class PursuitMap implements PursuitMapController {
         case 'delete': await this.remove(); break;
         case 'focus': if (this.selected?.editable) await this.mutate({ type: 'set_focus', id: this.selected.id, focused: !this.selected.focused }); break;
         case 'collapse': if (this.selected?.child_ids.length) this.setCollapsed(this.selected.id, !this.view.collapsed.includes(this.selected.id)); break;
+        case 'copy-context': await this.copyContext(); break;
         case 'note': this.openNote(); break;
         case 'save-note': await this.saveNote(); break;
         case 'close-note': if (await this.saveNote()) { this.$('.pm-note').hidden = true; this.drafts.note = null; this.renderer.focus(); } break;
@@ -432,8 +517,8 @@ class PursuitMap implements PursuitMapController {
       const folded = next.collapsed.join('\n') !== this.view.collapsed.join('\n');
       this.view = next;
       if (folded) this.render();
-      this.renderer.select(this.view.selected, true);
-      this.updateTools(); this.saveView();
+      this.renderer.selectMany(this.view.selectedIds, this.view.selected, true);
+      this.updateTools(); this.saveView(); this.notifySelection();
     } else if (command === 'escape') {
       this.renderer.cancelGesture();
       this.closeContextMenu();
@@ -457,6 +542,7 @@ class PursuitMap implements PursuitMapController {
     if (operation.parent_id) this.view = reveal(this.snapshot, this.view, operation.parent_id);
     this.view.collapsed = this.view.collapsed.filter((entry) => entry !== operation.parent_id);
     this.view.selected = id;
+    this.view.selectedIds = [id];
     this.render();
     void this.renderer.beginEdit(id, this.drafts.title.text);
   }
@@ -519,11 +605,15 @@ class PursuitMap implements PursuitMapController {
   }
 
   private async format(mark: TopicMark): Promise<void> {
-    const item = this.selected;
-    if (!item?.editable || !this.snapshot.writable || this.renderer.editing) return;
-    const title = toggleWholeTitleMark(item.title, mark);
+    const selected = this.selectedItems;
+    if (!selected.length || selected.some((item) => !item.editable) || !this.snapshot.writable || this.renderer.editing) return;
+    const enabled = !selected.every((item) => parseWholeTitleFormat(item.title).marks.has(mark));
+    const primary = this.selected;
+    const ordered = primary ? [primary, ...selected.filter((item) => item.id !== primary.id)] : selected;
+    const renames = ordered.map((item) => ({ id: item.id, title: setWholeTitleMark(item.title, mark, enabled) }))
+      .filter((rename, index) => rename.title !== ordered[index].title);
     this.renderer.focus();
-    if (title !== item.title) await this.mutate({ type: 'rename', id: item.id, title });
+    if (renames.length) await this.mutate({ type: 'rename_many', renames });
   }
 
   private async mutate(operation: Operation): Promise<MutationResult | null> {
@@ -536,11 +626,12 @@ class PursuitMap implements PursuitMapController {
     const item = this.selected;
     if (!item?.editable || !this.snapshot.writable) return;
     this.view.selected = deletionSelection(this.snapshot, item.id);
+    this.view.selectedIds = this.view.selected ? [this.view.selected] : [];
     const promise = this.queue.enqueue({ type: 'delete', id: item.id });
     const undo = async () => {
       try {
         const result = await promise;
-        if (this.queue.canUndo && this.snapshot.git_head === result.commit) await this.command('undo');
+        if (this.queue.canUndo && this.queue.lastUndoId === result.operation_id) await this.command('undo');
         else this.toast('Newer edits exist. Use the toolbar Undo to undo them in order.');
       } catch { /* Failure already restored the deleted direction. */ }
     };
@@ -549,6 +640,52 @@ class PursuitMap implements PursuitMapController {
       const result = await promise;
       if (result.repaired_references.length) this.toast(`“${titleText(item.title)}” removed; broken references repaired.`, { label: 'Undo', action: () => { void undo(); } }, 0);
     } catch { /* The queue reports failure and restores the authoritative snapshot. */ }
+  }
+
+  private async copyContext(): Promise<void> {
+    const item = this.selected;
+    if (!item || item.id.startsWith(DRAFT_PREFIX)) { this.toast('Save the direction before copying its context.'); return; }
+    if (this.copyingContext) return;
+    if (this.queue.pendingCount) { this.toast('Wait for the current save to finish, then copy context.'); return; }
+    if (this.drafts.dirty) { this.toast('Save or discard unsaved edits before copying context.'); return; }
+    if (!this.options.context) { this.toast('Context copying is unavailable in this view.'); return; }
+    this.copyingContext = true;
+    this.updateTools();
+    this.toast('Preparing context…', undefined, 0);
+    try {
+      await this.flush();
+      const revision = this.snapshot.revision;
+      const text = await this.options.context(item.id, revision);
+      if (this.abort.signal.aborted) return;
+      if (this.hasUnsavedChanges || this.snapshot.revision !== revision || !indexTree(this.snapshot).has(item.id)) {
+        this.toast('The map changed while preparing context. Finish your edits and copy again.', undefined, 0);
+        return;
+      }
+      try {
+        if (this.options.writeClipboard) await this.options.writeClipboard(text);
+        else {
+          if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable.');
+          await navigator.clipboard.writeText(text);
+        }
+      } catch {
+        this.toast('Could not copy context. Allow clipboard access in your browser, then try again.', undefined, 0);
+        return;
+      }
+      if (!this.abort.signal.aborted) this.toast('Context copied. Paste it into Codex App.');
+    } catch (error) {
+      if (this.abort.signal.aborted) return;
+      if (error instanceof ApiError && error.status === 409) {
+        try {
+          await this.refresh();
+          this.toast('The map changed elsewhere and has been refreshed. Review the direction and copy again.', undefined, 0);
+        } catch {
+          this.toast('The map changed elsewhere. Refresh the map before copying context.', undefined, 0);
+        }
+      } else this.toast(`Could not prepare context: ${(error as Error).message}`, undefined, 0);
+    } finally {
+      this.copyingContext = false;
+      if (!this.abort.signal.aborted) this.updateTools();
+    }
   }
 
   private openNote(): void {
@@ -654,15 +791,32 @@ class PursuitMap implements PursuitMapController {
   }
 
   async refresh(): Promise<void> { await this.queue.reload(); }
+  async flush(): Promise<void> {
+    do { await this.queue.flush(); }
+    while (this.queue.pendingCount || this.snapshot.pending);
+  }
+  getSelectedId(): string | null { return this.view.selected ?? null; }
+  subscribeSelection(listener: (id: string | null) => void): () => void {
+    this.selectionListeners.add(listener);
+    listener(this.getSelectedId());
+    return () => this.selectionListeners.delete(listener);
+  }
   get hasUnsavedChanges(): boolean { return this.queue.pendingCount > 0 || this.drafts.dirty; }
   setActive(active: boolean): void {
     this.active = active;
+    this.queue.setActive(active);
     if (active) { this.render(); this.renderer.focus(); }
-    else { this.closeContextMenu(); this.renderer.cancelGesture(); this.saveView(); }
+    else { this.closeContextMenu(); this.renderer.cancelGesture(); this.saveView(); this.flushInBackground(); }
   }
-  destroy(): void {
+  async destroy(): Promise<void> {
+    this.queue.setActive(false);
+    try { await this.flush(); }
+    catch (error) { this.queue.setActive(this.active); throw error; }
     this.unsubscribe();
+    this.selectionListeners.clear();
     clearTimeout(this.toastTimer);
+    clearTimeout(this.idleTimer);
+    clearTimeout(this.activityTimer);
     this.abort.abort();
     this.renderer.destroy();
   }
