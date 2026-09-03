@@ -1086,6 +1086,7 @@ class InstallScriptTests(unittest.TestCase):
                 "maintain-rightmemory",
                 "review-agent-guidance-inbox",
                 "rightmemory-auto-orchestrator",
+                "rightmemory-manager",
             ],
         )
 
@@ -1213,6 +1214,7 @@ class InstallScriptTests(unittest.TestCase):
                 self.assertTrue((target / "rightmemory-auto-orchestrator" / "SKILL.md").exists())
                 self.assertTrue((target / "maintain-rightmemory" / "SKILL.md").is_file())
                 self.assertTrue((target / "maintain-pursuit-map" / "SKILL.md").is_file())
+                self.assertTrue((target / "rightmemory-manager" / "SKILL.md").is_file())
                 self.assertFalse((target / "memory-retriever").exists())
                 self.assertFalse((target / "rightmemory-orchestrator").exists())
                 self.assertTrue((target / "review-agent-guidance-inbox" / "SKILL.md").is_file())

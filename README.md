@@ -82,7 +82,7 @@ cd RightMemory
 .\install.ps1
 ```
 
-The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs `rightmemory-auto-orchestrator` alongside the independent `maintain-pursuit-map`, `maintain-rightmemory`, and `review-agent-guidance-inbox` skills into both `~/.codex/skills` and `~/.claude/skills`. The three maintenance skills require explicit user requests. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
+The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs five skills into both `~/.codex/skills` and `~/.claude/skills`: `rightmemory-auto-orchestrator`, `maintain-pursuit-map`, `maintain-rightmemory`, `review-agent-guidance-inbox`, and `rightmemory-manager`. The three maintenance skills and Manager require explicit user requests; Manager coordinates work through Codex App's native project and task tools. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
 
 If you want RightMemory roles to run through the Codex SDK or Claude Code CLI:
 
@@ -103,23 +103,17 @@ After install, add a short instruction to your agent guidance file, such as
 Read the RightMemory MCP tool instructions, then automatically use the RightMemory MCP tools according to those instructions.
 ```
 
-Read-only retrieval and approval-gated orchestration remain optional source skills. Choose one ordinary orchestration variant for a conversation; the independent maintenance skills are available alongside that choice. The shared schema and focused rule documents define valid state, while client skills define access and maintenance workflows.
+Read-only retrieval and approval-gated orchestration remain optional source skills. Choose one ordinary orchestration variant for a conversation; the independent maintenance skills and Manager are available alongside that choice. The shared schema and focused rule documents define valid state, while client skills define access and maintenance workflows.
 
 Open the visual map with `rightmemory pursuit`. It starts or reuses the existing Web Studio and opens an automatic local browser session; check the intended root before editing. See [Pursuit Map](docs/PURSUIT_MAP.md) for the editor and its safety boundaries.
 
 Web Studio starts on demand and keeps running after its launching command or browser closes. Use `rightmemory web stop` to stop it; starting it does not register Windows sign-in or boot tasks. On Windows the background process requests separation from the launcher's process job; the host must permit that separation for the server to outlive the host.
 
-The same view can attach a Codex conversation to the selected Pursuit. This workspace connects directly to Codex App Server; it does not run conversation turns through the Codex SDK. RightMemory owns the attachment plus its local or SSH host and working-directory project, while App Server owns the thread, turns, streamed items, approvals, and interruption.
+To work from a direction, right-click its node or open **More**, choose **Copy context**, and paste the Markdown into an ordinary Codex App task or conversation alongside your request. The copied background comes from the current canonical graph: the selected direction, its direct incoming and outgoing neighbors, their logical heading ancestors, and direct connections. Readable titles and relationships carry the context without internal identifiers or runtime metadata. Copying leaves the map and Git history unchanged.
 
-On the first actual send in a new Pursuit conversation, RightMemory adds one persisted opening snapshot to the same user turn. The snapshot contains the bound Pursuit, its direct incoming and outgoing graph neighbors, their logical heading ancestors, Controller-relative sources, and the conversation's execution host, project, and working directory. Later turns never refresh or repeat it. Side chats receive their own first-turn snapshot; existing conversations with accepted history do not. The browser keeps the user's original message as the visible bubble and exposes the exact saved snapshot in a collapsed section.
+Use **Manager**, the `rightmemory-manager` skill in Codex App, when you explicitly want RightMemory management or task coordination. Manager carries out Memory and Pursuit changes through their existing maintenance workflows and can use Codex App's native tools to coordinate work. It creates a separate task when you request one or confirm a concrete proposal. Copied context supplies background; your request supplies the objective.
 
-The conversation pane supports per-message model and reasoning choices, an immediate Working surface with provider-produced reasoning summaries and tool activity, phase-aware commentary that folds after the final answer, sanitized Markdown and TeX, and live subagent activity derived from App Server thread items. Newly received provider raw reasoning content is discarded rather than displayed or stored. While a turn is active, the primary Send control becomes Stop and interrupts that App Server turn. Paste a PNG or JPEG, paste a large block of text, or use the paperclip to stage general files below the active root's `.runtime` directory. A message can contain up to eight staged inputs, including up to four images; each image or general file may be up to 20 MiB, while a managed text paste may be up to 5 MiB. PNG and JPEG inputs use App Server's image input. Other files are exposed to Codex through a managed absolute path, so their contents can be inspected only when the conversation's sandbox and available tools support the format; staging a file does not guarantee native understanding of every binary format. For an SSH conversation, RightMemory copies the staged input to the conversation host before the turn starts. This attachment-only transfer requires `python3` on the remote command path. If it is unavailable, messages without attachments still work; an attached send fails before its turn starts and keeps the local staged input available to retry or remove. Cleanup of a remote staged file is best effort and can leave the file under `~/.cache/rightmemory/attachments/` when the host or `python3` is unavailable.
-
-Side chats use separate, temporary App Server threads. They belong to the current browser/app session and disappear with it instead of becoming durable Pursuit conversations. Durable conversation attachments, staged inputs, and display state are operational data: they do not add fields or execution semantics to Pursuit Markdown. Map indicators summarize attached conversation activity such as working, waiting, an unread final answer, or a completed turn; they never assert that the Pursuit itself is complete.
-
-The conversation pane also has a fixed Manager entry for persistent, root-local Codex conversations. Manager runs on the Web Studio controller with its working directory fixed to the active RightMemory root, has no Pursuit attachment, and does not contribute to Pursuit activity indicators. Opening it can stage the current map selection as a removable reference for the next message. Manager can perform explicitly requested Memory, Pursuit, host, and project maintenance through the same validated files and Web Studio business APIs; it does not introduce a separate database, remote tool framework, or routine proposal-and-approval ceremony. `rightmemory manager` is the thin authenticated loopback client for those registered map and execution-configuration operations.
-
-Multiple browsers on the same machine can follow the same live conversation when they reach the same Web Studio process and active root. Web Studio accepts loopback hosts only because its automatic browser sessions are not a remote-access security boundary. Separately running Web Studio instances do not synchronize the root-local `.runtime` conversation database or attachment files through Git.
+Codex App owns projects, tasks, conversations, and execution. RightMemory keeps the user's directions and context in the map, with no persistent task links or status synchronization. A task's progress, failure, or completion does not change Pursuit. Web Studio accepts loopback hosts only because its automatic browser sessions are not a remote-access security boundary.
 
 Then start the background manager. It reviews idle agent sessions, evaluates prune generations, runs Dreamer consolidation, and produces Insight reflections when enough work has accumulated:
 
@@ -171,7 +165,7 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 - Three semantic modules: durable Memory, the user's Pursuit map, and reusable Agent Corrections.
 - One global id namespace and typed graph edges such as `dep:`, `cfg:`, `ver:`, `doc:`, and `todo:` across both trees.
 - Multi-device memory continuity across laptops, desktops, agent clients, and project-specific roots.
-- Automatic orchestration plus independent explicit skills for map maintenance, Memory maintenance, and guidance review.
+- Automatic orchestration plus independent explicit skills for map maintenance, Memory maintenance, guidance review, and Manager support in Codex App.
 - Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex SDK/Claude Code CLI role execution.
 - Model-selected, runtime-rendered retrieval output without model-authored summaries or commentary.
 - One updater for Memory and Agent Corrections, transcript-review candidate extraction, and immutable candidate records for input-to-edit provenance.
@@ -210,7 +204,7 @@ candidate identities during package installation.
 
 The memory root must be a standalone, non-bare Git working tree. An existing target nested inside another working tree, a bare repository, or an unusable `.git` entry is refused before installation writes anything.
 
-Reinstall refreshes the automatic orchestration skill and the three independent maintenance skills. It removes exact managed copies of the other ordinary orchestration variants and former loose skills-root references; customized copies are left untouched. Independent skills are not part of the mutually exclusive orchestration choice.
+Reinstall refreshes the automatic orchestration skill, the three independent maintenance skills, and Manager. It removes exact managed copies of the other ordinary orchestration variants and former loose skills-root references; customized copies are left untouched. Independent skills are not part of the mutually exclusive orchestration choice.
 
 ### Profiles
 
@@ -432,7 +426,7 @@ Root `corrections.md` is synchronized RightMemory Edit Feedback, not semantic Ri
 
 ## Agent Roles
 
-RightMemory separates ordinary work from state ownership. Automatic orchestration and three independent maintenance skills are installed by default; read-only retrieval and approval-gated orchestration remain optional alternatives for ordinary work:
+RightMemory separates ordinary work from state ownership. Automatic orchestration, three independent maintenance skills, and Manager are installed by default; read-only retrieval and approval-gated orchestration remain optional alternatives for ordinary work:
 
 ```text
 memory-retriever
@@ -455,6 +449,10 @@ maintain-pursuit-map / human map editor
   +--> PURSUIT*.md                  user-requested direction map edits
   +--> Memory edge repair           mechanical reference cleanup on deletion
 
+rightmemory-manager / Codex App
+  +--> maintenance workflows        explicitly requested RightMemory management
+  +--> native project/task tools    explicitly requested work coordination
+
 transcript review
   +--> candidate extraction         idle supported sessions
   +--> unified update queue         no direct graph edit
@@ -471,7 +469,8 @@ unified updater
 - `maintain-rightmemory` handles explicitly requested maintenance of Memory, linked content, and correction surfaces. It reads Pursuit for context and preserves its references without editing the map.
 - `maintain-pursuit-map` handles explicit map requests. A requested change is authorized directly; it asks for clarification only when the target or materially different interpretations cannot be resolved safely from canonical state. Neither maintenance skill adds a routine confirmation ceremony, calls the other, submits map work to Update, or starts a model role.
 - `review-agent-guidance-inbox` separately proposes and applies user-approved admission of pending guidance. It does not edit Pursuit.
-- Use one of `memory-retriever`, `rightmemory-orchestrator`, and `rightmemory-auto-orchestrator` for ordinary access in a conversation. This choice does not exclude independent maintenance skills, and RightMemory does not persist the choice.
+- `rightmemory-manager` is Manager in Codex App. It handles explicit RightMemory management through the appropriate maintenance workflow and coordinates requested work with Codex App's native project and task tools. It treats copied Pursuit context as background and preserves the user's objective without inventing requirements. Requested changes are followed by a refresh and verification of canonical state.
+- Use one of `memory-retriever`, `rightmemory-orchestrator`, and `rightmemory-auto-orchestrator` for ordinary access in a conversation. This choice does not exclude independent maintenance skills or Manager, and RightMemory does not persist the choice.
 - Once selected, `memory-retriever` calls Retrieve for the stated memory need. The two orchestrators retrieve conditionally when stored context could materially affect how the agent understands or approaches the work and skip clearly self-contained requests. Every ordinary Retrieve call may select relevant Agent Corrections through `AC#writing` and `AC#design`.
 - `memory-retriever` discloses active or deferred preferences, workflow or behavior guidance, reusable instructions, and Agent Corrections in a fixed `[RightMemory] Retrieved guidance` block; ordinary facts, knowledge, and descriptive context are not disclosed this way.
 - Evidence clears the Update submission bar when omitting it would likely cause poorer future decisions or substantial rediscovery, or allow a settled reusable failure pattern to recur. Transient progress, routine results, incompleteness by itself, and detail already preserved in project artifacts do not qualify. Ordinary work does not trigger a map-change submission or suggestion.
@@ -507,7 +506,7 @@ RightMemory has two install modes. The default is `standalone`.
 
 | Mode | Use When | What Gets Installed |
 | --- | --- | --- |
-| `standalone` | You want RightMemory to run its own local Pydantic AI role agents and tools. | The CLI, package definitions, automatic orchestration, and the three independent maintenance skills. |
+| `standalone` | You want RightMemory to run its own local Pydantic AI role agents and tools. | The CLI, package definitions, automatic orchestration, the three independent maintenance skills, and Manager. |
 | `cli-agent` | You want RightMemory to delegate each runtime role turn to the Codex SDK or Claude Code CLI. | The same CLI, definitions, and skills, with delegated role execution. |
 
 The installer arguments are:
@@ -522,7 +521,7 @@ The installer arguments are:
 
 - `<memory-root>` is where Memory, Pursuit, optional Agent Correction collections, optional RightMemory Edit Feedback, sharing state, and `insight_logs/` live.
 - `<skills-target>` is where your agent loads skills from, such as `~/.claude/skills` or `~/.codex/skills`.
-- With no path arguments, the installer uses `~/.rightmemory` and installs `rightmemory-auto-orchestrator`, `maintain-rightmemory`, `review-agent-guidance-inbox`, and `maintain-pursuit-map` into `~/.codex/skills` and `~/.claude/skills`.
+- With no path arguments, the installer uses `~/.rightmemory` and installs `rightmemory-auto-orchestrator`, `maintain-rightmemory`, `review-agent-guidance-inbox`, `maintain-pursuit-map`, and `rightmemory-manager` into `~/.codex/skills` and `~/.claude/skills`.
 
 Both modes require `git` and `uv`. On macOS, Linux, and WSL, the runtime is
 installed under `${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`, and the
@@ -556,7 +555,7 @@ semantic work and push successful memory changes after they land.
 
 1. Let the installed `rightmemory-auto-orchestrator` retrieve context and submit qualifying Memory evidence according to its instructions. Use an optional ordinary orchestration variant when you want read-only or approval-gated access.
 2. Run `rightmemory watch start` for transcript extraction, pruning, consolidation, Insight cycles, and optional sync.
-3. Open `rightmemory pursuit` or explicitly request `maintain-pursuit-map` to change your direction map. Ordinary updates leave it unchanged.
+3. Open `rightmemory pursuit` or explicitly request `maintain-pursuit-map` to change your direction map. Use a node's **Copy context** action to bring its background into Codex App, where Manager can handle explicit RightMemory management or task coordination. Ordinary updates leave the map unchanged.
 4. Use `rightmemory status` when you need to inspect watcher, queue, and sync state.
 
 Dreamer consolidates durable Memory when it needs structural cleanup. Insight commits timestamped reflections under `insight_logs/` when broader patterns, risks, or next-step ideas are worth preserving.
@@ -1075,12 +1074,13 @@ RightMemory/
     ├── memory-retriever-cli/SKILL.md
     ├── rightmemory-orchestrator-cli/SKILL.md
     ├── rightmemory-auto-orchestrator-cli/SKILL.md
+    ├── rightmemory-manager/SKILL.md
     ├── review-agent-guidance-inbox/SKILL.md
     ├── review-rightmemory-session/SKILL.md
     └── provider-transcript-normalizer/SKILL.md
 ```
 
-`review-rightmemory-session` is an explicit repository workflow, and `provider-transcript-normalizer` is an internal transcript-adapter asset. Neither is part of the four-skill installer surface.
+`review-rightmemory-session` is an explicit repository workflow, and `provider-transcript-normalizer` is an internal transcript-adapter asset. Neither is part of the five-skill installer surface.
 
 After install:
 
@@ -1103,7 +1103,8 @@ After install:
 ├── rightmemory-auto-orchestrator/SKILL.md
 ├── maintain-rightmemory/SKILL.md
 ├── review-agent-guidance-inbox/SKILL.md
-└── maintain-pursuit-map/SKILL.md
+├── maintain-pursuit-map/SKILL.md
+└── rightmemory-manager/SKILL.md
 ```
 
 On native Windows, the default memory root is `~\.rightmemory`, and the CLI shim

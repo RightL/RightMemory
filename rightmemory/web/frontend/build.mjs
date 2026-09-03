@@ -1,24 +1,11 @@
 import { build, context } from 'esbuild';
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 
 const preview = process.argv.includes('--serve');
 const frontendDir = fileURLToPath(new URL('.', import.meta.url));
 const previewDir = join(frontendDir, '.preview');
-const katexModernFonts = {
-  name: 'katex-modern-fonts',
-  setup(buildApi) {
-    buildApi.onLoad({ filter: /[\\/]katex(?:\.min)?\.css$/ }, async ({ path }) => ({
-      contents: (await readFile(path, 'utf8')).replace(
-        /,\s*url\([^)]*\.woff\)\s*format\(["']woff["']\)\s*,\s*url\([^)]*\.ttf\)\s*format\(["']truetype["']\)/g,
-        '',
-      ),
-      loader: 'css',
-      resolveDir: dirname(path),
-    }));
-  },
-};
 const options = {
   entryPoints: [join(frontendDir, preview ? 'tests/browser.ts' : 'src/pursuit-map.ts')],
   outfile: preview ? join(previewDir, 'browser.js') : join(frontendDir, '../static/pursuit-map.js'),
@@ -29,8 +16,6 @@ const options = {
   sourcemap: preview,
   legalComments: 'none',
   logLevel: 'info',
-  loader: { '.woff2': 'dataurl' },
-  plugins: [katexModernFonts],
 };
 if (preview) {
   await mkdir(previewDir, { recursive: true });
@@ -43,9 +28,6 @@ if (preview) {
   await build(options);
   const licenseSources = [
     ['Mind Elixir', 'https://github.com/SSShooter/mind-elixir-core', 'mind-elixir'],
-    ['Marked', 'https://marked.js.org/', 'marked'],
-    ['DOMPurify', 'https://github.com/cure53/DOMPurify', 'dompurify'],
-    ['KaTeX', 'https://katex.org/', 'katex'],
   ];
   const licenses = await Promise.all(licenseSources.map(async ([name, url, packageName]) => {
     const packageDir = join(frontendDir, 'node_modules', packageName);

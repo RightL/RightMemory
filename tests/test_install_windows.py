@@ -49,6 +49,7 @@ class WindowsInstallScriptTests(unittest.TestCase):
             maintainer = (skills_target / "maintain-rightmemory" / "SKILL.md")
             maintainer_exists = maintainer.exists()
             map_maintainer_exists = (skills_target / "maintain-pursuit-map" / "SKILL.md").is_file()
+            manager_exists = (skills_target / "rightmemory-manager" / "SKILL.md").is_file()
             guidance_reviewer_exists = (
                 skills_target / "review-agent-guidance-inbox" / "SKILL.md"
             ).is_file()
@@ -75,6 +76,7 @@ class WindowsInstallScriptTests(unittest.TestCase):
         self.assertTrue(auto_orchestrator_exists)
         self.assertTrue(maintainer_exists)
         self.assertTrue(map_maintainer_exists)
+        self.assertTrue(manager_exists)
         self.assertTrue(guidance_reviewer_exists)
         self.assertIn("rightmemory-auto-orchestrator", result.stdout)
         self.assertFalse(legacy_orchestrator_exists)
@@ -127,6 +129,7 @@ class WindowsInstallScriptTests(unittest.TestCase):
                     "maintain-rightmemory",
                     "review-agent-guidance-inbox",
                     "maintain-pursuit-map",
+                    "rightmemory-manager",
                 ):
                     self.assertTrue((skills_target / skill_name / "SKILL.md").is_file())
 

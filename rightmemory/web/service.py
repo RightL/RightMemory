@@ -16,7 +16,8 @@ from ..config import (
     load_review_config,
     load_sync_config,
 )
-from ..pursuit_store import PursuitStore
+from ..opening_context import OpeningContextError, build_opening_context
+from ..pursuit_store import PursuitStore, PursuitStoreError
 from ..session import MemoryWriteLock
 from ..share_models import ShareRelationship, load_shares
 from ..share_results import capability_from_parts
@@ -92,6 +93,26 @@ class WebStudioService:
 
     def pursuit_map(self) -> dict[str, Any]:
         return PursuitStore(self.memory_root).snapshot()
+
+    def pursuit_context(self, item_id: str, expected_revision: str) -> dict[str, str]:
+        snapshot = self.pursuit_map()
+        if snapshot["revision"] != expected_revision:
+            raise PursuitStoreError("conflict", "The map changed. Reload it before copying context.", 409)
+        if not snapshot["valid"]:
+            raise PursuitStoreError(
+                "invalid_root", "The map has validation errors.", 422,
+                diagnostics=snapshot["diagnostics"],
+            )
+        item = next((item for item in snapshot["items"] if item["id"] == item_id), None)
+        if item is None:
+            raise PursuitStoreError("not_found", "The selected Pursuit no longer exists.", 404)
+        try:
+            context = build_opening_context(self.memory_root, item)
+        except OpeningContextError as exc:
+            raise PursuitStoreError("conflict", "The map changed. Reload it before copying context.", 409) from exc
+        if self.pursuit_map()["revision"] != expected_revision:
+            raise PursuitStoreError("conflict", "The map changed. Reload it before copying context.", 409)
+        return {"text": context.text}
 
     def apply_pursuit_operation(self, payload: dict[str, Any], session_id: str) -> dict[str, Any]:
         expected_revision = _required_payload_str(payload, "expected_revision")

@@ -164,6 +164,7 @@ else:
                         "maintain-rightmemory",
                         "review-agent-guidance-inbox",
                         "maintain-pursuit-map",
+                        "rightmemory-manager",
                     ):
                         self.assertTrue((target / skill_name / "SKILL.md").is_file())
                     self.assertFalse((target / "memory-retriever").exists())
@@ -202,6 +203,7 @@ else:
             self.assertTrue((target / "maintain-rightmemory" / "SKILL.md").is_file())
             self.assertTrue((target / "review-agent-guidance-inbox" / "SKILL.md").is_file())
             self.assertTrue((target / "maintain-pursuit-map" / "SKILL.md").is_file())
+            self.assertTrue((target / "rightmemory-manager" / "SKILL.md").is_file())
             self.assertTrue((target / "rightmemory-auto-orchestrator" / "SKILL.md").is_file())
 
     def test_remove_old_loose_reference_accepts_managed_bytes_and_known_line_endings(self):

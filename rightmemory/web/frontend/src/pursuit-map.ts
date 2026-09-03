@@ -5,31 +5,8 @@ import { DraftBook, type TitleDraft } from './drafts.ts';
 import { MapRenderer } from './renderer.ts';
 import { parseWholeTitleFormat, setWholeTitleMark, titleText, type TopicMark } from './title-format.ts';
 import { keyboardCommand, navigate, readView, reconcileView, reveal, writeView, type ViewState } from './view-state.ts';
-import { ConversationWorkspace } from './conversation-workspace.ts';
-import type { FetchJson } from './conversation-api.ts';
-import {
-  aggregateConversationIndicators,
-  type OperationalConversationIndicatorInput,
-} from './conversation-indicators.ts';
-import 'katex/dist/katex.min.css';
+import { apiContext, apiTransport, type FetchJson } from './pursuit-api.ts';
 import './pursuit-map.css';
-
-export function apiTransport(fetchJson: FetchJson): Transport {
-  const request = async <T>(path: string, body?: unknown): Promise<T> => {
-    try {
-      const response = await fetchJson(`/api/pursuit-map${path}`, body === undefined ? undefined : { method: 'POST', body: JSON.stringify(body) });
-      return response.data as T;
-    } catch (cause) {
-      const error = cause as Error & { status?: number; detail?: { snapshot?: Snapshot } };
-      throw new ApiError(error.message, error.status ?? 0, error.detail?.snapshot);
-    }
-  };
-  return {
-    load: () => request<Snapshot>(''),
-    mutate: (expected_revision, operation) => request<MutationResult>('/operations', { expected_revision, operation }),
-    history: (kind, expected_revision, commit) => request<MutationResult>(`/${kind}`, { expected_revision, commit }),
-  };
-}
 
 const markup = `
   <div class="pm-toolbar" role="toolbar" aria-label="Pursuit Map tools">
@@ -45,6 +22,7 @@ const markup = `
       <button type="button" data-command="focus" title="Toggle Focus (F)" aria-pressed="false">✦ <span>Focus</span></button>
       <button type="button" data-command="collapse" title="Expand or collapse (Space)" aria-label="Expand or collapse selected direction">⊟</button>
       <details class="pm-more"><summary aria-label="More node actions" title="More actions">···</summary><div class="pm-menu">
+        <button type="button" data-command="copy-context">Copy context</button>
         <button type="button" data-command="rename">Rename <kbd>F2</kbd></button>
         <button type="button" data-command="promote">Promote <kbd>Shift Tab</kbd></button>
         <button type="button" data-command="root">New top-level direction</button>
@@ -106,7 +84,6 @@ const markup = `
 export interface PursuitMapController {
   refresh(): Promise<void>;
   setActive(active: boolean): void;
-  setConversationIndicators(conversations: readonly OperationalConversationIndicatorInput[]): void;
   getSelectedId(): string | null;
   subscribeSelection(listener: (id: string | null) => void): () => void;
   readonly hasUnsavedChanges: boolean;
@@ -114,53 +91,18 @@ export interface PursuitMapController {
 }
 
 export async function mountPursuitMap(host: HTMLElement, fetchJson: FetchJson): Promise<PursuitMapController> {
-  host.className = 'pursuit-workspace';
-  host.replaceChildren();
-  const mapShell = document.createElement('div');
-  mapShell.className = 'pw-map-shell';
-  const mapHost = document.createElement('div');
-  const paneHost = document.createElement('aside');
-  mapShell.append(mapHost);
-  host.append(mapShell, paneHost);
-  const transport = apiTransport(fetchJson);
-  const snapshot = await transport.load();
-  const map = new PursuitMap(mapHost, snapshot, transport, { selectionBoundary: host });
-  const conversations = new ConversationWorkspace(
-    host,
-    paneHost,
-    fetchJson,
-    snapshot.root_key,
-    () => location.reload(),
-    undefined,
-    (items) => map.setConversationIndicators(items),
-    () => map.refresh(),
-  );
-  const unsubscribeSelection = map.subscribeSelection((id) => conversations.selectPursuit(id));
-  await conversations.start();
-  return new PursuitWorkspaceController(map, conversations, unsubscribeSelection);
+  return mountMap(host, apiTransport(fetchJson), { context: apiContext(fetchJson) });
 }
 
-export interface MountMapOptions { selectionBoundary?: Element; }
+export interface MountMapOptions {
+  context?(itemId: string, revision: string): Promise<string>;
+  writeClipboard?(text: string): Promise<void>;
+}
 
 /** Exported separately so the browser fixture exercises the complete UI with disposable state. */
 export async function mountMap(host: HTMLElement, transport: Transport, options: MountMapOptions = {}): Promise<PursuitMapController> {
   const snapshot = await transport.load();
   return new PursuitMap(host, snapshot, transport, options);
-}
-
-class PursuitWorkspaceController implements PursuitMapController {
-  constructor(private map: PursuitMap, private conversations: ConversationWorkspace, private unsubscribeSelection: () => void) {}
-  async refresh(): Promise<void> { await Promise.all([this.map.refresh(), this.conversations.refresh()]); }
-  setActive(active: boolean): void { this.map.setActive(active); this.conversations.setActive(active); }
-  setConversationIndicators(conversations: readonly OperationalConversationIndicatorInput[]): void { this.map.setConversationIndicators(conversations); }
-  getSelectedId(): string | null { return this.map.getSelectedId(); }
-  subscribeSelection(listener: (id: string | null) => void): () => void { return this.map.subscribeSelection(listener); }
-  get hasUnsavedChanges(): boolean { return this.map.hasUnsavedChanges; }
-  destroy(): void {
-    this.unsubscribeSelection();
-    this.conversations.destroy();
-    this.map.destroy();
-  }
 }
 
 class PursuitMap implements PursuitMapController {
@@ -170,6 +112,7 @@ class PursuitMap implements PursuitMapController {
   private drafts = new DraftBook();
   private abort = new AbortController();
   private active = true;
+  private copyingContext = false;
   private matches: string[] = [];
   private matchIndex = -1;
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
@@ -208,13 +151,17 @@ class PursuitMap implements PursuitMapController {
       if (button?.disabled) return;
       if (button) { this.$<HTMLDetailsElement>('.pm-more').open = false; void this.command(button.dataset.command!); }
     }, { signal: this.abort.signal });
+    // Opening Copy context must not blur and silently save an unfinished title.
+    this.$('.pm-more').addEventListener('pointerdown', (event) => {
+      if (this.renderer.editing && event.button === 0) event.preventDefault();
+    }, { signal: this.abort.signal });
     this.$('.pm-topic-toolbar').addEventListener('pointerdown', (event) => {
       if (event.button === 0) event.preventDefault(); // Retain canvas keyboard focus after formatting.
     }, { signal: this.abort.signal });
     document.addEventListener('pointerdown', (event) => {
       if (!this.active) return;
       const target = event.target as Node;
-      if (!this.host.contains(target) && !this.options.selectionBoundary?.contains(target)) this.select(null);
+      if (!this.host.contains(target)) this.select(null);
       if (!(event.target as HTMLElement).closest('.pm-context-menu, [data-command="context-menu"]')) this.closeContextMenu();
     }, { signal: this.abort.signal });
     host.addEventListener('contextmenu', (event) => {
@@ -252,10 +199,6 @@ class PursuitMap implements PursuitMapController {
   private get selectedItems() {
     const items = indexTree(this.snapshot);
     return this.view.selectedIds.map((id) => items.get(id)).filter((item) => item !== undefined);
-  }
-
-  setConversationIndicators(conversations: readonly OperationalConversationIndicatorInput[]): void {
-    this.renderer.setConversationIndicators(aggregateConversationIndicators(conversations));
   }
 
   private displaySnapshot(): Snapshot {
@@ -311,6 +254,7 @@ class PursuitMap implements PursuitMapController {
       if (['bold', 'underline', 'strike'].includes(command)) button.disabled = !writable || !selectedItems.length || selectedItems.some((entry) => !entry.editable);
       if (command === 'promote') button.disabled = !writable || !item?.editable || !item.parent_id;
       if (command === 'note' || command === 'context-menu') button.disabled = !item;
+      if (command === 'copy-context') button.disabled = !item || this.copyingContext;
       if (command === 'child') button.disabled = !writable || !!item && !item.editable;
       if (['root', 'sibling', 'sibling-before'].includes(command)) button.disabled = !writable || command !== 'root' && !!item?.parent_id && !indexTree(this.snapshot).get(item.parent_id)?.editable;
       if (command === 'collapse') button.disabled = !item?.child_ids.length;
@@ -356,7 +300,7 @@ class PursuitMap implements PursuitMapController {
     const entries: Array<[string, string] | null> = item ? [
       ['child', 'Add child'], ['sibling', 'Add sibling after'], ['sibling-before', 'Add sibling before'], ['rename', 'Rename'], null,
       ['bold', 'Bold'], ['underline', 'Underline'], ['strike', 'Strikethrough'], null,
-      ['note', 'Note'], ['focus', 'Toggle Focus'],
+      ['copy-context', 'Copy context'], ['note', 'Note'], ['focus', 'Toggle Focus'],
       ...(item.child_ids.length ? [['collapse', this.view.collapsed.includes(item.id) ? 'Expand' : 'Collapse'] as [string, string]] : []),
       ...(item.parent_id ? [['promote', 'Promote'] as [string, string]] : []), null, ['delete', 'Delete subtree'],
     ] : [['root', 'Add top-level direction'], ['fit', 'Fit map']];
@@ -465,6 +409,7 @@ class PursuitMap implements PursuitMapController {
         case 'delete': await this.remove(); break;
         case 'focus': if (this.selected?.editable) await this.mutate({ type: 'set_focus', id: this.selected.id, focused: !this.selected.focused }); break;
         case 'collapse': if (this.selected?.child_ids.length) this.setCollapsed(this.selected.id, !this.view.collapsed.includes(this.selected.id)); break;
+        case 'copy-context': await this.copyContext(); break;
         case 'note': this.openNote(); break;
         case 'save-note': await this.saveNote(); break;
         case 'close-note': if (await this.saveNote()) { this.$('.pm-note').hidden = true; this.drafts.note = null; this.renderer.focus(); } break;
@@ -635,6 +580,51 @@ class PursuitMap implements PursuitMapController {
       const result = await promise;
       if (result.repaired_references.length) this.toast(`“${titleText(item.title)}” removed; broken references repaired.`, { label: 'Undo', action: () => { void undo(); } }, 0);
     } catch { /* The queue reports failure and restores the authoritative snapshot. */ }
+  }
+
+  private async copyContext(): Promise<void> {
+    const item = this.selected;
+    if (!item || item.id.startsWith(DRAFT_PREFIX)) { this.toast('Save the direction before copying its context.'); return; }
+    if (this.copyingContext) return;
+    if (this.queue.pendingCount) { this.toast('Wait for the current save to finish, then copy context.'); return; }
+    if (this.drafts.dirty) { this.toast('Save or discard unsaved edits before copying context.'); return; }
+    if (!this.options.context) { this.toast('Context copying is unavailable in this view.'); return; }
+    const revision = this.snapshot.revision;
+    this.copyingContext = true;
+    this.updateTools();
+    this.toast('Preparing context…', undefined, 0);
+    try {
+      const text = await this.options.context(item.id, revision);
+      if (this.abort.signal.aborted) return;
+      if (this.hasUnsavedChanges || this.snapshot.revision !== revision || !indexTree(this.snapshot).has(item.id)) {
+        this.toast('The map changed while preparing context. Finish your edits and copy again.', undefined, 0);
+        return;
+      }
+      try {
+        if (this.options.writeClipboard) await this.options.writeClipboard(text);
+        else {
+          if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable.');
+          await navigator.clipboard.writeText(text);
+        }
+      } catch {
+        this.toast('Could not copy context. Allow clipboard access in your browser, then try again.', undefined, 0);
+        return;
+      }
+      if (!this.abort.signal.aborted) this.toast('Context copied. Paste it into Codex App.');
+    } catch (error) {
+      if (this.abort.signal.aborted) return;
+      if (error instanceof ApiError && error.status === 409) {
+        try {
+          await this.refresh();
+          this.toast('The map changed elsewhere and has been refreshed. Review the direction and copy again.', undefined, 0);
+        } catch {
+          this.toast('The map changed elsewhere. Refresh the map before copying context.', undefined, 0);
+        }
+      } else this.toast(`Could not prepare context: ${(error as Error).message}`, undefined, 0);
+    } finally {
+      this.copyingContext = false;
+      if (!this.abort.signal.aborted) this.updateTools();
+    }
   }
 
   private openNote(): void {

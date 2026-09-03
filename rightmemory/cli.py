@@ -190,10 +190,6 @@ def main(argv: list[str] | None = None) -> int:
         return _agent_cli_main(argv[1:], memory_root)
     if argv and argv[0] == "web":
         return _web_main(argv[1:], memory_root)
-    if argv and argv[0] == "manager":
-        from .manager_client import manager_main
-
-        return manager_main(argv[1:], memory_root)
     if argv and argv[0] == "pursuit":
         return _pursuit_main(argv[1:], memory_root)
     if argv and argv[0] == "review":

@@ -45,7 +45,15 @@ const transport: Transport = {
 };
 const host = document.querySelector<HTMLElement>('#fixture')!;
 host.style.height = 'calc(100vh - 40px)';
-let controller = await mountMap(host, transport);
+let controller = await mountMap(host, transport, {
+  context: async (itemId, revision) => {
+    await latency();
+    if (revision !== current.revision) throw new ApiError('The fixture changed. Review it and copy again.', 409, clone(current));
+    const item = current.items.find((entry) => entry.id === itemId);
+    if (!item) throw new ApiError('The fixture direction no longer exists.', 404);
+    return `${item.title}\n\n${item.body}`;
+  },
+});
 const tools = document.createElement('div');
 tools.style.cssText = 'height:40px;padding:6px 12px;box-sizing:border-box;display:flex;gap:14px;align-items:center;background:#edf0e9;font:12px system-ui;';
 tools.innerHTML = '<strong>Disposable fixture</strong><label><input type="checkbox"> Slow saves</label><button type="button">Conflict next save</button><a href="/?layout=forest">Independent maps</a><a href="/?layout=single">Single map</a><a href="/?layout=empty">Empty map</a><a href="/?nodes=500">500 directions</a><span>No real Memory data is used.</span>';

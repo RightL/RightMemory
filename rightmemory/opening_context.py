@@ -1,9 +1,4 @@
-"""Deterministic graph context for the first turn of a Pursuit conversation.
-
-Controller source locations are always relative to the Controller's RightMemory
-root.  They are intentionally kept separate from the execution host, project,
-and working directory supplied by the conversation service.
-"""
+"""Deterministic background copied from a Pursuit's canonical graph context."""
 
 from __future__ import annotations
 
@@ -11,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 
-from ..graph import (
+from .graph import (
     FOCUS_HEADING_RE,
     BlockKey,
     DocumentBlock,
@@ -24,13 +19,6 @@ from ..graph import (
 
 class OpeningContextError(ValueError):
     """The selected Pursuit snapshot cannot be projected onto the current graph."""
-
-
-@dataclass(frozen=True, slots=True)
-class OpeningContextExecution:
-    host_label: str
-    project_label: str
-    execution_cwd: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,8 +57,6 @@ class OpeningContextSection:
 
 @dataclass(frozen=True, slots=True)
 class OpeningContext:
-    controller_memory_root: str
-    execution: OpeningContextExecution
     current: OpeningContextSection
     neighbors: tuple[OpeningContextSection, ...]
     ancestors: tuple[OpeningContextSection, ...]
@@ -84,8 +70,6 @@ class OpeningContext:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "controller_memory_root": self.controller_memory_root,
-            "execution": asdict(self.execution),
             "current": self.current.to_dict(),
             "neighbors": [section.to_dict() for section in self.neighbors],
             "ancestors": [section.to_dict() for section in self.ancestors],
@@ -98,37 +82,20 @@ class OpeningContext:
 def build_opening_context(
     memory_root: Path,
     pursuit_snapshot: Mapping[str, object],
-    *,
-    host_label: str,
-    project_label: str,
-    execution_cwd: str,
 ) -> OpeningContext:
     """Build opening context from the current canonical RightMemory graph."""
     manifest = build_graph_manifest(Path(memory_root))
     return project_opening_context(
         manifest,
         pursuit_snapshot,
-        host_label=host_label,
-        project_label=project_label,
-        execution_cwd=execution_cwd,
     )
 
 
 def project_opening_context(
     manifest: GraphManifest,
     pursuit_snapshot: Mapping[str, object],
-    *,
-    host_label: str,
-    project_label: str,
-    execution_cwd: str,
 ) -> OpeningContext:
     """Project one current Pursuit and its one-hop graph neighborhood."""
-    controller_memory_root = str(manifest.root)
-    execution = OpeningContextExecution(
-        host_label=_required_line(host_label, "host_label"),
-        project_label=_required_line(project_label, "project_label"),
-        execution_cwd=_required_line(execution_cwd, "execution_cwd"),
-    )
     current_block = _resolve_current_block(manifest, pursuit_snapshot)
     current_item = _graph_item_for_block(manifest, current_block)
 
@@ -199,15 +166,11 @@ def project_opening_context(
         )
     )
     rendered = _render(
-        controller_memory_root,
-        execution,
         current,
         sections,
         edge_triples,
     )
     return OpeningContext(
-        controller_memory_root=controller_memory_root,
-        execution=execution,
         current=current,
         neighbors=neighbors,
         ancestors=ancestors,
@@ -328,7 +291,7 @@ def _owned_prose_fragments(
         )
 
     # F# is a file boundary, not a logical content boundary. Direct backing-root
-    # text belongs to the owning heading, but retains its physical Controller
+    # text belongs to the owning heading, but retains its physical
     # source. Descendant BlockKeys stay excluded.
     groups: list[list[SourceTextPart]] = []
     for part in block.logical_text_parts:
@@ -398,74 +361,56 @@ def _is_focus(block: DocumentBlock) -> bool:
     )
 
 
-def _required_line(value: str, name: str) -> str:
-    if not isinstance(value, str):
-        raise OpeningContextError(f"{name} must be text")
-    clean = value.strip()
-    if not clean or "\x00" in clean or "\n" in clean or "\r" in clean:
-        raise OpeningContextError(f"{name} must be nonempty single-line text")
-    return clean
-
-
 def _render(
-    controller_memory_root: str,
-    execution: OpeningContextExecution,
     current: OpeningContextSection,
     sections: tuple[OpeningContextSection, ...],
     edge_triples: tuple[tuple[str, str, str], ...],
 ) -> str:
     parts = [
-        "# RightMemory opening context",
+        "The following is background from the user's Pursuit map, not a task by itself.",
         "",
-        f"Execution host: {execution.host_label}",
-        f"Execution project: {execution.project_label}",
-        f"Execution working directory: `{execution.execution_cwd}`",
-        "",
-        (
-            "Controller Memory root (Controller-only; not an execution working "
-            f"directory): `{controller_memory_root}`"
-        ),
-        "",
-        (
-            "Controller sources below are relative to that root. They are not "
-            "paths on the execution host."
-        ),
-        "",
-        f"Current Pursuit: `{current.selection_id}`",
-        "",
-        "## Selected graph context",
+        f"# {_readable_title(current)}",
     ]
-    for section in sections:
-        parts.extend(
-            (
-                "",
-                f"### Block `{section.selection_id}`",
-                f"Title: {section.title}",
-                f"Role: {', '.join(section.roles)}",
-                f"Controller anchor source: `{section.source_path}:{section.source_line}`",
-            )
-        )
-        if section.prose_fragments:
-            for fragment in section.prose_fragments:
-                source = f"{fragment.source_path}:{fragment.start_line}"
-                if fragment.end_line != fragment.start_line:
-                    source += f"-{fragment.end_line}"
-                parts.extend(
-                    (
-                        "",
-                        f"Owned prose from Controller source `{source}`:",
-                        "",
-                        fragment.markdown,
-                    )
-                )
-        else:
-            parts.extend(("", "_(This block has no owned prose.)_"))
-    parts.extend(("", "## Direct current-Pursuit connections"))
+    if current.markdown and current.block_kind != "node":
+        parts.extend(("", current.markdown))
+    background = [section for section in sections if section is not current]
+    if background:
+        parts.extend(("", "## Context"))
+        for section in background:
+            parts.extend(("", f"### {_readable_title(section)}"))
+            if section.markdown and section.block_kind != "node":
+                parts.extend(("", section.markdown))
     if edge_triples:
+        titles = {section.item_id: _readable_title(section) for section in sections}
+        parts.extend(("", "## Direct connections", ""))
         parts.extend(
-            f"- `{source}` --`{edge_type}`--> `{target}`"
+            "- " + _EDGE_SENTENCES[edge_type].format(source=titles[source], target=titles[target])
             for source, edge_type, target in edge_triples
         )
-    else:
-        parts.extend(("", "No direct graph connections were selected."))
     return "\n".join(parts).rstrip() + "\n"
+
+
+def _readable_title(section: OpeningContextSection) -> str:
+    # A bare graph node's indexed title falls back to its internal id.
+    if section.block_kind == "node" and not section.markdown:
+        return "Untitled item"
+    return section.title or "Untitled direction"
+
+
+_EDGE_SENTENCES = {
+    "dep": "{source} depends on {target}.",
+    "emb": "{source} embeds a copy of {target}.",
+    "bak": "{source} is a backup or snapshot of {target}.",
+    "agg": "{source} aggregates outputs from {target}.",
+    "ver": "{source} verifies or tests {target}.",
+    "ext": "{source} extends or enhances {target}.",
+    "up": "{source} is upstream of {target}.",
+    "rel": "{source} is related to {target}.",
+    "loc": "{source} is located inside {target}.",
+    "run": "{source} runs or launches through {target}.",
+    "cfg": "{source} uses {target} as configuration.",
+    "out": "{source} outputs {target}.",
+    "in": "{source} consumes {target} as input.",
+    "doc": "{source} documents {target}.",
+    "todo": "{source} is a question, todo, or blocker concerning {target}.",
+}
