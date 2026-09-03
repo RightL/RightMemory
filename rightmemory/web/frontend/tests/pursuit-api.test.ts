@@ -54,4 +54,14 @@ test('map reads and mutations retain their transport boundaries', async () => {
   assert.equal(calls[1].path, '/api/pursuit-map/operations');
   assert.equal(calls[1].options?.method, 'POST');
   assert.deepEqual(JSON.parse(String(calls[1].options?.body)), { expected_revision: 'r0', operation });
+  await api.history('undo', 'r1', 'action-1');
+  assert.equal(calls[2].path, '/api/pursuit-map/undo');
+  assert.deepEqual(JSON.parse(String(calls[2].options?.body)), { expected_revision: 'r1', operation_id: 'action-1' });
+  await api.flush('r2', true);
+  assert.equal(calls[3].path, '/api/pursuit-map/flush');
+  assert.deepEqual(JSON.parse(String(calls[3].options?.body)), { expected_revision: 'r2' });
+  assert.equal(calls[3].options?.keepalive, true);
+  await api.activity();
+  assert.equal(calls[4].path, '/api/pursuit-map/activity');
+  assert.deepEqual(JSON.parse(String(calls[4].options?.body)), {});
 });

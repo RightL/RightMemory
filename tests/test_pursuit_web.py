@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from rightmemory.opening_context import build_opening_context
 from rightmemory.web.app import create_web_app
+from rightmemory.web.service import PursuitBatchLifecycle
 from tests.asgi_client import ASGITestClient as TestClient
 
 
@@ -69,20 +70,29 @@ class PursuitWebTests(unittest.TestCase):
         query = urlencode({"item_id": item_id, "expected_revision": snapshot["revision"]})
         return (client or self.client).get(f"/api/pursuit-map/context?{query}")
 
+    def _flush(self, *, snapshot=None):
+        response = self.client.post(
+            "/api/pursuit-map/flush",
+            json={"expected_revision": (snapshot or self._snapshot())["revision"]},
+            headers={"x-csrf-token": self.csrf},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()["data"]
+
     def test_reads_and_mutations_require_a_bootstrapped_session(self):
         client = TestClient(self.app, request_timeout_seconds=30)
         responses = [
             client.get("/api/pursuit-map"),
             client.get("/api/pursuit-map/context?item_id=alpha&expected_revision=revision"),
         ]
-        for endpoint in ("operations", "undo", "redo"):
+        for endpoint in ("operations", "undo", "redo", "flush", "activity"):
             responses.append(client.post(f"/api/pursuit-map/{endpoint}", json={}))
         for response in responses:
             self.assertEqual(response.status_code, 401)
 
     def test_all_mutations_require_csrf(self):
         before = self._git(self.root, "rev-parse", "HEAD")
-        for endpoint in ("operations", "undo", "redo"):
+        for endpoint in ("operations", "undo", "redo", "flush", "activity"):
             for headers in ({}, {"x-csrf-token": "wrong"}):
                 with self.subTest(endpoint=endpoint, headers=headers):
                     response = self.client.post(f"/api/pursuit-map/{endpoint}", json={}, headers=headers)
@@ -243,8 +253,9 @@ class PursuitWebTests(unittest.TestCase):
                 response = self.client.request(method, path)
                 self.assertEqual(response.status_code, 404)
 
-    def test_each_operation_lands_one_commit_and_new_revision(self):
+    def test_operations_are_saved_in_order_and_share_one_checkpoint(self):
         snapshot = self._snapshot()
+        initial_head = snapshot["git_head"]
         operations = [
             {"type": "create", "parent_id": "alpha", "after_id": "child", "title": "New direction"},
             {"type": "rename", "title": "中文 and English"},
@@ -262,8 +273,9 @@ class PursuitWebTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200, response.text)
                 result = response.json()["data"]
                 next_snapshot = result["snapshot"]
-                self.assertEqual(result["commit"], self._git(self.root, "rev-parse", "HEAD"))
-                self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), snapshot["git_head"])
+                self.assertIsNone(result["commit"])
+                self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), initial_head)
+                self.assertTrue(next_snapshot["pending"])
                 self.assertNotEqual(next_snapshot["revision"], snapshot["revision"])
                 self.assertTrue(result["operation_id"])
                 self.assertTrue(result["undoable"])
@@ -274,6 +286,10 @@ class PursuitWebTests(unittest.TestCase):
                     self.assertIn(created_id, {item["id"] for item in next_snapshot["items"]})
                 snapshot = next_snapshot
         self.assertNotIn(created_id, {item["id"] for item in snapshot["items"]})
+        flushed = self._flush()
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), initial_head)
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), flushed["commit"])
+        self.assertFalse(flushed["snapshot"]["pending"])
 
     def test_stale_revision_returns_conflict_and_authoritative_snapshot(self):
         stale = self._snapshot()
@@ -310,7 +326,7 @@ class PursuitWebTests(unittest.TestCase):
         self.assertEqual(result["selected_id"], "alpha")
         self.assertEqual(result["id_remaps"], [])
         self.assertTrue(result["undoable"])
-        self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), stale["git_head"])
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), stale["git_head"])
         items = {item["id"]: item for item in result["snapshot"]["items"]}
         self.assertEqual(items["alpha"]["title"], "Alpha renamed")
         self.assertEqual(items["beta"]["title"], "Beta renamed")
@@ -323,46 +339,52 @@ class PursuitWebTests(unittest.TestCase):
         self.assertEqual(detail["code"], "conflict")
         self.assertEqual(detail["snapshot"]["revision"], result["snapshot"]["revision"])
         self.assertEqual((self.root / "PURSUITS.md").read_bytes(), changed)
-        self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), result["commit"])
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), stale["git_head"])
+        flushed = self._flush()
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), stale["git_head"])
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), flushed["commit"])
 
     def test_undo_and_redo_add_commits_in_the_same_session(self):
         original = (self.root / "PURSUITS.md").read_bytes()
         applied = self._operation({"type": "rename", "id": "alpha", "title": "Renamed"})
         self.assertEqual(applied.status_code, 200, applied.text)
+        checkpoint = self._flush()
         changed = (self.root / "PURSUITS.md").read_bytes()
         result = applied.json()["data"]
         undo = self.client.post(
             "/api/pursuit-map/undo",
-            json={"expected_revision": result["snapshot"]["revision"], "commit": result["commit"]},
+            json={"expected_revision": checkpoint["snapshot"]["revision"], "operation_id": result["operation_id"]},
             headers={"x-csrf-token": self.csrf},
         )
         self.assertEqual(undo.status_code, 200, undo.text)
+        undo_checkpoint = self._flush()
         self.assertEqual((self.root / "PURSUITS.md").read_bytes(), original)
-        self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), result["commit"])
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), checkpoint["commit"])
         undone = undo.json()["data"]
         redo = self.client.post(
             "/api/pursuit-map/redo",
-            json={"expected_revision": undone["snapshot"]["revision"], "commit": undone["commit"]},
+            json={"expected_revision": undo_checkpoint["snapshot"]["revision"], "operation_id": result["operation_id"]},
             headers={"x-csrf-token": self.csrf},
         )
         self.assertEqual(redo.status_code, 200, redo.text)
+        self._flush()
         self.assertEqual((self.root / "PURSUITS.md").read_bytes(), changed)
-        self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), undone["commit"])
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), undo_checkpoint["commit"])
         self.assertEqual(self._git(self.root, "status", "--porcelain"), "")
 
-    def test_another_session_cannot_undo_an_editor_commit(self):
+    def test_another_session_cannot_undo_an_editor_action(self):
         applied = self._operation({"type": "rename", "id": "alpha", "title": "Owner edit"})
         self.assertEqual(applied.status_code, 200, applied.text)
         result = applied.json()["data"]
         other_client, other_csrf = self._bootstrap()
         response = other_client.post(
             "/api/pursuit-map/undo",
-            json={"expected_revision": result["snapshot"]["revision"], "commit": result["commit"]},
+            json={"expected_revision": result["snapshot"]["revision"], "operation_id": result["operation_id"]},
             headers={"x-csrf-token": other_csrf},
         )
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["detail"]["code"], "history_forbidden")
-        self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), result["commit"])
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), result["snapshot"]["git_head"])
 
     def test_client_session_identifiers_are_not_trusted(self):
         snapshot = self._snapshot()
@@ -377,12 +399,128 @@ class PursuitWebTests(unittest.TestCase):
         self.assertTrue(actual)
         self.assertNotEqual(actual, "client-controlled")
 
+    def test_context_finishes_saved_edits_before_reading_canonical_state(self):
+        before = self._snapshot()
+        response = self._operation({"type": "rename", "id": "alpha", "title": "Updated title"})
+        self.assertEqual(response.status_code, 200, response.text)
+        pending = response.json()["data"]["snapshot"]
+        observed = []
+
+        def inspect_context_boundary(root, item):
+            observed.append((self._git(root, "rev-parse", "HEAD"), item["title"]))
+            return build_opening_context(root, item)
+
+        with patch("rightmemory.web.service.build_opening_context", side_effect=inspect_context_boundary):
+            copied = self._context(snapshot=pending)
+        self.assertEqual(copied.status_code, 200, copied.text)
+        self.assertEqual(len(observed), 1)
+        self.assertNotEqual(observed[0][0], before["git_head"])
+        self.assertEqual(observed[0][1], "Updated title")
+        self.assertFalse(self._snapshot()["pending"])
+        self.assertEqual(self._git(self.root, "status", "--porcelain"), "")
+
+    def test_flush_batches_distinct_actions_and_next_edit_makes_another_commit(self):
+        original = self._snapshot()
+        actions = [
+            {"type": "rename", "id": "alpha", "title": "Changed"},
+            {"type": "set_focus", "id": "beta", "focused": True},
+        ]
+        action_ids = []
+        for operation in actions:
+            response = self._operation(operation)
+            self.assertEqual(response.status_code, 200, response.text)
+            action_ids.append(response.json()["data"]["operation_id"])
+        first = self._flush()
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), original["git_head"])
+        self.assertEqual(first["snapshot"]["history"]["undo"], action_ids)
+        response = self._operation({"type": "edit_body", "id": "beta", "body": "A saved note."})
+        self.assertEqual(response.status_code, 200, response.text)
+        second = self._flush()
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), first["commit"])
+        self.assertNotEqual(second["commit"], first["commit"])
+
+    def test_root_switch_finishes_current_owner_batch(self):
+        other_root = self.root / "other"
+        self._seed_root(other_root)
+        initial = self._snapshot()
+        edited = self._operation({"type": "rename", "id": "alpha", "title": "Before switch"})
+        self.assertEqual(edited.status_code, 200, edited.text)
+        switched = self.client.post(
+            "/api/active-root", json={"root": str(other_root)}, headers={"x-csrf-token": self.csrf},
+        )
+        self.assertEqual(switched.status_code, 200, switched.text)
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), initial["git_head"])
+        self.assertIn("Before switch", (self.root / "PURSUITS.md").read_text(encoding="utf-8"))
+
+    def test_root_switch_conflict_preserves_selection_and_saved_recovery(self):
+        other_root = self.root / "other"
+        self._seed_root(other_root)
+        self._operation({"type": "rename", "id": "alpha", "title": "Pending"})
+        (self.root / "MEMORY.md").write_text("# Memory\n\nExternal change.\n", encoding="utf-8")
+        self._git(self.root, "add", "MEMORY.md")
+        self._git(self.root, "commit", "-qm", "external")
+        external = self._git(self.root, "rev-parse", "HEAD")
+        switched = self.client.post(
+            "/api/active-root", json={"root": str(other_root)}, headers={"x-csrf-token": self.csrf},
+        )
+        self.assertEqual(switched.status_code, 409, switched.text)
+        self.assertEqual(self.client.get("/api/session").json()["active_root"], str(self.root.resolve()))
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD"), external)
+        self.assertFalse(self._snapshot()["writable"])
+        with self.assertLogs("rightmemory.web.service", level="WARNING"):
+            self.app.state.pursuit_batches.flush_due(force=True)
+        fresh, _ = self._bootstrap()
+        recovery = self._snapshot(fresh)
+        self.assertFalse(recovery["writable"])
+        self.assertTrue(recovery["recovery"])
+        self.assertEqual(recovery["history"], {"undo": [], "redo": []})
+
+    def test_another_browser_cannot_write_or_refresh_owner_activity(self):
+        self._operation({"type": "rename", "id": "alpha", "title": "Owner"})
+        other, csrf = self._bootstrap()
+        snapshot = self._snapshot(other)
+        self.assertFalse(snapshot["writable"])
+        response = self._operation(
+            {"type": "rename", "id": "beta", "title": "Other"}, client=other, csrf=csrf, snapshot=snapshot,
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        activity = other.post("/api/pursuit-map/activity", json={}, headers={"x-csrf-token": csrf})
+        self.assertEqual(activity.status_code, 409, activity.text)
+        owner_activity = self.client.post(
+            "/api/pursuit-map/activity", json={}, headers={"x-csrf-token": self.csrf},
+        )
+        self.assertEqual(owner_activity.status_code, 200, owner_activity.text)
+
+    def test_shutdown_and_restart_finish_durable_batches_in_nested_roots(self):
+        other_root = self.root / "other"
+        self._seed_root(other_root)
+        selected = self.client.post(
+            "/api/active-root", json={"root": str(other_root)}, headers={"x-csrf-token": self.csrf},
+        )
+        self.csrf = selected.json()["data"]["csrf_token"]
+        original = self._snapshot()
+        edited = self._operation({"type": "rename", "id": "alpha", "title": "Recovered"})
+        self.assertEqual(edited.status_code, 200, edited.text)
+        restarted = PursuitBatchLifecycle(self.root)
+        try:
+            restarted.start()
+        finally:
+            restarted.stop()
+        self.assertEqual(self._git(other_root, "rev-parse", "HEAD^"), original["git_head"])
+        self.assertIn("Recovered", (other_root / "PURSUITS.md").read_text(encoding="utf-8"))
+        self.assertEqual(self._git(other_root, "status", "--porcelain"), "")
+        edited = self._operation({"type": "set_focus", "id": "beta", "focused": True})
+        self.assertEqual(edited.status_code, 200, edited.text)
+        before_stop = self._git(other_root, "rev-parse", "HEAD")
+        self.app.state.pursuit_batches.stop()
+        self.assertEqual(self._git(other_root, "rev-parse", "HEAD^"), before_stop)
+
     def test_missing_revision_or_operation_never_reaches_the_store(self):
         for endpoint in ("operations", "undo", "redo"):
             with self.subTest(endpoint=endpoint), patch("rightmemory.web.service.PursuitStore") as store:
                 response = self.client.post(
                     f"/api/pursuit-map/{endpoint}",
-                    json={"operation": {"type": "delete", "id": "alpha"}, "commit": "a" * 40},
+                    json={"operation": {"type": "delete", "id": "alpha"}, "operation_id": "action"},
                     headers={"x-csrf-token": self.csrf},
                 )
                 self.assertEqual(response.status_code, 400, response.text)
@@ -413,6 +551,7 @@ class PursuitWebTests(unittest.TestCase):
         self.assertNotEqual(other_snapshot["root_key"], before["root_key"])
         edited = self._operation({"type": "rename", "id": "alpha", "title": "Other root"})
         self.assertEqual(edited.status_code, 200, edited.text)
+        self._flush()
         self.assertEqual(self._snapshot(unchanged_client)["revision"], before["revision"])
         self.assertIn("Other root", (other_root / "PURSUITS.md").read_text(encoding="utf-8"))
         self.assertNotIn("Other root", (self.root / "PURSUITS.md").read_text(encoding="utf-8"))
@@ -490,7 +629,7 @@ class PursuitWebTests(unittest.TestCase):
     def test_store_calls_run_off_the_event_loop(self):
         caller_thread = threading.get_ident()
         with patch("rightmemory.web.service.PursuitStore") as store:
-            store.return_value.snapshot.side_effect = lambda: {"thread": threading.get_ident()}
+            store.return_value.snapshot.side_effect = lambda *args, **kwargs: {"thread": threading.get_ident()}
             store.return_value.apply.side_effect = lambda *args, **kwargs: {"thread": threading.get_ident()}
             read = self.client.get("/api/pursuit-map")
             write = self._operation({"type": "create", "title": "New"}, snapshot={"revision": "revision"})
@@ -518,6 +657,44 @@ class PursuitWebTests(unittest.TestCase):
                     f"/api/pursuit-map/{endpoint}", json={}, headers={"x-csrf-token": self.csrf},
                 )
                 self.assertEqual(response.status_code, 404)
+
+
+class PursuitBatchLifecycleTests(unittest.TestCase):
+    def test_real_activity_defers_idle_flush_but_not_maximum_duration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            lifecycle = PursuitBatchLifecycle(root)
+            with patch("rightmemory.web.service.PursuitStore") as stores:
+                store = stores.return_value
+                store.pending_state.return_value = {"pending": True, "started_at": 100.0, "updated_at": 100.0}
+                with patch("rightmemory.web.service.time.time", return_value=104.0):
+                    lifecycle.activity(root)
+                lifecycle.flush_due(now=108.0)
+                store.flush_pending.assert_not_called()
+                lifecycle.flush_due(now=110.0)
+                store.flush_pending.assert_called_once()
+                store.flush_pending.reset_mock()
+                with patch("rightmemory.web.service.time.time", return_value=159.0):
+                    lifecycle.activity(root)
+                lifecycle.flush_due(now=160.0)
+                store.flush_pending.assert_called_once()
+
+    def test_flush_failure_remains_visible_and_is_not_retried_every_tick(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            lifecycle = PursuitBatchLifecycle(root)
+            with patch("rightmemory.web.service.PursuitStore") as stores:
+                store = stores.return_value
+                store.pending_state.return_value = {"pending": True, "started_at": 100.0, "updated_at": 100.0}
+                store.flush_pending.side_effect = OSError("unavailable")
+                with self.assertLogs("rightmemory.web.service", level="WARNING"):
+                    lifecycle.flush_due(now=110.0)
+                self.assertIsNotNone(lifecycle.failure(root))
+                lifecycle.flush_due(now=111.0)
+                store.flush_pending.assert_called_once()
+                store.flush_pending.side_effect = None
+                lifecycle.flush_due(now=171.0)
+                self.assertIsNone(lifecycle.failure(root))
 
 
 if __name__ == "__main__":

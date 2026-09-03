@@ -13,14 +13,18 @@ if (layout === 'empty') current = { ...current, root_key: 'browser-empty-fixture
 let serial = 0;
 let failNext = false;
 let slow = false;
-const commits = new Map<string, { before: Snapshot; after: Snapshot }>();
+const actions = new Map<string, { before: Snapshot; after: Snapshot }>();
 const clone = <T>(value: T): T => structuredClone(value);
 const latency = () => new Promise((resolve) => setTimeout(resolve, slow ? 1800 : 100));
 const result = (before: Snapshot, next: Snapshot, selected_id: string | null): MutationResult => {
   serial++;
-  current = { ...next, revision: `r${serial}`, git_head: `c${serial}` };
-  commits.set(current.git_head, { before: clone(before), after: clone(current) });
-  return { snapshot: clone(current), commit: current.git_head, operation_id: `operation-${serial}`, repaired_references: [], undoable: true, selected_id, id_remaps: [] };
+  const operation_id = `operation-${serial}`;
+  current = {
+    ...next, revision: `r${serial}`, pending: true,
+    history: { undo: [...before.history.undo, operation_id], redo: [] },
+  };
+  actions.set(operation_id, { before: clone(before), after: clone(current) });
+  return { snapshot: clone(current), commit: null, operation_id, repaired_references: [], undoable: true, selected_id, id_remaps: [] };
 };
 const transport: Transport = {
   load: async () => clone(current),
@@ -36,12 +40,28 @@ const transport: Transport = {
       : operation.type === 'rename_many' ? operation.renames[0]?.id ?? null : operation.id;
     return result(current, applyOperation(current, operation, id), operation.type === 'delete' ? null : id);
   },
-  history: async (_kind, revision, commit) => {
+  history: async (kind, revision, operation_id) => {
     await latency();
-    const entry = commits.get(commit);
-    if (!entry || revision !== current.revision) throw new ApiError('History changed elsewhere.', 409, clone(current));
-    return result(current, entry.before, null);
+    const entry = actions.get(operation_id);
+    if (!entry || revision !== current.revision || current.history[kind].at(-1) !== operation_id) {
+      throw new ApiError('History changed elsewhere.', 409, clone(current));
+    }
+    const history = clone(current.history);
+    history[kind].pop();
+    history[kind === 'undo' ? 'redo' : 'undo'].push(operation_id);
+    current = {
+      ...clone(kind === 'undo' ? entry.before : entry.after),
+      revision: `r${++serial}`, git_head: current.git_head, pending: true, history,
+    };
+    return { snapshot: clone(current), commit: null, operation_id, repaired_references: [], undoable: true, selected_id: null, id_remaps: [] };
   },
+  flush: async (revision) => {
+    if (revision !== current.revision) throw new ApiError('The map changed in another window.', 409, clone(current));
+    const commit = current.pending ? `c${++serial}` : null;
+    if (commit) current = { ...current, revision: `r${serial}`, git_head: commit, pending: false };
+    return { snapshot: clone(current), commit, operation_id: '', repaired_references: [], undoable: false, selected_id: null, id_remaps: [] };
+  },
+  activity: async () => {},
 };
 const host = document.querySelector<HTMLElement>('#fixture')!;
 host.style.height = 'calc(100vh - 40px)';
@@ -72,7 +92,7 @@ run.addEventListener('click', async () => {
   run.disabled = true;
   tools.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input,button').forEach((control) => { control.disabled = true; });
   results.hidden = false; results.textContent = 'Running disposable browser checks…\n';
-  controller.destroy();
+  await controller.destroy();
   const checked = await runBrowserChecks(host, (line) => { results.textContent += line + '\n'; });
   if (checked) controller = checked;
   run.disabled = false;
