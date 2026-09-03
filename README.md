@@ -82,7 +82,7 @@ cd RightMemory
 .\install.ps1
 ```
 
-The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs five skills into both `~/.codex/skills` and `~/.claude/skills`: `rightmemory-auto-orchestrator`, `maintain-pursuit-map`, `maintain-rightmemory`, `review-agent-guidance-inbox`, and `rightmemory-manager`. The three maintenance skills and Manager require explicit user requests; Manager coordinates work through Codex App's native project and task tools. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
+The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs five skills into both `~/.codex/skills` and `~/.claude/skills`: `rightmemory-auto-orchestrator`, `maintain-pursuit-map`, `maintain-rightmemory`, `review-agent-guidance-inbox`, and `rightmemory-manager`. The three maintenance skills and Manager require explicit user requests; Manager acts as a long-lived coordination conversation for a Pursuit direction in Codex App. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
 
 If you want RightMemory roles to run through the Codex SDK or Claude Code CLI:
 
@@ -111,7 +111,7 @@ Web Studio starts on demand and keeps running after its launching command or bro
 
 To work from a direction, right-click its node or open **More**, choose **Copy context**, and paste the Markdown into an ordinary Codex App task or conversation alongside your request. The copied background comes from the current canonical graph: the selected direction, its direct incoming and outgoing neighbors, their logical heading ancestors, and direct connections. Readable titles and relationships carry the context without internal identifiers or runtime metadata. Copying leaves the map and Git history unchanged.
 
-Use **Manager**, the `rightmemory-manager` skill in Codex App, when you explicitly want RightMemory management or task coordination. Manager carries out Memory and Pursuit changes through their existing maintenance workflows and can use Codex App's native tools to coordinate work. It creates a separate task when you request one or confirm a concrete proposal. Copied context supplies background; your request supplies the objective.
+Use **Manager**, the `rightmemory-manager` skill in Codex App, to make a conversation the long-lived coordination point for a Pursuit direction. Manager coordinates separate temporary worker tasks, helps decide next steps, and synthesizes results without performing substantive project work. You can pin the conversation manually in Codex App; RightMemory stores no conversation association or task status. Worker task activity does not automatically change Pursuit or Memory, and Manager invokes maintenance workflows only when you explicitly ask to change RightMemory.
 
 Codex App owns projects, tasks, conversations, and execution. RightMemory keeps the user's directions and context in the map, with no persistent task links or status synchronization. A task's progress, failure, or completion does not change Pursuit. Web Studio accepts loopback hosts only because its automatic browser sessions are not a remote-access security boundary.
 
@@ -450,8 +450,8 @@ maintain-pursuit-map / human map editor
   +--> Memory edge repair           mechanical reference cleanup on deletion
 
 rightmemory-manager / Codex App
-  +--> maintenance workflows        explicitly requested RightMemory management
-  +--> native project/task tools    explicitly requested work coordination
+  +--> per-Pursuit coordination     long-lived coordination of separate worker tasks
+  +--> maintenance workflows        explicitly requested RightMemory changes
 
 transcript review
   +--> candidate extraction         idle supported sessions
@@ -469,7 +469,7 @@ unified updater
 - `maintain-rightmemory` handles explicitly requested maintenance of Memory, linked content, and correction surfaces. It reads Pursuit for context and preserves its references without editing the map.
 - `maintain-pursuit-map` handles explicit map requests. A requested change is authorized directly; it asks for clarification only when the target or materially different interpretations cannot be resolved safely from canonical state. Neither maintenance skill adds a routine confirmation ceremony, calls the other, submits map work to Update, or starts a model role.
 - `review-agent-guidance-inbox` separately proposes and applies user-approved admission of pending guidance. It does not edit Pursuit.
-- `rightmemory-manager` is Manager in Codex App. It handles explicit RightMemory management through the appropriate maintenance workflow and coordinates requested work with Codex App's native project and task tools. It treats copied Pursuit context as background and preserves the user's objective without inventing requirements. Requested changes are followed by a refresh and verification of canonical state.
+- `rightmemory-manager` is Manager in Codex App. It acts as the long-lived coordination point for one Pursuit direction, helping decide next steps, creating or coordinating separate worker tasks, and synthesizing results without performing substantive project work. It treats copied Pursuit context as background and creates worker tasks when requested or confirmed. It calls maintenance workflows only when the user explicitly asks to change RightMemory.
 - Use one of `memory-retriever`, `rightmemory-orchestrator`, and `rightmemory-auto-orchestrator` for ordinary access in a conversation. This choice does not exclude independent maintenance skills or Manager, and RightMemory does not persist the choice.
 - Once selected, `memory-retriever` calls Retrieve for the stated memory need. The two orchestrators retrieve conditionally when stored context could materially affect how the agent understands or approaches the work and skip clearly self-contained requests. Every ordinary Retrieve call may select relevant Agent Corrections through `AC#writing` and `AC#design`.
 - `memory-retriever` discloses active or deferred preferences, workflow or behavior guidance, reusable instructions, and Agent Corrections in a fixed `[RightMemory] Retrieved guidance` block; ordinary facts, knowledge, and descriptive context are not disclosed this way.
@@ -555,7 +555,7 @@ semantic work and push successful memory changes after they land.
 
 1. Let the installed `rightmemory-auto-orchestrator` retrieve context and submit qualifying Memory evidence according to its instructions. Use an optional ordinary orchestration variant when you want read-only or approval-gated access.
 2. Run `rightmemory watch start` for transcript extraction, pruning, consolidation, Insight cycles, and optional sync.
-3. Open `rightmemory pursuit` or explicitly request `maintain-pursuit-map` to change your direction map. Use a node's **Copy context** action to bring its background into Codex App, where Manager can handle explicit RightMemory management or task coordination. Ordinary updates leave the map unchanged.
+3. Open `rightmemory pursuit` or explicitly request `maintain-pursuit-map` to change your direction map. Use a node's **Copy context** action to bring its background into Codex App, where you can set up a long-lived Manager conversation for that direction to coordinate worker tasks. Ordinary updates leave the map unchanged.
 4. Use `rightmemory status` when you need to inspect watcher, queue, and sync state.
 
 Dreamer consolidates durable Memory when it needs structural cleanup. Insight commits timestamped reflections under `insight_logs/` when broader patterns, risks, or next-step ideas are worth preserving.

@@ -20,11 +20,20 @@ Right-click a direction or open its **More** menu and choose **Copy context**. P
 
 Copy context first finishes saved edits so the text includes your latest confirmed changes. Context comes from the current canonical graph. It contains the selected direction's title and prose, its direct incoming and outgoing neighbors, those blocks' logical heading ancestors, and readable direct connections. Selection and ordering use the shared opening-context builder. It does not expand second-hop edges, resource backings, Focus, sibling nodes, or child subtrees. The text has no generated block identifiers, roles, source locations, revision, Memory-root path, or execution metadata. Generating it is read-only and records no conversation association; finishing saved edits may first create their Git checkpoint.
 
-Use **Manager**, the installed `rightmemory-manager` skill in Codex App, for explicit RightMemory management or task coordination. Manager follows `maintain-rightmemory` for Memory and correction surfaces and `maintain-pursuit-map` for Pursuit, preserving their ownership and validated editing workflows. It carries out an explicit request directly, asking when the target or intended meaning cannot be resolved safely, and refreshes and verifies canonical state after requested changes.
+To coordinate work for a direction over time, set up one long-lived Manager conversation in Codex App:
 
-When you ask to create or coordinate Codex work, Manager uses Codex App's native project and task tools. It preserves your objective and relevant context without inventing requirements or prescribing implementation before the receiving task inspects its project. A separate task requires your explicit request or confirmation of a concrete proposal.
+```text
+Pursuit Map
+→ Copy context
+→ create a Codex App conversation
+→ invoke RightMemory Manager
+→ paste the copied context
+→ name and pin the conversation
+```
 
-Codex App manages projects, tasks, conversations, and execution. The Web Studio remains the map and editor, without persistent Pursuit-to-task links or status synchronization. Progress, failure, and completion in Codex do not change the map; a Pursuit change remains an explicit user decision.
+Use **Manager**, the installed `rightmemory-manager` skill in Codex App, as this stable coordination point. Manager keeps an integrated understanding of the direction, prior work, and open questions, helps decide what should happen next, creates or coordinates separate temporary worker tasks, and synthesizes their outcomes. Substantial investigation, implementation, experimentation, and debugging belong in worker tasks; Manager creates a separate task only when explicitly requested or confirmed.
+
+Codex App owns conversations, tasks, and pinning. RightMemory stores no Manager-conversation association or task status. Worker task progress, failure, or completion does not change the map; a Pursuit or Memory change remains an explicit user decision using the appropriate maintenance workflow.
 
 ## Edit On The Canvas
 
@@ -121,7 +130,7 @@ The human editor and an explicit `maintain-pursuit-map` request are the two norm
 
 Update, ordinary orchestration, transcript review, and Memory maintenance may read Pursuit. They do not infer, submit, or apply map changes from progress, unfinished work, new ideas, or completion. Update can retain independently durable evidence from a mixed candidate while reporting its Pursuit portion as skipped. Sync repair can reconcile already-authorized map state within its existing bounded repair workflow.
 
-Both install modes include five skills: `rightmemory-auto-orchestrator`, `maintain-pursuit-map`, `maintain-rightmemory`, `review-agent-guidance-inbox`, and `rightmemory-manager`. The three maintenance skills and Manager are available alongside ordinary orchestration. The maintenance skills do not invoke one another or exchange queued map work; Manager uses the workflow that owns the requested surface.
+Both install modes include five skills: `rightmemory-auto-orchestrator`, `maintain-pursuit-map`, `maintain-rightmemory`, `review-agent-guidance-inbox`, and `rightmemory-manager`. The three maintenance skills and Manager are available alongside ordinary orchestration. The maintenance skills do not invoke one another or exchange queued map work; Manager uses the workflow that owns the requested surface when the user explicitly asks to change RightMemory.
 
 ## Implementation Entry Points
 
