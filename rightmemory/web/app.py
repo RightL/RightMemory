@@ -4,6 +4,7 @@ import argparse
 import os
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -30,7 +31,7 @@ from .process import (
     register_web_process,
     validate_web_host,
 )
-from .service import WebStudioService, resolve_allowed_memory_root
+from .service import PursuitBatchLifecycle, WebStudioService, resolve_allowed_memory_root
 from ..pursuit_store import PursuitStoreError
 from ..shared_view_questions import question_response_payload, verify_question_view_token
 
@@ -38,7 +39,18 @@ from ..shared_view_questions import question_response_payload, verify_question_v
 def create_web_app(memory_root: Path) -> FastAPI:
     root = Path(memory_root).expanduser().resolve()
     ensure_web_session_secret(root)
-    app = FastAPI(title="RightMemory Web Studio")
+    pursuit_batches = PursuitBatchLifecycle(root)
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        await run_in_threadpool(pursuit_batches.start)
+        try:
+            yield
+        finally:
+            await run_in_threadpool(pursuit_batches.stop)
+
+    app = FastAPI(title="RightMemory Web Studio", lifespan=lifespan)
+    app.state.pursuit_batches = pursuit_batches
 
     @app.middleware("http")
     async def require_loopback_host(request: Request, call_next):
@@ -65,7 +77,8 @@ def create_web_app(memory_root: Path) -> FastAPI:
 
     def service_for_active_root(active_root: str | Path) -> WebStudioService:
         resolved = resolve_allowed_memory_root(root, active_root)
-        return WebStudioService(resolved, allowed_root=root)
+        pursuit_batches.register(resolved)
+        return WebStudioService(resolved, allowed_root=root, pursuit_batches=pursuit_batches)
 
     async def current_service(session=Depends(current_session)):
         return service_for_active_root(session.active_root)
@@ -92,6 +105,15 @@ def create_web_app(memory_root: Path) -> FastAPI:
     @app.post("/api/logout")
     async def logout(request: Request, response: Response, _session=Depends(current_session)):
         require_csrf(root, request, request.headers.get("x-csrf-token"))
+        try:
+            service = service_for_active_root(_session.active_root)
+        except ValueError:
+            service = None  # A removed root must not prevent session revocation.
+        if service is not None:
+            await pursuit_response(
+                service, "saved edits finished", service.finish_pursuit_session, _session.session_id,
+                session_id=_session.session_id,
+            )
         revoke_session(root, _session.session_id)
         clear_session_cookie(response)
         return ok_response("logged out")
@@ -104,7 +126,7 @@ def create_web_app(memory_root: Path) -> FastAPI:
     async def status_api(service=Depends(current_service)):
         return ok_response("status loaded", service.status())
 
-    async def pursuit_response(service, message, action, *args):
+    async def pursuit_response(service, message, action, *args, session_id=None):
         try:
             data = await run_in_threadpool(action, *args)
         except PursuitStoreError as exc:
@@ -112,7 +134,7 @@ def create_web_app(memory_root: Path) -> FastAPI:
             detail.update(code=exc.code, diagnostics=list(exc.diagnostics))
             if exc.status in {409, 422}:
                 try:
-                    detail["snapshot"] = await run_in_threadpool(service.pursuit_map)
+                    detail["snapshot"] = await run_in_threadpool(service.pursuit_map, session_id)
                 except (OSError, ValueError, RuntimeError):
                     # A concurrent filesystem failure must not hide the original conflict.
                     pass
@@ -124,17 +146,23 @@ def create_web_app(memory_root: Path) -> FastAPI:
         return ok_response(message, data)
 
     @app.get("/api/pursuit-map")
-    async def pursuit_map(service=Depends(current_service)):
-        return await pursuit_response(service, "pursuit map loaded", service.pursuit_map)
+    async def pursuit_map(session=Depends(current_session)):
+        service = service_for_active_root(session.active_root)
+        return await pursuit_response(
+            service, "pursuit map loaded", service.pursuit_map, session.session_id,
+            session_id=session.session_id,
+        )
 
     @app.get("/api/pursuit-map/context")
     async def pursuit_context(
         item_id: str = Query(..., min_length=1),
         expected_revision: str = Query(..., min_length=1),
-        service=Depends(current_service),
+        session=Depends(current_session),
     ):
+        service = service_for_active_root(session.active_root)
         return await pursuit_response(
             service, "pursuit context loaded", service.pursuit_context, item_id, expected_revision,
+            session.session_id, session_id=session.session_id,
         )
 
     @app.post("/api/pursuit-map/operations")
@@ -147,6 +175,7 @@ def create_web_app(memory_root: Path) -> FastAPI:
         service = service_for_active_root(session.active_root)
         return await pursuit_response(
             service, "pursuit map updated", service.apply_pursuit_operation, payload, session.session_id,
+            session_id=session.session_id,
         )
 
     @app.post("/api/pursuit-map/undo")
@@ -159,6 +188,7 @@ def create_web_app(memory_root: Path) -> FastAPI:
         service = service_for_active_root(session.active_root)
         return await pursuit_response(
             service, "pursuit map operation undone", service.undo_pursuit_operation, payload, session.session_id,
+            session_id=session.session_id,
         )
 
     @app.post("/api/pursuit-map/redo")
@@ -171,6 +201,29 @@ def create_web_app(memory_root: Path) -> FastAPI:
         service = service_for_active_root(session.active_root)
         return await pursuit_response(
             service, "pursuit map operation redone", service.redo_pursuit_operation, payload, session.session_id,
+            session_id=session.session_id,
+        )
+
+    @app.post("/api/pursuit-map/flush")
+    async def flush_pursuit_batch(
+        request: Request,
+        payload: dict[str, object] = Body(...),
+        session=Depends(current_session),
+    ):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        return await pursuit_response(
+            service, "saved edits finished", service.flush_pursuit_batch, payload, session.session_id,
+            session_id=session.session_id,
+        )
+
+    @app.post("/api/pursuit-map/activity")
+    async def pursuit_activity(request: Request, session=Depends(current_session)):
+        require_csrf(root, request, request.headers.get("x-csrf-token"))
+        service = service_for_active_root(session.active_root)
+        return await pursuit_response(
+            service, "editing activity recorded", service.pursuit_activity, session.session_id,
+            session_id=session.session_id,
         )
 
     @app.get("/api/settings")
@@ -549,6 +602,11 @@ def create_web_app(memory_root: Path) -> FastAPI:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=error_detail("invalid active root", technical=str(exc)),
             ) from exc
+        if Path(data["active_root"]) != service.memory_root:
+            await pursuit_response(
+                service, "saved edits finished", service.finish_pursuit_session, session.session_id,
+                session_id=session.session_id,
+            )
         cookie, updated_session = create_session_cookie(root, active_root=data["active_root"], session_id=session.session_id)
         set_session_cookie(response, cookie)
         data["csrf_token"] = updated_session.csrf_token

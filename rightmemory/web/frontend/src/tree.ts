@@ -25,6 +25,8 @@ export interface Snapshot {
   valid: boolean;
   writable: boolean;
   diagnostics: (string | { message?: string; [key: string]: unknown })[];
+  pending: boolean;
+  history: { undo: string[]; redo: string[] };
 }
 
 export type Operation =

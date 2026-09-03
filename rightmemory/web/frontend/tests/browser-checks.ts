@@ -18,6 +18,7 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
   let current: Snapshot;
   let serial = 0;
   let loads = 0;
+  let flushes = 0;
   let failNext = false;
   let heldSave: Promise<void> | undefined;
   const operations: Operation[] = [];
@@ -33,6 +34,7 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
       if (contextError) throw contextError;
       check(revision === current.revision, 'Context requests use the saved map revision');
       check(indexTree(current).has(itemId), 'Context requests use a saved item id');
+      check(!current.pending, 'Context requests follow the pending checkpoint flush');
       return copiedMarker;
     },
     writeClipboard: async (text) => {
@@ -41,7 +43,7 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     },
   };
   type IdRemap = { from: string; to: string };
-  const history = new Map<string, { snapshot: Snapshot; remaps: IdRemap[] }>();
+  const actions = new Map<string, { before: Snapshot; after: Snapshot; remaps: IdRemap[] }>();
   const remapSnapshot = (snapshot: Snapshot, remaps: readonly IdRemap[]): Snapshot => {
     const ids = new Map(remaps.map(({ from, to }) => [from, to]));
     const mapped = (id: string) => ids.get(id) ?? id;
@@ -78,24 +80,42 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
       check(revision === current.revision, 'Mutation revision must follow the last response');
       const id = operation.type === 'create' ? `created-${serial}`
         : operation.type === 'rename_many' ? operation.renames[0]?.id ?? null : operation.id;
-      const before = current;
+      const before = structuredClone(current);
       const remaps = operation.type === 'rename_many'
         ? operation.renames.filter((rename) => rename.id.startsWith('plain:'))
           .map((rename, index) => ({ from: rename.id, to: `promoted-${serial + 1}-${index}` }))
         : [];
-      current = { ...remapSnapshot(applyOperation(current, operation, id), remaps), revision: `r${++serial}`, git_head: `c${serial}` };
-      history.set(current.git_head, { snapshot: before, remaps: remaps.map(({ from, to }) => ({ from: to, to: from })) });
+      const operation_id = `operation-${++serial}`;
+      current = {
+        ...remapSnapshot(applyOperation(current, operation, id), remaps), revision: `r${serial}`, pending: true,
+        history: { undo: [...before.history.undo, operation_id], redo: [] },
+      };
+      actions.set(operation_id, { before, after: structuredClone(current), remaps });
       const selected = remaps.find((mapping) => mapping.from === id)?.to ?? id;
-      return { snapshot: structuredClone(current), commit: current.git_head, operation_id: current.git_head, repaired_references: [], undoable: true, selected_id: selected, id_remaps: remaps };
+      return { snapshot: structuredClone(current), commit: null, operation_id, repaired_references: [], undoable: true, selected_id: selected, id_remaps: remaps };
     },
-    history: async (_kind, _revision, commit) => {
-      const restored = history.get(commit);
-      check(restored, 'Undo must reference a saved interaction');
-      const before = current;
-      current = { ...restored.snapshot, revision: `r${++serial}`, git_head: `c${serial}` };
-      history.set(current.git_head, { snapshot: before, remaps: restored.remaps.map(({ from, to }) => ({ from: to, to: from })) });
-      return { snapshot: structuredClone(current), commit: current.git_head, operation_id: current.git_head, repaired_references: [], undoable: true, selected_id: null, id_remaps: restored.remaps };
+    history: async (kind, revision, operation_id) => {
+      check(revision === current.revision, 'History uses the last saved revision');
+      const action = actions.get(operation_id);
+      check(action && current.history[kind].at(-1) === operation_id, 'History references the last available action');
+      const history = structuredClone(current.history);
+      history[kind].pop();
+      history[kind === 'undo' ? 'redo' : 'undo'].push(operation_id);
+      current = {
+        ...structuredClone(kind === 'undo' ? action.before : action.after),
+        revision: `r${++serial}`, git_head: current.git_head, pending: true, history,
+      };
+      const remaps = kind === 'undo' ? action.remaps.map(({ from, to }) => ({ from: to, to: from })) : action.remaps;
+      return { snapshot: structuredClone(current), commit: null, operation_id, repaired_references: [], undoable: true, selected_id: null, id_remaps: remaps };
     },
+    flush: async (revision) => {
+      flushes++;
+      check(revision === current.revision, 'Checkpoint flush uses the last saved revision');
+      const commit = current.pending ? `c${++serial}` : null;
+      if (commit) current = { ...current, revision: `r${serial}`, git_head: commit, pending: false };
+      return { snapshot: structuredClone(current), commit, operation_id: '', repaired_references: [], undoable: false, selected_id: null, id_remaps: [] };
+    },
+    activity: async () => {},
   };
   const $ = <T extends HTMLElement = HTMLElement>(selector: string): T => {
     const element = host.querySelector<T>(selector); check(element, `Missing ${selector}`); return element;
@@ -130,9 +150,10 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
   };
   const settled = () => until(() => !controller!.hasUnsavedChanges, 'The save queue did not settle');
   const reset = async (count = 22, prepare?: (snapshot: Snapshot) => Snapshot) => {
-    controller?.destroy();
+    await controller?.destroy();
     const fixture = { ...forestFixture(count), root_key: `interaction-check-${crypto.randomUUID()}` };
     current = prepare ? prepare(fixture) : fixture;
+    actions.clear();
     operations.length = 0;
     contextRequests.length = 0;
     clipboardWrites.length = 0;
@@ -153,7 +174,7 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     check(!$('.pm-canvas').hasAttribute('aria-activedescendant'), 'A cleared selection has no active tree item');
     await controller!.refresh();
     check($('.pm-topic-toolbar').hidden && !host.querySelector('[aria-selected="true"]'), 'Refreshing must not restore a dismissed selection');
-    controller!.destroy(); controller = await mountMap(host, transport, mapOptions); await pause();
+    await controller!.destroy(); controller = await mountMap(host, transport, mapOptions); await pause();
     check($('.pm-topic-toolbar').hidden, 'Reopening the same map preserves the cleared selection');
     key('ArrowDown');
     check(topic('directions').getAttribute('aria-selected') === 'true', 'Keyboard navigation can select again after dismissal');
@@ -276,6 +297,67 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     check(indexTree(current!).get('design')!.title === 'Edited before dismissal' && $('.pm-topic-toolbar').hidden, 'Blank clicks finish title editing without losing text or reopening tools');
     report('PASS selection facade, outside-click dismissal, refresh/reopen persistence, keyboard recovery, toolbar actions, pan, and pending edits');
 
+    await reset(); select('design');
+    const checkpointBeforeEdits = current!.git_head;
+    click(button('bold', '.pm-topic-toolbar')); await settled();
+    click(button('underline', '.pm-topic-toolbar')); await settled();
+    const savedActions = [...current!.history.undo];
+    check($('.pm-save-status').textContent === 'Saved' && !controller!.hasUnsavedChanges
+      && current!.pending && current!.git_head === checkpointBeforeEdits && savedActions.length === 2,
+    'Acknowledged actions show Saved before their shared Git checkpoint');
+    const unload = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(unload);
+    check(!unload.defaultPrevented, 'A pending Git checkpoint alone never blocks leaving the page');
+    await controller!.flush();
+    check(!current!.pending && current!.git_head !== checkpointBeforeEdits
+      && JSON.stringify(current!.history.undo) === JSON.stringify(savedActions),
+    'Flushing the batch preserves both saved action IDs');
+    await controller!.destroy(); controller = await mountMap(host, transport, mapOptions); await pause();
+    check(!button('undo').disabled, 'Reopening the map restores available action history from the server');
+    button('undo').click(); await settled();
+    check(topic('design').querySelector('strong') && !topic('design').querySelector('u')
+      && current!.history.redo.at(-1) === savedActions.at(-1),
+    'Undo after a checkpoint reverses only the latest action and retains its ID');
+    await controller!.flush();
+    button('redo').click(); await settled();
+    check(topic('design').querySelector('strong > u') && current!.history.undo.at(-1) === savedActions.at(-1),
+      'Redo after another checkpoint reapplies that same action');
+    report('PASS immediate Saved state, unload without a checkpoint warning, and action undo/redo across checkpoints and reopen');
+
+    await reset(); select('design');
+    click(button('bold', '.pm-topic-toolbar')); await settled();
+    const typingCheckpoint = current!.git_head;
+    const flushesBeforeTyping = flushes;
+    click(button('note', '.pm-topic-toolbar'));
+    const typingNote = $<HTMLTextAreaElement>('.pm-note textarea');
+    for (let index = 0; index < 6; index++) {
+      typingNote.value = `Draft being typed ${index + 1}`;
+      typingNote.dispatchEvent(new Event('input', { bubbles: true }));
+      await pause(600);
+      check(current!.pending && current!.git_head === typingCheckpoint && flushes === flushesBeforeTyping,
+        'Continuous note input keeps the saved action in its pending batch beyond the idle interval');
+    }
+    const typedDraft = typingNote.value;
+    await until(() => !current!.pending && current!.git_head !== typingCheckpoint,
+      'The saved action should checkpoint once note input stops');
+    check(typingNote.value === typedDraft && controller!.hasUnsavedChanges
+      && indexTree(current!).get('design')!.body === '' && operations.slice().length === 1,
+    'The idle checkpoint preserves the dirty note without saving or discarding its draft');
+    const dirtyUnload = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(dirtyUnload);
+    check(dirtyUnload.defaultPrevented, 'A dirty note still protects against leaving after the saved action checkpoints');
+    click(button('discard-note', '.pm-note'));
+    const operationsBeforeInactive = operations.length;
+    controller!.setActive(false);
+    button('bold', '.pm-topic-toolbar').click(); await pause();
+    check(operations.length === operationsBeforeInactive && indexTree(current!).get('design')!.title === '**Design 设计**',
+      'Clicks cannot enqueue changes after the map is made inactive');
+    controller!.setActive(true);
+    click(button('bold', '.pm-topic-toolbar')); await settled();
+    check(operations.length === operationsBeforeInactive + 1 && indexTree(current!).get('design')!.title === 'Design 设计',
+      'Reactivating the map restores editing');
+    report('PASS continuous typing delays idle checkpoint, stopping input preserves dirty draft and unload protection, and inactive maps reject edits');
+
     await reset();
     select('design'); select('research', { ctrlKey: true });
     click(button('bold', '.pm-topic-toolbar')); await settled();
@@ -390,6 +472,20 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     check(contextRequests[1].itemId === 'research' && contextRequests[1].revision === current!.revision,
       'The More menu uses the current selection and revision');
     report('PASS context copy through right-click and More menus, exact payload delivery, success feedback, and no map mutation');
+
+    await reset(); select('design');
+    click(button('bold', '.pm-topic-toolbar')); await settled();
+    const contextAction = current!.history.undo.at(-1);
+    const contextCheckpoint = current!.git_head;
+    const flushesBeforeContext = flushes;
+    check(current!.pending && !controller!.hasUnsavedChanges, 'Context copying can start after an action is saved but before its checkpoint');
+    openNodeMenu('design'); copyContext();
+    await until(() => clipboardWrites.length === 1, 'Copy context should flush the saved action batch and finish copying');
+    check(flushes > flushesBeforeContext && !current!.pending && current!.git_head !== contextCheckpoint
+      && contextRequests[0].revision === current!.revision && current!.history.undo.at(-1) === contextAction
+      && operations.slice().length === 1 && topic('design').querySelector('strong'),
+    'Context flush advances the checkpoint before its request while preserving the saved map and action history');
+    report('PASS context copying flushes saved pending actions before reading context');
 
     await reset(); select('design');
     let releaseSave!: () => void;
@@ -536,7 +632,12 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
     button('close-relations', '.pm-relations').click();
     select('design'); button('delete').click(); await settled();
     check($('.pm-toast > span').textContent === '“A bold label” removed.', 'Deletion toast uses visible title text');
-    report('PASS plain-text search, relation labels, and deletion messages');
+    const deletedAction = current!.history.undo.at(-1);
+    await controller!.flush();
+    click($<HTMLButtonElement>('.pm-toast > button:not(.pm-toast-close)')); await settled();
+    check(indexTree(current!).has('design') && current!.history.redo.at(-1) === deletedAction,
+      'The deletion toast Undo targets its saved action after the checkpoint advances');
+    report('PASS plain-text search, relation labels, deletion messages, and toast Undo across checkpoint');
 
     const started = performance.now(); await reset(500);
     const mountMs = Math.round(performance.now() - started);
