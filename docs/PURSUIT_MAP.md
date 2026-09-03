@@ -12,13 +12,13 @@ This starts or reuses the existing Web Studio and opens its Pursuit Map view. Us
 
 Web Studio accepts loopback hosts only, so another device cannot reach it directly. Opening the page automatically creates a signed local browser session and enables request protection without asking for a credential. Each browser session has its own active-root selection; the session is not remote-access authentication.
 
-Check the active root before editing. The map uses the current browser session's selected root. Starting the service or opening the map does not rewrite Pursuit files.
+Check the active root before editing. The map uses the current browser session's selected root. Opening the map reads that root and restores any saved editing state.
 
 ## Use A Direction In Codex App
 
 Right-click a direction or open its **More** menu and choose **Copy context**. Paste the Markdown into an ordinary Codex App task or conversation alongside the work you want done. The copied text is background from the map; it does not ask the agent to perform a task by itself.
 
-Context comes from the current canonical graph. It contains the selected direction's title and prose, its direct incoming and outgoing neighbors, those blocks' logical heading ancestors, and readable direct connections. Selection and ordering use the shared opening-context builder. It does not expand second-hop edges, resource backings, Focus, sibling nodes, or child subtrees. The text has no generated block identifiers, roles, source locations, revision, Memory-root path, or execution metadata. Copying does not edit Pursuit, create a Git commit, or record a conversation association.
+Copy context first finishes saved edits so the text includes your latest confirmed changes. Context comes from the current canonical graph. It contains the selected direction's title and prose, its direct incoming and outgoing neighbors, those blocks' logical heading ancestors, and readable direct connections. Selection and ordering use the shared opening-context builder. It does not expand second-hop edges, resource backings, Focus, sibling nodes, or child subtrees. The text has no generated block identifiers, roles, source locations, revision, Memory-root path, or execution metadata. Generating it is read-only and records no conversation association; finishing saved edits may first create their Git checkpoint.
 
 Use **Manager**, the installed `rightmemory-manager` skill in Codex App, for explicit RightMemory management or task coordination. Manager follows `maintain-rightmemory` for Memory and correction surfaces and `maintain-pursuit-map` for Pursuit, preserving their ownership and validated editing workflows. It carries out an explicit request directly, asking when the target or intended meaning cannot be resolved safely, and refreshes and verifies canonical state after requested changes.
 
@@ -57,7 +57,7 @@ Long titles wrap within their nodes. Titles support bold (`**Important**`), unde
 | Edit a note | Open its note control or press `N`. |
 | Mark current attention | Toggle its Focus marker or press `F`. |
 
-New nodes receive stable ids automatically. Renaming or moving an anchored node preserves its id. Formatting an editable plain heading assigns it a stable id in the same transaction. Physical files, heading depth, and graph syntax stay out of the normal editing controls.
+New nodes receive stable ids automatically. Renaming or moving an anchored node preserves its id. Formatting an editable plain heading assigns it a stable id as part of that action. Physical files, heading depth, and graph syntax stay out of the normal editing controls.
 
 Every selected node has a visible selection state; the active node has the nearby toolbar for whole-topic formatting, Note, Focus, and **More**. Click blank canvas space or outside the map to clear the selection and hide this toolbar; dragging blank space still pans without clearing the selection. A normal node click returns to a single selection. Formatting buttons show whether a mark wraps every selected title, none of them, or a mixture. Applying a mark to a mixed selection adds it to all selected titles while preserving partial formatting inside each title. Finish raw title editing before using formatting shortcuts: they are suppressed while the title editor is open so the browser cannot insert rich-text HTML into it.
 
@@ -71,13 +71,17 @@ Focus is an ordered attention marker. It does not grant permission to execute wo
 
 ## Saving, Conflicts, And Undo
 
-The canvas shows an edit immediately and sends confirmed changes in order. Typing a title or dragging a pointer does not create a Git commit for every intermediate step. A confirmed semantic interaction produces a validated Git change; the returned snapshot is authoritative.
+The canvas shows an edit immediately and saves confirmed changes automatically, in order. **Saving…** means a confirmed change is still being sent or saved. **Saved** means the server has durably recorded it, so a browser or Web Studio restart will not silently lose it. Unconfirmed title and Note text remains a local draft. Leaving the page warns about drafts or requests that could still be lost; saved edits alone do not keep that warning active.
 
-Every write carries the revision it was based on. If another editor, sync, or an agent changes the root, a stale operation is rejected and the current snapshot is returned. The interface reports the conflict rather than silently overwriting the newer state. Failed note and title edits remain available for review and retry in the current page. These drafts are temporary, not stored in a separate database; preserve any needed text before closing or reloading the page.
+Continuous editing forms one Git checkpoint when you pause. Typing the next title or Note counts as activity, and an internal duration limit ensures a long editing session still produces checkpoints. One batch of changes produces one commit; changes that cancel out leave no empty commit. Copy context, changing the active root, leaving the map, and normal Web Studio shutdown finish saved edits. Page hiding or closing also requests this where possible, while server-side recovery protects changes already acknowledged.
 
-Undo and redo create new commits. They never reset the shared branch or erase another writer's history. The service accepts only history associated with the current editing session and rejects operations whose expected state no longer matches. The browser's undo stack lasts for the current page and is cleared after an external revision change or conflict; Git still preserves the commits.
+Undo and redo operate on one user action at a time, even when several actions share a Git checkpoint. A formatting change across a selection is one action. Undoing a saved checkpoint's last action preserves the other actions, then records the result in a later checkpoint. Delete undo restores the complete subtree, backing files, Focus, and repaired references. Session action history survives a page reload. The service uses action identities tied to the current browser session, rather than Git commit identities, and never resets or rewrites published history.
 
-The active root must be clean and valid for a map transaction. Unrelated dirty files are not absorbed into map commits. Candidate edits run in a temporary worktree, validate against the complete Memory/Pursuit graph, and land only while the active root still matches the captured state. A rejected operation leaves active files unchanged.
+Each write carries the revision it was based on. If sync, an agent, or another writer changes the captured root, the editor reports a conflict and retains saved recovery data. It does not replay edits onto the changed root or overwrite newer state. A second browser session cannot write while another session has pending edits. Failed title and Note drafts stay available for review and retry in the current page; preserve needed draft text before closing or reloading it.
+
+After a restart, the editor restores saved actions when their base is unchanged. If the base changed, it retains the recovery record and reports the conflict instead of automatically applying those actions. Recovery records and session action history live in the root's `.runtime/pursuit-editor/` directory, outside Git; preserve this directory when resolving a reported recovery conflict. Canonical Pursuit remains Markdown and Git.
+
+The active root must be clean and valid for editing. Unrelated dirty files are not absorbed into map commits. Each checkpoint is built in a temporary Git worktree and validated against the complete Memory/Pursuit graph. Saved actions leave active files untouched until the batch is published, and publication proceeds only while the root still matches the captured base. A completed checkpoint leaves the root clean; a rejected operation leaves active files unchanged.
 
 The editor also refuses roots whose Git settings could conceal or rewrite map data: `assume-unchanged` or `skip-worktree` index flags, ignored untracked canonical files, and checkout or filter settings that would alter existing or intended file bytes. The refusal explains the condition; the editor does not change Git configuration or normalize those files automatically.
 
@@ -105,7 +109,7 @@ Start from the repository's current design document.
 
 Pan, zoom, folding, and single or multiple selection are browser-local view state. They are not stored in Markdown and do not affect retrieval.
 
-Whole-topic formatting stays in the title string, with no style fields or separate metadata. Combined marks use a fixed order: bold outside underline outside strikethrough, such as `**<u>~~Important direction~~</u>**`. One formatting action sends the selected titles through one compound rename transaction, so the group is one Undo step. It preserves body, edges, Focus, backing files, and sibling order; anchored node ids also remain unchanged. New stable ids use visible title text, and a title with no visible text is rejected. Existing unusual titles remain readable.
+Whole-topic formatting stays in the title string, with no style fields or separate metadata. Combined marks use a fixed order: bold outside underline outside strikethrough, such as `**<u>~~Important direction~~</u>**`. One formatting action sends the selected titles through one compound rename operation, so the group is one Undo step. It preserves body, edges, Focus, backing files, and sibling order; anchored node ids also remain unchanged. New stable ids use visible title text, and a title with no visible text is rejected. Existing unusual titles remain readable.
 
 Existing old field blocks remain readable as body text until the user explicitly requests cleanup. Their former `do`, `ask`, and `wait` labels do not control agent actions. Existing plain structural headings and graph-node bullets are preserved; content that cannot be safely edited through the normal map controls is surfaced as a read-only item or diagnostic. Opening the map is not a migration.
 
@@ -126,14 +130,15 @@ Both install modes include five skills: `rightmemory-auto-orchestrator`, `mainta
 | Meaning and ownership | [Pursuit rules](../rightmemory/reference/PURSUIT_RULES.md) |
 | Graph grammar and index | [graph.py](../rightmemory/graph.py), [shared schema](../rightmemory/reference/rightmemory-schema.md) |
 | Logical tree and Markdown rendering | [pursuit_tree.py](../rightmemory/pursuit_tree.py) |
-| Transactions, revisions, and history | [pursuit_store.py](../rightmemory/pursuit_store.py) |
+| Saved actions, checkpoints, revisions, and history | [pursuit_store.py](../rightmemory/pursuit_store.py) |
+| Durable recovery records and exact file storage | [pursuit_journal.py](../rightmemory/pursuit_journal.py) |
 | Existing Web service and map routes | [web/app.py](../rightmemory/web/app.py), [web/service.py](../rightmemory/web/service.py) |
 | Browser source and static build | [web/frontend](../rightmemory/web/frontend/), [web/static](../rightmemory/web/static/) |
 | Context selection and Markdown output | [opening_context.py](../rightmemory/opening_context.py) |
 | Manager in Codex App | [rightmemory-manager](../skills/rightmemory-manager/SKILL.md) |
 | Direct agent editing | [maintain-pursuit-map](../skills/maintain-pursuit-map/SKILL.md) |
 
-The internal API is `GET /api/pursuit-map`, `GET /api/pursuit-map/context?item_id=...&expected_revision=...`, `POST /api/pursuit-map/operations`, and the corresponding `/undo` and `/redo` endpoints. The context endpoint returns generated Markdown without writing state. Mutations use the current browser session, active-root selection, and CSRF protection. A revision conflict returns HTTP `409` with a fresh snapshot. These routes serve the editor; there is no public create/edit/move command family or task-execution API.
+The internal API provides `GET /api/pursuit-map`, `GET /api/pursuit-map/context?item_id=...&expected_revision=...`, and `POST /api/pursuit-map/operations`, `/undo`, `/redo`, `/flush`, and `/activity`. Each POST suffix uses the `/api/pursuit-map` prefix. Operations return the authoritative pending snapshot and ID remaps after durable recording. Snapshots expose `pending` and session `history.undo` / `history.redo`; history requests identify an action by `operation_id`. `/activity` reports ongoing editing, and `/flush` publishes a checkpoint. Copy context finishes pending edits before generating Markdown from canonical state. Mutations use the current browser session, active-root selection, and CSRF protection. A revision conflict returns HTTP `409` with a snapshot and retains saved recovery data. These routes serve the editor; there is no public create/edit/move command family or task-execution API.
 
 For frontend changes, install locked dependencies and run the focused checks from `rightmemory/web/frontend`:
 

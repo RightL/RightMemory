@@ -27,7 +27,7 @@ export function fixture(count = 22): Snapshot {
     const parentId = index % 6 === 0 ? 'directions' : items[Math.max(1, Math.floor(index / 5))].id;
     add(`generated-${index}`, `Direction ${index} 方向`, parentId);
   }
-  return { items, root_ids: ['directions'], focus_ids: ['essays'], revision: 'r0', git_head: 'c0', root_key: 'browser-fixture', valid: true, writable: true, diagnostics: [] };
+  return { items, root_ids: ['directions'], focus_ids: ['essays'], revision: 'r0', git_head: 'c0', root_key: 'browser-fixture', valid: true, writable: true, diagnostics: [], pending: false, history: { undo: [], redo: [] } };
 }
 
 export function forestFixture(count = 22): Snapshot {

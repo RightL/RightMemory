@@ -1645,13 +1645,15 @@ function attachSettingsHandlers() {
           setMessage("Save or discard unsaved Pursuit Map edits before changing the active root.");
           return;
         }
+        state.pursuitMap?.setActive(false);
+        await state.pursuitMap?.flush();
         const payload = await fetchJson("/api/active-root", {
           method: "POST",
           body: JSON.stringify({ root }),
         });
         state.csrfToken = payload.data.csrf_token || state.csrfToken;
         document.querySelector("#active-root").textContent = payload.data.active_root || "";
-        state.pursuitMap?.destroy();
+        await state.pursuitMap?.destroy();
         state.pursuitMap = null;
         setMessage(payload.message);
         await loadPanel();
