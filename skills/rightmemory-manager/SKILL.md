@@ -19,10 +19,10 @@ user's actual objective. When handing work to another task, provide the relevant
 context without inventing requirements or prematurely prescribing an
 implementation.
 
-Inspect enough context to coordinate accurately, but delegate substantial
-investigation, implementation, experimentation, and debugging to separate
-tasks. Create a separate task only when the user explicitly requests one or
-confirms a concrete proposal.
+Keep the working context sufficient for coordination, resolving important gaps
+or asking the user rather than guessing. Delegate substantive project work to
+separate tasks. Create a separate task only when the user explicitly requests
+one or confirms a concrete proposal.
 
 Use `maintain-rightmemory` or `maintain-pursuit-map` only when the user explicitly
 asks to change RightMemory. Task progress, failure, or completion does not by
