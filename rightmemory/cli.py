@@ -2317,13 +2317,18 @@ def _async_worker(memory_root, role: str) -> int:
     sync_config = load_sync_config(memory_root=memory_root)
     coordinator = GitUpdateQueueCoordinator(sync_config) if sync_config.enabled else None
 
-    def yield_to_local_or_wait(next_attempt_at: datetime | None = None) -> bool:
+    def yield_to_local_or_wait(
+        wake_counter: int,
+        next_attempt_at: datetime | None = None,
+    ) -> bool:
         sync_deadline = datetime.now(UTC) + timedelta(
             seconds=DEFAULT_SYNC_WATCH_INTERVAL_SECONDS
         )
         if next_attempt_at is not None:
             sync_deadline = min(sync_deadline, next_attempt_at)
         while True:
+            if store._read_wake_counter() != wake_counter:
+                return False
             if should_stop():
                 return True
             local_ready, local_deadline = store.local_work_schedule(
@@ -2347,6 +2352,7 @@ def _async_worker(memory_root, role: str) -> int:
         while True:
             if should_stop():
                 return True
+            wake_counter = store._read_wake_counter()
             try:
                 _recover_synchronized_update_operations(memory_root, sync_config)
                 publication = coordinator.publish_outbox(
@@ -2380,7 +2386,7 @@ def _async_worker(memory_root, role: str) -> int:
                     if should_stop():
                         return True
                     if not completed:
-                        if yield_to_local_or_wait():
+                        if yield_to_local_or_wait(wake_counter):
                             return True
                     elif store.local_work_schedule(
                         trigger_candidates=async_update_config.trigger_candidates,
@@ -2391,7 +2397,7 @@ def _async_worker(memory_root, role: str) -> int:
                     continue
             except (UpdateQueueLeaseLost, UpdateQueueUnavailable):
                 # Published work stays online-only; retain the leader and retry.
-                if yield_to_local_or_wait():
+                if yield_to_local_or_wait(wake_counter):
                     return True
                 continue
             attempted_unresolved = any(
@@ -2401,12 +2407,12 @@ def _async_worker(memory_root, role: str) -> int:
             if not claim_result.online:
                 if not attempted_unresolved and not _synchronized_update_work_remains(memory_root):
                     return True
-                if yield_to_local_or_wait():
+                if yield_to_local_or_wait(wake_counter):
                     return True
                 continue
             if not attempted_unresolved and claim_result.next_attempt_at is None:
                 return True
-            if yield_to_local_or_wait(claim_result.next_attempt_at):
+            if yield_to_local_or_wait(wake_counter, claim_result.next_attempt_at):
                 return True
 
     def run_batch(batch_session_id: str, message: str) -> str:

@@ -272,6 +272,61 @@ class CliEntrypointTests(unittest.TestCase):
         self.assertLessEqual(sleep_calls[0], WORKER_IDLE_POLL_SECONDS)
         run_batch.assert_called_once()
 
+    def test_remote_wait_rechecks_queue_when_worker_is_woken(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory_root = Path(tempdir)
+            store = AsyncUpdateStore(memory_root, "update")
+            coordinator = Mock()
+            coordinator.store = UpdateQueueStore(memory_root)
+            coordinator.publish_outbox.return_value = SimpleNamespace(
+                settled_uids=(),
+                unresolved_uids=(),
+                online=True,
+            )
+            coordinator.claim_next.side_effect = (
+                SimpleNamespace(
+                    claim=None,
+                    next_attempt_at=datetime.now(UTC) + timedelta(hours=6),
+                    online=True,
+                ),
+                SimpleNamespace(claim=None, next_attempt_at=None, online=True),
+            )
+            sleep_calls = []
+
+            def wake_during_sleep(seconds):
+                sleep_calls.append(seconds)
+                if len(sleep_calls) > 1:
+                    raise AssertionError("worker wake must interrupt the remote wait")
+                store.wake_worker()
+
+            with (
+                patch(
+                    "rightmemory.cli.load_async_update_config",
+                    return_value=SimpleNamespace(
+                        trigger_candidates=1,
+                        target_batch_candidates=1,
+                        max_wait_seconds=0,
+                    ),
+                ),
+                patch(
+                    "rightmemory.cli.load_sync_config",
+                    return_value=SyncConfig(memory_root=memory_root, enabled=True),
+                ),
+                patch(
+                    "rightmemory.cli.GitUpdateQueueCoordinator",
+                    return_value=coordinator,
+                ),
+                patch("rightmemory.cli._recover_synchronized_update_operations"),
+                patch("rightmemory.cli.time.sleep", side_effect=wake_during_sleep),
+                patch("rightmemory.async_update._is_async_worker_process", return_value=True),
+            ):
+                result = _async_worker(memory_root, "update")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(sleep_calls), 1)
+        self.assertLessEqual(sleep_calls[0], WORKER_IDLE_POLL_SECONDS)
+        self.assertEqual(coordinator.claim_next.call_count, 2)
+
     def test_synchronized_batch_releases_lease_when_local_runtime_cannot_load(self):
         coordinator = Mock()
         claim = SimpleNamespace(lease=SimpleNamespace(token="a" * 32))
