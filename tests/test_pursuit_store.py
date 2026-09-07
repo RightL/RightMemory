@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.graph import build_graph_manifest
-from rightmemory.pursuit_store import PursuitStore, PursuitStoreError, _PursuitSupervisor
+from rightmemory.pursuit_store import PursuitStore, PursuitStoreError, _PursuitSupervisor, _validation_errors
 from rightmemory.pursuit_tree import PursuitEdit, apply_operation
 from tests.isolated_write_test_base import IsolatedWriteTestBase
 
@@ -431,10 +431,11 @@ class PursuitStoreTests(IsolatedWriteTestBase):
             "Beta",
         )
 
-    def test_external_base_change_preserves_recovery_without_replay(self):
+    def test_overlapping_external_change_preserves_recovery_without_replay(self):
         self._pending({"type": "rename", "id": "alpha", "title": "Pending title"})
-        self._append_memory(self.root, "\nExternal committed content.\n")
-        self._git("add", "MEMORY.md")
+        path = self.root / "PURSUITS.md"
+        path.write_bytes(path.read_bytes().replace(b"Alpha body.", b"External body."))
+        self._git("add", "PURSUITS.md")
         self._git("commit", "-m", "external change while editor has pending work")
         before, head = self._bytes(), self._git("rev-parse", "HEAD")
         for store in (self.store, PursuitStore(self.root)):
@@ -456,6 +457,135 @@ class PursuitStoreTests(IsolatedWriteTestBase):
             self.assertTrue(other_session["recovery"])
             self._assert_unchanged(before, head)
         self.assertNotIn(b"Pending title", before["PURSUITS.md"])
+
+    def test_operational_commit_does_not_interrupt_pending_actions_or_history(self):
+        renamed = self._pending({"type": "rename", "id": "alpha", "title": "Saved title"})
+        created = self._pending({"type": "create", "parent_id": "beta", "title": "Saved child"})
+        self._pending_history("undo", created)
+        pending = self.store.snapshot(self.session_id)
+        queue = self.root / "update_queue" / "candidates" / "external.json"
+        queue.parent.mkdir(parents=True, exist_ok=True)
+        queue.write_bytes(b"{}\n")
+        self._git("add", "update_queue")
+        self._git("commit", "-m", "background queue record")
+        external_head = self._git("rev-parse", "HEAD")
+        self.store = PursuitStore(self.root)
+        recovered = self.store.snapshot(self.session_id)
+        for field in ("items", "revision", "history", "pending"):
+            self.assertEqual(recovered[field], pending[field], field)
+        self.assertTrue(recovered["writable"])
+        flushed = self.store.flush(self.session_id, pending["revision"])
+        self.assertFalse(flushed["snapshot"]["pending"])
+        self.assertEqual(self._git("rev-parse", "HEAD^"), external_head)
+        self.assertEqual(self._git("diff", "--name-only", "HEAD^", "HEAD"), "PURSUITS.md")
+        self._redo(created)
+        self._undo(created)
+        self._undo(renamed)
+        self.assertEqual(queue.read_bytes(), b"{}\n")
+        self.assertEqual(build_graph_manifest(self.root).items["alpha"].title, "Alpha")
+        self.assertEqual(self._git("status", "--porcelain"), "")
+
+    def test_unrelated_memory_commit_is_preserved_through_checkpoint_and_undo(self):
+        renamed = self._pending({"type": "rename", "id": "alpha", "title": "Saved title"})
+        self._append_memory(self.root, "\nExternal committed context.\n")
+        self._git("add", "MEMORY.md")
+        self._git("commit", "-m", "external Memory update")
+        external_head = self._git("rev-parse", "HEAD")
+        memory = (self.root / "MEMORY.md").read_bytes()
+        recovered = PursuitStore(self.root).snapshot(self.session_id)
+        self.assertTrue(recovered["writable"])
+        self.assertNotEqual(recovered["revision"], renamed["snapshot"]["revision"])
+        with self.assertRaises(PursuitStoreError):
+            self.store.apply({"type": "rename", "id": "beta", "title": "Stale"},
+                             renamed["snapshot"]["revision"], self.session_id)
+        self.store.flush(self.session_id, recovered["revision"])
+        self.assertEqual(self._git("rev-parse", "HEAD^"), external_head)
+        self.assertEqual(self._git("diff", "--name-only", "HEAD^", "HEAD"), "PURSUITS.md")
+        self._undo(renamed)
+        self._redo(renamed)
+        self.assertEqual((self.root / "MEMORY.md").read_bytes(), memory)
+        self.assertEqual(build_graph_manifest(self.root).errors, [])
+
+    def test_disjoint_files_with_new_reference_to_pending_deletion_still_conflict(self):
+        self._pending({"type": "delete", "id": "beta"})
+        self._append_memory(self.root, "\n- `new-reference` Keep Beta. → [dep:beta]\n")
+        self._git("add", "MEMORY.md")
+        self._git("commit", "-m", "new reference to deleted Pursuit")
+        before, head = self._bytes(), self._git("rev-parse", "HEAD")
+        self.assertEqual(build_graph_manifest(self.root).errors, [])
+        journal = self.store._journal.path.read_bytes()
+        with self.assertRaises(PursuitStoreError) as caught:
+            self.store.flush_pending()
+        self.assertEqual(caught.exception.code, "conflict")
+        self.assertEqual(self.store._journal.path.read_bytes(), journal)
+        self._assert_unchanged(before, head)
+
+    def test_external_change_to_redo_file_preserves_exact_history(self):
+        self._pending({"type": "rename", "id": "beta", "title": "Pending Beta"})
+        deleted = self._pending({"type": "delete", "id": "alpha"})
+        self._pending_history("undo", deleted)
+        self._append_memory(self.root, "\nExternal context after undo.\n")
+        self._git("add", "MEMORY.md")
+        self._git("commit", "-m", "external update to file needed by redo")
+        before, head = self._bytes(), self._git("rev-parse", "HEAD")
+        journal = self.store._journal.path.read_bytes()
+        with self.assertRaises(PursuitStoreError):
+            self.store.flush_pending()
+        self.assertEqual(self.store._journal.path.read_bytes(), journal)
+        self._assert_unchanged(before, head)
+
+    def test_external_commit_with_dirty_files_does_not_refresh_pending_base(self):
+        self._pending({"type": "rename", "id": "alpha", "title": "Pending"})
+        self._git("commit", "--allow-empty", "-m", "external checkpoint")
+        self._append_memory(self.root, "\nUncommitted user content.\n")
+        before, head = self._bytes(), self._git("rev-parse", "HEAD")
+        journal = self.store._journal.path.read_bytes()
+        with self.assertRaises(PursuitStoreError) as caught:
+            self.store.flush_pending()
+        self.assertEqual(caught.exception.code, "dirty_root")
+        self.assertEqual(self._bytes(), before)
+        self.assertEqual(self._git("rev-parse", "HEAD"), head)
+        self.assertEqual(self.store._journal.path.read_bytes(), journal)
+
+    def test_failed_base_refresh_save_can_recover_without_losing_actions(self):
+        pending = self._pending({"type": "rename", "id": "alpha", "title": "Pending"})
+        self._git("commit", "--allow-empty", "-m", "external checkpoint")
+        before, head = self._bytes(), self._git("rev-parse", "HEAD")
+        journal = self.store._journal.path.read_bytes()
+        with patch.object(self.store._journal, "save", side_effect=OSError("disk failure")):
+            with self.assertRaises(PursuitStoreError):
+                self.store.flush_pending()
+        self.assertEqual(self.store._journal.path.read_bytes(), journal)
+        self._assert_unchanged(before, head)
+        self.store = PursuitStore(self.root)
+        self.store.flush(self.session_id, pending["snapshot"]["revision"])
+        self.assertEqual(self._git("rev-parse", "HEAD^"), head)
+        self.assertEqual(self.store.snapshot(self.session_id)["history"], pending["snapshot"]["history"])
+
+    def test_external_writer_during_base_refresh_is_fenced_before_journal_save(self):
+        pending = self._pending({"type": "rename", "id": "alpha", "title": "Pending"})
+        self._git("commit", "--allow-empty", "-m", "external checkpoint")
+        journal = self.store._journal.path.read_bytes()
+        before = self._bytes()
+        raced = False
+
+        def validate(root):
+            nonlocal raced
+            if root != self.root and not raced:
+                raced = True
+                self._git("commit", "--allow-empty", "-m", "writer during base refresh")
+            return _validation_errors(root)
+
+        with patch("rightmemory.pursuit_store._validation_errors", side_effect=validate):
+            with self.assertRaises(PursuitStoreError) as caught:
+                self.store.flush_pending()
+        self.assertTrue(raced)
+        self.assertEqual(caught.exception.code, "conflict")
+        self.assertEqual(self.store._journal.path.read_bytes(), journal)
+        head = self._git("rev-parse", "HEAD")
+        self._assert_unchanged(before, head)
+        self.store.flush(self.session_id, pending["snapshot"]["revision"])
+        self.assertEqual(self._git("rev-parse", "HEAD^"), head)
 
     def test_flush_requires_current_pending_revision(self):
         first = self._pending({"type": "rename", "id": "alpha", "title": "First title"})

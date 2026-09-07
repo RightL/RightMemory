@@ -452,12 +452,29 @@ class PursuitWebTests(unittest.TestCase):
         self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), initial["git_head"])
         self.assertIn("Before switch", (self.root / "PURSUITS.md").read_text(encoding="utf-8"))
 
+    def test_autosave_recovers_pending_edits_after_background_commit(self):
+        accepted = self._operation({"type": "rename", "id": "alpha", "title": "Saved"})
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        pending = self._snapshot()
+        self._git(self.root, "commit", "--allow-empty", "-qm", "background checkpoint")
+        external = self._git(self.root, "rev-parse", "HEAD")
+        lifecycle = self.app.state.pursuit_batches
+        lifecycle.flush_due(force=True)
+        saved = self._snapshot()
+        self.assertTrue(saved["writable"])
+        self.assertFalse(saved["pending"])
+        self.assertEqual(saved["history"], pending["history"])
+        self.assertIsNone(lifecycle.failure(self.root))
+        self.assertEqual(self._git(self.root, "rev-parse", "HEAD^"), external)
+        self.assertIn("Saved", (self.root / "PURSUITS.md").read_text(encoding="utf-8"))
+
     def test_root_switch_conflict_preserves_selection_and_saved_recovery(self):
         other_root = self.root / "other"
         self._seed_root(other_root)
         self._operation({"type": "rename", "id": "alpha", "title": "Pending"})
-        (self.root / "MEMORY.md").write_text("# Memory\n\nExternal change.\n", encoding="utf-8")
-        self._git(self.root, "add", "MEMORY.md")
+        path = self.root / "PURSUITS.md"
+        path.write_bytes(path.read_bytes().replace(b"Alpha", b"External Alpha"))
+        self._git(self.root, "add", "PURSUITS.md")
         self._git(self.root, "commit", "-qm", "external")
         external = self._git(self.root, "rev-parse", "HEAD")
         switched = self.client.post(

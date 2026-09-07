@@ -335,9 +335,79 @@ class PursuitStore:
                             return record
                         self._finish_checkpoint(record, commit, revision)
                         self._journal.save(record)
+            if record and _record_pending(record) and not record.get("publishing"):
+                self._refresh_pending_base(record)
             return record
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise PursuitStoreError("recovery_failed", "Saved Pursuit edits need recovery. Preserve .runtime/pursuit-editor and review the reported problem.", 409, (str(exc),)) from exc
+
+    def _refresh_pending_base(self, record: dict[str, Any]) -> None:
+        """Carry unrelated committed changes into a pending batch, preserving history.
+
+        History stores exact file inverses. An outside change to any file in that
+        history therefore remains a conflict, even if the current batch no longer
+        changes it. Publication still uses the existing exact candidate fence.
+        """
+        if self._head_or_empty() == record["base_head"]:
+            return
+        with MemoryWriteLock(self.root):
+            canonical = self._canonical_snapshot()
+            if not canonical["writable"] or canonical["git_head"] == record["base_head"]:
+                return
+            if self._reader._run_git(
+                self.root, "merge-base", "--is-ancestor", record["base_head"],
+                canonical["git_head"], check=False,
+            ).returncode:
+                return
+            current = self._read_files()
+            immutable = self._reader._commit_graph_snapshot(self.root, canonical["git_head"])
+            if any(not _same_git_bytes(content, immutable.files.get(name))
+                   for name, content in current.items() if name != CORRECTIONS_PATH):
+                return
+            current_refs = {name: hashlib.sha256(content).hexdigest() for name, content in current.items()}
+            current_modes = {name: immutable.modes[name] for name in current if name in immutable.modes}
+            if CORRECTIONS_PATH in current:
+                current_modes[CORRECTIONS_PATH] = "100644"
+            outside = {
+                name for name in record["base_files"].keys() | current_refs.keys()
+                if record["base_files"].get(name) != current_refs.get(name)
+                or record["base_modes"].get(name) != current_modes.get(name)
+            }
+            history_paths = {name for entry in record["actions"] for name in entry["before"]}
+            pending_paths = {
+                name for name in record["base_files"].keys() | record["files"].keys()
+                if record["base_files"].get(name) != record["files"].get(name)
+                or record["base_modes"].get(name) != record["modes"].get(name)
+            }
+            if outside & (history_paths | pending_paths):
+                return
+            files = self._journal.read_files(record["files"])
+            modes = dict(record["modes"])
+            for name in outside:
+                if name in current:
+                    files[name] = current[name]
+                    modes[name] = current_modes[name]
+                else:
+                    files.pop(name, None)
+                    modes.pop(name, None)
+            with self._candidate(files) as candidate:
+                if _validation_errors(candidate):
+                    return
+            # Also detect writers that do not participate in MemoryWriteLock.
+            state = self._repository_state()
+            if (state.dirty_paths or state.diagnostics
+                    or self._revision(state.head, state.branch) != canonical["revision"]):
+                return
+            record.update(
+                base_head=canonical["git_head"], base_revision=canonical["revision"],
+                base_files=self._journal.store_files(current), base_modes=current_modes,
+                files=self._journal.store_files(files), modes=modes,
+            )
+            # Operational-only commits do not change the displayed graph. Semantic
+            # changes require stale clients to refresh before their next action.
+            if outside:
+                record["revision"] = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+            self._journal.save(record)
 
     def _editable_record(self, expected_revision: str, session_id: str, *, history: bool = False) -> dict[str, Any]:
         record = self._load_record()
