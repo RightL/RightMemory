@@ -213,6 +213,9 @@ export class MapRenderer {
       this.renderDeferred = true;
       return;
     }
+    // Refresh replaces topics and reattaches root maps. Keep their keyboard
+    // focus on the stable canvas before those focused elements are detached.
+    if (this.host.contains(document.activeElement)) this.focus();
     if (!preserveDrag) this.cancelGesture();
     this.view = { ...view, collapsed: [...view.collapsed], selectedIds: [...view.selectedIds] };
     const anchor = this.topic(view.selected)?.getBoundingClientRect();
