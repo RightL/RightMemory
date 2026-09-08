@@ -164,6 +164,29 @@ export async function runBrowserChecks(host: HTMLElement, report: (line: string)
   };
   try {
     await reset();
+    for (const shortcut of ['Enter', 'Tab']) {
+      select('design');
+      // Native mouse defaults can focus the topic after our pointerdown handler.
+      topic('design').focus();
+      await controller!.refresh();
+      check($('.pm-canvas').contains(document.activeElement), 'Refreshing a focused topic must retain canvas keyboard focus');
+      key(shortcut, {}, document.activeElement as HTMLElement);
+      await until(() => host.querySelector('#input-box'), `${shortcut} must create a node after refresh`);
+      const editor = $('#input-box');
+      editor.textContent = `Created with ${shortcut}`;
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      editor.blur();
+      await settled();
+      const created = operations.at(-1);
+      check(created?.type === 'create' && created.parent_id === (shortcut === 'Tab' ? 'design' : 'directions'), `${shortcut} creates under the correct parent`);
+    }
+    button('search').click();
+    const searchInput = $('.pm-search input');
+    await controller!.refresh();
+    check(document.activeElement === searchInput, 'Refreshing must not steal focus from search');
+    report('PASS: canvas focus survives topic replacement; Enter/Tab create nodes; search retains focus');
+
+    await reset();
     select('design');
     const selections: Array<string | null> = [];
     const unsubscribeSelection = controller!.subscribeSelection((id) => selections.push(id));
