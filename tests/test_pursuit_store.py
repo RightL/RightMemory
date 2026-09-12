@@ -153,12 +153,13 @@ class PursuitStoreTests(IsolatedWriteTestBase):
                 ],
             }
         )
+        current = {item["title"]: item["id"] for item in renamed["snapshot"]["items"]}
         forward = [
-            {"from": plain["Second plain"], "to": "second-renamed"},
-            {"from": plain["First plain"], "to": "first-renamed"},
+            {"from": plain["Second plain"], "to": current["Second renamed"]},
+            {"from": plain["First plain"], "to": current["First renamed"]},
         ]
         self.assertEqual(renamed["id_remaps"], forward)
-        self.assertEqual(renamed["selected_id"], "second-renamed")
+        self.assertEqual(renamed["selected_id"], current["Second renamed"])
         renamed_bytes = self._bytes()
 
         undone = self._undo(renamed)

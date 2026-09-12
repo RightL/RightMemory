@@ -10,7 +10,7 @@ The human editor and explicitly requested `maintain-pursuit-map` workflow own se
 
 ### The tree carries meaning without task fields
 
-A title, ancestry, and optional Markdown note are enough to describe a direction. A shared ancestor can establish a project's starting document or repository without adding fixed project, person, or file fields. Existing graph edges represent real relationships when tree placement is insufficient. Reusable context remains ordinary Memory, and execution detail remains in project artifacts.
+Ancestry and optional title and Markdown body are enough to describe a direction. A shared ancestor can establish a project's starting document or repository without adding fixed project, person, or file fields. Existing graph edges represent real relationships when tree placement is insufficient. Reusable context remains ordinary Memory, and execution detail remains in project artifacts.
 
 Completion is a user decision to remove a direction after considering any independently durable consequence. Git supplies the earlier state. A completed-status collection would turn the map into a work log, while a natural branch such as “Later” already expresses a direction the user wants to retain.
 
@@ -46,8 +46,12 @@ Manager keeps the broader picture, synthesizes outcomes, helps decide what happe
 
 Codex App owns conversations, tasks, and pinning. RightMemory stores no Manager conversation association or task status. Worker task progress, failure, or completion does not automatically change Pursuit or Memory. The Manager conversation invokes `maintain-rightmemory` or `maintain-pursuit-map` only when the user explicitly asks to change RightMemory.
 
-### Existing data remains readable
+### Markdown ownership and durable addresses
 
-Old Pursuit field blocks are retained as body text so existing roots can open before a separate, explicitly approved cleanup. Their old action labels have no current control semantics. This is a narrow reading accommodation, not a second schema or an automatic migration. Installing or opening the editor does not rewrite a user's root.
+Headings organize the tree; complete Markdown list items are leaves. Following CommonMark container boundaries lets a leaf contain rich examples without turning their nested bullets or headings into graph nodes. One optional body fence resolves the remaining ambiguity when a heading's own body needs headings or lists. Source order records ownership, so splitting behind F# moves the suffix beginning at the first child instead of collecting parent prose ahead of the children.
+
+Titles and body previews are display text. Durable addresses come from explicit ids; anonymous editing handles bind to the complete document snapshot and become invalid when it changes. Retrieval keeps its existing id-based selection contract. A selected heading covers anonymous descendants, while a selected leaf includes its entire Markdown container and ancestor-owned context.
+
+Adopting this grammar requires explicit review of existing outer lists and nested ID-looking declarations. Old field names do not override Markdown ownership. Installing or opening the editor does not convert or rewrite a user's root.
 
 The [Pursuit rules](rightmemory/reference/PURSUIT_RULES.md) own semantic meaning; the [schema](rightmemory/reference/rightmemory-schema.md) owns representation; the [Pursuit Map guide](docs/PURSUIT_MAP.md) covers use and implementation entry points.
