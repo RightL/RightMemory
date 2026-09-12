@@ -55,8 +55,6 @@ Standalone mode supplies this object as the terminal output type. CLI-agent mode
 ## Local Graph Selection
 
 - Top-level `ids` contains globally unique ids from the local Memory and Pursuit graph, including graph items reached through `F#` details.
-- Selecting a heading includes its subtree, including anonymous descendants. Selecting a leaf returns its complete Markdown block, not children. Both include ancestor headings and their own bodies, not unrelated sibling items.
-- Anonymous content is returned through an addressed ancestor; independent id selection requires assigning an id. Snapshot-local editing handles are not retrieval ids.
 - Selecting a graph heading does not automatically select its linked `M#`, `S#`, `MF#`, or `MQ#` content.
 
 ## Linked Sources
@@ -91,10 +89,5 @@ Candidates are unsettled evidence, not stored RightMemory state. Select one only
 ## Delivery Behavior
 
 The runtime owns hierarchy expansion, Focus rendering, source ordering, overlap removal, delivery hashes, unchanged-result suppression, `--include-returned`, and final source formatting.
-
-Rendered content omits body-fence delimiters while preserving their payload.
-Delivery coverage accounts for complete leaf content and anonymous content.
-Preserve Markdown containers, required link definitions, and resource bases;
-source views and edits retain the structural delimiters.
 
 The Retrieve role must not compensate for those behaviors with model-authored prose.

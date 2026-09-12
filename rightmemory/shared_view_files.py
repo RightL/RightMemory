@@ -11,8 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory, mkdtemp
 
-from .graph import (BlockKey, DocumentBlock, GraphManifest, build_graph_manifest, validate_item_id,
-                    rendered_block_parts, resolve_markdown_references)
+from .graph import BlockKey, DocumentBlock, GraphManifest, build_graph_manifest, validate_item_id
 from .hub.client import HubClient, HubClientError
 from .shared_view_models import (
     PROVIDER_VIEWS_DIR,
@@ -878,7 +877,7 @@ class _FileViewProjection:
             while current is not None:
                 block = self.manifest.blocks[current]
                 # MF prose must remain attached to an addressable heading.
-                if block.kind == "heading":
+                if block.kind == "heading" and block.item_id is not None:
                     self.exact_node_ancestors.add(current)
                 current = block.logical_parent
 
@@ -897,13 +896,12 @@ class _FileViewProjection:
         if not include:
             return ""
         if block.kind == "node":
-            return resolve_markdown_references("\n".join([block.line, *block.physical_parts]),
-                                               self.manifest.documents[block.source_path]) if full or key in self.exact_nodes else ""
+            return block.line if full or key in self.exact_nodes else ""
 
         pieces: list[str] = []
         if block.kind != "root":
-            pieces.append(resolve_markdown_references(block.line, self.manifest.documents[block.source_path]))
-        for part in rendered_block_parts(self.manifest, block, physical=True, retain_fences=True):
+            pieces.append(block.line)
+        for part in block.physical_parts:
             if isinstance(part, tuple):
                 rendered = self._render_block(part, inherited_full=full)
                 if rendered:

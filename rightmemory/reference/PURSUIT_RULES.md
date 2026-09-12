@@ -11,14 +11,14 @@ Pursuit is not a backlog, work log, task execution store, or record of completed
 ## Structure
 
 ```md
-## <Optional title>
+## <Title> {#<stable-id>} → [<optional typed edges>]
 
 <Optional Markdown explaining meaning, scope, or stable entry context.>
 
 ### <Child direction> {#<stable-id>}
 ```
 
-Every map item is a heading with a tree position, optional title and id, and its own optional Markdown body. Add an id when graph relationships, Focus, or a typed backing need a durable address, and preserve existing ids across edits. Use the schema's body fence for headings or lists that belong to the heading's own body. Meaning comes from the title, ancestry, body, and useful graph relationships; there are no required progress, next-action, completion, or status fields.
+Every new map item is an addressable heading with a title, stable id, and tree position. The body is optional free-form Markdown. Meaning comes from the title, ancestry, body, and useful graph relationships; there are no node types or required progress, next-action, completion, or status fields.
 
 Tree nesting expresses decomposition and supplies reading context. Add an edge for a useful relationship that containment does not already express. Short project, file, or person context may appear naturally in the nearest relevant ancestor body. Independently reusable context belongs in Memory when it passes Memory admission. This does not introduce fixed context fields or another registry.
 

@@ -76,19 +76,17 @@ class PursuitTreeTests(unittest.TestCase):
             ],
         )
 
-        renamed = load_pursuit_tree(self.root)
-        new_first, _, new_second = renamed.root_ids
-        self.assertEqual(edit.selected_id, new_first)
+        self.assertEqual(edit.selected_id, "named-first")
         self.assertEqual(
             edit.id_remaps,
             (
-                {"from": first_plain, "to": new_first},
-                {"from": second_plain, "to": new_second},
+                {"from": first_plain, "to": "named-first"},
+                {"from": second_plain, "to": "named-second"},
             ),
         )
         renamed = load_pursuit_tree(self.root)
-        self.assertEqual(renamed.root_ids, (new_first, "existing", new_second))
-        self.assertEqual(renamed.items[new_first].child_ids, ("child",))
+        self.assertEqual(renamed.root_ids, ("named-first", "existing", "named-second"))
+        self.assertEqual(renamed.items["named-first"].child_ids, ("child",))
         self.assertEqual(renamed.items["existing"].title, "Existing renamed")
 
     def test_rename_many_validates_every_entry_before_mutating(self):
@@ -120,7 +118,7 @@ class PursuitTreeTests(unittest.TestCase):
     def test_body_edit_keeps_other_sections_and_newline_style(self):
         source = "# Pursuits\r\n\r\n## Parent {#parent}\r\n\r\nOld note.\r\n\r\n### Child {#child}\r\n\r\n  Child body.  \r\n\r\n## Other {#other}\r\n"
         self.write("PURSUITS.md", source)
-        self.apply(type="edit_body", id="parent", body="A **free** note.\n\n:::body\n- A list item\n:::\n\n```md\n## Example\n```")
+        self.apply(type="edit_body", id="parent", body="A **free** note.\n\n- A list item\n\n```md\n## Example\n```")
         after = (self.root / "PURSUITS.md").read_bytes().decode()
         self.assertEqual(after[after.index("### Child"):], source[source.index("### Child"):])
         self.assertNotIn("\n", after.replace("\r\n", ""))
@@ -339,25 +337,22 @@ class PursuitTreeTests(unittest.TestCase):
                     source.replace("## A {#a}", "- `a`\n\n## A {#a}").encode("utf-8"),
                 )
 
-    def test_plain_group_remains_anonymous_and_receives_a_fresh_handle_when_edited(self):
+    def test_plain_group_is_visible_and_receives_id_when_edited(self):
         self.write("PURSUITS.md", "# Pursuits\n\n## Plain Group\n\nPlain body.\n\n### Child {#child}\n")
         tree = load_pursuit_tree(self.root)
         plain = tree.root_ids[0]
         self.assertTrue(tree.items[plain].editable)
         self.assertEqual(tree.items[plain].anchor_kind, "plain")
         edit = self.apply(type="rename", id=plain, title="Named group")
-        self.assertNotEqual(edit.selected_id, plain)
-        self.assertEqual(load_pursuit_tree(self.root).items["child"].parent_id, edit.selected_id)
-        self.assertEqual(load_pursuit_tree(self.root).items[edit.selected_id].anchor_kind, "plain")
-        with self.assertRaises(PursuitOperationError):
-            apply_operation(self.root, {"type": "rename", "id": plain, "title": "Stale"})
+        self.assertEqual(edit.selected_id, "named-group")
+        self.assertEqual(load_pursuit_tree(self.root).items["child"].parent_id, "named-group")
 
     def test_legacy_bullet_is_read_only_preserved_on_move_and_removed_with_subtree(self):
         self.write("PURSUITS.md", "# Pursuits\n\n## A {#a}\n\nA body.\n\n- `legacy` Keep this leaf. → [doc:entry]\n\n## B {#b}\n")
         tree = load_pursuit_tree(self.root)
         self.assertEqual(tree.items["a"].child_ids, ("legacy",))
         self.assertFalse(tree.items["legacy"].editable)
-        self.assertEqual(tree.diagnostics, ())
+        self.assertTrue(any("legacy" in diagnostic for diagnostic in tree.diagnostics))
         for kind in ("rename", "delete", "move", "set_focus"):
             with self.subTest(kind=kind), self.assertRaises(PursuitOperationError):
                 apply_operation(self.root, {"type": kind, "id": "legacy", "title": "No", "focused": True})
@@ -369,15 +364,15 @@ class PursuitTreeTests(unittest.TestCase):
     def test_body_edit_cannot_silently_delete_or_change_legacy_graph_leaves(self):
         self.write("PURSUITS.md", "# Pursuits\n\n## A {#a}\n\nA note.\n\n- `legacy` Keep. → []\n")
         before = self.files()
-        for body in ("A note.\n\n- `legacy` Changed. → []", "## Another heading"):
+        for body in ("Replacement note.", "A note.\n\n- `legacy` Changed. → []", "## Another heading"):
             with self.subTest(body=body), self.assertRaises(PursuitOperationError):
                 apply_operation(self.root, {"type": "edit_body", "id": "a", "body": body})
             self.assertEqual(self.files(), before)
-        self.apply(type="edit_body", id="a", body="Replacement note.")
+        self.apply(type="edit_body", id="a", body="Replacement note.\n\n- `legacy` Keep. → []")
         self.assertIn("legacy", load_pursuit_tree(self.root).items)
 
-    def test_body_fenced_field_lists_remain_raw_note_text(self):
-        body = ":::body\n**State:** Old state.\n\n**Next:**\n- `research` Anything.\n- `do` Another.\n\n**Done when:** Old outcome.\n:::"
+    def test_legacy_next_bullets_are_raw_note_text_not_legacy_leaves(self):
+        body = "**State:** Old state.\n\n**Next:**\n- `research` Anything.\n- `do` Another.\n\n**Done when:** Old outcome."
         self.write("PURSUITS.md", "# Pursuits\n\n## A {#a}\n\n" + body + "\n")
         tree = load_pursuit_tree(self.root)
         self.assertEqual(tree.items["a"].body, body)
@@ -431,63 +426,20 @@ class PursuitTreeTests(unittest.TestCase):
         source = (self.root / "PURSUITS.md").read_bytes()
         backing = (self.root / "PURSUIT_child.md").read_bytes()
         self.assertIn(b"Before leaf.  \r\n", source)
-        self.assertIn(b"After leaf.  \r\n", backing)
+        self.assertIn(b"After leaf.  \r\n", source)
         self.assertIn("- `legacy` Leaf. → []\r\n".encode(), backing)
         self.assertNotIn(b"\n", backing.replace(b"\r\n", b""))
 
     def test_insert_after_legacy_leaf_preserves_body_and_rejects_reparenting(self):
         self.write("PURSUITS.md", "# Pursuits\n\n## Parent {#parent}\n\n- `legacy` Leaf. → []\n\nOwner text after leaf.\n")
         before = self.files()
-        with self.assertRaisesRegex(PursuitOperationError, "leaf items must remain before heading children"):
+        with self.assertRaisesRegex(PursuitOperationError, "legacy graph leaves"):
             apply_operation(self.root, {"type": "create", "parent_id": "parent", "after_id": None, "title": "First"})
         self.assertEqual(self.files(), before)
         self.apply(type="create", parent_id="parent", after_id="legacy", title="Child")
         tree = load_pursuit_tree(self.root)
         self.assertEqual(tree.items["parent"].child_ids, ("legacy", "child"))
         self.assertIn("Owner text after leaf.", tree.items["parent"].body)
-
-    def test_own_body_edit_preserves_leaf_spans_and_interleaved_body_positions(self):
-        leaf = "- `leaf` First. → []\n\n  ### Internal heading\n\n  - Nested content.\n\n"
-        self.write("PURSUITS.md", "# Pursuits\n\n## A {#a}\n\nBefore.\n\n" + leaf + "Between.\n\n- Anonymous.\n\nAfter.\n")
-        body = load_pursuit_tree(self.root).items["a"].body
-        self.apply(type="edit_body", id="a", body=body.replace("Between.", "Revised between."))
-        result = (self.root / "PURSUITS.md").read_text(encoding="utf-8")
-        self.assertIn(leaf + "Revised between.\n\n- Anonymous.\n\nAfter.\n", result)
-        self.assertEqual(len(load_pursuit_tree(self.root).items["a"].child_ids), 2)
-
-    def test_detail_own_body_edit_keeps_prose_after_a_leaf_in_the_detail_file(self):
-        self.write("PURSUITS.md", "# Pursuits\n\n## A {F#a}\n\nLeading.\n")
-        self.write("PURSUIT_a.md", "- Anonymous.\n\nTrailing.\n")
-        body = load_pursuit_tree(self.root).items["a"].body
-        self.apply(type="edit_body", id="a", body=body.replace("Trailing.", "Changed trailing."))
-        self.assertEqual((self.root / "PURSUIT_a.md").read_text(encoding="utf-8"), "- Anonymous.\n\nChanged trailing.\n")
-        self.assertNotIn("Changed trailing.", (self.root / "PURSUITS.md").read_text(encoding="utf-8"))
-
-    def test_empty_title_and_stale_anonymous_handle_at_same_line(self):
-        self.write("PURSUITS.md", "# Pursuits\n\n##\n\nOriginal body.\n")
-        old = load_pursuit_tree(self.root).root_ids[0]
-        edit = self.apply(type="edit_body", id=old, body="Revised body.")
-        current = load_pursuit_tree(self.root)
-        self.assertEqual(current.items[edit.selected_id].title, "")
-        self.assertEqual(current.items[edit.selected_id].anchor_kind, "plain")
-        before = self.files()
-        with self.assertRaises(PursuitOperationError):
-            apply_operation(self.root, {"type": "rename", "id": old, "title": "Wrong snapshot"})
-        self.assertEqual(self.files(), before)
-        self.apply(type="rename", id=edit.selected_id, title="")
-
-    def test_moving_reference_links_preserves_both_document_definitions(self):
-        from markdown_it import MarkdownIt
-        self.write("PURSUITS.md", "# Pursuits\n\n## A {#a}\n\n[Source][diagram].\n\n- `leaf` See [diagram]. → []\n\n  ![Picture][diagram]\n\n## B {F#b}\n\n[Retained][diagram].\n\n[diagram]: images/source.png\n")
-        self.write("PURSUIT_b.md", "# Existing {#existing}\n\n[Destination][diagram].\n\n[diagram]: images/destination.png\n")
-        self.apply(type="move", id="a", parent_id="b")
-        parser = MarkdownIt("commonmark")
-        def destinations(path):
-            tokens = parser.parse((self.root / path).read_text(encoding="utf-8"))
-            return [child.attrGet("href") or child.attrGet("src") for token in tokens for child in token.children or []
-                    if child.type in {"link_open", "image"}]
-        self.assertEqual(destinations("PURSUITS.md"), ["images/source.png"])
-        self.assertEqual(destinations("PURSUIT_b.md"), ["images/destination.png", "images/source.png", "images/source.png", "images/source.png"])
 
 
 if __name__ == "__main__":

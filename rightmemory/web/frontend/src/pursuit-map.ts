@@ -555,7 +555,7 @@ class PursuitMap implements PursuitMapController {
     const draft = this.drafts.title;
     if (!draft || draft.id !== id) return;
     this.drafts.title = null;
-    if (canceled) { this.render(); return; }
+    if (canceled || !text) { this.render(); return; }
     if (draft.operation.type === 'rename' && indexTree(this.snapshot).get(id)?.title === text) { this.render(); return; }
     draft.text = text;
     draft.operation = { ...draft.operation, title: text };
