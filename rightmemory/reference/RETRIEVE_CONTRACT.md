@@ -4,7 +4,7 @@ This contract owns Retrieve's input envelope and terminal-selection mechanics. T
 
 ## Input Context
 
-The conversation begins with a stable snapshot of:
+The conversation begins with an indexed reading copy of:
 
 - `MEMORY.md`;
 - `PURSUITS.md`;
@@ -23,7 +23,7 @@ Later context may contain:
 - pending updater candidates;
 - the current retrieval query, placed last.
 
-This volatile context follows the inherited snapshot in each CLI-agent session fork. Apply each diff to the earlier snapshot. Added lines are current; removed lines are obsolete. Standalone mode builds the same logical context without a provider prefix base or fork.
+This context follows the inherited reading copy in each CLI-agent session fork. Apply each diff to that copy, including changes to supplied ids. Added lines are current; removed lines are obsolete. Standalone mode builds the same logical context without a provider prefix base or fork.
 
 ## Terminal Selection
 
@@ -54,9 +54,10 @@ Standalone mode supplies this object as the terminal output type. CLI-agent mode
 
 ## Local Graph Selection
 
-- Top-level `ids` contains globally unique ids from the local Memory and Pursuit graph, including graph items reached through `F#` details.
-- Selecting a heading includes its subtree, including anonymous descendants. Selecting a leaf returns its complete Markdown block, not children. Both include ancestor headings and their own bodies, not unrelated sibling items.
-- Anonymous content is returned through an addressed ancestor; independent id selection requires assigning an id. Snapshot-local editing handles are not retrieval ids.
+- Top-level `ids` selects elements from the local Memory and Pursuit reading copy, including content reached through `F#` details.
+- The id in a reading copy's file header selects the document root.
+- Selecting a document root or heading includes its subtree. Selecting a leaf returns its complete Markdown block. Both include ancestor headings and their own bodies, excluding unrelated sibling items.
+- Use the ids shown in this retrieval view; generated ids select anonymous elements and are not persistent references. The runtime returns original content with its ancestor context, without the generated ids.
 - Selecting a graph heading does not automatically select its linked `M#`, `S#`, `MF#`, or `MQ#` content.
 
 ## Linked Sources
@@ -65,7 +66,7 @@ A linked graph `source_id` includes its marker:
 
 - `M#<id>`: free-form Markdown evidence; select inclusive one-based line ranges.
 - `S#<id>`: complete instruction; use empty `ids` and `ranges`.
-- `MF#<view-id>`: imported graph items; place view-local graph ids in that source's `ids`. Direct ranges are invalid.
+- `MF#<view-id>`: imported document elements; place ids shown in that view's reading copy in that source's `ids`. Direct ranges are invalid.
 - `MF#<view-id>/M#<id>`: imported free-form evidence; select inclusive one-based line ranges.
 - `MF#<view-id>/S#<id>`: complete imported instruction; use empty `ids` and `ranges`.
 
@@ -90,7 +91,7 @@ Candidates are unsettled evidence, not stored RightMemory state. Select one only
 
 ## Delivery Behavior
 
-The runtime owns hierarchy expansion, Focus rendering, source ordering, overlap removal, delivery hashes, unchanged-result suppression, `--include-returned`, and final source formatting.
+The runtime owns hierarchy expansion, Focus rendering, source ordering, overlap removal, delivery hashes, `--include-returned`, and final source formatting. Explicit selections are returned even when previously delivered.
 
 Rendered content omits body-fence delimiters while preserving their payload.
 Delivery coverage accounts for complete leaf content and anonymous content.

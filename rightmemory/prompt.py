@@ -144,10 +144,10 @@ def _cli_agent_guidance(memory_root: Path, role: str) -> str:
             "- Your final response must be exactly one JSON object with only `ids`, `sources`, and "
             "`recent_candidates`; do not wrap it in Markdown or add prose.\n"
             "- The `read_*` names in the canonical instructions describe standalone tools. In CLI-agent mode, "
-            "inspect the equivalent files with the provider CLI's read-only file tools instead of emitting those tool calls.\n"
+            "inspect the graph reading copies supplied for this turn with the provider CLI's read-only file tools.\n"
             "- Inspect M# and S# backing files only through their schema-derived filenames. Inspect MF# content "
-            "only through its schema-valid `dist/MEMORY.md` and referenced `dist/MEMORY_<id>.md` or "
-            "`dist/MEMORY_SKILL_<id>.md` resources; package metadata is not retrieval content.\n"
+            "through its supplied graph reading copies and referenced `dist/MEMORY_<id>.md` or "
+            "`dist/MEMORY_SKILL_<id>.md` evidence and skill resources; package metadata is not retrieval content.\n"
             "- Use one-based line numbers from the exact source content when selecting ranges.\n"
         )
     return ""

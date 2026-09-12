@@ -565,7 +565,6 @@ class _ParseProfile:
     roots: tuple[tuple[str, str], ...]
     allowed_memory_kinds: frozenset[str]
     allow_focus: bool
-    require_addressed_body: bool
 
 
 def build_graph_manifest(memory_root: Path) -> GraphManifest:
@@ -576,7 +575,6 @@ def build_graph_manifest(memory_root: Path) -> GraphManifest:
         roots=ROOT_FILES,
         allowed_memory_kinds=frozenset({"#", "F#", "M#", "S#", "MF#", "MQ#"}),
         allow_focus=True,
-        require_addressed_body=False,
     )
     return _build_manifest(root, profile)
 
@@ -591,7 +589,6 @@ def build_mf_manifest(package_root: Path, view_id: str) -> GraphManifest:
         roots=(("MEMORY.md", "memory"),),
         allowed_memory_kinds=frozenset({"#", "F#", "M#", "S#"}),
         allow_focus=False,
-        require_addressed_body=True,
     )
     return _build_manifest(root, profile)
 
@@ -621,8 +618,6 @@ def _build_manifest(root: Path, profile: _ParseProfile) -> GraphManifest:
     _validate_items(manifest)
     if profile.allow_focus:
         _validate_focus(manifest)
-    if profile.require_addressed_body:
-        _validate_addressed_body(manifest)
     _assign_logical_metadata(manifest)
     digest = hashlib.sha256()
     for document in sorted(manifest.documents.values(), key=lambda item: item.relative_path):
@@ -1371,22 +1366,6 @@ def _validate_focus(manifest: GraphManifest) -> None:
             )
 
 
-def _validate_addressed_body(manifest: GraphManifest) -> None:
-    for block in manifest.blocks.values():
-        owner = block
-        while owner.item_id is None and owner.logical_parent is not None:
-            owner = manifest.blocks[owner.logical_parent]
-        if owner.item_id is not None:
-            continue
-        offending_line = block.line_number if block.kind == "node" else next(
-            (part.line_number for part in block.logical_text_parts if part.text.strip()), None
-        )
-        if offending_line is not None:
-            _add_error(manifest, "MF document prose must belong to an addressable heading "
-                       f"or leaf at {_relative(manifest.root, block.source_path)}:{offending_line}",
-                       block.source_path, offending_line)
-
-
 def _assign_logical_metadata(manifest: GraphManifest) -> None:
     rank = 0
     seen: set[BlockKey] = set()
@@ -1404,16 +1383,21 @@ def _assign_logical_metadata(manifest: GraphManifest) -> None:
                     item.logical_parent = block.logical_parent
     for item in manifest.items.values():
         if item.block_key is not None:
-            context = []
-            current = item.logical_parent
-            while current is not None:
-                ancestor = manifest.blocks[current]
-                context.append(resolve_markdown_references(ancestor.line, manifest.documents[ancestor.source_path]))
-                context.extend(part for part in rendered_block_parts(manifest, ancestor) if isinstance(part, str))
-                current = ancestor.logical_parent
-            item.content_hash = hashlib.sha256(
-                ("\n".join(context) + "\n" + _flatten_logical_block(manifest, item.block_key)).rstrip("\r\n").encode("utf-8")
-            ).hexdigest()
+            item.content_hash = block_content_hash(manifest, manifest.blocks[item.block_key])
+
+
+def block_content_hash(manifest: GraphManifest, block: DocumentBlock) -> str:
+    """Version original content and its logical ancestor context, without selectors."""
+    context = []
+    current = block.logical_parent
+    while current is not None:
+        ancestor = manifest.blocks[current]
+        context.append(resolve_markdown_references(ancestor.line, manifest.documents[ancestor.source_path]))
+        context.extend(part for part in rendered_block_parts(manifest, ancestor) if isinstance(part, str))
+        current = ancestor.logical_parent
+    return hashlib.sha256(
+        ("\n".join(context) + "\n" + _flatten_logical_block(manifest, block.key)).rstrip("\r\n").encode("utf-8")
+    ).hexdigest()
 
 
 def _flatten_logical_block(manifest: GraphManifest, key: BlockKey) -> str:
