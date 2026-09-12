@@ -17,13 +17,10 @@ from .corrections import (
 from .graph import (
     ITEM_ID_PATTERN,
     BlockKey,
-    BodyFenceDelimiter,
     DocumentBlock,
     GraphManifest,
     build_graph_manifest,
     is_valid_item_id,
-    rendered_block_parts,
-    resolve_markdown_references,
 )
 from .recent_submitted import RecentSubmittedMemoryEntry
 from .shared_view_models import load_connections
@@ -960,35 +957,34 @@ def _render_selected_tree(
     def render_entry(key: BlockKey) -> str:
         block = manifest.blocks[key]
         if key in full_entries:
-            return _flatten_block(manifest, key, mq_notice=mq_notice)
+            return _flatten_block(manifest, key, mq_notice=mq_notice).rstrip("\r\n")
         if key in exact_entries and block.kind in {"node", "focus"}:
-            return _flatten_block(manifest, key, mq_notice=mq_notice)
-        if not relevant(key):
-            return ""
-        pieces = [resolve_markdown_references(block.line, manifest.documents[block.source_path])] if block.kind != "root" else []
-        for part in rendered_block_parts(manifest, block):
-            if isinstance(part, tuple):
-                if relevant(part):
-                    pieces.append(render_entry(part))
-            elif not isinstance(part, BodyFenceDelimiter):
-                pieces.append(part)
-        return "\n".join(pieces)
+            return block.line
+        children = [
+            render_entry(part)
+            for part in block.logical_parts
+            if isinstance(part, tuple) and relevant(part)
+        ]
+        children = [child for child in children if child]
+        if block.kind == "root":
+            return "\n\n".join(children)
+        if not children:
+            return block.line if key in exact_entries else ""
+        body = "\n".join(
+            part for part in block.logical_parts if isinstance(part, str)
+        ).strip("\r\n")
+        return "\n\n".join(part for part in (block.line, body, *children) if part)
 
     return render_entry(root).strip("\r\n")
 
 
 def _flatten_block(manifest: GraphManifest, key: BlockKey, *, mq_notice: bool) -> str:
     block = manifest.blocks[key]
-    # Resolve a leaf as one Markdown container, including references in its
-    # opening line and in all continuation blocks.
-    if block.kind in {"node", "focus"}:
-        return resolve_markdown_references("\n".join([block.line, *block.logical_parts]),
-                                           manifest.documents[block.source_path])
-    lines = [resolve_markdown_references(block.line, manifest.documents[block.source_path])] if block.kind != "root" else []
-    for part in rendered_block_parts(manifest, block):
+    lines = [block.line] if block.kind != "root" else []
+    for part in block.logical_parts:
         if isinstance(part, tuple):
-            lines.append(_flatten_block(manifest, part, mq_notice=mq_notice))
-        elif not isinstance(part, BodyFenceDelimiter):
+            lines.extend(_flatten_block(manifest, part, mq_notice=mq_notice).splitlines())
+        else:
             lines.append(part)
     if mq_notice and block.anchor_kind == "MQ#" and block.item_id is not None:
         if lines and lines[-1].strip():

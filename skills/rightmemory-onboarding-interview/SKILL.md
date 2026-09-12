@@ -27,13 +27,13 @@ Run a short, evidence-aware interview that produces reviewable RightMemory draft
 - Avoid broad preference surveys, quickly stale status labels, and questions already answered by available evidence.
 - Organize only the domains supported by the evidence. Common domains are a project or responsibility graph, `# User Context`, `# Cross-Session Agent Behavior`, and `# Open Context Questions`.
 - Put loose, actionable unknowns in `# Open Context Questions` as normal nodes with `todo:` edges. Use `Uncertain:` only for tentative claims worth retaining and revising later.
-- Use `{F#slug}` only when moving content to `MEMORY_slug.md` improves root-file scanability. A split keeps the heading and its leading own body in the current file, then moves the ordered remainder into the detail file. A terminal `####` file reference may have its own body but no child headings or leaf items. Use a body fence for headings or lists intended as body content.
+- Use `{F#slug}` only when moving content to `MEMORY_slug.md` improves root-file scanability. Keep the heading and its summary in the current file, but not the moved child content. A terminal `####` file reference may have a summary but no child nodes or headings.
 
 ## Schema And Completion Checks
 
 Before saying the drafts are ready:
 
-- follow the canonical schema: titles and ids are optional, declared ids are globally unique, and addressed leaves include an edge list on their opening line; nested Markdown remains inside its complete leaf;
+- follow the canonical schema, including meaningful, unique heading and node IDs across the file set and `→[...]` on every node line;
 - confirm every file-backed heading maps to its matching sibling detail file;
 - confirm questions and uncertain claims use the correct forms;
 - list the created files and identify user-provided facts that remain unverified, such as an inaccessible remote path.

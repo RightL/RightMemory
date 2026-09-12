@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import re
 import uuid
-from difflib import SequenceMatcher
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Mapping
@@ -16,7 +15,6 @@ from typing import Mapping
 from .graph import (
     ANCHOR_RE,
     FOCUS_HEADING_RE,
-    HEADING_RE,
     BlockKey,
     DocumentBlock,
     GraphManifest,
@@ -26,9 +24,6 @@ from .graph import (
     remove_edge_targets,
     render_heading_line,
     replace_heading_title,
-    resolve_markdown_references,
-    snapshot_block_id,
-    span_text,
     validate_heading_title,
 )
 
@@ -132,7 +127,10 @@ class PursuitEdit:
 
 
 def _block_id(manifest: GraphManifest, block: DocumentBlock) -> str:
-    return snapshot_block_id(manifest, block)
+    if block.item_id is not None:
+        return block.item_id
+    relative = block.source_path.relative_to(manifest.root).as_posix()
+    return f"plain:{relative}:{block.line_number}"
 
 
 def _reserved(manifest: GraphManifest, block: DocumentBlock) -> bool:
@@ -170,7 +168,7 @@ def _project(manifest: GraphManifest) -> PursuitTree:
             if item_id in item_data:
                 return  # Duplicate ids are already diagnosed; the root is read-only.
             graph_item = manifest.items.get(block.item_id or "")
-            leaf = block.kind == "node"
+            legacy = block.kind == "node"
             item_data[item_id] = {
                 "id": item_id,
                 "title": block.title,
@@ -180,12 +178,17 @@ def _project(manifest: GraphManifest) -> PursuitTree:
                 "focused": item_id in focus_ids,
                 "source_path": block.source_path.relative_to(manifest.root).as_posix(),
                 "source_line": block.line_number,
-                "anchor_kind": "node" if leaf else block.anchor_kind or "plain",
-                "editable": not leaf,
+                "anchor_kind": "node" if legacy else block.anchor_kind or "plain",
+                "editable": not legacy,
             }
             children.setdefault(parent_id, []).append(item_id)
             children[item_id] = []
             current_parent = item_id
+            if legacy:
+                diagnostics.append(
+                    f"Legacy graph node `{item_id}` at "
+                    f"{item_data[item_id]['source_path']}:{block.line_number} is read-only in the map."
+                )
         for child in block.logical_children:
             visit(child, current_parent)
 
@@ -257,8 +260,6 @@ class _Editor:
         self.memory_changes: dict[Path, str] = {}
         self.repairs: list[dict[str, object]] = []
         self.id_remaps: list[dict[str, str]] = []
-        self.remap_order: list[str] = []
-        self.resource_documents: set[Path] = set()
         for source in manifest.documents.values():
             if source.family != "pursuit":
                 continue
@@ -300,7 +301,7 @@ class _Editor:
             raise PursuitOperationError("unknown Pursuit item")
         entry = self.items[value]
         if editable and entry.kind != "heading":
-            raise PursuitOperationError("leaf items are read-only in the map; edit their Markdown source")
+            raise PursuitOperationError("legacy graph node leaves are read-only in the map")
         return entry
 
     def new_id(self, title: str) -> str:
@@ -365,13 +366,11 @@ class _Editor:
         document = _Document(path, entry.document.newline)
         self.documents[path] = document
         self.used_paths.add(path.name.casefold())
-        first_child = next((index for index, part in enumerate(entry.parts) if isinstance(part, _Entry)), len(entry.parts))
-        document.parts = entry.parts[first_child:]
-        entry.parts = entry.parts[:first_child]
-        source = self.manifest.documents.get(entry.document.path)
-        if source is not None:
-            document.parts = [resolve_markdown_references(part, source) if isinstance(part, str) else part
-                              for part in document.parts]
+        # Strings in the indexed owner block are its own body, including prose
+        # around legacy node lines. Keep that prose with the owner when its
+        # children cross the physical backing boundary.
+        document.parts = [part for part in entry.parts if isinstance(part, _Entry)]
+        entry.parts = [part for part in entry.parts if isinstance(part, str)]
         self.anchor(entry, "F#")
         for part in document.parts:
             if isinstance(part, _Entry):
@@ -379,17 +378,6 @@ class _Editor:
                 self.normalize(part, 1, document)
 
     def normalize(self, entry: _Entry, depth: int, document: _Document) -> None:
-        if entry.document.path != document.path:
-            self.resource_documents.update((entry.document.path, document.path))
-            source = self.manifest.documents.get(entry.document.path)
-            if source is not None:
-                if entry.kind == "node":
-                    lines = resolve_markdown_references(_render(entry), source).splitlines(keepends=True)
-                    entry.header, entry.parts = lines[0], ["".join(lines[1:])]
-                else:
-                    entry.header = resolve_markdown_references(entry.header, source)
-                    entry.parts = [resolve_markdown_references(part, source) if isinstance(part, str) else part
-                                   for part in entry.parts]
         if entry.document.newline != document.newline:
             entry.header = _with_newline(entry.header, document.newline)
             entry.parts = [
@@ -402,9 +390,7 @@ class _Editor:
         if depth > 3:
             raise PursuitOperationError("a map heading needs a backing boundary before physical depth four")
         if depth != entry.depth:
-            marker = HEADING_RE.match(entry.header)
-            assert marker is not None
-            entry.header = entry.header[:marker.start(1)] + "#" * depth + entry.header[marker.end(1):]
+            entry.header = "#" * depth + entry.header[entry.depth:]
             entry.depth = depth
         physical_children = [part for part in entry.parts if isinstance(part, _Entry)]
         if entry.anchor_kind != "F#" and depth == 3 and any(child.kind == "heading" for child in physical_children):
@@ -429,7 +415,7 @@ class _Editor:
             isinstance(part, _Entry) and part.kind == "node" for part in container.parts[index:]
         ):
             raise PursuitOperationError(
-                "leaf items must remain before heading children in their document; insert after them"
+                "legacy graph leaves must remain before heading children in their document; insert after them"
             )
         document = container if isinstance(container, _Document) else container.document
         depth = 1 if isinstance(container, _Document) and container.path.name != "PURSUITS.md" else (container.depth + 1 if isinstance(container, _Entry) else 2)
@@ -524,25 +510,6 @@ class _Editor:
         return reachable
 
     def plan(self) -> dict[Path, str | None]:
-        for path in self.resource_documents:
-            source = self.manifest.documents.get(path)
-            if source is None or path not in self.documents:
-                continue
-
-            def preserve_references(owner):
-                if isinstance(owner, _Entry):
-                    if owner.kind == "node":
-                        lines = resolve_markdown_references(_render(owner), source).splitlines(keepends=True)
-                        owner.header, owner.parts = lines[0], ["".join(lines[1:])]
-                        return
-                    owner.header = resolve_markdown_references(owner.header, source)
-                for index, part in enumerate(owner.parts):
-                    if isinstance(part, str):
-                        owner.parts[index] = resolve_markdown_references(part, source)
-                    else:
-                        preserve_references(part)
-
-            preserve_references(self.documents[path])
         reachable = self.reachable_documents()
         before = {path for path, document in self.manifest.documents.items() if document.family == "pursuit"}
         changes: dict[Path, str | None] = {}
@@ -553,66 +520,6 @@ class _Editor:
                 changes[path] = rendered
         changes.update(self.memory_changes)
         return changes
-
-    def edit_body(self, entry: _Entry, body: str) -> None:
-        """Apply prose edits to the owned source slots without moving children."""
-        owners = [entry]
-        boundary = None
-        if entry.anchor_kind == "F#":
-            if entry.block and any(part.line_number == 0 for part in entry.block.logical_text_parts):
-                own_text = "".join(part for part in entry.parts if isinstance(part, str))
-                separator = "\n" if not own_text or own_text.endswith(("\n", "\r")) else "\n\n"
-                boundary = _Document(entry.document.path, entry.document.newline, [separator])
-                owners.append(boundary)
-            owners.append(self.backing(entry))
-        slots = [(owner, index) for owner in owners for index, part in enumerate(owner.parts)
-                 if isinstance(part, str)]
-        if not slots:
-            entry.parts.insert(0, entry.document.newline + body + entry.document.newline * 2)
-            return
-        old = "".join(owner.parts[index] for owner, index in slots)
-        prefix = old[:len(old) - len(old.lstrip("\r\n"))] or entry.document.newline
-        suffix = old[len(old.rstrip("\r\n")):] or entry.document.newline * 2
-        replacement = prefix + body + suffix if body else prefix
-        offsets = []
-        offset = 0
-        for owner, index in slots:
-            size = len(owner.parts[index])
-            offsets.append((offset, offset + size, owner, index))
-            offset += size
-        for tag, start, end, new_start, new_end in reversed(SequenceMatcher(None, old, replacement, autojunk=False).get_opcodes()):
-            if tag == "equal":
-                continue
-            affected = [(left, right, owner, index) for left, right, owner, index in offsets
-                        if (left < end and right > start) or (start == end and left <= start < right)]
-            if not affected:
-                affected = [offsets[-1]]
-            for position, (left, right, owner, index) in enumerate(affected):
-                value = owner.parts[index]
-                first = max(0, start - left)
-                last = min(right - left, end - left)
-                owner.parts[index] = value[:first] + (replacement[new_start:new_end] if position == 0 else "") + value[max(first, last):]
-        if boundary is not None and boundary.parts[0].strip():
-            entry.parts.append(boundary.parts[0])
-
-    def remap_anonymous(self, candidate: GraphManifest) -> None:
-        def visit(owner: _Entry | _Document, line: int) -> int:
-            if isinstance(owner, _Entry):
-                if owner.block is not None and owner.block.item_id is None:
-                    previous = _block_id(self.manifest, owner.block)
-                    block = candidate.blocks.get((owner.document.path, line))
-                    if previous in self.tree.items and block is not None:
-                        current = _block_id(candidate, block)
-                        if current != previous and not any(value["from"] == previous for value in self.id_remaps):
-                            self.id_remaps.append({"from": previous, "to": current})
-                line += len(re.findall(r"\r\n|\r|\n", owner.header))
-            for part in owner.parts:
-                line = line + len(re.findall(r"\r\n|\r|\n", part)) if isinstance(part, str) else visit(part, line)
-            return line
-        for path in self.reachable_documents():
-            visit(self.documents[path], 1)
-        order = {item_id: index for index, item_id in enumerate(self.remap_order)}
-        self.id_remaps.sort(key=lambda value: order.get(value["from"], len(order)))
 
 
 def _string(operation: Mapping[str, object], name: str) -> str:
@@ -625,7 +532,7 @@ def _string(operation: Mapping[str, object], name: str) -> str:
 def _title(operation: Mapping[str, object]) -> str:
     try:
         title = validate_heading_title(_string(operation, "title"))
-        if title and not plain_title(title).strip():
+        if not plain_title(title).strip():
             raise ValueError("title must have nonempty visible text")
         return title
     except ValueError as exc:
@@ -654,9 +561,9 @@ def _rename_many(
         (item_id, title, editor.item(item_id))
         for item_id, title in requested
     ]
-    editor.remap_order = [item_id for item_id, _title, _entry in prepared]
     resulting_ids: list[str] = []
     for item_id, title, entry in prepared:
+        editor.address(entry, title=title)
         entry.header = replace_heading_title(entry.header, title)
         entry.title = title
         resulting_ids.append(entry.id or item_id)
@@ -691,6 +598,7 @@ def _apply(editor: _Editor, operation: Mapping[str, object]) -> tuple[str | None
     entry = editor.item(original_id)
     if kind == "rename":
         title = _title(operation)
+        editor.address(entry, title=title)
         entry.header = replace_heading_title(entry.header, title)
         entry.title = title
     elif kind in {"move", "reorder"}:
@@ -701,6 +609,7 @@ def _apply(editor: _Editor, operation: Mapping[str, object]) -> tuple[str | None
         after = editor.item(operation["after_id"], editable=False) if operation.get("after_id") is not None else None
         if after is entry or (after is not None and editor.tree.items[after.id].parent_id != parent_id):
             raise PursuitOperationError("after_id must be another sibling at the destination")
+        editor.address(entry)
         container = editor.destination(parent)
         previous = entry.parent
         previous.parts.remove(entry)
@@ -720,7 +629,9 @@ def _apply(editor: _Editor, operation: Mapping[str, object]) -> tuple[str | None
         newline = entry.document.newline
         body = _with_newline(body, newline).strip("\r\n")
         if body != _with_newline(editor.tree.items[original_id].body, newline):
-            editor.edit_body(entry, body)
+            editor.address(entry)
+            first_heading = next((i for i, part in enumerate(entry.parts) if isinstance(part, _Entry) and part.kind == "heading"), len(entry.parts))
+            entry.parts[:first_heading] = [newline + body + newline * 2 if body else newline]
     elif kind == "set_focus":
         focused = operation.get("focused")
         if not isinstance(focused, bool):
@@ -735,8 +646,8 @@ def _apply(editor: _Editor, operation: Mapping[str, object]) -> tuple[str | None
             if focus is None:
                 focus = _Entry("heading", None, "Focus", None, 2,
                                "## Focus" + document.newline, [document.newline], document, container)
-                last_leaf = next((part for part in reversed(container.parts) if isinstance(part, _Entry) and part.kind == "node"), None)
-                editor.insert(focus, container, last_leaf, first=last_leaf is None)
+                legacy_after = next((part for part in reversed(container.parts) if isinstance(part, _Entry) and part.kind == "node"), None)
+                editor.insert(focus, container, legacy_after, first=legacy_after is None)
             reference = _Entry("focus", None, "", None, 0,
                                f"- `{entry.id}`" + document.newline, [], document, focus)
             last = max((i for i, part in enumerate(focus.parts) if isinstance(part, _Entry) and part.kind == "focus"), default=-1)
@@ -760,16 +671,20 @@ def _apply(editor: _Editor, operation: Mapping[str, object]) -> tuple[str | None
 
 def _check_body_edit(before: GraphManifest, after: GraphManifest, original_id: str) -> None:
     """Notes may contain Markdown, but cannot silently replace graph structure."""
+    old_item = before.items.get(original_id)
+    # Addressing a pre-existing plain group is an allowed structural change.
+    added = 0 if old_item is not None else 1
     before_headings = sum(block.kind == "heading" for block in before.blocks.values())
     after_headings = sum(block.kind == "heading" for block in after.blocks.values())
-    if before_headings != after_headings or set(after.items) != set(before.items):
+    if before_headings != after_headings or len(after.items) != len(before.items) + added:
         raise PursuitOperationError("note text cannot add or remove map headings or graph nodes; use the map editor")
-    def leaves(manifest):
-        return [(block.item_id, span_text(manifest, block.span).rstrip("\r\n"))
-                for root in manifest.root_blocks for block in manifest.walk_logical(root)
-                if block.kind == "node"]
-    if leaves(before) != leaves(after):
-        raise PursuitOperationError("own-body edits must preserve complete leaf items; use a body fence for body lists")
+    for item_id, item in before.items.items():
+        other = after.items.get(item_id)
+        if other is None:
+            raise PursuitOperationError("note text cannot remove a graph item")
+        if item.item_kind == "node":
+            if before.blocks[item.block_key].line != after.blocks[other.block_key].line:
+                raise PursuitOperationError("legacy graph node lines are read-only; preserve them when editing the note")
 
 
 def apply_operation(root: Path, operation: Mapping[str, object]) -> PursuitEdit:
@@ -808,8 +723,6 @@ def apply_operation(root: Path, operation: Mapping[str, object]) -> PursuitEdit:
             focused = any(item_id == selected_id for item_id, _, _ in candidate.focus_ids)
             if focused != operation["focused"]:
                 raise PursuitOperationError("the edited document did not retain the requested Focus marker")
-        editor.remap_anonymous(candidate)
-        selected_id = next((value["to"] for value in editor.id_remaps if value["from"] == selected_id), selected_id)
     except BaseException:
         for path, content in previous.items():
             if content is None:
