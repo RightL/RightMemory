@@ -33,7 +33,7 @@ After edits, run validation, stage the touched memory files, and commit with sub
 
 `prune: expired active memory`
 
-The commit body should include the generation boundary, current head, removed items, revival grace items, and useful skips. Use addressable references like `MEMORY.md#node-id` or `MEMORY_project.md#heading-id`.
+The commit body should include the generation boundary, current head, removed items, revival grace items, and useful skips. Identify content with existing graph ids when available; otherwise include its file, heading context, and enough text to distinguish it.
 
 If pruning is due but no active memory should be removed, make an empty checkpoint commit:
 
