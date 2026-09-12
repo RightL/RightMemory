@@ -2392,7 +2392,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(final, "no strong match")
         self.assertIn("fact", runtime.retrieve_context.load("agent-session").delivery_coverage.local_items)
 
-    def test_retrieve_turn_does_not_record_context_state_after_failure(self):
+    def test_retrieve_failure_records_issued_ids_without_recording_delivery(self):
         root = Path(self.tempdir.name)
         (root / "MEMORY.md").write_text("# Root {#root}\n", encoding="utf-8")
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=root)
@@ -2407,7 +2407,10 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 runtime.run_session_turn("agent-session", "find root")
 
-        self.assertFalse((root / ".runtime" / "retrieve_context" / "sessions" / "agent-session.json").exists())
+        state = runtime.retrieve_context.load("agent-session")
+        self.assertIsNone(state.model_history_json)
+        self.assertEqual(state.delivery_coverage.local_items, {})
+        self.assertTrue(state.selection_state["issued"])
 
     def test_retrieve_surfaces_changed_f_detail_with_the_same_id(self):
         root = Path(self.tempdir.name)
@@ -2479,6 +2482,73 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertFalse(separate_state.exists())
 
+    def test_anonymous_retrieval_in_both_modes_preserves_sources_and_session_bindings(self):
+        from rightmemory.retrieve_view import RetrieveView
+
+        root = Path(self.tempdir.name)
+        memory = root / "MEMORY.md"
+        for mode in ("standalone", "cli-agent"):
+            with self.subTest(mode=mode):
+                memory.write_text("##\n\nContext.\n\n- First.\n- Selected.\n", encoding="utf-8")
+                source = memory.read_bytes()
+                initial = RetrieveView(root)
+                selected = initial.local.block_ids[(memory.resolve(), 6)]
+                selection = RetrieveSelection(ids=[selected])
+                config = RuntimeConfig(role="retrieve", runtime_mode=mode, model_id="openai/test", memory_root=root,
+                                       agent_cli=AgentCliConfig(provider="codex"))
+                with patch.dict("sys.modules", self._fake_pydantic_modules()), patch("rightmemory.runtime.CliAgentExecutor") as executor:
+                    executor.return_value.has_saved_session.return_value = False
+                    executor.return_value.run_session_turn.return_value = selection.model_dump_json()
+                    runtime = RightMemoryRuntime(config)
+                    if mode == "standalone":
+                        runtime.agent.output_values = iter([selection, selection])
+                    result = runtime.run_session_turn(mode, "find selected")
+                    executor.return_value.has_saved_session.return_value = True
+                    repeated = runtime.run_session_turn(mode, "return selected again")
+                    self.assertEqual(memory.read_bytes(), source)
+                    state = runtime.retrieve_context.load(mode)
+                    same = RetrieveView(root, state.selection_state)
+                    self.assertEqual(same.local.block_ids[(memory.resolve(), 6)], selected)
+                    memory.write_text(source.decode().replace("Selected.", "Changed."), encoding="utf-8", newline="")
+                    current = RetrieveView(root, state.selection_state)
+                    updated_id = current.local.block_ids[(memory.resolve(), 6)]
+                    self.assertNotEqual(updated_id, selected)
+                    updated_selection = RetrieveSelection(ids=[updated_id])
+                    if mode == "standalone":
+                        runtime.agent.output_values = iter([updated_selection])
+                    else:
+                        executor.return_value.run_session_turn.return_value = updated_selection.model_dump_json()
+                    updated = runtime.run_session_turn(mode, "find changed content")
+                self.assertEqual(result, "##\n\nContext.\n\n- Selected.")
+                self.assertEqual(repeated, result)
+                self.assertEqual(updated, "##\n\nContext.\n\n- Changed.")
+                state = runtime.retrieve_context.load(mode)
+                self.assertNotIn(selected, state.delivery_coverage.local_items)
+                self.assertTrue(state.delivery_coverage.local_items)
+
+    def test_retrieval_rejects_source_change_between_read_and_delivery(self):
+        from rightmemory.retrieve_view import RetrieveView
+
+        root = Path(self.tempdir.name)
+        memory = root / "MEMORY.md"
+        memory.write_text("##\n- Original.\n", encoding="utf-8")
+        config = RuntimeConfig(role="retrieve", runtime_mode="cli-agent", memory_root=root,
+                               agent_cli=AgentCliConfig(provider="codex"))
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor:
+            runtime = RightMemoryRuntime(config)
+            executor.return_value.has_saved_session.return_value = False
+
+            def select_after_edit(_session, _request, **_kwargs):
+                view = RetrieveView(root, runtime.retrieve_context.load("changing").selection_state)
+                selector = view.local.block_ids[(memory.resolve(), 2)]
+                memory.write_text("##\n- Replacement.\n", encoding="utf-8")
+                return RetrieveSelection(ids=[selector]).model_dump_json()
+
+            executor.return_value.run_session_turn.side_effect = select_after_edit
+            with self.assertRaisesRegex(ValueError, "source changed"):
+                runtime.run_session_turn("changing", "find original")
+        self.assertEqual(runtime.retrieve_context.load("changing").delivery_coverage.local_items, {})
+
     def test_retrieve_turn_does_not_advance_candidate_state_after_failure(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
         self._write_async_update_state(
@@ -2501,14 +2571,10 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 runtime.run_session_turn("agent-session", "find one")
 
-        state_path = (
-            Path(self.tempdir.name)
-            / ".runtime"
-            / "retrieve_context"
-            / "sessions"
-            / "agent-session.json"
-        )
-        self.assertFalse(state_path.exists())
+        state = runtime.retrieve_context.load("agent-session")
+        self.assertEqual(state.visible_recent_candidates, {})
+        self.assertIsNone(state.delivered_memory_commit)
+        self.assertIsNone(state.model_history_json)
 
     def test_cli_agent_new_retrieve_starts_fresh_local_context(self):
         root = Path(self.tempdir.name)

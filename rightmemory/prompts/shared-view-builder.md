@@ -18,7 +18,7 @@ Do not hand-write `recipe.toml` and do not commit. Use exactly one file-view com
 - Call `create_generative_file_view` with `memory_document`, containing a complete schema-valid RightMemory Memory document.
 
 The generated Memory document follows the canonical schema and shared-view
-coverage rules, including anonymous content under addressed headings.
+rules; ordinary headings and leaves may omit stored ids.
 This compiler version does not accept generated backing
 files, so use extractive mode when the result needs `F#`, `M#`, or `S#`.
 Never place `MF#` or `MQ#` inside a mirrored file view.

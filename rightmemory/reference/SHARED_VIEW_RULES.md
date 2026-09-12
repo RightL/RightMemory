@@ -16,15 +16,15 @@ shared_views/<view-id>/
     manifest.toml
 ```
 
-Every included graph item must be interpretable from local reading context
+Every included element must be interpretable from local reading context
 contained in the package. Provider-only ancestry and resolver state outside
 the package are not implicit consumer context.
 
 `view.md` and `recipe.toml` are provider-owned file-view source files. The recipe records the approved source headings, nodes, or files chosen by the builder. The generated `dist/` directory is preview or publishing output; it is not active provider memory. A version-two `dist/MEMORY.md` is a schema-valid, Memory-only RightMemory document, not arbitrary Markdown. It has an id namespace local to that view, so its ids do not collide with local ids or ids in another view, and its edges remain inside that namespace.
 
-An MF document may use ordinary headings and nodes plus F#, M#, and S# headings. Its F# and M# files live at `dist/MEMORY_<id>.md`; its S# files live at `dist/MEMORY_SKILL_<id>.md`. F# content participates in the MF graph, M# remains free-form evidence, and S# remains a complete instruction resource that is never installed or executed automatically. Every typed heading needs its package-local backing, and unreferenced backing files are invalid. Content-bearing headings and leaf items need an id of their own or an addressable heading ancestor. Anonymous grouping headings with no own body may group addressable descendants. Body fences and leaf-internal Markdown follow the canonical schema and create no additional graph items. Nested MF# and MQ# headings are invalid because an imported package has no authority to resolve another live connection.
+An MF document may use ordinary headings and nodes plus F#, M#, and S# headings. Its F# and M# files live at `dist/MEMORY_<id>.md`; its S# files live at `dist/MEMORY_SKILL_<id>.md`. F# content participates in the MF graph, M# remains free-form evidence, and S# remains a complete instruction resource that is never installed or executed automatically. Every typed heading needs its package-local backing, and unreferenced backing files are invalid. Stored ids are optional for ordinary headings and leaves; Retrieve supplies temporary ids in its reading copy. Saved graph relationships and extractive selections use stored ids. Body fences and leaf-internal Markdown follow the canonical schema and create no additional graph items. Nested MF# and MQ# headings are invalid because an imported package has no authority to resolve another live connection.
 
-Selecting the local outer MF# heading returns its local relationship context only. Imported graph items are selected by id within the `MF#<view-id>` source, including items reached through F#. Direct ranges over `dist/MEMORY.md` are invalid. Imported M# ranges use a qualified source such as `MF#auth-api/M#incident-evidence`; imported S# uses a qualified source such as `MF#auth-api/S#review-checklist` and returns the complete instruction.
+Selecting the local outer MF# heading returns its local relationship context only. Imported document elements are selected using the ids shown in the `MF#<view-id>` reading copy, including content reached through F#. Direct ranges over `dist/MEMORY.md` are invalid. Imported M# ranges use a qualified source such as `MF#auth-api/M#incident-evidence`; imported S# uses a qualified source such as `MF#auth-api/S#review-checklist` and returns the complete instruction.
 
 A provider root may define question views under `shared_views/<view-id>/`:
 

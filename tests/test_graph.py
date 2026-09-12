@@ -235,11 +235,11 @@ class MarkdownLeafStructureTests(unittest.TestCase):
             with self.subTest(heading=heading):
                 self.assertTrue(self.parse("# Memory\n" + heading + "\n- Anonymous child\n").errors)
 
-    def test_mf_addressed_ancestor_covers_anonymous_content(self):
+    def test_mf_anonymous_content_needs_no_addressed_ancestor(self):
         self.parse("# {#owner}\n\n##\n\nBody.\n\n- Anonymous\n\n:::body\n- Body list\n:::\n")
         self.assertEqual(build_mf_manifest(self.root, "view").errors, [])
         self.parse("# Wrapper\n\n- Uncovered\n\n## {#child}\n")
-        self.assertTrue(build_mf_manifest(self.root, "view").errors)
+        self.assertEqual(build_mf_manifest(self.root, "view").errors, [])
 
     def test_delivery_hashes_cover_continuations_anonymous_descendants_and_context(self):
         source = "# {#owner}\n\nContext.\n\n- `leaf` First. → []\n\n  More.\n\n- Anonymous.\n"
@@ -492,7 +492,7 @@ class MfGraphManifestTests(unittest.TestCase):
         self.assertEqual(manifest.backing["evidence"].kind, "M#")
         self.assertEqual(manifest.backing["instructions"].kind, "S#")
 
-    def test_mf_profile_rejects_nested_views_and_unaddressed_prose(self):
+    def test_mf_profile_rejects_nested_views(self):
         (self.dist / "MEMORY.md").write_text(
             "# Shared Memory\n\n"
             "Unaddressed prose.\n\n"
@@ -504,7 +504,6 @@ class MfGraphManifestTests(unittest.TestCase):
 
         errors = "\n".join(manifest.errors)
         self.assertIn("MF# heading `nested` is not valid in MF#auth-api", errors)
-        self.assertIn("MF document prose must belong to an addressable heading", errors)
 
 
 if __name__ == "__main__":

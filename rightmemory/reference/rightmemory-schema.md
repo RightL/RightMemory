@@ -44,9 +44,12 @@ Heading titles and ids are optional. These headings are valid:
 Text before the first structural heading belongs to the document root. Titles
 and body previews are display text, not identity. Anonymous elements participate
 in the tree; only explicitly addressed elements participate in the graph. Add an
-id when graph relationships, independent retrieval, Focus, or a typed backing
-need it. Ordinary reading and editing do not require persistent ids; tools may
-use snapshot-local handles and reject them after the snapshot changes.
+id when graph relationships, saved references, Focus, or a typed backing need
+it. Reading and editing do not require stored ids. Retrieve supplies missing
+ids in its reading copy; editing tools may use snapshot-local handles. Neither
+kind of temporary address is a stored graph identity.
+
+Protocol-defined sections such as `## Focus` retain their specified identifying syntax.
 
 Addressable headings use:
 

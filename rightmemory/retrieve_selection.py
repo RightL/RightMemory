@@ -20,14 +20,13 @@ from .graph import (
     BodyFenceDelimiter,
     DocumentBlock,
     GraphManifest,
-    build_graph_manifest,
     is_valid_item_id,
     rendered_block_parts,
     resolve_markdown_references,
 )
 from .recent_submitted import RecentSubmittedMemoryEntry
-from .shared_view_models import load_connections
-from .shared_view_package import FileViewPackageError, ValidatedFileViewPackage, validate_file_view_package
+from .retrieve_view import RetrieveIndex, RetrieveView
+from .shared_view_package import ValidatedFileViewPackage
 
 
 NO_STRONG_MATCH = "no strong match"
@@ -37,7 +36,6 @@ SOURCE_ID_RE = re.compile(
 AGENT_CORRECTION_POSITION_RE = re.compile(r"^[1-9][0-9]*$")
 HEADING_RE = re.compile(r"^(#{1,})\s+")
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-MF_CANONICAL_PATH = Path(".runtime/shared_views/imports")
 
 
 class RetrieveSelectionError(ValueError):
@@ -190,9 +188,15 @@ class _RenderedSource:
 
 
 class RetrieveSelectionRenderer:
-    def __init__(self, memory_root: Path, *, max_output_chars: int):
+    def __init__(self, memory_root: Path, *, max_output_chars: int, view: RetrieveView | None = None):
         self.memory_root = Path(memory_root).resolve()
         self.max_output_chars = max_output_chars
+        self.view = view
+
+    def _read_view(self) -> RetrieveView:
+        view = self.view or RetrieveView(self.memory_root)
+        self._active_view = view
+        return view
 
     def render(
         self,
@@ -201,7 +205,10 @@ class RetrieveSelectionRenderer:
         recent_entries: list[RecentSubmittedMemoryEntry] | None = None,
     ) -> RenderedRetrieveSelection:
         recent_entries = recent_entries or []
-        manifest = build_graph_manifest(self.memory_root)
+        view = self._read_view()
+        if self.view is not None:
+            view.assert_current()
+        manifest = view.local.manifest
 
         local_text, local_delivery = self._render_local(selection.ids, manifest)
         source_sections = self._render_sources(
@@ -259,27 +266,19 @@ class RetrieveSelectionRenderer:
         unchanged_only: bool = False,
     ) -> RetrieveSelection:
         """Return the currently selectable form of previously delivered coverage."""
-        manifest = build_graph_manifest(self.memory_root)
-        local_ids = [
-            item_id
-            for item_id, version in delivered.local_items.items()
-            if (
-                item_id not in manifest.duplicates
-                and (item := manifest.items.get(item_id)) is not None
-                and (not unchanged_only or item.content_hash == version)
-            )
-        ]
-        local_ids.sort(
-            key=lambda item_id: (
-                manifest.items[item_id].traversal_rank,
-                item_id,
-            )
-        )
+        view = self._read_view()
+        manifest = view.local.manifest
+        local_ids = []
+        for key, version in delivered.local_items.items():
+            block = view.local.delivered_block(key, version, unchanged_only=unchanged_only)
+            if block is not None and block.item_id not in manifest.duplicates:
+                local_ids.append(view.local.block_ids[block.key])
+        local_ids.sort(key=lambda item_id: (view.local.ids[item_id].traversal_rank, item_id))
 
         source_parts: dict[str, tuple[list[str], list[LineRange]]] = {}
         for key, version in delivered.source_items.items():
             try:
-                source_id, item_id = key.rsplit(":", 1)
+                source_id, item_id = key.split(":", 1)
             except ValueError:
                 continue
             if source_id in AGENT_CORRECTION_SOURCE_PATHS:
@@ -313,11 +312,12 @@ class RetrieveSelectionRenderer:
                 package = self._validated_mf_package(owner_id, source_id)
             except (OSError, ValueError):
                 continue
-            item = package.manifest.items.get(item_id)
-            if item is None or (unchanged_only and item.content_hash != version):
+            index = view.indexes[source_id]
+            block = index.delivered_block(item_id, version, unchanged_only=unchanged_only)
+            if block is None:
                 continue
             ids, _ranges = source_parts.setdefault(source_id, ([], []))
-            ids.append(item_id)
+            ids.append(index.block_ids[block.key])
 
         for source_id, version in delivered.complete_sources.items():
             text = self._current_linked_source_text(
@@ -405,14 +405,28 @@ class RetrieveSelectionRenderer:
             recent_entries=recent_entries,
             unchanged_only=True,
         )
-        manifest = build_graph_manifest(self.memory_root)
+        view = self._read_view()
+        manifest = view.local.manifest
         labels = [
             f"local item `{item_id}`"
             for item_id in current.ids
             if item_id not in set(unchanged.ids)
-            and (block := manifest.block_for_id(item_id)) is not None
+            and (block := view.local.ids.get(item_id)) is not None
             and block.source_path.name not in {"MEMORY.md", "PURSUITS.md"}
         ]
+        for namespace, coverage in (("local", delivered.local_items), ("sources", delivered.source_items)):
+            for key, version in coverage.items():
+                if namespace == "local":
+                    source_id, location = "local", key
+                else:
+                    source_id, separator, location = key.partition(":")
+                    if not separator:
+                        continue
+                if not location.startswith("@"):
+                    continue
+                index = view.indexes.get(source_id)
+                if index is None or index.delivered_block(location, version, unchanged_only=True) is None:
+                    labels.append(f"source `{source_id}` changed; read it again")
         unchanged_sources = {source.source_id: source for source in unchanged.sources}
         for source in current.sources:
             old = unchanged_sources.get(source.source_id)
@@ -520,23 +534,18 @@ class RetrieveSelectionRenderer:
         for item_id in _unique(requested_ids):
             if item_id in manifest.duplicates:
                 raise RetrieveSelectionError(f"local graph id `{item_id}` is duplicated")
-            item = manifest.items.get(item_id)
-            entry = manifest.block_for_id(item_id)
-            if item is None or entry is None:
-                raise RetrieveSelectionError(f"unknown local graph id `{item_id}`")
-            version = item.content_hash
-            if entry.kind == "heading":
+            index = self._active_view.local
+            entry = index.ids.get(item_id)
+            if entry is None:
+                raise RetrieveSelectionError(f"unknown or expired local selection id `{item_id}`; read the current retrieval view")
+            if entry.kind in {"heading", "root"}:
                 full_entries.add(entry.key)
-                if entry.family == "pursuit":
-                    selected_pursuits.add(item_id)
-                for descendant in manifest.walk_logical(entry.key, include_self=True):
-                    if descendant.item_id is not None:
-                        descendant_item = manifest.items.get(descendant.item_id)
-                        if descendant_item is not None:
-                            delivery[descendant.item_id] = descendant_item.content_hash
+                if entry.family == "pursuit" and entry.item_id is not None:
+                    selected_pursuits.add(entry.item_id)
+                self._record_blocks(index, entry, delivery)
             else:
                 exact_entries.add(entry.key)
-                delivery[item_id] = version
+                delivery[index.coverage_key(entry)] = index.versions[entry.key]
 
         focus_entries: set[BlockKey] = set()
         if selected_pursuits:
@@ -781,23 +790,16 @@ class RetrieveSelectionRenderer:
         for item_id in _unique(ids):
             if item_id in mf_manifest.duplicates:
                 raise RetrieveSelectionError(f"source-scoped id `{item_id}` is duplicated in `{source_id}`")
-            item = mf_manifest.items.get(item_id)
-            entry = mf_manifest.block_for_id(item_id)
-            if item is None or entry is None:
-                raise RetrieveSelectionError(f"unknown source-scoped id `{item_id}` in `{source_id}`")
-            key = f"{source_id}:{item_id}"
-            version = item.content_hash
-            if entry.kind == "heading":
+            index = self._active_view.indexes[source_id]
+            entry = index.ids.get(item_id)
+            if entry is None:
+                raise RetrieveSelectionError(f"unknown or expired source-scoped id `{item_id}` in `{source_id}`; read the current retrieval view")
+            if entry.kind in {"heading", "root"}:
                 full_entries.add(entry.key)
-                for descendant in mf_manifest.walk_logical(entry.key, include_self=True):
-                    if descendant.item_id is not None:
-                        descendant_key = f"{source_id}:{descendant.item_id}"
-                        descendant_item = mf_manifest.items.get(descendant.item_id)
-                        if descendant_item is not None:
-                            source_delivery[descendant_key] = descendant_item.content_hash
+                self._record_blocks(index, entry, source_delivery, prefix=f"{source_id}:")
             else:
                 exact_entries.add(entry.key)
-                source_delivery[key] = version
+                source_delivery[f"{source_id}:{index.coverage_key(entry)}"] = index.versions[entry.key]
         tree_text = "\n\n".join(
             rendered
             for root in mf_manifest.root_blocks
@@ -877,23 +879,17 @@ class RetrieveSelectionRenderer:
         owner_id: str,
         source_id: str,
     ) -> ValidatedFileViewPackage:
-        package_root = self.memory_root / MF_CANONICAL_PATH / owner_id
-        connection = load_connections(self.memory_root).get(owner_id)
-        expected_view_id = (
-            connection.target.view_id
-            if connection is not None and connection.target.view_id
-            else owner_id
-        )
-        try:
-            return validate_file_view_package(
-                package_root,
-                expected_view_id=expected_view_id,
-                namespace_id=owner_id,
-            )
-        except (FileNotFoundError, OSError, FileViewPackageError) as exc:
-            raise RetrieveSelectionError(
-                f"missing or invalid canonical mirrored view `{source_id}`: {exc}"
-            ) from exc
+        package = self._active_view.packages.get(owner_id)
+        if package is None:
+            detail = self._active_view.package_errors.get(owner_id, "no validated import in this retrieval view")
+            raise RetrieveSelectionError(f"missing or invalid canonical mirrored view `{source_id}`: {detail}")
+        return package
+
+    @staticmethod
+    def _record_blocks(index: RetrieveIndex, entry: DocumentBlock, delivery: dict[str, str], *, prefix: str = "") -> None:
+        for block in (entry, *index.manifest.walk_logical(entry.key)):
+            if block.key in index.block_ids:
+                delivery[prefix + index.coverage_key(block)] = index.versions[block.key]
 
     def _render_recent(
         self,

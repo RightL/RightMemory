@@ -134,11 +134,10 @@ shared_views/auth-api-files/
 
 Only `dist/MEMORY.md` and `dist/manifest.toml` are always present. The other
 files appear when referenced by F#, M#, or S# headings. `dist/MEMORY.md` is a
-schema-valid Memory document, not a prose wrapper: ordinary headings and nodes
+document following the Memory schema: ordinary headings and leaves
 plus F#, M#, and S# are allowed, and every typed heading must have its
-package-local backing. Content-bearing headings and leaf items need their own
-id or an addressed heading ancestor. Anonymous headings without their own body
-may group addressed descendants. Body fences and leaf contents follow the
+package-local backing. Ordinary headings and leaves may omit stored ids;
+Retrieve supplies temporary ids in its reading copy. Body fences and leaf contents follow the
 shared schema and create no additional graph items. Nested MF# and MQ#
 headings are invalid. The package has one view-local id namespace, so its ids
 cannot collide with local memory or a different MF# view and its edges cannot

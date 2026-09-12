@@ -93,7 +93,7 @@ class SharedViewPackageV2Tests(unittest.TestCase):
                 view_id="auth-api",
                 title="Auth API",
                 intent="Expose generated auth context.",
-                memory_document="# Arbitrary wrapper\n\nUnaddressed prose.\n",
+                memory_document="# Invalid import {MF#nested}\n",
                 approved=True,
             )
 

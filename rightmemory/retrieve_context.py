@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import subprocess
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -14,8 +14,8 @@ from .retrieve_selection import DeliveredRange, RetrieveDeliveryCoverage
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
 
 
-SNAPSHOT_HEADER = "Daily RightMemory root snapshot"
-SNAPSHOT_SCOPE = "rightmemory-roots-v3"
+SNAPSHOT_HEADER = "RightMemory root retrieval view"
+SNAPSHOT_SCOPE = "rightmemory-roots-v4"
 DIFF_HEADER = "RightMemory root changes since previous retrieve turn"
 RECENT_SUBMITTED_CONTEXT_HEADER = "Recent submitted RightMemory candidates"
 UPDATED_MATERIAL_HEADER = "Updated retrieval material"
@@ -42,6 +42,8 @@ class RetrieveSessionState:
     model_history_json: bytes | None = field(default=None, repr=False)
     visible_recent_candidates: dict[str, str] = field(default_factory=dict)
     delivery_coverage: RetrieveDeliveryCoverage = field(default_factory=RetrieveDeliveryCoverage)
+    selection_state: dict = field(default_factory=dict)
+    root_views: dict[str, str] = field(default_factory=dict)
 
 
 class RetrieveContextStore:
@@ -62,6 +64,8 @@ class RetrieveContextStore:
             "model_history",
             "visible_recent_candidates",
             "delivery_coverage",
+            "selection_state",
+            "root_views",
         }
         unknown = set(data) - allowed
         if unknown:
@@ -87,12 +91,20 @@ class RetrieveContextStore:
         ):
             raise ValueError("retrieve context visible_recent_candidates must be a string map")
         coverage = _coverage_from_dict(data.get("delivery_coverage", {}))
+        selection_state = data.get("selection_state", {})
+        root_views = data.get("root_views", {})
+        if not isinstance(selection_state, dict) or not isinstance(root_views, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str) for key, value in root_views.items()
+        ):
+            raise ValueError("retrieve reading view state is malformed")
         return RetrieveSessionState(
             session_id=session_id,
             delivered_memory_commit=delivered,
             model_history_json=model_history_json,
             visible_recent_candidates=dict(raw_visible),
             delivery_coverage=coverage,
+            selection_state=selection_state,
+            root_views=root_views,
         )
 
     def record_success(
@@ -103,6 +115,7 @@ class RetrieveContextStore:
         model_history_json: bytes | None,
         visible_recent_candidates: dict[str, str],
         delivery: RetrieveDeliveryCoverage | None = None,
+        root_views: dict[str, str] | None = None,
     ) -> None:
         state = self.load(session_id)
         next_state = RetrieveSessionState(
@@ -111,8 +124,15 @@ class RetrieveContextStore:
             model_history_json=model_history_json,
             visible_recent_candidates=dict(visible_recent_candidates),
             delivery_coverage=state.delivery_coverage.merged(delivery or RetrieveDeliveryCoverage()),
+            selection_state=state.selection_state,
+            root_views=state.root_views if root_views is None else dict(root_views),
         )
         self._write(next_state)
+
+    def record_selection_state(self, session_id: str, selection_state: dict) -> None:
+        # Record issuance before calling the provider: a failed call may still
+        # leave these IDs in provider history.
+        self._write(replace(self.load(session_id), selection_state=selection_state))
 
     def reset(self, session_id: str) -> bool:
         path = self._state_path(session_id)
@@ -133,6 +153,8 @@ class RetrieveContextStore:
             "model_history": _model_history_value(state.model_history_json),
             "visible_recent_candidates": dict(state.visible_recent_candidates),
             "delivery_coverage": _coverage_to_dict(state.delivery_coverage),
+            "selection_state": state.selection_state,
+            "root_views": state.root_views,
         }
         _write_json(self.memory_root, self._state_path(state.session_id), data)
 
@@ -147,18 +169,20 @@ def root_memory_paths(memory_root: Path) -> list[str]:
     return [name for name in names if (root / name).is_file()]
 
 
-def load_daily_snapshot(memory_root: Path, *, now: datetime | None = None) -> DailySnapshot:
+def load_daily_snapshot(memory_root: Path, *, now: datetime | None = None,
+                        documents: dict[str, str] | None = None) -> DailySnapshot:
     root = Path(memory_root)
     now = datetime.now(UTC) if now is None else now.astimezone(UTC)
     day = now.date().isoformat()
     state_path = root / SNAPSHOT_STATE
     if state_path.exists():
         data = json.loads(state_path.read_text(encoding="utf-8"))
-        if data.get("day") == day and data.get("scope") == SNAPSHOT_SCOPE:
+        if (data.get("day") == day and data.get("scope") == SNAPSHOT_SCOPE
+                and (documents is None or data.get("text") == _join_snapshot_documents(documents))):
             return _snapshot_from_dict(data)
 
     paths = root_memory_paths(root)
-    text = _render_snapshot_text(root, paths)
+    text = _render_snapshot_text(root, paths) if documents is None else _join_snapshot_documents(documents)
     snapshot = DailySnapshot(
         day=day,
         base_commit=current_memory_head(root),
@@ -168,6 +192,35 @@ def load_daily_snapshot(memory_root: Path, *, now: datetime | None = None) -> Da
     )
     _write_json(root, state_path, asdict(snapshot))
     return snapshot
+
+
+def retrieval_root_views(memory_root: Path, view) -> dict[str, str]:
+    documents = {}
+    corrections = {path: source_id for source_id, path in AGENT_CORRECTION_SOURCE_PATHS.items()}
+    for relative in root_memory_paths(memory_root):
+        path = (memory_root / relative).resolve()
+        if path in view.local.manifest.documents:
+            documents[relative] = view.local.document_text(path)
+        else:
+            text = path.read_text(encoding="utf-8")
+            documents[relative] = f"===== {relative} =====\n" + annotate_agent_correction_entries(text, corrections[relative])
+    return documents
+
+
+def retrieval_view_diff(previous: dict[str, str], current: dict[str, str]) -> str:
+    parts = []
+    for path in sorted(previous.keys() | current.keys()):
+        patch = "\n".join(difflib.unified_diff(
+            previous.get(path, "").splitlines(), current.get(path, "").splitlines(),
+            fromfile=f"a/{path}", tofile=f"b/{path}", lineterm="",
+        ))
+        if patch:
+            parts.append(patch)
+    return "\n\n".join(parts)
+
+
+def _join_snapshot_documents(documents: dict[str, str]) -> str:
+    return "\n\n".join([SNAPSHOT_HEADER, *(text.rstrip() for text in documents.values())]) + "\n"
 
 
 def current_memory_head(memory_root: Path) -> str | None:
@@ -246,7 +299,7 @@ def format_memory_diff_block(diff: str) -> str:
         return ""
     return (
         f"# {DIFF_HEADER}\n\n"
-        "Apply this patch mentally to the daily RightMemory root snapshot. "
+        "Apply this patch to the previous RightMemory reading copy. "
         "Added lines are current. Removed lines are obsolete.\n\n"
         "```diff\n"
         f"{clean}\n"

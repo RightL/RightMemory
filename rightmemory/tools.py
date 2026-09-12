@@ -19,6 +19,7 @@ from .graph import (
     validate_item_id,
 )
 from .guidance import GUIDANCE_INBOX_PATH
+from .retrieve_view import ACTIVE_RETRIEVE_VIEW
 from .share_models import ShareFilePart, ShareQuestionPart, ShareRelationship, load_shares, save_shares, validate_share_id
 from .share_results import normalize_share_capability
 from .shared_view_files import (
@@ -145,6 +146,7 @@ class MemoryTools:
     def read_mf(self, mf_id: str, resource_id: str | None = None) -> str:
         """Read a validated MF document or one referenced F#, M#, or S# resource."""
         clean_id = self._validate_memory_reference_id(mf_id)
+        view = ACTIVE_RETRIEVE_VIEW.get() if self.role == "retrieve" else None
         package_root = (
             self.memory_root
             / RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX
@@ -156,18 +158,23 @@ class MemoryTools:
             if connection is not None and connection.target.view_id
             else clean_id
         )
-        try:
-            validated = validate_file_view_package(
-                package_root,
-                expected_view_id=expected_view_id,
-                namespace_id=clean_id,
-            )
-        except (FileNotFoundError, OSError, FileViewPackageError):
-            return self._missing_mf_message(clean_id)
+        if view is not None:
+            validated = view.packages.get(clean_id)
+            if validated is None:
+                return self._missing_mf_message(clean_id)
+        else:
+            try:
+                validated = validate_file_view_package(
+                    package_root,
+                    expected_view_id=expected_view_id,
+                    namespace_id=clean_id,
+                )
+            except (FileNotFoundError, OSError, FileViewPackageError):
+                return self._missing_mf_message(clean_id)
         if resource_id is None:
-            result = self._read_numbered_source(
-                package_root / "dist" / "MEMORY.md",
-                f"MF#{clean_id}",
+            result = (
+                f"Source: MF#{clean_id}\n\n" + view.indexes[f"MF#{clean_id}"].document_text(validated.manifest.root / "MEMORY.md")
+                if view is not None else self._read_numbered_source(package_root / "dist" / "MEMORY.md", f"MF#{clean_id}")
             )
             resources = sorted(
                 f"{reference.kind}{reference.id}"
@@ -189,6 +196,8 @@ class MemoryTools:
         ):
             raise ValueError(f"unknown or mismatched MF resource: {resource_id}")
         label = f"MF#{clean_id}/{marker}{inner_id}"
+        if marker == "F#" and view is not None:
+            return f"Source: {label}\n\n" + view.indexes[f"MF#{clean_id}"].document_text(reference.path.resolve())
         if marker == "S#":
             return self._read_text(reference.path)
         return self._read_numbered_source(reference.path, label)
@@ -196,6 +205,15 @@ class MemoryTools:
     def read_detail(self, detail_id: str) -> str:
         """Read the root-relative graph detail file for an F# heading id."""
         clean_id = self._validate_memory_reference_id(detail_id)
+        view = ACTIVE_RETRIEVE_VIEW.get() if self.role == "retrieve" else None
+        if view is not None:
+            reference = view.local.manifest.backing.get(clean_id)
+            if reference is None or reference.kind != "F#":
+                return self._missing_typed_backing_message("F# detail", clean_id, "F#")
+            path = reference.path.resolve()
+            if path not in view.local.manifest.documents:
+                return self._missing_typed_backing_message("F# detail", clean_id, "F#")
+            return view.local.document_text(path)
         reference = resolve_backing_reference(self.memory_root, clean_id, "F#")
         if reference is None or not self._is_safe_read_file(reference.path):
             return self._missing_typed_backing_message("F# detail", clean_id, "F#")

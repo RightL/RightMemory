@@ -284,7 +284,7 @@ Common top-level domains include project or work domains, `# User Context`, and 
 
 `#`, `##`, and `###` are normal tree layers and may contain Memory or Pursuit content. They can have `{#slug}` anchors and heading-level edges when the whole subtree is useful as a graph target.
 
-Headings branch; list items remain leaves. A heading's own Markdown body excludes its leaf items and subheadings. Titles and ids are optional: `## Topic`, `## {#topic}`, and `##` are all valid. Anonymous content belongs to the tree and is retrieved through an addressed ancestor. An id supplies a durable address for independent retrieval, edges, Focus, or a typed backing.
+Headings branch; list items remain leaves. A heading's own Markdown body excludes its leaf items and subheadings. Titles and ids are optional: `## Topic`, `## {#topic}`, and `##` are all valid. Retrieve supplies missing ids in its reading copy so anonymous headings and leaves can be selected independently. Stored ids provide durable addresses for saved references, edges, Focus, and typed backings.
 
 CommonMark block boundaries, with pipe tables, determine content ownership. Ordinary paragraphs, images, quotes, code, HTML, tables, and Setext headings belong to the surrounding body. Use an optional `:::body` / `:::` fence when that body itself needs ATX headings or lists. Fence markers are standalone, unindented lines; opening and closing colon counts match. Use more colons when the payload includes a matching closing line. Unclosed or unmatched fences are errors. Stored Markdown retains the delimiters; rendered retrieval omits them.
 

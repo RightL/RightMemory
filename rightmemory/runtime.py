@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -39,8 +39,10 @@ from .retrieve_context import (
     format_recent_submitted_context_block,
     format_updated_material_block,
     load_daily_snapshot,
-    memory_diff_since,
+    retrieval_root_views,
+    retrieval_view_diff,
 )
+from .retrieve_view import ACTIVE_RETRIEVE_VIEW, RetrieveView
 from .retrieve_selection import (
     RenderedRetrieveSelection,
     RetrieveSelection,
@@ -119,6 +121,8 @@ class PreparedRetrieveTurn:
     visible_recent_candidates: dict[str, str]
     memory_commit: str | None
     model_history_json: bytes | None
+    view: RetrieveView | None = None
+    root_views: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -685,6 +689,7 @@ class RightMemoryRuntime:
     ) -> CompletedRetrieveTurn:
         history = self._retrieve_message_history(prepared)
         active_token = _ACTIVE_RETRIEVE_TURN.set(prepared)
+        view_token = ACTIVE_RETRIEVE_VIEW.set(prepared.view)
         try:
             result = self.agent.run_sync(
                 format_query_block(prepared.query),
@@ -693,6 +698,7 @@ class RightMemoryRuntime:
                 usage_limits=self._usage_limits(),
             )
         finally:
+            ACTIVE_RETRIEVE_VIEW.reset(view_token)
             _ACTIVE_RETRIEVE_TURN.reset(active_token)
         selection = self._coerce_retrieve_selection(getattr(result, "output", result))
         rendered = self._render_retrieve_selection(prepared, selection)
@@ -745,6 +751,7 @@ class RightMemoryRuntime:
         renderer = RetrieveSelectionRenderer(
             self.config.memory_root,
             max_output_chars=self.config.retrieve_max_output_chars,
+            view=prepared.view,
         )
         return renderer.render(
             selection,
@@ -1517,19 +1524,17 @@ class RightMemoryRuntime:
             raise ValueError("cli_agent_phase must be new, resume, or None")
         if cli_agent_phase == "new":
             self.retrieve_context.reset(session_id)
-        snapshot = load_daily_snapshot(self.config.memory_root)
         state = self.retrieve_context.load(session_id)
+        view = RetrieveView(self.config.memory_root, state.selection_state)
+        self.retrieve_context.record_selection_state(session_id, view.state)
+        root_views = retrieval_root_views(self.config.memory_root, view)
+        snapshot = load_daily_snapshot(self.config.memory_root, documents=root_views)
         new_conversation = (
             cli_agent_phase == "new"
             or (cli_agent_phase is None and state.model_history_json is None)
         )
         current_commit = current_memory_head(self.config.memory_root)
-        base_commit = (
-            snapshot.base_commit
-            if new_conversation
-            else state.delivered_memory_commit
-        )
-        diff = memory_diff_since(self.config.memory_root, base_commit, current_commit)
+        diff = "" if new_conversation else retrieval_view_diff(state.root_views, root_views)
         diff_block = format_memory_diff_block(diff)
 
         entries = collect_recent_submitted_memory(self.config.memory_root)
@@ -1566,6 +1571,7 @@ class RightMemoryRuntime:
         renderer = RetrieveSelectionRenderer(
             self.config.memory_root,
             max_output_chars=self.config.retrieve_max_output_chars,
+            view=view,
         )
         updated_block = format_updated_material_block(
             renderer.changed_delivery_labels(
@@ -1587,6 +1593,7 @@ class RightMemoryRuntime:
                 context_renderer = RetrieveSelectionRenderer(
                     self.config.memory_root,
                     max_output_chars=sys.maxsize,
+                    view=view,
                 )
                 current_material = context_renderer.render(
                     current_selection,
@@ -1595,12 +1602,22 @@ class RightMemoryRuntime:
                 current_material_block = format_current_material_block(
                     current_material.text
                 )
+        reading_files = ""
+        if cli_agent_phase is not None:
+            directory = view.write_files(session_id)
+            reading_files = (
+                f"Graph retrieval copies: `{directory.as_posix()}`. "
+                "Read local graph files under `local/` and MF graph files under `imports/<view-id>/`; "
+                "these copies contain the selection IDs for this turn. "
+                "Linked resources, including M# and S# backings, retain their paths under the original Memory root or MF dist directory."
+            )
         prefix_context = snapshot.text if cli_agent_phase == "new" else None
         context_parts = tuple(
             part
             for part in (
                 snapshot.text if new_conversation and prefix_context is None else "",
                 diff_block,
+                reading_files,
                 recent_block,
                 updated_block,
                 current_material_block,
@@ -1619,6 +1636,8 @@ class RightMemoryRuntime:
             recent_submitted_entries=entries,
             visible_recent_candidates=current_visible,
             memory_commit=current_commit,
+            view=view,
+            root_views=root_views,
             model_history_json=(
                 state.model_history_json
                 if cli_agent_phase is None
@@ -1640,6 +1659,7 @@ class RightMemoryRuntime:
             model_history_json=completed.model_history_json,
             visible_recent_candidates=prepared.visible_recent_candidates,
             delivery=completed.rendered.delivery,
+            root_views=prepared.root_views,
         )
 
     def _pull_file_views_for_retrieve(self) -> None:
