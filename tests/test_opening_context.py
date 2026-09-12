@@ -18,6 +18,11 @@ class OpeningContextTests(unittest.TestCase):
     def write(self, name: str, text: str) -> None:
         (self.root / name).write_text(text, encoding="utf-8", newline="")
 
+    def plain(self, path: str, line: int) -> str:
+        from rightmemory.graph import build_graph_manifest, snapshot_block_id
+        manifest = build_graph_manifest(self.root)
+        return snapshot_block_id(manifest, manifest.blocks[(self.root / path, line)])
+
     def snapshot(self, item_id: str) -> dict[str, object]:
         items = load_pursuit_tree(self.root).to_dict()["items"]
         return next(item for item in items if item["id"] == item_id)
@@ -99,11 +104,11 @@ Unrelated secret.
         self.assertEqual(
             set(selected),
             {
-                "plain:MEMORY.md:1",
+                self.plain("MEMORY.md", 1),
                 "incoming",
                 "second-outgoing",
                 "outgoing",
-                "plain:PURSUITS.md:1",
+                self.plain("PURSUITS.md", 1),
                 "current",
             },
         )
@@ -121,7 +126,7 @@ Unrelated secret.
                 for selection_id, section in selected.items()
             },
             {
-                "plain:MEMORY.md:1": ("heading", "MEMORY.md", 1, ()),
+                self.plain("MEMORY.md", 1): ("heading", "MEMORY.md", 1, ()),
                 "incoming": ("heading", "MEMORY.md", 3, (("MEMORY.md", 5, 5),)),
                 "second-outgoing": (
                     "heading",
@@ -130,14 +135,14 @@ Unrelated secret.
                     (("MEMORY.md", 13, 13),),
                 ),
                 "outgoing": ("heading", "MEMORY.md", 15, (("MEMORY.md", 17, 17),)),
-                "plain:PURSUITS.md:1": ("heading", "PURSUITS.md", 1, ()),
+                self.plain("PURSUITS.md", 1): ("heading", "PURSUITS.md", 1, ()),
                 "current": ("heading", "PURSUITS.md", 7, (("PURSUITS.md", 9, 9),)),
             },
         )
         self.assertTrue(
             set(selected).isdisjoint(
                 {
-                    "plain:PURSUITS.md:3",
+                    self.plain("PURSUITS.md", 3),
                     "current-child",
                     "incoming-child",
                     "outgoing-child",
@@ -178,9 +183,9 @@ Unrelated secret.
             "Bridge backing-root prose.\n\n# Plain leaf\n\nLeaf-owned prose.\n",
         )
 
-        context = self.build("plain:PURSUIT_bridge.md:3")
+        context = self.build(self.plain("PURSUIT_bridge.md", 3))
 
-        self.assertEqual(context.current.selection_id, "plain:PURSUIT_bridge.md:3")
+        self.assertEqual(context.current.selection_id, self.plain("PURSUIT_bridge.md", 3))
         self.assertEqual(context.current.block_kind, "heading")
         self.assertEqual(
             (context.current.source_path, context.current.source_line),
@@ -197,11 +202,11 @@ Unrelated secret.
         self.assertEqual(context.edge_triples, ())
         self.assertEqual(
             [section.selection_id for section in context.ancestors],
-            ["plain:PURSUITS.md:1", "parent", "bridge"],
+            [self.plain("PURSUITS.md", 1), "parent", "bridge"],
         )
         self.assertEqual(
             [section.selection_id for section in context.sections],
-            ["plain:PURSUITS.md:1", "parent", "bridge", "plain:PURSUIT_bridge.md:3"],
+            [self.plain("PURSUITS.md", 1), "parent", "bridge", self.plain("PURSUIT_bridge.md", 3)],
         )
         parent = next(section for section in context.sections if section.selection_id == "parent")
         bridge = next(section for section in context.sections if section.selection_id == "bridge")
@@ -294,7 +299,7 @@ Unrelated secret.
         self.assertEqual(context.edge_triples, (("legacy", "doc", "memory-target"),))
         self.assertEqual(
             [section.selection_id for section in context.ancestors],
-            ["plain:MEMORY.md:1", "plain:PURSUITS.md:1", "direction"],
+            [self.plain("MEMORY.md", 1), self.plain("PURSUITS.md", 1), "direction"],
         )
 
 

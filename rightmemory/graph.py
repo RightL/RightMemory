@@ -28,23 +28,24 @@ KNOWN_EDGE_TYPES = {
 ITEM_ID_PATTERN = r"[A-Za-z0-9_.-]+"
 ITEM_ID_RE = re.compile(rf"^{ITEM_ID_PATTERN}$")
 ANCHOR_RE = re.compile(
-    rf"^(#{{1,}})\s+.*?\{{(F#|M#|S#|MF#|MQ#|#)({ITEM_ID_PATTERN})\}}"
-    r"(?:\s*(?:\u2192|->)\s*\[(.*?)\])?\s*$"
+    rf"^ {{0,3}}(#{{1,}})[ \t]+.*?\{{(F#|M#|S#|MF#|MQ#|#)({ITEM_ID_PATTERN})\}}"
+    r"(?:\s*(?:\u2192|->)\s*\[(.*?)\])?(?:[ \t]+#+)?[ \t]*$"
 )
 ANCHOR_CANDIDATE_RE = re.compile(
-    r"^(#{1,})\s+.*?\{(F#|M#|S#|MF#|MQ#|#)([^}]*)\}"
+    r"^ {0,3}(#{1,})[ \t]+.*?\{(F#|M#|S#|MF#|MQ#|#)([^}]*)\}(?=\s*(?:(?:→|->)\s*\[.*|#+)?$)"
 )
-UNSUPPORTED_ANCHOR_RE = re.compile(r"^(#{1,})\s+.*?\{([A-Za-z]+#)([^}]*)\}")
-NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s(?:\u2192|->)\s*\[(.*?)\])\s*$")
-NODE_CANDIDATE_RE = re.compile(r"^\s*-\s+`([^`]+)`(?:\s|$)")
-# Reading compatibility for existing user data, not the current Pursuit schema.
-LEGACY_PURSUIT_FIELD_RE = re.compile(r"^\s*\*\*(State|Next|Done when|Status):\*\*", re.IGNORECASE)
+UNSUPPORTED_ANCHOR_RE = re.compile(r"^ {0,3}(#{1,})[ \t]+.*?\{([A-Za-z]+#)([^}]*)\}(?=\s*(?:(?:→|->)\s*\[.*|#+)?$)")
+NODE_RE = re.compile(r"^\s*(?:[-+*]|[0-9]{1,9}[.)])\s+`([^`]+)`.*(?:\s(?:\u2192|->)\s*\[(.*?)\])\s*$")
+NODE_CANDIDATE_RE = re.compile(r"^\s*(?:[-+*]|[0-9]{1,9}[.)])\s+`(?!`)([^`]*)`(?!`)(?:\s|$)")
 EDGE_RE = re.compile(rf"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*({ITEM_ID_PATTERN})\s*$")
-FOCUS_HEADING_RE = re.compile(r"^##\s+Focus\s*$", re.IGNORECASE)
+FOCUS_HEADING_RE = re.compile(r"^ {0,3}##[ \t]+Focus(?:[ \t]+#+)?[ \t]*$", re.IGNORECASE)
 FOCUS_REFERENCE_RE = re.compile(rf"^\s*-\s+`({ITEM_ID_PATTERN})`(?:\s|$)")
 FOCUS_CANDIDATE_RE = re.compile(r"^\s*-\s+`([^`]+)`(?:\s|$)")
-HEADING_RE = re.compile(r"^(#+)\s+")
+HEADING_RE = re.compile(r"^ {0,3}(#+)(?:[ \t]+|$)")
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+BODY_OPEN_RE = re.compile(r"^(:{3,})body[ \t]*$")
+BODY_CLOSE_RE = re.compile(r"^:{3,}[ \t]*$")
+LIST_PREFIX_RE = re.compile(r"^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)")
 
 MEMORY_DETAIL_FILE_RE = re.compile(rf"^MEMORY_{ITEM_ID_PATTERN}\.md$")
 MEMORY_SKILL_FILE_RE = re.compile(rf"^MEMORY_SKILL_{ITEM_ID_PATTERN}\.md$")
@@ -57,6 +58,10 @@ MEMORY_ONLY_ANCHOR_KINDS = {"M#", "S#", "MF#", "MQ#"}
 TERMINAL_HEADING_KINDS = {"F#", "M#", "S#", "MF#", "MQ#"}
 
 BlockKey = tuple[Path, int]
+
+
+class BodyFenceDelimiter(str):
+    """A source delimiter retained for editing and omitted from rendered content."""
 
 
 def is_valid_item_id(value: str) -> bool:
@@ -81,9 +86,59 @@ class AddressableHeading:
     malformed_edges: tuple[str, ...] = ()
 
 
+def _literal_mask(line: str) -> str:
+    """Mask escaped characters and complete inline code spans, preserving offsets."""
+    chars = list(line)
+    index = 0
+    while index < len(line):
+        if line[index] == "\\" and index + 1 < len(line):
+            chars[index:index + 2] = "  "
+            index += 2
+        elif line[index] == "`":
+            run = re.match(r"`+", line[index:]).group()
+            close = re.search(r"(?<!`)" + run + r"(?!`)", line[index + len(run):])
+            if close is None:
+                index += len(run)
+            else:
+                end = index + len(run) + close.end()
+                chars[index:end] = " " * (end - index)
+                index = end
+        else:
+            index += 1
+    return "".join(chars)
+
+
+def _heading_declarations(line: str):
+    mask = _literal_mask(line)
+    matches = []
+    for regex in (ANCHOR_RE, ANCHOR_CANDIDATE_RE, UNSUPPORTED_ANCHOR_RE):
+        match = regex.match(line)
+        if match is not None and mask[match.start(2) - 1:match.start(2)] != "{":
+            match = None
+        if match is not None and regex is ANCHOR_RE and match.group(4) is not None:
+            if mask[match.start(4) - 1] != "[":
+                match = None
+        matches.append(match)
+    return tuple(matches)
+
+
+def _node_declaration(line: str):
+    candidate = NODE_CANDIDATE_RE.match(line)
+    if candidate is None:
+        return None, None
+    mask = _literal_mask(line)
+    markers = list(re.finditer(r"(?:→|->)\s*\[", mask[candidate.end():]))
+    if not markers:
+        return None, None
+    node = NODE_RE.match(line)
+    if node is not None and node.start(2) - 1 != candidate.end() + markers[-1].end() - 1:
+        node = None
+    return candidate, node
+
+
 def parse_addressable_heading(line: str) -> AddressableHeading | None:
     """Read a heading using the same grammar as the canonical document index."""
-    match = ANCHOR_RE.match(line.rstrip("\r\n"))
+    match, _, _ = _heading_declarations(line.rstrip("\r\n"))
     if match is None:
         return None
     heading = HEADING_RE.match(line)
@@ -107,18 +162,18 @@ def heading_title(line: str) -> str:
     heading = HEADING_RE.match(line)
     if heading is None:
         raise ValueError("expected a Markdown heading")
-    return line[heading.end():].strip()
+    return re.sub(r"[ \t]+#+[ \t]*$", "", line[heading.end():]).strip()
 
 
 def validate_heading_title(title: str) -> str:
     """Reject titles that would change the structural meaning of a heading."""
-    if not isinstance(title, str) or not title.strip():
-        raise ValueError("title must be a nonempty string")
+    if not isinstance(title, str):
+        raise ValueError("title must be a string")
     title = title.strip()
-    if len(title.splitlines()) != 1 or "\x00" in title:
+    if "\n" in title or "\r" in title or "\x00" in title:
         raise ValueError("title must fit on one line")
     probe = f"## {title}"
-    if ANCHOR_CANDIDATE_RE.match(probe) or UNSUPPORTED_ANCHOR_RE.match(probe):
+    if any(_heading_declarations(probe)):
         raise ValueError("title must not contain a RightMemory heading anchor")
     return title
 
@@ -150,12 +205,15 @@ def render_heading_line(
 
 
 def replace_heading_title(line: str, title: str) -> str:
-    """Patch only an addressed heading's title, retaining its anchor and suffix."""
+    """Patch a heading's title, retaining any existing address and edge suffix."""
     title = validate_heading_title(title)
-    anchor = ANCHOR_RE.match(line.rstrip("\r\n"))
+    anchor, _, _ = _heading_declarations(line.rstrip("\r\n"))
     heading = HEADING_RE.match(line)
-    if anchor is None or heading is None:
-        raise ValueError("expected an addressable heading")
+    if heading is None:
+        raise ValueError("expected a Markdown heading")
+    if anchor is None:
+        ending = line[len(line.rstrip("\r\n")):]
+        return line[:heading.end()].rstrip(" \t") + (" " + title if title else "") + ending
     title_end = anchor.start(2) - 1
     old_title = line[heading.end():title_end]
     spacing = old_title[len(old_title.rstrip()):]
@@ -165,10 +223,10 @@ def replace_heading_title(line: str, title: str) -> str:
 def remove_edge_targets(line: str, deleted_ids: set[str] | frozenset[str]) -> str:
     """Remove selected typed edges without changing prose, other edges, or newlines."""
     source = line.rstrip("\r\n")
-    match = ANCHOR_RE.match(source)
+    match, _, _ = _heading_declarations(source)
     group = 4
     if match is None:
-        match = NODE_RE.match(source)
+        _, match = _node_declaration(source)
         group = 2
     if match is None or match.group(group) is None:
         return line
@@ -239,6 +297,9 @@ class ParsedDocument:
     family: str
     source_order: int
     root_key: BlockKey
+    body_delimiters: set[int] = field(default_factory=set)
+    reference_spans: list[SourceSpan] = field(default_factory=list)
+    references: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -304,6 +365,7 @@ class GraphManifest:
     duplicates: set[str] = field(default_factory=set)
     diagnostics: list[GraphDiagnostic] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    snapshot_hash: str = ""
 
     @property
     def files(self) -> list[Path]:
@@ -335,7 +397,165 @@ def span_text(manifest: GraphManifest, span: SourceSpan | None) -> str:
 
 
 def block_body_text(manifest: GraphManifest, block: DocumentBlock | GraphItem) -> str:
-    return span_text(manifest, block.body_span)
+    """Source-editable own body, with separation across backing boundaries."""
+    if isinstance(block, GraphItem):
+        block = manifest.blocks[block.block_key]
+    pieces = []
+    for part in block.logical_text_parts:
+        if part.line_number == 0:
+            pieces.append("\n" if not pieces or pieces[-1].endswith(("\n", "\r")) else "\n\n")
+        else:
+            pieces.append(span_text(manifest, SourceSpan(part.source_path, part.line_number, part.line_number)))
+    return "".join(pieces)
+
+
+def snapshot_block_id(manifest: GraphManifest, block: DocumentBlock) -> str:
+    """Anonymous handles identify one exact snapshot, never persistent identity."""
+    if block.item_id is not None:
+        return block.item_id
+    relative = block.source_path.relative_to(manifest.root).as_posix()
+    return f"plain:{relative}:{block.line_number}:{manifest.snapshot_hash}"
+
+
+def _reference_parser(*, body_fences: bool = True):
+    from markdown_it import MarkdownIt
+    from markdown_it.helpers import parseLinkLabel
+    from markdown_it.rules_inline import image, link
+
+    parser = MarkdownIt("commonmark", {"store_labels": True}).enable("table")
+
+    def trace(rule, image_rule=False):
+        def wrapped(state, silent):
+            if state.src[state.pos] != ("!" if image_rule else "["):
+                return False
+            start, first = state.pos, len(state.tokens)
+            label_end = parseLinkLabel(state, start + int(image_rule), not image_rule)
+            accepted = rule(state, silent)
+            if accepted and not silent and first < len(state.tokens):
+                expected = "image" if image_rule else "link_open"
+                token = next((item for item in state.tokens[first:] if item.type == expected), None)
+                if token is not None and token.meta.get("label") is not None:
+                    token.meta["reference_suffix"] = (label_end + 1, state.pos)
+            return accepted
+        return wrapped
+
+    parser.inline.ruler.at("link", trace(link))
+    parser.inline.ruler.at("image", trace(image, True))
+    if body_fences:
+        parser.block.ruler.before("fence", "rightmemory_body", _body_fence_rule,
+                                 {"alt": ["paragraph", "reference", "blockquote", "list"]})
+    return parser
+
+
+def resolve_markdown_references(text: str, document: ParsedDocument, *, _body_fences: bool = True) -> str:
+    """Make extracted Markdown independent of document-local link definitions.
+
+    Only references recognized by CommonMark are rewritten, as inline links.
+    Code, HTML, escaping, visible link text, and all other source text survive.
+    Graph files and their backings are siblings, so relative resource bases stay
+    the same across their physical boundaries.
+    """
+    if not document.references:
+        return text
+    parser = _reference_parser(body_fences=_body_fences)
+    environment = {"references": dict(document.references)}
+    tokens = parser.parse(text, environment)
+    lines = text.splitlines(keepends=True)
+    starts, offset = [], 0
+    for line in lines:
+        starts.append(offset)
+        offset += len(line)
+    replacements = []
+    in_cell = False
+    cell_offsets: dict[int, int] = {}
+    for token in tokens:
+        if token.type in {"th_open", "td_open"}:
+            in_cell = True
+        elif token.type in {"th_close", "td_close"}:
+            in_cell = False
+        if token.type == "rightmemory_body" and token.map and not token.meta["error"]:
+            start, end = token.map
+            payload_start, payload_end = starts[start + 1], starts[end - 1]
+            replacements.append((payload_start, payload_end,
+                                 resolve_markdown_references(text[payload_start:payload_end], document, _body_fences=False)))
+            continue
+        if token.type != "inline" or token.map is None:
+            continue
+        if not in_cell and not any("reference_suffix" in child.meta for child in token.children or []):
+            continue
+        fragments = token.content.split("\n")
+        locations = []
+        content_offset = 0
+        for number, fragment in enumerate(fragments, token.map[0]):
+            if number >= len(lines):
+                break
+            raw = lines[number]
+            positions = [index for index in range(len(raw))
+                         if not (in_cell and raw[index:index + 2] == "\\|")]
+            normalized = "".join(raw[index] for index in positions)
+            column = normalized.find(fragment, cell_offsets.get(number, 0) if in_cell else 0)
+            if column < 0:
+                raise ValueError("cannot preserve a Markdown reference source span")
+            if in_cell:
+                cell_offsets[number] = column + len(fragment)
+            mapped = positions[column:column + len(fragment)]
+            mapped.append(mapped[-1] + 1 if mapped else (positions[column] if column < len(positions) else len(raw)))
+            locations.append((content_offset, [starts[number] + position for position in mapped]))
+            content_offset += len(fragment) + 1
+
+        def source_offset(position):
+            begin, source_positions = next(pair for pair in reversed(locations) if pair[0] <= position)
+            return source_positions[position - begin]
+
+        for child in token.children or []:
+            suffix = child.meta.get("reference_suffix")
+            if suffix is None:
+                continue
+            href = child.attrGet("src" if child.type == "image" else "href") or ""
+            href = href.replace("<", "%3C").replace(">", "%3E")
+            title = child.attrGet("title")
+            destination = "(<" + href + ">"
+            if title:
+                destination += ' "' + title.replace("\\", "\\\\").replace('"', '\\"') + '"'
+            if in_cell:
+                destination = destination.replace("|", "\\|")
+            replacements.append((source_offset(suffix[0]), source_offset(suffix[1]), destination + ")"))
+    for start, end, replacement in sorted(replacements, reverse=True):
+        text = text[:start] + replacement + text[end:]
+    return text
+
+
+def rendered_block_parts(manifest: GraphManifest, block: DocumentBlock, *, physical: bool = False,
+                         retain_fences: bool = False) -> Iterable[str | BlockKey]:
+    """Project source-aware owned Markdown while preserving child positions."""
+    text_parts = iter(part for part in block.logical_text_parts
+                      if not physical or part.source_path == block.source_path)
+    pending: list[str] = []
+    source_path = block.source_path
+
+    def flush():
+        text = resolve_markdown_references("\n".join(pending), manifest.documents[source_path])
+        pending.clear()
+        return text
+
+    for part in block.physical_parts if physical else block.logical_parts:
+        if isinstance(part, tuple):
+            if pending:
+                yield flush()
+            yield part
+            continue
+        source = next(text_parts)
+        if source.source_path != source_path or isinstance(part, BodyFenceDelimiter):
+            if pending:
+                yield flush()
+            source_path = source.source_path
+        if isinstance(part, BodyFenceDelimiter):
+            if retain_fences:
+                yield str(part)
+        else:
+            pending.append(part)
+    if pending:
+        yield flush()
 
 
 @dataclass(frozen=True)
@@ -404,6 +624,10 @@ def _build_manifest(root: Path, profile: _ParseProfile) -> GraphManifest:
     if profile.require_addressed_body:
         _validate_addressed_body(manifest)
     _assign_logical_metadata(manifest)
+    digest = hashlib.sha256()
+    for document in sorted(manifest.documents.values(), key=lambda item: item.relative_path):
+        digest.update(document.relative_path.encode("utf-8") + b"\0" + document.text.encode("utf-8") + b"\0")
+    manifest.snapshot_hash = digest.hexdigest()
     manifest.graph_files.sort()
     manifest.non_graph_files = sorted(set(manifest.non_graph_files))
     return manifest
@@ -483,6 +707,75 @@ def _load_document(
     return root_key
 
 
+def _body_fence_rule(state, start_line: int, end_line: int, silent: bool) -> bool:
+    # The Markdown parser owns container boundaries. A marker inside a list,
+    # quote, HTML block, or code block never reaches this rule at level zero.
+    if state.level != 0 or state.tShift[start_line] != 0:
+        return False
+    line = state.src[state.bMarks[start_line]:state.eMarks[start_line]]
+    opener = BODY_OPEN_RE.fullmatch(line)
+    if opener is None and BODY_CLOSE_RE.fullmatch(line) is None:
+        return False
+    if silent:
+        return True
+    last = start_line
+    error = "unmatched closing body fence" if opener is None else "unclosed body fence"
+    if opener is not None:
+        for last in range(start_line + 1, end_line):
+            candidate = state.src[state.bMarks[last]:state.eMarks[last]]
+            if candidate.rstrip(" \t") == opener.group(1):
+                error = ""
+                break
+        else:
+            last = end_line - 1
+    state.line = last + 1
+    token = state.push("rightmemory_body", "", 0)
+    token.map = [start_line, state.line]
+    token.meta = {"error": error}
+    return True
+
+
+def _document_structure(manifest: GraphManifest, document: ParsedDocument) -> dict[int, tuple[str, int]]:
+    # Keep this import lazy: the installer bootstrap itself is stdlib-only.
+    from markdown_it import MarkdownIt
+
+    parser = MarkdownIt("commonmark").enable("table")
+    parser.block.ruler.before("fence", "rightmemory_body", _body_fence_rule,
+                             {"alt": ["paragraph", "reference", "blockquote", "list"]})
+    environment: dict = {}
+    tokens = parser.parse(document.text, environment)
+    structure = {}
+    for token in tokens:
+        if token.map is None:
+            continue
+        start, end = token.map
+        if token.type == "heading_open" and token.level == 0 and token.markup.startswith("#"):
+            structure[start + 1] = ("heading", end)
+        elif token.type == "list_item_open" and token.level == 1:
+            structure[start + 1] = ("node", end)
+        elif token.type == "rightmemory_body":
+            document.body_delimiters.add(start + 1)
+            if token.meta["error"]:
+                _add_error(manifest, f"{token.meta['error']} at {document.relative_path}:{start + 1}",
+                           document.path, start + 1)
+            else:
+                document.body_delimiters.add(end)
+                payload_environment: dict = {}
+                MarkdownIt("commonmark").enable("table").parse(
+                    "\n".join(document.lines[start + 1:end - 1]), payload_environment)
+                for label, reference in payload_environment.get("references", {}).items():
+                    reference["map"] = [number + start + 1 for number in reference["map"]]
+                    existing = environment.setdefault("references", {}).get(label)
+                    if existing is None or existing["map"][0] > reference["map"][0]:
+                        environment["references"][label] = reference
+    document.references.update(environment.get("references", {}))
+    for reference in environment.get("references", {}).values():
+        if "map" in reference:
+            start, end = reference["map"]
+            document.reference_spans.append(SourceSpan(document.path, start + 1, end))
+    return structure
+
+
 def _parse_document(
     manifest: GraphManifest,
     profile: _ParseProfile,
@@ -490,38 +783,25 @@ def _parse_document(
 ) -> list[tuple[BlockKey, BackingReference]]:
     stack: list[BlockKey] = []
     in_focus = False
-    in_pursuit_next = False
-    fence_char: str | None = None
-    fence_length = 0
     f_references: list[tuple[BlockKey, BackingReference]] = []
+    structure = _document_structure(manifest, document)
+    consumed_until = 0
 
     for line_number, line in enumerate(document.lines, start=1):
+        if line_number <= consumed_until:
+            continue
+        if line_number in document.body_delimiters:
+            line = BodyFenceDelimiter(line)
         parent_key = stack[-1] if stack else document.root_key
-        fence = FENCE_RE.match(line)
-        if fence is not None:
-            _append_text(manifest.blocks[parent_key], line, line_number)
-            marker = fence.group(1)
-            if fence_char is None:
-                fence_char = marker[0]
-                fence_length = len(marker)
-            elif marker[0] == fence_char and len(marker) >= fence_length:
-                fence_char = None
-                fence_length = 0
-            continue
-        if fence_char is not None:
-            _append_text(manifest.blocks[parent_key], line, line_number)
-            continue
-
-        heading_match = HEADING_RE.match(line)
+        kind, end_line = structure.get(line_number, ("body", line_number))
+        heading_match = HEADING_RE.match(line) if kind == "heading" else None
         if heading_match is not None:
             depth = len(heading_match.group(1))
             while stack and manifest.blocks[stack[-1]].depth >= depth:
                 manifest.blocks[stack.pop()].end_line = line_number - 1
             parent_key = stack[-1] if stack else document.root_key
             parent = manifest.blocks[parent_key]
-            anchor = ANCHOR_RE.match(line)
-            candidate = ANCHOR_CANDIDATE_RE.match(line)
-            unsupported = UNSUPPORTED_ANCHOR_RE.match(line)
+            anchor, candidate, unsupported = _heading_declarations(line)
             anchor_kind: str | None = None
             item_id: str | None = None
             edge_text = ""
@@ -559,7 +839,7 @@ def _parse_document(
 
             addressed = anchor or candidate or unsupported
             title_end = addressed.start(2) - 1 if addressed is not None else len(line)
-            indexed_title = line[heading_match.end():title_end].strip()
+            indexed_title = line[heading_match.end():title_end].strip() if addressed else heading_title(line)
 
             key = (document.path, line_number)
             block = DocumentBlock(
@@ -631,9 +911,6 @@ def _parse_document(
 
             if document.family == "pursuit" and depth <= 2:
                 in_focus = bool(profile.allow_focus and FOCUS_HEADING_RE.match(line))
-            if document.family == "pursuit":
-                in_pursuit_next = False
-
             if item_id is not None:
                 edges, malformed = _parse_edges(edge_text)
                 item = GraphItem(
@@ -686,13 +963,7 @@ def _parse_document(
 
         parent_key = stack[-1] if stack else document.root_key
         parent = manifest.blocks[parent_key]
-        if document.family == "pursuit":
-            field_match = LEGACY_PURSUIT_FIELD_RE.match(line)
-            if field_match:
-                in_pursuit_next = field_match.group(1).casefold() == "next"
-                _append_text(parent, line, line_number)
-                continue
-        if in_focus:
+        if in_focus and kind == "node":
             focus_candidate = FOCUS_CANDIDATE_RE.match(line)
             if focus_candidate is not None:
                 focus_id = focus_candidate.group(1)
@@ -711,7 +982,7 @@ def _parse_document(
                     kind="focus",
                     line=line,
                     line_number=line_number,
-                    end_line=line_number,
+                    end_line=end_line,
                     family=document.family,
                     source_path=document.path,
                     focus_target=focus_id,
@@ -722,16 +993,12 @@ def _parse_document(
                 _append_child(parent, key)
                 manifest.focus_ids.append((focus_id, document.path, line_number))
                 manifest.focus_blocks.append(key)
+                for number in range(line_number + 1, end_line + 1):
+                    _append_text(block, document.lines[number - 1], number)
+                consumed_until = end_line
                 continue
 
-        if document.family == "pursuit" and in_pursuit_next:
-            # Older roots used Next lists. Retain every line as unstructured body
-            # until another legacy field or heading, including unknown actions.
-            _append_text(parent, line, line_number)
-            continue
-
-        node_candidate = NODE_CANDIDATE_RE.match(line)
-        if node_candidate is not None:
+        if kind == "node":
             terminal_ancestor = _nearest_ancestor(
                 manifest,
                 stack,
@@ -754,9 +1021,9 @@ def _parse_document(
                     document.path,
                     line_number,
                 )
-            node = NODE_RE.match(line)
-            node_id = node_candidate.group(1)
-            if not is_valid_item_id(node_id):
+            node_candidate, node = _node_declaration(line)
+            node_id = node_candidate.group(1) if node_candidate else None
+            if node_id is not None and not is_valid_item_id(node_id):
                 _add_error(
                     manifest,
                     f"invalid node id `{node_id}` at {document.relative_path}:{line_number}; "
@@ -764,29 +1031,27 @@ def _parse_document(
                     document.path,
                     line_number,
                 )
-                _append_text(parent, line, line_number)
-                continue
-            if node is None:
+                node_id = None
+            elif node_candidate is not None and node is None:
                 _add_error(
                     manifest,
-                    f"node `{node_id}` must include an edge list such as `\u2192 []` at "
+                    f"node `{node_id}` has a malformed edge list at "
                     f"{document.relative_path}:{line_number}",
                     document.path,
                     line_number,
                 )
-                _append_text(parent, line, line_number)
-                continue
-            edges, malformed = _parse_edges(node.group(2) or "")
-            prose = _node_prose(line, node)
+                node_id = None
+            edges, malformed = _parse_edges(node.group(2) or "") if node and node_id else ([], [])
+            prose = _node_prose(line, node) if node and node_id else LIST_PREFIX_RE.sub("", line, count=1)
             key = (document.path, line_number)
             block = DocumentBlock(
                 key=key,
                 kind="node",
                 line=line,
-                title=prose or node_id,
+                title=prose or node_id or "",
                 prose=prose,
                 line_number=line_number,
-                end_line=line_number,
+                end_line=end_line,
                 item_id=node_id,
                 item_kind="node",
                 family=document.family,
@@ -796,25 +1061,29 @@ def _parse_document(
             )
             manifest.blocks[key] = block
             _append_child(parent, key)
-            _record_item(
-                manifest,
-                GraphItem(
-                    id=node_id,
-                    file=document.path,
-                    line_number=line_number,
-                    family=document.family,
-                    item_kind="node",
-                    anchor_kind=None,
-                    edges=tuple(edges),
-                    title=block.title,
-                    prose=block.prose,
-                    malformed_edges=tuple(malformed),
-                    block_key=key,
-                    end_line=line_number,
-                    physical_parent=parent_key,
-                    logical_parent=parent_key,
-                ),
-            )
+            for number in range(line_number + 1, end_line + 1):
+                _append_text(block, document.lines[number - 1], number)
+            consumed_until = end_line
+            if node_id is not None:
+                _record_item(
+                    manifest,
+                    GraphItem(
+                        id=node_id,
+                        file=document.path,
+                        line_number=line_number,
+                        family=document.family,
+                        item_kind="node",
+                        anchor_kind=None,
+                        edges=tuple(edges),
+                        title=block.title,
+                        prose=block.prose,
+                        malformed_edges=tuple(malformed),
+                        block_key=key,
+                        end_line=end_line,
+                        physical_parent=parent_key,
+                        logical_parent=parent_key,
+                    ),
+                )
             continue
 
         _append_text(parent, line, line_number)
@@ -865,31 +1134,29 @@ def _nearest_ancestor(
 
 def _finalize_document(manifest: GraphManifest, document: ParsedDocument) -> None:
     root = manifest.blocks[document.root_key]
-    first_root_heading = next(
+    first_root_child = next(
         (
             manifest.blocks[child].line_number
             for child in root.physical_children
-            if manifest.blocks[child].kind == "heading"
         ),
         None,
     )
-    root_body_end = (first_root_heading - 1) if first_root_heading is not None else len(document.lines)
+    root_body_end = (first_root_child - 1) if first_root_child is not None else len(document.lines)
     if root_body_end >= 1:
         root.body_span = SourceSpan(document.path, 1, root_body_end)
     for key, block in manifest.blocks.items():
         if key[0] != document.path or block.kind == "root":
             continue
         if block.kind == "heading":
-            first_child_heading = next(
+            first_child = next(
                 (
                     manifest.blocks[child].line_number
                     for child in block.physical_children
-                    if manifest.blocks[child].kind == "heading"
                 ),
                 None,
             )
             body_start = block.line_number + 1
-            body_end = (first_child_heading - 1) if first_child_heading is not None else block.end_line
+            body_end = (first_child - 1) if first_child is not None else block.end_line
             if body_start <= body_end:
                 block.body_span = SourceSpan(document.path, body_start, body_end)
         item = manifest.items.get(block.item_id or "")
@@ -974,11 +1241,13 @@ def _backing_reference(root: Path, item: GraphItem) -> BackingReference | None:
 def _attach_detail_document(manifest: GraphManifest, owner_key: BlockKey, detail_root_key: BlockKey) -> None:
     owner = manifest.blocks[owner_key]
     detail_root = manifest.blocks[detail_root_key]
+    detail_root.logical_parent = owner_key
     detail_parts = list(detail_root.logical_parts)
     if not detail_parts:
         return
     if not owner.logical_parts or not isinstance(owner.logical_parts[-1], str) or owner.logical_parts[-1].strip():
         owner.logical_parts.append("")
+        owner.logical_text_parts.append(SourceTextPart(owner.source_path, 0, ""))
     for part in detail_parts:
         if isinstance(part, tuple):
             child = manifest.blocks[part]
@@ -1103,41 +1372,19 @@ def _validate_focus(manifest: GraphManifest) -> None:
 
 
 def _validate_addressed_body(manifest: GraphManifest) -> None:
-    for document in manifest.documents.values():
-        structured_lines = {
-            block.line_number
-            for key, block in manifest.blocks.items()
-            if key[0] == document.path and block.kind in {"node", "focus"}
-        }
-        for key, block in manifest.blocks.items():
-            if key[0] != document.path or block.kind not in {"root", "heading"}:
-                continue
-            if block.kind == "heading" and block.item_id is not None:
-                continue
-            offending_line = _first_nonblank_body_line(block, document, structured_lines)
-            if offending_line is not None:
-                _add_error(
-                    manifest,
-                    f"MF document prose must belong to an addressable heading at "
-                    f"{document.relative_path}:{offending_line}",
-                    document.path,
-                    offending_line,
-                )
-
-
-def _first_nonblank_body_line(
-    block: DocumentBlock,
-    document: ParsedDocument,
-    structured_lines: set[int],
-) -> int | None:
-    if block.body_span is None:
-        return None
-    for line_number in range(block.body_span.start_line, block.body_span.end_line + 1):
-        if line_number in structured_lines:
+    for block in manifest.blocks.values():
+        owner = block
+        while owner.item_id is None and owner.logical_parent is not None:
+            owner = manifest.blocks[owner.logical_parent]
+        if owner.item_id is not None:
             continue
-        if document.lines[line_number - 1].strip():
-            return line_number
-    return None
+        offending_line = block.line_number if block.kind == "node" else next(
+            (part.line_number for part in block.logical_text_parts if part.text.strip()), None
+        )
+        if offending_line is not None:
+            _add_error(manifest, "MF document prose must belong to an addressable heading "
+                       f"or leaf at {_relative(manifest.root, block.source_path)}:{offending_line}",
+                       block.source_path, offending_line)
 
 
 def _assign_logical_metadata(manifest: GraphManifest) -> None:
@@ -1157,17 +1404,27 @@ def _assign_logical_metadata(manifest: GraphManifest) -> None:
                     item.logical_parent = block.logical_parent
     for item in manifest.items.values():
         if item.block_key is not None:
+            context = []
+            current = item.logical_parent
+            while current is not None:
+                ancestor = manifest.blocks[current]
+                context.append(resolve_markdown_references(ancestor.line, manifest.documents[ancestor.source_path]))
+                context.extend(part for part in rendered_block_parts(manifest, ancestor) if isinstance(part, str))
+                current = ancestor.logical_parent
             item.content_hash = hashlib.sha256(
-                _flatten_logical_block(manifest, item.block_key).rstrip("\r\n").encode("utf-8")
+                ("\n".join(context) + "\n" + _flatten_logical_block(manifest, item.block_key)).rstrip("\r\n").encode("utf-8")
             ).hexdigest()
 
 
 def _flatten_logical_block(manifest: GraphManifest, key: BlockKey) -> str:
     block = manifest.blocks[key]
-    lines = [block.line] if block.kind != "root" else []
-    for part in block.logical_parts:
+    if block.kind in {"node", "focus"}:
+        return resolve_markdown_references("\n".join([block.line, *block.logical_parts]),
+                                           manifest.documents[block.source_path])
+    lines = [resolve_markdown_references(block.line, manifest.documents[block.source_path])] if block.kind != "root" else []
+    for part in rendered_block_parts(manifest, block):
         if isinstance(part, tuple):
-            lines.extend(_flatten_logical_block(manifest, part).splitlines())
+            lines.append(_flatten_logical_block(manifest, part))
         else:
             lines.append(part)
     return "\n".join(lines)
@@ -1176,9 +1433,12 @@ def _flatten_logical_block(manifest: GraphManifest, key: BlockKey) -> str:
 def _parse_edges(edge_text: str) -> tuple[list[tuple[str, str]], list[str]]:
     edges: list[tuple[str, str]] = []
     malformed: list[str] = []
+    if not edge_text.strip():
+        return edges, malformed
     for raw in edge_text.split(","):
         value = raw.strip()
         if not value:
+            malformed.append("(empty edge)")
             continue
         match = EDGE_RE.match(value)
         if match is None:
