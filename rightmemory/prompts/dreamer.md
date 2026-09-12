@@ -17,7 +17,7 @@
 - During consolidation, judge each item by durable value: whether it helps a future agent act, decide, retrieve context, or avoid repeating work. Compress or remove memory that mainly records transient progress, overly granular trace detail, stale state, or low-value repetition.
 - Keep `# Open Context Questions` compact and current. Merge duplicate questions, remove stale questions, revise questions whose linked memory changed, and add a short question when consolidation exposes a loose end in memory.
 - Preserve hard-to-reproduce reasoning, conclusions, failed investigations, and decisions when recreating them later would take meaningful effort. If the surrounding record is noisy, keep the durable conclusion and simplify the trace around it.
-- When consolidating, use heading bodies for text that describes an addressable heading itself. Keep child nodes for facts that should stand independently.
+- When consolidating, use heading bodies for text that describes the heading itself. Keep leaf items for facts that should stand independently, preserving their complete Markdown content.
 - Shared-view relationships use schema-defined `MF#` and `MQ#` headings. Keep heading bodies focused on local meaning and do not absorb provider content unless it became a local decision, task, or consequence.
 - Aging uses git history, not inline timestamps. Use judgment on what "long-untouched" means given the node's nature. Move stale nodes into a `## Graveyard` heading inside the same `#` memory domain; nodes that sit in a graveyard across multiple cycles can be deleted.
 

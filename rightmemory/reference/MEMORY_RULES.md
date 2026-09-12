@@ -60,7 +60,7 @@ Good structure makes domain, topic, scope, and local reading context obvious. Av
 - edges that only repeat containment;
 - `rel:` when a more specific edge type is accurate.
 
-Put new items in the closest existing group with matching domain and scope. Prefer a meaningful anchored heading over a fake hub node. Move a subtree behind `F#`, or split, merge, or relocate it, when that materially improves navigation. About fifteen direct node lines is a useful prompt to reconsider structure, not a validity threshold.
+Put new items in the closest existing group with matching domain and scope. Prefer a meaningful heading over a fake hub node. Move a subtree behind `F#`, or split, merge, or relocate it, when that materially improves navigation. About fifteen direct leaf items is a useful prompt to reconsider structure, not a validity threshold; each complete Markdown leaf counts as one item.
 
 ## User Context
 
