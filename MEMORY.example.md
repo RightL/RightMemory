@@ -21,6 +21,11 @@ than the user's broader cross-session behavior guidance.
 - `proj-pref-contract-first` When changing frontend/backend data flow, update the API contract before changing UI call sites. → [rel:api-public-contract, rel:proj-web, rel:proj-api]
 - `proj-pref-release-proof` Release-facing changes should leave a short verification note in the release runbook. → [rel:sample-release-runbook, rel:proj-deploy]
 
+  The note belongs to this same leaf:
+
+  - Describe the behavior checked.
+  - Record the result and any remaining uncertainty.
+
 ### Durable Architecture Context {#sample-architecture-context} → [rel:sample-release-runbook]
 
 Keep relationships here when they are expensive to reconstruct or easy to misread.
@@ -35,6 +40,13 @@ project artifacts.
 
 Release-facing changes should leave concise verification evidence covering the
 checklist, rollout, rollback, and environment-specific considerations.
+
+:::body
+### Reading the runbook
+
+- The latest verification note explains what is safe to release.
+- Rollback instructions remain available alongside the rollout steps.
+:::
 
 ### Interface Contracts {#sample-interface-contracts}
 

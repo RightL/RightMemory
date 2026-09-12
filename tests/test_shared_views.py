@@ -340,6 +340,25 @@ class SharedFileViewRecipeTests(unittest.TestCase):
         self.assertNotIn("Payroll details", exported.read_text(encoding="utf-8"))
         self.assertIn('kind = "file"', recipe.read_text(encoding="utf-8"))
 
+    def test_exact_rich_leaf_keeps_its_span_under_anonymous_ancestors(self):
+        from rightmemory.graph import build_mf_manifest, span_text
+        (self.root / "MEMORY.md").write_text(
+            "# Owner {#owner}\n\n##\n\n:::body\n### Body heading\n- Body list\n:::\n\n"
+            "- `rich-leaf` First paragraph. → []\n\n  Another paragraph.\n\n"
+            "  - `literal` Nested code is content. → [rel:missing]\n\n"
+            "- A sibling that is not selected.\n", encoding="utf-8")
+        write_extractive_file_view_recipe(self.root, view_id="rich-leaf-view", title="Rich leaf",
+                                         intent="Share the selected example.", include_headings=[],
+                                         include_nodes=["rich-leaf"], approved=True)
+        render_file_view(self.root, "rich-leaf-view")
+        manifest = build_mf_manifest(self.root / "shared_views" / "rich-leaf-view" / "dist", "rich-leaf-view")
+        self.assertEqual(manifest.errors, [])
+        self.assertEqual(set(manifest.items), {"owner", "rich-leaf"})
+        leaf = manifest.block_for_id("rich-leaf")
+        self.assertEqual(leaf.logical_children, [])
+        self.assertIn("  Another paragraph.", span_text(manifest, leaf.span))
+        self.assertEqual(sum(block.kind == "node" for block in manifest.blocks.values()), 1)
+
     def test_exact_node_preserves_ancestor_bodies_without_sibling_leaks(self):
         (self.root / "MEMORY.md").write_text(
             "# Project {#project}\n\n"

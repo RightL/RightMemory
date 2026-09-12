@@ -169,7 +169,16 @@ test('sibling moves work in both directions at every depth and are no-ops at bou
   }
 });
 
-test('visible-empty create and rename are refused without changing the snapshot', () => {
+test('empty titles remain data while the canvas supplies a display label', () => {
+  const original = fixture();
+  const renamed = applyOperation(original, { type: 'rename', id: 'design', title: '' });
+  assert.equal(indexTree(renamed).get('design')!.title, '');
+  const node = forestData(renamed, { collapsed: [], selected: null, selectedIds: [] })[0].nodeData.children!.find((item) => item.id === 'design');
+  assert.equal(node!.topic, 'Untitled');
+  assert.equal(indexTree(original).get('design')!.title, indexTree(fixture()).get('design')!.title);
+});
+
+test('visible-empty formatting is refused without changing the snapshot', () => {
   const original = fixture();
   const before = structuredClone(original);
   for (const title of ['****', '~~~~', '<u></u>', '**<u>~~ ~~</u>**']) {
