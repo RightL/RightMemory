@@ -271,7 +271,7 @@ export class MapRenderer {
       const id = topic.nodeObj.id;
       const item = items.get(id)!;
       topic.setAttribute('role', 'treeitem');
-      topic.setAttribute('aria-label', titleText(item.title));
+      topic.setAttribute('aria-label', titleText(item.title) || 'Untitled');
       topic.classList.remove('selected');
       topic.setAttribute('aria-selected', String(selected.has(id)));
       topic.id = `pm-node-${id}`;
@@ -378,8 +378,8 @@ export class MapRenderer {
     this.editingId = id;
     this.callbacks.dismissOverlays();
     this.notifyGeometry();
-    // Mind Elixir edits nodeObj.topic, which retains the original Markdown.
-    if (this.editText !== undefined) editor.textContent = this.editText;
+    // The visible fallback for an untitled heading is never its stored title.
+    editor.textContent = this.editText ?? indexTree(this.snapshot).get(id)?.title ?? '';
     this.editText = undefined;
     editor.setAttribute('role', 'textbox');
     editor.setAttribute('aria-label', 'Direction title');

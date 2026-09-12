@@ -8,12 +8,16 @@ from pathlib import Path, PurePosixPath
 
 from .graph import (
     FOCUS_HEADING_RE,
+    LIST_PREFIX_RE,
     BlockKey,
+    BodyFenceDelimiter,
     DocumentBlock,
     GraphItem,
     GraphManifest,
     SourceTextPart,
     build_graph_manifest,
+    snapshot_block_id,
+    resolve_markdown_references,
 )
 
 
@@ -281,12 +285,15 @@ def _owned_prose_fragments(
     if block.kind == "node":
         if not block.prose:
             return ()
+        prefix = LIST_PREFIX_RE.match(block.line)
+        first_line = (prefix.group() if prefix is not None else "- ") + block.prose
         return (
             OpeningContextProseFragment(
                 source_path=_source_path(manifest, block),
                 start_line=block.line_number,
-                end_line=block.line_number,
-                markdown=block.prose,
+                end_line=block.end_line,
+                markdown=resolve_markdown_references("\n".join([first_line, *block.logical_parts]),
+                                                     manifest.documents[block.source_path]).rstrip("\r\n"),
             ),
         )
 
@@ -295,6 +302,8 @@ def _owned_prose_fragments(
     # source. Descendant BlockKeys stay excluded.
     groups: list[list[SourceTextPart]] = []
     for part in block.logical_text_parts:
+        if isinstance(part.text, BodyFenceDelimiter):
+            continue
         if (
             groups
             and groups[-1][-1].source_path == part.source_path
@@ -323,16 +332,15 @@ def _owned_prose_fragments(
                 source_path=_source_path_for_path(manifest, content[0].source_path),
                 start_line=content[0].line_number,
                 end_line=content[-1].line_number,
-                markdown="\n".join(part.text for part in content),
+                markdown=resolve_markdown_references("\n".join(part.text for part in content),
+                                                     manifest.documents[content[0].source_path]),
             )
         )
     return tuple(fragments)
 
 
 def _selection_id(manifest: GraphManifest, block: DocumentBlock) -> str:
-    if block.item_id is not None:
-        return block.item_id
-    return f"plain:{_source_path(manifest, block)}:{block.line_number}"
+    return snapshot_block_id(manifest, block)
 
 
 def _source_path(manifest: GraphManifest, block: DocumentBlock) -> str:

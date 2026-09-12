@@ -11,7 +11,7 @@ export function forestData(snapshot: Snapshot, view: ViewState): MindElixirData[
   const build = (id: string, depth: number, color: string): NodeObj => {
     const item = items.get(id)!;
     return {
-      id, topic: item.title, expanded: !folded.has(id), branchColor: color,
+      id, topic: item.title || 'Untitled', expanded: !folded.has(id), branchColor: color,
       style: depth === 0
         ? { color: '#243633', fontSize: '25px', background: '#ffffff', border: 'none', fontWeight: '650' }
         : depth === 1

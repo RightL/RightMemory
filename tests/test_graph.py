@@ -54,7 +54,7 @@ class CanonicalGraphManifestTests(unittest.TestCase):
         self.assertEqual(manifest.items["project"].span.start_line, 3)
         self.assertEqual(manifest.items["project"].span.end_line, 12)
         self.assertEqual(manifest.items["project"].body_span.start_line, 4)
-        self.assertEqual(manifest.items["project"].body_span.end_line, 8)
+        self.assertEqual(manifest.items["project"].body_span.end_line, 6)
 
         project = manifest.block_for_id("project")
         child = manifest.block_for_id("child")
@@ -87,7 +87,7 @@ class CanonicalGraphManifestTests(unittest.TestCase):
 
         self.assertNotEqual(first, second)
 
-    def test_invalid_ids_and_missing_node_edge_lists_share_parser_diagnostics(self):
+    def test_invalid_ids_are_errors_but_bare_code_spans_are_anonymous_leaves(self):
         (self.root / "MEMORY.md").write_text(
             "# Memory\n\n"
             "## Invalid {#bad id}\n\n"
@@ -105,7 +105,7 @@ class CanonicalGraphManifestTests(unittest.TestCase):
         errors = "\n".join(manifest.errors)
         self.assertIn("invalid heading id `bad id`", errors)
         self.assertIn("invalid node id `bad id`", errors)
-        self.assertIn("node `missing-edges` must include an edge list", errors)
+        self.assertNotIn("missing-edges", errors)
         self.assertNotIn("node `example`", errors)
         self.assertNotIn("bad id", manifest.items)
         self.assertNotIn("missing-edges", manifest.items)
@@ -138,6 +138,150 @@ class CanonicalGraphManifestTests(unittest.TestCase):
         self.assertTrue(any("cyclic F# backing path" in error for error in manifest.errors))
 
 
+class MarkdownLeafStructureTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+
+    def parse(self, source):
+        (self.root / "MEMORY.md").write_bytes(source.encode("utf-8"))
+        return build_graph_manifest(self.root)
+
+    def test_complete_leaf_span_excludes_nested_graph_looking_content(self):
+        leaf = ("- `leaf` First paragraph. → []\r\n\r\n"
+                "  Second paragraph.\r\n\r\n  ### Example {#example}\r\n\r\n"
+                "  - `nested` Literal. → [rel:missing]\r\n\r\n"
+                "  ![Image](images/example.png)\r\n\r\n")
+        manifest = self.parse("# {#owner}\r\n\r\n" + leaf + "Owner prose.\r\n")
+        self.assertEqual(manifest.errors, [])
+        self.assertEqual(set(manifest.items), {"owner", "leaf"})
+        block = manifest.block_for_id("leaf")
+        self.assertEqual(block.logical_children, [])
+        from rightmemory.graph import span_text
+        self.assertEqual(span_text(manifest, block.span), leaf)
+        self.assertEqual(block_body_text(manifest, manifest.items["owner"]), "\r\nOwner prose.\r\n")
+
+    def test_anonymous_headings_and_all_outer_list_markers(self):
+        manifest = self.parse("Root prose.\n\n# {#owner}\n\n##\n\n- one\n\n+ two\n\n* three\n\n1. four\n2. five\n")
+        self.assertEqual(manifest.errors, [])
+        leaves = [b for b in manifest.blocks.values() if b.kind == "node"]
+        self.assertEqual(len(leaves), 5)
+        self.assertTrue(all(b.item_id is None for b in leaves))
+        self.assertEqual(set(manifest.items), {"owner"})
+
+    def test_body_fence_payload_and_longer_delimiter_are_opaque(self):
+        body = "::::body\n### Literal {#fake}\n- `fake` → [bad:nope]\n```\n:::\n```\n::::  \n"
+        manifest = self.parse("# {#owner}\n" + body + "- Real leaf.\n")
+        self.assertEqual(manifest.errors, [])
+        self.assertEqual(set(manifest.items), {"owner"})
+        owner = manifest.block_for_id("owner")
+        self.assertEqual(len(owner.logical_children), 1)
+        self.assertEqual(block_body_text(manifest, owner), body)
+
+    def test_body_fence_errors(self):
+        for text, message in ((":::body\ntext\n", "unclosed"), (":::\n", "unmatched"),
+                              ("::::body\ntext\n:::\n", "unclosed")):
+            with self.subTest(text=text):
+                manifest = self.parse("# {#owner}\n" + text)
+                self.assertTrue(any(message in error for error in manifest.errors))
+
+    def test_markers_inside_markdown_containers_are_literal(self):
+        cases = [
+            "```md\n:::body\n## {#fake}\n- `fake` → []\n```\n",
+            "    :::body\n    ## {#fake}\n    - `fake` → []\n",
+            "> :::body\n> ## {#fake}\n> - `fake` → []\n",
+            "<div>\n:::body\n## {#fake}\n- `fake` → []\n</div>\n",
+            "<!--\n:::body\n## {#fake}\n-->\n",
+            "- Literal.\n\n  :::body\n  ## {#fake}\n  - `fake` → []\n",
+        ]
+        for source in cases:
+            with self.subTest(source=source):
+                manifest = self.parse("# {#owner}\n\n" + source)
+                self.assertEqual(manifest.errors, [])
+                self.assertEqual(set(manifest.items), {"owner"})
+
+    def test_setext_and_tables_belong_to_heading_body(self):
+        body = "\nA Setext heading\n---\n\na | b\n--|--\nc | d\n"
+        manifest = self.parse("# {#owner}\n" + body)
+        self.assertEqual(manifest.errors, [])
+        self.assertEqual(manifest.block_for_id("owner").logical_children, [])
+        self.assertEqual(block_body_text(manifest, manifest.items["owner"]), body)
+
+    def test_opening_line_metadata_disambiguation(self):
+        manifest = self.parse(
+            "# {#owner}\n\n"
+            "- `Blender` is available.\n"
+            "- `example` Literal `→ [rel:missing]`.\n"
+            "- `escaped` Literal → \\[rel:missing]\n"
+            "- `escaped-arrow` Literal \\→ [rel:missing]\n"
+            "+ `real` Code `→ [example]` and metadata → []\n"
+            "1. `ordered` Addressed too. -> []\n\n"
+            "## `{#code}`\n\n## \\{#escaped}\n"
+        )
+        self.assertEqual(manifest.errors, [])
+        self.assertEqual(set(manifest.items), {"owner", "real", "ordered"})
+
+    def test_attempted_leaf_declaration_rejects_bad_id_or_edges(self):
+        for declaration in ("- `bad id` Text → []", "- `bad` Text → [rel:missing",
+                            "- `bad` Text → [invalid]", "- `bad` Text → [] trailing"):
+            with self.subTest(declaration=declaration):
+                self.assertTrue(self.parse("# Owner\n\n" + declaration + "\n").errors)
+
+    def test_anonymous_children_are_rejected_under_f_and_terminal_headings(self):
+        (self.root / "MEMORY_detail.md").write_text("# Detail\n", encoding="utf-8")
+        for heading in ("## Detail {F#detail}", "### Topic\n#### Detail {F#detail}"):
+            with self.subTest(heading=heading):
+                self.assertTrue(self.parse("# Memory\n" + heading + "\n- Anonymous child\n").errors)
+
+    def test_mf_addressed_ancestor_covers_anonymous_content(self):
+        self.parse("# {#owner}\n\n##\n\nBody.\n\n- Anonymous\n\n:::body\n- Body list\n:::\n")
+        self.assertEqual(build_mf_manifest(self.root, "view").errors, [])
+        self.parse("# Wrapper\n\n- Uncovered\n\n## {#child}\n")
+        self.assertTrue(build_mf_manifest(self.root, "view").errors)
+
+    def test_delivery_hashes_cover_continuations_anonymous_descendants_and_context(self):
+        source = "# {#owner}\n\nContext.\n\n- `leaf` First. → []\n\n  More.\n\n- Anonymous.\n"
+        first = self.parse(source)
+        changed_leaf = self.parse(source.replace("More.", "Changed."))
+        self.assertNotEqual(first.items["leaf"].content_hash, changed_leaf.items["leaf"].content_hash)
+        changed_anonymous = self.parse(source.replace("Anonymous.", "Other."))
+        self.assertNotEqual(first.items["owner"].content_hash, changed_anonymous.items["owner"].content_hash)
+        self.assertEqual(first.items["leaf"].content_hash, changed_anonymous.items["leaf"].content_hash)
+        changed_context = self.parse(source.replace("Context.", "Revised context."))
+        self.assertNotEqual(first.items["leaf"].content_hash, changed_context.items["leaf"].content_hash)
+
+    def test_reference_definitions_participate_in_selected_leaf_delivery_hash(self):
+        source = "# {#owner}\n\n- `leaf` See [diagram][image]. → []\n\n# Definitions\n\n[image]: images/one.png\n"
+        first = self.parse(source).items["leaf"].content_hash
+        second = self.parse(source.replace("one.png", "two.png")).items["leaf"].content_hash
+        self.assertNotEqual(first, second)
+
+    def test_commonmark_closing_heading_marks_preserve_addresses(self):
+        manifest = self.parse("  # Owner {#owner} ###\n\n   ## {#child} → [doc:owner] ##\n")
+        self.assertEqual(manifest.errors, [])
+        self.assertEqual(set(manifest.items), {"owner", "child"})
+        self.assertEqual(manifest.items["child"].title, "")
+
+    def test_reference_rewrite_preserves_table_cells_and_literal_code(self):
+        from markdown_it import MarkdownIt
+        from rightmemory.graph import resolve_markdown_references
+        source = ("# {#owner}\n\n| Label | Value |\n|---|---|\n"
+                  "| `[x][ref]` | [x][ref] |\n"
+                  "| Text\\|[x][ref] | [x][ref] |\n\n[ref]: images/a.png \"A|B\"\n")
+        manifest = self.parse(source)
+        self.assertEqual(manifest.errors, [])
+        rewritten = resolve_markdown_references(source, manifest.documents[(self.root / "MEMORY.md").resolve()])
+        tokens = MarkdownIt("commonmark").enable("table").parse(rewritten)
+        self.assertEqual(sum(token.type == "table_open" for token in tokens), 1)
+        children = [child for token in tokens for child in token.children or []]
+        links = [child for child in children if child.type == "link_open"]
+        self.assertEqual(len(links), 3)
+        self.assertTrue(all(link.attrGet("href") == "images/a.png" and link.attrGet("title") == "A|B" for link in links))
+        self.assertEqual(sum(child.type == "code_inline" for child in children), 1)
+
+
 class PursuitGrammarTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -146,7 +290,7 @@ class PursuitGrammarTests(unittest.TestCase):
         (self.root / "MEMORY.md").write_bytes(b"# Memory\n")
 
     def test_title_only_and_free_markdown_body_validate_without_fields(self):
-        body = "\r\nA **note**, a [link](https://example.test), and a list.  \r\n\r\n- Ordinary list\r\n\r\n```md\r\n## An example, not a map group\r\n```\r\n"
+        body = "\r\nA **note**, a [link](https://example.test), and a list.  \r\n\r\n:::body\r\n- Ordinary list\r\n:::\r\n\r\n```md\r\n## An example, not a map group\r\n```\r\n"
         (self.root / "PURSUITS.md").write_bytes(
             ("# Pursuits\r\n\r\n## Title only {#first}\r\n\r\n## Notes {#notes}\r\n" + body).encode()
         )
@@ -155,14 +299,14 @@ class PursuitGrammarTests(unittest.TestCase):
         self.assertEqual(set(manifest.items), {"first", "notes"})
         self.assertEqual(block_body_text(manifest, manifest.items["notes"]), body)
 
-    def test_legacy_next_keeps_all_actions_and_graph_looking_bullets_as_body(self):
+    def test_body_fence_keeps_old_field_lists_literal(self):
         body = (
-            "\n**State:** Old context.\n\n**Next:**\n"
+            "\n:::body\n**State:** Old context.\n\n**Next:**\n"
             "- `do` Continue.\n- `research` Unknown old action.\n"
             "- `not a slug` No validation as a node. -> [rel:missing]\n"
             "- `looks-like-node` Still a Next bullet. -> []\n"
             "- An ordinary bullet.\n\n**Done when:** Older prose.\n"
-            "**Status:** Anything here is body.\n"
+            "**Status:** Anything here is body.\n:::\n"
         )
         (self.root / "PURSUITS.md").write_bytes(("# Pursuits\n\n## Old {#old}\n" + body).encode())
         manifest = build_graph_manifest(self.root)
@@ -170,15 +314,16 @@ class PursuitGrammarTests(unittest.TestCase):
         self.assertEqual(set(manifest.items), {"old"})
         self.assertEqual(block_body_text(manifest, manifest.items["old"]), body)
 
-    def test_legacy_next_stops_at_field_or_heading(self):
+    def test_field_names_do_not_change_markdown_list_parsing(self):
         for boundary in ("**State:** Another field.", "## Other {#other}"):
             with self.subTest(boundary=boundary):
                 (self.root / "PURSUITS.md").write_bytes((
                     "# Pursuits\n\n## Old {#old}\n**Next:**\n"
-                    "- `research` Kept.\n" + boundary + "\n- `broken` Missing edge list.\n"
+                    "- `research` Kept.\n" + boundary + "\n- `fact` An addressed leaf. → []\n"
                 ).encode())
                 manifest = build_graph_manifest(self.root)
-                self.assertTrue(any("node `broken` must include an edge list" in error for error in manifest.errors))
+                self.assertEqual(manifest.errors, [])
+                self.assertIn("fact", manifest.items)
 
     def test_heading_helpers_share_edges_and_preserve_original_suffix(self):
         line = "###   中文 and English  {F#stable}  -> [doc:target,  dep:other ]\r\n"
@@ -190,7 +335,8 @@ class PursuitGrammarTests(unittest.TestCase):
                          "###   Changed  {F#stable}  -> [doc:target,  dep:other ]\r\n")
         rendered = render_heading_line("中文 and English", "#", "stable", heading.edges, depth=2)
         self.assertEqual(parse_addressable_heading(rendered).edges, heading.edges)
-        for invalid in ("", "  ", "two\nlines", "Anchor {#hidden}"):
+        self.assertEqual(parse_addressable_heading(render_heading_line("", "#", "stable")).title, "")
+        for invalid in ("two\nlines", "Anchor {#hidden}"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 render_heading_line(invalid, "#", "stable")
 

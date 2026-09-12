@@ -96,7 +96,7 @@ export function dropOperation(snapshot: Snapshot, id: string, target: string, po
 
 /** Null after_id means the first position; callers pass the last sibling to append. */
 export function applyOperation(snapshot: Snapshot, operation: Operation, temporaryId?: string): Snapshot {
-  if ((operation.type === 'create' || operation.type === 'rename') && !titleText(operation.title).trim()) {
+  if ((operation.type === 'create' || operation.type === 'rename') && operation.title.trim() && !titleText(operation.title).trim()) {
     throw new Error('A direction needs a visible title.');
   }
   if (operation.type === 'rename_many') {
@@ -105,7 +105,7 @@ export function applyOperation(snapshot: Snapshot, operation: Operation, tempora
     for (const rename of operation.renames) {
       if (!rename.id.trim()) throw new Error('A rename target needs an identity.');
       if (targets.has(rename.id)) throw new Error('Each direction can be renamed only once.');
-      if (!titleText(rename.title).trim()) throw new Error('A direction needs a visible title.');
+      if (rename.title.trim() && !titleText(rename.title).trim()) throw new Error('A direction needs a visible title.');
       targets.add(rename.id);
     }
   }
