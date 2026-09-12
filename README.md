@@ -276,7 +276,7 @@ Runtime facts that apply to the whole project.
 
 The tree tells agents where to read in local context. Anchors and node ids tell agents what can be referenced. Edges tell agents where to walk across otherwise separate branches or between durable context and live intent.
 
-A Pursuit item is a heading with a position in the tree, optional title and id, and its own Markdown body. The body can explain meaning or stable entry context; it has no required task fields. The user decides when to create, rename, move, focus, or remove directions. When a direction is completed, abandoned, or superseded, remove it through an authorized map edit after considering independently durable consequences for Memory. Git preserves earlier map states.
+A Pursuit item is an addressable heading with a title, position in the tree, and optional free-form Markdown body. The body can explain meaning or stable entry context; it has no required task fields. The user decides when to create, rename, move, focus, or remove directions. When a direction is completed, abandoned, or superseded, remove it through an authorized map edit after considering independently durable consequences for Memory. Git preserves earlier map states.
 
 Common top-level domains include project or work domains, `# User Context`, and `# Cross-Session Agent Behavior`. User context stores the user's durable context profile. Agent behavior stores guidance about how coding agents should collaborate with that user.
 
@@ -284,35 +284,27 @@ Common top-level domains include project or work domains, `# User Context`, and 
 
 `#`, `##`, and `###` are normal tree layers and may contain Memory or Pursuit content. They can have `{#slug}` anchors and heading-level edges when the whole subtree is useful as a graph target.
 
-Headings branch; list items remain leaves. A heading's own Markdown body excludes its leaf items and subheadings. Titles and ids are optional: `## Topic`, `## {#topic}`, and `##` are all valid. Anonymous content belongs to the tree and is retrieved through an addressed ancestor. An id supplies a durable address for independent retrieval, edges, Focus, or a typed backing.
-
-CommonMark block boundaries, with pipe tables, determine content ownership. Ordinary paragraphs, images, quotes, code, HTML, tables, and Setext headings belong to the surrounding body. Use an optional `:::body` / `:::` fence when that body itself needs ATX headings or lists. Fence markers are standalone, unindented lines; opening and closing colon counts match. Use more colons when the payload includes a matching closing line. Unclosed or unmatched fences are errors. Stored Markdown retains the delimiters; rendered retrieval omits them.
+Addressable `#`, `##`, and `###` headings may also have body paragraphs directly under the heading. Those paragraphs describe the heading itself. Use a heading body when the text explains the whole concept; use child nodes when the fact should stand on its own.
 
 Use `{F#slug}` instead of `{#slug}` when a heading is backed by a sibling parsed detail file. F# is root-relative: Memory maps to `MEMORY_<slug>.md`, while Pursuit maps to `PURSUIT_<slug>.md`. Graph edges still target `slug`, not `F#slug`.
 
 `####` is the deepest heading level allowed in a parsed graph file. A `#### Topic {F#slug}` heading points to the root-relative detail file; it may have body paragraphs that summarize or explain that file, but no nodes or child headings in its containing file.
 
-### Leaf Items
+### Nodes
 
-An outer Markdown list item owns its complete content, including continuation paragraphs, nested lists, headings, images, and code. Its interior creates no RightMemory children. Leaves may be anonymous or addressed:
+Nodes are addressable statements under a heading:
 
 ```md
-- An anonymous leaf.
-- `spacing` Keep the composition clear. → []
-
-  - These nested bullets are part of the same leaf.
-  - They have no separate graph addresses.
+- `<node-id>` <description> → [edge1, edge2, ...]
 ```
 
-Heading ids and leaf ids share one namespace across both trees. A leading backtick id is metadata only when its opening line also contains an unescaped edge-list marker outside inline code. Thus an ordinary bullet beginning with a code span needs no edge list. An addressed leaf with no edges writes `→ []`; a heading may omit an empty edge list. Escape the opening bracket to quote an edge-list marker. New Pursuit map entries use headings; `Focus` entries are references, not graph nodes.
+Heading ids and node ids share one namespace across both trees. A node with no edges still writes `→ []`; a heading with no edges may omit the edge list. New Pursuit map items use headings; `Focus` entries are references, not graph nodes.
 
 ### Detail Files
 
 Any `#`, `##`, or `###` heading can use its id as a parsed detail-file target by writing `{F#slug}`. For example, Memory `{F#alpha-runtime}` maps to `MEMORY_alpha-runtime.md`; the same form in Pursuit maps to `PURSUIT_alpha-runtime.md`.
 
-Move child content into a detail file when a heading becomes too dense. A split retains the heading and its leading own body, then moves the remaining ordered content. Body text between leaves stays between those leaves and belongs to the owning F# heading across the file boundary. Source spans and complete leaf content are preserved; reference-style links can become inline links when extraction or movement needs to retain their original document's definitions. Graph files and their backings share a resource base because they are siblings.
-
-Existing roots need explicit review when adopting this grammar: unwrapped outer lists are leaves, and nested ID-looking lines inside a leaf are literal Markdown. Wrap lists intended as heading-body content in a body fence. Installation and opening the editor do not rewrite user memory to make that change.
+Move child content into a detail file when a heading becomes too dense, especially past about 15 direct node lines. Count only direct node lines, not child headings or `####` pointers. After moving content out, keep the F# heading and optional summary in the parent file.
 
 The Pursuit editor creates `F#` boundaries automatically when a logical branch would exceed the physical heading limit. The canvas still shows one tree. Existing boundaries are retained rather than repeatedly splitting and inlining unchanged branches.
 

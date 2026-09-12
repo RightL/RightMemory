@@ -27,26 +27,9 @@ It recursively follows `F#` detail references from those roots. Filename pattern
 
 Item ids use the grammar `[A-Za-z0-9_.-]+`.
 
-## Document Structure And Addressability
+## Addressable Items
 
-Headings contain their own Markdown body, leaf items, and subheadings. Only
-headings branch. A leaf item owns its complete Markdown content; lists or headings
-inside that content are formatting, not RightMemory children or graph items.
-
-Heading titles and ids are optional. These headings are valid:
-
-```md
-## Aesthetic quality
-## {#aesthetics}
-##
-```
-
-Text before the first structural heading belongs to the document root. Titles
-and body previews are display text, not identity. Anonymous elements participate
-in the tree; only explicitly addressed elements participate in the graph. Add an
-id when graph relationships, independent retrieval, Focus, or a typed backing
-need it. Ordinary reading and editing do not require persistent ids; tools may
-use snapshot-local handles and reject them after the snapshot changes.
+A graph item is either an addressable heading or a node.
 
 Addressable headings use:
 
@@ -59,87 +42,34 @@ Addressable headings use:
 ### Provider Question View {MQ#heading-id} → [edge1, edge2, ...]
 ```
 
-Pursuit map entries remain headings; their titles and ids may be omitted, and
-there are no dedicated task fields.
+Plain tree headings without graph relationships may omit the anchor and edge list. New Pursuit map items use addressable headings; their bodies are ordinary optional Markdown, with no dedicated task fields or node types.
 
-Leaf items use ordinary Markdown list syntax. Addressed items retain the existing
-backtick-id notation; an unaddressed item needs neither an id nor an edge list:
+Addressable `#`, `##`, and `###` headings may have body paragraphs directly below them. The body describes the heading concept as a whole. Use child nodes only for independently useful items.
+
+Nodes use:
 
 ```md
-- A leaf without an id.
-- `spacing` An addressed leaf. → []
-
-  Another paragraph in the same leaf.
-
-  - This nested list is Markdown content, not a RightMemory child.
+- `<node-id>` <free-form description> → [edge1, edge2, ...]
 ```
 
-Metadata is recognized only on a structural heading or leaf's opening line.
-A leaf's leading backtick id is metadata when followed on that line by an
-unescaped `→ [` or `-> [` outside inline code; otherwise it is ordinary Markdown.
-An attempted declaration with an invalid id or malformed edge list is an error.
-Heading anchors occupy the existing trailing declaration position. Code spans
-and escaped markers are literal text, not metadata; escaping `[` disambiguates
-a literal edge-list marker.
+Rules:
 
-- Heading ids and leaf ids share one namespace across Memory and Pursuit.
-- An addressed leaf with no edges writes `→ []`; a heading may omit the empty edge list.
-- Existing ids remain stable when titles or bodies change.
+- Heading ids and node ids share one namespace across Memory and Pursuit.
+- A node with no edges writes `→ []`. A heading with no edges may omit the edge list.
 - Edges may connect any two addressable graph items.
 - Useful but unsettled Memory begins its description with `Uncertain:`.
 - Focus entries in `PURSUITS.md` reference Pursuit heading ids; they are not graph nodes.
-
-## Markdown Bodies And Boundaries
-
-Parse CommonMark block structure with pipe tables. Outside a body fence,
-document-level ATX headings and outer list items establish RightMemory structure.
-List indentation and continuation follow Markdown. Consume each leaf's entire
-list-item block without interpreting its interior as RightMemory structure.
-Other blocks, including quotes, code, HTML, tables, and Setext headings, belong
-to the surrounding heading or document body.
-
-Use an optional body fence when a heading body itself needs headings or lists:
-
-```md
-:::body
-### A heading within the body, not a RightMemory subheading
-
-- A list within the same body, not a RightMemory item.
-:::
-```
-
-A body fence is one owned Markdown block, not a tree node. Its opener is a
-standalone, unindented line of at least three colons followed by `body`; its
-closer is a standalone, unindented line with exactly the same number of colons.
-Fence lines may have trailing spaces. The enclosed text is opaque to RightMemory
-structure and metadata. Fences do not nest; use more colons when the payload
-contains a matching closing line, including inside a code example. Unclosed
-fences and unmatched closing fences are errors. Outside a body fence, recognize
-markers only at document block level, not within a leaf, quote, code block, or
-HTML block.
-
-A heading's own body excludes its leaf items and subheadings. Preserve the source
-order of body blocks and children, including body text between leaf items. An
-own-body view returns only that body; a subtree view also includes the children.
-Keep fence delimiters in stored/source-editable Markdown; omit them when rendering
-body content. Preserve original source spans and Markdown resource resolution
-when extracting or moving content.
 
 ## Backing Forms
 
 ### F#: Graph Detail
 
-`F#` moves child headings and leaf items, addressed or anonymous, into a sibling detail file while preserving the heading as the graph item.
+`F#` moves child graph content into a sibling detail file while preserving the heading as the graph item.
 
 - Memory: `MEMORY_<id>.md`
 - Pursuit: `PURSUIT_<id>.md`
 
 The logical ancestor chain continues recursively across detail-file boundaries. The Pursuit editor presents this as one tree and hides the physical document split; each graph file still obeys the heading and terminal-reference rules below.
-
-A split retains the heading and its leading own-body content, then moves the
-remaining ordered content to the detail file. Document-root body blocks there
-belong to the owning `F#` heading. Splitting or joining preserves logical order
-and ownership, including body text between leaf items.
 
 ### M#: Markdown Evidence
 
@@ -157,7 +87,7 @@ and ownership, including body text between leaf items.
 
 ## Reading Context And Referential Clarity
 
-An item's local reading context consists of the item plus the titles and own bodies of its logical ancestor headings, excluding their other leaf items and subheadings. This context continues across `F#` boundaries. Ancestor headings may establish shared subject, scope, viewpoint, and reference points for descendants; descendants need not restate that context.
+An item's local reading context consists of the item plus the titles and bodies of its logical ancestor headings. This context continues across `F#` boundaries. Ancestor headings may establish shared subject, scope, viewpoint, and reference points for descendants; descendants need not restate that context.
 
 A reference that materially affects interpretation or application is clear when its referent is determined by local reading context or explicitly identified in the item, including by graph id or typed edge.
 
@@ -176,7 +106,7 @@ A valid local graph has:
 - no self-edges;
 - no duplicate edges on one item;
 - no child-to-parent edge used only to repeat containment;
-- no inline child headings or leaf items under an `F#` heading in its containing file;
+- no graph content under an `F#` heading in its containing file;
 - exactly the backing resource required by each typed heading;
 - no unreferenced typed backing resource treated as graph state.
 
@@ -202,14 +132,13 @@ An edge may be one-way or reciprocal. Store the reverse edge only when it improv
 
 ## Heading And Placement Rules
 
-These rules apply to structural headings, not Markdown inside a leaf or body fence.
-
 - `#`, `##`, and `###` are normal tree layers and may be addressable.
 - `####` is the deepest level allowed in a graph file. It is a terminal reference under an existing `###` topic and may use `F#`, `M#`, `S#`, `MF#`, or `MQ#`.
-- A `####` terminal reference may have its own Markdown body, including body-fenced content.
-- Do not place child headings or leaf items under a `####` terminal reference, addressed or anonymous.
+- A `####` terminal reference may have body paragraphs directly below it when they summarize or explain the reference.
+- Do not place child headings or graph nodes under a `####` terminal reference.
 - Create a `####` terminal reference only under an existing or newly created `###` topic; do not jump directly from `#` or `##` to `####`.
 - Detail files follow this schema recursively.
+- When child graph content moves behind `F#`, retain only the heading line and any body describing the heading itself in the containing file.
 - Tree nesting expresses containment and reading context. Do not add an edge merely to repeat that relationship.
 - Use heading edges for relationships that apply to the whole subtree and node edges for relationships that apply to one item.
 
