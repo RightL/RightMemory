@@ -66,7 +66,7 @@ Long titles wrap within their nodes. Titles support bold (`**Important**`), unde
 | Edit a note | Open its note control or press `N`. |
 | Mark current attention | Toggle its Focus marker or press `F`. |
 
-New nodes receive stable ids automatically. Renaming or moving an anchored node preserves its id. Ordinary edits to an anonymous heading keep it anonymous; the editor uses a handle valid for the current snapshot and rejects stale handles. Focus and automatic detail-file creation assign an id when they need one. Physical files and heading depth stay out of the normal editing controls.
+New nodes receive stable ids automatically. Renaming or moving an anchored node preserves its id. Formatting an editable plain heading assigns it a stable id as part of that action. Physical files, heading depth, and graph syntax stay out of the normal editing controls.
 
 Every selected node has a visible selection state; the active node has the nearby toolbar for whole-topic formatting, Note, Focus, and **More**. Click blank canvas space or outside the map to clear the selection and hide this toolbar; dragging blank space still pans without clearing the selection. A normal node click returns to a single selection. Formatting buttons show whether a mark wraps every selected title, none of them, or a mixture. Applying a mark to a mixed selection adds it to all selected titles while preserving partial formatting inside each title. Finish raw title editing before using formatting shortcuts: they are suppressed while the title editor is open so the browser cannot insert rich-text HTML into it.
 
@@ -74,7 +74,7 @@ Right-click a node or choose its **More** button for **Copy context**, structura
 
 Drag empty canvas space or use the wheel/trackpad to pan; use the zoom buttons or `Ctrl/Cmd` with the wheel to zoom. Dragging a branch near a canvas edge pans the view; hovering over the middle of a collapsed destination for about two-thirds of a second expands it. Hover expansion changes only the browser view and creates no Git commit. Escape cancels a drag. Touch pans even when it starts on a label; two fingers pinch to zoom. Touch gestures do not move directions; structural dragging uses a mouse or pen. Fit includes every independent map.
 
-The note editor holds a heading's own raw Markdown, excluding its leaf items and subheadings. Use a `:::body` / `:::` fence for lists or headings inside the note. Edits preserve the complete child blocks and the positions of unchanged body text between them. Save with its button or `Ctrl/Cmd+S`. Closing the panel also saves; a failed save leaves it open with the text intact. Keep stable context near the direction it explains, or in a shared ancestor when it applies to a whole branch. Detailed progress, commands, test output, and experiment history belong in project artifacts.
+The note editor holds raw Markdown, not a set of generated task fields. Save with its button or `Ctrl/Cmd+S`. Closing the panel also saves; a failed save leaves it open with the text intact. Keep stable context near the direction it explains, or in a shared ancestor when it applies to a whole branch. Detailed progress, commands, test output, and experiment history belong in project artifacts.
 
 Focus is an ordered attention marker. It does not grant permission to execute work or turn the map into a queue. A direction can remain visible without being focused.
 
@@ -118,9 +118,9 @@ Start from the repository's current design document.
 
 Pan, zoom, folding, and single or multiple selection are browser-local view state. They are not stored in Markdown and do not affect retrieval.
 
-Whole-topic formatting stays in the title string, with no style fields or separate metadata. Combined marks use a fixed order: bold outside underline outside strikethrough, such as `**<u>~~Important direction~~</u>**`. One formatting action sends the selected titles through one compound rename operation, so the group is one Undo step. It preserves body, edges, Focus, backing files, and sibling order; anchored node ids also remain unchanged. Titles may be empty; the canvas displays “Untitled” without storing that label as the title. Formatting that contains marks but no visible text is rejected.
+Whole-topic formatting stays in the title string, with no style fields or separate metadata. Combined marks use a fixed order: bold outside underline outside strikethrough, such as `**<u>~~Important direction~~</u>**`. One formatting action sends the selected titles through one compound rename operation, so the group is one Undo step. It preserves body, edges, Focus, backing files, and sibling order; anchored node ids also remain unchanged. New stable ids use visible title text, and a title with no visible text is rejected. Existing unusual titles remain readable.
 
-Outer lists are leaf items, including lists following old field names. To keep such a list in a heading's note, wrap it in a body fence during an explicit source edit. Nested bullets and ID-looking examples remain inside their containing leaf. Leaf items appear read-only in the heading-oriented map and remain editable in Markdown source. Opening the map does not rewrite existing data.
+Existing old field blocks remain readable as body text until the user explicitly requests cleanup. Their former `do`, `ask`, and `wait` labels do not control agent actions. Existing plain structural headings and graph-node bullets are preserved; content that cannot be safely edited through the normal map controls is surfaced as a read-only item or diagnostic. Opening the map is not a migration.
 
 When a direction is completed, abandoned, or superseded, remove it through an explicit map edit after considering any independently durable consequence for Memory. Earlier map states remain in Git. A natural branch such as “Later” can express something you still want visible; there is no archived or parked status system.
 
