@@ -199,6 +199,14 @@ def fused_ranks(dense, lexical, lexical_scores):
     return sorted(scores, key=lambda i: (-scores[i], i))
 
 
+
+def pool_hidden_state(hidden, attention_mask, pooling):
+    if pooling == "mean":
+        masked = hidden.masked_fill(~attention_mask[..., None].bool(), 0.0)
+        return masked.sum(dim=1) / attention_mask.sum(dim=1)[..., None]
+    return hidden[:, -1]
+
+
 def embed(args):
     import numpy as np
     import torch
@@ -210,8 +218,10 @@ def embed(args):
     torch.set_num_threads(4)
     load_start = time.perf_counter()
     tokenizer = AutoTokenizer.from_pretrained(args.model, revision=args.revision, padding_side="left")
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
     model = AutoModel.from_pretrained(
-        args.model, revision=args.revision, dtype=torch.float16,
+        args.model, revision=args.revision, dtype=getattr(torch, args.dtype),
         attn_implementation="sdpa").to(args.device).eval()
     load_s = time.perf_counter() - load_start
 
@@ -222,19 +232,18 @@ def embed(args):
     @torch.inference_mode()
     def encode(texts):
         batch = tokenizer(texts, padding=True, truncation=False, return_tensors="pt").to(args.device)
-        if batch["input_ids"].shape[1] > 32768:
+        if batch["input_ids"].shape[1] > args.max_length:
             raise ValueError("A document exceeds model context; no silent truncation is allowed.")
-        hidden = model(**batch).last_hidden_state[:, -1]
+        hidden = pool_hidden_state(model(**batch).last_hidden_state, batch["attention_mask"], args.pooling)
         return torch.nn.functional.normalize(hidden.float(), p=2, dim=1).cpu().numpy()
 
     sync()
     start = time.perf_counter()
-    vectors = np.concatenate([encode([d["text"] for d in docs[i:i+args.batch_size]])
+    vectors = np.concatenate([encode([args.document_prefix + d["text"] for d in docs[i:i+args.batch_size]])
                               for i in range(0, len(docs), args.batch_size)])
     sync()
     build_s = time.perf_counter() - start
-    query_prefix = ("Instruct: Given a task or question, retrieve stored context, facts, decisions, "
-                    "and user guidance that would help answer it or avoid a mistake.\nQuery: ")
+    query_prefix = args.query_prefix
     encode([query_prefix + "Warm up retrieval."])
     rankings = {}
     for case in cases:
@@ -267,7 +276,9 @@ def embed(args):
     write_json(args.out, {
         "corpus_sha256": digest(args.corpus), "cases_sha256": digest(args.cases),
         "model": args.model, "revision": args.revision,
-        "query_instruction": query_prefix, "dtype": "float16", "attention": "sdpa",
+        "query_instruction": query_prefix, "document_prefix": args.document_prefix,
+        "max_length": args.max_length, "dtype": args.dtype, "pooling": args.pooling, "attention": "sdpa",
+        "model_architecture": model.__class__.__name__, "is_causal": getattr(model.config, "is_causal", None),
         "dimensions": int(vectors.shape[1]), "device": torch.cuda.get_device_name() if
         str(args.device).startswith("cuda") else args.device,
         "torch": torch.__version__, "transformers": transformers.__version__,
@@ -288,22 +299,23 @@ def serve(args):
     docs = corpus["documents"]
     torch.set_num_threads(4)
     tokenizer = AutoTokenizer.from_pretrained(args.model, revision=args.revision, padding_side="left")
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
     model = AutoModel.from_pretrained(
-        args.model, revision=args.revision, dtype=torch.float16,
+        args.model, revision=args.revision, dtype=getattr(torch, args.dtype),
         attn_implementation="sdpa").to(args.device).eval()
 
     @torch.inference_mode()
     def encode(texts):
         batch = tokenizer(texts, padding=True, truncation=False, return_tensors="pt").to(args.device)
-        if batch["input_ids"].shape[1] > 32768:
+        if batch["input_ids"].shape[1] > args.max_length:
             raise ValueError("Context limit exceeded")
-        vectors = model(**batch).last_hidden_state[:, -1]
+        vectors = pool_hidden_state(model(**batch).last_hidden_state, batch["attention_mask"], args.pooling)
         return torch.nn.functional.normalize(vectors.float(), p=2, dim=1).cpu().numpy()
 
-    vectors = np.concatenate([encode([d["text"] for d in docs[i:i+8]])
-                              for i in range(0, len(docs), 8)])
-    prefix = ("Instruct: Given a task or question, retrieve stored context, facts, decisions, "
-              "and user guidance that would help answer it or avoid a mistake.\nQuery: ")
+    vectors = np.concatenate([encode([args.document_prefix + d["text"] for d in docs[i:i+args.batch_size]])
+                              for i in range(0, len(docs), args.batch_size)])
+    prefix = args.query_prefix
     encode([prefix + "Warm up retrieval."])
     corpus_hash = digest(args.corpus)
 
@@ -328,7 +340,8 @@ def serve(args):
                 lexical_scores = bm25_scores(docs, request["query"])
                 dense = fused_ranks(dense, rank_indices(lexical_scores), lexical_scores)
             payload = json.dumps({"ids": [docs[i]["id"] for i in dense],
-                                  "server_seconds": time.perf_counter()-start}).encode()
+                                  "server_seconds": time.perf_counter()-start,
+                                  "model": args.model, "revision": args.revision}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -402,6 +415,7 @@ def direct(args):
                          "category": case["category"], "top_k": args.top_k,
                          "seconds": done-start, "embedding_roundtrip_seconds": embedded-start,
                          "render_seconds": done-embedded, "server_seconds": result["server_seconds"],
+                         "embedding_model": result["model"], "embedding_revision": result["revision"],
                          "delivered": sorted(delivered), "output_chars": len(rendered.text),
                          "no_match": rendered.text == NO_STRONG_MATCH,
                          "score": score_ids(delivered, case["required"], case.get("optional", []))})
@@ -436,6 +450,8 @@ def select(args):
                     retrieved = remote_ranking(args.embedding_url, digest(args.corpus), message, args.method)
                     self.embedding_seconds = time.perf_counter()-started
                     self.server_seconds = retrieved["server_seconds"]
+                    self.embedding_model = retrieved["model"]
+                    self.embedding_revision = retrieved["revision"]
                     ids = retrieved["ids"][:args.top_k]
                 else:
                     ids = rankings["rankings"][self.case_id][args.method][:args.top_k]
@@ -496,6 +512,8 @@ def select(args):
                             "session_id": session,
                             "embedding_seconds": getattr(runtime, "embedding_seconds", None),
                             "server_embedding_seconds": getattr(runtime, "server_seconds", None),
+                            "embedding_model": getattr(runtime, "embedding_model", None),
+                            "embedding_revision": getattr(runtime, "embedding_revision", None),
                             "score": score_ids(runtime.delivered, case["required"], case.get("optional", []))})
             except Exception as exc:
                 row["error"] = f"{type(exc).__name__}: {exc}"
@@ -558,6 +576,7 @@ def main():
     p.add_argument("--revision", required=True)
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--port", type=int, default=18762)
+    p.add_argument("--batch-size", type=int, default=8)
     p.set_defaults(run=serve)
     p = sub.add_parser("embed")
     p.add_argument("--corpus", type=Path, required=True)
@@ -598,7 +617,18 @@ def main():
         else:
             p.add_argument("--selector", type=Path, nargs="*", default=[])
             p.add_argument("--ks", type=int, nargs="+", default=[1, 3, 5, 10, 20, 40])
+    for command in ("embed", "serve"):
+        model_parser = sub.choices[command]
+        model_parser.add_argument("--query-prefix", default=(
+            "Instruct: Given a task or question, retrieve stored context, facts, decisions, "
+            "and user guidance that would help answer it or avoid a mistake.\nQuery: "))
+        model_parser.add_argument("--document-prefix", default="")
+        model_parser.add_argument("--max-length", type=int, default=32768)
+        model_parser.add_argument("--pooling", choices=["last", "mean"], default="last")
+        model_parser.add_argument("--dtype", choices=["float16", "bfloat16"], default="float16")
     args = parser.parse_args()
+    if getattr(args, "batch_size", 1) < 1 or getattr(args, "max_length", 1) < 1:
+        parser.error("batch-size and max-length must be positive")
     if getattr(args, "repeats", 1) < 1 or getattr(args, "top_k", 1) < 1:
         parser.error("repeats and top-k must be positive")
     if args.command == "select" and args.method != "baseline" and not (args.rankings or args.embedding_url):

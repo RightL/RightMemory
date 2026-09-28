@@ -4,9 +4,61 @@
 
 ## Embedding retrieval — 2026-09-28
 
-**Result: embedding search is fast, but the tested shortlist followed by the current selector does not improve overall retrieval latency.** Median latency was similar; the mean and slow cases were worse. Direct embedding results are much faster but miss some expected references and have no no-match decision.
+**Result: model choice changes reference coverage. Nemotron 1B is the fastest encoder tested; Jina covers all labelled positive cases within twenty candidates.** Jina plus the current selector shows a modest mean/median improvement in one fresh pass, with a worse slow tail. Direct search is fast but still needs a no-match decision. The small, agent-labelled benchmark does not establish a production winner.
 
-### End-to-end comparison
+### Expanded model comparison
+
+Six downloadable models were measured on the same frozen corpus and 32 cases. The two Qwen models were rerun; their rankings exactly match the original run. These measurements compare specific model revisions and input formats, not all embedding models or independently judged answer quality.
+
+| Model | Complete at 5 | Complete at 10 | Complete at 20 | Chinese complete at 10 | Query encoding median |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Qwen3-Embedding-0.6B | 24/28 | 25/28 | 25/28 | 4/6 | 27.4 ms |
+| Qwen3-Embedding-4B | 24/28 | 25/28 | 25/28 | 4/6 | 43.7 ms |
+| Harrier-0.6B | 25/28 | 25/28 | 27/28 | 4/6 | 26.8 ms |
+| Jina v5 small retrieval | 26/28 | 26/28 | 28/28 | 5/6 | 27.9 ms |
+| RTriever-4B | 24/28 | 25/28 | 25/28 | 4/6 | 36.8 ms |
+| Nemotron 3 Embed 1B BF16 | 25/28 | 26/28 | 26/28 | 5/6 | 18.6 ms |
+
+Nemotron 1B is the fastest query encoder in this comparison. Jina is the only tested model that covers every required reference within twenty candidates; Harrier and Nemotron reach 28/28 at forty. The two remaining Jina top-ten omissions occur at exact ranks 11 and 17, so the improvement at twenty comes from finding those entries, not a heading expanding the entire memory. Jina already reaches 26/28 at five candidates. These candidate-count choices are exploratory observations on the same labels, not a held-out confirmation.
+
+At ten candidates, mean per-query required-ID recall is 95.2% for both Qwen models and RTriever, 94.0% for Harrier, and 97.0% for Jina and Nemotron. RTriever is documented for English; its Chinese results are included explicitly. There are only six Chinese cases, some related to English cases. Fixed-count embedding retrieval still returns material for all four no-answer queries; no rejection threshold was trained.
+
+The first five models have Qwen-based designs. Nemotron provides a different, bidirectional Ministral design. Every expanded ranking run used idle L20 GPU 0, 246 indexed entries, five individual encodings per query (160 timing samples per model), SDPA, normalized full-dimensional vectors, and no input truncation. Qwen, Harrier, Jina, and RTriever used float16 and last-token pooling; Nemotron used its documented bfloat16 and mean pooling over valid tokens. Precision differs and is recorded rather than treated as an isolated architecture comparison. Full retrieval was served on idle L20 GPU 1.
+
+Harrier and RTriever use the same task instruction as Qwen. Jina uses its saved `Query: ` / `Document: ` prefixes. Nemotron uses the checkpoint/card prefixes `query: ` / `passage: `, not the release blog table's `document:` shorthand. Transformers 5.12 honors Nemotron's saved `is_causal=false`; no remote custom code or model code override is used. Numeric checks confirmed padding exclusion in mean pooling and finite bounded Nemotron similarity scores.
+
+| Additional model | Pinned revision | Peak PyTorch allocation |
+| --- | --- | ---: |
+| Harrier-0.6B | `f9b9dc8d367d443f2479d27aa5d8d2850c0774ee` | 1.22 GiB |
+| Jina v5 small retrieval | `6856e76bb72982e58de0620458a4e8b3614da340` | 1.64 GiB |
+| RTriever-4B | `2133b3d737c602f70b73642944e19ab4b8c0e70c` | 7.96 GiB |
+| Nemotron 3 Embed 1B BF16 | `c0c9fea93ea424587517f2c59e20db9f1d6bf615` | 2.59 GiB |
+
+Official loading references: [Harrier](https://huggingface.co/microsoft/harrier-oss-v1-0.6b), [Jina retrieval](https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval), [RTriever](https://huggingface.co/yale-nlp/RTriever-4B), and [Nemotron 1B](https://huggingface.co/nvidia/Nemotron-3-Embed-1B-BF16).
+
+Nemotron 8B BF16 revision `d1f2f25730bbd775b99b29185134bc86653bf2d1` has public weights but was not measured: the Xet download stalled and the direct HTTP retry was impractically slow, with a read timeout. Both attempts were stopped. Qwen3.7 Text Embedding and Flash were excluded because the official documentation exposes API access and no official downloadable weights were found. No new embedding API was used.
+
+### Expanded live comparison
+
+Jina at twenty candidates was selected for a live check because it covers all required references at that count. This changes both the embedding model and candidate count relative to the initial Qwen prototype. A fresh baseline and Jina each ran all 32 requests once, in identical shuffled order (seed 311), separate state directories, with the same selector model and source-root instructions. Their wall-clock windows partially overlapped. Repository tests had finished before these calls. The direct row has three repeats per case.
+
+| Path | Mean seconds | Median seconds | 95th percentile seconds | All expected references | Correct no-match |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Current retriever, fresh pass | 100.596 | 97.872 | 163.197 | 26/28 | 4/4 |
+| Jina, top twenty, then current selector | 90.687 | 82.501 | 166.528 | 27/28 | 4/4 |
+| Jina, top twenty, directly rendered | 0.072 | 0.070 | 0.079 | 28/28 | 0/4 |
+
+The assisted path's mean was 9.8% lower and median 15.7% lower, while its 95th percentile was 2.0% higher. Its maximum was 219.31 seconds versus 177.95. This one pass does not establish a reliable speedup. Overall latency was much higher than the earlier pass for both methods; compare within this round rather than combining the old and new wall times. Service conditions were not controlled, and the individual cause of that shift was not isolated.
+
+All 64 new selector calls completed without errors. The baseline missed one expected correction in each of two cases; Jina's selector omitted one correction that was present in its candidate context. Thus perfect candidate coverage did not translate into perfect final reference coverage. These are source-ID labels, including some overlapping guidance, not independently adjudicated answer correctness.
+
+Private evidence is in `tmp/embedding-retrieval/`: `rankings-<model>.json`, `metrics-<model>.json`, `model-comparison.json`, `baseline-expanded.jsonl`, `jina20-selector.jsonl`, `direct-jina20.json`, and `expanded-live-summary.json`. These files contain private context and remain uncommitted.
+
+The experiment harness now accepts `--query-prefix`, `--document-prefix`, `--pooling last|mean`, `--dtype float16|bfloat16`, and `--max-length` for `embed` and `serve`. For Jina supply `--query-prefix "Query: " --document-prefix "Document: "`; for Nemotron supply `--query-prefix "query: " --document-prefix "passage: " --pooling mean --dtype bfloat16`. Use the model IDs and pinned revisions above. Other models retain the original query instruction and unprefixed documents. Live results record the model and revision.
+
+Final verification used the installed RightMemory runtime Python and `python -m tests --jobs 8`: 1,494 tests, 44 skips, no failures or errors. Syntax compilation passed. No production runtime or dependency files changed.
+
+### Initial Qwen live comparison
 
 The main table uses the second selector pass, including live Windows-to-lzt242 requests over SSH, GPU search, local rendering, runtime setup/cleanup, and the selector where applicable. Model/index startup is excluded. Each selector row has 32 requests. Direct retrieval has three repetitions per query, or 96 timing samples, with unchanged reference coverage.
 
