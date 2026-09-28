@@ -323,8 +323,13 @@ def _wait_for_watch_registration(
         return process.pid
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() <= deadline:
-        pid = _read_pid(watch_pid_path(memory_root, name))
-        identity = _read_identity(watch_identity_path(memory_root, name))
+        try:
+            pid = _read_pid(watch_pid_path(memory_root, name))
+            identity = _read_identity(watch_identity_path(memory_root, name))
+        except PermissionError:
+            # Registration files can briefly be locked during replacement.
+            time.sleep(0.05)
+            continue
         if pid is not None:
             if identity is not None and process_identity(pid) == identity:
                 return pid

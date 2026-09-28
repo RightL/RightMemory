@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -988,29 +989,10 @@ class GitUpdateQueueCoordinator:
         path: str,
         candidate: UpdateCandidate,
     ) -> bool:
-        history = self._git(
-            "log",
-            "--format=%H",
-            revision,
-            "--",
-            path,
-            check=False,
-        )
-        if history.returncode != 0:
-            raise UpdateQueueUnavailable("could not inspect synchronized candidate history")
-        revisions = [revision, *history.stdout.splitlines()]
         found = False
-        inspected: set[str] = set()
-        for commit in revisions:
-            commit = commit.strip()
-            if not commit or commit in inspected:
-                continue
-            inspected.add(commit)
-            shown = self._git("show", f"{commit}:{path}", check=False)
-            if shown.returncode != 0:
-                continue
+        for content in self._historical_files(revision, path):
             try:
-                existing = parse_update_candidate_json(shown.stdout)
+                existing = parse_update_candidate_json(content)
             except (json.JSONDecodeError, UpdateQueueFormatError) as exc:
                 raise UpdateQueueFormatError(
                     f"published candidate history is malformed: {path}"
@@ -1024,33 +1006,66 @@ class GitUpdateQueueCoordinator:
 
     def _candidate_lease_batches(self, revision: str, candidate_uid: str) -> set[str]:
         path = "update_queue/lease.json"
-        history = self._git(
-            "log",
-            "--format=%H",
-            revision,
-            "--",
-            path,
-            check=False,
-        )
-        if history.returncode != 0:
-            raise UpdateQueueUnavailable("could not inspect synchronized lease history")
         batches: set[str] = set()
-        inspected: set[str] = set()
-        for commit in [revision, *history.stdout.splitlines()]:
-            commit = commit.strip()
-            if not commit or commit in inspected:
-                continue
-            inspected.add(commit)
-            shown = self._git("show", f"{commit}:{path}", check=False)
-            if shown.returncode != 0:
-                continue
+        for content in self._historical_files(revision, path):
             try:
-                lease = parse_update_queue_lease_json(shown.stdout)
+                lease = parse_update_queue_lease_json(content)
             except (json.JSONDecodeError, UpdateQueueFormatError) as exc:
                 raise UpdateQueueFormatError("published queue lease history is malformed") from exc
             if candidate_uid in lease.candidate_uids:
                 batches.add(lease.batch_id)
         return batches
+
+    def _historical_files(self, revision: str, path: str) -> Iterator[str]:
+        history = self._git("log", "--format=%H", revision, "--", path, check=False)
+        if history.returncode != 0:
+            raise UpdateQueueUnavailable("could not inspect synchronized file history")
+        revisions = dict.fromkeys(
+            value.strip() for value in (revision, *history.stdout.splitlines()) if value.strip()
+        )
+        specs = [f"{commit}:{path}" for commit in revisions]
+        if any("\n" in spec or "\r" in spec for spec in specs):
+            raise UpdateQueueUnavailable("invalid synchronized history object name")
+        for start in range(0, len(specs), 64):
+            yield from self._read_history_batch(specs[start:start + 64])
+
+    def _read_history_batch(self, specs: list[str]) -> Iterator[str]:
+        env = os.environ.copy()
+        env.update(GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="true")
+        try:
+            result = subprocess.run(
+                ["git", "cat-file", "--batch"], cwd=self.memory_root,
+                input="".join(f"{spec}\n" for spec in specs).encode("utf-8"),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                timeout=GIT_TIMEOUT_SECONDS,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise UpdateQueueUnavailable("could not read synchronized history objects") from exc
+        if result.returncode:
+            raise UpdateQueueUnavailable(result.stderr.decode("utf-8", errors="replace").strip())
+        offset = 0
+        for spec in specs:
+            end = result.stdout.find(b"\n", offset)
+            header = result.stdout[offset:end] if end >= 0 else b""
+            offset = end + 1
+            if header == spec.encode("utf-8") + b" missing":
+                continue
+            fields = header.split()
+            if len(fields) != 3 or not _OID_RE.fullmatch(fields[0].decode("ascii", errors="replace")):
+                raise UpdateQueueUnavailable("invalid synchronized history object response")
+            if fields[1] != b"blob":
+                raise UpdateQueueFormatError("synchronized history path is not a file")
+            try:
+                size = int(fields[2])
+            except ValueError as exc:
+                raise UpdateQueueUnavailable("invalid synchronized history object size") from exc
+            end = offset + size
+            if size < 0 or result.stdout[end:end + 1] != b"\n":
+                raise UpdateQueueUnavailable("incomplete synchronized history object")
+            yield result.stdout[offset:end].decode("utf-8", errors="replace")
+            offset = end + 1
+        if offset != len(result.stdout):
+            raise UpdateQueueUnavailable("unexpected synchronized history object response")
 
     def _changed_paths(self, start: str, end: str) -> list[str]:
         if start == end:

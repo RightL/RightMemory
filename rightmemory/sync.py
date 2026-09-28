@@ -1123,33 +1123,23 @@ class SyncManager:
     def _outgoing_paths(self, upstream_commit: str, captured_commit: str) -> list[str]:
         result = self._run_git(
             self.memory_root,
-            "rev-list",
+            "log",
+            "--format=",
+            "--no-show-signature",
+            "--root",
+            "--diff-merges=separate",
+            "--name-status",
+            "-r",
+            "-M",
+            "-z",
             "--reverse",
             f"{upstream_commit}..{captured_commit}",
         )
         if result.returncode != 0:
             raise RuntimeError("could not inspect outgoing sync history")
-        paths: set[str] = set()
-        for commit in result.stdout.splitlines():
-            commit = commit.strip()
-            if not commit:
-                continue
-            changed = self._run_git(
-                self.memory_root,
-                "diff-tree",
-                "--root",
-                "-m",
-                "--no-commit-id",
-                "--name-status",
-                "-r",
-                "-M",
-                "-z",
-                commit,
-            )
-            if changed.returncode != 0:
-                raise RuntimeError("could not inspect an outgoing sync commit")
-            paths.update(_name_status_paths(changed.stdout))
-        return sorted(paths)
+        # Log emits each intermediate diff, including both sides of merges;
+        # an endpoint-only diff would miss paths changed and then restored.
+        return sorted(set(_name_status_paths(result.stdout)))
 
     def _diff_paths(self, cwd: Path, start_commit: str, end_commit: str) -> list[str]:
         result = self._run_git(

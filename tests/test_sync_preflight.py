@@ -8,6 +8,18 @@ from tests.sync_test_base import SyncTestBase
 
 
 class SyncPreflightTests(SyncTestBase):
+    def test_outgoing_paths_include_files_created_then_deleted(self):
+        start = self._git(self.device, "rev-parse", "HEAD")
+        (self.device / "transient.txt").write_text("temporary change\n", encoding="utf-8")
+        self._git(self.device, "add", "transient.txt")
+        self._git(self.device, "commit", "-m", "add transient file")
+        self._git(self.device, "rm", "transient.txt")
+        self._git(self.device, "commit", "-m", "remove transient file")
+        end = self._git(self.device, "rev-parse", "HEAD")
+        self.assertEqual(self._git(self.device, "diff", "--name-only", start, end), "")
+        manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True))
+        self.assertEqual(manager._outgoing_paths(start, end), ["transient.txt"])
+
     def test_preflight_disabled(self):
         result = SyncManager(SyncConfig(memory_root=self.device, enabled=False)).preflight()
 
