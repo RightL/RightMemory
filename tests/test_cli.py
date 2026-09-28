@@ -2272,17 +2272,22 @@ class JsonRequestTests(unittest.TestCase):
             "deleted: 2\npending: 1\nskipped: 3\nmalformed: 0",
         )
 
-    def test_agent_cli_cleanup_watch_scans_every_ten_minutes_by_default(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            with (
-                patch("rightmemory.cli.default_memory_root", return_value=root),
-                patch("rightmemory.cli._agent_cli_cleanup_watch", return_value=0) as watch,
-            ):
-                result = main(["agent-cli", "cleanup", "--watch"])
+    def test_agent_cli_cleanup_rejects_missing_once_and_removed_options(self):
+        for options in ([], ["--watch"], ["--once", "--watch"], ["--once", "--interval", "600"]):
+            with self.subTest(options=options), patch("sys.stderr", io.StringIO()), patch(
+                "rightmemory.cli.AgentCliThreadCleanup"
+            ) as cleanup:
+                with self.assertRaises(SystemExit) as raised:
+                    main(["agent-cli", "cleanup", *options])
+                self.assertEqual(raised.exception.code, 2)
+                cleanup.assert_not_called()
 
-        self.assertEqual(result, 0)
-        watch.assert_called_once_with(10 * 60, root)
+    def test_watch_rejects_removed_cleanup_target(self):
+        for command in ("start", "stop", "restart", "status"):
+            with self.subTest(command=command), patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    main(["watch", command, "agent-cli-cleanup"])
+                self.assertEqual(raised.exception.code, 2)
 
     def test_watch_start_starts_review_dreamer_pruner_and_insight_managed_processes(self):
         stdout = io.StringIO()
@@ -2314,7 +2319,6 @@ class JsonRequestTests(unittest.TestCase):
                         FakeProcess(102),
                         FakeProcess(103),
                         FakeProcess(104),
-                        FakeProcess(105),
                     ],
                 ) as popen,
                 patch("sys.stdout", stdout),
@@ -2325,24 +2329,20 @@ class JsonRequestTests(unittest.TestCase):
             dreamer_pid = (memory_root / ".runtime" / "watch" / "dreamer.pid").read_text(encoding="utf-8")
             pruner_pid = (memory_root / ".runtime" / "watch" / "pruner.pid").read_text(encoding="utf-8")
             insight_pid = (memory_root / ".runtime" / "watch" / "insight.pid").read_text(encoding="utf-8")
-            cleanup_pid = (memory_root / ".runtime" / "watch" / "agent-cli-cleanup.pid").read_text(
-                encoding="utf-8"
-            )
+            self.assertFalse((memory_root / ".runtime" / "watch" / "agent-cli-cleanup.pid").exists())
 
         self.assertEqual(result, 0)
         self.assertEqual(roles, ["reviewer", "dreamer", "pruner", "insight"])
-        self.assertEqual(popen.call_count, 5)
+        self.assertEqual(popen.call_count, 4)
         self.assertEqual(review_pid, "101\n")
         self.assertEqual(dreamer_pid, "102\n")
         self.assertEqual(pruner_pid, "103\n")
         self.assertEqual(insight_pid, "104\n")
-        self.assertEqual(cleanup_pid, "105\n")
         self.assertIn("review: running pid 101", stdout.getvalue())
         self.assertIn("dreamer: running pid 102", stdout.getvalue())
         self.assertIn("pruner: running pid 103", stdout.getvalue())
         self.assertIn("insight: running pid 104", stdout.getvalue())
         self.assertIn("sync: disabled", stdout.getvalue())
-        self.assertIn("agent-cli-cleanup: running pid 105", stdout.getvalue())
 
     def test_watch_start_starts_sync_when_enabled(self):
         stdout = io.StringIO()
@@ -2373,7 +2373,6 @@ class JsonRequestTests(unittest.TestCase):
                         FakeProcess(103),
                         FakeProcess(104),
                         FakeProcess(105),
-                        FakeProcess(106),
                     ],
                 ) as popen,
                 patch("sys.stdout", stdout),
@@ -2383,7 +2382,7 @@ class JsonRequestTests(unittest.TestCase):
             sync_pid = (memory_root / ".runtime" / "watch" / "sync.pid").read_text(encoding="utf-8")
 
         self.assertEqual(result, 0)
-        self.assertEqual(popen.call_count, 6)
+        self.assertEqual(popen.call_count, 5)
         self.assertEqual(sync_pid, "105\n")
         self.assertIn("sync: running pid 105", stdout.getvalue())
 
@@ -2415,7 +2414,6 @@ class JsonRequestTests(unittest.TestCase):
                         FakeProcess(102),
                         FakeProcess(103),
                         FakeProcess(104),
-                        FakeProcess(105),
                     ],
                 ) as popen,
                 patch("sys.stdout", stdout),
@@ -2423,7 +2421,7 @@ class JsonRequestTests(unittest.TestCase):
                 result = main(["watch", "start"])
 
         self.assertEqual(result, 0)
-        self.assertEqual(popen.call_count, 5)
+        self.assertEqual(popen.call_count, 4)
         self.assertIn("sync: disabled", stdout.getvalue())
 
     def test_watch_start_passes_selected_profile_root_to_subprocess_env(self):
@@ -2503,7 +2501,6 @@ class JsonRequestTests(unittest.TestCase):
                         FakeProcess(202),
                         FakeProcess(203),
                         FakeProcess(204),
-                        FakeProcess(205),
                     ],
                 ) as popen,
                 patch("sys.stdout", stdout),
@@ -2518,7 +2515,7 @@ class JsonRequestTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertEqual(roles, ["reviewer", "dreamer", "pruner", "insight"])
-        self.assertEqual(popen.call_count, 5)
+        self.assertEqual(popen.call_count, 4)
         self.assertEqual(dreamer_pid, "201\n")
         self.assertEqual(pruner_pid, "202\n")
         self.assertEqual(insight_pid, "203\n")
@@ -2581,7 +2578,6 @@ class JsonRequestTests(unittest.TestCase):
                 ("cleanup", "insight"),
                 ("start", "insight"),
                 ("start", "sync"),
-                ("start", "cleanup"),
             ],
         )
 
