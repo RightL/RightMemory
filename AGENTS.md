@@ -44,7 +44,8 @@
 - Run the full test suite with `python -m tests` for changes that affect executable
   behavior beyond agent-facing text. It runs every `test_*.py` module in bounded
   parallel processes; use `python -m tests --jobs N` to override the default
-  concurrency of six.
+  concurrency of up to 24 (limited to the CPU count). Independent test modules
+  share their cases across workers; other modules keep their process boundary.
 - For changes limited to agent-facing text, do not run the full test suite. Run only
   relevant non-test validation such as syntax or packaging checks when applicable.
   Run tests only when executable behavior also changes or when the user explicitly

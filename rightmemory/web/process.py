@@ -340,13 +340,19 @@ def _wait_for_web_ready(
         elif not _is_web_process(expected_pid, memory_root=memory_root):
             clear_web_process_files(memory_root, expected_pid)
             raise RuntimeError(f"rightmemory web service stopped before it was ready; see {web_log_path(memory_root)}")
-        pid = _read_pid(web_ready_path(memory_root))
-        identity = _read_identity(web_identity_path(memory_root))
-        registered_pid = _read_pid(web_pid_path(memory_root))
-        matches_launch = (
-            _read_identity(web_launch_path(memory_root)) == launch_id
-            if launch_id is not None else pid == expected_pid
-        )
+        try:
+            pid = _read_pid(web_ready_path(memory_root))
+            identity = _read_identity(web_identity_path(memory_root))
+            registered_pid = _read_pid(web_pid_path(memory_root))
+            matches_launch = (
+                _read_identity(web_launch_path(memory_root)) == launch_id
+                if launch_id is not None else pid == expected_pid
+            )
+        except PermissionError:
+            # Windows can briefly deny reads while the child replaces a marker.
+            # Retry within the existing startup deadline before trusting any PID.
+            time.sleep(0.05)
+            continue
         if pid is not None and pid == registered_pid and matches_launch:
             if identity is not None and process_identity(pid) == identity:
                 return pid

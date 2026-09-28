@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -13,6 +14,13 @@ from tests.asgi_client import ASGITestClient as TestClient
 
 
 class PursuitWebTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._seed_tempdir = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._seed_tempdir.cleanup)
+        cls._seed = Path(cls._seed_tempdir.name)
+        cls._build_seed(cls._seed)
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
@@ -36,6 +44,10 @@ class PursuitWebTests(unittest.TestCase):
         return result.stdout.strip()
 
     def _seed_root(self, root):
+        shutil.copytree(self._seed, root, dirs_exist_ok=True)
+
+    @classmethod
+    def _build_seed(cls, root):
         root.mkdir(parents=True, exist_ok=True)
         (root / ".gitignore").write_text(".runtime/\nother/\n", encoding="utf-8")
         (root / "MEMORY.md").write_text("# Memory\n\n## Context {#context}\n\nStable context.\n", encoding="utf-8")
@@ -45,12 +57,12 @@ class PursuitWebTests(unittest.TestCase):
             "### Child {#child}\n\n## Beta {#beta}\n",
             encoding="utf-8",
         )
-        self._git(root, "init", "-q")
-        self._git(root, "config", "user.name", "Pursuit Web Test")
-        self._git(root, "config", "user.email", "pursuit-web@example.test")
-        self._git(root, "config", "core.autocrlf", "false")
-        self._git(root, "add", ".gitignore", "MEMORY.md", "PURSUITS.md")
-        self._git(root, "commit", "-qm", "initial map")
+        cls._git(root, "init", "-q")
+        cls._git(root, "config", "user.name", "Pursuit Web Test")
+        cls._git(root, "config", "user.email", "pursuit-web@example.test")
+        cls._git(root, "config", "core.autocrlf", "false")
+        cls._git(root, "add", ".gitignore", "MEMORY.md", "PURSUITS.md")
+        cls._git(root, "commit", "-qm", "initial map")
 
     def _snapshot(self, client=None):
         response = (client or self.client).get("/api/pursuit-map")

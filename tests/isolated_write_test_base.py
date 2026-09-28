@@ -40,7 +40,12 @@ class IsolatedWriteTestBase(unittest.TestCase):
         (cls._seed_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         seed_git("add", "MEMORY.md", "PURSUITS.md")
         seed_git("commit", "-m", "initial memory")
+        cls._prepare_seed(seed_git)
         cls._seed_head = seed_git("rev-parse", "HEAD")
+
+    @classmethod
+    def _prepare_seed(cls, seed_git):
+        pass
 
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()

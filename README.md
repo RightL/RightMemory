@@ -1110,6 +1110,28 @@ After install:
 On native Windows, the default memory root is `~\.rightmemory`, and the CLI shim
 is `%LOCALAPPDATA%\RightMemory\bin\rightmemory.cmd`.
 
+## Development Checks
+
+Run the full suite from the checkout using a Python environment with the project
+and its `codex-sdk` extra installed:
+
+```bash
+python -m tests
+python -m compileall -q rightmemory tests
+```
+
+The test runner uses up to 24 processes, limited to the CPU count. Workers share
+a queue within selected independent test modules, taking the next test as they
+finish and starting known long cases early. Each worker keeps
+its own module and class setup and cleanup. Git tests use separate disposable
+repositories per case. Other modules run in one process each.
+Timing-sensitive Windows process checks run alone before the parallel tests.
+Use `python -m tests --jobs N` to choose a lower process limit when sharing the
+machine. Workers disable automatic Git maintenance for their disposable test
+repositories and use an empty Git template instead of repeatedly copying sample
+hooks. On Windows, workers use Git for Windows' underlying executable when
+available to avoid launching an extra process for every Git command.
+
 ## Design Notes
 
 - Memory and Pursuit are separate document trees in one globally addressable graph; Agent Corrections is a third, non-graph semantic module.

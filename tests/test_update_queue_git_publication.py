@@ -7,6 +7,19 @@ from tests.update_queue_git_base import GitUpdateQueueTestBase
 
 
 class GitUpdateQueuePublicationTests(GitUpdateQueueTestBase):
+    def test_history_batch_preserves_blob_boundaries_and_deleted_revisions(self):
+        self._git(self.first, "config", "core.autocrlf", "false")
+        path = self.first / "history fixture.txt"
+        contents = ["one\r\n\0" + "a" * 40 + " blob 999\n", "second 中文\n"]
+        for content in contents:
+            path.write_bytes(content.encode("utf-8"))
+            self._git(self.first, "add", path.name)
+            self._git(self.first, "commit", "-m", "history fixture")
+        self._git(self.first, "rm", path.name)
+        self._git(self.first, "commit", "-m", "delete history fixture")
+        coordinator = self._coordinator(self.first, "1" * 32)
+        self.assertEqual(list(coordinator._historical_files("HEAD", path.name)), contents[::-1])
+
     def test_publishes_outbox_candidate_and_preserves_it_until_acknowledged(self):
         candidate = self._outbox_candidate(self.first, "a" * 32)
         coordinator = self._coordinator(self.first, "1" * 32)
