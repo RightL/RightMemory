@@ -25,9 +25,9 @@ class WatchControlTests(unittest.TestCase):
         self.assertIn("review", MANAGED_WATCH_TARGETS)
         self.assertEqual(WATCH_COMMANDS["review"], ("review", "watch"))
 
-    def test_agent_cli_cleanup_has_its_own_managed_target(self):
-        self.assertIn("agent-cli-cleanup", MANAGED_WATCH_TARGETS)
-        self.assertEqual(WATCH_COMMANDS["agent-cli-cleanup"], ("agent-cli", "cleanup", "--watch"))
+    def test_agent_cli_cleanup_is_not_a_managed_target(self):
+        self.assertNotIn("agent-cli-cleanup", MANAGED_WATCH_TARGETS)
+        self.assertNotIn("agent-cli-cleanup", WATCH_COMMANDS)
 
     def test_managed_watch_registers_and_cleans_its_own_pid(self):
         with tempfile.TemporaryDirectory() as tempdir:

@@ -758,7 +758,7 @@ Each logical Retrieve session owns its provider fork, conversation history, and 
 
 Every other independent CLI-agent role turn starts a fresh provider conversation. An explicit `chat` process may keep one in-memory conversation until that process exits, but it does not create a mapping for another process to resume. This policy is the same for Codex and Claude.
 
-RightMemory records prefix-base and fork ownership. Ordinary role threads expire after one hour without successful activity, while reusable prefix bases expire after 24 hours; successful child activity refreshes its base. An explicit `chat` process leases its current thread until that process exits. After each Codex role turn, RightMemory unsubscribes and closes the turn's connection, then immediately archives the helper thread so it stays out of the Codex task list. A stored thread is unarchived only while RightMemory resumes or forks it and is archived again when the turn ends. Retention still controls deletion: cleanup removes due children before their bases and retains a base while an active child references it. It runs opportunistically before top-level CLI-agent work and every ten minutes through the managed `agent-cli-cleanup` watcher. Run a bounded diagnostic pass directly with:
+RightMemory records prefix-base and fork ownership. Ordinary role threads expire after one hour without successful activity, while reusable prefix bases expire after 24 hours; successful child activity refreshes its base. An explicit `chat` process leases its current thread until that process exits. After each Codex role turn, RightMemory unsubscribes and closes the turn's connection, then immediately archives the helper thread so it stays out of the Codex task list. A stored thread is unarchived only while RightMemory resumes or forks it and is archived again when the turn ends. Retention still controls deletion: cleanup removes due children before their bases and retains a base while an active child references it. It runs opportunistically before top-level CLI-agent work. During idle periods, expired threads remain until the next eligible activity or a manual cleanup pass. Run a bounded diagnostic pass directly with:
 
 ```bash
 rightmemory agent-cli cleanup --once
@@ -847,7 +847,7 @@ rightmemory --profile my-project watch start
 rightmemory --profile my-project status
 ```
 
-By default these commands manage `review`, `dreamer`, `insight`, `pruner`, and `agent-cli-cleanup`, plus `sync` when `[sync].enabled` is true. Pass a target when you want one loop, such as `rightmemory watch start agent-cli-cleanup`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.
+By default these commands manage `review`, `dreamer`, `insight`, and `pruner`, plus `sync` when `[sync].enabled` is true. Pass a target when you want one loop, such as `rightmemory watch start review`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.
 
 For a single read-only view of watcher state, Dreamer and Insight trigger
 progress, async update queues, recent previews, and paths to the underlying logs

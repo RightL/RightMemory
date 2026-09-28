@@ -124,7 +124,6 @@ DEFAULT_INSIGHT_WATCH_RETRY_SECONDS = 60
 DEFAULT_PRUNER_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 DEFAULT_PRUNER_WATCH_RETRY_SECONDS = 60
 DEFAULT_SYNC_WATCH_INTERVAL_SECONDS = 60 * 60
-DEFAULT_AGENT_CLI_CLEANUP_WATCH_INTERVAL_SECONDS = 10 * 60
 DEFAULT_WATCH_MAX_CONSECUTIVE_FAILURES = 3
 DEFAULT_HUB_ROOT = Path("rightmemory-hub")
 WATCH_REFRESH_POLL_SECONDS = 5
@@ -1072,8 +1071,6 @@ def _watch_start(target: str, memory_root: Path) -> int:
                     print("sync: disabled")
                     continue
                 target_root = sync_config.memory_root
-            elif name == "agent-cli-cleanup":
-                target_root = memory_root
             else:
                 config = load_config(_watch_role(name), memory_root=memory_root)
                 target_root = config.memory_root
@@ -1367,62 +1364,10 @@ def _agent_cli_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory agent-cli")
     subparsers = parser.add_subparsers(dest="command", required=True)
     cleanup = subparsers.add_parser("cleanup", help="delete expired registered Codex threads")
-    mode = cleanup.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--once", action="store_true", help="run one bounded cleanup pass")
-    mode.add_argument("--watch", action="store_true", help="run cleanup periodically")
-    cleanup.add_argument(
-        "--interval",
-        type=int,
-        default=DEFAULT_AGENT_CLI_CLEANUP_WATCH_INTERVAL_SECONDS,
-        help="seconds between cleanup scans in watch mode",
-    )
-    args = parser.parse_args(argv)
-    if args.command != "cleanup":
-        raise ValueError(f"unknown agent-cli command: {args.command}")
-    if args.once:
-        print(AgentCliThreadCleanup(memory_root).run().format())
-        return 0
-    return _agent_cli_cleanup_watch(args.interval, memory_root)
-
-
-def _agent_cli_cleanup_watch(interval: int, memory_root: Path) -> int:
-    if interval < 1:
-        raise ValueError("--interval must be a positive integer")
-    refresh = InstallStamp(memory_root)
-    consecutive_failures = 0
-    exit_code = 0
-    try:
-        with _watch_stop_signal("agent-cli-cleanup", memory_root) as stop, WatchLock(
-            memory_root,
-            "agent-cli-cleanup",
-        ):
-            while not stop.requested:
-                _reexec_if_install_changed(refresh, stop)
-                timestamp = datetime.now(UTC).isoformat()
-                print(f"[{timestamp}] rightmemory agent-cli cleanup", flush=True)
-                try:
-                    result = AgentCliThreadCleanup(memory_root).run()
-                except Exception as exc:
-                    print(
-                        f"rightmemory agent-cli cleanup failed: {type(exc).__name__}: {exc}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    consecutive_failures += 1
-                    if _watch_failure_limit_reached("agent-cli-cleanup", consecutive_failures):
-                        exit_code = 1
-                        break
-                else:
-                    consecutive_failures = 0
-                    print(result.format(), flush=True)
-                _reexec_if_install_changed(refresh, stop)
-                if not _sleep_with_refresh_check(interval, refresh, stop):
-                    break
-        print("rightmemory agent-cli cleanup watch stopped", file=sys.stderr)
-        return exit_code
-    except KeyboardInterrupt:
-        print("rightmemory agent-cli cleanup watch stopped", file=sys.stderr)
-        return 130
+    cleanup.add_argument("--once", action="store_true", required=True, help="run one bounded cleanup pass")
+    parser.parse_args(argv)
+    print(AgentCliThreadCleanup(memory_root).run().format())
+    return 0
 
 
 def _status_main(argv: list[str], memory_root: Path) -> int:
