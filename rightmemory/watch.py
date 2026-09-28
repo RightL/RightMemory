@@ -33,7 +33,6 @@ MANAGED_WATCH_TARGETS = (
     "pruner",
     "insight",
     "sync",
-    "agent-cli-cleanup",
 )
 WATCH_COMMANDS = {
     "review": ("review", "watch"),
@@ -41,7 +40,6 @@ WATCH_COMMANDS = {
     "pruner": ("prune", "watch"),
     "insight": ("insight", "watch"),
     "sync": ("sync", "watch"),
-    "agent-cli-cleanup": ("agent-cli", "cleanup", "--watch"),
 }
 WATCH_CLEANUP_ROLES = {
     "review": "reviewer",

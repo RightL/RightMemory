@@ -507,16 +507,6 @@ class StatusDashboardTests(unittest.TestCase):
                         "log_path": root / ".runtime" / "watch" / "sync.log",
                     },
                 )(),
-                "agent-cli-cleanup": type(
-                    "WatchStatus",
-                    (),
-                    {
-                        "name": "agent-cli-cleanup",
-                        "state": "stopped",
-                        "pid": None,
-                        "log_path": root / ".runtime" / "watch" / "agent-cli-cleanup.log",
-                    },
-                )(),
             }
 
             watches, issues = collect_managed_watch_sections(
@@ -526,7 +516,7 @@ class StatusDashboardTests(unittest.TestCase):
 
         self.assertEqual(
             [watch.name for watch in watches],
-            ["review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"],
+            ["review", "dreamer", "pruner", "insight", "sync"],
         )
         self.assertEqual(watches[0].state, "running pid 123")
         self.assertEqual(watches[0].last, "reviewed 3 sessions")
@@ -542,7 +532,7 @@ class StatusDashboardTests(unittest.TestCase):
             log.write_text("rightmemory pruner check failed: RuntimeError: boom\n", encoding="utf-8")
 
             statuses = {}
-            for name in ("review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"):
+            for name in ("review", "dreamer", "pruner", "insight", "sync"):
                 statuses[name] = type(
                     "WatchStatus",
                     (),
@@ -579,7 +569,7 @@ class StatusDashboardTests(unittest.TestCase):
                 encoding="utf-8",
             )
             statuses = {}
-            for name in ("review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"):
+            for name in ("review", "dreamer", "pruner", "insight", "sync"):
                 statuses[name] = type(
                     "WatchStatus",
                     (),
@@ -608,7 +598,7 @@ class StatusDashboardTests(unittest.TestCase):
             log.parent.mkdir(parents=True)
             log.write_text("rightmemory dreamer watch stopping after current work\n", encoding="utf-8")
             statuses = {}
-            for name in ("review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"):
+            for name in ("review", "dreamer", "pruner", "insight", "sync"):
                 statuses[name] = type(
                     "WatchStatus",
                     (),
@@ -630,6 +620,22 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(dreamer.last, "rightmemory dreamer watch stopping after current work")
         self.assertEqual(issues, [])
 
+    def test_collect_managed_watches_ignores_retired_cleanup_records(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            watch_dir = root / ".runtime" / "watch"
+            watch_dir.mkdir(parents=True)
+            pid_path = watch_dir / "agent-cli-cleanup.pid"
+            pid_path.write_text("30944\n", encoding="utf-8")
+            (watch_dir / "agent-cli-cleanup.log").write_text(
+                "rightmemory agent-cli cleanup failed: old failure\n", encoding="utf-8"
+            )
+            watches, issues = collect_managed_watch_sections(root)
+            self.assertNotIn("agent-cli-cleanup", [watch.name for watch in watches])
+            self.assertEqual(issues, [])
+            self.assertEqual(pid_path.read_text(encoding="utf-8"), "30944\n")
+            self.assertIsNone(status_module._watch_recovery_hint("agent-cli-cleanup: stale pid 30944"))
+
     def test_collect_managed_watches_default_reader_does_not_create_lock_files(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -642,7 +648,7 @@ class StatusDashboardTests(unittest.TestCase):
 
             self.assertEqual(
                 [watch.name for watch in watches],
-                ["review", "dreamer", "pruner", "insight", "sync", "agent-cli-cleanup"],
+                ["review", "dreamer", "pruner", "insight", "sync"],
             )
             self.assertEqual(issues, [])
             self.assertFalse((watch_dir / "review.lock").exists())
