@@ -13,6 +13,19 @@ from tests.isolated_write_test_base import IsolatedWriteTestBase
 
 
 class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
+    def test_tree_validation_checks_every_changed_path(self):
+        for name in ("MEMORY_safe.md", "MEMORY_unsafe.md"):
+            (self.root / name).write_text("content\n", encoding="utf-8")
+        self._git("add", "MEMORY_safe.md", "MEMORY_unsafe.md")
+        blob = self._git("hash-object", "MEMORY_unsafe.md")
+        self._git("update-index", "--cacheinfo", f"120000,{blob},MEMORY_unsafe.md")
+        self._git("commit", "-m", "unsafe second path")
+        with self.assertRaisesRegex(RuntimeError, "not a regular file: MEMORY_unsafe.md"):
+            IsolatedWriteSupervisor(self.root, "update")._validate_commit_tree(
+                self.root, self._git("rev-parse", "HEAD"),
+                {"MEMORY_safe.md", "MEMORY_unsafe.md"},
+            )
+
     def test_update_model_cannot_author_a_candidate_record(self):
         candidate = UpdateCandidate(
             uid="a" * 32,

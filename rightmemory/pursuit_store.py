@@ -106,8 +106,8 @@ class PursuitStore:
                 errors.extend(_validation_errors(self.root))
             except (OSError, ValueError) as exc:
                 errors.append(str(exc))
-            current_head = self._head_or_empty()
-            current_revision = self._revision(current_head)
+            current_head, current_branch = self._head_and_branch()
+            current_revision = self._revision(current_head, current_branch)
             stable = revision == current_revision
             diagnostics = list(dict.fromkeys([
                 *snapshot.get("diagnostics", []),
@@ -777,18 +777,28 @@ class PursuitStore:
         result = self._reader._run_git(self.root, "rev-parse", "--verify", "HEAD", check=False)
         return result.stdout.strip() if result.returncode == 0 else ""
 
-    def _repository_state(self) -> _RepositoryState:
+    def _head_and_branch(self) -> tuple[str, str]:
         result = self._reader._run_git(
-            self.root, "rev-parse", "--show-toplevel", "--absolute-git-dir", "HEAD", check=False,
+            self.root, "rev-parse", "HEAD", "--symbolic-full-name", "HEAD", check=False,
         )
         fields = result.stdout.strip().splitlines()
-        if result.returncode or len(fields) != 3 or Path(fields[0]).resolve() != self.root:
+        if result.returncode or len(fields) != 2:
+            return "", ""
+        return fields[0], fields[1] if fields[1] != "HEAD" else ""
+
+    def _repository_state(self) -> _RepositoryState:
+        result = self._reader._run_git(
+            self.root, "rev-parse", "--show-toplevel", "--absolute-git-dir", "HEAD",
+            "--symbolic-full-name", "HEAD", check=False,
+        )
+        fields = result.stdout.strip().splitlines()
+        if result.returncode or len(fields) != 4 or Path(fields[0]).resolve() != self.root:
             return _RepositoryState(diagnostics=("The memory root must be a Git repository root with an initial commit.",))
         git_dir = Path(fields[1])
         head = fields[2]
-        branch = self._reader._run_git(self.root, "symbolic-ref", "--quiet", "HEAD", check=False)
+        branch = fields[3] if fields[3] != "HEAD" else ""
         diagnostics = []
-        if branch.returncode:
+        if not branch:
             diagnostics.append("The memory root has a detached HEAD. Check out its active branch before editing.")
         if any((git_dir / name).exists() for name in (
             "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer",
@@ -816,15 +826,12 @@ class PursuitStore:
         except RuntimeError as exc:
             dirty = set()
             diagnostics.append(str(exc))
-        return _RepositoryState(head, branch.stdout.strip(), tuple(sorted(dirty)), tuple(diagnostics))
+        return _RepositoryState(head, branch, tuple(sorted(dirty)), tuple(diagnostics))
 
-    def _revision(self, head: str, branch: str | None = None) -> str:
+    def _revision(self, head: str, branch: str) -> str:
         digest = hashlib.sha256()
         digest.update(self.root_key.encode("ascii") + b"\0")
         digest.update(head.encode("ascii", errors="replace") + b"\0")
-        if branch is None:
-            result = self._reader._run_git(self.root, "symbolic-ref", "--quiet", "HEAD", check=False)
-            branch = result.stdout.strip() if result.returncode == 0 else ""
         digest.update(branch.encode("utf-8") + b"\0")
         for name in sorted(self._semantic_names()):
             digest.update(name.encode("utf-8") + b"\0")
