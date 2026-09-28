@@ -832,11 +832,30 @@ class IsolatedWriteSupervisor:
         raise RuntimeError("isolated empty commits are limited to pruner `prune: checkpoint` commits")
 
     def _validate_commit_tree(self, worktree: Path, commit: str, changed_paths: set[str]) -> None:
-        if self.role != "insight":
-            self._validate_regular_memory_path(worktree, commit, "MEMORY.md", required=True)
-            self._validate_regular_memory_path(worktree, commit, "PURSUITS.md", required=True)
-        for path in sorted(changed_paths - {"MEMORY.md", "PURSUITS.md"}):
-            self._validate_regular_memory_path(worktree, commit, path, required=False)
+        required = {"MEMORY.md", "PURSUITS.md"} if self.role != "insight" else set()
+        paths = sorted(required | changed_paths)
+        if not paths:
+            return
+        # Inspect all paths in the same immutable commit with one Git process.
+        output = self._git_stdout(worktree, "ls-tree", "-z", commit, "--", *paths)
+        entries = {}
+        for record in output.split("\0"):
+            if not record:
+                continue
+            metadata, separator, path = record.partition("\t")
+            parts = metadata.split()
+            if not separator or len(parts) < 2:
+                raise RuntimeError("could not inspect memory paths in git tree")
+            entries[path] = parts[0], parts[1]
+        for path in paths:
+            entry = entries.get(path)
+            if entry is None:
+                if path in required:
+                    raise RuntimeError("isolated commit must keep MEMORY.md as a regular file")
+                continue
+            mode, kind = entry
+            if kind != "blob" or mode not in {"100644", "100755"}:
+                raise RuntimeError(f"memory path is not a regular file: {path}")
 
     def _is_role_write_path(self, path: str) -> bool:
         if self.role == "insight":
@@ -1033,30 +1052,6 @@ class IsolatedWriteSupervisor:
         if offset != len(result.stdout):
             raise RuntimeError("unexpected immutable Pursuit graph blob response")
         return blobs
-
-    def _validate_regular_memory_path(self, worktree: Path, commit: str, path: str, required: bool) -> None:
-        tree_entry = self._tree_entry(worktree, commit, path)
-        if tree_entry is None:
-            if required:
-                raise RuntimeError("isolated commit must keep MEMORY.md as a regular file")
-            return
-
-        mode, kind = tree_entry
-        if kind != "blob" or mode not in {"100644", "100755"}:
-            raise RuntimeError(f"memory path is not a regular file: {path}")
-
-    def _tree_entry(self, worktree: Path, commit: str, path: str) -> tuple[str, str] | None:
-        output = self._git_stdout(worktree, "ls-tree", "-z", commit, "--", path)
-        if not output:
-            return None
-        record = output.split("\0", 1)[0]
-        metadata, separator, _entry_path = record.partition("\t")
-        if not separator:
-            raise RuntimeError(f"could not inspect memory path in git tree: {path}")
-        parts = metadata.split()
-        if len(parts) < 2:
-            raise RuntimeError(f"could not inspect memory path in git tree: {path}")
-        return parts[0], parts[1]
 
     def _commit_paths(self, worktree: Path, commit: str) -> list[str]:
         output = self._git_stdout(

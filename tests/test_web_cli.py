@@ -450,6 +450,33 @@ class WebStartupTests(unittest.TestCase):
         wait.assert_called_once()
         process.terminate.assert_not_called()
 
+    def test_registration_retries_a_temporarily_locked_pid_marker(self):
+        from rightmemory.web.process import _read_pid
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            process = Mock(pid=12345)
+            process.poll.return_value = None
+            locked = True
+
+            def read_pid(path):
+                nonlocal locked
+                if path == web_pid_path(root) and locked:
+                    locked = False
+                    raise PermissionError("marker is being replaced")
+                return _read_pid(path)
+
+            with patch("rightmemory.web.process.process_identity", return_value="test-process"):
+                register_web_process(root, process.pid, ready=True)
+                with (
+                    patch("rightmemory.web.process._read_pid", side_effect=read_pid),
+                    patch("rightmemory.web.process.time.sleep") as wait,
+                ):
+                    result = _wait_for_web_registration(root, process, timeout_seconds=1)
+        self.assertEqual(result, process.pid)
+        wait.assert_called_once_with(0.05)
+        process.terminate.assert_not_called()
+
     def test_registration_reports_child_exit_without_waiting_for_timeout(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

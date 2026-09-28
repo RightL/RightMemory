@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from rightmemory.watch import (
     MANAGED_WATCH_TARGETS,
@@ -17,10 +17,23 @@ from rightmemory.watch import (
     watch_identity_path,
     watch_pid_path,
     watch_stop_path,
+    _wait_for_watch_registration,
 )
 
 
 class WatchControlTests(unittest.TestCase):
+    def test_registration_retries_temporarily_locked_identity_file(self):
+        process = Mock()
+        with (
+            patch("rightmemory.watch._read_pid", return_value=42),
+            patch("rightmemory.watch._read_identity", side_effect=[PermissionError(), "identity"]),
+            patch("rightmemory.watch.process_identity", return_value="identity"),
+            patch("rightmemory.watch.time.sleep") as sleep,
+        ):
+            self.assertEqual(_wait_for_watch_registration(Path("fixture"), "sync", process), 42)
+        sleep.assert_called_once_with(0.05)
+        process.terminate.assert_not_called()
+
     def test_transcript_review_is_a_managed_target(self):
         self.assertIn("review", MANAGED_WATCH_TARGETS)
         self.assertEqual(WATCH_COMMANDS["review"], ("review", "watch"))

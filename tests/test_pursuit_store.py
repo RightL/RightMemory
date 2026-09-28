@@ -14,23 +14,25 @@ class PursuitStoreTests(IsolatedWriteTestBase):
 
     def setUp(self):
         super().setUp()
-        self._git("config", "core.autocrlf", "false")
-        self._git("config", "commit.gpgSign", "false")
-        (self.root / "MEMORY.md").write_bytes(
+        self.store = PursuitStore(self.root)
+
+    @classmethod
+    def _prepare_seed(cls, seed_git):
+        seed_git("config", "core.autocrlf", "false")
+        seed_git("config", "commit.gpgSign", "false")
+        (cls._seed_root / "MEMORY.md").write_bytes(
             "# Memory\n\n## Context {#context}\n\n"
             "- `memory-one` Stable context. → [dep:alpha]\n\n"
             "## Other {#other}\n\nUnchanged body.\n".encode("utf-8")
         )
-        (self.root / "PURSUITS.md").write_bytes(
+        (cls._seed_root / "PURSUITS.md").write_bytes(
             "# Pursuits\n\n## Focus\n\n- `alpha`\n\n"
             "## Alpha {#alpha} → [dep:context]\n\nAlpha body.\n\n"
             "### Child {#alpha-child}\n\nChild body.\n\n"
             "## Beta {#beta}\n\nBeta body.\n".encode("utf-8")
         )
-        self._git("add", "MEMORY.md", "PURSUITS.md")
-        self._git("commit", "-m", "seed editable map")
-        self.initial_head = self._git("rev-parse", "HEAD")
-        self.store = PursuitStore(self.root)
+        seed_git("add", "MEMORY.md", "PURSUITS.md")
+        seed_git("commit", "-m", "seed editable map")
 
     def _apply(self, operation, *, revision=None, session_id=None):
         result = self._pending(operation, revision=revision, session_id=session_id)
