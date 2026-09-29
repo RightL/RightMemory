@@ -184,9 +184,24 @@ class EmbeddingRetriever:
     def _render(self, corpus: RetrievalCorpus, selected: list[RetrievalEntry]) -> EmbeddingRetrieveResult:
         if not selected:
             return EmbeddingRetrieveResult("No searchable Memory entries are available.", (), corpus.fingerprint)
-        intro = "Retrieved candidates; use the entries that apply to the current need.\n\n"
-        blocks = [f"Source: `{entry.source}`\n\n{entry.text}" for entry in selected]
-        text = intro + "\n\n---\n\n".join(blocks)
+        # Source order keeps facts under their original headings, as in the agent retriever.
+        tree = {}
+        selected_keys = {entry.key for entry in selected}
+        for entry in corpus.entries:
+            if entry.key not in selected_keys:
+                continue
+            branch = tree
+            parts = entry.display_parts or ((entry.key, f"Source: `{entry.source}`\n\n{entry.text}"),)
+            for key, body in parts:
+                _, branch = branch.setdefault(key, (body, {}))
+
+        def render(branch: dict) -> str:
+            return "\n\n".join(
+                part for body, children in branch.values()
+                for part in (body, render(children)) if part
+            )
+
+        text = render(tree)
         if len(text) > self.max_output_chars:
             raise ValueError(
                 f"retrieval output is {len(text)} characters; reduce [retrieve.embedding].result_count "
