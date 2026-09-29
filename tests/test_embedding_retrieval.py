@@ -15,7 +15,7 @@ from rightmemory.config import EmbeddingRetrieveConfig, RuntimeConfig, load_conf
 from rightmemory.embedding_retrieval import (
     EmbeddingRetriever, EmbeddingServiceClient, EmbeddingServiceError, ModelInfo, _vector,
 )
-from rightmemory.embedding_service import create_app
+from rightmemory.embedding_service import create_app, _allows_keyless_bind
 from rightmemory.embedding_models import adapter_identity, model_fingerprint
 from rightmemory.profiles import _profile_seed_config
 from rightmemory.recent_submitted import RecentSubmittedMemoryEntry
@@ -452,20 +452,33 @@ class EmbeddingProtocolTests(unittest.TestCase):
                         self.assertRaises(EmbeddingServiceError):
                     client.info()
 
-    def test_service_selects_adapters_independently(self):
+    def test_service_selects_adapters_for_unauthenticated_private_host(self):
         from rightmemory import embedding_service
         with patch.dict(embedding_service.EMBEDDING_ADAPTERS, {"other-embedding": FakeEmbeddingAdapter}), \
                 patch.dict(embedding_service.RERANKER_ADAPTERS, {"other-reranker": FakeRerankerAdapter}), \
+                patch.dict("os.environ", {"RIGHTMEMORY_EMBEDDING_API_KEY": ""}), \
                 patch("uvicorn.run") as run:
             status = embedding_service.main([
                 "--embedding-adapter", "other-embedding", "--reranker-adapter", "other-reranker",
                 "--embedding-model", "embed", "--reranker-model", "rerank", "--device", "cpu",
+                "--host", "10.21.1.242",
             ])
         self.assertEqual(status, 0)
+        self.assertEqual(run.call_args.kwargs["host"], "10.21.1.242")
         with TestClient(run.call_args.args[0]) as client:
-            info = client.get("/info").json()
+            response = client.get("/info")
+            self.assertEqual(response.status_code, 200)
+            info = response.json()
         self.assertEqual((info["embedding_model"], info["reranker_model"]), ("embedding-one", "reranker-one"))
         self.assertEqual((info["max_batch_size"], info["max_candidates"]), (3, 200))
+
+    def test_keyless_bind_is_limited_to_loopback_and_explicit_private_addresses(self):
+        for host in ("localhost", "127.0.0.1", "::1", "10.21.1.242", "172.16.0.1", "192.168.1.1", "fd00::1"):
+            with self.subTest(host=host):
+                self.assertTrue(_allows_keyless_bind(host))
+        for host in ("0.0.0.0", "::", "8.8.8.8", "2606:4700:4700::1111", "169.254.1.1", "example.com", "172.32.0.1"):
+            with self.subTest(host=host):
+                self.assertFalse(_allows_keyless_bind(host))
 
     def test_adapter_identity_includes_settings_and_revision(self):
         with tempfile.TemporaryDirectory() as directory:
