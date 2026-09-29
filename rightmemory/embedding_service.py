@@ -15,6 +15,21 @@ from pydantic import BaseModel, ConfigDict, Field
 from .embedding_models import EMBEDDING_ADAPTERS, RERANKER_ADAPTERS, EmbeddingAdapter, RerankerAdapter
 
 
+PRIVATE_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7",
+))
+
+
+def _allows_keyless_bind(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or any(address in network for network in PRIVATE_NETWORKS)
+
+
 class EmbedRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     texts: list[Annotated[str, Field(min_length=1, max_length=131072)]] = Field(min_length=1)
@@ -94,12 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--api-key-env", default="RIGHTMEMORY_EMBEDDING_API_KEY")
     args = parser.parse_args(argv)
     api_key = os.environ.get(args.api_key_env) or None
-    try:
-        loopback = args.host == "localhost" or ipaddress.ip_address(args.host).is_loopback
-    except ValueError:
-        loopback = False
-    if not loopback and not api_key:
-        parser.error("set the API key environment variable before binding beyond loopback")
+    if not _allows_keyless_bind(args.host) and not api_key:
+        parser.error("without an API key, bind to localhost or an explicit private IP address")
     if not 1 <= args.port <= 65535:
         parser.error("port must be between 1 and 65535")
     import uvicorn
