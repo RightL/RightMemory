@@ -8,6 +8,8 @@ Search units follow the canonical graph rather than a second Markdown parser. An
 
 The ordinary runtime owns source validation, sync, snapshot consistency, and a disposable vector cache. A separate model service keeps independently selected embedding and reranking adapters loaded. Model-specific loading, input formatting, and token limits belong to those adapters; the transport and retrieval client consume their reported dimensions and capacities. Cache identities include source text, model contents, encoding settings, and adapter revision, so a reranker replacement can reuse vectors while an embedding change rebuilds them. Queries are independent; the caller supplies the current need and may receive repeated results. Separate bookkeeping keeps the existing agent retriever's native conversation and delivery semantics intact when the user changes retrieval settings.
 
+Service availability is independent of Memory validity. Keeping an agent executor configured supplies a per-query fallback when the model service fails; the next query tries embedding again. The fallback reuses the ordinary agent retriever and its session history, so it needs no second rendering policy or persistent health state. Invalid sources, unstable snapshots, and local output limits still fail visibly. A successful search does not trigger fallback merely because its results might be irrelevant.
+
 ## Human-Owned Pursuit Map
 
 ### Ownership follows the kind of state

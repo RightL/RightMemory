@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+from dataclasses import replace
 import asyncio
 import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
-from rightmemory.config import EmbeddingRetrieveConfig, RuntimeConfig, load_config
+from rightmemory.config import AgentCliConfig, EmbeddingRetrieveConfig, RuntimeConfig, load_config
 from rightmemory.embedding_retrieval import (
     EmbeddingRetriever, EmbeddingServiceClient, EmbeddingServiceError, ModelInfo, _vector,
 )
@@ -216,8 +217,9 @@ class EmbeddingRetrievalTests(unittest.TestCase):
             path.write_text(path.read_text(encoding="utf-8") + "\nUpdated.\n", encoding="utf-8")
             return selected
 
-        with patch.object(self.retriever, "_select", side_effect=select), self.assertRaises(EmbeddingServiceError):
+        with patch.object(self.retriever, "_select", side_effect=select), self.assertRaises(RuntimeError) as raised:
             self.retriever.retrieve("Find project context")
+        self.assertNotIsInstance(raised.exception, EmbeddingServiceError)
 
     def test_output_limit_errors_instead_of_silently_cutting_sources(self):
         self.retriever.max_output_chars = 20
@@ -253,6 +255,76 @@ class EmbeddingRetrievalTests(unittest.TestCase):
             runtime.run_chat_turn("Find context", "cli-agent-install")
             runtime.cleanup()
         self.assertEqual(self.client.query_count, 1)
+
+    def test_service_failure_falls_back_once_and_next_call_recovers(self):
+        for cli in (False, True):
+            with self.subTest(cli=cli):
+                config = RuntimeConfig(
+                    role="retrieve", memory_root=self.root, retrieve_backend="embedding", embedding=self.config,
+                    runtime_mode="cli-agent" if cli else "standalone",
+                    agent_cli=AgentCliConfig("claude") if cli else None,
+                    model_id=None if cli else "test:model",
+                )
+                agent = Mock()
+                started = Mock()
+                method = "_run_session_cli_agent" if cli else "_run_session_model"
+                with patch.object(RightMemoryRuntime, "_build_cli_agent", return_value=agent) as cli_build, \
+                        patch.object(RightMemoryRuntime, "_build_agent", return_value=agent) as model_build, \
+                        patch.object(RightMemoryRuntime, "_pull_file_views_for_retrieve"), \
+                        patch.object(RightMemoryRuntime, method, return_value="agent result") as fallback:
+                    runtime = RightMemoryRuntime(config)
+                    self.addCleanup(runtime.cleanup)
+                    runtime._embedding_retriever.client = self.client
+                    runtime.run_session_turn("healthy", "Find context")
+                    cli_build.assert_not_called()
+                    model_build.assert_not_called()
+                    with patch.object(self.client, "info", side_effect=EmbeddingServiceError("offline")), \
+                            self.assertLogs("rightmemory.runtime", level="WARNING"):
+                        result = runtime.run_session_turn("fallback", "The same query", on_started=started,
+                                                          include_returned=True)
+                    self.assertEqual(result, "agent result")
+                    fallback.assert_called_once_with("fallback", "The same query", include_returned=True)
+                    started.assert_called_once_with()
+                    agent.cleanup.assert_called_once_with()
+                    history = MessageSessionStore(self.root, "retrieve-embedding").paths("fallback").history
+                    self.assertFalse(history.exists())
+                    runtime.run_session_turn("recovered", "Find context")
+                    self.assertEqual(fallback.call_count, 1)
+
+    def test_fallback_preserves_config_and_no_session_dispatch_and_cleans_up_on_failure(self):
+        from rightmemory.agent_cli import NO_SESSION_RIGHTMEMORY_SESSION_ID
+        config = RuntimeConfig(
+            role="retrieve", memory_root=self.root, state_root=self.root / "separate-state",
+            retrieve_backend="embedding", embedding=self.config, model_id="test:model", api_key="secret",
+            model_kwargs={"temperature": 0}, retrieve_max_output_chars=12345,
+        )
+        with patch.object(RightMemoryRuntime, "_pull_file_views_for_retrieve"):
+            runtime = RightMemoryRuntime(config)
+            fake = Mock()
+            fake._run_session_model.side_effect = RuntimeError("agent also failed")
+            with patch.object(runtime._embedding_retriever, "retrieve", side_effect=EmbeddingServiceError("offline")), \
+                    patch("rightmemory.runtime.RightMemoryRuntime", return_value=fake) as factory, \
+                    self.assertLogs("rightmemory.runtime", level="WARNING"), \
+                    self.assertRaisesRegex(RuntimeError, "agent also failed"):
+                runtime.run_turn("Find context")
+            factory.assert_called_once_with(replace(config, retrieve_backend="agent", embedding=None), codex_runner=None)
+            fake._run_session_model.assert_called_once_with(NO_SESSION_RIGHTMEMORY_SESSION_ID, "Find context", include_returned=False)
+            fake.cleanup.assert_called_once_with()
+            runtime.cleanup()
+
+    def test_source_and_local_errors_do_not_trigger_fallback(self):
+        config = RuntimeConfig(role="retrieve", memory_root=self.root, retrieve_backend="embedding",
+                               embedding=self.config, model_id="test:model")
+        with patch.object(RightMemoryRuntime, "_build_agent", side_effect=AssertionError("agent constructed")), \
+                patch.object(RightMemoryRuntime, "_pull_file_views_for_retrieve"):
+            runtime = RightMemoryRuntime(config)
+            self.addCleanup(runtime.cleanup)
+            for error in (ValueError("invalid source or output limit"), RuntimeError("source changed"), OSError("cache failed")):
+                with self.subTest(error=error), \
+                        patch.object(runtime._embedding_retriever, "retrieve", side_effect=error), \
+                        self.assertRaises(type(error)) as raised:
+                    runtime.run_session_turn("invalid", "Find context")
+                self.assertIs(raised.exception, error)
 
     def test_backing_symlink_cannot_escape_the_memory_root(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -351,7 +423,7 @@ class EmbeddingConfigurationTests(unittest.TestCase):
             'url="http://localhost"\ncandidate_count=3\nresult_count=10',
             'url="http://localhost"\nresult_count=true', 'url="http://localhost"\nthreshold=0.1',
             'url="http://localhost"\ntimeout_seconds=nan',
-            'url="http://localhost"\n[retrieve.model]\nmodel_id="test"',
+            'url="http://localhost"\n[retrieve.model]\nmodel_id="test"\n[retrieve.agent_cli]\nprovider="codex"',
         ):
             with self.subTest(body=body), self.assertRaises(ValueError):
                 self.configure(base + body)
@@ -359,8 +431,38 @@ class EmbeddingConfigurationTests(unittest.TestCase):
             self.configure('[retrieve.embedding]\nurl="http://localhost"')
 
     def test_profile_seed_preserves_retrieval_service_settings(self):
-        settings = {"backend": "embedding", "embedding": {"url": "http://localhost:8766"}, "max_output_chars": 15000}
+        settings = {"backend": "embedding", "embedding": {"url": "http://localhost:8766"}, "max_output_chars": 15000,
+                    "agent_cli": {"provider": "codex", "model": "test-model"}}
         self.assertEqual(_profile_seed_config({"retrieve": settings})["retrieve"], settings)
+
+    def test_preserves_existing_agent_settings_for_fallback(self):
+        base = '[retrieve]\nbackend="embedding"\n[retrieve.embedding]\nurl="http://localhost:8766"\n'
+        for executor in (
+            '[retrieve.agent_cli]\nprovider="codex"\nmodel="test-model"\nreasoning_effort="low"\n',
+            '[agent_cli]\nprovider="claude"\n',
+            '[retrieve.model]\nmodel_id="openai:test"\napi_base="http://provider"\napi_key="secret"\n[retrieve.model.kwargs]\ntemperature=0\n',
+        ):
+            with self.subTest(executor=executor):
+                config = self.configure(base + executor)
+                previous = self.configure(executor)
+                self.assertEqual(replace(config, retrieve_backend="agent", embedding=None), previous)
+
+    def test_doctor_checks_configured_cli_fallback(self):
+        from rightmemory.doctor import _load_agent_cli_configs
+        cli = RuntimeConfig(role="retrieve", runtime_mode="cli-agent", agent_cli=AgentCliConfig("codex"))
+        embedding = replace(cli, retrieve_backend="embedding", embedding=EmbeddingRetrieveConfig("http://localhost"))
+        with patch("rightmemory.doctor.load_config", side_effect=lambda role, **kw: embedding if role == "retrieve" else replace(cli, role=role)):
+            configs = _load_agent_cli_configs([])
+        self.assertEqual(configs["retrieve"], cli)
+
+    def test_http_transport_failures_are_service_failures(self):
+        from http.client import IncompleteRead
+        from urllib.error import URLError
+        client = EmbeddingServiceClient(EmbeddingRetrieveConfig("http://localhost"))
+        for error in (TimeoutError(), URLError("offline"), IncompleteRead(b"partial")):
+            with self.subTest(error=error), patch.object(client.opener, "open", side_effect=error), \
+                    self.assertRaises(EmbeddingServiceError):
+                client.info()
 
     def test_candidate_count_is_not_capped_by_a_specific_model(self):
         config = self.configure('[retrieve]\nbackend="embedding"\n[retrieve.embedding]\n'
