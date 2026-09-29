@@ -117,6 +117,26 @@ class WebStudioReadApiTests(unittest.TestCase):
         self.assertEqual(retrieve["executor"]["reasoning_effort"], "high")
         self.assertNotIn("secret-token", response.text)
 
+    def test_settings_reports_embedding_counts_without_service_credentials(self):
+        (self.root / "rightmemory.toml").write_text(
+            '[agent_cli]\nprovider = "codex"\n'
+            '[retrieve]\nbackend = "embedding"\n'
+            '[retrieve.embedding]\nurl = "http://127.0.0.1:8766"\n'
+            'candidate_count = 40\nresult_count = 10\napi_key = "embedding-secret"\n',
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/settings")
+
+        self.assertEqual(response.status_code, 200)
+        retrieve = next(role for role in response.json()["data"]["roles"] if role["role"] == "retrieve")
+        self.assertTrue(retrieve["ok"])
+        self.assertEqual(retrieve["executor"], {
+            "mode": "embedding", "url": "http://127.0.0.1:8766",
+            "candidate_count": 40, "result_count": 10, "api_key": "configured",
+        })
+        self.assertNotIn("embedding-secret", response.text)
+
 
 class WebStudioStaticTests(unittest.TestCase):
     def test_static_shell_loads_assets(self):

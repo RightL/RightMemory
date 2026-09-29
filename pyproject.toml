@@ -35,6 +35,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+embedding-service = [
+  "torch>=2.12,<3",
+  "transformers>=5.12,<6",
+  "numpy>=2,<3",
+]
 codex-sdk = [
   "openai-codex==0.147.0",
 ]
