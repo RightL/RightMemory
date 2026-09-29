@@ -556,8 +556,8 @@ def _embedding_config(value: object) -> EmbeddingRetrieveConfig:
         raise ValueError(f"{context}.url has an invalid port") from exc
     candidates = _positive_integer(value, "candidate_count", 40, context)
     results = _positive_integer(value, "result_count", 10, context)
-    if not results <= candidates <= 125:
-        raise ValueError(f"{context} requires result_count <= candidate_count <= 125")
+    if results > candidates:
+        raise ValueError(f"{context} requires result_count <= candidate_count")
     return EmbeddingRetrieveConfig(
         url=url,
         api_key=_optional_string(value, "api_key"),

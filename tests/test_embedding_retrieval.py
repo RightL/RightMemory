@@ -15,7 +15,8 @@ from rightmemory.config import EmbeddingRetrieveConfig, RuntimeConfig, load_conf
 from rightmemory.embedding_retrieval import (
     EmbeddingRetriever, EmbeddingServiceClient, EmbeddingServiceError, ModelInfo, _vector,
 )
-from rightmemory.embedding_service import create_app, model_fingerprint
+from rightmemory.embedding_service import create_app
+from rightmemory.embedding_models import adapter_identity, model_fingerprint
 from rightmemory.profiles import _profile_seed_config
 from rightmemory.recent_submitted import RecentSubmittedMemoryEntry
 from rightmemory.retrieval_index import RetrievalCorpus, RetrievalEntry, build_retrieval_corpus, search_passages
@@ -27,12 +28,13 @@ from tests import test_retrieve_selection
 class FakeClient:
     def __init__(self):
         self.model = "embedding-one"
+        self.reranker_model = "reranker-one"
         self.document_counts = []
         self.query_count = 0
         self.rerank_counts = []
 
     def info(self):
-        return ModelInfo(self.model, "reranker-one", 2, 125)
+        return ModelInfo(self.model, self.reranker_model, 2, 125, 8)
 
     def embed(self, texts, *, query, info):
         if query:
@@ -153,6 +155,39 @@ class EmbeddingRetrievalTests(unittest.TestCase):
         path.write_text("broken cache", encoding="utf-8")
         self.retriever.retrieve("Find project context")
         self.assertEqual(sum(self.client.document_counts), first * 3)
+
+    def test_reranker_change_reuses_document_vectors(self):
+        self.retriever.retrieve("Find context")
+        embedded = sum(self.client.document_counts)
+        self.client.reranker_model = "another-reranker"
+        self.retriever.retrieve("Find context")
+        self.assertEqual(sum(self.client.document_counts), embedded)
+        self.assertEqual(len(self.client.rerank_counts), 2)
+
+    def test_replacement_adapters_control_batch_and_candidate_limits(self):
+        embedding, reranker = FakeEmbeddingAdapter(), FakeRerankerAdapter()
+        config = EmbeddingRetrieveConfig("http://service", candidate_count=150)
+        retriever = EmbeddingRetriever(self.root, self.root, config, max_output_chars=100000)
+        entries = tuple(RetrievalEntry(str(i), f"Value {i}", str(i)) for i in range(160))
+        with TestClient(create_app(embedding, reranker)) as client:
+            def request(route, payload=None):
+                response = client.get(route) if payload is None else client.post(route, json=payload)
+                response.raise_for_status()
+                return response.json()
+
+            with patch.object(retriever.client, "_request", side_effect=request), \
+                    patch("rightmemory.embedding_retrieval.build_retrieval_corpus",
+                          return_value=RetrievalCorpus(entries, "fixed")):
+                result = retriever.retrieve("Find context")
+                self.assertEqual([entry.key for entry in result.entries], [str(i) for i in range(149, 139, -1)])
+                self.assertEqual(reranker.calls, [150])
+                batches = [count for kind, count in embedding.calls if kind == "passage"]
+                self.assertEqual(max(batches), 3)
+                self.assertEqual(sum(batches), 160)
+                reranker.max_candidates = 100
+                with self.assertRaises(EmbeddingServiceError):
+                    retriever.retrieve("Find context")
+                self.assertEqual(reranker.calls, [150])
 
     def test_source_change_during_scoring_retries_once(self):
         original = self.retriever._select
@@ -327,12 +362,42 @@ class EmbeddingConfigurationTests(unittest.TestCase):
         settings = {"backend": "embedding", "embedding": {"url": "http://localhost:8766"}, "max_output_chars": 15000}
         self.assertEqual(_profile_seed_config({"retrieve": settings})["retrieve"], settings)
 
+    def test_candidate_count_is_not_capped_by_a_specific_model(self):
+        config = self.configure('[retrieve]\nbackend="embedding"\n[retrieve.embedding]\n'
+                                'url="http://localhost:8766"\ncandidate_count=150\n')
+        self.assertEqual(config.embedding.candidate_count, 150)
+
     def test_service_entrypoint_does_not_require_a_memory_root(self):
         from rightmemory import entrypoint
         with patch("rightmemory.embedding_service.main", return_value=0) as main, \
                 patch("rightmemory.entrypoint.resolve_memory_root", side_effect=AssertionError("root resolved")):
             self.assertEqual(entrypoint.main(["embedding-service", "--help"]), 0)
         main.assert_called_once_with(["--help"])
+
+
+class FakeEmbeddingAdapter:
+    identity = "embedding-one"
+    dimensions = 2
+    max_batch_size = 3
+
+    def __init__(self, path=None, *, device=None):
+        self.calls = []
+
+    def encode(self, texts, *, kind):
+        self.calls.append((kind, len(texts)))
+        return [[1.0, 0.0] for _ in texts]
+
+
+class FakeRerankerAdapter:
+    identity = "reranker-one"
+    max_candidates = 200
+
+    def __init__(self, path=None, *, device=None):
+        self.calls = []
+
+    def rerank(self, query, documents):
+        self.calls.append(len(documents))
+        return list(reversed(range(len(documents))))
 
 
 class EmbeddingProtocolTests(unittest.TestCase):
@@ -344,7 +409,7 @@ class EmbeddingProtocolTests(unittest.TestCase):
 
     def test_bad_rerank_results_and_model_changes_are_rejected(self):
         client = EmbeddingServiceClient(EmbeddingRetrieveConfig("http://localhost"))
-        info = ModelInfo("embedding-one", "reranker-one", 2, 125)
+        info = ModelInfo("embedding-one", "reranker-one", 2, 125, 8)
         for indices in ([0, 0], [1], [1, True], [0, 2]):
             with patch.object(client, "_request", return_value={"model": "reranker-one", "indices": indices}), \
                     self.assertRaises(EmbeddingServiceError):
@@ -354,18 +419,7 @@ class EmbeddingProtocolTests(unittest.TestCase):
             client.embed(["Find context"], query=True, info=info)
 
     def test_service_authentication_and_model_identity(self):
-        class Models:
-            def info(self):
-                return {"version": 1, "embedding_model": "embedding-one", "reranker_model": "reranker-one",
-                        "dimensions": 2, "max_candidates": 125}
-
-            def encode(self, texts, *, kind):
-                return [[1.0, 0.0] for _ in texts]
-
-            def rerank(self, query, documents):
-                return list(reversed(range(len(documents))))
-
-        with TestClient(create_app(Models(), api_key="test-token")) as client:
+        with TestClient(create_app(FakeEmbeddingAdapter(), FakeRerankerAdapter(), api_key="test-token")) as client:
             self.assertEqual(client.get("/info").status_code, 401)
             headers = {"Authorization": "Bearer test-token"}
             self.assertEqual(client.get("/info", headers=headers).status_code, 200)
@@ -375,6 +429,52 @@ class EmbeddingProtocolTests(unittest.TestCase):
             self.assertEqual(client.post("/embed", json=request, headers=headers).status_code, 409)
             self.assertEqual(client.post("/rerank", json={"model": "reranker-one", "query": "q",
                              "documents": ["a", "b"]}, headers=headers).json()["indices"], [1, 0])
+
+    def test_service_enforces_each_adapters_limits_before_inference(self):
+        embedding, reranker = FakeEmbeddingAdapter(), FakeRerankerAdapter()
+        reranker.max_candidates = 1
+        with TestClient(create_app(embedding, reranker)) as client:
+            response = client.post("/embed", json={"model": embedding.identity, "kind": "passage", "texts": ["x"] * 4})
+            self.assertEqual(response.status_code, 422)
+            response = client.post("/rerank", json={"model": reranker.identity, "query": "q", "documents": ["x"] * 2})
+            self.assertEqual(response.status_code, 422)
+        self.assertEqual(embedding.calls, [])
+        self.assertEqual(reranker.calls, [])
+
+    def test_invalid_service_capabilities_are_rejected(self):
+        client = EmbeddingServiceClient(EmbeddingRetrieveConfig("http://localhost"))
+        valid = {"version": 1, "embedding_model": "e", "reranker_model": "r",
+                 "dimensions": 2, "max_candidates": 200, "max_batch_size": 3}
+        for field in ("dimensions", "max_candidates", "max_batch_size"):
+            for value in (0, -1, True, 1.5, None):
+                with self.subTest(field=field, value=value), \
+                        patch.object(client, "_request", return_value={**valid, field: value}), \
+                        self.assertRaises(EmbeddingServiceError):
+                    client.info()
+
+    def test_service_selects_adapters_independently(self):
+        from rightmemory import embedding_service
+        with patch.dict(embedding_service.EMBEDDING_ADAPTERS, {"other-embedding": FakeEmbeddingAdapter}), \
+                patch.dict(embedding_service.RERANKER_ADAPTERS, {"other-reranker": FakeRerankerAdapter}), \
+                patch("uvicorn.run") as run:
+            status = embedding_service.main([
+                "--embedding-adapter", "other-embedding", "--reranker-adapter", "other-reranker",
+                "--embedding-model", "embed", "--reranker-model", "rerank", "--device", "cpu",
+            ])
+        self.assertEqual(status, 0)
+        with TestClient(run.call_args.args[0]) as client:
+            info = client.get("/info").json()
+        self.assertEqual((info["embedding_model"], info["reranker_model"]), ("embedding-one", "reranker-one"))
+        self.assertEqual((info["max_batch_size"], info["max_candidates"]), (3, 200))
+
+    def test_adapter_identity_includes_settings_and_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "model.safetensors").write_bytes(b"fixed weights")
+            first = adapter_identity(root, "test", revision=1, settings={"dimensions": 2, "normalize": True})
+            self.assertEqual(first, adapter_identity(root, "test", revision=1, settings={"normalize": True, "dimensions": 2}))
+            self.assertNotEqual(first, adapter_identity(root, "test", revision=1, settings={"dimensions": 3, "normalize": True}))
+            self.assertNotEqual(first, adapter_identity(root, "test", revision=2, settings={"dimensions": 2, "normalize": True}))
 
     def test_model_fingerprint_changes_with_weights_or_code(self):
         with tempfile.TemporaryDirectory() as directory:
