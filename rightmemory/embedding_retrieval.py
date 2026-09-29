@@ -30,6 +30,7 @@ class ModelInfo:
     reranker_model: str
     dimensions: int
     max_candidates: int
+    max_batch_size: int
 
 
 class EmbeddingServiceClient:
@@ -73,10 +74,11 @@ class EmbeddingServiceClient:
         data = self._request("/info")
         if (type(data.get("version")) is not int or data["version"] != 1
                 or not all(isinstance(data.get(key), str) and data[key] for key in ("embedding_model", "reranker_model"))
-                or type(data.get("dimensions")) is not int or not 1 <= data["dimensions"] <= 16384
-                or type(data.get("max_candidates")) is not int or not 1 <= data["max_candidates"] <= 125):
+                or any(type(data.get(key)) is not int or data[key] < 1
+                       for key in ("dimensions", "max_candidates", "max_batch_size"))):
             raise EmbeddingServiceError("embedding service returned invalid model metadata")
-        return ModelInfo(data["embedding_model"], data["reranker_model"], data["dimensions"], data["max_candidates"])
+        return ModelInfo(data["embedding_model"], data["reranker_model"], data["dimensions"],
+                         data["max_candidates"], data["max_batch_size"])
 
     def embed(self, texts: list[str], *, query: bool, info: ModelInfo) -> list[list[float]]:
         data = self._request("/embed", {
@@ -170,8 +172,8 @@ class EmbeddingRetriever:
                     except EmbeddingServiceError:
                         pass
             missing = [key for key in unique if key not in vectors]
-            for offset in range(0, len(missing), 8):
-                keys = missing[offset:offset + 8]
+            for offset in range(0, len(missing), info.max_batch_size):
+                keys = missing[offset:offset + info.max_batch_size]
                 values = self.client.embed([unique[key] for key in keys], query=False, info=info)
                 vectors.update(zip(keys, values))
             if missing or set(cache) != set(vectors):

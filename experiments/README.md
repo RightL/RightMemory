@@ -36,6 +36,8 @@ Validation exercised 1,524 tests: 1,480 pass and 44 are skipped on Windows, coun
 
 The test environment uses MCP 2.2.0, Pydantic AI 2.12.0, and Codex SDK 0.147.0. A fresh dependency resolution selected Pydantic AI 2.51.0, which fails the existing DeepSeek `tool_choice` profile assertion on both this branch and unchanged `main` (`9ebfa16`). That independent dependency/test incompatibility remains outside this backend change; production dependency requirements were not pinned to hide it. The GPU service, tunnel, and disposable remote staging directory used for this validation have been removed; downloaded model snapshots remain available.
 
+After separating embedding and reranking adapters, a fresh live pass returned exactly the same ranked IDs for all 32 cases; all 28 positive cases retained every required entry. The CLI and MCP smoke results also matched. The report is `tmp/embedding-retrieval/runtime-adapters.json`; its 1.33-second median was measured while the Windows test suite was running, so this pass checks ranking preservation rather than a controlled latency comparison. The final full suite completed in 250.72 seconds: 1,531 tests, 44 skips, no failures or errors. The 35 focused embedding tests include independent adapter selection, service-reported batching, a replacement reranker supporting more than 125 candidates, and vector-cache identity/reuse. Both adapter-check GPU and tunnel resources were released, with logs retained alongside the report.
+
 ## Nemotron + Jina reranking — 2026-09-29
 
 **Result: Jina improves the final ten-entry ranking, but a score cutoff does not reliably detect that the requested answer is absent.** These model-only measurements motivated the optional runtime backend measured above.

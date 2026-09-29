@@ -844,12 +844,17 @@ Install the model service on the GPU host; ordinary clients do not need these de
 ```bash
 python -m pip install '.[embedding-service]'
 rightmemory embedding-service \
+  --embedding-adapter nemotron3 --reranker-adapter jina-v3.5 \
   --embedding-model /path/to/Nemotron-3-Embed-1B-BF16/snapshot \
   --reranker-model /path/to/jina-reranker-v3.5/snapshot \
   --device cuda:0 --port 8766
 ```
 
-Supply downloaded snapshots, for example from ModelScope. The service loads local files offline and keeps both models resident. The supported model interfaces are documented by [NVIDIA](https://huggingface.co/nvidia/Nemotron-3-Embed-1B-BF16) and [Jina](https://huggingface.co/jinaai/jina-reranker-v3.5); Jina's snapshot includes custom model code. Cache identities cover the weights, tokenizer, configuration, and model code. The service serializes GPU requests and defaults to loopback. For a remote host, forward the port with `ssh -N -L 8766:127.0.0.1:8766 <host>` and use the local URL. Encoding sends source passages to that configured host; reranking sends the query and candidate passages.
+Supply downloaded snapshots, for example from ModelScope. The service loads local files offline and keeps both models resident. The supported model interfaces are documented by [NVIDIA](https://huggingface.co/nvidia/Nemotron-3-Embed-1B-BF16) and [Jina](https://huggingface.co/jinaai/jina-reranker-v3.5); Jina's snapshot includes custom model code. The service serializes GPU requests and defaults to loopback. For a remote host, forward the port with `ssh -N -L 8766:127.0.0.1:8766 <host>` and use the local URL. Encoding sends source passages to that configured host; reranking sends the query and candidate passages.
+
+Embedding and reranking adapters are selected independently. The defaults above support the tested Nemotron 1B / Jina v3.5 pair. To support another model family, implement the small `EmbeddingAdapter` or `RerankerAdapter` interface in `rightmemory/embedding_models.py` and register it in the corresponding adapter dictionary. An embedding adapter returns dense vectors for cosine search; a reranker returns every candidate index in ranked order. The adapters own model loading, input formatting, and token limits. The service reports embedding dimensions, batch size, and candidate capacity, which the client uses instead of model-specific constants. A compatible external service can also implement `/info`, `/embed`, and `/rerank`.
+
+Embedding cache identities cover snapshot contents, adapter settings, and an adapter revision. The built-in adapter records its input prefixes, pooling, normalization, precision, and library versions; bump its revision for behavior changes not represented in those settings. Changing embedding identity rebuilds the vector cache; replacing only the reranker reuses it. Adding another model family requires an adapter rather than just pointing an existing adapter at unrelated weights.
 
 An optional `[retrieve.embedding].api_key` is sent as a Bearer credential. Set `RIGHTMEMORY_EMBEDDING_API_KEY` on the service to require it. Binding beyond loopback requires that key; use an SSH tunnel or HTTPS transport for remote access. Service failures are reported directly, without starting the agent retriever automatically. The service is started separately and is not launched by the normal installer or a retrieve call.
 
