@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
 import tomllib
@@ -177,9 +177,7 @@ def load_config(role: str, memory_root: Path | None = None) -> RuntimeConfig:
         if backend not in ("agent", "embedding"):
             raise ValueError("[retrieve].backend must be agent or embedding")
         if backend == "embedding":
-            if "model" in role_section or "agent_cli" in role_section:
-                raise ValueError("embedding retrieval uses [retrieve.embedding], not model or agent_cli")
-            return RuntimeConfig(
+            config = RuntimeConfig(
                 role=role,
                 memory_root=root,
                 state_root=root,
@@ -189,8 +187,18 @@ def load_config(role: str, memory_root: Path | None = None) -> RuntimeConfig:
                 debug_trace=_debug_trace(data.get("debug", {})),
                 sync=_sync_config(data.get("sync", {}), memory_root=root),
             )
+            if _has_executor_config(role_section) or "agent_cli" in data:
+                fallback = _executor_runtime_config(role, data, role_section, root)
+                return replace(fallback, retrieve_backend="embedding", embedding=config.embedding)
+            return config
         if "embedding" in role_section:
             raise ValueError('[retrieve.embedding] requires backend = "embedding"')
+    return _executor_runtime_config(role, data, role_section, root)
+
+
+def _executor_runtime_config(
+    role: str, data: dict[str, Any], role_section: dict[str, Any], root: Path,
+) -> RuntimeConfig:
     executor_role = role
     if role != "retrieve" and not _has_executor_config(role_section):
         inherited = _fallback_executor_section(data, role)
@@ -214,7 +222,7 @@ def load_config(role: str, memory_root: Path | None = None) -> RuntimeConfig:
             memory_root=root,
         )
     if not isinstance(model_section, dict):
-        config_path = _active_config_path(memory_root)
+        config_path = root / "rightmemory.toml"
         raise ValueError(f"{config_path} must contain a [{executor_role}.model] table")
     _reject_unknown_keys(model_section, {"model_id", "api_base", "api_key", "kwargs"}, f"[{executor_role}.model]")
 

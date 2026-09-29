@@ -5,6 +5,7 @@ import json
 import math
 import os
 import uuid
+from http.client import HTTPException
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -59,10 +60,10 @@ class EmbeddingServiceClient:
                 error = json.loads(exc.read(8192))
                 if isinstance(error, dict) and isinstance(error.get("detail"), str):
                     detail = ": " + error["detail"][:300]
-            except (OSError, ValueError, UnicodeError):
+            except (OSError, ValueError, UnicodeError, HTTPException):
                 pass
             raise EmbeddingServiceError(f"embedding service rejected {route}: HTTP {exc.code}{detail}") from exc
-        except (URLError, OSError, TimeoutError) as exc:
+        except (URLError, OSError, TimeoutError, HTTPException) as exc:
             raise EmbeddingServiceError(f"embedding service is unavailable: {exc}") from exc
         except (ValueError, UnicodeError) as exc:
             raise EmbeddingServiceError("embedding service returned invalid JSON") from exc
@@ -130,7 +131,7 @@ class EmbeddingRetriever:
                 if current.fingerprint != corpus.fingerprint:
                     continue
                 return self._render(corpus, selected)
-        raise EmbeddingServiceError("Memory changed during both retrieval attempts; retry the query")
+        raise RuntimeError("Memory changed during both retrieval attempts; retry the query")
 
     def _select(self, query: str, corpus: RetrievalCorpus) -> list[RetrievalEntry]:
         if not corpus.entries:
