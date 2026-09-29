@@ -30,7 +30,7 @@ from rightmemory.agent_cli import (
     _stable_claude_session_id,
 )
 from rightmemory.codex_sdk import CodexSdkRunResult, CodexSdkRunner, CodexSdkTiming
-from rightmemory.config import AgentCliConfig, RuntimeConfig, SyncConfig
+from rightmemory.config import AgentCliConfig, EmbeddingRetrieveConfig, ROLES, RuntimeConfig, SyncConfig
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
 from rightmemory.provider_threads import ProviderThreadStore
 
@@ -1595,6 +1595,36 @@ class AgentCliDoctorTests(unittest.TestCase):
 
         self.assertEqual(len(checks), 1)
         self.assertTrue(checks[0].ok)
+
+    def test_doctor_checks_cli_roles_when_retrieve_uses_embedding(self):
+        def fake_load_config(role, memory_root=None):
+            if role == "retrieve":
+                return RuntimeConfig(
+                    role=role, retrieve_backend="embedding",
+                    embedding=EmbeddingRetrieveConfig("http://127.0.0.1:8766"),
+                )
+            return _doctor_config(role)
+
+        with (
+            patch("rightmemory.doctor.load_config", side_effect=fake_load_config),
+            patch("rightmemory.doctor._provider_runtime", return_value="codex-test"),
+            patch("rightmemory.doctor._seed_memory_root"),
+            patch("rightmemory.doctor._check_first_provider_calls") as first,
+            patch("rightmemory.doctor._check_resume_provider_thread") as resume,
+            patch("rightmemory.doctor._check_retrieve_reads_memory") as retrieve,
+            patch("rightmemory.doctor._check_write_edits_memory") as write,
+            patch("rightmemory.doctor._check_write_commits_memory"),
+            patch("rightmemory.doctor._check_write_boundary"),
+            patch("rightmemory.doctor._check_codex_thread_cleanup"),
+        ):
+            checks = run_agent_cli_doctor()
+
+        self.assertTrue(checks)
+        self.assertTrue(all(check.ok for check in checks))
+        self.assertEqual(set(first.call_args.args[1]), set(ROLES) - {"retrieve"})
+        resume.assert_not_called()
+        retrieve.assert_not_called()
+        write.assert_called_once()
 
     def test_resume_check_verifies_provider_thread_identity(self):
         with tempfile.TemporaryDirectory() as tempdir:

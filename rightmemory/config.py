@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 import tomllib
+from urllib.parse import urlsplit
 
 
 MEMORY_ROOT_ENV = "RIGHTMEMORY_ROOT"
@@ -129,6 +130,15 @@ class AgentCliConfig:
 
 
 @dataclass(frozen=True)
+class EmbeddingRetrieveConfig:
+    url: str
+    api_key: str | None = field(default=None, repr=False)
+    candidate_count: int = 40
+    result_count: int = 10
+    timeout_seconds: float = 60.0
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     role: str
     model_id: str | None = None
@@ -144,6 +154,8 @@ class RuntimeConfig:
     debug_trace: bool = False
     sync: SyncConfig = field(default_factory=SyncConfig)
     fresh_provider_session: bool = False
+    retrieve_backend: str = "agent"
+    embedding: EmbeddingRetrieveConfig | None = None
 
     def __post_init__(self) -> None:
         if self.state_root is _STATE_ROOT_UNSET:
@@ -160,6 +172,25 @@ def load_config(role: str, memory_root: Path | None = None) -> RuntimeConfig:
 
     _reject_unknown_keys(data, _top_level_keys(), "top-level")
     role_section = _role_section(data, role)
+    if role == "retrieve":
+        backend = role_section.get("backend", "agent")
+        if backend not in ("agent", "embedding"):
+            raise ValueError("[retrieve].backend must be agent or embedding")
+        if backend == "embedding":
+            if "model" in role_section or "agent_cli" in role_section:
+                raise ValueError("embedding retrieval uses [retrieve.embedding], not model or agent_cli")
+            return RuntimeConfig(
+                role=role,
+                memory_root=root,
+                state_root=root,
+                retrieve_backend="embedding",
+                embedding=_embedding_config(role_section.get("embedding")),
+                retrieve_max_output_chars=_retrieve_max_output_chars(role, role_section),
+                debug_trace=_debug_trace(data.get("debug", {})),
+                sync=_sync_config(data.get("sync", {}), memory_root=root),
+            )
+        if "embedding" in role_section:
+            raise ValueError('[retrieve.embedding] requires backend = "embedding"')
     executor_role = role
     if role != "retrieve" and not _has_executor_config(role_section):
         inherited = _fallback_executor_section(data, role)
@@ -501,12 +532,39 @@ def _allowed_role_keys(role: str) -> set[str]:
     if role == "update":
         allowed.add("async")
     if role == "retrieve":
-        allowed.add("max_output_chars")
+        allowed.update({"max_output_chars", "backend", "embedding"})
     return allowed
 
 
 def _has_executor_config(section: dict[str, object]) -> bool:
     return "model" in section or "agent_cli" in section
+
+
+def _embedding_config(value: object) -> EmbeddingRetrieveConfig:
+    context = "[retrieve.embedding]"
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must be a TOML table")
+    _reject_unknown_keys(value, {"url", "api_key", "candidate_count", "result_count", "timeout_seconds"}, context)
+    url = _required_string(value, "url").rstrip("/")
+    parsed = urlsplit(url)
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username or parsed.password or parsed.query or parsed.fragment):
+        raise ValueError(f"{context}.url must be an HTTP(S) service URL without credentials, query, or fragment")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{context}.url has an invalid port") from exc
+    candidates = _positive_integer(value, "candidate_count", 40, context)
+    results = _positive_integer(value, "result_count", 10, context)
+    if not results <= candidates <= 125:
+        raise ValueError(f"{context} requires result_count <= candidate_count <= 125")
+    return EmbeddingRetrieveConfig(
+        url=url,
+        api_key=_optional_string(value, "api_key"),
+        candidate_count=candidates,
+        result_count=results,
+        timeout_seconds=_positive_number(value, "timeout_seconds", 60.0, context),
+    )
 
 
 def _fallback_executor_section(data: dict[str, object], role: str) -> tuple[str, dict[str, object]] | None:

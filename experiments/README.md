@@ -1,10 +1,44 @@
 # Retrieval experiments
 
-[retrieval_embeddings.py](retrieval_embeddings.py) runs an isolated benchmark on disposable copies of Memory using the canonical graph index and renderer. Production code, prompts, installation, and dependencies are unchanged.
+[retrieval_embeddings.py](retrieval_embeddings.py) and [retrieval_reranker.py](retrieval_reranker.py) compare models on frozen, disposable Memory copies. [retrieval_runtime.py](retrieval_runtime.py) verifies the optional embedding backend through the actual CLI and MCP interfaces. Private inputs and raw results remain under ignored `tmp/embedding-retrieval/`.
+
+## Integrated embedding retrieval — 2026-09-29
+
+The optional runtime backend uses Nemotron 3 Embed 1B and Jina reranker v3.5, with forty candidates and at most ten returned entries. The Windows client owns the canonical source index and incremental vector cache; the models run on L20 GPU 1 through a private SSH tunnel. The configured host is a service address, not a hard-coded server dependency.
+
+On the original frozen 32 cases and 178 substantive entries, all **28/28 positive cases** retain every labelled required ID on each of three randomized passes: **84/84 positive measurements**. All 32 cases return identical rankings across repeats. The four no-answer queries also receive ten candidates; deciding their usefulness belongs to the caller.
+
+| Actual runtime measurement | Result |
+| --- | ---: |
+| MCP measurements | 96 |
+| Warm end-to-end median | 1,168.6 ms |
+| Warm end-to-end 95th percentile | 1,441.6 ms |
+| Maximum returned entries | 10 |
+| Cold index plus first request, with models already loaded | 4.94 s |
+| CLI dispatcher smoke request | 1.32 s |
+| CLI/MCP selected source IDs on the smoke case | Identical |
+
+These measurements include Windows source indexing/validation, cache reads, session bookkeeping, MCP dispatch, SSH transport, and both model stages. They exclude model-service startup and use a disposable root with sync disabled. This is still a small, agent-labelled coverage test, not independent answer-quality evaluation. Live pending submissions, linked sources, imports, cache invalidation, concurrent source changes, and failure behavior are covered by focused tests rather than these frozen labels.
+
+The service uses the same downloaded checkpoints as the model-only experiment. Model content fingerprints are saved in the report. Run against a separately started service:
+
+```sh
+python experiments/retrieval_runtime.py \
+  --source-root tmp/embedding-retrieval/root \
+  --cases tmp/embedding-retrieval/cases.json \
+  --url http://127.0.0.1:18766 --repeats 3 \
+  --out tmp/embedding-retrieval/runtime-nemotron-jina.json
+```
+
+The script creates and removes its own disposable Memory copy and never rewrites the source root. The raw report is `tmp/embedding-retrieval/runtime-nemotron-jina.json`. Normal entries retain their ancestor text; long entries use bounded search passages but still occupy one result slot, with their original source text returned. The backend keeps independent-query session records separately from the existing agent retriever's conversation state.
+
+Validation exercised 1,524 tests: 1,480 pass and 44 are skipped on Windows, counting the final CLI rerun. The full run's only remaining failure was an exact CLI help-text assertion; after retaining the established wording, all 156 CLI tests passed. The 28 embedding tests cover source identity and invalidation, bounded selection, repeated requests, concurrent source edits, service failures, and real CLI/MCP dispatch. Doctor and dashboard checks also pass. Python compilation, JavaScript syntax, the installed service command, and Git whitespace checks pass. Logs are retained beside the private benchmark report.
+
+The test environment uses MCP 2.2.0, Pydantic AI 2.12.0, and Codex SDK 0.147.0. A fresh dependency resolution selected Pydantic AI 2.51.0, which fails the existing DeepSeek `tool_choice` profile assertion on both this branch and unchanged `main` (`9ebfa16`). That independent dependency/test incompatibility remains outside this backend change; production dependency requirements were not pinned to hide it. The GPU service, tunnel, and disposable remote staging directory used for this validation have been removed; downloaded model snapshots remain available.
 
 ## Nemotron + Jina reranking — 2026-09-29
 
-**Result: Jina improves the final ten-entry ranking, but a score cutoff does not reliably detect that the requested answer is absent.** This is an isolated experiment, not an adoption of a production retrieval path.
+**Result: Jina improves the final ten-entry ranking, but a score cutoff does not reliably detect that the requested answer is absent.** These model-only measurements motivated the optional runtime backend measured above.
 
 [retrieval_reranker.py](retrieval_reranker.py) runs Nemotron 3 Embed 1B followed by Jina reranker v3.5 on the frozen corpus. It retrieves forty substantive entries, reranks them against the original complete request, and selects at most ten exact entry IDs. It does not expand headings or selected entries into whole subtrees. The baseline uses the same entry policy, so the limit really means ten memory entries; this differs from the hierarchy-expanding renderer in the earlier embedding experiments.
 
@@ -72,7 +106,7 @@ Syntax checks and six focused numerical boundary checks passed. The repository s
 
 ## Embedding retrieval — 2026-09-28–29
 
-**Result: model choice changes reference coverage. Nemotron 1B is the fastest encoder tested; Jina covers all labelled positive cases within twenty candidates.** Jina plus the current selector shows a modest mean/median improvement in one fresh pass, with a worse slow tail. Direct search is fast but still needs a no-match decision. Nemotron 8B does not improve coverage in this comparison. The small, agent-labelled benchmark does not establish a production winner.
+**Result: model choice changes reference coverage. Nemotron 1B is the fastest encoder tested; Jina covers all labelled positive cases within twenty candidates.** Jina plus the current selector shows a modest mean/median improvement in one fresh pass, with a worse slow tail. Direct search returns a fixed count even for absent answers. Nemotron 8B does not improve coverage in this comparison. The small, agent-labelled benchmark does not establish a production winner.
 
 ### Expanded model comparison
 

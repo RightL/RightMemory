@@ -65,8 +65,9 @@ def run_agent_cli_doctor(memory_root: Path | None = None) -> list[DoctorCheck]:
 
         doctor_configs = {role: _doctor_config(config, memory_root) for role, config in configs.items()}
         _check_first_provider_calls(checks, doctor_configs, run_nonce)
-        _check_resume_provider_thread(checks, doctor_configs["retrieve"], run_nonce)
-        _check_retrieve_reads_memory(checks, doctor_configs["retrieve"], retrieve_token, run_nonce)
+        if "retrieve" in doctor_configs:
+            _check_resume_provider_thread(checks, doctor_configs["retrieve"], run_nonce)
+            _check_retrieve_reads_memory(checks, doctor_configs["retrieve"], retrieve_token, run_nonce)
         write_config = _write_config(doctor_configs)
         _check_write_edits_memory(checks, write_config, memory_root, run_nonce)
         _check_write_commits_memory(checks, write_config, memory_root, run_nonce)
@@ -94,6 +95,12 @@ def _load_agent_cli_configs(checks: list[DoctorCheck], *, memory_root: Path | No
             config = load_config(role, memory_root=memory_root)
         except Exception as exc:
             failures.append(f"{role}: {_exception_detail(exc)}")
+            continue
+        if role == "retrieve" and config.retrieve_backend == "embedding":
+            checks.append(DoctorCheck(
+                "retrieve backend", True,
+                "embedding retrieval has no CLI-agent thread; its model service is not probed by this command",
+            ))
             continue
         if config.runtime_mode != "cli-agent" or config.agent_cli is None:
             failures.append(f"{role}: runtime_mode={config.runtime_mode}, agent_cli={config.agent_cli is not None}")

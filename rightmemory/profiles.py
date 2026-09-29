@@ -318,6 +318,10 @@ def _profile_seed_config(raw: dict[str, Any]) -> dict[str, Any]:
             value = section.get(key)
             if value is not None:
                 copied[key] = value
+        if role == "retrieve":
+            for key in ("backend", "embedding", "max_output_chars"):
+                if key in section:
+                    copied[key] = section[key]
         if copied:
             seeded[role] = copied
     review = raw.get("review")

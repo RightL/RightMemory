@@ -167,7 +167,7 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 - Multi-device memory continuity across laptops, desktops, agent clients, and project-specific roots.
 - Automatic orchestration plus independent explicit skills for map maintenance, Memory maintenance, guidance review, and Manager support in Codex App.
 - Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex SDK/Claude Code CLI role execution.
-- Model-selected, runtime-rendered retrieval output without model-authored summaries or commentary.
+- Source-authored retrieval output, selected by an agent or an optional Nemotron + Jina retrieval service.
 - One updater for Memory and Agent Corrections, transcript-review candidate extraction, and immutable candidate records for input-to-edit provenance.
 
 ## Install Options And Updates
@@ -623,7 +623,8 @@ The runtime is intentionally small:
 
 - Standalone mode uses `pydantic_ai.Agent` as a chat-like agent loop.
 - CLI-agent mode delegates the same role turn to the Codex SDK or Claude Code CLI. Retrieve keeps one active provider fork mapping per logical session under `<memory-root>/.runtime/agent_cli_sessions/` and uses a reusable internal provider conversation that holds its stable prefix; other independent role commands are one-shot. Each Codex role turn uses a short-lived SDK/App Server connection so the completed helper thread has no long-lived writer.
-- Standalone retrieve uses complete typed reads for local F# details and S# skills, line-numbered reads for local M# evidence, typed progressive reads for validated MF# graphs and their F#/M#/S# resources, and fixed `AC#writing` / `AC#design` sources for complete Agent Correction entries. CLI-agent emits the same selector as strict JSON. The shared runtime uses the canonical index and Retrieve contract to resolve ids, permitted ranges, hierarchy, source positions, and source-authored Markdown.
+- Agent-based retrieve uses complete typed reads for local F# details and S# skills, line-numbered reads for local M# evidence, typed progressive reads for validated MF# graphs and their F#/M#/S# resources, and fixed `AC#writing` / `AC#design` sources for complete Agent Correction entries. CLI-agent emits the same selector as strict JSON. The shared runtime uses the canonical index and Retrieve contract to resolve ids, permitted ranges, hierarchy, source positions, and source-authored Markdown.
+- Embedding retrieve uses the same CLI and MCP entrypoints, with a configurable model service and an incrementally refreshed local source index. It ranks each complete query independently and returns a bounded list of original source entries for the calling agent to judge.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different no-profile root, or use `--profile <name>` / `.rightmemory-profile` for project-specific roots.
 - Retrieve, unified Update, transcript-review extraction, history, dreamer, insight, pruner, and sync repair have separate runtime boundaries selected by command line, queue, scanner, or watcher.
 - Role-specific executor settings are read from `<memory-root>/rightmemory.toml`.
@@ -788,7 +789,7 @@ api_key = "<token>"
 extra_body = { chat_template_kwargs = { thinking = true, preserve_thinking = true } }
 ```
 
-Retrieve retains native per-session model history and asks the model not to reselect unchanged content it already returned. A terminal model selection is always rendered faithfully. `rightmemory retrieve --include-returned --session <id> "<query>"` attaches the current authoritative forms of previously returned graph items, linked sources, and Agent Correction entries to that call's retrieval context without clearing accumulated coverage; later calls return to the normal context policy. Changed content at the same address is surfaced as changed. `max_output_chars` is a safety limit: oversized selections are rejected for model retry rather than truncated.
+Agent-based retrieve retains native per-session model history and asks the model not to reselect unchanged content it already returned. A terminal model selection is always rendered faithfully. `rightmemory retrieve --include-returned --session <id> "<query>"` attaches the current authoritative forms of previously returned graph items, linked sources, and Agent Correction entries to that call's retrieval context without clearing accumulated coverage; later calls return to the normal context policy. Changed content at the same address is surfaced as changed. `max_output_chars` is a safety limit: oversized selections are rejected for model retry rather than truncated.
 
 Anthropic-compatible dreamer/reviewer config:
 
@@ -811,6 +812,46 @@ Normalized `deepseek-*` model ids keep that configurable OpenAI-compatible trans
 Standalone configs use role-local model tables such as `[retrieve.model]`, `[update.model]`, `[historian.model]`, `[dreamer.model]`, `[insight.model]`, `[reviewer.model]`, and `[pruner.model]` for the roles you run. In the common setup, configure `[retrieve.model]` for search and `[update.model]` as the default writer model. `[reviewer.model]` is for transcript candidate extraction. Other non-retrieve roles reuse the writer model unless you give them their own table.
 
 Configure `[sync-reconciler.model]` or `[sync-reconciler.agent_cli]` only if sync repair should use a different model from the default writer.
+
+### Embedding Retrieval
+
+Embedding retrieval is an optional alternative to the agent-based retriever in either installation mode. One complete query goes to **Nemotron 3 Embed 1B**, which selects forty source entries; **Jina reranker v3.5** ranks those candidates and RightMemory returns up to ten. There is no relevance-score cutoff or additional LLM selection call. Related entries can be returned even when Memory does not contain the requested answer; the calling agent decides which entries apply.
+
+Replace the retrieve executor table with:
+
+```toml
+[retrieve]
+backend = "embedding"
+max_output_chars = 100000
+
+[retrieve.embedding]
+url = "http://127.0.0.1:8766"
+candidate_count = 40
+result_count = 10
+timeout_seconds = 60
+```
+
+The same `rightmemory retrieve --session <id> "<complete need>"` command and `rightmemory_retrieve(session_id, need)` MCP tool work with this setting. Writer and other role settings remain independent. `[retrieve.model]` and `[retrieve.agent_cli]` are omitted for this backend. The default backend is `agent`.
+
+The source index comes from the canonical graph, including F# details, Pursuit context, both Agent Correction collections, valid mirrored MF# imports and their backing resources, and current pending submissions. Pending submissions retain their unsettled status. Local MQ# relationship context is searchable; live provider questions retain the separate `shared-view ask` command. Unsafe or invalid referenced sources fail retrieval instead of disappearing silently.
+
+Each selected graph entry returns its own source text and the parent text needed to interpret it, including applicable Pursuit Focus. Selecting a heading does not expand all its children. M# evidence uses source-addressed line passages with complete fenced blocks; S# resources return the complete skill. A long entry can have multiple search passages but occupies one candidate/result slot: embedding search selects its best-matching passage for reranking and the original complete entry is returned. Ordinary entries remain intact up to 2,000 characters. Thus ten results bounds the entry count, not a token budget. The output character limit raises an actionable error rather than silently cutting instructions. Model input limits also fail explicitly instead of truncating a query or passage.
+
+Each query searches the current source snapshot independently, so the caller supplies a self-contained need and repeated queries may return the same entries. `--include-returned` has no additional effect in this backend. Session bookkeeping lives under `.runtime/sessions/retrieve-embedding/`, separately from the agent retriever's history. Embedding vectors are cached under `.runtime/embedding_retrieval/`; edits, removals, ancestor changes, and embedding-model changes refresh the relevant cached material. Source changes during a model request trigger one fresh attempt before returning an error. The cache is derived state and can be rebuilt.
+
+Install the model service on the GPU host; ordinary clients do not need these dependencies:
+
+```bash
+python -m pip install '.[embedding-service]'
+rightmemory embedding-service \
+  --embedding-model /path/to/Nemotron-3-Embed-1B-BF16/snapshot \
+  --reranker-model /path/to/jina-reranker-v3.5/snapshot \
+  --device cuda:0 --port 8766
+```
+
+Supply downloaded snapshots, for example from ModelScope. The service loads local files offline and keeps both models resident. The supported model interfaces are documented by [NVIDIA](https://huggingface.co/nvidia/Nemotron-3-Embed-1B-BF16) and [Jina](https://huggingface.co/jinaai/jina-reranker-v3.5); Jina's snapshot includes custom model code. Cache identities cover the weights, tokenizer, configuration, and model code. The service serializes GPU requests and defaults to loopback. For a remote host, forward the port with `ssh -N -L 8766:127.0.0.1:8766 <host>` and use the local URL. Encoding sends source passages to that configured host; reranking sends the query and candidate passages.
+
+An optional `[retrieve.embedding].api_key` is sent as a Bearer credential. Set `RIGHTMEMORY_EMBEDDING_API_KEY` on the service to require it. Binding beyond loopback requires that key; use an SSH tunnel or HTTPS transport for remote access. Service failures are reported directly, without starting the agent retriever automatically. The service is started separately and is not launched by the normal installer or a retrieve call.
 
 Pruner has lifecycle settings in the same role table:
 
