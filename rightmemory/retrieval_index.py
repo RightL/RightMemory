@@ -24,6 +24,7 @@ class RetrievalEntry:
     text: str
     source: str
     pending: bool = False
+    display_parts: tuple[tuple[str, str], ...] = ()
 
     @property
     def version(self) -> str:
@@ -73,8 +74,13 @@ def build_retrieval_corpus(memory_root: Path) -> RetrievalCorpus:
         assert owner is not None
         package = renderer._validated_mf_package(item.id, f"MF#{item.id}")
         context = _entry_text(manifest, owner)
-        _graph_entries(package.manifest, entries, namespace=f"MF#{item.id}", context=context)
-        _backing_entries(package.manifest, entries, namespace=f"MF#{item.id}", context=context)
+        display_context = _entry_display_parts(manifest, owner) + (
+            (f"source:MF#{item.id}", f"Source: `MF#{item.id}`"),
+        )
+        _graph_entries(package.manifest, entries, namespace=f"MF#{item.id}", context=context,
+                       display_context=display_context)
+        _backing_entries(package.manifest, entries, namespace=f"MF#{item.id}", context=context,
+                         display_context=display_context)
     for source, filename in AGENT_CORRECTION_SOURCE_PATHS.items():
         path = root / filename
         if not path.exists() and not path.is_symlink():
@@ -85,6 +91,8 @@ def build_retrieval_corpus(memory_root: Path) -> RetrievalCorpus:
                 key=f"{source}:{entry.position}",
                 text=f"Agent Corrections ({source})\n{entry.text}",
                 source=f"{source}:{entry.position} ({filename}:{entry.start_line})",
+                display_parts=((f"source:{source}", f"Source: `{source}`"),
+                               (f"{source}:{entry.position}", entry.text)),
             ))
     for entry in collect_recent_submitted_memory(root):
         entries.append(_pending_entry(entry))
@@ -103,7 +111,7 @@ def _own_text(block: DocumentBlock) -> str:
     return "\n".join([block.line, *(part.text for part in block.logical_text_parts)]).strip()
 
 
-def _entry_text(manifest: GraphManifest, block: DocumentBlock) -> str:
+def _entry_chain(manifest: GraphManifest, block: DocumentBlock) -> list[DocumentBlock]:
     chain: list[DocumentBlock] = [block]
     parent = block.logical_parent
     while parent is not None:
@@ -111,7 +119,12 @@ def _entry_text(manifest: GraphManifest, block: DocumentBlock) -> str:
         if ancestor.kind != "root":
             chain.append(ancestor)
         parent = ancestor.logical_parent
-    parts = [_own_text(ancestor) for ancestor in reversed(chain)]
+    return list(reversed(chain))
+
+
+def _entry_text(manifest: GraphManifest, block: DocumentBlock) -> str:
+    chain = _entry_chain(manifest, block)
+    parts = [_own_text(ancestor) for ancestor in chain]
     # Focus records qualify the corresponding Pursuit; they are context, not children to expand.
     ids = {ancestor.item_id for ancestor in chain}
     for key in manifest.focus_blocks:
@@ -121,8 +134,20 @@ def _entry_text(manifest: GraphManifest, block: DocumentBlock) -> str:
     return "\n\n".join(part for part in parts if part.strip())
 
 
+def _entry_display_parts(manifest: GraphManifest, block: DocumentBlock) -> tuple[tuple[str, str], ...]:
+    # Source identity, rather than equal wording, determines shared context.
+    parts = []
+    for ancestor in _entry_chain(manifest, block):
+        text = [_own_text(ancestor)]
+        text.extend(_own_text(manifest.blocks[key]) for key in manifest.focus_blocks
+                    if manifest.blocks[key].focus_target == ancestor.item_id)
+        parts.append((f"graph:{ancestor.key}", "\n\n".join(part for part in text if part.strip())))
+    return tuple(parts)
+
+
 def _graph_entries(
     manifest: GraphManifest, entries: list[RetrievalEntry], *, namespace: str = "", context: str = "",
+    display_context: tuple[tuple[str, str], ...] = (),
 ) -> None:
     for item in sorted(manifest.items.values(), key=lambda item: item.traversal_rank):
         block = manifest.block_for_id(item.id)
@@ -133,14 +158,19 @@ def _graph_entries(
                 continue
         key = f"{namespace}:{item.id}" if namespace else item.id
         text = "\n\n".join(part for part in (context, _entry_text(manifest, block)) if part)
+        display_parts = display_context + _entry_display_parts(manifest, block)
         if item.anchor_kind == "MQ#":
-            text += f"\n\nProvider question context is available for `MQ#{item.id}`."
+            notice = f"Provider question context is available for `MQ#{item.id}`."
+            text += f"\n\n{notice}"
+            display_parts += ((f"notice:{key}", notice),)
         location = item.file.relative_to(manifest.root).as_posix()
-        entries.append(RetrievalEntry(key, text, f"{key} ({location}:{item.line_number})"))
+        entries.append(RetrievalEntry(key, text, f"{key} ({location}:{item.line_number})",
+                                      display_parts=display_parts))
 
 
 def _backing_entries(
     manifest: GraphManifest, entries: list[RetrievalEntry], *, namespace: str = "", context: str = "",
+    display_context: tuple[tuple[str, str], ...] = (),
 ) -> None:
     for item in sorted(manifest.items.values(), key=lambda item: item.traversal_rank):
         if item.anchor_kind not in {"M#", "S#"}:
@@ -155,10 +185,14 @@ def _backing_entries(
         source = f"{item.anchor_kind}{item.id}"
         if namespace:
             source = f"{namespace}/{source}"
+        display_parts = display_context + _entry_display_parts(manifest, owner) + (
+            (f"source:{source}", f"Source: `{source}`"),
+        )
         text = _read_text(reference.path)
         if item.anchor_kind == "S#":
             if text.strip():
-                entries.append(RetrievalEntry(source, f"{prefix}\n\n{text.rstrip()}", source))
+                entries.append(RetrievalEntry(source, f"{prefix}\n\n{text.rstrip()}", source,
+                                              display_parts=display_parts + ((source, text.rstrip()),)))
             continue
         seen: set[tuple[int, int]] = set()
         for start, end in _line_passages(text):
@@ -169,7 +203,8 @@ def _backing_entries(
                 continue
             seen.add((first, last))
             key = f"{source}:{first}-{last}"
-            entries.append(RetrievalEntry(key, f"{prefix}\n\n{resolved.text}", key))
+            entries.append(RetrievalEntry(key, f"{prefix}\n\n{resolved.text}", key,
+                                          display_parts=display_parts + ((key, resolved.text),)))
 
 
 def _line_passages(text: str) -> list[tuple[int, int]]:
