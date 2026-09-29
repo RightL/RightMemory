@@ -2,6 +2,74 @@
 
 [retrieval_embeddings.py](retrieval_embeddings.py) runs an isolated benchmark on disposable copies of Memory using the canonical graph index and renderer. Production code, prompts, installation, and dependencies are unchanged.
 
+## Nemotron + Jina reranking — 2026-09-29
+
+**Result: Jina improves the final ten-entry ranking, but a score cutoff does not reliably detect that the requested answer is absent.** This is an isolated experiment, not an adoption of a production retrieval path.
+
+[retrieval_reranker.py](retrieval_reranker.py) runs Nemotron 3 Embed 1B followed by Jina reranker v3.5 on the frozen corpus. It retrieves forty substantive entries, reranks them against the original complete request, and selects at most ten exact entry IDs. It does not expand headings or selected entries into whole subtrees. The baseline uses the same entry policy, so the limit really means ten memory entries; this differs from the hierarchy-expanding renderer in the earlier embedding experiments.
+
+### Ranking and time
+
+The original 32 cases contain 28 positive cases and four unrelated questions with no stored answer. All 28 positive cases have every labelled required entry in Nemotron's forty candidates. Jina promotes those entries into the final ten.
+
+| Method | Complete positive cases at ten | Chinese complete cases | Median warm local time | 95th percentile |
+| --- | ---: | ---: | ---: | ---: |
+| Nemotron 1B, direct ten entries | 26/28 | 5/6 | 15.7 ms | 16.3 ms |
+| Nemotron 1B, forty candidates, Jina, ten entries | 28/28 | 6/6 | 498.4 ms | 779.8 ms |
+
+The Jina stage alone takes a median 483.1 ms. These are 96 measurements, three per case, on previously idle L20 GPU 0. Both models remain loaded in the same process. Timings include live query encoding, vector scoring, candidate selection, and reranking; they exclude model/index startup, network transport, validation checks, and final rendering. They therefore are not directly comparable to the older full-selector wall times. The benchmark uses bfloat16, SDPA, Torch 2.12.0+cu130, and Transformers 5.12.0. Peak allocated GPU memory for both models is 4.84 GiB. Candidate prompts contain 6,922–12,655 tokens; no query or document is truncated.
+
+All fresh Nemotron rankings exactly reproduce the frozen control, and all three Jina repetitions produce identical rankings. Reversing the forty candidates for every case still gives 28/28 complete cases. This does not establish order invariance: the top-ten ordering changes in every case, and individual scores move by as much as 0.508.
+
+### Empty-result filtering
+
+Fixed-count selection returns entries for every no-answer question. The following Jina score cutoffs are exploratory, evaluated on the same labels rather than calibrated on separate training data.
+
+| Per-entry Jina cutoff | Complete positive cases | Correct empty results, original four negatives | Mean entries returned across 32 cases |
+| --- | ---: | ---: | ---: |
+| None | 28/28 | 0/4 | 10.00 |
+| 0.0 | 27/28 | 3/4 | 4.25 |
+| 0.1 | 25/28 | 4/4 | 2.44 |
+| 0.4 | 19/28 | 4/4 | 0.81 |
+
+Some supporting memories receive low scores even when another passage clearly answers the main question. A required correction in `g03` scores -0.0698, below the highest original negative score of 0.0403. No single per-entry cutoff can retain all labelled requirements and reject all four original negative queries on this run.
+
+A simpler query-level check—return nothing if the highest score is below 0.1, otherwise return the top ten—appears perfect on the original set: 28/28 positives and 4/4 negatives, including the reversed-order run. To challenge that observation, six additional related-topic questions were authored and their absence-of-answer labels frozen before prediction. A read-only check of all 246 frozen documents found none of the requested exact values: maintenance timing, backup policy, budget, latency target, reranker configuration, and a named on-call owner. Nearby project facts may still be useful context; these cases test absent answers, not universal irrelevance of every related memory.
+
+**The preselected 0.1 query-level check rejects none of these six new questions.** Their maximum Jina scores range from 0.1585 to 0.3544. This overlaps answerable cases: the original multi-part request's best score is 0.3268 and the historical request's is 0.3215. Raising a single query-level cutoff enough to reject all six necessarily rejects some answerable cases. At a per-entry cutoff of 0.4, all ten no-answer cases are empty, but only 19/28 original positive cases retain every expected reference.
+
+These six questions are agent-authored challenge cases, not an independently judged benchmark. They do demonstrate why successful rejection of four unrelated questions was insufficient evidence for adopting a cutoff. Jina is useful for ranking this corpus; a production decision about missing answers remains unvalidated.
+
+### Multiple-query diagnostic
+
+For `m01`, a single original query plus Jina retrieves all three labelled requirements; the source-update rule moves from raw Nemotron rank 35 to Jina rank 4. The complete warm local path takes a median 0.788 seconds for this case.
+
+Reusing the earlier original query plus four manual variants produces 74 unique candidates after taking forty substantive entries per search. Jina returns all three requirements within ten, ranking the source-update rule third, but median time rises to 1.749 seconds. This does not justify query splitting for that case: the single-query path already succeeds. The variants were written after inspecting the earlier failure and are a mechanism diagnostic, not new independent test cases.
+
+### Download, reproduction, and verification
+
+The model downloaded from [ModelScope](https://modelscope.cn/models/jinaai/jina-reranker-v3.5) in about 27 seconds. Its weight SHA-256 and nine supporting files match official Jina revision `e8a93f33f0b22108f8c2364f8484ce3422552fbc`. The model's small custom Python file was inspected before execution; the checkpoint and code were not modified. The [official model card](https://huggingface.co/jinaai/jina-reranker-v3.5) defines the local reranking interface.
+
+The retained snapshot is at `/home/lztt/.cache/modelscope/models/jinaai--jina-reranker-v3.5/snapshots/master`. The harness loads both models from local caches with networking disabled during inference. It uses Nemotron revision `c0c9fea93ea424587517f2c59e20db9f1d6bf615`, the documented `query: ` / `passage: ` prefixes, masked mean pooling, and normalized full-dimensional vectors.
+
+Copy both experiment scripts and the frozen inputs to the GPU host, select an idle GPU, and run:
+
+```sh
+CUDA_VISIBLE_DEVICES=<idle-gpu> HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+python retrieval_reranker.py \
+  --corpus corpus.json --cases cases.json \
+  --rankings rankings-nemotron-1b-control.json \
+  --model /home/lztt/.cache/modelscope/models/jinaai--jina-reranker-v3.5/snapshots/master \
+  --revision e8a93f33f0b22108f8c2364f8484ce3422552fbc \
+  --candidate-k 40 --top-k 10 --repeats 3 --out jina-rerank.json
+```
+
+Use `--order reverse --repeats 1` for the order diagnostic. For the merged-search diagnostic, select `--ids m01` and add both `--additional-search cases-m01-decomposed.json rankings-nemotron-1b-m01-decomposed.json` and `--additional-search cases-m01-unscoped.json rankings-nemotron-1b-m01-unscoped.json`. For the new no-answer cases, first run the existing `embed` command with the same Nemotron settings, then pass the resulting case/ranking pair to the reranking harness. The output preserves all scores, exact IDs, timing samples, input hashes, threshold results, and repeat consistency.
+
+Private evidence remains in `tmp/embedding-retrieval/`: `jina-rerank.json`, `jina-rerank-reverse.json`, `jina-rerank-m01-multi.json`, `jina-rerank-related-no-answer.json`, `cases-jina-related-no-answer.json`, `rankings-nemotron-jina-related-no-answer.json`, `jina-rerank-model-verification.json`, and the `jina-rerank-*.log` files. The original corpus and 32-case labels are unchanged.
+
+Syntax checks and six focused numerical boundary checks passed. The repository suite completed 1,494 tests with 44 skips, zero failures, and zero errors. These checks support implementation correctness, not the semantic accuracy of the labels. No production runtime, prompt, installer, or dependency configuration changed.
+
 ## Embedding retrieval — 2026-09-28–29
 
 **Result: model choice changes reference coverage. Nemotron 1B is the fastest encoder tested; Jina covers all labelled positive cases within twenty candidates.** Jina plus the current selector shows a modest mean/median improvement in one fresh pass, with a worse slow tail. Direct search is fast but still needs a no-match decision. Nemotron 8B does not improve coverage in this comparison. The small, agent-labelled benchmark does not establish a production winner.
