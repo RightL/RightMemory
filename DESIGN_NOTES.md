@@ -1,5 +1,13 @@
 # RightMemory Design Notes
 
+## Embedding Retrieval
+
+The embedding backend separates finding likely context from deciding how to use it. Nemotron 1B selects forty candidates, Jina reranker v3.5 orders them, and the calling agent judges up to ten returned source entries. On the small frozen experiment, reranking recovered every labelled positive case within ten; score cutoffs also removed required context and failed on related questions whose answers were absent. The production path therefore uses rank and a count limit without claiming to detect missing answers. The experiment and its limits are recorded in `experiments/README.md`.
+
+Search units follow the canonical graph rather than a second Markdown parser. An entry keeps its own text and inherited context; a heading selection does not imply the entire descendant subtree. Referenced evidence supplies addressed passages, while a selected skill remains a complete instruction. Long entries may be represented by multiple search passages, with their strongest embedding match entering the reranker once. Rendering returns original source material, including parent conditions and pending-submission status, rather than an inferred summary.
+
+The ordinary runtime owns source validation, sync, snapshot consistency, and a disposable vector cache. A separate model service keeps independently selected embedding and reranking adapters loaded. Model-specific loading, input formatting, and token limits belong to those adapters; the transport and retrieval client consume their reported dimensions and capacities. Cache identities include source text, model contents, encoding settings, and adapter revision, so a reranker replacement can reuse vectors while an embedding change rebuilds them. Queries are independent; the caller supplies the current need and may receive repeated results. Separate bookkeeping keeps the existing agent retriever's native conversation and delivery semantics intact when the user changes retrieval settings.
+
 ## Human-Owned Pursuit Map
 
 ### Ownership follows the kind of state

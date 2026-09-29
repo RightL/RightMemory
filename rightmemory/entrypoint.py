@@ -13,6 +13,14 @@ from .profiles import ProfileError, resolve_memory_root
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     profile_name, remaining = _parse_global_args(args)
+    if remaining[:1] == ["embedding-service"]:
+        try:
+            from .embedding_service import main as embedding_service_main
+
+            return embedding_service_main(remaining[1:])
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     if remaining[:1] == ["agent-files"]:
         try:
             from .agent_files import main as agent_files_main

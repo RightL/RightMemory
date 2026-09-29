@@ -1149,7 +1149,7 @@ def _chat_parser(role: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=f"rightmemory {role} chat")
     parser.add_argument(
         "--session",
-        help="persist standalone history or a CLI-agent retrieve thread under this session id",
+        help="keep this backend's session state under this session id",
     )
     return parser
 
@@ -1193,12 +1193,15 @@ def _insight_watch_parser() -> argparse.ArgumentParser:
 
 def _turn_parser(role: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=f"rightmemory {role}")
-    parser.add_argument("--session", required=True, help="persist Pydantic AI message history under this session id")
+    parser.add_argument("--session", required=True, help="keep this backend's session state under this session id")
     if role == "retrieve":
         parser.add_argument(
             "--include-returned",
             action="store_true",
-            help="attach current forms of previously returned content to this call's retrieval context",
+            help=(
+                "attach current forms of previously returned content to this call's retrieval context "
+                "(agent backend; embedding queries already allow repeats)"
+            ),
         )
     parser.add_argument("message", nargs=argparse.REMAINDER)
     return parser
