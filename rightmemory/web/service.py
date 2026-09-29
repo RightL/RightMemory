@@ -592,7 +592,15 @@ def _role_settings(role: str, memory_root: Path) -> dict[str, Any]:
         config = load_config(role, memory_root=memory_root)
     except Exception as exc:
         return {"role": role, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
-    if config.runtime_mode == "standalone":
+    if config.retrieve_backend == "embedding" and config.embedding is not None:
+        executor = {
+            "mode": "embedding",
+            "url": config.embedding.url,
+            "candidate_count": config.embedding.candidate_count,
+            "result_count": config.embedding.result_count,
+            "api_key": "configured" if config.embedding.api_key else "not configured",
+        }
+    elif config.runtime_mode == "standalone":
         executor = {
             "mode": "standalone",
             "model_id": config.model_id,

@@ -154,6 +154,18 @@ class RightMemoryRuntime:
         if config.runtime_mode not in {"standalone", "cli-agent"}:
             raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
         self.config = config
+        if config.retrieve_backend not in {"agent", "embedding"}:
+            raise ValueError(f"unsupported retrieval backend: {config.retrieve_backend}")
+        self._embedding_retriever = None
+        if config.retrieve_backend == "embedding":
+            if config.role != "retrieve" or config.embedding is None:
+                raise ValueError("embedding retrieval requires the retrieve role and its service configuration")
+            from .embedding_retrieval import EmbeddingRetriever
+
+            self._embedding_retriever = EmbeddingRetriever(
+                config.memory_root, config.state_root, config.embedding,
+                max_output_chars=config.retrieve_max_output_chars,
+            )
         self.tools = MemoryTools(config.memory_root, role=config.role)
         self.sessions = MessageSessionStore(config.state_root, config.role)
         self.retrieve_context = RetrieveContextStore(config.state_root)
@@ -163,7 +175,8 @@ class RightMemoryRuntime:
         self._retrieve_sync_result: SyncResult | None = None
         self._last_write_result: IsolatedWriteResult | None = None
         uses_codex_sdk = (
-            config.runtime_mode == "cli-agent"
+            self._embedding_retriever is None
+            and config.runtime_mode == "cli-agent"
             and config.agent_cli is not None
             and config.agent_cli.provider == "codex"
         )
@@ -171,7 +184,10 @@ class RightMemoryRuntime:
         self._owns_codex_runner = codex_runner is None and self._codex_runner is not None
         self.semantic_upgrades = self._semantic_upgrade_context()
         self._semantic_upgrade_ids = self.semantic_upgrades.ids if self.semantic_upgrades is not None else []
-        self.agent = self._build_cli_agent() if config.runtime_mode == "cli-agent" else self._build_agent()
+        self.agent = (
+            None if self._embedding_retriever is not None
+            else self._build_cli_agent() if config.runtime_mode == "cli-agent" else self._build_agent()
+        )
 
     @_complete_retrieve_sync
     def run_turn(self, message: str, *, operation_id: str | None = None) -> str:
@@ -199,7 +215,7 @@ class RightMemoryRuntime:
         *,
         operation_id: str | None = None,
     ) -> str:
-        if self.config.runtime_mode != "cli-agent":
+        if self._embedding_retriever is not None or self.config.runtime_mode != "cli-agent":
             if session_id is None:
                 return self.run_turn(message, operation_id=operation_id)
             return self.run_session_turn(session_id, message, operation_id=operation_id)
@@ -214,6 +230,8 @@ class RightMemoryRuntime:
     def _run_turn_unlocked(self, message: str) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
+        if self._embedding_retriever is not None:
+            return self._run_session_embedding(NO_SESSION_RIGHTMEMORY_SESSION_ID, message)
         if self.config.runtime_mode == "cli-agent":
             result, post_sync = self._run_locked_turn(
                 lambda: self._run_session_cli_agent(NO_SESSION_RIGHTMEMORY_SESSION_ID, message)
@@ -463,7 +481,9 @@ class RightMemoryRuntime:
             try:
                 isolate_write = self._should_isolate_write_turn()
                 run_session = (
-                    self._run_session_cli_agent
+                    self._run_session_embedding
+                    if self._embedding_retriever is not None
+                    else self._run_session_cli_agent
                     if self.config.runtime_mode == "cli-agent"
                     else self._run_session_model
                 )
@@ -567,6 +587,31 @@ class RightMemoryRuntime:
             output = self._result_output(result)
             self._trace("run_finished", output=output)
         return output
+
+    def _run_session_embedding(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        on_started: Callable[[], None] | None = None,
+        include_returned: bool = False,
+    ) -> str:
+        assert self._embedding_retriever is not None
+        # Separate bookkeeping leaves the existing retriever's conversation and coverage intact.
+        with MessageSessionStore(self.config.state_root, "retrieve-embedding").locked(session_id) as session:
+            self._pull_file_views_for_retrieve()
+            if on_started is not None:
+                on_started()
+            result = self._embedding_retriever.retrieve(message)
+            session.save_json(json.dumps({
+                "session_id": session_id,
+                "memory_commit": current_memory_head(self.config.memory_root),
+                "source_fingerprint": result.fingerprint,
+                "entries": {entry.key: entry.version for entry in result.entries},
+            }, ensure_ascii=False).encode("utf-8"))
+            self._trace("embedding_retrieval_finished", result_count=len(result.entries))
+            # Every query already allows previously returned content, including --include-returned calls.
+            return result.text
 
     def _run_session_model(
         self,

@@ -1044,9 +1044,11 @@ function renderRoleRow(role) {
   const executor = role.executor || {};
   const mode = executor.mode || "unknown";
   const detail =
-    mode === "cli-agent"
-      ? `${executor.provider || "provider"}${executor.model ? ` / ${executor.model}` : ""}`
-      : `${executor.model_id || "model"}${executor.api_base ? ` / ${executor.api_base}` : ""}`;
+    mode === "embedding"
+      ? `${executor.url} / ${executor.candidate_count} candidates, up to ${executor.result_count} results`
+      : mode === "cli-agent"
+        ? `${executor.provider || "provider"}${executor.model ? ` / ${executor.model}` : ""}`
+        : `${executor.model_id || "model"}${executor.api_base ? ` / ${executor.api_base}` : ""}`;
   return `
     <div>${escapeHtml(role.role)}</div>
     <div>${escapeHtml(mode)}</div>
