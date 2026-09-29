@@ -2,26 +2,27 @@
 
 [retrieval_embeddings.py](retrieval_embeddings.py) runs an isolated benchmark on disposable copies of Memory using the canonical graph index and renderer. Production code, prompts, installation, and dependencies are unchanged.
 
-## Embedding retrieval — 2026-09-28
+## Embedding retrieval — 2026-09-28–29
 
-**Result: model choice changes reference coverage. Nemotron 1B is the fastest encoder tested; Jina covers all labelled positive cases within twenty candidates.** Jina plus the current selector shows a modest mean/median improvement in one fresh pass, with a worse slow tail. Direct search is fast but still needs a no-match decision. The small, agent-labelled benchmark does not establish a production winner.
+**Result: model choice changes reference coverage. Nemotron 1B is the fastest encoder tested; Jina covers all labelled positive cases within twenty candidates.** Jina plus the current selector shows a modest mean/median improvement in one fresh pass, with a worse slow tail. Direct search is fast but still needs a no-match decision. Nemotron 8B does not improve coverage in this comparison. The small, agent-labelled benchmark does not establish a production winner.
 
 ### Expanded model comparison
 
-Six downloadable models were measured on the same frozen corpus and 32 cases. The two Qwen models were rerun; their rankings exactly match the original run. These measurements compare specific model revisions and input formats, not all embedding models or independently judged answer quality.
+Seven downloadable models were measured on the same frozen corpus and 32 cases. Six ran on September 28; Nemotron 8B and fresh Jina/Nemotron 1B controls ran on September 29. The table uses the fresh control timings for those two models. The two Qwen reruns and both later control runs exactly reproduce their earlier rankings. These measurements compare specific model revisions and input formats, not all embedding models or independently judged answer quality.
 
 | Model | Complete at 5 | Complete at 10 | Complete at 20 | Chinese complete at 10 | Query encoding median |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Qwen3-Embedding-0.6B | 24/28 | 25/28 | 25/28 | 4/6 | 27.4 ms |
 | Qwen3-Embedding-4B | 24/28 | 25/28 | 25/28 | 4/6 | 43.7 ms |
 | Harrier-0.6B | 25/28 | 25/28 | 27/28 | 4/6 | 26.8 ms |
-| Jina v5 small retrieval | 26/28 | 26/28 | 28/28 | 5/6 | 27.9 ms |
+| Jina v5 small retrieval | 26/28 | 26/28 | 28/28 | 5/6 | 27.8 ms |
 | RTriever-4B | 24/28 | 25/28 | 25/28 | 4/6 | 36.8 ms |
-| Nemotron 3 Embed 1B BF16 | 25/28 | 26/28 | 26/28 | 5/6 | 18.6 ms |
+| Nemotron 3 Embed 1B BF16 | 25/28 | 26/28 | 26/28 | 5/6 | 18.5 ms |
+| Nemotron 3 Embed 8B BF16 | 25/28 | 25/28 | 26/28 | 4/6 | 30.8 ms |
 
-Nemotron 1B is the fastest query encoder in this comparison. Jina is the only tested model that covers every required reference within twenty candidates; Harrier and Nemotron reach 28/28 at forty. The two remaining Jina top-ten omissions occur at exact ranks 11 and 17, so the improvement at twenty comes from finding those entries, not a heading expanding the entire memory. Jina already reaches 26/28 at five candidates. These candidate-count choices are exploratory observations on the same labels, not a held-out confirmation.
+Nemotron 1B is the fastest query encoder in this comparison. Jina is the only tested model that covers every required reference within twenty candidates; Harrier and Nemotron 1B reach 28/28 at forty; Nemotron 8B reaches 27/28 at forty. The two remaining Jina top-ten omissions occur at exact ranks 11 and 17, so the improvement at twenty comes from finding those entries, not a heading expanding the entire memory. Jina already reaches 26/28 at five candidates. These candidate-count choices are exploratory observations on the same labels, not a held-out confirmation.
 
-At ten candidates, mean per-query required-ID recall is 95.2% for both Qwen models and RTriever, 94.0% for Harrier, and 97.0% for Jina and Nemotron. RTriever is documented for English; its Chinese results are included explicitly. There are only six Chinese cases, some related to English cases. Fixed-count embedding retrieval still returns material for all four no-answer queries; no rejection threshold was trained.
+At ten candidates, mean per-query required-ID recall is 95.2% for both Qwen models, RTriever, and Nemotron 8B, 94.0% for Harrier, and 97.0% for Jina and Nemotron 1B. RTriever is documented for English; its Chinese results are included explicitly. There are only six Chinese cases, some related to English cases. Fixed-count embedding retrieval still returns material for all four no-answer queries; no rejection threshold was trained.
 
 The first five models have Qwen-based designs. Nemotron provides a different, bidirectional Ministral design. Every expanded ranking run used idle L20 GPU 0, 246 indexed entries, five individual encodings per query (160 timing samples per model), SDPA, normalized full-dimensional vectors, and no input truncation. Qwen, Harrier, Jina, and RTriever used float16 and last-token pooling; Nemotron used its documented bfloat16 and mean pooling over valid tokens. Precision differs and is recorded rather than treated as an isolated architecture comparison. Full retrieval was served on idle L20 GPU 1.
 
@@ -33,26 +34,47 @@ Harrier and RTriever use the same task instruction as Qwen. Jina uses its saved 
 | Jina v5 small retrieval | `6856e76bb72982e58de0620458a4e8b3614da340` | 1.64 GiB |
 | RTriever-4B | `2133b3d737c602f70b73642944e19ab4b8c0e70c` | 7.96 GiB |
 | Nemotron 3 Embed 1B BF16 | `c0c9fea93ea424587517f2c59e20db9f1d6bf615` | 2.59 GiB |
+| Nemotron 3 Embed 8B BF16 | `d1f2f25730bbd775b99b29185134bc86653bf2d1` | 15.80 GiB |
 
-Official loading references: [Harrier](https://huggingface.co/microsoft/harrier-oss-v1-0.6b), [Jina retrieval](https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval), [RTriever](https://huggingface.co/yale-nlp/RTriever-4B), and [Nemotron 1B](https://huggingface.co/nvidia/Nemotron-3-Embed-1B-BF16).
+Official loading references: [Harrier](https://huggingface.co/microsoft/harrier-oss-v1-0.6b), [Jina retrieval](https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval), [RTriever](https://huggingface.co/yale-nlp/RTriever-4B), [Nemotron 1B](https://huggingface.co/nvidia/Nemotron-3-Embed-1B-BF16), and [Nemotron 8B](https://huggingface.co/nvidia/Nemotron-3-Embed-8B-BF16).
 
-Nemotron 8B BF16 revision `d1f2f25730bbd775b99b29185134bc86653bf2d1` has public weights but remains unmeasured. The original Xet and HTTP attempts stalled. A further retry resumed the existing partial files, tried 24 parallel HTTP ranges, and retried native Xet with one file at a time, sixteen connections, and sequential writes. Parallel ranges received only 44.6 MB after 210 seconds; Xet reported about 58.6 MB after seven minutes without completing a shard. Local HTTP and a mirror probe were also slow. About 2.83 GB is still missing from the largest retained partial files, which cannot be considered verified model weights until complete and hash-checked. All retry jobs were stopped; GPU 0 returned to its pre-experiment 19 MiB allocation. Download evidence is retained privately as `nemotron-8b-retry.json` and retry logs. Qwen3.7 Text Embedding and Flash were excluded because the official documentation exposes API access and no official downloadable weights were found. No new embedding API was used.
+Qwen3.7 Text Embedding and Flash were excluded because the official documentation exposes API access and no official downloadable weights were found. No new embedding API was used.
+
+### Nemotron 8B follow-up — 2026-09-29
+
+The user supplied a completed ModelScope snapshot of `nv-community/Nemotron-3-Embed-8B-BF16` at `/home/lztt/.cache/modelscope/models/nv-community--Nemotron-3-Embed-8B-BF16/snapshots/master`. All four weight-file SHA-256 hashes match the pinned NVIDIA revision above. Seven supporting files, including the model config, weight index, and tokenizer, are byte-identical to the cached official snapshot. Inference loaded that local path offline, without changing its files or executing remote model code. The earlier unsuccessful download attempts remain recorded privately; they no longer prevent testing.
+
+The full 32-case run used the same harness, frozen input hashes, idle L20 GPU 0, and five individual warm encodings per query. The 8B run uses 4,096-dimensional normalized embeddings, bfloat16, masked mean pooling, SDPA, and the saved bidirectional setting. Peak PyTorch allocation was 15.80 GiB; corpus encoding took 11.365 seconds and loading took 5.027 seconds. Neither startup time is included in warm query timing. The `apply_yarn_scaling` configuration warning is explicitly documented as expected in the [NVIDIA model card](https://huggingface.co/nvidia/Nemotron-3-Embed-8B-BF16#expected-configuration-warning); the saved config was preserved.
+
+Fresh control runs followed sequentially on the same GPU. Every Jina and Nemotron 1B query reproduced its September 28 ranking exactly.
+
+| Model, September 29 run | Complete at 10 | Complete at 20 | Complete at 40 | Query encoding median | Peak allocation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Jina v5 small retrieval | 26/28 | 28/28 | 28/28 | 27.8 ms | 1.64 GiB |
+| Nemotron 3 Embed 1B BF16 | 26/28 | 26/28 | 28/28 | 18.5 ms | 2.59 GiB |
+| Nemotron 3 Embed 8B BF16 | 25/28 | 26/28 | 27/28 | 30.8 ms | 15.80 GiB |
+
+The 8B model ranks the source-update rule 58th, versus 35th for 1B and 11th for Jina, while ranking the requested packaging and adapter memories first and second. Its other top-ten misses are the correction in the Chinese partial-result question (`cn04`, rank 18) and the correction in the Chinese animation question (`cn05`, rank 27). In both Chinese cases, the overlapping factual contract ranks first. Missing the additional correction ID therefore does not itself demonstrate a wrong answer.
+
+This follow-up measures candidate-reference coverage and local encoding latency, not another full selector comparison. Fixed-count search continues to return candidates for all four no-answer cases. The results do not support choosing 8B over the smaller models for this frozen benchmark; the small, agent-labelled dataset still does not establish a general model ranking.
+
+Private evidence is stored as `nemotron-8b-verification.json`, `rankings-nemotron-8b.json`, `metrics-nemotron-8b.json`, and the `rankings-`/`metrics-` files ending in `jina-small-control` and `nemotron-1b-control`. `model-comparison.json` includes 8B and preserves the fresh controls separately from the earlier timing records. Use the local model path with the existing `embed` command, revision `d1f2f25730bbd775b99b29185134bc86653bf2d1`, query prefix `query: `, document prefix `passage: `, mean pooling, bfloat16, batch size eight, and five repeats to reproduce this run.
 
 ### Recovering the source-update rule
 
-The `m01` question requests the source-update rule, Quad packaging details, and the generic-core/SP-adapter boundary. With the original single query, Jina ranks the source-update rule 11th and Nemotron 1B ranks it 35th. Both find the project-specific facts. The following manual diagnostic keeps the same frozen corpus, model revisions, input prefixes, and pooling settings; it changes the query alone.
+The `m01` question requests the source-update rule, Quad packaging details, and the generic-core/SP-adapter boundary. With the original single query, Jina ranks the source-update rule 11th, Nemotron 1B ranks it 35th, and Nemotron 8B ranks it 58th. All three find the project-specific facts. The following manual diagnostic keeps the same frozen corpus, model revisions, input prefixes, and pooling settings; it changes the query alone.
 
-| Query for the source-update rule | Jina rank | Nemotron 1B rank |
-| --- | ---: | ---: |
-| Original question with all three requests | 11 | 35 |
-| `I will update Quad in dmd_algorithm. Retrieve the source-update rule.` | 1 | 17 |
-| `Retrieve the source-update rule.` | 1 | 1 |
+| Query for the source-update rule | Jina rank | Nemotron 1B rank | Nemotron 8B rank |
+| --- | ---: | ---: | ---: |
+| Original question with all three requests | 11 | 35 | 58 |
+| `I will update Quad in dmd_algorithm. Retrieve the source-update rule.` | 1 | 17 | 27 |
+| `Retrieve the source-update rule.` | 1 | 1 | 1 |
 
-The other two clause queries retain the same project lead-in and ask for the current packaging boundary or how core code should relate to SP-specific adapters. Their respective target ranks are 2 and 4 for Jina, and 1 and 3 for Nemotron. Splitting clauses therefore brings all three target entries within the first five of their respective Jina searches. Nemotron still needs the more general source-rule query to bring that rule into its first ten.
+The other two clause queries retain the same project lead-in and ask for the current packaging boundary or how core code should relate to SP-specific adapters. Their respective target ranks are 2 and 4 for Jina, 1 and 3 for Nemotron 1B, and 1 and 1 for Nemotron 8B. Splitting clauses therefore brings all three target entries within the first five of their respective Jina searches. Both Nemotron models still need the more general source-rule query to bring that rule into their first ten.
 
-The added general query takes a median 26.8 ms to encode with Jina and 17.6 ms with Nemotron 1B, over five warm encodings on idle L20 GPU 0. These are encoding times only: they exclude producing the query, network transport, merging, final selection, and rendering. Query variants and labels were written after inspecting this known failure, so this is a mechanism diagnostic, not a held-out accuracy improvement. No automatic query generator, reranker, final-answer selector, or no-match behavior was evaluated in this diagnostic. The original 32 benchmark queries and labels remain unchanged.
+The added general query takes a median 26.8 ms to encode with Jina, 17.6 ms with Nemotron 1B, and 36.7 ms with Nemotron 8B, over five warm encodings on idle L20 GPU 0. The first two diagnostic runs are from September 28; the 8B diagnostic is from September 29. These are encoding times only: they exclude producing the query, network transport, merging, final selection, and rendering. Query variants and labels were written after inspecting this known failure, so this is a mechanism diagnostic, not a held-out accuracy improvement. No automatic query generator, reranker, final-answer selector, or no-match behavior was evaluated in this diagnostic. The original 32 benchmark queries and labels remain unchanged.
 
-There is also an existing lexical signal: BM25 puts the source-update rule first for the original question. Equal reciprocal-rank fusion puts it third with Jina and seventh with Nemotron, recovering all three required entries within ten candidates. However, across all 28 positive cases, Jina fusion stays at 26 complete cases while mean required-ID recall falls from 97.0% to 92.9%; Nemotron fusion falls from 26 to 25 complete cases and also reaches 92.9% recall. Several Chinese cases get worse. Fixing this single example does not justify replacing embedding rankings with equal-weight fusion globally.
+There is also an existing lexical signal: BM25 puts the source-update rule first for the original question. Equal reciprocal-rank fusion puts it third with Jina and seventh with Nemotron 1B, recovering all three required entries within ten candidates. However, across all 28 positive cases, Jina fusion stays at 26 complete cases while mean required-ID recall falls from 97.0% to 92.9%; Nemotron 1B fusion falls from 26 to 25 complete cases and also reaches 92.9% recall. Several Chinese cases get worse. Fixing this single example does not justify replacing embedding rankings with equal-weight fusion globally.
 
 Primary-source research suggests three useful comparisons:
 
@@ -62,7 +84,7 @@ Primary-source research suggests three useful comparisons:
 
 The strongest local evidence favors testing an additional rule-focused query while retaining the original search. Widening Jina's candidate count to twenty is the simpler measured control. Neither the papers nor this one-case diagnostic establish a production improvement, and the current benchmark explicitly asks for the source-update rule; it does not establish recovery when the user leaves that need unstated.
 
-Private reproduction evidence: `cases-m01-decomposed.json`, `cases-m01-unscoped.json`, and `rankings-{jina,nemotron-1b}-m01-{decomposed,unscoped}.json`. Run the existing `embed` command with the corresponding case file and the documented model settings; no harness or production implementation change is required.
+Private reproduction evidence: `cases-m01-decomposed.json`, `cases-m01-unscoped.json`, and `rankings-{jina,nemotron-1b,nemotron-8b}-m01-{decomposed,unscoped}.json`. Run the existing `embed` command with the corresponding case file and the documented model settings; no harness or production implementation change is required.
 
 ### Expanded live comparison
 
