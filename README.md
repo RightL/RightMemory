@@ -817,7 +817,7 @@ Configure `[sync-reconciler.model]` or `[sync-reconciler.agent_cli]` only if syn
 
 Embedding retrieval is an optional alternative to the agent-based retriever in either installation mode. One complete query goes to **Nemotron 3 Embed 1B**, which selects forty source entries; **Jina reranker v3.5** ranks those candidates and RightMemory returns up to ten. There is no relevance-score cutoff or additional LLM selection call. Related entries can be returned even when Memory does not contain the requested answer; the calling agent decides which entries apply.
 
-Replace the retrieve executor table with:
+Add these retrieval settings, keeping the existing `[retrieve.agent_cli]` or `[retrieve.model]` table as the fallback:
 
 ```toml
 [retrieve]
@@ -831,7 +831,9 @@ result_count = 10
 timeout_seconds = 60
 ```
 
-The same `rightmemory retrieve --session <id> "<complete need>"` command and `rightmemory_retrieve(session_id, need)` MCP tool work with this setting. Writer and other role settings remain independent. `[retrieve.model]` and `[retrieve.agent_cli]` are omitted for this backend. The default backend is `agent`.
+The same `rightmemory retrieve --session <id> "<complete need>"` command and `rightmemory_retrieve(session_id, need)` MCP tool work with this setting. Writer and other role settings remain independent. The default backend is `agent`.
+
+If the service cannot connect, times out, or returns an error or invalid response, retrieval sends the same query to the configured agent retriever. The existing `[retrieve.agent_cli]` or `[retrieve.model]` settings supply that fallback; a global `[agent_cli]` provider also works. The agent is started only when needed and retains its normal session, rendering, and output rules, including its usual latency and token cost. The embedding ten-entry limit does not apply to its output. A warning records the fallback, with an event in the debug trace when enabled. Every subsequent query tries embedding retrieval again. Without agent settings, service failures are reported directly. Invalid Memory, source consistency failures, and local output-limit errors remain visible rather than triggering fallback; successful results are left for the calling agent to judge.
 
 The source index comes from the canonical graph, including F# details, Pursuit context, both Agent Correction collections, valid mirrored MF# imports and their backing resources, and current pending submissions. Pending submissions retain their unsettled status. Local MQ# relationship context is searchable; live provider questions retain the separate `shared-view ask` command. Unsafe or invalid referenced sources fail retrieval instead of disappearing silently.
 
@@ -856,7 +858,7 @@ Embedding and reranking adapters are selected independently. The defaults above 
 
 Embedding cache identities cover snapshot contents, adapter settings, and an adapter revision. The built-in adapter records its input prefixes, pooling, normalization, precision, and library versions; bump its revision for behavior changes not represented in those settings. Changing embedding identity rebuilds the vector cache; replacing only the reranker reuses it. Adding another model family requires an adapter rather than just pointing an existing adapter at unrelated weights.
 
-An API key is optional when binding to loopback or an explicit private IP address (RFC 1918 IPv4 or IPv6 unique-local). Without a service key, requests are accepted without credentials. To enable authentication, set `RIGHTMEMORY_EMBEDDING_API_KEY` on the service and the matching `[retrieve.embedding].api_key` on clients. Public, wildcard, and other hostname bindings require a key. Service failures are reported directly, without starting the agent retriever automatically. The service is started separately and is not launched by the normal installer or a retrieve call.
+An API key is optional when binding to loopback or an explicit private IP address (RFC 1918 IPv4 or IPv6 unique-local). Without a service key, requests are accepted without credentials. To enable authentication, set `RIGHTMEMORY_EMBEDDING_API_KEY` on the service and the matching `[retrieve.embedding].api_key` on clients. Public, wildcard, and other hostname bindings require a key. The service is started separately and is not launched by the normal installer or a retrieve call.
 
 Pruner has lifecycle settings in the same role table:
 

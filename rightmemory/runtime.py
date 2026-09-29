@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import sys
@@ -597,12 +598,23 @@ class RightMemoryRuntime:
         include_returned: bool = False,
     ) -> str:
         assert self._embedding_retriever is not None
+        from .embedding_retrieval import EmbeddingServiceError
+
         # Separate bookkeeping leaves the existing retriever's conversation and coverage intact.
         with MessageSessionStore(self.config.state_root, "retrieve-embedding").locked(session_id) as session:
             self._pull_file_views_for_retrieve()
             if on_started is not None:
                 on_started()
-            result = self._embedding_retriever.retrieve(message)
+            try:
+                result = self._embedding_retriever.retrieve(message)
+            except EmbeddingServiceError:
+                if self.config.agent_cli is None and self.config.model_id is None:
+                    raise
+                logging.getLogger(__name__).warning(
+                    "Embedding service failed; using the configured agent retriever for this query"
+                )
+                self._trace("embedding_retrieval_fallback", backend="agent")
+                return self._run_retrieve_fallback(session_id, message, include_returned=include_returned)
             session.save_json(json.dumps({
                 "session_id": session_id,
                 "memory_commit": current_memory_head(self.config.memory_root),
@@ -612,6 +624,19 @@ class RightMemoryRuntime:
             self._trace("embedding_retrieval_finished", result_count=len(result.entries))
             # Every query already allows previously returned content, including --include-returned calls.
             return result.text
+
+    def _run_retrieve_fallback(self, session_id: str, message: str, *, include_returned: bool) -> str:
+        config = replace(self.config, retrieve_backend="agent", embedding=None)
+        fallback = RightMemoryRuntime(config, codex_runner=self._codex_runner)
+        fallback._active_trace = self._active_trace
+        try:
+            run = fallback._run_session_cli_agent if config.runtime_mode == "cli-agent" else fallback._run_session_model
+            return run(session_id, message, include_returned=include_returned)
+        finally:
+            try:
+                fallback._finish_retrieve_sync()
+            finally:
+                fallback.cleanup()
 
     def _run_session_model(
         self,
