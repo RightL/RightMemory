@@ -99,12 +99,63 @@ def detached_process_kwargs() -> dict[str, object]:
     flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
     # A hidden process still inherits a terminal/task host's Windows job.
-    # Ask to leave that job so its kill-on-close cleanup cannot stop a daemon.
-    flags |= getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
+    # Explicit breakaway is rejected by jobs that do not allow it, including
+    # harmless accounting jobs and hosts that already use silent breakaway.
+    job_flags = _windows_job_limit_flags()
+    if job_flags is None or job_flags & 0x0800:  # BREAKAWAY_OK
+        flags |= getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
+    elif not job_flags & 0x1000 and job_flags & 0x2000:
+        # Neither explicit nor silent breakaway can escape kill-on-close.
+        # Do not claim a daemon is detached when closing its host will kill it.
+        raise RuntimeError(
+            "Windows host job prevents detached processes; "
+            "start RightMemory from a host that allows job breakaway"
+        )
     kwargs: dict[str, object] = {"close_fds": True}
     if flags:
         kwargs["creationflags"] = flags
     return kwargs
+
+
+def _windows_job_limit_flags() -> int | None:
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64),
+            ("flags", wintypes.DWORD), ("min_working_set", ctypes.c_size_t),
+            ("max_working_set", ctypes.c_size_t), ("active_processes", wintypes.DWORD),
+            ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD),
+            ("scheduling", wintypes.DWORD),
+        ]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("basic", BasicLimits), ("io_counters", ctypes.c_uint64 * 6),
+            ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+            ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t),
+        ]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetCurrentProcess.argtypes = ()
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.IsProcessInJob.argtypes = (wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL))
+    kernel.IsProcessInJob.restype = wintypes.BOOL
+    kernel.QueryInformationJobObject.argtypes = (
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel.QueryInformationJobObject.restype = wintypes.BOOL
+    in_job = wintypes.BOOL()
+    if not kernel.IsProcessInJob(kernel.GetCurrentProcess(), None, ctypes.byref(in_job)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not in_job.value:
+        return None
+    limits = ExtendedLimits()
+    # NULL queries the immediate job, whose policy controls child breakaway.
+    if not kernel.QueryInformationJobObject(None, 9, ctypes.byref(limits), ctypes.sizeof(limits), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return limits.basic.flags
 
 
 def python_module_child_env() -> dict[str, str]:
