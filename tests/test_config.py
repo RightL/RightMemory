@@ -1048,7 +1048,9 @@ class RuntimeTests(unittest.TestCase):
         model = build_model(config)
 
         self.assertTrue(model.profile["supports_thinking"])
-        self.assertFalse(model.profile["openai_supports_tool_choice_required"])
+        self.assertTrue(model.profile["thinking_enabled_by_default"])
+        self.assertTrue(model.profile["supports_forced_tool_choice"])
+        self.assertFalse(model.profile["supports_forced_tool_choice_with_thinking"])
         self.assertEqual(model.profile["openai_chat_thinking_field"], "reasoning_content")
         self.assertEqual(model.profile["openai_chat_send_back_thinking_parts"], "field")
 

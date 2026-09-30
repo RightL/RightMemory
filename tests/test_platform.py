@@ -159,11 +159,48 @@ class PlatformHelperTests(unittest.TestCase):
             patch.object(rm_platform.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True),
             patch.object(rm_platform.subprocess, "CREATE_NO_WINDOW", 0x8000000, create=True),
             patch.object(rm_platform.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x1000000, create=True),
+            patch.object(rm_platform, "_windows_job_limit_flags", return_value=None),
         ):
             kwargs = rm_platform.detached_process_kwargs()
 
         self.assertTrue(kwargs["close_fds"])
         self.assertEqual(kwargs["creationflags"], 0x9000200)
+
+    def test_windows_detachment_respects_job_breakaway_policy(self):
+        for job_flags, expected in (
+            (0x2800, 0x9000200),  # Kill-on-close with explicit breakaway
+            (0x3800, 0x9000200),  # Both breakaway modes are permitted
+            (0x3000, 0x8000200),  # Kill-on-close with automatic breakaway
+            (0x0000, 0x8000200),  # Accounting job does not kill on close
+        ):
+            with (
+                self.subTest(job_flags=hex(job_flags)),
+                patch.object(rm_platform, "IS_WINDOWS", True),
+                patch.object(rm_platform, "_windows_job_limit_flags", return_value=job_flags),
+                patch.object(rm_platform.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True),
+                patch.object(rm_platform.subprocess, "CREATE_NO_WINDOW", 0x8000000, create=True),
+                patch.object(rm_platform.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x1000000, create=True),
+            ):
+                self.assertEqual(
+                    rm_platform.detached_process_kwargs(),
+                    {"close_fds": True, "creationflags": expected},
+                )
+
+    def test_windows_detachment_refuses_non_breakaway_kill_on_close_job(self):
+        with (
+            patch.object(rm_platform, "IS_WINDOWS", True),
+            patch.object(rm_platform, "_windows_job_limit_flags", return_value=0x2000),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "host job prevents detached processes"):
+                rm_platform.detached_process_kwargs()
+
+    def test_windows_detachment_preserves_job_query_errors(self):
+        with (
+            patch.object(rm_platform, "IS_WINDOWS", True),
+            patch.object(rm_platform, "_windows_job_limit_flags", side_effect=PermissionError("job query failed")),
+        ):
+            with self.assertRaisesRegex(PermissionError, "job query failed"):
+                rm_platform.detached_process_kwargs()
 
     def test_posix_detached_process_starts_a_new_session(self):
         with patch.object(rm_platform, "IS_WINDOWS", False):
