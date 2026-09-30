@@ -31,6 +31,7 @@ Choose one stable session id for the conversation and reuse it for every RightMe
 - Propose only when omitting the evidence would likely:
   - cause poorer future decisions or substantial rediscovery (**Memory**); or
   - make repetition of a settled, reusable failure pattern more likely (**Agent Corrections**).
+- Propose concrete findings of missing or ambiguous context that meet this bar, even when the answer is not yet known.
 - Do not propose transient progress, routine task results, unfinished work by itself, or implementation detail already adequately preserved in project-local artifacts.
 - Name the apparent module and briefly explain why the evidence passes this bar. Do not propose final stored wording, ids, or edits.
 - Present the proposal once the evidence is clear and the conversation reaches a natural boundary. Completion is not required. If nothing passes the bar, say nothing about updating RightMemory.
