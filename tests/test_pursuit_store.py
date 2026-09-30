@@ -716,10 +716,13 @@ class PursuitStoreTests(IsolatedWriteTestBase):
     def test_delete_undo_restores_executable_backing_file_mode(self):
         self._apply({"type": "create", "parent_id": "alpha-child", "title": "Grandchild"})
         backing = "PURSUIT_alpha-child.md"
+        backing_path = self.root / backing
+        backing_path.chmod(backing_path.stat().st_mode | 0o111)
         self._git("update-index", "--chmod=+x", backing)
         self._git("commit", "-m", "mark backing executable")
         before = (self.root / backing).read_bytes()
         self.assertTrue(self._git("ls-tree", "HEAD", "--", backing).startswith("100755 "))
+        self.assertEqual(self._git("status", "--porcelain"), "")
         deleted = self._pending({"type": "delete", "id": "alpha"})
         self.store.flush(self.session_id)
         self.assertEqual(self._git("ls-tree", "HEAD", "--", backing), "")

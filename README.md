@@ -107,7 +107,7 @@ Read-only retrieval and approval-gated orchestration remain optional source skil
 
 Open the visual map with `rightmemory pursuit`. It starts or reuses the existing Web Studio and opens an automatic local browser session; check the intended root before editing. See [Pursuit Map](docs/PURSUIT_MAP.md) for the editor and its safety boundaries.
 
-Web Studio starts on demand and keeps running after its launching command or browser closes. Use `rightmemory web stop` to stop it; starting it does not register Windows sign-in or boot tasks. On Windows the background process requests separation from the launcher's process job; the host must permit that separation for the server to outlive the host.
+Web Studio starts on demand and keeps running after its launching command or browser closes. Use `rightmemory web stop` to stop it; starting it does not register Windows sign-in or boot tasks. On Windows, background processes use explicit or automatic job breakaway when permitted, and may inherit jobs that do not kill processes on close. Startup is refused when the immediate job forbids breakaway and kills processes on close; enclosing host jobs can still impose lifetime limits.
 
 To work from a direction, right-click its node or open **More**, choose **Copy context**, and paste the Markdown into an ordinary Codex App task or conversation alongside your request. The copied background comes from the current canonical graph: the selected direction, its direct incoming and outgoing neighbors, their logical heading ancestors, and direct connections. Readable titles and relationships carry the context without internal identifiers or runtime metadata. Copying leaves the map and Git history unchanged.
 
