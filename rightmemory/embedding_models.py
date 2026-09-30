@@ -99,6 +99,49 @@ class Nemotron3Embedding:
         return vectors.cpu().tolist()
 
 
+class JinaV5NanoEmbedding:
+    """The merged jina-embeddings-v5-text-nano-retrieval checkpoint."""
+
+    max_batch_size = 8
+
+    def __init__(self, path: Path, *, device: str):
+        torch, transformers = _dependencies()
+        self.torch, self.device = torch, device
+        path = path.expanduser().resolve(strict=True)
+        dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+            str(path), local_files_only=True, trust_remote_code=True, padding_side="right",
+        )
+        self.model = transformers.AutoModel.from_pretrained(
+            str(path), local_files_only=True, use_safetensors=True, trust_remote_code=True,
+            dtype=dtype, attn_implementation="sdpa",
+        ).to(device).eval()
+        self.dimensions = self.model.config.hidden_size
+        self.max_tokens = min(8192, self.model.config.max_position_embeddings)
+        self.prefixes = {"query": "Query: ", "passage": "Document: "}
+        self.identity = adapter_identity(path, "jina-v5-nano", revision=1, settings={
+            "checkpoint": "jinaai/jina-embeddings-v5-text-nano-retrieval",
+            "prefixes": self.prefixes, "pooling": "last-token", "normalization": "l2",
+            "padding_side": "right", "dtype": str(dtype), "attention": "sdpa",
+            "dimensions": self.dimensions, "max_tokens": self.max_tokens,
+            "torch": torch.__version__, "transformers": transformers.__version__,
+        })
+
+    def encode(self, texts: list[str], *, kind: Literal["query", "passage"]) -> list[list[float]]:
+        batch = self.tokenizer([self.prefixes[kind] + text for text in texts],
+                               padding=True, truncation=False, return_tensors="pt")
+        if batch["input_ids"].shape[1] > self.max_tokens:
+            raise ValueError("embedding input exceeds the model context; shorten the query or source passage")
+        batch = batch.to(self.device)
+        with self.torch.inference_mode():
+            hidden = self.model(**batch).last_hidden_state
+            # With right padding, each row ends at its own last non-padding token.
+            last_tokens = batch["attention_mask"].sum(dim=1) - 1
+            pooled = hidden[self.torch.arange(hidden.shape[0], device=hidden.device), last_tokens]
+            vectors = self.torch.nn.functional.normalize(pooled.float(), p=2, dim=1)
+        return vectors.cpu().tolist()
+
+
 class Jina35Reranker:
     max_candidates = 125
     max_query_tokens = 1024
@@ -143,5 +186,5 @@ class Jina35Reranker:
         return [int(result["index"]) for result in results]
 
 
-EMBEDDING_ADAPTERS = {"nemotron3": Nemotron3Embedding}
+EMBEDDING_ADAPTERS = {"nemotron3": Nemotron3Embedding, "jina-v5-nano": JinaV5NanoEmbedding}
 RERANKER_ADAPTERS = {"jina-v3.5": Jina35Reranker}
