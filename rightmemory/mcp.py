@@ -56,6 +56,8 @@ the correction and current evidence with rightmemory_submit_update."""
 SUBMIT_UPDATE_DESCRIPTION = """\
 Submit durable Memory or Agent Correction evidence when omitting it would likely cause
 poorer future decisions, substantial rediscovery, or loss of useful context.
+Include concrete findings of missing or ambiguous context that meet this bar, even
+when the answer is not yet known.
 
 Pursuit is read-only to Update. Explicit map edits belong in the human editor or the
 maintain-pursuit-map workflow, not in an Update submission.
