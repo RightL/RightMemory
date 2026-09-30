@@ -26,6 +26,7 @@ Choose one stable session id for the conversation and reuse it for every RightMe
 ## Submit Updates
 
 - Submit automatic Memory evidence when omitting it would likely cause poorer future decisions or substantial rediscovery.
+- Include concrete findings of missing or ambiguous context that meet this bar, even when the answer is not yet known.
 - Do not submit transient progress, routine task results, unfinished work by itself, or implementation detail already adequately preserved in project-local artifacts.
 - Submit once the durable evidence is clear and the work reaches a natural boundary. Completion is not required. If nothing passes the bar, submit nothing; task progress and new ideas do not trigger a map-change suggestion.
 - Combine related evidence due at the same boundary into one candidate. State what happened, what is true now, and why it may matter; do not prescribe final stored wording, ids, classification, placement, or edits.

@@ -13,6 +13,7 @@ Reconcile the supplied candidates into durable Memory and Agent Corrections. Can
 - If a candidate mixes durable evidence with a possible Pursuit map change, judge the durable portion normally and report the map portion as skipped. Do not infer or apply Pursuit changes.
 - Do not preserve candidate ids, submission labels, or operational event names unless they independently matter to the user.
 - Revalidate claims that may have become stale instead of copying candidates as fact.
+- Preserve consequential context gaps or ambiguity found in the candidates or related state as Open Context Questions when available evidence cannot resolve them.
 
 ## Plan The Edit
 
@@ -30,7 +31,7 @@ Reconcile the supplied candidates into durable Memory and Agent Corrections. Can
 - Preserve unrelated valid content while using enough scope to keep the complete affected graph coherent.
 - Validate the complete graph before finishing.
 - If state changed, stage and commit only allowed RightMemory files touched by the update.
-- If no candidate survives reconciliation and no encountered violation requires repair, make no commit.
+- If reconciliation and permitted repairs leave state unchanged, make no commit.
 
 ## Final Reply
 
