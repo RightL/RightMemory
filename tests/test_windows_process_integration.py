@@ -40,39 +40,9 @@ class WindowsProcessIntegrationTests(unittest.TestCase):
         # A terminal/task host can close a kill-on-close job after its command
         # returns. Hidden windows and process groups alone do not detach a server.
         import ctypes
-        from ctypes import wintypes
 
-        class BasicLimits(ctypes.Structure):
-            _fields_ = [
-                ("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64),
-                ("flags", wintypes.DWORD), ("min_working_set", ctypes.c_size_t),
-                ("max_working_set", ctypes.c_size_t), ("active_processes", wintypes.DWORD),
-                ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD),
-                ("scheduling", wintypes.DWORD),
-            ]
-
-        class ExtendedLimits(ctypes.Structure):
-            _fields_ = [
-                ("basic", BasicLimits), ("io_counters", ctypes.c_uint64 * 6),
-                ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
-                ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t),
-            ]
-
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
-        kernel.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
-        kernel.SetInformationJobObject.restype = wintypes.BOOL
-        kernel.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
-        kernel.AssignProcessToJobObject.restype = wintypes.BOOL
-        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
-        kernel.CloseHandle.restype = wintypes.BOOL
-        job = kernel.CreateJobObjectW(None, None)
-        self.assertTrue(job, ctypes.get_last_error())
+        kernel, job = self._create_job(0x2000 | 0x0800)  # KILL_ON_JOB_CLOSE | BREAKAWAY_OK
         try:
-            limits = ExtendedLimits()
-            limits.basic.flags = 0x2000 | 0x0800  # KILL_ON_JOB_CLOSE | BREAKAWAY_OK
-            self.assertTrue(kernel.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)))
             with tempfile.TemporaryDirectory() as tempdir, socket.socket() as reservation:
                 root = Path(tempdir)
                 reservation.bind(("127.0.0.1", 0))
@@ -116,6 +86,56 @@ class WindowsProcessIntegrationTests(unittest.TestCase):
                     launcher.communicate(timeout=5)
                     self._remove_web_log_after_redirector_exit(root)
         finally:
+            if job:
+                kernel.CloseHandle(job)
+
+    def test_detached_process_survives_supported_native_job_close(self):
+        for flags in (0, 0x2800, 0x3000):  # Accounting, explicit breakaway, silent breakaway
+            with self.subTest(job_flags=hex(flags)):
+                self._check_detached_process_job(flags)
+
+    def test_detached_process_refuses_native_non_breakaway_kill_job(self):
+        self._check_detached_process_job(0x2000, refuse=True)
+
+    def _check_detached_process_job(self, flags, *, refuse=False):
+        import ctypes
+
+        kernel, job = self._create_job(flags)
+        launcher = None
+        child_pid = None
+        try:
+            # The base interpreter gates the actual launch inside the selected
+            # job, without a virtualenv redirector adding its own job policy.
+            code = (
+                "import subprocess, sys; "
+                "from rightmemory.platform import detached_process_kwargs; "
+                "sys.stdin.readline(); "
+                "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+                "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+                "**detached_process_kwargs()); print(p.pid, flush=True)"
+            )
+            launcher = subprocess.Popen(
+                [sys._base_executable, "-c", code],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=python_module_child_env(), text=True, creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            self.assertTrue(kernel.AssignProcessToJobObject(job, int(launcher._handle)), ctypes.get_last_error())
+            output, _ = launcher.communicate("start\n", timeout=10)
+            if refuse:
+                self.assertNotEqual(launcher.returncode, 0)
+                self.assertIn("Windows host job prevents detached processes", output)
+                return
+            self.assertEqual(launcher.returncode, 0, output)
+            child_pid = int(output.strip())
+            self.assertTrue(kernel.CloseHandle(job))
+            job = None
+            self.assertFalse(self._wait_until(lambda: not process_exists(child_pid), timeout=0.5))
+        finally:
+            self._terminate_if_running(child_pid)
+            if launcher is not None:
+                if launcher.poll() is None:
+                    launcher.kill()
+                launcher.communicate(timeout=5)
             if job:
                 kernel.CloseHandle(job)
 
@@ -236,6 +256,46 @@ class WindowsProcessIntegrationTests(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                 process.wait(timeout=5)
+
+    def _create_job(self, limit_flags):
+        import ctypes
+        from ctypes import wintypes
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64),
+                ("flags", wintypes.DWORD), ("min_working_set", ctypes.c_size_t),
+                ("max_working_set", ctypes.c_size_t), ("active_processes", wintypes.DWORD),
+                ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD),
+                ("scheduling", wintypes.DWORD),
+            ]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("basic", BasicLimits), ("io_counters", ctypes.c_uint64 * 6),
+                ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t),
+            ]
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+        kernel.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+        kernel.SetInformationJobObject.restype = wintypes.BOOL
+        kernel.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel.CloseHandle.restype = wintypes.BOOL
+        job = kernel.CreateJobObjectW(None, None)
+        self.assertTrue(job, ctypes.get_last_error())
+        try:
+            limits = ExtendedLimits()
+            limits.basic.flags = limit_flags
+            self.assertTrue(kernel.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)))
+        except BaseException:
+            kernel.CloseHandle(job)
+            raise
+        return kernel, job
 
     def _remove_web_log_after_redirector_exit(self, root: Path) -> None:
         # The registered server can exit just before its venv redirector releases
