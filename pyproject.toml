@@ -41,7 +41,7 @@ embedding-service = [
   "numpy>=2,<3",
 ]
 codex-sdk = [
-  "openai-codex==0.147.0",
+  "openai-codex==0.162.1",
 ]
 
 [project.scripts]
