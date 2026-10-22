@@ -96,7 +96,11 @@ rightmemory doctor agent-cli
 rightmemory doctor agent-cli
 ```
 
-After install, add a short instruction to your agent guidance file, such as
+Before using RightMemory, configure its role backend in `<memory-root>/rightmemory.toml` (by default `~/.rightmemory/rightmemory.toml`). See [Standalone Config](#standalone-config) for model endpoints and credentials, or [CLI-Agent Config](#cli-agent-config) for Codex SDK / Claude Code CLI execution. MCP connects your host agent to this runtime; it does not replace the configured backend or use the host's model automatically.
+
+For an MCP client, follow [MCP setup](docs/MCP.md) to register `rightmemory mcp` as a local stdio server. Connect the server in your host and check its available tools: `rightmemory_retrieve`, `rightmemory_submit_update`, and `rightmemory_capture_guidance`. Seeing all three verifies tool discovery, not backend execution or a completed memory update. Do not also load a RightMemory orchestrator skill in that MCP conversation; command-only clients use the CLI skills instead.
+
+After connecting MCP, add a short instruction to your agent guidance file, such as
 `AGENTS.md` for Codex or `CLAUDE.md` for Claude Code:
 
 ```markdown
@@ -244,7 +248,7 @@ RightMemory is not trying to replace notes, search, or embeddings. It focuses on
 | Raw Markdown notes | Human-readable context | Agent-addressable trees, graph edges, and role-owned updates |
 | Vector retrieval | Fuzzy recall across large text | Inspectable structure, deterministic files, and explicit consolidation |
 | Agent chat history | Recent session continuity | Durable project memory that survives new sessions, devices, and agent clients |
-| MCP memory adapters | Tool integration | A file schema and command runtime that can be wrapped by adapters later |
+| MCP memory adapters | Tool integration | A file schema and command runtime exposed through a local [MCP stdio adapter](docs/MCP.md) |
 
 ## Document Model And Reference
 
@@ -638,7 +642,7 @@ The runtime is intentionally small:
 - Async `update submit` calls for the same `--session` accumulate as pending candidates and reset that session's configured quiet period. A global worker batches whole session queues, but the updater groups candidates by the work they describe rather than treating a session as one task. Natural-boundary submissions about related evidence are reconciled together; `pull` and `undo` remain per-session. Retrieve can see pending evidence as `Recent submitted RightMemory` before consolidation.
 - Automatic unified-update, dreamer, insight, and pruner turns use isolated Git worktrees when they operate on the main state root. Runtime validates complete role-owned results before landing them. Transcript review remains read-only and queues any resulting candidate.
 - Standalone daemon context is preserved with Pydantic AI message history.
-- MCP support can be added later as an adapter over the same daemon.
+- The local [MCP stdio adapter](docs/MCP.md) exposes the same runtime, async Update store, and guidance capture implementation as the CLI.
 
 ### Async Update Config
 
