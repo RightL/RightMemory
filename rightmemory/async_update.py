@@ -76,6 +76,7 @@ class AsyncUpdateState:
     current_batch: list[AsyncUpdateJob] = field(default_factory=list)
     pending: list[AsyncUpdateJob] = field(default_factory=list)
     next_id: int = 1
+    executor: str = "worker"
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ class AsyncBatchReservation:
     operation_id: str
     created_at: str
     participants: list[AsyncUpdateSessionBatch]
+    executor: str = "worker"
 
 
 @dataclass(frozen=True)
@@ -127,9 +129,12 @@ class _WorkerSnapshot:
 
 
 class AsyncUpdateStore:
-    def __init__(self, memory_root: Path, role: str):
+    def __init__(self, memory_root: Path, role: str, *, executor: str = "worker"):
+        if executor not in {"worker", "assistant"}:
+            raise ValueError("unknown update executor")
         self.memory_root = memory_root
         self.role = role
+        self.executor = executor
         self.root = memory_root / ".runtime" / "async" / role
         self.worker_root = self.root / "_worker"
         self.reservations_root = self.root / "_batches"
@@ -210,7 +215,7 @@ class AsyncUpdateStore:
                 except (OSError, json.JSONDecodeError, ValueError):
                     skipped_sessions += 1
                     continue
-                if state.status != STATUS_MANUAL_RECOVERY:
+                if state.executor != self.executor or state.status != STATUS_MANUAL_RECOVERY:
                     continue
                 retry_count = len(state.current_batch) + len(state.pending)
                 if not retry_count:
@@ -277,6 +282,13 @@ class AsyncUpdateStore:
             with self._locked(session_id):
                 current = self._read_checked_locked(session_id)
                 current = self._reconcile_session_outbox_locked(current)
+                if current.executor != self.executor and (current.current_batch or current.pending):
+                    raise ValueError("update session is already owned by a different executor")
+                current = replace(current, executor=self.executor)
+                if self.executor == "assistant":
+                    # Preserve executor ownership even if an outbox-first submit
+                    # is interrupted before the complete session state is saved.
+                    self._write(session_id, current)
                 matching = [
                     job
                     for job in [*current.current_batch, *current.pending]
@@ -296,7 +308,7 @@ class AsyncUpdateStore:
                     UpdateQueueStore(self.memory_root).write_outbox(
                         self._candidate_from_job(session_id, job)
                     )
-                    worker_pid = self._active_worker_pid()
+                    worker_pid = self._active_worker_pid() if self.executor == "worker" else None
                     current = replace(
                         current,
                         accepted_candidate_uids=[
@@ -307,9 +319,34 @@ class AsyncUpdateStore:
                     state = self._enqueue_locked(current, job, now=now, worker_pid=worker_pid)
                     self._write(session_id, state)
 
-        if state.status != STATUS_MANUAL_RECOVERY:
+        if self.executor == "worker" and state.status != STATUS_MANUAL_RECOVERY:
             self._start_worker_if_needed(session_id)
         return state
+
+    def ready_batch(
+        self, *, trigger_candidates: int, target_batch_candidates: int, max_wait_seconds: int,
+    ) -> tuple[list[AsyncUpdateSessionBatch] | None, datetime | None]:
+        """Inspect the existing batching policy without starting an executor."""
+        return self._next_batch(trigger_candidates, target_batch_candidates, max_wait_seconds)
+
+    def reserve_batch(self, batch: list[AsyncUpdateSessionBatch]) -> AsyncBatchReservation | None:
+        return self._reserve_cross_session_batch(batch, _batch_session_id(batch))
+
+    def start_reserved_batch(self, operation_id: str) -> tuple[UpdateCandidate, ...]:
+        reservation = self._read_reservation(operation_id)
+        if reservation is None or reservation.executor != self.executor:
+            raise RuntimeError("update batch does not belong to this executor")
+        self._start_cross_session_batch(reservation.participants, operation_id)
+        return self.operation_candidates(operation_id)
+
+    def finish_reserved_batch(self, operation_id: str, result: str) -> None:
+        reservation = self._read_reservation(operation_id)
+        if reservation is None:
+            return
+        if reservation.executor != self.executor:
+            raise RuntimeError("update batch does not belong to this executor")
+        self._finish_cross_session_batch(reservation.participants, operation_id, result)
+        self._clear_reservation_if_acknowledged(operation_id)
 
     def acknowledge_synchronized(
         self,
@@ -759,7 +796,7 @@ class AsyncUpdateStore:
                 continue
             with self._locked(session_id):
                 state = self._read_checked_locked(session_id)
-                if state.role != self.role:
+                if state.role != self.role or state.executor != self.executor:
                     continue
                 if state.current_batch:
                     operation_id = state.current_operation_id
@@ -880,6 +917,8 @@ class AsyncUpdateStore:
                 session_id = sorted(overlap)[0]
                 raise RuntimeError(f"async session belongs to multiple reserved batches: {session_id}")
             reserved_sessions.update(participant_ids)
+            if reservation.executor != self.executor:
+                continue
             if not blocked and not retry_deadlines:
                 ready.append(reservation)
             elif not blocked and retry_deadlines:
@@ -937,6 +976,8 @@ class AsyncUpdateStore:
             path = self._reservation_path(operation_id)
             if path.exists():
                 existing = self._read_reservation_path(path)
+                if existing.executor != self.executor:
+                    raise RuntimeError("async batch belongs to a different executor")
                 if existing.participants != participants:
                     raise RuntimeError("async operation id already belongs to a different reserved batch")
                 return existing
@@ -952,6 +993,8 @@ class AsyncUpdateStore:
             for item in participants:
                 with self._locked(item.session_id):
                     state = self._read_raw(item.session_id)
+                    if state.executor != self.executor:
+                        raise RuntimeError(f"async reserved batch has a different executor: {item.session_id}")
                     if fresh_selection and any(
                         UpdateQueueStore(self.memory_root).publication_state(job.candidate_uid)
                         == "attempted"
@@ -974,6 +1017,7 @@ class AsyncUpdateStore:
                 operation_id=operation_id,
                 created_at=_now(),
                 participants=participants,
+                executor=self.executor,
             )
             self._write_reservation_locked(path, reservation)
             return reservation
@@ -1064,7 +1108,10 @@ class AsyncUpdateStore:
             raise ValueError("async batch reservation does not match its operation id")
         if path.name != self._reservation_path(operation_id).name:
             raise ValueError("async batch reservation filename does not match its operation id")
-        return AsyncBatchReservation(operation_id, created_at, participants)
+        executor = data.get("executor", "worker")
+        if executor not in {"worker", "assistant"}:
+            raise ValueError("unknown async batch executor")
+        return AsyncBatchReservation(operation_id, created_at, participants, executor)
 
     def _write_reservation_locked(self, path: Path, reservation: AsyncBatchReservation) -> None:
         content = json.dumps(
@@ -1072,6 +1119,7 @@ class AsyncUpdateStore:
                 "version": 1,
                 "operation_id": reservation.operation_id,
                 "created_at": reservation.created_at,
+                "executor": reservation.executor,
                 "participants": [
                     {
                         "session_id": item.session_id,
@@ -1158,7 +1206,7 @@ class AsyncUpdateStore:
                         finished_at=None,
                         result=None,
                         error=None,
-                        pid=os.getpid(),
+                        pid=os.getpid() if state.executor == "worker" else None,
                         current_operation_id=operation_id,
                     )
                     self._write(item.session_id, next_state)
@@ -1188,7 +1236,7 @@ class AsyncUpdateStore:
                     next_flush_at=state.next_flush_at if pending else None,
                     result=None,
                     error=None,
-                    pid=os.getpid(),
+                    pid=os.getpid() if state.executor == "worker" else None,
                     current_operation_id=operation_id,
                 )
                 self._write(item.session_id, next_state)
@@ -1225,7 +1273,7 @@ class AsyncUpdateStore:
 
     def _finished_state(self, state: AsyncUpdateState, operation_id: str, result: str) -> AsyncUpdateState:
         common = {
-            "pid": os.getpid(),
+            "pid": os.getpid() if state.executor == "worker" else None,
             "current_batch": [],
             "current_operation_id": None,
             "last_operation_id": operation_id,
@@ -1531,6 +1579,10 @@ class AsyncUpdateStore:
 
     def _read_checked_locked(self, session_id: str) -> AsyncUpdateState:
         state = self._read_raw(session_id)
+        # Native child tasks outlive individual CLI processes. Their durable
+        # claim is settled by AssistantService, never by worker PID inference.
+        if state.executor == "assistant" or state.executor != self.executor:
+            return state
         if state.current_batch and state.current_operation_id is not None:
             terminal_output = self._terminal_operation_output(state.current_operation_id)
             if terminal_output is not None:
@@ -1573,6 +1625,7 @@ class AsyncUpdateStore:
                 last_operation_id=state.last_operation_id,
                 accepted_candidate_uids=state.accepted_candidate_uids,
                 next_id=next_id,
+                executor=state.executor,
             )
         if state.status in {"failed", STATUS_MANUAL_RECOVERY}:
             return replace(
@@ -1608,6 +1661,7 @@ class AsyncUpdateStore:
             last_operation_id=state.last_operation_id,
             accepted_candidate_uids=state.accepted_candidate_uids,
             next_id=next_id,
+            executor=state.executor,
         )
 
     def _reconcile_session_outbox_locked(
@@ -1773,7 +1827,7 @@ class AsyncUpdateStore:
     def _read_raw(self, session_id: str) -> AsyncUpdateState:
         state_path = self._state_path(session_id)
         if not state_path.exists():
-            return AsyncUpdateState(status="idle", session_id=session_id, role=self.role)
+            return AsyncUpdateState(status="idle", session_id=session_id, role=self.role, executor=self.executor)
         data = json.loads(state_path.read_text(encoding="utf-8"))
         return _state_from_json(data)
 
@@ -1815,6 +1869,9 @@ def _state_from_json(data: object) -> AsyncUpdateState:
     status = _required_state_str(data, "status")
     session_id = _required_state_str(data, "session_id")
     role = _required_state_str(data, "role")
+    executor = data.get("executor", "worker")
+    if executor not in {"worker", "assistant"}:
+        raise ValueError("unknown async update executor")
     next_id = data.get("next_id")
     if isinstance(next_id, bool) or not isinstance(next_id, int) or next_id < 1:
         raise ValueError("async update state must contain positive integer field: next_id")
@@ -1862,6 +1919,7 @@ def _state_from_json(data: object) -> AsyncUpdateState:
         current_batch=current_batch,
         pending=pending,
         next_id=next_id,
+        executor=executor,
     )
 
 

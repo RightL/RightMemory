@@ -1,5 +1,34 @@
 # RightMemory Design Notes
 
+## Native Assistant Execution
+
+Assistant execution separates the agent's judgment from RightMemory's deterministic
+storage boundary. The shared orchestrator skill delegates retrieval needs and submits
+evidence. A Retrieve child prepares access to live source files and pending evidence,
+then summarizes what matters. An Update child uses the canonical Update instructions
+and native file tools in a persistent Git worktree. CLI JSON and MCP call the same
+model-free core; neither constructs an internal role agent.
+
+Batching reuses the existing candidate identity, reservation policy, and synchronized
+Git queue. Readiness is carried in ordinary tool results, including instructions for a
+child to relay the notice to its main agent. A notice does not acquire ownership.
+Local assistant reservations survive individual CLI processes; synchronized claims use
+a stable assistant-specific holder so the old worker cannot resume the same live lease.
+
+A batch retains its evidence identity across attempts. Each attempt has its own worktree,
+version, and fenced semantic operation. Completion freezes committed edits, validates
+every original commit and the complete candidate, retains the existing UpdateRecord,
+and publishes through the existing write supervisor or Git queue finalizer. Prepared
+results have an external finalizer so ordinary worker recovery cannot publish them
+without their current claim. Durable outcomes recover interrupted acknowledgement;
+failed publication retries the prepared result without repeating agent judgment.
+
+This is a separate execution path. It preserves the existing runtime and does not claim
+equivalent model history, incremental retrieval caches, delivery suppression, watchers,
+or maintenance scheduling. Ordinary sync is shared; semantic sync conflicts remain an
+explicit blocked state until reconciled. Usage and verification are documented in
+[Assistant Execution](docs/ASSISTANT_EXECUTION.md).
+
 ## Embedding Retrieval
 
 The embedding backend separates finding likely context from deciding how to use it. Nemotron 1B selects forty candidates, Jina reranker v3.5 orders them, and the calling agent judges up to ten returned source entries. On the small frozen experiment, reranking recovered every labelled positive case within ten; score cutoffs also removed required context and failed on related questions whose answers were absent. The production path therefore uses rank and a count limit without claiming to detect missing answers. The experiment and its limits are recorded in `experiments/README.md`.

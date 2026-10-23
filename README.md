@@ -47,6 +47,8 @@ RightMemory is aimed at developers who spend serious time with coding agents and
 
 ## Quick Start
 
+To use your current assistant's native agents without a RightMemory model backend, follow [Assistant execution](docs/ASSISTANT_EXECUTION.md). It uses `rightmemory assistant`, a shared skill, and native file tools. The installer paths below configure the existing internal runtime.
+
 Install prerequisites:
 
 ```bash
@@ -96,9 +98,9 @@ rightmemory doctor agent-cli
 rightmemory doctor agent-cli
 ```
 
-Before using RightMemory, configure its role backend in `<memory-root>/rightmemory.toml` (by default `~/.rightmemory/rightmemory.toml`). See [Standalone Config](#standalone-config) for model endpoints and credentials, or [CLI-Agent Config](#cli-agent-config) for Codex SDK / Claude Code CLI execution. MCP connects your host agent to this runtime; it does not replace the configured backend or use the host's model automatically.
+Before using the internal runtime, configure its role backend in `<memory-root>/rightmemory.toml` (by default `~/.rightmemory/rightmemory.toml`). See [Standalone Config](#standalone-config) for model endpoints and credentials, or [CLI-Agent Config](#cli-agent-config) for Codex SDK / Claude Code CLI execution. The `rightmemory mcp` transport connects your host agent to this runtime; it does not replace the configured backend or use the host's model automatically. Native assistant execution instead uses `rightmemory assistant`, including its optional `assistant mcp` transport.
 
-For an MCP client, follow [MCP setup](docs/MCP.md) to register `rightmemory mcp` as a local stdio server. Connect the server in your host and check its available tools: `rightmemory_retrieve`, `rightmemory_submit_update`, and `rightmemory_capture_guidance`. Seeing all three verifies tool discovery, not backend execution or a completed memory update. Do not also load a RightMemory orchestrator skill in that MCP conversation; command-only clients use the CLI skills instead.
+For the internal runtime's MCP transport, follow [MCP setup](docs/MCP.md) to register `rightmemory mcp` as a local stdio server. Connect the server in your host and check its available tools: `rightmemory_retrieve`, `rightmemory_submit_update`, and `rightmemory_capture_guidance`. Seeing all three verifies tool discovery, not backend execution or a completed memory update. Do not also load a RightMemory orchestrator skill in that MCP conversation; command-only clients use the CLI skills instead.
 
 After connecting MCP, add a short instruction to your agent guidance file, such as
 `AGENTS.md` for Codex or `CLAUDE.md` for Claude Code:
@@ -171,6 +173,7 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 - Multi-device memory continuity across laptops, desktops, agent clients, and project-specific roots.
 - Automatic orchestration plus independent explicit skills for map maintenance, Memory maintenance, guidance review, and Manager support in Codex App.
 - Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex SDK/Claude Code CLI role execution.
+- Native assistant execution through shared role instructions and deterministic JSON CLI/MCP tools; your assistant supplies its own agents.
 - Source-authored retrieval output, selected by an agent or an optional embedding + reranking retrieval service.
 - One updater for Memory and Agent Corrections, transcript-review candidate extraction, and immutable candidate records for input-to-edit provenance.
 

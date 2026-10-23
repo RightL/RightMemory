@@ -220,7 +220,7 @@ class UpdateQueueStore:
             )
         return candidate
 
-    def outbox_candidates(self) -> tuple[UpdateCandidate, ...]:
+    def outbox_candidates(self, *, cleanup_temporary: bool = True) -> tuple[UpdateCandidate, ...]:
         if not self.outbox_root.exists() and not self.outbox_root.is_symlink():
             return ()
         if self.outbox_root.is_symlink() or not self.outbox_root.is_dir():
@@ -235,7 +235,7 @@ class UpdateQueueStore:
                     raise UpdateQueueFormatError(
                         f"local outbox temporary artifact must be a regular file: {path}"
                     )
-                if not process_exists(int(temporary.group("pid"))):
+                if cleanup_temporary and not process_exists(int(temporary.group("pid"))):
                     _unlink(path)
                 continue
             if _OUTBOX_RECORD_RE.fullmatch(path.name) is None:
