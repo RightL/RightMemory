@@ -210,6 +210,30 @@ class AssistantSyncTests(GitUpdateQueueTestBase):
         self.assertIn("current owner result", memory)
         self.assertNotIn("obsolete attempt", memory)
 
+    def test_expired_ordinary_begin_keeps_native_task_but_does_not_bypass_foreign_lease(self):
+        _submission, old = self._begin()
+        self._commit_memory(old, key="old-owner", value="retained native attempt")
+        expires = datetime.fromisoformat(old["expires_at"]) + timedelta(seconds=1)
+        with (
+            patch("rightmemory.update_queue_git._utc_now", return_value=expires),
+            patch("rightmemory.assistant._now", return_value=expires),
+        ):
+            resumed = AssistantService(self.first).begin_update()
+            self.assertFalse(resumed["claimed"])
+            self.assertEqual(resumed["task_id"], old["task_id"])
+            self.assertEqual(resumed["worktree"], old["worktree"])
+            replacement = self.other.begin_update()
+            self.assertTrue(replacement["claimed"])
+            remote_head = self._remote_head()
+            with self.assertRaises(UpdateQueueLeaseLost):
+                self.service.complete_update(old["task_id"])
+            resumed_after_takeover = AssistantService(self.first).begin_update()
+        self.assertFalse(resumed_after_takeover["claimed"])
+        self.assertEqual(resumed_after_takeover["task_id"], old["task_id"])
+        self.assertTrue(Path(old["worktree"]).is_dir())
+        self.assertEqual(self._remote_head(), remote_head)
+        self.assertNotIn("retained native attempt", self._git(self.remote, "show", "main:MEMORY.md"))
+
     def test_ordinary_pull_conflict_stops_update_without_internal_model_repair(self):
         for root, value in ((self.first, "local fact"), (self.second, "remote fact")):
             (root / "MEMORY.md").write_text(f"# Domain\n\n- `one` {value} → []\n", encoding="utf-8")

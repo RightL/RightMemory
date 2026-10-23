@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 from .prompt import _read_prompt_file, build_cli_agent_instructions
@@ -27,6 +28,10 @@ def build_assistant_update_instructions(
 ) -> str:
     """Reuse Update judgment and native Git work, then return to program finalization."""
     canonical = build_cli_agent_instructions(worktree, "update")
+    validate_command = shlex.join(["rightmemory", "validate", "--root", str(worktree)])
+    control = ["rightmemory", "assistant", "--root", str(active_root), "update"]
+    complete_command = shlex.join([*control, "complete", "--task", task_id])
+    status_command = shlex.join([*control, "status", "--task", task_id])
     return f"""{canonical}
 
 Assistant execution:
@@ -34,14 +39,15 @@ Assistant execution:
 - The active root for assistant control commands is {active_root}. Keep that binding
   when running commands from the candidate worktree.
 - Use native file and Git tools for the canonical Update role. Validate with
-  `rightmemory validate --root <worktree>` before committing the allowed changes.
-- After the worktree is clean, call the task's supplied complete_command, or the
-  matching assistant MCP completion tool. The command is
-  `rightmemory assistant --root <active-root> update complete --task <task-id>`.
+  `{validate_command}` before committing the allowed changes.
+- After the worktree is clean, run `{complete_command}`, or the matching
+  assistant MCP completion tool.
   Complete an unchanged task too so its batch can be recorded.
 - A worktree commit is candidate work. Only the program's completion receipt
   confirms application to the active root; report its application and sync outcome.
-- If completion is interrupted or its reply is lost, inspect the same task's status
+  Successful completion removes the candidate worktree; run later checks from
+  the active root instead.
+- If completion is interrupted or its reply is lost, run `{status_command}`
   and retry its completion as directed. Preserve the worktree and task identity.
   A prepared result awaiting publication needs the same completion retry, not
   another semantic edit of its candidate.
