@@ -123,6 +123,11 @@ class AssistantService:
                             from .assistant_write import AssistantStaleVersionError
                             if not isinstance(exc, AssistantStaleVersionError):
                                 raise
+                    if retry_task is None:
+                        # Lease expiry is not permission to abandon native edits.
+                        # Keep the task identity until an explicit retry, while
+                        # publication still enforces the shared queue's fence.
+                        return self._response(self._prepare(active, claimed=False))
 
             sync_result = SyncManager(self.sync_config).pull()
             if sync_result.status not in {"disabled", "synced", "ahead", "pushed"}:
