@@ -126,11 +126,40 @@ class AssistantServiceTests(IsolatedWriteTestBase):
         self.assertIn("Concurrent evidence", memory)
         self.assertIn("Orion", memory)
 
-    def test_expired_unfinished_claim_can_be_replaced_and_old_no_change_is_fenced(self):
+    def test_expired_ordinary_begin_resumes_native_edits_without_replacing_task(self):
+        task = self._begin()
+        self._edit(task)
+        candidate = self._git("rev-parse", "HEAD", cwd=Path(task["worktree"]))
+        later = datetime(2100, 1, 1, tzinfo=UTC)
+        with patch("rightmemory.assistant._now", return_value=later):
+            resumed = AssistantService(self.root).begin_update()
+        self.assertFalse(resumed["claimed"])
+        self.assertEqual(resumed["task_id"], task["task_id"])
+        self.assertEqual(resumed["worktree"], task["worktree"])
+        self.assertEqual(self._git("rev-parse", "HEAD", cwd=Path(task["worktree"])), candidate)
+        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
+        completed = self.service.complete_update(task["task_id"])
+        self.assertEqual(completed["status"], "completed")
+        self.assertIn("Orion", (self.root / "MEMORY.md").read_text())
+
+    def test_expired_ordinary_begin_recovers_prepared_result_without_replacing_task(self):
+        task = self._begin()
+        self._edit(task)
+        with patch.object(self.service.writer.supervisor, "publish_external", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                self.service.complete_update(task["task_id"])
+        later = datetime(2100, 1, 1, tzinfo=UTC)
+        with patch("rightmemory.assistant._now", return_value=later):
+            recovered = AssistantService(self.root).begin_update()
+        self.assertEqual(recovered["status"], "completed")
+        self.assertEqual(recovered["task_id"], task["task_id"])
+        self.assertEqual(self._git("rev-list", "--count", f"{self.initial_head}..HEAD"), "1")
+
+    def test_expired_unfinished_claim_can_be_explicitly_replaced_and_old_no_change_is_fenced(self):
         task = self._begin()
         later = datetime(2100, 1, 1, tzinfo=UTC)
         with patch("rightmemory.assistant._now", return_value=later):
-            replacement = self.service.begin_update()
+            replacement = self.service.begin_update(retry_task=task["task_id"])
         self.assertNotEqual(task["task_id"], replacement["task_id"])
         with self.assertRaises(AssistantClaimLost):
             self.service.complete_update(task["task_id"])
