@@ -102,6 +102,10 @@ class MainMemoryDirtyError(RuntimeError):
         super().__init__(f"main memory files have uncommitted changes: {detail}")
 
 
+class MemoryVersionConflictError(RuntimeError):
+    """The validated operation can no longer publish against its original memory state."""
+
+
 @dataclass(frozen=True)
 class IsolatedWriteResult:
     output: Any
@@ -175,6 +179,26 @@ class IsolatedWriteSupervisor:
                 completed = store.complete_commit(operation_id, landed_commit)
             self._delete_operation_ref(operation_id)
             return self._result_from_operation(completed)
+
+    def publish_external(
+        self,
+        operation_id: str,
+        *,
+        external_finalizer: str,
+        check_current: Callable[[], None] | None = None,
+    ) -> IsolatedWriteResult:
+        """Publish a prepared local outcome under its owner's current fence."""
+        self._ensure_repo_root()
+        store = SemanticOperationStore(self.memory_root)
+        with store.execution_locked():
+            operation = store.read(operation_id)
+            if operation is None:
+                raise FileNotFoundError(f"semantic operation does not exist: {operation_id}")
+            self._require_external_finalizer(operation, external_finalizer)
+            if operation.phase in FINAL_PHASES:
+                return self._result_from_operation(operation)
+            operation = store.claim_prepared(operation_id)
+            return self._resume_prepared_operation(store, operation, check_current=check_current)
 
     def restart_external(
         self,
@@ -253,6 +277,7 @@ class IsolatedWriteSupervisor:
         ]
         | None = None,
         external_finalizer: str | None = None,
+        check_current: Callable[[], None] | None = None,
     ) -> IsolatedWriteResult:
         if external_finalizer is not None:
             if not isinstance(external_finalizer, str) or not external_finalizer.strip():
@@ -267,6 +292,7 @@ class IsolatedWriteSupervisor:
                 prepare_effects=prepare_effects,
                 prepare_managed_artifacts=prepare_managed_artifacts,
                 external_finalizer=external_finalizer,
+                check_current=check_current,
             )
         self._ensure_repo_root()
         store = SemanticOperationStore(self.memory_root)
@@ -280,6 +306,7 @@ class IsolatedWriteSupervisor:
                 prepare_effects=prepare_effects,
                 prepare_managed_artifacts=prepare_managed_artifacts,
                 external_finalizer=external_finalizer,
+                check_current=check_current,
             )
 
     def _run_claimed(
@@ -295,6 +322,7 @@ class IsolatedWriteSupervisor:
         ]
         | None = None,
         external_finalizer: str | None = None,
+        check_current: Callable[[], None] | None = None,
     ) -> IsolatedWriteResult:
         self._ensure_repo_root()
         operation_store: SemanticOperationStore | None = None
@@ -317,7 +345,7 @@ class IsolatedWriteSupervisor:
                             f"prepared operation requires external finalizer: {recorded_finalizer}"
                         )
                     return self._result_from_operation(operation)
-                return self._resume_prepared_operation(operation_store, operation)
+                return self._resume_prepared_operation(operation_store, operation, check_current=check_current)
             self._delete_operation_ref(operation_id)
 
         dirty = self._dirty_memory_files()
@@ -365,7 +393,7 @@ class IsolatedWriteSupervisor:
                     semantic_changes = self._semantic_changes_between(start_head, current_head)
                     if semantic_changes:
                         detail = ", ".join(semantic_changes)
-                        raise RuntimeError(
+                        raise MemoryVersionConflictError(
                             "main semantic state changed during isolated memory write: " + detail
                         )
                     if commits:
@@ -395,6 +423,8 @@ class IsolatedWriteSupervisor:
                             commits,
                             managed_paths=frozenset(managed_paths),
                         )
+                if check_current is not None:
+                    check_current()
                 if operation_store is not None and operation_id is not None:
                     if commits:
                         self._pin_operation_ref(operation_id, commits[0])
@@ -467,12 +497,16 @@ class IsolatedWriteSupervisor:
         self,
         store: SemanticOperationStore,
         operation: SemanticOperationRecord,
+        *,
+        check_current: Callable[[], None] | None = None,
     ) -> IsolatedWriteResult:
         outcome = operation.outcome
         if outcome is None:
             raise RuntimeError(f"prepared operation has no outcome: {operation.operation_id}")
         candidate = outcome.metadata.get("candidate_commit")
         with MemoryWriteLock(self.memory_root):
+            if check_current is not None:
+                check_current()
             current_head = self._git_stdout(self.memory_root, "rev-parse", "HEAD")
             if candidate is not None:
                 if not isinstance(candidate, str) or not candidate:
@@ -505,7 +539,7 @@ class IsolatedWriteSupervisor:
                             )
                             if semantic_changes:
                                 detail = ", ".join(semantic_changes)
-                                raise RuntimeError(
+                                raise MemoryVersionConflictError(
                                     "main semantic state changed before prepared memory write could land: "
                                     + detail
                                 )
@@ -522,7 +556,7 @@ class IsolatedWriteSupervisor:
                     )
                     if semantic_changes:
                         detail = ", ".join(semantic_changes)
-                        raise RuntimeError(
+                        raise MemoryVersionConflictError(
                             "main semantic state changed before prepared no-change outcome completed: "
                             + detail
                         )
@@ -778,7 +812,7 @@ class IsolatedWriteSupervisor:
 
     def _semantic_changes_between(self, start_commit: str, end_commit: str) -> list[str]:
         if not self._is_ancestor(start_commit, end_commit):
-            raise RuntimeError("main history diverged during isolated memory write")
+            raise MemoryVersionConflictError("main history diverged during isolated memory write")
         output = self._git_stdout(
             self.memory_root,
             "diff",

@@ -82,7 +82,7 @@ from .shared_views import (
 from .share_results import format_share_operation_result
 from .shares import approve_share, create_share, join_share, list_shares, publish_share, revise_share, share_status
 from .status import collect_status, format_status_dashboard
-from .sync import LEGACY_ROOT_REFERENCE_PATHS, REQUIRED_ROOT_DOCUMENTS, SyncManager
+from .sync import SyncManager
 from .tools import MemoryTools
 from .update_queue_git import (
     QUEUE_FINALIZER,
@@ -1412,33 +1412,11 @@ def _validate_main(argv: list[str], profile_name: str | None) -> int:
         )
         root = active.memory_root.expanduser().resolve()
 
-    document_errors = [
-        f"required root document is not a regular file: {name}"
-        for name in REQUIRED_ROOT_DOCUMENTS
-        if (root / name).is_symlink() or not (root / name).is_file()
-    ]
-    document_errors.extend(
-        f"legacy package reference must be removed from the root: {name}"
-        for name in sorted(LEGACY_ROOT_REFERENCE_PATHS)
-        if os.path.lexists(root / name)
-    )
-    corrections_path = root / "corrections.md"
-    if corrections_path.is_symlink() or (
-        corrections_path.exists() and not corrections_path.is_file()
-    ):
-        document_errors.append(
-            "optional root document is not a regular file: corrections.md"
-        )
-    if document_errors:
-        print(
-            "validation failed:\n"
-            + "\n".join(f"- {error}" for error in document_errors)
-        )
-        return 1
+    from .validation import validate_memory_root
 
-    report = MemoryTools(root, role="sync-reconciler").validate_memory()
-    print(report)
-    return 0 if report.startswith("validation passed:") else 1
+    result = validate_memory_root(root)
+    print(result.report)
+    return 0 if result.ok else 1
 
 
 def _prune_main(argv: list[str], memory_root: Path) -> int:
