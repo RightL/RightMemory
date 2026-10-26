@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
@@ -8,6 +9,7 @@ from pathlib import Path
 
 from .async_update import AsyncUpdateJob, AsyncUpdateState, AsyncUpdateStore
 from .platform import lock_file, unlock_file
+from .semantic_operation import FINAL_PHASES, SemanticOperationStore
 from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_id
 from .update_queue import UpdateQueueStore
 
@@ -145,10 +147,69 @@ def collect_recent_submitted_memory(memory_root: Path) -> list[RecentSubmittedMe
                 candidate_uid=candidate.uid,
             )
         )
-    # A publishing device may temporarily see the same immutable candidate in both lanes.
-    entries = list({entry.key: entry for entry in entries}.values())
+    return _unique_sorted_entries(entries)
+
+
+def collect_recent_submitted_memory_readonly(
+    memory_root: Path,
+    *,
+    excluded_candidate_uids: Iterable[str] = (),
+) -> list[RecentSubmittedMemoryEntry]:
+    """Read pending evidence without recovering sessions or inspecting workers.
+
+    Terminal operation receipts take precedence over an unacknowledged current
+    batch, including copies still present in the local outbox or tracked queue.
+    State locks may be created, but candidate and session records are unchanged.
+    """
+    store = AsyncUpdateStore(memory_root, "update")
+    operations = SemanticOperationStore(memory_root)
+    excluded = set(excluded_candidate_uids)
+    entries: list[RecentSubmittedMemoryEntry] = []
+    for state_path in store._session_state_paths():
+        with store._locked(state_path.stem):
+            state = store._read_raw(state_path.stem)
+        if state.role != "update":
+            raise ValueError(f"async update state role mismatch: expected update, got {state.role}")
+        completed = False
+        if state.current_batch and state.current_operation_id is not None:
+            operation = operations.read(state.current_operation_id)
+            completed = (
+                operation is not None
+                and operation.phase in FINAL_PHASES
+                and operation.outcome is not None
+            )
+        if completed:
+            excluded.update(job.candidate_uid for job in state.current_batch)
+        else:
+            entries.extend(_entries_from_jobs(state, state.current_batch))
+        entries.extend(_entries_from_jobs(state, state.pending))
+
+    queue_store = UpdateQueueStore(memory_root)
+    for candidate in (
+        *queue_store.outbox_candidates(cleanup_temporary=False),
+        *queue_store.snapshot().candidates,
+    ):
+        entries.append(
+            RecentSubmittedMemoryEntry(
+                update_session_id=candidate.session_id,
+                candidate_id=candidate.display_id,
+                submitted_at=candidate.submitted_at,
+                message=candidate.message,
+                candidate_uid=candidate.uid,
+            )
+        )
+    return _unique_sorted_entries(
+        entry for entry in entries if entry.candidate_uid not in excluded
+    )
+
+
+def _unique_sorted_entries(
+    entries: Iterable[RecentSubmittedMemoryEntry],
+) -> list[RecentSubmittedMemoryEntry]:
+    # Publication temporarily exposes the same immutable candidate in both lanes.
+    unique = {entry.key: entry for entry in entries}
     return sorted(
-        entries,
+        unique.values(),
         key=lambda entry: (
             entry.submitted_at,
             entry.update_session_id,

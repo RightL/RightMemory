@@ -4,15 +4,31 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import cli
 from .config import default_memory_root
-from .guidance import GUIDANCE_INBOX_PATH, submit_guidance, validate_guidance_inbox
+from .guidance import submit_guidance
 from .profiles import ProfileError, resolve_memory_root
 
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     profile_name, remaining = _parse_global_args(args)
+    if remaining[:1] == ["assistant"]:
+        from .assistant_cli import main as assistant_main
+
+        return assistant_main(remaining[1:], profile_name=profile_name)
+    if remaining[:1] == ["validate"]:
+        try:
+            parser = argparse.ArgumentParser(prog="rightmemory validate")
+            parser.add_argument("--root", type=Path)
+            parser.parse_args(remaining[1:])
+            from .validation import validate_memory_root
+
+            result = validate_memory_root(_validation_root(profile_name, remaining[1:]))
+            print(result.report)
+            return 0 if result.ok else 1
+        except (ValueError, ProfileError, OSError, RuntimeError, UnicodeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     if remaining[:1] == ["embedding-service"]:
         try:
             from .embedding_service import main as embedding_service_main
@@ -53,21 +69,9 @@ def main(argv: list[str] | None = None) -> int:
         except (ValueError, ProfileError, FileNotFoundError, RuntimeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-    result = cli.main(args)
-    if result != 0 or remaining[:1] != ["validate"]:
-        return result
-    try:
-        root = _validation_root(profile_name, remaining[1:])
-        errors = _guidance_validation_errors(root)
-    except (ValueError, ProfileError, FileNotFoundError, OSError, UnicodeError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    if errors:
-        print("guidance validation failed:", file=sys.stderr)
-        for error in errors:
-            print(f"- {error}", file=sys.stderr)
-        return 1
-    return 0
+    from . import cli
+
+    return cli.main(args)
 
 
 def _parse_global_args(argv: list[str]) -> tuple[str | None, list[str]]:
@@ -109,12 +113,9 @@ def _validation_root(profile_name: str | None, argv: list[str]) -> Path:
 
 
 def _guidance_validation_errors(memory_root: Path) -> list[str]:
-    path = memory_root / GUIDANCE_INBOX_PATH
-    if not path.exists() and not path.is_symlink():
-        return []
-    if path.is_symlink() or not path.is_file():
-        return [f"{GUIDANCE_INBOX_PATH} must be a regular file"]
-    return validate_guidance_inbox(path.read_text(encoding="utf-8"))
+    from .validation import guidance_validation_errors
+
+    return guidance_validation_errors(memory_root)
 
 
 if __name__ == "__main__":
