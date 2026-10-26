@@ -119,11 +119,13 @@ class Installer:
         self._require_valid_update_records()
         self._require_no_live_legacy_async_updates()
         self._require_no_legacy_review_deliveries()
+        self._require_compatible_update_executor()
         target = self._inspect_target()
         self._print_layout()
         self._require_complete_existing_target(target)
 
         with self._async_update_install_boundary() as worker_was_running:
+            self._require_compatible_update_executor()
             if target.kind == "new":
                 self._bootstrap_state()
             else:
@@ -252,6 +254,32 @@ class Installer:
                 "to finish these deliveries, then rerun the installer"
             )
 
+    def _require_compatible_update_executor(self) -> None:
+        expected = "assistant" if self.mode == "assistant" else "worker"
+        async_root = self.memory_root / ".runtime" / "async" / "update"
+        states = {
+            path.stem: _state_from_json(json.loads(path.read_text(encoding="utf-8")))
+            for path in sorted(async_root.glob("*.json"))
+        }
+        incompatible = {
+            session for session, state in states.items()
+            if state.executor != expected and (state.pending or state.current_batch)
+        }
+        # An interrupted submission can have durable outbox evidence before its
+        # session's pending list is written. Missing sessions use the worker default.
+        for candidate in UpdateQueueStore(self.memory_root).outbox_candidates(cleanup_temporary=False):
+            state = states.get(candidate.session_id)
+            executor = state.executor if state is not None else "worker"
+            if executor != expected:
+                incompatible.add(candidate.session_id)
+        if incompatible:
+            raise InstallError(
+                "pending updates belong to another execution mode: "
+                + ", ".join(sorted(incompatible))
+                + "; installation made no changes. Finish or cancel those updates "
+                "with their current executor before switching modes."
+            )
+
     @contextmanager
     def _async_update_install_boundary(self):
         try:
@@ -267,6 +295,8 @@ class Installer:
             ) from exc
 
     def _restart_async_update_worker(self, worker_was_running: bool) -> None:
+        if self.mode == "assistant":
+            return
         if not worker_was_running and not self._async_update_work_remains():
             return
         if self.runtime_python is None:
@@ -623,6 +653,23 @@ class Installer:
     def _install_skills(self) -> None:
         for target in self.skills_targets:
             target.mkdir(parents=True, exist_ok=True)
+            if self.mode == "assistant":
+                self._remove_managed_skill(
+                    self.repo_root / "skills" / "rightmemory-auto-orchestrator-cli" / "SKILL.md",
+                    "rightmemory-auto-orchestrator",
+                    target,
+                )
+                self._install_skill(
+                    self.repo_root / "skills" / "rightmemory-assistant" / "SKILL.md",
+                    "rightmemory-assistant",
+                    target,
+                )
+                continue
+            self._remove_managed_skill(
+                self.repo_root / "skills" / "rightmemory-assistant" / "SKILL.md",
+                "rightmemory-assistant",
+                target,
+            )
             self._remove_old_loose_reference(
                 target,
                 "rightmemory-schema.md",
@@ -794,8 +841,9 @@ class Installer:
         install_stamp = runtime_dir / "install.stamp"
         _write_utf8(install_stamp, stamp)
         print(f"  [refresh] {install_stamp}")
-        print("             running watch processes refresh after their current cycle or sleep check")
-        print("             run rightmemory watch start or restart to start newly added watch targets")
+        if self.mode != "assistant":
+            print("             running watch processes refresh after their current cycle or sleep check")
+            print("             run rightmemory watch start or restart to start newly added watch targets")
 
     def _print_next_steps(self) -> None:
         separator = "\\" if self.is_windows else "/"
@@ -805,6 +853,14 @@ class Installer:
             f"  1. Open {self.memory_root}{separator}MEMORY.md and "
             f"{self.memory_root}{separator}PURSUITS.md and replace the examples with your own state."
         )
+        if self.mode == "assistant":
+            print("  2. Enable the installed rightmemory-assistant skill in your assistant.")
+            print("     The main agent and native subagents need access to this root and its worktrees.")
+            print("     No RightMemory model API or CLI-agent backend configuration is needed.")
+            print(f"  3. Check the root: rightmemory validate --root {self.memory_root}")
+            print("     Use rightmemory assistant commands; do not run an internal Update worker on this root.")
+            print("Re-run this installer with --mode assistant and the same paths to update the runtime and skill.")
+            return
         if self.mode == "cli-agent":
             print(
                 "  2. Write [agent_cli], [retrieve.agent_cli], and a default writer [update.agent_cli] "
@@ -925,17 +981,19 @@ def _resolved_path(path: str | Path) -> Path:
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="install.ps1" if os.name == "nt" else "install.sh",
-        usage="%(prog)s [--mode cli-agent|standalone] [<memory-root> <skills-target>]",
+        usage="%(prog)s [--mode assistant|cli-agent|standalone] [<memory-root> <skills-target>]",
     )
     parser.add_argument("--mode", default="standalone")
     parser.add_argument("paths", nargs="*")
     args = parser.parse_args(argv)
     if args.mode == "subagent":
         parser.exit(1, "Unsupported --mode: subagent\nUse --mode cli-agent for command-backed agent skill installs.\n")
-    if args.mode not in {"cli-agent", "standalone"}:
+    if args.mode not in {"assistant", "cli-agent", "standalone"}:
         parser.error(f"Invalid --mode: {args.mode}")
     if len(args.paths) not in {0, 2}:
         parser.error("provide either no paths or both <memory-root> and <skills-target>")
+    if args.mode == "assistant" and not args.paths:
+        parser.error("assistant mode requires explicit <memory-root> and <skills-target> paths")
     return args
 
 

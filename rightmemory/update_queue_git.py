@@ -123,6 +123,22 @@ class GitUpdateQueueCoordinator:
         self.store = UpdateQueueStore(self.memory_root)
         self.device_id = device_id or _load_device_id(self.memory_root)
 
+    def ready_candidates(
+        self, *, trigger_candidates: int, target_batch_candidates: int,
+        max_wait_seconds: int, now: datetime | None = None,
+    ) -> tuple[tuple[UpdateCandidate, ...], datetime | None]:
+        """Inspect the last synchronized queue without acquiring its lease."""
+        now = _utc_now() if now is None else now.astimezone(UTC)
+        snapshot = self.store.snapshot()
+        if snapshot.lease is not None and not _lease_expired(snapshot.lease, now):
+            return (), _parse_time(snapshot.lease.expires_at)
+        candidates, deadline = _select_candidates(
+            snapshot, trigger_candidates=trigger_candidates,
+            target_batch_candidates=target_batch_candidates,
+            max_wait_seconds=max_wait_seconds, now=now,
+        )
+        return tuple(candidates), deadline
+
     def publish_outbox(
         self,
         candidate_uids: set[str] | frozenset[str] | None = None,
@@ -420,7 +436,13 @@ class GitUpdateQueueCoordinator:
             execution_locked=True,
         ):
             return recovered
-        raise UpdateQueueLeaseLost("synchronized update finalization lost its Git lease")
+        if upstream is None:
+            raise UpdateQueueUnavailable("cannot confirm synchronized finalization while Git is offline")
+        if recovered is not None:
+            raise UpdateQueueUnavailable("published update could not advance the active checkout")
+        with self._worktree(upstream.commit) as worktree:
+            self._require_claim(UpdateQueueStore(worktree).snapshot(), claim)
+        raise UpdateQueueUnavailable("synchronized update is prepared but Git publication has not succeeded")
 
     def release(self, claim: ClaimedUpdateBatch) -> None:
         self._settle_failed_claim(claim, recovery=None)

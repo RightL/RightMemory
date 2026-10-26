@@ -1,5 +1,9 @@
 # RightMemory MCP
 
+For native assistant execution, use `rightmemory assistant --root /absolute/memory-root mcp --transport stdio` with the shared `rightmemory-assistant` skill. This transport exposes the model-independent assistant core and returns native-agent handoffs and batch notices. See [Assistant execution](ASSISTANT_EXECUTION.md) for setup, filesystem access, and verification boundaries.
+
+The `rightmemory mcp` server described below keeps the existing internal role backend and its ordinary-agent contract.
+
 RightMemory exposes a local MCP stdio server for ordinary agent work using the official MCP Python SDK v2:
 
 ```bash

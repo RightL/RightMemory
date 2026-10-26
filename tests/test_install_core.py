@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+from rightmemory.async_update import AsyncUpdateJob, AsyncUpdateState
 from rightmemory import install_core
 from rightmemory.install_core import InstallError, InstallTarget, Installer, _posix_data_home
 from rightmemory.update_queue import UpdateCandidate, UpdateQueueStore
@@ -76,7 +77,7 @@ else:
     def test_runtime_install_adds_codex_extra_only_for_cli_agent_mode(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            for mode, suffix in (("standalone", ""), ("cli-agent", "[codex-sdk]")):
+            for mode, suffix in (("standalone", ""), ("assistant", ""), ("cli-agent", "[codex-sdk]")):
                 with self.subTest(mode=mode):
                     installer = Installer(REPO_ROOT, mode, root / "memory", [root / "skills"])
                     installer.runtime_home = root / f"runtime-{mode}"
@@ -108,6 +109,105 @@ else:
                             f"{REPO_ROOT}{suffix}",
                         ]
                     )
+
+    def test_assistant_mode_requires_explicit_paths(self):
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            install_core._parse_args(["--mode", "assistant"])
+        args = install_core._parse_args(["--mode", "assistant", "/memory", "/skills"])
+        self.assertEqual(args.mode, "assistant")
+        self.assertEqual(args.paths, ["/memory", "/skills"])
+
+    def test_assistant_mode_does_not_start_internal_worker(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            installer = Installer(REPO_ROOT, "assistant", root / "memory", [root / "skills"])
+            with (
+                patch.object(installer, "_async_update_work_remains") as remains,
+                patch.object(install_core.AsyncUpdateStore, "wake_worker") as wake,
+            ):
+                installer._restart_async_update_worker(True)
+                installer._restart_async_update_worker(False)
+            remains.assert_not_called()
+            wake.assert_not_called()
+
+    def test_assistant_mode_selects_native_skill_instead_of_internal_orchestrator(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            target = root / "skills"
+            installer = Installer(REPO_ROOT, "assistant", root / "memory", [target])
+            with (
+                patch.object(installer, "_install_skill") as install,
+                patch.object(installer, "_remove_managed_skill") as remove,
+                patch("builtins.print"),
+            ):
+                installer._install_skills()
+            install.assert_called_once_with(
+                REPO_ROOT / "skills" / "rightmemory-assistant" / "SKILL.md",
+                "rightmemory-assistant", target,
+            )
+            remove.assert_called_once_with(
+                REPO_ROOT / "skills" / "rightmemory-auto-orchestrator-cli" / "SKILL.md",
+                "rightmemory-auto-orchestrator", target,
+            )
+
+    def test_internal_mode_removes_managed_native_skill(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            target = root / "skills"
+            installer = Installer(REPO_ROOT, "standalone", root / "memory", [target])
+            with (
+                patch.object(installer, "_install_skill"),
+                patch.object(installer, "_remove_managed_skill") as remove,
+                patch.object(installer, "_remove_old_skill"),
+                patch.object(installer, "_remove_old_loose_reference"),
+                patch("builtins.print"),
+            ):
+                installer._install_skills()
+            remove.assert_any_call(
+                REPO_ROOT / "skills" / "rightmemory-assistant" / "SKILL.md",
+                "rightmemory-assistant", target,
+            )
+
+    def test_mode_switch_refuses_other_executors_pending_work_without_changes(self):
+        for old, new in (("worker", "assistant"), ("assistant", "standalone")):
+            with self.subTest(old=old, new=new), tempfile.TemporaryDirectory() as tempdir:
+                root = Path(tempdir)
+                memory = root / "memory"
+                store = install_core.AsyncUpdateStore(memory, "update", executor=old)
+                job = AsyncUpdateJob(1, "a" * 32, "fixture evidence", "2026-01-01T00:00:00+00:00")
+                state = AsyncUpdateState("running", "fixture", "update", phase="waiting", pending=[job], next_id=2, executor=old)
+                store._write("fixture", state)
+                before = _snapshot(memory)
+                installer = Installer(REPO_ROOT, new, memory, [root / "skills"])
+                with self.assertRaisesRegex(InstallError, "another execution mode"):
+                    installer.run()
+                self.assertEqual(_snapshot(memory), before)
+                self.assertFalse((root / "skills").exists())
+
+    def test_assistant_mode_refuses_orphan_worker_outbox_without_cleanup(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory = Path(tempdir) / "memory"
+            queue = UpdateQueueStore(memory)
+            queue.write_outbox(UpdateCandidate(
+                uid="a" * 32, submitted_at="2026-01-01T00:00:00+00:00",
+                display_id=1, session_id="interrupted-worker", message="fixture evidence",
+            ))
+            temporary = queue.outbox_root / (".999999999." + "b" * 32 + ".tmp")
+            temporary.write_text("preserve on refusal", encoding="utf-8")
+            before = _snapshot(memory)
+            with self.assertRaisesRegex(InstallError, "another execution mode"):
+                Installer(REPO_ROOT, "assistant", memory, [])._require_compatible_update_executor()
+            self.assertEqual(_snapshot(memory), before)
+
+    def test_same_executor_reinstall_preserves_pending_work(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            memory = Path(tempdir) / "memory"
+            store = install_core.AsyncUpdateStore(memory, "update", executor="assistant")
+            job = AsyncUpdateJob(1, "a" * 32, "fixture evidence", "2026-01-01T00:00:00+00:00")
+            store._write("fixture", AsyncUpdateState("running", "fixture", "update", phase="waiting", pending=[job], next_id=2, executor="assistant"))
+            before = _snapshot(memory)
+            Installer(REPO_ROOT, "assistant", memory, [])._require_compatible_update_executor()
+            self.assertEqual(_snapshot(memory), before)
 
     def test_empty_xdg_data_home_uses_standard_default(self):
         home = Path("test-home")
