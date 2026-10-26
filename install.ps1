@@ -6,7 +6,7 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction Sile
 }
 
 if ($args -contains "-h" -or $args -contains "--help") {
-  Write-Host "Usage: .\install.ps1 [--mode cli-agent|standalone] [<memory-root> <skills-target>]"
+  Write-Host "Usage: .\install.ps1 [--mode assistant|cli-agent|standalone] [<memory-root> <skills-target>]"
   exit 0
 }
 

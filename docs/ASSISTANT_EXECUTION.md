@@ -6,13 +6,15 @@ This path uses one shared [assistant skill](../skills/rightmemory-assistant/SKIL
 
 ## Setup
 
-Install the package in a Python 3.11+ environment on the computer that will hold the memory root:
+From the repository checkout, run the shared installer with explicit memory and skill directories:
 
 ```bash
-python -m pip install .
+./install.sh --mode assistant /absolute/memory-root /absolute/assistant-skills
 ```
 
-Use a complete RightMemory Git root with a configured Git author. A disposable root is appropriate for initial verification. Copy `skills/rightmemory-assistant/` from the same checkout into the assistant's supported skill location and enable it in the conversation. The existing `install.sh` and `install.ps1` modes do not select assistant execution or install this skill automatically.
+On Windows, use `./install.ps1 --mode assistant C:\path\memory C:\path\assistant-skills` in PowerShell. The installer uses Git and uv, provisions Python 3.11+ and the runtime, initializes a new memory root, and installs `rightmemory-assistant` with that root bound. Existing complete roots are preserved; incomplete roots are refused before changes. Enable the installed skill using your assistant's supported skill mechanism. The skills directory is an explicit host choice, not automatic dot plugin registration.
+
+Use `rightmemory validate --root /absolute/memory-root` to check the root. Replace the new root's example entries with your own state through the normal memory workflow. Re-run the same installer command after updating the checkout. Stop agents and separately configured watchers that can submit evidence before switching execution modes. Finish or cancel pending updates with their original executor first; the installer refuses a switch while it finds their pending work. Use assistant execution rather than an internal Update worker for this root. If an old orchestrator skill was customized and therefore preserved, disable it before enabling the native assistant skill. The default standalone and CLI-agent installer modes remain unchanged.
 
 Assistant execution does not require RightMemory model API credentials, Codex, or Claude Code. The assistant uses its own configured agent. Keep the active root explicit:
 
@@ -81,7 +83,7 @@ rightmemory assistant --root /absolute/memory-root sync pull
 rightmemory assistant --root /absolute/memory-root sync push
 ```
 
-An incoming conflict or invalid merged state returns sync status and available file/operation details, and blocks a new Update. This assistant interface does not yet provide a native-agent sync-repair workspace protocol. The existing separate repair paths remain available; resolve the conflict before retrying ordinary sync.
+An incoming conflict or invalid merged state returns sync status and available file/operation details, and blocks a new Update. Resolve the reported conflict using the existing sync repair workflow, then retry ordinary sync before preparing another Update. Sync conflicts are not delegated to a native repair agent by this interface.
 
 The optional MCP transport wraps the same assistant core:
 
@@ -91,45 +93,4 @@ rightmemory assistant --root /absolute/memory-root mcp --transport stdio
 
 Load the shared assistant skill with this MCP transport; it explains how the assistant's own agents use the deterministic tools. The older `rightmemory mcp` command continues to use its configured internal role backend. See [MCP](MCP.md).
 
-The assistant path is not a replacement for all internal-runtime behavior. It does not promise the old model-session history, incremental retrieval cache, delivery suppression, transcript watchers, Dreamer, or scheduled maintenance. Use the existing paths for those mechanisms unless separately supported. The public assistant queue and completion receipts cover native batch execution rather than pretending that the old `update submit` worker queue dispatches native subagents.
-
-## Dot Verification
-
-Run the following in an explicitly authorized disposable memory root. Do not connect real memory, create credentials, or enable a persistent connection merely to run this checklist. In that root's `rightmemory.toml`, use a small test batch so one submitted candidate becomes ready immediately:
-
-```toml
-[update.async]
-trigger_candidates = 1
-target_batch_candidates = 1
-max_wait_seconds = 1
-```
-
-The normal defaults are 15 candidates to trigger, 30 as the preferred batch size, and a 24-hour fallback after the quiet period. The small values above are for this disposable exercise.
-
-1. **Check the actual execution environment.** Let a native Retrieve subagent read a fictional marker stored in a valid memory entry using its own file tools. During Update, let its native subagent modify an allowed entry in the assigned worktree, then have RightMemory inspect that candidate. This establishes shared filesystem access; MCP discovery alone does not.
-2. **Exercise the shared skill.** Submit a fictional durable fact. Before reconciliation, have a fresh Retrieve subagent find it as pending evidence. Trigger a normal tool call that returns a ready-batch notice to the subagent and verify that the main agent receives it and delegates Update.
-3. **Finish a real Update.** Let the native Update subagent read the candidate, decide and make the edit in the assigned worktree, run standalone validation, commit, and complete the task. Inspect the program's outcome and the active root's Git change.
-4. **Read it independently.** Start a fresh Retrieve subagent with a question that requires the new fact, without giving it the answer or the Update transcript. Check the returned source against the committed memory.
-5. **Exercise failure cases.** Run the cases below against disposable state and inspect both operation receipts and Git state.
-
-| Case | Required result |
-| --- | --- |
-| Same submission retried | The original submission is returned; evidence is not duplicated. Reusing its id for different content fails. |
-| Active root changed after `begin` | Completion reports a conflict; it does not overwrite the newer state. |
-| Invalid path or non-regular file | Candidate admission rejects unsafe Git paths or file types; task and session ids cannot escape their state directory. No outside path is changed through the program. |
-| Invalid candidate graph | Independent validation and completion reject it; active memory stays unchanged. |
-| Interrupted before application | The task remains inspectable and recoverable; no partial active update appears. |
-| Applied, reply lost | Status or repeated completion reports the same outcome; no second memory commit is created. |
-| Shared-queue publication failed | The durable prepared result remains; repeating completion retries publication without repeating semantic Update. |
-
-Record the assistant/version, RightMemory commit, root and worktree locations, native agent identities, task id, validation result, applied commit, and sync outcome. A check passes only when its observed output supports that result.
-
-## Assistant Verification Status
-
-| Assistant | What the existing evidence establishes | Still to verify for this path |
-| --- | --- | --- |
-| dot | An earlier isolated stdio handshake, three-tool discovery/error handling, and a limited synthetic write/read exercise. | The native-agent batch flow and failure/recovery cases above; native plugin and filesystem access in the intended deployment. |
-| DeepSeek Harness | No completed test of this path is recorded. | This shared skill and tool flow in DSH, using its native provider and filesystem. |
-| WorkBuddy | No completed test of this path in WorkBuddy itself is recorded. | The full flow in WorkBuddy itself, including native delegation and worktree access. CodeBuddy results do not establish this. |
-
-These are verification boundaries, not claims that a product has been adapted. Private dot MCP access may use [OpenAI Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), including its direct stdio bridge; tunnel authentication and a persistent client require separate setup and authorization.
+Assistant execution covers native retrieval and batch updates. Internal model-session history, incremental retrieval caching, transcript watchers, Dreamer, and scheduled maintenance belong to the separate internal runtime. Use `assistant submit` and its completion receipts for native batches, not the internal `update submit` worker commands.

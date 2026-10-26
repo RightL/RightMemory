@@ -47,7 +47,7 @@ RightMemory is aimed at developers who spend serious time with coding agents and
 
 ## Quick Start
 
-To use your current assistant's native agents without a RightMemory model backend, follow [Assistant execution](docs/ASSISTANT_EXECUTION.md). It uses `rightmemory assistant`, a shared skill, and native file tools. The installer paths below configure the existing internal runtime.
+To use your current assistant's native agents without a RightMemory model backend, follow [Assistant execution](docs/ASSISTANT_EXECUTION.md). It uses `rightmemory assistant`, a shared skill, and native file tools. Use the installer’s `--mode assistant` with explicit memory-root and skill-directory paths. The default installer paths below configure the existing internal runtime.
 
 Install prerequisites:
 
