@@ -5,7 +5,7 @@ set -u
 
 for argument in "$@"; do
   if [ "$argument" = "-h" ] || [ "$argument" = "--help" ]; then
-    echo "Usage: ./install.sh [--mode cli-agent|standalone] [<memory-root> <skills-target>]"
+    echo "Usage: ./install.sh [--mode assistant|cli-agent|standalone] [<memory-root> <skills-target>]"
     exit 0
   fi
 done

@@ -5,7 +5,7 @@ description: "Use when the user chooses RightMemory assistant execution: retriev
 
 # Use RightMemory with Native Agents
 
-Use the configured RightMemory root and one stable session id throughout the conversation. Use its absolute path as `<active-root>` in every assistant command. The main agent owns submissions and Update delegation. Retrieve and Update run as native subagents with access to the supplied directories; RightMemory tools manage the queue, isolation, validation, and publication.
+The installed memory root is `{{MEMORY_ROOT}}`. Use that root and one stable session id throughout the conversation. Use its absolute path as `<active-root>` in every assistant command. The main agent owns submissions and Update delegation. Retrieve and Update run as native subagents with access to the supplied directories; RightMemory tools manage the queue, isolation, validation, and publication.
 
 Use the `rightmemory assistant` commands below, or their matching assistant MCP tools. Keep this skill active with either transport.
 
