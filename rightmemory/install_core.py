@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 from .async_update import STATUS_MANUAL_RECOVERY, AsyncUpdateStore, _state_from_json
+from .learning import learning_files, learning_validation_errors
 from .platform import prepare_command
 from .update_queue import UpdateQueueStore, validate_update_queue
 from .update_record import validate_update_records
@@ -23,6 +24,7 @@ from .update_record import validate_update_records
 PYTHON_REQUIREMENT = ">=3.11"
 # Hash of the superseded managed template after its generated memory-root line is normalized.
 LEGACY_MEMORY_ORCHESTRATOR_SHA256 = "b2e0ed77f669b8d1da3f702755b85e7ac9cb8a664ccd02ffe9f7149cea095e00"
+RETIRED_GUIDANCE_REVIEW_SHA256 = "984155b199ee6b37f7475aece207c975f10f6c97397ab31a34848a83b2650875"
 LEGACY_MEMORY_ROOT_LINE = (
     "- The memory root is `{{MEMORY_ROOT}}`; the main agent must not read or edit files there by any means "
     "unless the user explicitly permits direct access."
@@ -60,6 +62,8 @@ PURSUIT_RULES.md
 !update_queue/lease.json
 !update_records/
 !update_records/*.json
+!learning/
+!learning/**
 """
 ROLE_PROMPTS = {
     "{{ROLE_PROMPT_RETRIEVE}}": "retrieve.md",
@@ -114,6 +118,7 @@ class Installer:
     def run(self) -> None:
         self._require_valid_update_queue()
         self._require_valid_update_records()
+        self._require_valid_learning()
         self._require_no_live_legacy_async_updates()
         self._require_no_retired_review_deliveries()
         self._require_compatible_update_executor()
@@ -152,6 +157,15 @@ class Installer:
                 "RightMemory update records are invalid:\n- "
                 + "\n- ".join(diagnostics)
                 + "\ninstallation made no changes; repair the invalid retained evidence before reinstalling"
+            )
+
+    def _require_valid_learning(self) -> None:
+        diagnostics = learning_validation_errors(self.memory_root)
+        if diagnostics:
+            raise InstallError(
+                "RightMemory learning state is invalid:\n- "
+                + "\n- ".join(diagnostics)
+                + "\ninstallation made no changes; repair the invalid learning state before reinstalling"
             )
 
     def _require_no_live_legacy_async_updates(self) -> None:
@@ -391,6 +405,8 @@ class Installer:
                 "PURSUITS.md",
                 "PURSUIT_RULES.md",
                 "AGENT_CORRECTION_MEMORY_RULES.md",
+                "AGENT_GUIDANCE_INBOX.md",
+                "learning",
                 "corrections.md",
                 "shared_views.toml",
                 "shares.toml",
@@ -539,6 +555,7 @@ class Installer:
                 if path.is_file()
                 and re.fullmatch(r"update-batch-[0-9a-f]{64}\.json", path.name)
             )
+        files.extend(path.relative_to(self.memory_root).as_posix() for path in learning_files(self.memory_root))
         return files
 
     def _ensure_initial_commit(self) -> None:
@@ -546,9 +563,12 @@ class Installer:
             print("  [keep]    initial memory commit already exists")
             return
         files = self._initial_memory_files()
-        regular_files = [path for path in files if path != ".gitignore"]
+        learning_paths = [path for path in files if path.startswith("learning/")]
+        regular_files = [path for path in files if path != ".gitignore" and not path.startswith("learning/")]
         if regular_files:
             self._git("add", "--", *regular_files)
+        if learning_paths:
+            self._git("add", "-f", "--", *learning_paths)
         if ".gitignore" in files:
             self._git("add", "-f", "--", ".gitignore")
         staged = self._git_capture("diff", "--cached", "--name-only", "--", *files).splitlines() if files else []
@@ -621,6 +641,17 @@ class Installer:
     def _install_skills(self) -> None:
         for target in self.skills_targets:
             target.mkdir(parents=True, exist_ok=True)
+            for skill_name in (
+                "maintain-rightmemory",
+                "maintain-agent-guidance",
+                "maintain-work-skills",
+            ):
+                self._install_skill(
+                    self.repo_root / "skills" / skill_name / "SKILL.md",
+                    skill_name,
+                    target,
+                )
+            self._remove_retired_guidance_review(target)
             if self.mode == "assistant":
                 self._remove_managed_skill(
                     self.repo_root / "skills" / "rightmemory-auto-orchestrator-cli" / "SKILL.md",
@@ -659,8 +690,6 @@ class Installer:
                 )
             for source_directory, skill_name in (
                 ("rightmemory-auto-orchestrator-cli", "rightmemory-auto-orchestrator"),
-                ("maintain-rightmemory", "maintain-rightmemory"),
-                ("review-agent-guidance-inbox", "review-agent-guidance-inbox"),
                 ("maintain-pursuit-map", "maintain-pursuit-map"),
                 ("rightmemory-manager", "rightmemory-manager"),
             ):
@@ -673,6 +702,27 @@ class Installer:
             self._remove_old_skill("memory-curator", target)
             self._remove_old_skill("memory-dreamer", target)
         print(f"  [skip]    generated role skills; {self.mode} mode uses rightmemory")
+
+    def _remove_retired_guidance_review(self, target: Path) -> None:
+        directory = target / "review-agent-guidance-inbox"
+        if not os.path.lexists(directory):
+            return
+        skill_file = directory / "SKILL.md"
+        if (
+            directory.is_symlink()
+            or not directory.is_dir()
+            or skill_file.is_symlink()
+            or not skill_file.is_file()
+            or sorted(path.name for path in directory.iterdir()) != ["SKILL.md"]
+        ):
+            print(f"  [skip]    {directory} is not a managed skill directory; left untouched")
+            return
+        digest = sha256(skill_file.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+        if digest != RETIRED_GUIDANCE_REVIEW_SHA256:
+            print(f"  [skip]    {directory} differs from the retired managed skill; left untouched")
+            return
+        shutil.rmtree(directory)
+        print(f"  [remove]  {directory}  (replaced by domain maintenance skills)")
 
     def _remove_old_loose_reference(self, target: Path, name: str, canonical: Path) -> None:
         legacy = target / name
@@ -823,6 +873,7 @@ class Installer:
         )
         if self.mode == "assistant":
             print("  2. Enable the installed rightmemory-assistant skill in your assistant.")
+            print("     Memory, guidance, and work-skills maintenance skills are installed alongside it.")
             print("     The main agent and native subagents need access to this root and its worktrees.")
             print("     No RightMemory model API or CLI-agent backend configuration is needed.")
             print(f"  3. Check the root: rightmemory validate --root {self.memory_root}")
@@ -846,8 +897,8 @@ class Installer:
         print(
             "  4. Open the Pursuit map with rightmemory pursuit and copy node context "
             "into Codex App. Use rightmemory-manager there for requested RightMemory "
-            "management or task coordination. Maintenance and pending-guidance review "
-            "are also installed as separate explicit skills."
+            "management or task coordination. Memory, guidance, and work-skills "
+            "maintenance are installed as separate explicit skills."
         )
         print(
             "  5. Optional background pruning, insight, and sync: "
@@ -857,7 +908,7 @@ class Installer:
         print("Re-run the installer any time you pull updates from the RightMemory repo;")
         print(
             "your existing MEMORY.md, MEMORY_*.md, PURSUITS.md, PURSUIT_*.md, "
-            "AGENT_GUIDANCE_INBOX.md, corrections.md, insight_logs/, and pending update queue are preserved."
+            "AGENT_GUIDANCE_INBOX.md, learning/, corrections.md, insight_logs/, and pending update queue are preserved."
         )
 
     def _git(self, *args: str) -> None:

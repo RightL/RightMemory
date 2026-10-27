@@ -30,7 +30,7 @@ from rightmemory.agent_cli import (
     _stable_claude_session_id,
 )
 from rightmemory.codex_sdk import CodexSdkRunResult, CodexSdkRunner, CodexSdkTiming
-from rightmemory.config import AgentCliConfig, EmbeddingRetrieveConfig, ROLES, RuntimeConfig, SyncConfig
+from rightmemory.config import AgentCliConfig, EmbeddingRetrieveConfig, RUNTIME_ROLES, RuntimeConfig, SyncConfig
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
 from rightmemory.provider_threads import ProviderThreadStore
 
@@ -1621,7 +1621,7 @@ class AgentCliDoctorTests(unittest.TestCase):
 
         self.assertTrue(checks)
         self.assertTrue(all(check.ok for check in checks))
-        self.assertEqual(set(first.call_args.args[1]), set(ROLES) - {"retrieve"})
+        self.assertEqual(set(first.call_args.args[1]), set(RUNTIME_ROLES) - {"retrieve"})
         resume.assert_not_called()
         retrieve.assert_not_called()
         write.assert_called_once()

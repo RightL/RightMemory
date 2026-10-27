@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from rightmemory.assistant_write import AssistantStaleVersionError, AssistantWriteManager
 from rightmemory.isolated_write import IsolatedWriteSupervisor
+from rightmemory.learning import list_learning_candidates, submit_learning
 from rightmemory.semantic_operation import SemanticOperationStore
 from rightmemory.update_queue import UpdateCandidate, update_candidate_batch_id
 from rightmemory.update_record import UpdateRecordStore
@@ -82,6 +83,18 @@ class AssistantWriteTests(IsolatedWriteTestBase):
         self.assertEqual((self.root / "MEMORY.md").read_bytes(), original)
         self.assertIsNotNone(UpdateRecordStore(self.root).read(self.batch_id))
         self.assertEqual(self._git("rev-list", "--count", f"{self.initial_head}..HEAD"), "1")
+
+    def test_learning_capture_does_not_invalidate_an_ordinary_update(self):
+        task = self._prepare()
+        self._commit_memory(task)
+        submitted = submit_learning(self.root, "another-session", "Keep the useful redirection")
+
+        result = self.manager.complete(task.task_id)
+
+        self.assertEqual(result.commits_landed, 1)
+        self.assertIn("native assistant edit", (self.root / "MEMORY.md").read_text())
+        self.assertEqual([candidate.candidate_id for candidate in list_learning_candidates(self.root)], [submitted.candidate_id])
+        self.assertIsNotNone(UpdateRecordStore(self.root).read(self.batch_id))
 
     def test_prepare_rejects_same_task_for_different_batch(self):
         self._prepare()

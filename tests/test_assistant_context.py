@@ -56,7 +56,7 @@ class AssistantRetrieveContextTests(unittest.TestCase):
         self.assertTrue(all(Path(path).parent == self.root for path in result["source_files"]))
         self.assertTrue(Path(result["pending_file"]).is_file())
         self.assertTrue(Path(result["instructions_file"]).is_file())
-        self.assertEqual(len(list(Path(result["pending_file"]).parent.iterdir())), 2)
+        self.assertEqual(len(list(Path(result["pending_file"]).parent.iterdir())), 3)
         self.assertEqual(result["pending_count"], 0)
         self.assertEqual(result["sync"]["status"], "disabled")
         self.assertIsInstance(json.loads(json.dumps(result)), dict)

@@ -13,7 +13,7 @@ from .agent_cli_cleanup import (
     CODEX_FORK_BASE_RETENTION,
     CODEX_THREAD_RETENTION,
 )
-from .config import ROLES, RuntimeConfig, SyncConfig, load_config
+from .config import RUNTIME_ROLES, RuntimeConfig, SyncConfig, load_config
 from .platform import prepare_command
 from .provider_sessions import ProviderSessionStore
 from .provider_threads import ProviderThreadStore
@@ -90,7 +90,7 @@ def _provider_runtime(provider: str) -> str:
 def _load_agent_cli_configs(checks: list[DoctorCheck], *, memory_root: Path | None = None) -> dict[str, RuntimeConfig]:
     configs: dict[str, RuntimeConfig] = {}
     failures = []
-    for role in sorted(ROLES):
+    for role in sorted(RUNTIME_ROLES):
         try:
             config = load_config(role, memory_root=memory_root)
         except Exception as exc:

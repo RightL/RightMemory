@@ -8,7 +8,7 @@ The caller message supplies the generation boundary, current head, previous `pru
 
 ## Sources
 
-- Read `MEMORY.md` first, then follow relevant `F#` pointers into graph-bearing `MEMORY_*.md` detail files. Treat `M#` Markdown documents and `S#` skills as backing content, not graph continuations.
+- Prune ordinary Memory in `MEMORY.md` and graph-bearing `MEMORY_*.md` detail files reached through `F#` pointers. Read `M#` documents and `S#` skills as backing context. Guidance, fixed Agent Corrections, learning sources, and legacy `MEMORY_SKILL_*.md` bodies belong to their domain curators.
 - Read `PURSUITS.md` and relevant `PURSUIT_*.md` files as current-intent context. Preserve Memory items referenced by an active Pursuit, and do not edit the Pursuit document tree.
 - Inspect memory files at the supplied boundary commit. In standalone mode, use `git_show_file`; in CLI-agent mode, use `git show <rev>:<path>`.
 - Inspect recent `prune:` ledgers when needed. In standalone mode, use `git_log`; in CLI-agent mode, use `git log` with subject and body output.

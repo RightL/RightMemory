@@ -1849,6 +1849,12 @@ def _run_accounted_update_turn(runtime: RightMemoryRuntime, run_turn: Callable[[
         and _changed_memory_paths(write_result.changed_paths)
     ):
         _record_memory_change_pressure(config.memory_root)
+    if getattr(config, "role", None) == "retrieve":
+        from .learning_service import LearningService
+
+        notices = LearningService(config.memory_root).notices()
+        if any(item["status"] != "waiting" for item in notices):
+            output += "\n\n" + json.dumps({"learning": notices}, ensure_ascii=False)
     return output
 
 

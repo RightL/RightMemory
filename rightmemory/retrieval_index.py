@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .corrections import AGENT_CORRECTION_SOURCE_PATHS, agent_correction_entries
 from .graph import DocumentBlock, GraphManifest, build_graph_manifest
+from .learning_retrieval import learning_sources
 from .recent_submitted import RecentSubmittedMemoryEntry, collect_recent_submitted_memory
 from .retrieve_selection import (
     LineRange, RetrieveSelectionError, RetrieveSelectionRenderer,
@@ -96,6 +97,15 @@ def build_retrieval_corpus(memory_root: Path) -> RetrievalCorpus:
             ))
     for entry in collect_recent_submitted_memory(root):
         entries.append(_pending_entry(entry))
+    for source in learning_sources(root).values():
+        entries.append(RetrievalEntry(
+            key=source.source_id,
+            text=f"{source.kind}\n\n{source.text}",
+            source=source.source_id,
+            pending=source.kind == "interaction evidence",
+            display_parts=((f"source:{source.source_id}", f"Source: `{source.source_id}`"),
+                           (source.source_id, source.text)),
+        ))
     keys = [entry.key for entry in entries]
     if len(keys) != len(set(keys)):
         raise RetrieveSelectionError("duplicate retrieval source identity")

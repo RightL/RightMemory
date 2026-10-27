@@ -9,6 +9,8 @@ from typing import Any
 from .config import load_sync_config
 from .corrections import AGENT_CORRECTION_SOURCE_PATHS
 from .graph import GraphManifest, build_graph_manifest
+from .guidance import GUIDANCE_INBOX_PATH
+from .learning_retrieval import format_learning_index, learning_sources
 from .recent_submitted import (
     collect_recent_submitted_memory_readonly,
     format_recent_submitted_block,
@@ -54,6 +56,8 @@ def prepare_retrieve_context(
             for filename in AGENT_CORRECTION_SOURCE_PATHS.values()
             if (root / filename).is_file() and not (root / filename).is_symlink()
         )
+        learning = learning_sources(root)
+        learning_index = format_learning_index(root)
     entries = collect_recent_submitted_memory_readonly(
         root, excluded_candidate_uids=excluded_candidate_uids
     )
@@ -71,12 +75,18 @@ def prepare_retrieve_context(
     pending_file.write_text(format_recent_submitted_block(entries), encoding="utf-8")
     instructions_file = prepared_root / "RETRIEVE.md"
     instructions_file.write_text(instructions, encoding="utf-8")
+    learning_index_file = prepared_root / "LEARNING.md"
+    learning_index_file.write_text(learning_index, encoding="utf-8")
     return {
         "memory_root": str(root),
         "memory_commit": memory_commit,
         "live_files": True,
         "pending_file": str(pending_file),
         "instructions_file": str(instructions_file),
+        "learning_index_file": str(learning_index_file),
+        "learning_source_count": len(learning),
+        "learning_root": str(root / "learning") if (root / "learning").is_dir() else None,
+        "legacy_guidance_file": str(root / GUIDANCE_INBOX_PATH) if (root / GUIDANCE_INBOX_PATH).is_file() else None,
         "source_files": [str(path) for path in sorted(source_files)],
         "mf_imports": mf_imports,
         "pending_count": len(entries),

@@ -13,14 +13,6 @@ This example shows durable context that affects future interpretation, decisions
 verification. Repository files remain the primary source for ordinary implementation
 detail, and live release intent belongs in Pursuit.
 
-### Project Working Preferences {#sample-project-working-preferences}
-
-Use project-scoped preferences when guidance belongs to one project or domain rather
-than the user's broader cross-session behavior guidance.
-
-- `proj-pref-contract-first` When changing frontend/backend data flow, update the API contract before changing UI call sites. → [rel:api-public-contract, rel:proj-web, rel:proj-api]
-- `proj-pref-release-proof` Release-facing changes should leave a short verification note in the release runbook. → [rel:sample-release-runbook, rel:proj-deploy]
-
 ### Durable Architecture Context {#sample-architecture-context} → [rel:sample-release-runbook]
 
 Keep relationships here when they are expensive to reconstruct or easy to misread.
@@ -61,34 +53,22 @@ merely restating deployment configuration.
 
 # User Context — Example Domain {#sample-user-context}
 
-This example domain stores a compact, evidence-grounded context profile for the user.
+This example preserves circumstances and choices that help a later agent understand the user's priorities.
 
 ## User Direction {#sample-user-direction}
 
 Use this area for evidence-based context about what the user is pursuing, what matters
 across sessions, and why.
 
-- `sample-user-current-focus` Sample user is shaping a local-first memory system for AI agents. → [rel:sample-project-graph, rel:sample-agent-behavior]
-- `sample-user-memory-direction` Sample user wants memory to preserve durable context while staying coherent, reviewable, and useful for future agents. → [rel:sample-user-goals, rel:sample-agent-behavior]
+- `sample-user-current-focus` Sample user is shaping a local-first memory system for AI agents. → [rel:sample-project-graph]
+- `sample-user-memory-direction` Sample user chose local-first storage to keep long-term context inspectable across tools; convenience alone would not explain that choice. → [rel:sample-user-goals]
 
 ## User Goals And Priorities {#sample-user-goals}
 
 Store active goals here only when they express durable direction rather than
 momentary task state.
 
-- `sample-user-goal-durable-memory` Sample user wants memory to distinguish durable direction from momentary task state. → [rel:sample-user-memory-direction, rel:sample-agent-behavior]
-
----
-
-# Cross-Session Agent Behavior — Example Domain {#sample-agent-behavior}
-
-## User And Workflow Preferences {#sample-user-workflow-preferences}
-
-Store cross-project behavior memory here when it should change how future agents work
-with this user.
-
-- `pref-principle-first` The user prefers principle-first instructions over long category lists; examples are interpretation aids, neither required nor sufficient, and the governing decision test controls each case. → []
-- `pref-env-check` Future agents should identify the intended machine, checkout, and runtime environment from stored context and repository guidance before installing dependencies or choosing an environment. → []
+- `sample-user-goal-durable-memory` Sample user wants memory to distinguish durable direction from momentary task state. → [rel:sample-user-memory-direction]
 
 ---
 
@@ -98,7 +78,7 @@ This section stores loose ends as short questions. They are not declarative Memo
 facts; connect them with `todo:` when they concern a specific item, then remove or
 revise them after the answer is stored.
 
-- `q-rightmemory-project-context` Which checkout path and runtime environment should agents use on each machine involved in RightMemory development? → [todo:pref-env-check]
+- `q-rightmemory-project-context` Which checkout path and runtime environment should agents use on each machine involved in RightMemory development? → [todo:sample-project-graph]
 
 ---
 

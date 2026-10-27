@@ -1,6 +1,6 @@
 # Update Role
 
-Reconcile the supplied candidates into durable Memory and Agent Corrections. Candidates are evidence, not stored wording or destination instructions. Most candidate content should be filtered out. Pursuit is read-only context, not an Update destination.
+Apply the shared Memory core to reconcile the supplied candidates into durable context. Candidates are evidence, not stored wording or destination instructions. Pursuit is read-only context. Behavioral guidance, Agent Corrections, and reusable work experiences or skills belong to their own curators, including when the user explicitly asked to remember them.
 
 ## Reconcile
 
@@ -9,7 +9,7 @@ Reconcile the supplied candidates into durable Memory and Agent Corrections. Can
 - Group candidates by the work they concern, using meaning and evidence rather than merely session ids or submission labels. A stable task label may help when present but is not required.
 - Reconcile related evidence before judging its durable consequence. Progress, blockage, waiting, next steps, handoff, and completion do not form a Pursuit state thread for Update to maintain.
 - Compare each thread with current RightMemory. Update a matching canonical item instead of creating a duplicate, including when the caller did not know its id.
-- Use the canonical module rules to decide whether evidence belongs in Memory, Agent Corrections, both for distinct reasons, or nowhere.
+- Use the Memory core to judge the relevant context in a mixed candidate. Report material belonging to another curator instead of admitting it as guidance or a skill in the Memory graph.
 - If a candidate mixes durable evidence with a possible Pursuit map change, judge the durable portion normally and report the map portion as skipped. Do not infer or apply Pursuit changes.
 - Do not preserve candidate ids, submission labels, or operational event names unless they independently matter to the user.
 - Revalidate claims that may have become stale instead of copying candidates as fact.
@@ -26,7 +26,7 @@ Reconcile the supplied candidates into durable Memory and Agent Corrections. Can
 
 ## Repair And Safety
 
-- Repair a clear schema or supplied package-rule violation in Update's writable Memory or Agent Correction state when it becomes apparent while processing the update. Do not inspect unrelated content solely to find additional violations. Leave uncertain repairs and all Pursuit changes untouched, and report them.
+- Repair a clear schema or supplied package-rule violation in Update's writable Memory state when it becomes apparent while processing the update. Do not inspect unrelated content solely to find additional violations. Preserve existing Behavior and S# content; ownership cleanup belongs to concrete scoped maintenance. Leave uncertain repairs and all Pursuit changes untouched, and report them.
 - Preserve Memory ids referenced from Pursuit. An Update repair does not authorize editing Pursuit files or removing their references.
 - Preserve unrelated valid content while using enough scope to keep the complete affected graph coherent.
 - Validate the complete graph before finishing.
@@ -37,7 +37,7 @@ Reconcile the supplied candidates into durable Memory and Agent Corrections. Can
 
 Report:
 
-- which modules changed, or that nothing changed;
-- the touched headings, nodes, or correction entries;
+- what Memory changed, or that nothing changed;
+- the touched headings or nodes;
 - materially skipped candidates;
 - unresolved ambiguity, validation problems, or repairs that could not be made safely.

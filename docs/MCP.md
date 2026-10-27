@@ -40,21 +40,23 @@ For a named profile, use `"args": ["--profile", "my-project", "mcp"]`.
 
 ## Ordinary-agent tools
 
-The server exposes exactly three tools:
+The ordinary tools separate context from shared learning:
 
-- `rightmemory_retrieve` retrieves cross-session context when it could materially affect the current work.
-- `rightmemory_submit_update` submits durable Memory and explicitly requested agent-guidance evidence to the asynchronous Update queue. Pursuit is read-only context, not an Update destination.
-- `rightmemory_capture_guidance` captures plausible reusable agent-behavior evidence, including explicit and implicit user redirections.
+- `rightmemory_retrieve` retrieves context that could materially affect the work, including relevant raw learning evidence and complete skills.
+- `rightmemory_submit_update` submits ordinary Memory evidence, including user and people context, to the asynchronous Update queue.
+- `rightmemory_submit_learning` durably captures behavioral or procedural evidence for the guidance and skills curators, including explicit requests to remember it.
 
-The tool and parameter descriptions contain the complete automatic ordinary-agent contract. An MCP client should not also load the RightMemory orchestrator skill; that skill remains the CLI transport for clients without MCP support.
+Learning control tools are `rightmemory_begin_learning`, `rightmemory_complete_learning`, and `rightmemory_learning_status`. Internal MCP also exposes `rightmemory_run_learning` to run a prepared curator through the configured executor. Native assistant MCP shares the model-free controls and lets the current assistant delegate its own native agent.
 
-Successful writes return no model-visible content. A write result contains text only when the agent must act, such as when evidence was saved but the Update worker could not start, or when queued work requires manual recovery. Update submission never reports synchronous semantic acceptance: the updater reconciles submitted evidence later and may change Memory, Agent Corrections, both, or neither.
+The tool and parameter descriptions carry the ordinary-agent contract. An internal MCP client should not also load the command-backed orchestrator skill; native assistant MCP keeps the shared `rightmemory-assistant` skill for delegation.
 
-Guidance capture favors recall. A signal need not already be a fully settled general rule, and independent later occurrences of a similar pattern may be captured again. Capture does not replace applying the user's direction to the current work.
+Capture favors useful evidence before demanding a settled general rule. Preserve uncertainty and scope, and capture independent later occurrences when they add evidence. Raw learning remains available to relevant retrieval before curation. A captured candidate is not an adopted rule or skill.
+
+Learning responses include readiness or active-task notices. The daily entry acts on ready domains with the configured executor or native begin/delegate/complete workflow. Domain curators make their own retention and generalization judgments without a per-item manual inbox review. Only the completion receipt confirms publication.
 
 ## Scope
 
-The MCP adapter calls the same runtime, async Update store, and guidance capture implementation as the CLI. The CLI remains available for human inspection, explicit maintenance, queue status, retry, undo, and clients that cannot use MCP.
+The MCP adapter calls the same runtime, async Memory Update store, and shared learning implementation as the CLI. The CLI remains available for human inspection, explicit maintenance, queue status, retry, undo, and clients that cannot use MCP.
 
 Ordinary MCP work does not create, rename, reorganize, focus, or remove Pursuits. Explicit map requests use the human editor or the independent `maintain-pursuit-map` skill; no additional MCP map-write tools are provided.
 

@@ -50,8 +50,8 @@ class WindowsInstallScriptTests(unittest.TestCase):
             maintainer_exists = maintainer.exists()
             map_maintainer_exists = (skills_target / "maintain-pursuit-map" / "SKILL.md").is_file()
             manager_exists = (skills_target / "rightmemory-manager" / "SKILL.md").is_file()
-            guidance_reviewer_exists = (
-                skills_target / "review-agent-guidance-inbox" / "SKILL.md"
+            guidance_maintainer_exists = (
+                skills_target / "maintain-agent-guidance" / "SKILL.md"
             ).is_file()
             legacy_orchestrator_exists = (skills_target / "memory-orchestrator").exists()
             leaked_requirement_file = (root / "3.11").exists()
@@ -77,7 +77,7 @@ class WindowsInstallScriptTests(unittest.TestCase):
         self.assertTrue(maintainer_exists)
         self.assertTrue(map_maintainer_exists)
         self.assertTrue(manager_exists)
-        self.assertTrue(guidance_reviewer_exists)
+        self.assertTrue(guidance_maintainer_exists)
         self.assertIn("rightmemory-auto-orchestrator", result.stdout)
         self.assertFalse(legacy_orchestrator_exists)
         self.assertIn('set "PYTHONUTF8=1"', wrapper_text)
@@ -127,7 +127,8 @@ class WindowsInstallScriptTests(unittest.TestCase):
                     self.assertFalse((skills_target / skill_name).exists())
                 for skill_name in (
                     "maintain-rightmemory",
-                    "review-agent-guidance-inbox",
+                    "maintain-agent-guidance",
+                    "maintain-work-skills",
                     "maintain-pursuit-map",
                     "rightmemory-manager",
                 ):

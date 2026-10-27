@@ -386,6 +386,12 @@ class AssistantService:
             response["update"] = self._notice()
         except (OSError, ValueError, RuntimeError) as exc:
             response["update"] = {"ready": False, "status": "error", "error": str(exc)}
+        from .learning_service import LearningService
+
+        try:
+            response["learning"] = LearningService(self.memory_root).notices()
+        except (OSError, ValueError, RuntimeError) as exc:
+            response["learning"] = {"status": "error", "error": str(exc)}
         return response
 
     def _notice(self) -> dict:

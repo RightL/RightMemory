@@ -1,6 +1,6 @@
 # RightMemory Edit Feedback
 
-RightMemory Edit Feedback records concrete user feedback on proposed edits to Memory, Pursuit, Agent Corrections, or linked RightMemory content.
+RightMemory Edit Feedback records concrete user feedback on proposed edits to Memory, Pursuit, guidance, Agent Corrections, work experiences, skills, or linked RightMemory content.
 
 The optional root file is `corrections.md`. It is operational curation feedback, not semantic RightMemory state, part of the Memory/Pursuit graph, or part of Agent Corrections.
 

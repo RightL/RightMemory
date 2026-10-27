@@ -1057,6 +1057,7 @@ def _input_metadata(value: dict[str, Any]) -> dict[str, Any]:
             "expected_merge_parent",
             "merge_conflicted",
             "repair_input_sha256",
+            "learning_input_sha256",
             "policy_sha256",
         )
         return {key: value[key] for key in keys if key in value}

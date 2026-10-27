@@ -10,6 +10,7 @@ from mcp.server import MCPServer
 from mcp.types import CallToolResult, TextContent
 
 from .validation import validate_memory_root
+from .learning_mcp import register_learning_tools
 
 
 class AssistantBackend(Protocol):
@@ -96,6 +97,7 @@ def create_mcp_server(
     def validate() -> CallToolResult:
         return _invoke(lambda: validate_memory_root(root).to_dict())
 
+    register_learning_tools(server, root, native=True)
     return server
 
 

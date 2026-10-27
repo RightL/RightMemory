@@ -83,7 +83,7 @@ Pursuit items are coarse and often span several conversations or tasks. Rather t
 
 Manager keeps the broader picture, synthesizes outcomes, helps decide what happens next, and creates or coordinates separate temporary worker tasks. Light inspection needed for accurate coordination is natural, but substantive investigation, implementation, experimentation, and debugging belong in those separate worker tasks.
 
-Codex App owns conversations, tasks, and pinning. RightMemory stores no Manager conversation association or task status. Worker task progress, failure, or completion does not automatically change Pursuit or Memory. The Manager conversation invokes `maintain-rightmemory` or `maintain-pursuit-map` only when the user explicitly asks to change RightMemory.
+Codex App owns conversations, tasks, and pinning. RightMemory stores no Manager conversation association or task status. Worker task progress, failure, or completion does not automatically change Pursuit or Memory. For requested changes, the Manager conversation invokes the workflow that owns the content: ordinary Memory, agent guidance, work skills, or the Pursuit map.
 
 ### Existing data remains readable
 

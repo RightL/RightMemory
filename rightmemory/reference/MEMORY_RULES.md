@@ -1,8 +1,12 @@
 # Memory Rules
 
-## Purpose
+## Core
 
 Memory is durable context that helps a future agent act, decide, interpret, retrieve, or avoid costly rediscovery. It is not a record of everything that happened.
+
+Preserve enough of the user's circumstances, intentions, relationships, choices, and reasons for a future agent to understand what matters and act with less repeated explanation. Distinguish evidence, interpretation, and unresolved uncertainty; a compact personality label is rarely a substitute for the context behind a choice.
+
+This core governs both candidate updates and requested Memory maintenance. Agent-behavior guidance and reusable work experience have their own curators and shared cores; ordinary Memory updates do not admit that material as rules or skills in the graph.
 
 Project artifacts remain the primary home of project-specific implementation detail. Memory adds value when it preserves compact context, interpretation, scope, or a lookup rule that would otherwise require substantial search or reasoning.
 
@@ -25,12 +29,11 @@ Useful unsettled context may be stored as `Uncertain:` when the uncertainty itse
 Good Memory commonly includes:
 
 - durable user context, direction, responsibilities, or constraints;
-- stable preferences and collaboration expectations;
+- personal preferences and the circumstances that explain their use;
 - environment constraints that recur across work;
 - project or domain interpretations that are expensive to reconstruct;
 - stable decisions and the reason or scope needed to apply them;
 - compact lookup rules for recurring artifact families;
-- reusable operating guidance whose rule is useful independently of one correction case;
 - concise unresolved questions whose answer would materially improve future work.
 
 Clearly unsuitable as ordinary Memory:
@@ -46,7 +49,7 @@ Clearly unsuitable as ordinary Memory:
 
 ## Item And Structure Quality
 
-A Memory item should express one reusable fact, preference, rule, decision, conclusion, or unresolved question at the smallest scope that remains independently meaningful.
+A Memory item should express one reusable fact, personal preference, constraint, decision, conclusion, or unresolved question at the smallest scope that remains independently meaningful.
 
 Prefer revising, merging, narrowing, moving, or removing existing content over appending a near-duplicate.
 
@@ -66,29 +69,17 @@ Put new items in the closest existing group with matching domain and scope. Pref
 
 Use `# User Context` for durable context about the user as a person with ongoing work and direction: relevant background, goals, motivations, responsibilities, circumstances, and why they matter.
 
-User Context is a compact context profile grounded in evidence. Do not infer personal characteristics beyond what the stored evidence supports.
+Ground User Context in evidence. Preserve relevant choices and stated reasons, while leaving an unstated reason uncertain. A habit observed in one situation need not be a general preference; facts about the user's habits do not automatically instruct an agent to act that way.
+
+For other people, preserve the relationship, responsibilities, shared context, and consequential commitments that would help the user or an agent continue the interaction. Keep changing circumstances and uncertain interpretations distinguishable from settled facts about a person.
 
 A direction's place in the Pursuit map is the user's decision. An unfinished commitment is not automatically Memory or Pursuit; preserve independently durable context here and leave execution continuity in project artifacts.
 
-## Cross-Session Agent Behavior
+## Related Domains
 
-Use `# Cross-Session Agent Behavior` for future-facing guidance about how agents should reason, communicate, use tools, verify work, or collaborate with this user.
+Guidance about how agents should reason, communicate, verify work, or collaborate belongs to the guidance curator under `AGENT_GUIDANCE_RULES.md`. Work cases and reusable instruction assets belong to the skills curator under `WORK_SKILLS_RULES.md`. An explicit request to remember such evidence does not change its domain.
 
-Guidance may be global or project-scoped. Express narrower scope through tree placement or explicit wording.
-
-Behavior Memory should read as an operating rule, not as transcript review notes, frustration history, or a growing incident log.
-
-Use Behavior Memory when the generalized rule is independently useful. Use Agent Corrections when the concrete attempted/redirection/outcome contrast is itself valuable. Keep both only when the two representations add distinct value.
-
-## Memory Skills
-
-A Memory skill is a reusable instruction asset: a workflow, judgment playbook, prompt-shaped instruction, or bounded operating style for a recurring situation.
-
-Use an `S#` heading when a compact heading body can explain when the instruction applies and the full instruction belongs in `MEMORY_SKILL_<id>.md`.
-
-The skill file is free-form instructional Markdown, not graph-bearing content. Keep ids, edges, and graph placement on the `S#` heading or nearby Memory.
-
-Do not create a skill for a one-off project detail or a mechanical rule that should be enforced by code or validation.
+Existing Cross-Session Agent Behavior and `S#` resources remain valid and readable. Preserve them during ordinary Memory updates rather than extending or migrating them incidentally. A concrete scoped maintenance task can address ownership and overlap while preserving the meaning and references of affected content.
 
 ## Open Context Questions
 

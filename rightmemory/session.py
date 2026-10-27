@@ -215,6 +215,8 @@ def _ensure_memory_gitignore(memory_root: Path) -> None:
             b"!shared_views/*/.gitignore\n"
             b"!insight_logs/\n"
             b"!insight_logs/*.md\n"
+            b"!learning/\n"
+            b"!learning/**\n"
             b"!update_queue/\n"
             b"!update_queue/candidates/\n"
             b"!update_queue/candidates/*.json\n"

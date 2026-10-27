@@ -172,13 +172,11 @@ class GuidanceIsolationTests(unittest.TestCase):
         (self.root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
         (self.root / GUIDANCE_INBOX_PATH).write_text(SAMPLE_ONE, encoding="utf-8")
 
-    def test_model_role_file_tools_cannot_see_inbox(self):
+    def test_ordinary_memory_roles_do_not_use_legacy_learning_inbox(self):
         for role in (
             None,
-            "retrieve",
             "update",
             "pruner",
-            "sync-reconciler",
             "insight",
             "shared-view-builder",
         ):
@@ -190,6 +188,14 @@ class GuidanceIsolationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     tools.read_command(f"cat {GUIDANCE_INBOX_PATH}")
                 self.assertNotIn(GUIDANCE_INBOX_PATH, tools.read_command("rg --files"))
+
+    def test_retrieve_and_learning_curators_can_read_legacy_evidence(self):
+        for role in ("retrieve", "guidance-curator", "skills-curator", "sync-reconciler"):
+            with self.subTest(role=role):
+                tools = MemoryTools(self.root, role=role)
+                self.assertIn(GUIDANCE_INBOX_PATH, tools.list_files("*.md"))
+                tools.read(GUIDANCE_INBOX_PATH)
+                tools.read_command(f"cat {GUIDANCE_INBOX_PATH}")
 
     def test_validation_boundary_keeps_inbox_out_of_semantic_graph(self):
         tools = MemoryTools(self.root)
@@ -353,12 +359,12 @@ class GuidanceInstallTests(unittest.TestCase):
 
         self.assertIn(GUIDANCE_INBOX_PATH, self.installer._initial_memory_files())
 
-    def test_installer_keeps_guidance_review_independent_from_orchestration(self):
+    def test_installer_keeps_domain_maintenance_alongside_daily_entry(self):
         self.installer._install_skills()
 
-        self.assertTrue(
-            (self.skills_root / "review-agent-guidance-inbox" / "SKILL.md").is_file()
-        )
+        for skill_name in ("maintain-rightmemory", "maintain-agent-guidance", "maintain-work-skills"):
+            self.assertTrue((self.skills_root / skill_name / "SKILL.md").is_file())
+        self.assertFalse((self.skills_root / "review-agent-guidance-inbox").exists())
         self.assertTrue(
             (self.skills_root / "rightmemory-auto-orchestrator" / "SKILL.md").is_file()
         )

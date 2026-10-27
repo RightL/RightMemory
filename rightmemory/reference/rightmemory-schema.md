@@ -1,12 +1,14 @@
 # RightMemory Model And Schema
 
-## Modules
+## Stored Domains
 
-RightMemory has three semantic modules:
+RightMemory maintains three learning domains:
 
 - **Memory** stores durable context that should remain useful beyond the current task or session.
-- **Pursuit** is a user-owned hierarchical map of ongoing directions, with the context needed to understand or enter them.
-- **Agent Corrections** stores bounded, reusable cases in which the user redirected prior agent work.
+- **Agent guidance** stores how agents should work with the user, including the existing bounded Agent Correction cases.
+- **Work experience and skills** preserves useful work cases and reusable methods with their supporting resources.
+
+**Pursuit** remains a user-owned hierarchical map of ongoing directions, with the context needed to understand or enter them. Ordinary learning does not change it.
 
 Memory and Pursuit form one addressable graph organized into two Markdown document trees. Their headings and nodes share one globally unique id namespace, and typed edges may cross between the trees.
 
@@ -14,7 +16,27 @@ Agent Corrections is a non-graph case library. Its two fixed collections are `ME
 
 Root `corrections.md` contains RightMemory Edit Feedback. It is neither semantic RightMemory state nor part of Agent Corrections.
 
-The canonical module rules define what belongs in each module. This document defines representation and validity.
+The shared Memory, Agent Guidance, and Work Skills cores define judgment in their domains; the focused Pursuit and Agent Correction rules retain their existing responsibilities. This document defines representation and validity.
+
+## Learning Files
+
+Learning content is outside the Memory/Pursuit graph:
+
+```text
+learning/candidates/<id>.json
+learning/guidance/**/*.md
+learning/experiences/**/*.md
+learning/skills/<slug>/SKILL.md
+learning/skills/<slug>/<supporting assets>
+learning/processed/guidance/<id>.json
+learning/processed/skills/<id>.json
+```
+
+Candidate and receipt ids are full lowercase SHA-256 identifiers managed by the program. Candidates retain free-form evidence and provenance; each domain records processing independently. Curated Markdown has no mandatory body fields or graph ids. Each skill directory contains `SKILL.md`; its supporting assets are ordinary files. Learning paths must be regular files and directories, without symlinks or special files.
+
+Raw candidates are available to relevant retrieval before curation and may remain useful afterward. Both domains completing an update does not automatically remove them. Requested maintenance can retire fully processed evidence after preserving its independent value; pending input for either domain is protected. Processing receipts are internal bookkeeping and excluded from retrieval.
+
+Existing `AGENT_GUIDANCE_INBOX.md`, Behavior sections, and `S#` resources remain readable. Installation does not migrate or delete them; concrete scoped maintenance may address ownership while preserving affected references.
 
 ## Graph Roots And Membership
 
@@ -144,7 +166,7 @@ An edge may be one-way or reciprocal. Store the reverse edge only when it improv
 
 ## File Set
 
-Semantic state:
+Graph and fixed correction files:
 
 ```text
 MEMORY.md

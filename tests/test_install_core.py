@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
@@ -141,9 +142,9 @@ else:
                 patch("builtins.print"),
             ):
                 installer._install_skills()
-            install.assert_called_once_with(
-                REPO_ROOT / "skills" / "rightmemory-assistant" / "SKILL.md",
-                "rightmemory-assistant", target,
+            self.assertEqual(
+                [call.args[1] for call in install.call_args_list],
+                ["maintain-rightmemory", "maintain-agent-guidance", "maintain-work-skills", "rightmemory-assistant"],
             )
             remove.assert_called_once_with(
                 REPO_ROOT / "skills" / "rightmemory-auto-orchestrator-cli" / "SKILL.md",
@@ -248,7 +249,7 @@ else:
         installer_type.return_value.run.assert_called_once_with()
 
     def test_install_skills_populates_every_selected_target(self):
-        for mode in ("standalone", "cli-agent"):
+        for mode in ("standalone", "cli-agent", "assistant"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tempdir:
                 root = Path(tempdir)
                 targets = [root / "codex-skills", root / "claude-skills"]
@@ -259,13 +260,13 @@ else:
                 for target in targets:
                     self.assertFalse((target / "rightmemory-schema.md").exists())
                     self.assertFalse((target / "rightmemory-edit-correction-rules.md").exists())
-                    for skill_name in (
-                        "rightmemory-auto-orchestrator",
-                        "maintain-rightmemory",
-                        "review-agent-guidance-inbox",
-                        "maintain-pursuit-map",
-                        "rightmemory-manager",
-                    ):
+                    expected = {"maintain-rightmemory", "maintain-agent-guidance", "maintain-work-skills"}
+                    if mode == "assistant":
+                        expected.add("rightmemory-assistant")
+                    else:
+                        expected.update({"rightmemory-auto-orchestrator", "maintain-pursuit-map", "rightmemory-manager"})
+                    self.assertEqual({path.name for path in target.iterdir()}, expected)
+                    for skill_name in expected:
                         self.assertTrue((target / skill_name / "SKILL.md").is_file())
                     self.assertFalse((target / "memory-retriever").exists())
                     self.assertFalse((target / "rightmemory-orchestrator").exists())
@@ -280,7 +281,7 @@ else:
                 ("memory-retriever-cli", "memory-retriever"),
                 ("rightmemory-orchestrator-cli", "rightmemory-orchestrator"),
                 ("maintain-rightmemory", "maintain-rightmemory"),
-                ("review-agent-guidance-inbox", "review-agent-guidance-inbox"),
+                ("maintain-agent-guidance", "maintain-agent-guidance"),
             )
             with patch("builtins.print"):
                 for source_directory, skill_name in previous_defaults:
@@ -301,10 +302,68 @@ else:
             self.assertTrue(modified.is_file())
             self.assertFalse((target / "rightmemory-orchestrator").exists())
             self.assertTrue((target / "maintain-rightmemory" / "SKILL.md").is_file())
-            self.assertTrue((target / "review-agent-guidance-inbox" / "SKILL.md").is_file())
+            self.assertTrue((target / "maintain-agent-guidance" / "SKILL.md").is_file())
+            self.assertTrue((target / "maintain-work-skills" / "SKILL.md").is_file())
             self.assertTrue((target / "maintain-pursuit-map" / "SKILL.md").is_file())
             self.assertTrue((target / "rightmemory-manager" / "SKILL.md").is_file())
             self.assertTrue((target / "rightmemory-auto-orchestrator" / "SKILL.md").is_file())
+
+    def test_retired_guidance_review_cleanup_preserves_customized_directories(self):
+        managed = b"managed fixture\n"
+        for variant in ("managed", "customized", "extra-file"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as tempdir:
+                root = Path(tempdir)
+                target = root / "skills"
+                directory = target / "review-agent-guidance-inbox"
+                directory.mkdir(parents=True)
+                (directory / "SKILL.md").write_bytes(
+                    managed + b"custom change\n" if variant == "customized" else managed
+                )
+                if variant == "extra-file":
+                    (directory / "notes.txt").write_bytes(b"user notes")
+                before = _snapshot(directory)
+                installer = Installer(REPO_ROOT, "assistant", root / "memory", [target])
+                with (
+                    patch.object(install_core, "RETIRED_GUIDANCE_REVIEW_SHA256", sha256(managed).hexdigest()),
+                    patch("builtins.print"),
+                ):
+                    installer._remove_retired_guidance_review(target)
+                if variant == "managed":
+                    self.assertFalse(directory.exists())
+                else:
+                    self.assertEqual(_snapshot(directory), before)
+
+    def test_install_refuses_learning_only_root_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory = root / "memory"
+            evidence = memory / "learning" / "experiences" / "case.md"
+            evidence.parent.mkdir(parents=True)
+            evidence.write_bytes(b"retained work evidence\n")
+            before = _snapshot(memory)
+            installer = Installer(REPO_ROOT, "assistant", memory, [root / "skills"])
+            with patch("builtins.print"), patch.object(installer, "_install_runtime") as install:
+                with self.assertRaises(InstallError):
+                    installer.run()
+            install.assert_not_called()
+            self.assertEqual(_snapshot(memory), before)
+            self.assertFalse((root / "skills").exists())
+
+    def test_install_refuses_invalid_learning_before_changes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory = root / "memory"
+            invalid = memory / "learning" / "candidates" / "invalid.json"
+            invalid.parent.mkdir(parents=True)
+            invalid.write_bytes(b"unreadable evidence")
+            before = _snapshot(memory)
+            installer = Installer(REPO_ROOT, "standalone", memory, [root / "skills"])
+            with patch("builtins.print"), patch.object(installer, "_install_runtime") as install:
+                with self.assertRaisesRegex(InstallError, "learning state is invalid"):
+                    installer.run()
+            install.assert_not_called()
+            self.assertEqual(_snapshot(memory), before)
+            self.assertFalse((root / "skills").exists())
 
     def test_remove_old_loose_reference_accepts_managed_bytes_and_known_line_endings(self):
         with tempfile.TemporaryDirectory() as tempdir:

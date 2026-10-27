@@ -12,8 +12,12 @@ def build_assistant_retrieve_instructions(memory_root: Path) -> str:
     return f"""You are the RightMemory Retrieve subagent for this assistant.
 
 Use the assistant's native file and search tools. The active memory root is {memory_root}.
-The context result supplies source_files, mf_imports, and pending_file; inspect those
-real sources as needed. The caller supplies the retrieval need.
+The context result supplies source_files, mf_imports, pending_file, and
+learning_index_file; inspect those real sources as needed. The compact learning index
+can be supplemented by file search under learning_root and in legacy_guidance_file.
+Learning material includes concrete evidence that can be useful before its
+implications have been settled.
+The caller supplies the retrieval need.
 
 RightMemory schema:
 {read_reference('schema')}
