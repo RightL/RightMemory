@@ -612,7 +612,7 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "corrections.md").write_text("private updater feedback\n", encoding="utf-8")
 
         with self.assertRaises(ValueError):
-            MemoryTools(self.root, role="dreamer").read("corrections.md")
+            MemoryTools(self.root, role="pruner").read("corrections.md")
         self.assertIn("private updater feedback", MemoryTools(self.root, role="update").read("corrections.md"))
 
     def test_only_update_and_sync_can_modify_fixed_agent_correction_collections(self):
@@ -622,7 +622,7 @@ class MemoryToolsTests(unittest.TestCase):
         )
         for path in paths:
             (self.root / path).write_text("# Curated corrections\n", encoding="utf-8")
-            for role in (None, "dreamer", "pruner", "reviewer"):
+            for role in (None, "pruner", "historian"):
                 with self.subTest(path=path, role=role):
                     tools = MemoryTools(self.root, role=role)
                     tools.read(path)
@@ -646,11 +646,11 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn(paths[0], self._git("diff", "--cached", "--name-only"))
         self.assertIn(paths[1], self._git("diff", "--cached", "--name-only"))
 
-    def test_dreamer_can_modify_ordinary_m_and_s_backing_files(self):
+    def test_pruner_can_modify_ordinary_m_and_s_backing_files(self):
         for path in ("MEMORY_research-notes.md", "MEMORY_SKILL_two-pass-review.md"):
             with self.subTest(path=path):
                 (self.root / path).write_text("# Linked resource\n", encoding="utf-8")
-                tools = MemoryTools(self.root, role="dreamer")
+                tools = MemoryTools(self.root, role="pruner")
                 tools.read(path)
                 self.assertIn("edited", tools.edit_file(path, "Linked", "Maintained"))
 
@@ -669,14 +669,14 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"insight_logs/\*\.md"):
             tools.git_add(["MEMORY.md"])
 
-    def test_dreamer_tools_reject_dream_logs(self):
+    def test_pruner_tools_reject_unrelated_logs(self):
         self._git("init")
-        (self.root / "dream_logs").mkdir()
-        (self.root / "dream_logs" / "2026-05-30.md").write_text("# Dream\n", encoding="utf-8")
-        tools = MemoryTools(self.root, role="dreamer")
+        (self.root / "unrelated_logs").mkdir()
+        (self.root / "unrelated_logs" / "2026-05-30.md").write_text("# Unrelated log\n", encoding="utf-8")
+        tools = MemoryTools(self.root, role="pruner")
 
         with self.assertRaises(ValueError):
-            tools.git_add(["dream_logs/2026-05-30.md"])
+            tools.git_add(["unrelated_logs/2026-05-30.md"])
 
     def test_insight_create_file_rejects_active_memory(self):
         tools = MemoryTools(self.root, role="insight")
@@ -905,9 +905,9 @@ class MemoryToolsTests(unittest.TestCase):
         insight = self.root / "insight_logs" / "2026-05-30-143012.md"
         insight.parent.mkdir()
         insight.write_text("# Insight\n\nreflection beta\n", encoding="utf-8")
-        dream = self.root / "dream_logs" / "2026-05-30.md"
-        dream.parent.mkdir()
-        dream.write_text("# Dream\n\nsecret beta\n", encoding="utf-8")
+        unrelated = self.root / "unrelated_logs" / "2026-05-30.md"
+        unrelated.parent.mkdir()
+        unrelated.write_text("# Unrelated log\n\nsecret beta\n", encoding="utf-8")
         runtime = self.root / ".runtime" / "state.json"
         runtime.parent.mkdir()
         runtime.write_text('{"secret":"beta"}\n', encoding="utf-8")
@@ -925,7 +925,7 @@ class MemoryToolsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"can only read MEMORY.md, MEMORY_\*\.md, or insight_logs/\*\.md"):
             tools.read("rightmemory.toml")
         with self.assertRaisesRegex(ValueError, r"can only read MEMORY.md, MEMORY_\*\.md, or insight_logs/\*\.md"):
-            tools.outline_file("dream_logs/2026-05-30.md")
+            tools.outline_file("unrelated_logs/2026-05-30.md")
         with self.assertRaisesRegex(ValueError, r"can only read MEMORY.md, MEMORY_\*\.md, or insight_logs/\*\.md"):
             tools.read_command("cat rightmemory.toml")
 
@@ -935,9 +935,9 @@ class MemoryToolsTests(unittest.TestCase):
         insight = self.root / "insight_logs" / "2026-05-30-143012.md"
         insight.parent.mkdir()
         insight.write_text("# Insight\n\nreflection beta\n", encoding="utf-8")
-        dream = self.root / "dream_logs" / "2026-05-30.md"
-        dream.parent.mkdir()
-        dream.write_text("# Dream\n\nsecret beta\n", encoding="utf-8")
+        unrelated = self.root / "unrelated_logs" / "2026-05-30.md"
+        unrelated.parent.mkdir()
+        unrelated.write_text("# Unrelated log\n\nsecret beta\n", encoding="utf-8")
         runtime = self.root / ".runtime" / "state.json"
         runtime.parent.mkdir()
         runtime.write_text('{"secret":"beta"}\n', encoding="utf-8")
@@ -953,15 +953,15 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn("insight_logs/2026-05-30-143012.md:reflection beta", result)
         self.assertNotIn("rightmemory.toml", result)
         self.assertNotIn(".runtime", result)
-        self.assertNotIn("dream_logs", result)
+        self.assertNotIn("unrelated_logs", result)
         explicit_result = tools.read_command("rg beta .")
         self.assertIn("MEMORY.md:memory beta", explicit_result)
         self.assertIn("insight_logs/2026-05-30-143012.md:reflection beta", explicit_result)
         self.assertNotIn("rightmemory.toml", explicit_result)
         self.assertNotIn(".runtime", explicit_result)
-        self.assertNotIn("dream_logs", explicit_result)
+        self.assertNotIn("unrelated_logs", explicit_result)
         with self.assertRaisesRegex(ValueError, r"can only read MEMORY.md, MEMORY_\*\.md, or insight_logs/\*\.md"):
-            tools.read_command("rg beta dream_logs/2026-05-30.md")
+            tools.read_command("rg beta unrelated_logs/2026-05-30.md")
 
     def test_git_add_accepts_memory_skill_files(self):
         self._git("init")

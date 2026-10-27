@@ -28,22 +28,16 @@ MANAGED_WATCH_ENV = "RIGHTMEMORY_MANAGED_WATCH"
 WATCH_HANDOFF_PID_ENV = "RIGHTMEMORY_WATCH_HANDOFF_PID"
 WATCH_START_TIMEOUT_SECONDS = 10
 MANAGED_WATCH_TARGETS = (
-    "review",
-    "dreamer",
     "pruner",
     "insight",
     "sync",
 )
 WATCH_COMMANDS = {
-    "review": ("review", "watch"),
-    "dreamer": ("dreamer", "watch"),
     "pruner": ("prune", "watch"),
     "insight": ("insight", "watch"),
     "sync": ("sync", "watch"),
 }
 WATCH_CLEANUP_ROLES = {
-    "review": "reviewer",
-    "dreamer": "dreamer",
     "pruner": "pruner",
     "insight": "insight",
 }

@@ -368,7 +368,6 @@ else:
                 patch.object(installer, "_bootstrap_state") as bootstrap_state,
                 patch.object(installer, "_ensure_memory_git"),
                 patch.object(installer, "_install_runtime"),
-                patch.object(installer, "_run_semantic_upgrades") as semantic_upgrades,
                 patch.object(installer, "_install_skills"),
                 patch.object(installer, "_warn_if_command_not_on_path"),
                 patch.object(installer, "_write_install_stamp"),
@@ -378,8 +377,6 @@ else:
                 installer.run()
 
             bootstrap_state.assert_not_called()
-            target = semantic_upgrades.call_args.args[0]
-            self.assertEqual(target.kind, "existing")
             self.assertEqual(
                 {name: (memory_root / name).read_bytes() for name in files},
                 expected,
@@ -515,35 +512,6 @@ else:
             self.assertEqual(_snapshot(memory_root), before)
             self.assertFalse(skills_target.exists())
 
-    def test_semantic_upgrade_failure_prevents_success_stamp_and_remaining_install(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            installer = Installer(REPO_ROOT, "cli-agent", memory_root, [root / "skills"])
-            installer.runtime_python = Path("fake-python")
-            target = InstallTarget("new", False, (), ())
-            failure = subprocess.CompletedProcess(["fake-python"], 7)
-
-            with (
-                patch.object(installer, "_inspect_target", return_value=target),
-                patch.object(installer, "_print_layout"),
-                patch.object(installer, "_bootstrap_state"),
-                patch.object(installer, "_ensure_memory_git"),
-                patch.object(installer, "_install_runtime"),
-                patch.object(installer, "_install_skills") as install_skills,
-                patch.object(installer, "_write_install_stamp") as write_install_stamp,
-                patch.object(install_core, "_run", return_value=failure),
-            ):
-                with self.assertRaisesRegex(
-                    InstallError,
-                    "semantic upgrade baseline failed with status 7",
-                ):
-                    installer.run()
-
-            install_skills.assert_not_called()
-            write_install_stamp.assert_not_called()
-            self.assertFalse((memory_root / ".runtime" / "install.stamp").exists())
-
     def test_install_quiesces_worker_before_runtime_and_restarts_after_stamp(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -571,7 +539,6 @@ else:
                     "_install_runtime",
                     side_effect=lambda: events.append("install-runtime"),
                 ),
-                patch.object(installer, "_run_semantic_upgrades"),
                 patch.object(installer, "_install_skills"),
                 patch.object(installer, "_warn_if_command_not_on_path"),
                 patch.object(

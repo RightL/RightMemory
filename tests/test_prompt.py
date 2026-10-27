@@ -9,12 +9,10 @@ from rightmemory.prompt import ROLE_PROMPTS, _role_reference_guidance
 class PromptReferenceSelectionTests(unittest.TestCase):
     def test_each_role_reads_only_its_package_references(self):
         expected = {
-            "dreamer": ["memory", "shared-view"],
             "historian": [],
             "insight": [],
             "pruner": ["memory", "shared-view"],
             "retrieve": ["retrieve-contract"],
-            "reviewer": [],
             "shared-view-builder": ["memory", "shared-view"],
             "sync-reconciler": [
                 "memory",

@@ -11,7 +11,7 @@
 - Keep reads inside the memory root. Do not read or infer project directories
   outside it.
 - Keep writes scoped to `insight_logs/*.md`; leave active Memory edits to
-  update and dreamer. Transcript review only extracts updater candidates.
+  Update and explicitly requested `maintain-rightmemory` work.
 
 ## Insight Work
 

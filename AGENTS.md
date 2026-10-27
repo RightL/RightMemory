@@ -31,7 +31,6 @@
 - Do not add migration frameworks, compatibility adapters, deprecated aliases, dual-format handling, fallback branches, or similar machinery for hypothetical users. Add an upgrade path only when the task explicitly requires one.
 - When a change intentionally breaks an old format or behavior, update the implementation, tests, examples, and documentation together, and report the breakage in the handoff.
 - Backward compatibility is optional; data safety is not. Never silently delete or overwrite a user's real memory data, and use disposable roots or fixtures for destructive verification.
-- Do not create semantic upgrade notes merely to preserve hypothetical compatibility. Add or update one only when the task explicitly requires existing memory roots to be upgraded.
 
 ## State Admission Invariants
 
@@ -60,7 +59,6 @@
   such as role and tool selection, state transitions, persistence, invocation, and
   parsing of agent output. Editing agent-facing text must never require test changes.
 - When changing installer behavior, verify the affected modes with `./install.sh [--mode cli-agent|standalone] <memory-root> <skills-target>` on macOS/Linux/WSL or `.\install.ps1 [--mode cli-agent|standalone] <memory-root> <skills-target>` on Windows PowerShell. Use disposable test roots.
-- When changing semantic upgrade machinery or notes, run `python -m unittest discover -s tests -p 'test_semantic_upgrades.py'`.
 
 ## Git And Repository Safety
 

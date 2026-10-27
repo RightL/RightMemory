@@ -16,10 +16,8 @@ from rightmemory.config import (
     RuntimeConfig,
     load_async_update_config,
     load_config,
-    load_dreamer_watch_config,
     load_insight_watch_config,
     load_pruner_config,
-    load_review_config,
     load_sync_config,
 )
 from rightmemory.isolated_write import IsolatedWriteResult, MainMemoryDirtyError
@@ -46,6 +44,20 @@ from rightmemory.update_record import UpdateRecord, UpdateRecordStore
 EMPTY_RETRIEVE_SELECTION_JSON = '{"ids": [], "sources": [], "recent_candidates": []}'
 
 class ConfigTests(unittest.TestCase):
+    def test_retired_subsystem_config_is_rejected_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            config_path = root / "rightmemory.toml"
+            for section in ("review", "reviewer", "dreamer"):
+                with self.subTest(section=section):
+                    content = f"[{section}]\n"
+                    config_path.write_text(content, encoding="utf-8")
+
+                    with self.assertRaisesRegex(ValueError, "unsupported top-level config key"):
+                        load_config("retrieve", memory_root=root)
+
+                    self.assertEqual(config_path.read_text(encoding="utf-8"), content)
+
     def test_load_config_accepts_explicit_memory_root(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -80,22 +92,6 @@ class ConfigTests(unittest.TestCase):
             config = load_config("retrieve", memory_root=root)
 
         self.assertEqual(config.retrieve_max_output_chars, 12345)
-
-    def test_load_review_config_accepts_explicit_memory_root(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            (root / "rightmemory.toml").write_text(
-                """
-                [review]
-                sources = []
-                """,
-                encoding="utf-8",
-            )
-
-            config = load_review_config(memory_root=root)
-
-        self.assertEqual(config.memory_root, root)
-        self.assertEqual(config.sources, [])
 
     def test_load_sync_config_accepts_explicit_memory_root(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -140,18 +136,18 @@ class ConfigTests(unittest.TestCase):
     def test_anthropic_compatible_config(self):
         config_path = self._write_config(
             """
-            [dreamer.model]
-            model_id = "anthropic/example-dreamer-model"
+            [pruner.model]
+            model_id = "anthropic/example-pruner-model"
             api_base = "https://api.example.com/anthropic"
             api_key = "token"
             """
         )
 
         with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            config = load_config("dreamer")
+            config = load_config("pruner")
 
-        self.assertEqual(config.role, "dreamer")
-        self.assertEqual(config.model_id, "anthropic/example-dreamer-model")
+        self.assertEqual(config.role, "pruner")
+        self.assertEqual(config.model_id, "anthropic/example-pruner-model")
         self.assertEqual(config.api_base, "https://api.example.com/anthropic")
         self.assertEqual(config.api_key, "token")
 
@@ -224,14 +220,14 @@ class ConfigTests(unittest.TestCase):
             [agent_cli]
             provider = "codex"
 
-            [dreamer.agent_cli]
+            [pruner.agent_cli]
             provider = "claude"
             model = "claude-opus-4"
             """
         )
 
         with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            config = load_config("dreamer")
+            config = load_config("pruner")
 
         self.assertEqual(config.runtime_mode, "cli-agent")
         self.assertEqual(config.agent_cli, AgentCliConfig(provider="claude", model="claude-opus-4"))
@@ -351,21 +347,6 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("unsupported top-level config key(s): curator", str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
-    def test_reviewer_config(self):
-        config_path = self._write_config(
-            """
-            [reviewer.model]
-            model_id = "openai/reviewer"
-            """
-        )
-
-        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            config = load_config("reviewer")
-
-        self.assertEqual(config.role, "reviewer")
-        self.assertEqual(config.model_id, "openai/reviewer")
-
-    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_non_retrieve_role_inherits_missing_standalone_executor_from_update(self):
         config_path = self._write_config(
             """
@@ -441,10 +422,10 @@ class ConfigTests(unittest.TestCase):
 
         with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
             with self.assertRaises(ValueError) as caught:
-                load_config("reviewer")
+                load_config("pruner")
 
         self.assertIn("[agent_cli].provider", str(caught.exception))
-        self.assertIn("[reviewer.agent_cli].provider", str(caught.exception))
+        self.assertIn("[pruner.agent_cli].provider", str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_explicit_incomplete_role_model_does_not_inherit_fields(self):
@@ -468,8 +449,8 @@ class ConfigTests(unittest.TestCase):
     def test_missing_executor_fallback_prefers_update(self):
         config_path = self._write_config(
             """
-            [dreamer.model]
-            model_id = "openai/dreamer"
+            [pruner.model]
+            model_id = "openai/pruner"
 
             [update.model]
             model_id = "openai/update"
@@ -477,7 +458,7 @@ class ConfigTests(unittest.TestCase):
         )
 
         with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            config = load_config("reviewer")
+            config = load_config("historian")
 
         self.assertEqual(config.model_id, "openai/update")
 
@@ -516,58 +497,6 @@ class ConfigTests(unittest.TestCase):
                 load_config("retrieve")
 
         self.assertIn("unsupported [debug] config key(s): format", str(caught.exception))
-
-    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
-    def test_review_config_sources(self):
-        config_path = self._write_config(
-            """
-            [review]
-            idle_seconds = 7200
-            since_days = 14
-            batch_size = 4
-
-            [[review.sources]]
-            kind = "codex"
-            path = "~/codex-history"
-            """
-        )
-
-        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            config = load_review_config()
-
-        self.assertEqual(config.idle_seconds, 7200)
-        self.assertEqual(config.since_days, 14)
-        self.assertEqual(config.batch_size, 4)
-        self.assertEqual(len(config.sources), 1)
-        self.assertEqual(config.sources[0].kind, "codex")
-        self.assertEqual(config.sources[0].path, Path("~/codex-history").expanduser())
-
-    def test_review_config_defaults_to_six_hour_idle_and_three_day_window(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            memory_root = Path(tempdir)
-            config_path = memory_root / "rightmemory.toml"
-
-            with patch("rightmemory.config.MEMORY_ROOT", memory_root), patch("rightmemory.config.CONFIG_PATH", config_path):
-                config = load_review_config()
-
-        self.assertEqual(config.idle_seconds, 6 * 60 * 60)
-        self.assertEqual(config.since_days, 3)
-        self.assertEqual(config.batch_size, 3)
-
-    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
-    def test_review_config_rejects_invalid_batch_size(self):
-        config_path = self._write_config(
-            """
-            [review]
-            batch_size = 0
-            """
-        )
-
-        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            with self.assertRaises(ValueError) as caught:
-                load_review_config()
-
-        self.assertIn("[review].batch_size must be a positive integer", str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_async_update_config_defaults(self):
@@ -666,72 +595,6 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("unsupported [update.async] config key(s): extra", str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
-    def test_dreamer_watch_config_defaults(self):
-        config_path = self._write_config("")
-
-        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            config = load_dreamer_watch_config()
-
-        self.assertEqual(config.memory_root, Path("/home/example/.rightmemory"))
-        self.assertEqual(config.trigger_points, 50.0)
-        self.assertEqual(config.update_candidate_points, 1.0)
-        self.assertFalse(hasattr(config, "review_session_points"))
-        self.assertEqual(config.check_interval_seconds, 3000)
-
-    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
-    def test_dreamer_watch_config_parses_custom_values(self):
-        config_path = self._write_config(
-            """
-            [dreamer.model]
-            model_id = "openai/dreamer"
-
-            [dreamer.watch]
-            trigger_points = 75.5
-            update_candidate_points = 2
-            review_session_points = 3.25
-            check_interval_seconds = 120
-            """
-        )
-
-        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            config = load_dreamer_watch_config()
-            runtime_config = load_config("dreamer")
-
-        self.assertEqual(config.trigger_points, 75.5)
-        self.assertEqual(config.update_candidate_points, 2)
-        self.assertFalse(hasattr(config, "review_session_points"))
-        self.assertEqual(config.check_interval_seconds, 120)
-        self.assertEqual(runtime_config.model_id, "openai/dreamer")
-
-    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
-    def test_dreamer_watch_config_rejects_invalid_values(self):
-        cases = [
-            ("trigger_points = 0", "[dreamer.watch].trigger_points must be a positive number"),
-            ("trigger_points = nan", "[dreamer.watch].trigger_points must be a positive number"),
-            ("trigger_points = inf", "[dreamer.watch].trigger_points must be a positive number"),
-            ("update_candidate_points = -1", "[dreamer.watch].update_candidate_points must be a positive number"),
-            ("review_session_points = true", "[dreamer.watch].review_session_points must be a positive number"),
-            ("review_session_points = -inf", "[dreamer.watch].review_session_points must be a positive number"),
-            ("check_interval_seconds = 1.5", "[dreamer.watch].check_interval_seconds must be a positive integer"),
-            ("unknown = 1", "unsupported [dreamer.watch] config key(s): unknown"),
-        ]
-
-        for watch_config, message in cases:
-            with self.subTest(watch_config=watch_config):
-                config_path = self._write_config(
-                    f"""
-                    [dreamer.watch]
-                    {watch_config}
-                    """
-                )
-
-                with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-                    with self.assertRaises(ValueError) as caught:
-                        load_dreamer_watch_config()
-
-                self.assertIn(message, str(caught.exception))
-
-    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_insight_watch_config_defaults(self):
         config_path = self._write_config("")
 
@@ -741,7 +604,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.memory_root, Path("/home/example/.rightmemory"))
         self.assertEqual(config.trigger_points, 150.0)
         self.assertEqual(config.update_candidate_points, 1.0)
-        self.assertFalse(hasattr(config, "review_session_points"))
         self.assertEqual(config.check_interval_seconds, 3000)
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
@@ -754,7 +616,6 @@ class ConfigTests(unittest.TestCase):
             [insight.watch]
             trigger_points = 225
             update_candidate_points = 2.5
-            review_session_points = 4
             check_interval_seconds = 600
             """
         )
@@ -765,7 +626,6 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.trigger_points, 225.0)
         self.assertEqual(config.update_candidate_points, 2.5)
-        self.assertFalse(hasattr(config, "review_session_points"))
         self.assertEqual(config.check_interval_seconds, 600)
         self.assertEqual(runtime_config.model_id, "openai/insight")
 
@@ -774,7 +634,7 @@ class ConfigTests(unittest.TestCase):
         cases = [
             ("trigger_points = 0", "[insight.watch].trigger_points must be a positive number"),
             ("update_candidate_points = -1", "[insight.watch].update_candidate_points must be a positive number"),
-            ("review_session_points = true", "[insight.watch].review_session_points must be a positive number"),
+            ("review_session_points = true", "unsupported [insight.watch] config key(s): review_session_points"),
             ("check_interval_seconds = 1.5", "[insight.watch].check_interval_seconds must be a positive integer"),
             ("unknown = 1", "unsupported [insight.watch] config key(s): unknown"),
         ]
@@ -851,23 +711,6 @@ class ConfigTests(unittest.TestCase):
                 load_pruner_config()
 
         self.assertIn("[pruner].generation_commits must be a positive integer", str(caught.exception))
-
-    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
-    def test_review_config_allows_sync_section(self):
-        config_path = self._write_config(
-            """
-            [sync]
-            enabled = true
-
-            [review]
-            idle_seconds = 7200
-            """
-        )
-
-        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            config = load_review_config()
-
-        self.assertEqual(config.idle_seconds, 7200)
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_sync_config_defaults_to_disabled(self):
@@ -1056,8 +899,8 @@ class RuntimeTests(unittest.TestCase):
 
     def test_builds_anthropic_model(self):
         config = RuntimeConfig(
-            role="dreamer",
-            model_id="anthropic/example-dreamer-model",
+            role="pruner",
+            model_id="anthropic/example-pruner-model",
             api_base="https://api.example.com/anthropic",
             api_key="token",
         )
@@ -1065,7 +908,7 @@ class RuntimeTests(unittest.TestCase):
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             model = build_model(config)
 
-        self.assertEqual(model.model_name, "example-dreamer-model")
+        self.assertEqual(model.model_name, "example-pruner-model")
         self.assertEqual(
             model.provider.kwargs,
             {"base_url": "https://api.example.com/anthropic", "api_key": "token"},
@@ -1166,11 +1009,6 @@ class RuntimeTests(unittest.TestCase):
     def test_write_role_session_turn_uses_isolated_runner(self):
         cases = [
             (
-                RuntimeConfig(role="dreamer", model_id="openai/test", memory_root=Path(self.tempdir.name)),
-                patch.dict("sys.modules", self._fake_pydantic_modules()),
-                "_run_session_model",
-            ),
-            (
                 RuntimeConfig(role="insight", model_id="openai/test", memory_root=Path(self.tempdir.name)),
                 patch.dict("sys.modules", self._fake_pydantic_modules()),
                 "_run_session_model",
@@ -1203,46 +1041,6 @@ class RuntimeTests(unittest.TestCase):
 
                 self.assertEqual(result, "isolated reply")
                 isolated.assert_called_once_with("agent-session", "remember one")
-
-    def test_reviewer_session_turn_is_read_only_and_not_isolated(self):
-        config = RuntimeConfig(
-            role="reviewer",
-            runtime_mode="cli-agent",
-            agent_cli=AgentCliConfig(provider="codex"),
-            memory_root=Path(self.tempdir.name),
-        )
-
-        with (
-            patch("rightmemory.runtime.CliAgentExecutor"),
-            patch.object(RightMemoryRuntime, "_run_session_cli_agent", return_value="candidate bundle") as direct,
-            patch.object(
-                RightMemoryRuntime,
-                "_run_session_turn_isolated",
-                side_effect=AssertionError("reviewer must not use a write worktree"),
-            ),
-        ):
-            runtime = RightMemoryRuntime(config)
-            result = runtime.run_session_turn("review-session", "extract candidates")
-
-        self.assertEqual(result, "candidate bundle")
-        direct.assert_called_once_with("review-session", "extract candidates")
-
-    def test_reviewer_tools_are_read_only(self):
-        config = RuntimeConfig(
-            role="reviewer",
-            model_id="openai/test",
-            memory_root=Path(self.tempdir.name),
-        )
-
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-
-        tool_names = {tool.__name__ for tool in runtime.agent.tools}
-        self.assertIn("read", tool_names)
-        self.assertIn("validate_memory", tool_names)
-        self.assertNotIn("edit_file", tool_names)
-        self.assertNotIn("git_add", tool_names)
-        self.assertNotIn("git_commit", tool_names)
 
     def test_sync_reconciler_session_turn_does_not_isolate(self):
         config = RuntimeConfig(
@@ -1321,8 +1119,8 @@ class RuntimeTests(unittest.TestCase):
 
     def test_isolated_worktree_runtime_uses_cli_agent_path(self):
         main_root = Path(self.tempdir.name)
-        worktree = main_root / ".runtime" / "worktrees" / "reviewer-123"
-        state_root = main_root / ".runtime" / "isolated-state" / "reviewer-123"
+        worktree = main_root / ".runtime" / "worktrees" / "pruner-123"
+        state_root = main_root / ".runtime" / "isolated-state" / "pruner-123"
         nested_configs = []
         nested_runners = []
         calls = []
@@ -1346,7 +1144,7 @@ class RuntimeTests(unittest.TestCase):
                 calls.append(("cleanup",))
 
         config = RuntimeConfig(
-            role="reviewer",
+            role="pruner",
             runtime_mode="cli-agent",
             agent_cli=AgentCliConfig(provider="codex"),
             memory_root=main_root,
@@ -1357,7 +1155,7 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config, codex_runner=codex_runner)
 
         with patch("rightmemory.runtime.RightMemoryRuntime", FakeNestedRuntime):
-            result = runtime._run_session_turn_in_worktree(worktree, state_root, "agent-session", "review one")
+            result = runtime._run_session_turn_in_worktree(worktree, state_root, "agent-session", "prune one")
 
         self.assertEqual(result, "cli result")
         self.assertEqual(nested_configs[0].memory_root, worktree)
@@ -1369,7 +1167,7 @@ class RuntimeTests(unittest.TestCase):
             calls,
             [
                 ("locked", False),
-                ("cli-agent", "agent-session", "review one"),
+                ("cli-agent", "agent-session", "prune one"),
                 ("cleanup",),
             ],
         )
@@ -1554,17 +1352,17 @@ class RuntimeTests(unittest.TestCase):
             self._git(worktree, "commit", "-m", "memory: remember two")
             return "updated once"
 
-        config = RuntimeConfig(role="dreamer", model_id="openai/test", memory_root=root)
+        config = RuntimeConfig(role="pruner", model_id="openai/test", memory_root=root)
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
         with patch.object(runtime, "_run_session_turn_in_worktree", side_effect=nested):
-            first = runtime.run_session_turn("dream-session", "dream", operation_id="dream-op-1")
-            second = runtime.run_session_turn("dream-session", "dream", operation_id="dream-op-1")
+            first = runtime.run_session_turn("prune-session", "prune", operation_id="prune-op-1")
+            second = runtime.run_session_turn("prune-session", "prune", operation_id="prune-op-1")
 
         self.assertEqual((first, second), ("updated once", "updated once"))
         self.assertEqual(calls, ["model"])
         self.assertEqual(self._git(root, "rev-list", "--count", "HEAD~1..HEAD"), "1")
-        self.assertIn("RightMemory-Operation: dream-op-1", self._git(root, "log", "-1", "--format=%B"))
+        self.assertIn("RightMemory-Operation: prune-op-1", self._git(root, "log", "-1", "--format=%B"))
 
     def test_terminal_operation_pressure_effect_is_idempotently_applied(self):
         root = Path(self.tempdir.name)
@@ -1579,7 +1377,7 @@ class RuntimeTests(unittest.TestCase):
             effects=(
                 OperationEffect(
                     "memory-pressure",
-                    metadata={"dreamer_points": 2.0, "insight_points": 3.0},
+                    metadata={"insight_points": 3.0},
                 ),
             ),
         )
@@ -1596,7 +1394,6 @@ class RuntimeTests(unittest.TestCase):
         pressure.assert_called_once_with(
             root,
             "update-op-1",
-            dreamer_points=2.0,
             insight_points=3.0,
         )
         self.assertEqual(store.list_pending_effects("update-op-1"), ())
@@ -1826,34 +1623,34 @@ class RuntimeTests(unittest.TestCase):
     def test_failed_follow_up_effect_does_not_change_terminal_outcome(self):
         root = Path(self.tempdir.name)
         store = SemanticOperationStore(root)
-        input_data = {"role": "dreamer", "session_id": "dream-session", "message": "dream"}
-        store.begin("dream-op-1", input_data)
+        input_data = {"role": "pruner", "session_id": "prune-session", "message": "prune"}
+        store.begin("prune-op-1", input_data)
         store.prepare_outcome(
-            "dream-op-1",
+            "prune-op-1",
             output="no change",
             start_commit="base123",
             changed_paths=(),
             effects=(OperationEffect("file-view-publish"),),
         )
-        store.complete_no_change("dream-op-1")
-        config = RuntimeConfig(role="dreamer", model_id="openai/test", memory_root=root)
+        store.complete_no_change("prune-op-1")
+        config = RuntimeConfig(role="pruner", model_id="openai/test", memory_root=root)
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
         state = type("State", (), {})()
 
         with patch.object(runtime, "_publish_file_views_after_write", side_effect=OSError("hub offline")):
-            runtime._run_operation_effects("dream-op-1", state)
+            runtime._run_operation_effects("prune-op-1", state)
 
-        record = store.read("dream-op-1")
+        record = store.read("prune-op-1")
         self.assertEqual(record.phase, "no_change")
         self.assertEqual(record.outcome.output, "no change")
-        self.assertEqual(store.list_pending_effects("dream-op-1")[0].status, "failed")
+        self.assertEqual(store.list_pending_effects("prune-op-1")[0].status, "failed")
 
     def test_older_publish_effect_is_superseded_after_newer_publish(self):
         root = Path(self.tempdir.name)
         store = SemanticOperationStore(root)
         for operation_id in ("publish-old", "publish-new"):
-            store.begin(operation_id, {"role": "dreamer", "session_id": operation_id})
+            store.begin(operation_id, {"role": "pruner", "session_id": operation_id})
             store.prepare_outcome(
                 operation_id,
                 output="saved",
@@ -1862,7 +1659,7 @@ class RuntimeTests(unittest.TestCase):
                 effects=(OperationEffect("file-view-publish"),),
             )
             store.complete_no_change(operation_id)
-        config = RuntimeConfig(role="dreamer", model_id="openai/test", memory_root=root)
+        config = RuntimeConfig(role="pruner", model_id="openai/test", memory_root=root)
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
 
@@ -1876,7 +1673,7 @@ class RuntimeTests(unittest.TestCase):
     def test_publish_effect_reads_the_durable_operation_outbox(self):
         root = Path(self.tempdir.name)
         store = SemanticOperationStore(root)
-        store.begin("publish-snapshot", {"role": "dreamer", "session_id": "dream-session"})
+        store.begin("publish-snapshot", {"role": "pruner", "session_id": "prune-session"})
         store.prepare_outcome(
             "publish-snapshot",
             output="saved",
@@ -1884,7 +1681,7 @@ class RuntimeTests(unittest.TestCase):
             changed_paths=(),
             effects=(OperationEffect("file-view-publish"),),
         )
-        config = RuntimeConfig(role="dreamer", model_id="openai/test", memory_root=root)
+        config = RuntimeConfig(role="pruner", model_id="openai/test", memory_root=root)
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
         runtime._prepare_operation_effects("publish-snapshot", root)
@@ -2152,10 +1949,10 @@ class RuntimeTests(unittest.TestCase):
 
     def test_cli_agent_isolated_run_does_not_seed_prior_provider_session(self):
         main_root = Path(self.tempdir.name)
-        worktree = main_root / ".runtime" / "worktrees" / "reviewer-123"
-        old_provider = self._provider_record_json("reviewer", "agent-session", "old-thread")
-        new_provider = self._provider_record_json("reviewer", "agent-session", "new-thread")
-        self._write_runtime_state(main_root, "reviewer", "agent-session", history='["old message"]', provider=old_provider)
+        worktree = main_root / ".runtime" / "worktrees" / "pruner-123"
+        old_provider = self._provider_record_json("pruner", "agent-session", "old-thread")
+        new_provider = self._provider_record_json("pruner", "agent-session", "new-thread")
+        self._write_runtime_state(main_root, "pruner", "agent-session", history='["old message"]', provider=old_provider)
 
         class FakeSupervisor:
             def __init__(self, memory_root, role):
@@ -2166,13 +1963,13 @@ class RuntimeTests(unittest.TestCase):
 
         def nested(_runtime, _worktree, state_root, session_id, _message):
             self.assertEqual(
-                self._runtime_history_path(state_root, "reviewer", session_id).read_text(encoding="utf-8"),
+                self._runtime_history_path(state_root, "pruner", session_id).read_text(encoding="utf-8"),
                 '["old message"]',
             )
-            self.assertFalse(self._provider_session_path(state_root, "reviewer", session_id).exists())
+            self.assertFalse(self._provider_session_path(state_root, "pruner", session_id).exists())
             self._write_runtime_state(
                 state_root,
-                "reviewer",
+                "pruner",
                 session_id,
                 history='["new message"]',
                 provider=new_provider,
@@ -2180,7 +1977,7 @@ class RuntimeTests(unittest.TestCase):
             ProviderThreadStore(state_root).record_created(
                 provider="codex",
                 provider_session_id="new-thread",
-                role="reviewer",
+                role="pruner",
                 rightmemory_session_id=session_id,
                 policy="one-shot",
                 created_at="2026-07-17T00:00:00+00:00",
@@ -2188,7 +1985,7 @@ class RuntimeTests(unittest.TestCase):
             return "nested output"
 
         config = RuntimeConfig(
-            role="reviewer",
+            role="pruner",
             runtime_mode="cli-agent",
             agent_cli=AgentCliConfig(provider="codex"),
             memory_root=main_root,
@@ -2200,19 +1997,19 @@ class RuntimeTests(unittest.TestCase):
             patch.object(RightMemoryRuntime, "_run_session_turn_in_worktree", nested),
         ):
             runtime = RightMemoryRuntime(config)
-            result = runtime._run_session_turn_isolated("agent-session", "review one")
+            result = runtime._run_session_turn_isolated("agent-session", "prune one")
 
         self.assertEqual(result, "nested output")
-        provider = json.loads(self._provider_session_path(main_root, "reviewer", "agent-session").read_text(encoding="utf-8"))
+        provider = json.loads(self._provider_session_path(main_root, "pruner", "agent-session").read_text(encoding="utf-8"))
         self.assertEqual(provider["provider_session_id"], "new-thread")
         self.assertEqual(ProviderThreadStore(main_root).load("codex", "new-thread").policy, "one-shot")
 
     def test_failed_cli_agent_isolated_run_keeps_prior_provider_session(self):
         main_root = Path(self.tempdir.name)
-        worktree = main_root / ".runtime" / "worktrees" / "reviewer-123"
-        old_provider = self._provider_record_json("reviewer", "agent-session", "old-thread")
-        new_provider = self._provider_record_json("reviewer", "agent-session", "new-thread")
-        self._write_runtime_state(main_root, "reviewer", "agent-session", history='["old message"]', provider=old_provider)
+        worktree = main_root / ".runtime" / "worktrees" / "pruner-123"
+        old_provider = self._provider_record_json("pruner", "agent-session", "old-thread")
+        new_provider = self._provider_record_json("pruner", "agent-session", "new-thread")
+        self._write_runtime_state(main_root, "pruner", "agent-session", history='["old message"]', provider=old_provider)
 
         class FailingSupervisor:
             def __init__(self, memory_root, role):
@@ -2223,10 +2020,10 @@ class RuntimeTests(unittest.TestCase):
                 raise RuntimeError("validation failed")
 
         def nested(_runtime, _worktree, state_root, session_id, _message):
-            self.assertFalse(self._provider_session_path(state_root, "reviewer", session_id).exists())
+            self.assertFalse(self._provider_session_path(state_root, "pruner", session_id).exists())
             self._write_runtime_state(
                 state_root,
-                "reviewer",
+                "pruner",
                 session_id,
                 history='["new message"]',
                 provider=new_provider,
@@ -2234,7 +2031,7 @@ class RuntimeTests(unittest.TestCase):
             ProviderThreadStore(state_root).record_created(
                 provider="codex",
                 provider_session_id="new-thread",
-                role="reviewer",
+                role="pruner",
                 rightmemory_session_id=session_id,
                 policy="one-shot",
                 created_at="2026-07-17T00:00:00+00:00",
@@ -2242,7 +2039,7 @@ class RuntimeTests(unittest.TestCase):
             return "nested output"
 
         config = RuntimeConfig(
-            role="reviewer",
+            role="pruner",
             runtime_mode="cli-agent",
             agent_cli=AgentCliConfig(provider="codex"),
             memory_root=main_root,
@@ -2255,9 +2052,9 @@ class RuntimeTests(unittest.TestCase):
         ):
             runtime = RightMemoryRuntime(config)
             with self.assertRaises(RuntimeError):
-                runtime._run_session_turn_isolated("agent-session", "review one")
+                runtime._run_session_turn_isolated("agent-session", "prune one")
 
-        provider = json.loads(self._provider_session_path(main_root, "reviewer", "agent-session").read_text(encoding="utf-8"))
+        provider = json.loads(self._provider_session_path(main_root, "pruner", "agent-session").read_text(encoding="utf-8"))
         self.assertEqual(provider["provider_session_id"], "old-thread")
         self.assertTrue(ProviderSessionStore.is_internal_provider_session(main_root, "codex", "new-thread"))
         self.assertEqual(ProviderThreadStore(main_root).load("codex", "new-thread").policy, "one-shot")
@@ -2332,7 +2129,7 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("reserved", str(caught.exception))
 
     def test_automatic_write_run_turn_uses_reserved_internal_session_path(self):
-        for role in ("dreamer", "insight", "pruner", "update"):
+        for role in ("insight", "pruner", "update"):
             with self.subTest(role=role):
                 config = RuntimeConfig(
                     role=role,
@@ -2988,7 +2785,7 @@ class RuntimeTests(unittest.TestCase):
         manager_class.assert_not_called()
 
     def test_sync_reconciler_receives_sync_push_tool_when_sync_enabled(self):
-        for role in ("dreamer", "pruner", "reviewer", "sync-reconciler", "update"):
+        for role in ("pruner", "sync-reconciler", "update"):
             with self.subTest(role=role):
                 config = RuntimeConfig(
                     role=role,
@@ -3057,7 +2854,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("validate_memory", tool_names)
 
     def test_write_roles_do_not_receive_sync_push_tool_when_sync_disabled(self):
-        for role in ("dreamer", "pruner", "reviewer", "sync-reconciler", "update"):
+        for role in ("pruner", "sync-reconciler", "update"):
             with self.subTest(role=role):
                 config = RuntimeConfig(
                     role=role,

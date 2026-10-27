@@ -19,12 +19,10 @@ from .prompt import build_cli_agent_instructions
 from .provider_prefixes import ProviderPrefixRecord, ProviderPrefixStore
 from .provider_sessions import ProviderSessionRecord, ProviderSessionStore
 from .provider_threads import ProviderThreadLease, ProviderThreadStore
-from .semantic_upgrades import SemanticUpgradeContext
 
 
-READ_ROLES = {"historian", "retrieve", "reviewer"}
+READ_ROLES = {"historian", "retrieve"}
 WRITE_ROLES = {
-    "dreamer",
     "insight",
     "pruner",
     "shared-view-builder",
@@ -62,7 +60,6 @@ class CliAgentExecutor:
         memory_root: Path,
         role: str,
         config: AgentCliConfig,
-        semantic_upgrades: SemanticUpgradeContext | None = None,
         state_root: Path | None = None,
         fresh_provider_session: bool = False,
         codex_runner: CodexSdkRunner | None = None,
@@ -73,7 +70,6 @@ class CliAgentExecutor:
         self.state_root = state_root if state_root is not None else memory_root
         self.role = role
         self.config = config
-        self.semantic_upgrades = semantic_upgrades
         self.fresh_provider_session = fresh_provider_session
         self._codex_runner = codex_runner
         self._owns_codex_runner = False
@@ -317,7 +313,6 @@ class CliAgentExecutor:
             self.memory_root,
             self.role,
             bootstrap_message,
-            self.semantic_upgrades,
             include_instructions=True,
         )
         payload = json.dumps(
@@ -362,7 +357,6 @@ class CliAgentExecutor:
             self.memory_root,
             self.role,
             message,
-            self.semantic_upgrades,
             include_instructions=not resume,
         )
         created_at = _now()
@@ -446,7 +440,6 @@ class CliAgentExecutor:
             self.memory_root,
             self.role,
             message,
-            self.semantic_upgrades,
             include_instructions=False,
         )
         created_at = _now()
@@ -725,14 +718,13 @@ def _turn_prompt(
     memory_root: Path,
     role: str,
     message: str,
-    semantic_upgrades: SemanticUpgradeContext | None = None,
     *,
     include_instructions: bool = True,
 ) -> str:
     caller = f"Caller message:\n{message}\n"
     if not include_instructions:
         return caller
-    instructions = build_cli_agent_instructions(memory_root, role, semantic_upgrades=semantic_upgrades).rstrip()
+    instructions = build_cli_agent_instructions(memory_root, role).rstrip()
     return f"{instructions}\n\n{caller}"
 
 
