@@ -1,6 +1,6 @@
 > This starter template is copied into a new RightMemory root during bootstrap.
 > Add real user/project Memory before this block, and do not treat sample nodes as user facts.
-> Dreamer may remove the block once real Memory provides a clear working structure. <!-- rightmemory:example:start -->
+> Requested `maintain-rightmemory` work may remove the block once real Memory provides a clear working structure. <!-- rightmemory:example:start -->
 
 # Sample Project Graph — Example Domain {#sample-project-graph}
 

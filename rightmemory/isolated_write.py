@@ -894,8 +894,6 @@ class IsolatedWriteSupervisor:
     def _is_role_write_path(self, path: str) -> bool:
         if self.role == "insight":
             return bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
-        if self.role == "reviewer":
-            return False
         if self.role == "pursuit-map":
             # Memory paths also require byte-exact mechanical repair proof below.
             return self._is_graph_rightmemory_path(path)
@@ -909,7 +907,9 @@ class IsolatedWriteSupervisor:
                 or bool(SHARED_VIEW_DEFINITION_FILE_RE.fullmatch(path))
                 or bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
             )
-        return path == "MEMORY.md" or bool(MEMORY_DETAIL_FILE_RE.fullmatch(path))
+        return self.role in {"pruner", "update"} and (
+            path == "MEMORY.md" or bool(MEMORY_DETAIL_FILE_RE.fullmatch(path))
+        )
 
     def _is_graph_rightmemory_path(self, path: str) -> bool:
         if path in FIXED_CORRECTION_COLLECTION_PATHS:

@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from .config import MEMORY_ROOT_ENV, default_memory_root
-from .semantic_upgrades import baseline_packaged_notes
 from .session import _ensure_memory_gitignore, _ensure_runtime_gitignore, _fsync_directory
 
 
@@ -193,7 +192,6 @@ def initialize_memory_root(memory_root: Path, *, source_root: Path) -> None:
     _ensure_git_author(root)
     _ensure_initial_memory_commit(root)
     _seed_profile_config(source_root=Path(source_root).expanduser(), target_root=root)
-    baseline_packaged_notes(root)
 
 
 def _looks_like_memory_root(path: Path) -> bool:
@@ -272,7 +270,6 @@ def _seed_profile_config(*, source_root: Path, target_root: Path) -> None:
         with source_config.open("rb") as handle:
             raw = tomllib.load(handle)
         data = _profile_seed_config(raw)
-    data.setdefault("review", {})["sources"] = []
     target_config.write_text(_dump_toml(data), encoding="utf-8")
 
 
@@ -309,7 +306,7 @@ def _profile_seed_config(raw: dict[str, Any]) -> dict[str, Any]:
     seeded: dict[str, Any] = {}
     if isinstance(raw.get("agent_cli"), dict):
         seeded["agent_cli"] = dict(raw["agent_cli"])
-    for role in ("retrieve", "update", "dreamer", "insight", "reviewer", "pruner", "historian", "sync-reconciler"):
+    for role in ("retrieve", "update", "insight", "pruner", "historian", "sync-reconciler"):
         section = raw.get(role)
         if not isinstance(section, dict):
             continue
@@ -324,9 +321,6 @@ def _profile_seed_config(raw: dict[str, Any]) -> dict[str, Any]:
                     copied[key] = section[key]
         if copied:
             seeded[role] = copied
-    review = raw.get("review")
-    if isinstance(review, dict):
-        seeded["review"] = {key: value for key, value in review.items() if key != "sources"}
     return seeded
 
 
