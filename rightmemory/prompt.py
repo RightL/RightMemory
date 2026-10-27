@@ -6,16 +6,13 @@ from shlex import quote
 
 from .config import MEMORY_ROOT_ENV
 from .reference import read_reference
-from .semantic_upgrades import SemanticUpgradeContext, render_prompt_context
 
 
 ROLE_PROMPTS = {
-    "dreamer",
     "historian",
     "insight",
     "pruner",
     "retrieve",
-    "reviewer",
     "shared-view-builder",
     "sync-reconciler",
     "update",
@@ -25,7 +22,6 @@ ROLE_PROMPTS = {
 def build_cli_agent_instructions(
     memory_root: Path,
     role: str,
-    semantic_upgrades: SemanticUpgradeContext | None = None,
 ) -> str:
     if role not in ROLE_PROMPTS:
         raise ValueError(f"role must be one of: {_role_list()}")
@@ -33,7 +29,6 @@ def build_cli_agent_instructions(
     reference_guidance = _role_reference_guidance(role)
     role_guidance = _read_prompt_file(f"prompts/{role}.md")
     cli_agent_guidance = _cli_agent_guidance(memory_root, role)
-    semantic_guidance = _semantic_upgrade_guidance(role, semantic_upgrades)
     corrections_store = "- corrections.md\n" if role in {"update", "sync-reconciler"} else ""
     if role == "retrieve":
         final_reply = "Return only the strict JSON retrieve selection required below."
@@ -61,7 +56,6 @@ Follow the canonical role instructions below. Use the embedded package reference
 RightMemory schema:
 {schema}
 {reference_guidance}
-{semantic_guidance}
 
 Role instructions:
 {role_guidance}
@@ -71,7 +65,6 @@ Role instructions:
 def build_instructions(
     memory_root: Path,
     role: str,
-    semantic_upgrades: SemanticUpgradeContext | None = None,
 ) -> str:
     if role not in ROLE_PROMPTS:
         raise ValueError(f"role must be one of: {_role_list()}")
@@ -81,7 +74,6 @@ def build_instructions(
     command_guidance = _command_guidance(role)
     sync_guidance = _sync_guidance(role)
     tool_guidance = _tool_guidance(role)
-    semantic_guidance = _semantic_upgrade_guidance(role, semantic_upgrades)
     if role == "retrieve":
         final_reply = "- Finish through the terminal retrieve-selection output type; do not return natural-language prose."
     else:
@@ -121,20 +113,10 @@ RightMemory schema:
 Standalone adaptation:
 - Treat the embedded package references above as the schema and rule source of truth. Do not try to read reference files outside the memory store; the provided tools only expose that store.
 - Treat the caller's message according to the command-selected behavior and the role instructions below.
-{semantic_guidance}
 
 Role instructions:
 {role_guidance}
 """
-
-
-def _semantic_upgrade_guidance(role: str, semantic_upgrades: SemanticUpgradeContext | None) -> str:
-    if role != "dreamer" or semantic_upgrades is None:
-        return ""
-    rendered = render_prompt_context(semantic_upgrades)
-    if not rendered:
-        return ""
-    return f"\nSemantic upgrade context:\n{rendered}\n"
 
 
 def _cli_agent_guidance(memory_root: Path, role: str) -> str:
@@ -181,22 +163,10 @@ def _command_guidance(role: str) -> str:
             "current prune generation context.\n"
             "- Edit memory files when the supplied generation context says pruning is due."
         )
-    if role == "dreamer":
-        return (
-            "- The `rightmemory dreamer` command selected dreamer consolidation behavior. Run one consolidation cycle for the memory store.\n"
-            "- Treat the caller message as an optional operator hint, not as the ordinary source of truth."
-        )
     if role == "insight":
         return (
             "- The `rightmemory insight` command selected insight behavior. Run one reflection cycle for the memory store.\n"
             "- Treat the caller message as an optional operator hint, not as the ordinary source of truth."
-        )
-    if role == "reviewer":
-        return (
-            "- The automatic transcript review scanner selected reviewer behavior. Treat the normalized transcript "
-            "batch JSON in the caller message as the review input.\n"
-            "- Extract concise, provenance-preserving RightMemory candidates for the unified updater. Do not edit "
-            "or commit RightMemory state."
         )
     if role == "sync-reconciler":
         return (
@@ -225,11 +195,6 @@ def _sync_guidance(role: str) -> str:
             "accepted `MF#` file views. It does not add either pull result to session history. Do not mention "
             "pull results unless imported content is relevant."
         )
-    if role == "reviewer":
-        return (
-            "- Use only the provided read, search, outline, and validation tools to understand current context.\n"
-            "- Reviewer is an extractor, not a graph writer: do not edit files, stage changes, or commit."
-        )
     if role == "sync-reconciler":
         return (
             "- The runtime supplies repair context in the caller message. If the caller message "
@@ -238,8 +203,6 @@ def _sync_guidance(role: str) -> str:
             "reports dirty state or a conflict, repair the supplied memory files in the same role, validate memory, "
             "commit the repaired state, and call `sync_push` again."
         )
-    if role in {"dreamer", "insight", "pruner", "reviewer", "shared-view-builder", "update"}:
-        return ""
     return ""
 
 
@@ -324,7 +287,6 @@ def _tool_guidance(role: str) -> str:
 def _role_reference_guidance(role: str) -> str:
     guidance = ""
     semantic_writers = {
-        "dreamer",
         "pruner",
         "shared-view-builder",
         "sync-reconciler",

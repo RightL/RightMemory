@@ -111,32 +111,6 @@ class InstallScriptTests(unittest.TestCase):
             "  mkdir -p \"$target/bin\"\n"
             "  cat > \"$target/bin/python\" <<'PYEOF'\n"
             "#!/usr/bin/env sh\n"
-            "if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"rightmemory.semantic_upgrades\" ]; then\n"
-            "  command=\"$3\"\n"
-            "  memory_root=''\n"
-            "  previous=''\n"
-            "  for arg in \"$@\"; do\n"
-            "    if [ \"$previous\" = \"--memory-root\" ]; then memory_root=\"$arg\"; fi\n"
-            "    previous=\"$arg\"\n"
-            "  done\n"
-            "  mkdir -p \"$memory_root/.runtime\"\n"
-            "  state=\"$memory_root/.runtime/semantic-upgrades.json\"\n"
-            "  if [ \"$command\" = \"baseline\" ]; then\n"
-            "    echo '  [keep]    semantic upgrade baseline recorded for 3 current note(s):'\n"
-            "    echo '            user-context-agent-behavior-split'\n"
-            "    echo '            open-context-questions'\n"
-            "    echo '            uncertain-memory-marker'\n"
-            "    printf '{\"absorbed\":{\"user-context-agent-behavior-split\":{},\"open-context-questions\":{},\"uncertain-memory-marker\":{}}}\\n' > \"$state\"\n"
-            "  elif grep -q 'user-context-agent-behavior-split' \"$state\" 2>/dev/null; then\n"
-            "    echo '  [keep]    no semantic upgrade notes pending'\n"
-            "  else\n"
-            "    echo '  [notice]  3 semantic upgrade note(s) pending for the next dreamer cycle:'\n"
-            "    echo '            user-context-agent-behavior-split'\n"
-            "    echo '            open-context-questions'\n"
-            "    echo '            uncertain-memory-marker'\n"
-            "    printf '{\"absorbed\": {}}\\n' > \"$state\"\n"
-            "  fi\n"
-            "fi\n"
             "exit 0\n"
             "PYEOF\n"
             "  chmod 755 \"$target/bin/python\"\n"
@@ -190,7 +164,7 @@ class InstallScriptTests(unittest.TestCase):
             "PATH": f"{fake_bin}:/bin",
         }
 
-    def test_initial_install_copies_managed_example(self):
+    def test_initial_install_creates_state_and_runtime_files(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
@@ -198,28 +172,13 @@ class InstallScriptTests(unittest.TestCase):
 
             self._install(memory_root, skills_target)
 
-            memory = (memory_root / "MEMORY.md").read_text(encoding="utf-8")
-            pursuits = (memory_root / "PURSUITS.md").read_text(encoding="utf-8")
-            state = (memory_root / ".runtime" / "semantic-upgrades.json").read_text(encoding="utf-8")
-            install_stamp_exists = (memory_root / ".runtime" / "install.stamp").exists()
-            insight_logs_exists = (memory_root / "insight_logs").is_dir()
-            dream_logs_exists = (memory_root / "dream_logs").exists()
-            pursuit_rules_exists = (memory_root / "PURSUIT_RULES.md").exists()
-            correction_rules_exists = (memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").exists()
-
-        self.assertIn(EXAMPLE_START, memory)
-        self.assertIn(EXAMPLE_END, memory)
-        self.assertIn("# Open Context Questions {#open-context-questions}", memory)
-        self.assertIn("q-rightmemory-project-context", memory)
-        self.assertIn(PURSUIT_EXAMPLE_START, pursuits)
-        self.assertIn(PURSUIT_EXAMPLE_END, pursuits)
-        self.assertFalse(pursuit_rules_exists)
-        self.assertFalse(correction_rules_exists)
-        self.assertIn("user-context-agent-behavior-split", state)
-        self.assertIn("open-context-questions", state)
-        self.assertTrue(install_stamp_exists)
-        self.assertTrue(insight_logs_exists)
-        self.assertFalse(dream_logs_exists)
+            self.assertTrue((memory_root / "MEMORY.md").is_file())
+            self.assertTrue((memory_root / "PURSUITS.md").is_file())
+            self.assertTrue((memory_root / ".runtime" / "install.stamp").is_file())
+            self.assertTrue((memory_root / "insight_logs").is_dir())
+            self.assertFalse((memory_root / "PURSUIT_RULES.md").exists())
+            self.assertFalse((memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").exists())
+            self.assertFalse((memory_root / ".runtime" / "semantic-upgrades.json").exists())
 
     def test_initial_install_configures_git_author_and_baseline_commit(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -616,140 +575,58 @@ class InstallScriptTests(unittest.TestCase):
         self.assertFalse((memory_root / ".git").exists())
         self.assertFalse(skills_target.exists())
 
-    def test_install_refuses_legacy_pending_review_delivery_before_changes(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md"):
-                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
-            delivery = memory_root / ".runtime" / "review" / "deliveries" / "legacy.json"
-            delivery.parent.mkdir(parents=True)
-            delivery.write_text(
-                json.dumps({"version": 1, "batch_id": "legacy"}),
-                encoding="utf-8",
-            )
+    def test_install_refuses_pending_retired_review_evidence_without_mutation(self):
+        reviewed_at = "2026-07-20T00:00:00+00:00"
+        valid_delivery = {
+            "version": 2,
+            "batch_id": "review-batch",
+            "candidate": "durable evidence awaiting delivery",
+            "candidate_id": 1,
+            "candidate_uid": "a" * 32,
+            "reviewed_at": reviewed_at,
+            "sessions": [{
+                "session_id": "session-1",
+                "source": "codex",
+                "last_reviewed_at": reviewed_at,
+            }],
+            "reviewed_count": 1,
+            "skipped_duplicate_count": 0,
+        }
+        cases = (
+            (hashlib.sha256(b"review-batch").hexdigest() + ".json",
+             json.dumps(valid_delivery).encode("utf-8")),
+            ("legacy.json", b'{"version": 1, "batch_id": "legacy"}'),
+            ("damaged.json", b"unreadable delivery evidence"),
+            (".pending.tmp", b"interrupted delivery evidence"),
+        )
+        for filename, contents in cases:
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tempdir:
+                root = Path(tempdir)
+                memory_root = root / "memory"
+                skills_target = root / "skills"
+                runtime_home = root / "data" / "rightmemory"
+                memory_root.mkdir()
+                skills_target.mkdir()
+                runtime_home.mkdir(parents=True)
+                for name in ("MEMORY.md", "PURSUITS.md"):
+                    (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+                (skills_target / "existing.txt").write_bytes(b"user-owned skill state")
+                (runtime_home / "existing.txt").write_bytes(b"installed runtime")
+                delivery = memory_root / ".runtime" / "review" / "deliveries" / filename
+                delivery.parent.mkdir(parents=True)
+                delivery.write_bytes(contents)
+                before_memory = self._snapshot(memory_root)
+                before_skills = self._snapshot(skills_target)
+                before_runtime = self._snapshot(runtime_home)
 
-            result = self._run_install(memory_root, skills_target, check=False)
+                result = self._run_install(memory_root, skills_target, check=False)
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("pending transcript-review deliveries are incompatible", result.stderr)
-        self.assertIn(delivery.relative_to(memory_root).as_posix(), result.stderr)
-        self.assertFalse((memory_root / ".git").exists())
-        self.assertFalse(skills_target.exists())
-
-    def test_install_refuses_malformed_v2_review_delivery_before_changes(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md"):
-                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
-            batch_id = "review-batch"
-            filename = hashlib.sha256(batch_id.encode("utf-8")).hexdigest() + ".json"
-            delivery = memory_root / ".runtime" / "review" / "deliveries" / filename
-            delivery.parent.mkdir(parents=True)
-            delivery.write_text(
-                json.dumps(
-                    {
-                        "version": 2,
-                        "batch_id": batch_id,
-                        "candidate_uid": "a" * 32,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            result = self._run_install(memory_root, skills_target, check=False)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("pending transcript-review deliveries are incompatible", result.stderr)
-        self.assertIn(delivery.relative_to(memory_root).as_posix(), result.stderr)
-        self.assertFalse((memory_root / ".git").exists())
-        self.assertFalse(skills_target.exists())
-
-    def test_install_accepts_valid_v2_review_delivery(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md"):
-                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
-            batch_id = "review-batch"
-            reviewed_at = "2026-07-20T00:00:00+00:00"
-            filename = hashlib.sha256(batch_id.encode("utf-8")).hexdigest() + ".json"
-            delivery = memory_root / ".runtime" / "review" / "deliveries" / filename
-            delivery.parent.mkdir(parents=True)
-            delivery.write_text(
-                json.dumps(
-                    {
-                        "version": 2,
-                        "batch_id": batch_id,
-                        "candidate": "durable review evidence",
-                        "candidate_id": 1,
-                        "candidate_uid": "a" * 32,
-                        "reviewed_at": reviewed_at,
-                        "sessions": [
-                            {
-                                "session_id": "session-1",
-                                "source": "codex",
-                                "last_reviewed_at": reviewed_at,
-                            }
-                        ],
-                        "reviewed_count": 1,
-                        "skipped_duplicate_count": 0,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            result = self._run_install(memory_root, skills_target, check=False)
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_install_refuses_valid_review_delivery_under_wrong_filename(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md"):
-                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
-            reviewed_at = "2026-07-20T00:00:00+00:00"
-            delivery = memory_root / ".runtime" / "review" / "deliveries" / "wrong.json"
-            delivery.parent.mkdir(parents=True)
-            delivery.write_text(
-                json.dumps(
-                    {
-                        "version": 2,
-                        "batch_id": "review-batch",
-                        "candidate": "durable review evidence",
-                        "candidate_id": 1,
-                        "candidate_uid": "a" * 32,
-                        "reviewed_at": reviewed_at,
-                        "sessions": [
-                            {
-                                "session_id": "session-1",
-                                "source": "codex",
-                                "last_reviewed_at": reviewed_at,
-                            }
-                        ],
-                        "reviewed_count": 1,
-                        "skipped_duplicate_count": 0,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            result = self._run_install(memory_root, skills_target, check=False)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("pending transcript-review deliveries are incompatible", result.stderr)
-        self.assertIn(delivery.relative_to(memory_root).as_posix(), result.stderr)
-        self.assertFalse(skills_target.exists())
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("pending transcript-review deliveries require explicit resolution", result.stderr)
+                self.assertIn(delivery.relative_to(memory_root).as_posix(), result.stderr)
+                self.assertEqual(self._snapshot(memory_root), before_memory)
+                self.assertEqual(self._snapshot(skills_target), before_skills)
+                self.assertEqual(self._snapshot(runtime_home), before_runtime)
 
     def test_install_refuses_symlink_review_delivery_root_before_changes(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -768,7 +645,7 @@ class InstallScriptTests(unittest.TestCase):
             result = self._run_install(memory_root, skills_target, check=False)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("pending transcript-review deliveries are incompatible", result.stderr)
+        self.assertIn("pending transcript-review deliveries require explicit resolution", result.stderr)
         self.assertIn(deliveries_root.relative_to(memory_root).as_posix(), result.stderr)
         self.assertFalse((memory_root / ".git").exists())
         self.assertFalse(skills_target.exists())
@@ -1225,8 +1102,6 @@ class InstallScriptTests(unittest.TestCase):
             self.assertIn("Write [retrieve.model] and a default writer [update.model] config", result.stdout)
             self.assertIn("rightmemory-auto-orchestrator", result.stdout)
             self.assertIn("rightmemory is installed", result.stdout)
-            self.assertIn("semantic upgrade baseline recorded", result.stdout)
-            self.assertNotIn("pending for the next dreamer cycle", result.stdout)
 
     def test_install_reports_missing_git_before_writes(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1309,26 +1184,31 @@ class InstallScriptTests(unittest.TestCase):
         self.assertFalse(memory_exists)
         self.assertFalse(skills_exists)
 
-    def test_install_reports_pending_semantic_upgrade_notes_for_existing_memory(self):
+    def test_install_preserves_retired_runtime_state(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
             skills_target = root / "skills"
             memory_root.mkdir()
-            (memory_root / "MEMORY.md").write_text(
-                "# Existing Memory {#existing-memory}\n\n- `existing-node` keep me. → []\n",
-                encoding="utf-8",
-            )
-            (memory_root / "PURSUITS.md").write_text("# Existing Pursuits\n", encoding="utf-8")
+            for name in ("MEMORY.md", "PURSUITS.md"):
+                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+            retired = {
+                ".runtime/review/state.json": b'{"sessions": {"past-session": {}}}',
+                ".runtime/dreamer/trigger-state.json": b'{"points": 12}',
+                ".runtime/semantic-upgrades.json": b'{"absorbed": {"old-note": {}}}',
+            }
+            for name, contents in retired.items():
+                path = memory_root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(contents)
+            deliveries = memory_root / ".runtime" / "review" / "deliveries"
+            deliveries.mkdir()
 
-            result = self._install(memory_root, skills_target)
-            state_exists = (memory_root / ".runtime" / "semantic-upgrades.json").exists()
+            self._install(memory_root, skills_target)
 
-        self.assertIn("semantic upgrade note(s) pending", result.stdout)
-        self.assertIn("user-context-agent-behavior-split", result.stdout)
-        self.assertIn("open-context-questions", result.stdout)
-        self.assertIn("uncertain-memory-marker", result.stdout)
-        self.assertTrue(state_exists)
+            self.assertEqual({name: (memory_root / name).read_bytes() for name in retired}, retired)
+            self.assertTrue(deliveries.is_dir())
+            self.assertEqual(list(deliveries.iterdir()), [])
 
     def test_install_warns_when_stale_rightmemory_precedes_installed_wrapper(self):
         with tempfile.TemporaryDirectory() as tempdir:

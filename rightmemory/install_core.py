@@ -16,7 +16,6 @@ from typing import Literal
 
 from .async_update import STATUS_MANUAL_RECOVERY, AsyncUpdateStore, _state_from_json
 from .platform import prepare_command
-from .review import ReviewDeliveryStore
 from .update_queue import UpdateQueueStore, validate_update_queue
 from .update_record import validate_update_records
 
@@ -65,8 +64,6 @@ PURSUIT_RULES.md
 ROLE_PROMPTS = {
     "{{ROLE_PROMPT_RETRIEVE}}": "retrieve.md",
     "{{ROLE_PROMPT_UPDATE}}": "update.md",
-    "{{ROLE_PROMPT_DREAMER}}": "dreamer.md",
-    "{{ROLE_PROMPT_REVIEWER}}": "reviewer.md",
 }
 LEGACY_ROOT_REFERENCE_FILES = (
     "PURSUIT_RULES.md",
@@ -118,7 +115,7 @@ class Installer:
         self._require_valid_update_queue()
         self._require_valid_update_records()
         self._require_no_live_legacy_async_updates()
-        self._require_no_legacy_review_deliveries()
+        self._require_no_retired_review_deliveries()
         self._require_compatible_update_executor()
         target = self._inspect_target()
         self._print_layout()
@@ -133,7 +130,6 @@ class Installer:
             (self.memory_root / "insight_logs").mkdir(parents=True, exist_ok=True)
             self._ensure_memory_git()
             self._install_runtime()
-            self._run_semantic_upgrades(target)
             self._install_skills()
             self._warn_if_command_not_on_path()
             self._write_install_stamp()
@@ -217,7 +213,7 @@ class Installer:
                 "`current_batch: 0`; archive any listed drained legacy state, then rerun the installer"
             )
 
-    def _require_no_legacy_review_deliveries(self) -> None:
+    def _require_no_retired_review_deliveries(self) -> None:
         runtime_root = self.memory_root / ".runtime"
         review_parent = runtime_root / "review"
         deliveries_root = self.memory_root / ".runtime" / "review" / "deliveries"
@@ -228,30 +224,18 @@ class Installer:
             if container.is_symlink() or not container.is_dir():
                 incompatible.append(container.relative_to(self.memory_root).as_posix())
                 break
-        if incompatible:
-            raise InstallError(
-                "pending transcript-review deliveries are incompatible with this coordinated upgrade:\n- "
-                + "\n- ".join(incompatible)
-                + "\ninstallation made no changes; use the currently installed RightMemory review watcher "
-                "to finish these deliveries, then rerun the installer"
+        if not incompatible:
+            incompatible.extend(
+                path.relative_to(self.memory_root).as_posix()
+                for path in sorted(deliveries_root.iterdir())
             )
-
-        delivery_store = ReviewDeliveryStore(self.memory_root)
-        for path in sorted(deliveries_root.glob("*.json")):
-            relative = path.relative_to(self.memory_root).as_posix()
-            if path.is_symlink() or not path.is_file():
-                incompatible.append(relative)
-                continue
-            try:
-                delivery_store._load(path)
-            except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
-                incompatible.append(relative)
         if incompatible:
             raise InstallError(
-                "pending transcript-review deliveries are incompatible with this coordinated upgrade:\n- "
+                "pending transcript-review deliveries require explicit resolution before removing Review:\n- "
                 + "\n- ".join(incompatible)
-                + "\ninstallation made no changes; use the currently installed RightMemory review watcher "
-                "to finish these deliveries, then rerun the installer"
+                + "\ninstallation made no changes; finish these deliveries with the currently installed "
+                "RightMemory, or preserve and resolve their candidate evidence explicitly, then archive "
+                "the listed retired state before reinstalling"
             )
 
     def _require_compatible_update_executor(self) -> None:
@@ -634,22 +618,6 @@ class Installer:
             self.runtime_command.chmod(0o755)
         print(f"  [install] {self.runtime_command}")
 
-    def _run_semantic_upgrades(self, target: InstallTarget) -> None:
-        assert self.runtime_python is not None
-        command = "baseline" if target.kind == "new" else "refresh"
-        result = _run(
-            [
-                str(self.runtime_python),
-                "-m",
-                "rightmemory.semantic_upgrades",
-                command,
-                "--memory-root",
-                str(self.memory_root),
-            ]
-        )
-        if result.returncode != 0:
-            raise InstallError(f"semantic upgrade {command} failed with status {result.returncode}")
-
     def _install_skills(self) -> None:
         for target in self.skills_targets:
             target.mkdir(parents=True, exist_ok=True)
@@ -882,7 +850,7 @@ class Installer:
             "are also installed as separate explicit skills."
         )
         print(
-            "  5. Optional background transcript review, dreamer, pruning, insight, and sync: "
+            "  5. Optional background pruning, insight, and sync: "
             "rightmemory watch start"
         )
         print()

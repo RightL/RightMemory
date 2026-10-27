@@ -13,7 +13,6 @@ from rightmemory.status import (
     SectionStatus,
     SyncStatus,
     collect_async_update_section,
-    collect_dreamer_section,
     collect_git_status,
     collect_insight_section,
     collect_managed_watch_sections,
@@ -250,27 +249,27 @@ class StatusDashboardTests(unittest.TestCase):
 
     def test_read_log_preview_prefers_recent_failure_line(self):
         with tempfile.TemporaryDirectory() as tempdir:
-            log = Path(tempdir) / "dreamer.log"
+            log = Path(tempdir) / "insight.log"
             log.write_text(
-                "[2026-05-29T08:00:00+00:00] rightmemory dreamer cycle\n"
+                "[2026-05-29T08:00:00+00:00] rightmemory insight cycle\n"
                 "ordinary success message\n"
-                "rightmemory dreamer cycle failed: RuntimeError: boom\n"
-                "rightmemory dreamer watch stopped\n",
+                "rightmemory insight cycle failed: RuntimeError: boom\n"
+                "rightmemory insight watch stopped\n",
                 encoding="utf-8",
             )
 
             preview = read_log_preview(log)
 
-        self.assertEqual(preview, "rightmemory dreamer cycle failed: RuntimeError: boom")
+        self.assertEqual(preview, "rightmemory insight cycle failed: RuntimeError: boom")
 
     def test_read_log_preview_ignores_old_failure_before_later_event(self):
         with tempfile.TemporaryDirectory() as tempdir:
-            log = Path(tempdir) / "dreamer.log"
+            log = Path(tempdir) / "insight.log"
             log.write_text(
-                "[2026-05-29T08:00:00+00:00] rightmemory dreamer cycle\n"
-                "rightmemory dreamer cycle failed: RuntimeError: old boom\n"
-                "[2026-05-29T09:00:00+00:00] rightmemory dreamer cycle\n"
-                "## Dream Cycle Complete\n"
+                "[2026-05-29T08:00:00+00:00] rightmemory insight cycle\n"
+                "rightmemory insight cycle failed: RuntimeError: old boom\n"
+                "[2026-05-29T09:00:00+00:00] rightmemory insight cycle\n"
+                "## Insight Cycle Complete\n"
                 "Validation: Passed\n"
                 "Commit: abc1234\n",
                 encoding="utf-8",
@@ -278,7 +277,7 @@ class StatusDashboardTests(unittest.TestCase):
 
             preview = read_log_preview(log)
 
-        self.assertEqual(preview, "## Dream Cycle Complete\nValidation: Passed\nCommit: abc1234")
+        self.assertEqual(preview, "## Insight Cycle Complete\nValidation: Passed\nCommit: abc1234")
 
     def test_read_log_preview_uses_bounded_tail(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -320,10 +319,10 @@ class StatusDashboardTests(unittest.TestCase):
             ),
             watches=[
                 SectionStatus(
-                    name="review",
+                    name="insight",
                     state="running pid 123",
-                    log_path=".runtime/watch/review.log",
-                    last="reviewed 3 sessions",
+                    log_path=".runtime/watch/insight.log",
+                    last="completed one cycle",
                 ),
                 SectionStatus(
                     name="pruner",
@@ -333,12 +332,6 @@ class StatusDashboardTests(unittest.TestCase):
                     issue="pruner failed",
                 ),
             ],
-            dreamer=SectionStatus(
-                name="dreamer",
-                state="running pid 456",
-                log_path=".runtime/watch/dreamer.log",
-                detail="trigger: 12.5/50.0 points",
-            ),
             insight=SectionStatus(
                 name="insight",
                 state="trigger progress",
@@ -362,7 +355,7 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("message: local memory is current", output)
         self.assertIn("files: MEMORY.md", output)
         self.assertIn("Managed Watches", output)
-        self.assertIn("review: running pid 123", output)
+        self.assertIn("insight: running pid 123", output)
         self.assertIn("Insight", output)
         self.assertIn("Async Update", output)
         self.assertIn("state: .runtime/async/update", output)
@@ -375,9 +368,9 @@ class StatusDashboardTests(unittest.TestCase):
             git=GitStatus(summary="clean on main @ abc1234"),
             watches=[
                 SectionStatus(
-                    name="review",
+                    name="pruner",
                     state="stopped",
-                    log_path=".runtime/watch/review.log",
+                    log_path=".runtime/watch/pruner.log",
                     log_missing=True,
                 ),
             ],
@@ -385,7 +378,7 @@ class StatusDashboardTests(unittest.TestCase):
 
         output = format_status_dashboard(dashboard)
 
-        self.assertIn("log: .runtime/watch/review.log (missing)", output)
+        self.assertIn("log: .runtime/watch/pruner.log (missing)", output)
 
     def test_format_status_dashboard_renders_recovery_hints_for_known_issue_shapes(self):
         dashboard = DashboardStatus(
@@ -393,12 +386,11 @@ class StatusDashboardTests(unittest.TestCase):
             git=GitStatus(summary="dirty: 1 path", issue="dirty worktree: 1 path"),
             issues=[
                 "git unavailable: not a git repository",
-                "review: stale pid 456",
-                "dreamer: running outside manager",
-                "review: status error: ValueError: bad state",
+                "pruner: stale pid 456",
+                "insight: running outside manager",
+                "pruner: status error: ValueError: bad state",
                 "pruner: rightmemory pruner check failed: RuntimeError: boom",
                 "sync config error: ValueError: bad sync config",
-                "dreamer trigger error: ValueError: dreamer trigger points must be a number",
                 "insight trigger error: ValueError: insight trigger points must be a number",
                 "update worker: stale pid 4",
                 "update worker: state error: ValueError: async update worker state must contain string field: status",
@@ -408,7 +400,6 @@ class StatusDashboardTests(unittest.TestCase):
                 "update: retrying: retrying after error: temporary boom",
                 "update: agent-1: error: boom",
                 "managed watches: status error: RuntimeError: collector failed",
-                "dreamer: status error: RuntimeError: collector failed",
                 "insight: status error: RuntimeError: collector failed",
                 "update: status error: RuntimeError: collector failed",
             ],
@@ -420,12 +411,11 @@ class StatusDashboardTests(unittest.TestCase):
         expected_hints = [
             "git: inspect with `git status --short`; resolve local changes before automatic writes continue",
             "git: inspect the configured memory root and repair Git before retrying",
-            "review: run `rightmemory watch restart review`",
-            "dreamer: stop the foreground process directly, then run `rightmemory watch start dreamer`",
-            "review: rerun `rightmemory status`; inspect watch state if it persists",
+            "pruner: run `rightmemory watch restart pruner`",
+            "insight: stop the foreground process directly, then run `rightmemory watch start insight`",
+            "pruner: rerun `rightmemory status`; inspect watch state if it persists",
             "pruner: inspect the shown log path, then run `rightmemory watch restart pruner` when appropriate",
             "sync: fix `rightmemory.toml`, then rerun `rightmemory status`",
-            "dreamer: inspect `.runtime/dreamer/trigger-state.json`",
             "insight: inspect `.runtime/insight/trigger-state.json`",
             "update worker: inspect `.runtime/async/update/`; run `rightmemory update retry` only for manual recovery",
             "update worker: inspect `.runtime/async/update/_worker/state.json`",
@@ -434,7 +424,6 @@ class StatusDashboardTests(unittest.TestCase):
             "update retrying: automatic retry is pending; inspect with `rightmemory update pull --session retrying`",
             "update agent-1: inspect with `rightmemory update pull --session agent-1`",
             "managed watches: rerun `rightmemory status`; inspect watch state if it persists",
-            "dreamer: rerun `rightmemory status`; inspect dreamer state if it persists",
             "insight: rerun `rightmemory status`; inspect insight state if it persists",
             "update: rerun `rightmemory status`; inspect async update state if it persists",
         ]
@@ -457,56 +446,17 @@ class StatusDashboardTests(unittest.TestCase):
     def test_collect_managed_watches_keeps_sync_watcher_state_and_log_preview(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            log = root / ".runtime" / "watch" / "review.log"
+            log = root / ".runtime" / "watch" / "insight.log"
             log.parent.mkdir(parents=True)
-            log.write_text("reviewed 3 sessions\n", encoding="utf-8")
-
+            log.write_text("completed one cycle\n", encoding="utf-8")
             statuses = {
-                "review": type(
-                    "WatchStatus",
-                    (),
-                    {"name": "review", "state": "running", "pid": 123, "log_path": log},
-                )(),
-                "dreamer": type(
-                    "WatchStatus",
-                    (),
-                    {
-                        "name": "dreamer",
-                        "state": "stopped",
-                        "pid": None,
-                        "log_path": root / ".runtime" / "watch" / "dreamer.log",
-                    },
-                )(),
-                "pruner": type(
-                    "WatchStatus",
-                    (),
-                    {
-                        "name": "pruner",
-                        "state": "stale",
-                        "pid": 456,
-                        "log_path": root / ".runtime" / "watch" / "pruner.log",
-                    },
-                )(),
-                "insight": type(
-                    "WatchStatus",
-                    (),
-                    {
-                        "name": "insight",
-                        "state": "stopped",
-                        "pid": None,
-                        "log_path": root / ".runtime" / "watch" / "insight.log",
-                    },
-                )(),
-                "sync": type(
-                    "WatchStatus",
-                    (),
-                    {
-                        "name": "sync",
-                        "state": "stopped",
-                        "pid": None,
-                        "log_path": root / ".runtime" / "watch" / "sync.log",
-                    },
-                )(),
+                name: type("WatchStatus", (), {
+                    "name": name,
+                    "state": "stale" if name == "pruner" else "running" if name == "insight" else "stopped",
+                    "pid": 456 if name == "pruner" else 123 if name == "insight" else None,
+                    "log_path": root / ".runtime" / "watch" / f"{name}.log",
+                })()
+                for name in ("pruner", "insight", "sync")
             }
 
             watches, issues = collect_managed_watch_sections(
@@ -514,12 +464,10 @@ class StatusDashboardTests(unittest.TestCase):
                 watch_status_reader=lambda memory_root, name: statuses[name],
             )
 
-        self.assertEqual(
-            [watch.name for watch in watches],
-            ["review", "dreamer", "pruner", "insight", "sync"],
-        )
-        self.assertEqual(watches[0].state, "running pid 123")
-        self.assertEqual(watches[0].last, "reviewed 3 sessions")
+        self.assertEqual([watch.name for watch in watches], ["pruner", "insight", "sync"])
+        insight = next(watch for watch in watches if watch.name == "insight")
+        self.assertEqual(insight.state, "running pid 123")
+        self.assertEqual(insight.last, "completed one cycle")
         self.assertEqual(next(watch.state for watch in watches if watch.name == "pruner"), "stale pid 456")
         self.assertEqual(next(watch.state for watch in watches if watch.name == "sync"), "stopped")
         self.assertIn("pruner: stale pid 456", issues)
@@ -532,7 +480,7 @@ class StatusDashboardTests(unittest.TestCase):
             log.write_text("rightmemory pruner check failed: RuntimeError: boom\n", encoding="utf-8")
 
             statuses = {}
-            for name in ("review", "dreamer", "pruner", "insight", "sync"):
+            for name in ("pruner", "insight", "sync"):
                 statuses[name] = type(
                     "WatchStatus",
                     (),
@@ -551,54 +499,54 @@ class StatusDashboardTests(unittest.TestCase):
             )
 
         pruner = next(watch for watch in watches if watch.name == "pruner")
-        review = next(watch for watch in watches if watch.name == "review")
+        insight = next(watch for watch in watches if watch.name == "insight")
         self.assertEqual(pruner.last, "rightmemory pruner check failed: RuntimeError: boom")
         self.assertIn("pruner: rightmemory pruner check failed: RuntimeError: boom", issues)
-        self.assertTrue(review.log_missing)
+        self.assertTrue(insight.log_missing)
 
     def test_collect_managed_watches_does_not_surface_zero_failed_counter_as_issue(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            log = root / ".runtime" / "watch" / "review.log"
+            log = root / ".runtime" / "watch" / "pruner.log"
             log.parent.mkdir(parents=True)
             log.write_text(
-                "[2026-05-29T15:00:00+00:00] rightmemory review scan\n"
-                "reviewed: 0\n"
+                "[2026-05-29T15:00:00+00:00] rightmemory pruner scan\n"
+                "processed: 0\n"
                 "retried: 0\n"
                 "failed: 0\n",
                 encoding="utf-8",
             )
             statuses = {}
-            for name in ("review", "dreamer", "pruner", "insight", "sync"):
+            for name in ("pruner", "insight", "sync"):
                 statuses[name] = type(
                     "WatchStatus",
                     (),
                     {
                         "name": name,
-                        "state": "running" if name == "review" else "stopped",
-                        "pid": 123 if name == "review" else None,
+                        "state": "running" if name == "pruner" else "stopped",
+                        "pid": 123 if name == "pruner" else None,
                         "log_path": root / ".runtime" / "watch" / f"{name}.log",
                     },
                 )()
-            statuses["review"].log_path = log
+            statuses["pruner"].log_path = log
 
             watches, issues = collect_managed_watch_sections(
                 root,
                 watch_status_reader=lambda memory_root, name: statuses[name],
             )
 
-        review = next(watch for watch in watches if watch.name == "review")
-        self.assertIn("failed: 0", review.last)
-        self.assertNotIn("review: failed: 0", issues)
+        pruner = next(watch for watch in watches if watch.name == "pruner")
+        self.assertIn("failed: 0", pruner.last)
+        self.assertNotIn("pruner: failed: 0", issues)
 
     def test_collect_managed_watches_does_not_surface_graceful_stop_notice_as_issue(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            log = root / ".runtime" / "watch" / "dreamer.log"
+            log = root / ".runtime" / "watch" / "insight.log"
             log.parent.mkdir(parents=True)
-            log.write_text("rightmemory dreamer watch stopping after current work\n", encoding="utf-8")
+            log.write_text("rightmemory insight watch stopping after current work\n", encoding="utf-8")
             statuses = {}
-            for name in ("review", "dreamer", "pruner", "insight", "sync"):
+            for name in ("pruner", "insight", "sync"):
                 statuses[name] = type(
                     "WatchStatus",
                     (),
@@ -609,15 +557,15 @@ class StatusDashboardTests(unittest.TestCase):
                         "log_path": root / ".runtime" / "watch" / f"{name}.log",
                     },
                 )()
-            statuses["dreamer"].log_path = log
+            statuses["insight"].log_path = log
 
             watches, issues = collect_managed_watch_sections(
                 root,
                 watch_status_reader=lambda memory_root, name: statuses[name],
             )
 
-        dreamer = next(watch for watch in watches if watch.name == "dreamer")
-        self.assertEqual(dreamer.last, "rightmemory dreamer watch stopping after current work")
+        insight = next(watch for watch in watches if watch.name == "insight")
+        self.assertEqual(insight.last, "rightmemory insight watch stopping after current work")
         self.assertEqual(issues, [])
 
     def test_collect_managed_watches_ignores_retired_cleanup_records(self):
@@ -648,38 +596,12 @@ class StatusDashboardTests(unittest.TestCase):
 
             self.assertEqual(
                 [watch.name for watch in watches],
-                ["review", "dreamer", "pruner", "insight", "sync"],
+                ["pruner", "insight", "sync"],
             )
             self.assertEqual(issues, [])
-            self.assertFalse((watch_dir / "review.lock").exists())
-            self.assertFalse((watch_dir / "dreamer.lock").exists())
             self.assertFalse((watch_dir / "pruner.lock").exists())
             self.assertFalse((watch_dir / "insight.lock").exists())
             self.assertFalse((watch_dir / "agent-cli-cleanup.lock").exists())
-
-    def test_collect_dreamer_section_reports_trigger_progress(self):
-        state = type(
-            "DreamerState",
-            (),
-            {
-                "points": 37.5,
-                "updated_at": "2026-05-29T08:00:00+00:00",
-                "last_successful_dream_at": "2026-05-28T08:00:00+00:00",
-                "last_recovery_at": None,
-            },
-        )()
-        config = type("DreamerConfig", (), {"trigger_points": 50.0, "check_interval_seconds": 3000})()
-
-        section = collect_dreamer_section(
-            Path("/memory/root"),
-            trigger_reader=lambda memory_root: state,
-            config_loader=lambda: config,
-        )
-
-        self.assertEqual(section.name, "dreamer")
-        self.assertEqual(section.state, "trigger progress")
-        self.assertIn("trigger: 37.5/50.0 points", section.detail)
-        self.assertIn("check interval: 3000 seconds", section.detail)
 
     def test_collect_insight_section_reports_trigger_progress(self):
         state = type(
@@ -730,36 +652,6 @@ class StatusDashboardTests(unittest.TestCase):
 
         self.assertEqual(section.last, "2026-05-30T08:00:00+00:00")
         self.assertIn("last result: noop", section.detail)
-
-    def test_collect_dreamer_section_reports_malformed_trigger_without_rewriting(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            trigger_path = root / ".runtime" / "dreamer" / "trigger-state.json"
-            trigger_path.parent.mkdir(parents=True)
-            trigger_path.write_text("{not json", encoding="utf-8")
-            config = type("DreamerConfig", (), {"trigger_points": 50.0, "check_interval_seconds": 3000})()
-
-            section = collect_dreamer_section(root, config_loader=lambda: config)
-
-            self.assertIn("error", section.state)
-            self.assertEqual(trigger_path.read_text(encoding="utf-8"), "{not json")
-            self.assertEqual(list(trigger_path.parent.glob("trigger-state.corrupt-*.json")), [])
-
-    def test_collect_dreamer_section_reports_invalid_trigger_timestamp(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            trigger_path = root / ".runtime" / "dreamer" / "trigger-state.json"
-            trigger_path.parent.mkdir(parents=True)
-            trigger_path.write_text(
-                json.dumps({"points": 5.0, "updated_at": "not-a-date"}),
-                encoding="utf-8",
-            )
-            config = type("DreamerConfig", (), {"trigger_points": 50.0, "check_interval_seconds": 3000})()
-
-            section = collect_dreamer_section(root, config_loader=lambda: config)
-
-        self.assertIn("error", section.state)
-        self.assertIn("updated_at must be an ISO datetime string or null", section.issue)
 
     def test_collect_async_update_section_reports_idle_when_state_missing(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1221,11 +1113,6 @@ class StatusDashboardTests(unittest.TestCase):
                     [SectionStatus(name="pruner", state="stale pid 42", issue="pruner: stale pid 42")],
                     ["pruner: stale pid 42"],
                 ),
-                dreamer_collector=lambda memory_root: SectionStatus(
-                    name="dreamer",
-                    state="trigger progress",
-                    detail="trigger: 1.0/50.0 points",
-                ),
                 insight_collector=lambda memory_root: SectionStatus(
                     name="insight",
                     state="trigger progress",
@@ -1237,7 +1124,6 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(dashboard.root, root)
         self.assertEqual(dashboard.sync.upstream, "origin/main")
         self.assertEqual(len(dashboard.watches), 1)
-        self.assertEqual(dashboard.dreamer.name, "dreamer")
         self.assertEqual(dashboard.insight.name, "insight")
         self.assertEqual(dashboard.update.name, "update")
         self.assertIn("pruner: stale pid 42", dashboard.issues)
@@ -1266,7 +1152,6 @@ class StatusDashboardTests(unittest.TestCase):
                             [SectionStatus(name="sync", state="stopped")],
                             [],
                         ),
-                        dreamer_collector=lambda memory_root: None,
                         insight_collector=lambda memory_root: None,
                         update_collector=lambda memory_root: (
                             SectionStatus(
@@ -1295,7 +1180,6 @@ class StatusDashboardTests(unittest.TestCase):
                     root,
                     sync_collector=None,
                     watch_collector=lambda memory_root: ([], []),
-                    dreamer_collector=lambda memory_root: None,
                     insight_collector=lambda memory_root: None,
                     update_collector=lambda memory_root: (
                         SectionStatus(name="update", state="worker: idle"),
@@ -1355,7 +1239,6 @@ class StatusDashboardTests(unittest.TestCase):
             dashboard = collect_status(
                 root,
                 watch_collector=lambda memory_root: ([], []),
-                dreamer_collector=lambda memory_root: SectionStatus(name="dreamer", state="trigger progress"),
                 insight_collector=lambda memory_root: SectionStatus(name="insight", state="trigger progress"),
             )
             output = format_status_dashboard(dashboard)

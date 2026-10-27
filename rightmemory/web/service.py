@@ -14,10 +14,8 @@ from ..config import (
     ROLES,
     load_async_update_config,
     load_config,
-    load_dreamer_watch_config,
     load_insight_watch_config,
     load_pruner_config,
-    load_review_config,
     load_sync_config,
 )
 from ..opening_context import OpeningContextError, build_opening_context
@@ -80,7 +78,6 @@ class WebStudioService:
             "active_root": str(self.memory_root),
             "git": _json_safe(status.git),
             "watches": [_json_safe(watch) for watch in status.watches],
-            "dreamer": _json_safe(status.dreamer),
             "insight": _json_safe(status.insight),
             "update": _json_safe(status.update),
             "shared_views": {
@@ -183,9 +180,7 @@ class WebStudioService:
             "config_path": str(config_path),
             "config_exists": config_path.is_file(),
             "runtime": {
-                "review": _settings_loader(load_review_config, self.memory_root),
                 "update": _settings_loader(load_async_update_config, self.memory_root),
-                "dreamer_watch": _settings_loader(load_dreamer_watch_config, self.memory_root),
                 "insight_watch": _settings_loader(load_insight_watch_config, self.memory_root),
                 "pruner": _settings_loader(load_pruner_config, self.memory_root),
                 "sync": _settings_loader(load_sync_config, self.memory_root),

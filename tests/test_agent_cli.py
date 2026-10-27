@@ -99,11 +99,11 @@ class AgentCliCommandTests(unittest.TestCase):
             ],
         )
 
-    def test_build_claude_uses_plan_permission_for_reviewer(self):
+    def test_build_claude_uses_plan_permission_for_historian(self):
         session_id = "123e4567-e89b-12d3-a456-426614174000"
 
         command = build_claude_command(
-            "reviewer",
+            "historian",
             AgentCliConfig(provider="claude"),
             "prompt",
             session_id,
@@ -1365,13 +1365,13 @@ class CliAgentExecutorTests(unittest.TestCase):
             root = Path(tempdir)
             first = CliAgentExecutor(
                 root,
-                "reviewer",
+                "historian",
                 AgentCliConfig(provider="codex"),
                 codex_runner=runner,
             )
             second = CliAgentExecutor(
                 root,
-                "reviewer",
+                "historian",
                 AgentCliConfig(provider="codex"),
                 codex_runner=runner,
             )
@@ -1407,7 +1407,7 @@ class CliAgentExecutorTests(unittest.TestCase):
             root = Path(tempdir)
             executor = CliAgentExecutor(
                 root,
-                "reviewer",
+                "historian",
                 AgentCliConfig(provider="codex"),
                 codex_runner=runner,
             )
@@ -1428,7 +1428,7 @@ class CliAgentExecutorTests(unittest.TestCase):
             root = Path(tempdir)
             executor = CliAgentExecutor(
                 root,
-                "reviewer",
+                "historian",
                 AgentCliConfig(provider="codex"),
                 codex_runner=runner,
             )
