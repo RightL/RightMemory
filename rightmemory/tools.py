@@ -56,7 +56,6 @@ RUNTIME_SHARED_VIEW_PATH_PREFIX = ".runtime/shared_views/"
 RUNTIME_SHARED_VIEW_IMPORTS_PATH_PREFIX = ".runtime/shared_views/imports/"
 GIT_REVISION_RE = re.compile(r"^[A-Za-z0-9_.^~/-]+$")
 PRUNE_SUBJECT_PREFIX = "prune:"
-ACTIVE_MEMORY_ROLES = {"dreamer", "pruner", "reviewer", "sync-reconciler", "update"}
 UPDATE_WRITE_ROLES = {"update"}
 PURSUIT_MAP_WRITE_ROLES = {"pursuit-map"}
 CORRECTIONS_READ_ROLES = {"update", "sync-reconciler"}

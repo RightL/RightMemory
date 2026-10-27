@@ -19,7 +19,7 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             self._git("commit", "-m", "memory: isolated update", cwd=worktree)
             return "updated"
 
-        result = IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+        result = IsolatedWriteSupervisor(self.root, "pruner").run(callback)
 
         self.assertEqual(result.output, "updated")
         self.assertEqual(result.commits_landed, 1)
@@ -37,7 +37,7 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             raise RuntimeError("agent failed")
 
         with self.assertRaisesRegex(RuntimeError, "agent failed"):
-            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+            IsolatedWriteSupervisor(self.root, "pruner").run(callback)
 
         self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
         self.assertEqual(self._git("log", "-1", "--format=%s"), "initial memory")
@@ -46,16 +46,16 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
         self._assert_isolated_cleanup()
 
     def test_completed_no_change_operation_does_not_run_callback_again(self):
-        supervisor = IsolatedWriteSupervisor(self.root, "dreamer")
+        supervisor = IsolatedWriteSupervisor(self.root, "pruner")
         first = supervisor.run(
             lambda _worktree: "nothing to change",
-            operation_id="dreamer-no-change-1",
-            operation_input={"message": "dream"},
+            operation_id="pruner-no-change-1",
+            operation_input={"message": "prune"},
         )
         second = supervisor.run(
             lambda _worktree: self.fail("completed operation must not rerun"),
-            operation_id="dreamer-no-change-1",
-            operation_input={"message": "dream"},
+            operation_id="pruner-no-change-1",
+            operation_input={"message": "prune"},
         )
 
         self.assertEqual(first.commits_landed, 0)
@@ -73,10 +73,10 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             self._git("commit", "-m", "memory: second step", cwd=worktree)
             return "updated"
 
-        result = IsolatedWriteSupervisor(self.root, "dreamer").run(
+        result = IsolatedWriteSupervisor(self.root, "pruner").run(
             callback,
-            operation_id="dreamer-squash-1",
-            operation_input={"message": "dream"},
+            operation_id="pruner-squash-1",
+            operation_input={"message": "prune"},
         )
 
         self.assertEqual(result.commits_landed, 1)
@@ -87,7 +87,7 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
     def test_successful_noop_returns_output_and_lands_zero_commits(self):
         output = {"status": "noop"}
 
-        result = IsolatedWriteSupervisor(self.root, "dreamer").run(lambda _worktree: output)
+        result = IsolatedWriteSupervisor(self.root, "pruner").run(lambda _worktree: output)
 
         self.assertIs(result.output, output)
         self.assertEqual(result.commits_landed, 0)
@@ -137,7 +137,7 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             self._git("commit", "-m", "memory: outside main update")
 
         with self.assertRaisesRegex(RuntimeError, "main HEAD changed"):
-            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+            IsolatedWriteSupervisor(self.root, "pruner").run(callback)
 
         self.assertEqual(self._git("log", "-1", "--format=%s"), "memory: outside main update")
         self.assertEqual(self._git("status", "--short"), "")
@@ -152,7 +152,7 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             self._git("commit", "-m", "memory: invalid isolated update", cwd=worktree)
 
         with self.assertRaisesRegex(RuntimeError, "validation failed"):
-            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+            IsolatedWriteSupervisor(self.root, "pruner").run(callback)
 
         self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
         self.assertEqual(self._git("status", "--short"), "")
@@ -166,7 +166,7 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             return "noop"
 
         with self.assertRaisesRegex(RuntimeError, "main HEAD changed"):
-            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+            IsolatedWriteSupervisor(self.root, "pruner").run(callback)
 
         self.assertEqual(self._git("log", "-1", "--format=%s"), "memory: outside main update")
         self.assertEqual(self._git("status", "--short"), "")
@@ -180,7 +180,7 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             return "noop"
 
         with self.assertRaises(MainMemoryDirtyError) as caught:
-            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+            IsolatedWriteSupervisor(self.root, "pruner").run(callback)
 
         self.assertEqual(caught.exception.paths, ("MEMORY.md",))
         self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
@@ -201,7 +201,7 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             called = True
 
         with self.assertRaises(MainMemoryDirtyError):
-            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+            IsolatedWriteSupervisor(self.root, "pruner").run(callback)
 
         self.assertFalse(called)
         self.assertEqual(self._git("status", "--short", "--", "MEMORY.md"), "M MEMORY.md")
@@ -236,17 +236,17 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
         self.assertEqual(caught.exception.paths, ("MEMORY.md",))
         self.assertFalse(called)
 
-    def test_untracked_main_dream_log_does_not_block_dreamer(self):
+    def test_untracked_main_unrelated_log_does_not_block_pruner(self):
         called = False
-        dream_log = self.root / "dream_logs" / "2026-05-22.md"
-        dream_log.parent.mkdir()
-        dream_log.write_text("# Dream\n", encoding="utf-8")
+        unrelated_log = self.root / "unrelated_logs" / "2026-05-22.md"
+        unrelated_log.parent.mkdir()
+        unrelated_log.write_text("# Unrelated log\n", encoding="utf-8")
 
         def callback(_worktree: Path) -> None:
             nonlocal called
             called = True
 
-        result = IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+        result = IsolatedWriteSupervisor(self.root, "pruner").run(callback)
 
         self.assertIsNone(result.output)
         self.assertTrue(called)
@@ -272,16 +272,16 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             return "dirty"
 
         with self.assertRaisesRegex(RuntimeError, "uncommitted changes"):
-            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+            IsolatedWriteSupervisor(self.root, "pruner").run(callback)
 
         self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
         self.assertEqual(self._git("status", "--short"), "")
         self.assertNotIn("uncommitted isolated", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
 
     def test_cleanup_stale_removes_temp_branch_and_worktree(self):
-        branch, worktree = self._add_isolated_worktree("dreamer", "0123456789abcdef0123456789abcdef")
+        branch, worktree = self._add_isolated_worktree("pruner", "0123456789abcdef0123456789abcdef")
 
-        IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+        IsolatedWriteSupervisor(self.root, "pruner").cleanup_stale()
 
         self.assertFalse(worktree.exists())
         self.assertEqual(self._git("branch", "--list", branch), "")
@@ -289,9 +289,9 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
 
     def test_cleanup_removes_empty_directory_left_by_git(self):
         branch, worktree = self._add_isolated_worktree(
-            "dreamer", "0123456789abcdef0123456789abcdef"
+            "pruner", "0123456789abcdef0123456789abcdef"
         )
-        supervisor = IsolatedWriteSupervisor(self.root, "dreamer")
+        supervisor = IsolatedWriteSupervisor(self.root, "pruner")
         run_git = supervisor._run_git
 
         def leave_empty_directory(cwd: Path, *args: str, **kwargs):
@@ -311,11 +311,11 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             self.root
             / ".runtime"
             / "worktrees"
-            / "dreamer-0123456789abcdef0123456789abcdef"
+            / "pruner-0123456789abcdef0123456789abcdef"
         )
         worktree.mkdir(parents=True)
 
-        IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+        IsolatedWriteSupervisor(self.root, "pruner").cleanup_stale()
 
         self.assertFalse(worktree.exists())
 
@@ -324,12 +324,12 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             self.root
             / ".runtime"
             / "worktrees"
-            / "dreamer-0123456789abcdef0123456789abcdef"
+            / "pruner-0123456789abcdef0123456789abcdef"
         )
         worktree.mkdir(parents=True)
         (worktree / "preserve.txt").write_text("preserve\n", encoding="utf-8")
 
-        IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+        IsolatedWriteSupervisor(self.root, "pruner").cleanup_stale()
 
         self.assertTrue(worktree.exists())
         self.assertTrue((worktree / "preserve.txt").is_file())
@@ -340,11 +340,11 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
         def callback(worktree: Path) -> str:
             nonlocal observed_lease
             branch = self._git("branch", "--show-current", cwd=worktree)
-            leases = list((self.root / ".runtime" / "worktree-leases").glob("dreamer-*.json"))
+            leases = list((self.root / ".runtime" / "worktree-leases").glob("pruner-*.json"))
             self.assertEqual(len(leases), 1)
             observed_lease = leases[0]
 
-            IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+            IsolatedWriteSupervisor(self.root, "pruner").cleanup_stale()
 
             self.assertTrue(worktree.exists())
             self.assertIn(branch, self._git("branch", "--list", branch))
@@ -352,7 +352,7 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             return "no memory change"
 
         with patch("rightmemory.isolated_write.process_identity", return_value="proc:live"):
-            result = IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+            result = IsolatedWriteSupervisor(self.root, "pruner").run(callback)
 
         self.assertEqual(result.commits_landed, 0)
         self.assertIsNotNone(observed_lease)
@@ -361,14 +361,14 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
 
     def test_cleanup_stale_removes_reused_pid_lease(self):
         identifier = "55555555555555555555555555555555"
-        branch, worktree = self._add_isolated_worktree("dreamer", identifier)
-        lease = self._write_lease("dreamer", identifier, pid=1234, identity="proc:old")
+        branch, worktree = self._add_isolated_worktree("pruner", identifier)
+        lease = self._write_lease("pruner", identifier, pid=1234, identity="proc:old")
 
         with (
             patch("rightmemory.isolated_write.process_identity", return_value="proc:new"),
             patch("rightmemory.isolated_write.process_exists", return_value=True),
         ):
-            IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+            IsolatedWriteSupervisor(self.root, "pruner").cleanup_stale()
 
         self.assertFalse(worktree.exists())
         self.assertEqual(self._git("branch", "--list", branch), "")
@@ -376,14 +376,14 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
 
     def test_cleanup_stale_preserves_owner_when_identity_is_temporarily_unavailable(self):
         identifier = "66666666666666666666666666666666"
-        branch, worktree = self._add_isolated_worktree("dreamer", identifier)
-        lease = self._write_lease("dreamer", identifier, pid=1234, identity="proc:owner")
+        branch, worktree = self._add_isolated_worktree("pruner", identifier)
+        lease = self._write_lease("pruner", identifier, pid=1234, identity="proc:owner")
 
         with (
             patch("rightmemory.isolated_write.process_identity", return_value=None),
             patch("rightmemory.isolated_write.process_exists", return_value=True),
         ):
-            IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+            IsolatedWriteSupervisor(self.root, "pruner").cleanup_stale()
 
         self.assertTrue(worktree.exists())
         self.assertIn(branch, self._git("branch", "--list", branch))
@@ -393,30 +393,30 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             patch("rightmemory.isolated_write.process_identity", return_value=None),
             patch("rightmemory.isolated_write.process_exists", return_value=False),
         ):
-            IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+            IsolatedWriteSupervisor(self.root, "pruner").cleanup_stale()
         self._assert_isolated_cleanup()
 
     def test_cleanup_stale_preserves_live_branch_before_worktree_registration(self):
         identifier = "77777777777777777777777777777777"
-        branch = f"rightmemory-isolated-dreamer-{identifier}"
+        branch = f"rightmemory-isolated-pruner-{identifier}"
         self._git("branch", branch)
-        lease = self._write_lease("dreamer", identifier, pid=1234, identity="proc:live")
+        lease = self._write_lease("pruner", identifier, pid=1234, identity="proc:live")
 
         with patch("rightmemory.isolated_write.process_identity", return_value="proc:live"):
-            IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+            IsolatedWriteSupervisor(self.root, "pruner").cleanup_stale()
 
         self.assertIn(branch, self._git("branch", "--list", branch))
         self.assertTrue(lease.exists())
 
         with patch("rightmemory.isolated_write.process_identity", return_value="proc:gone"):
-            IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+            IsolatedWriteSupervisor(self.root, "pruner").cleanup_stale()
         self._assert_isolated_cleanup()
 
     def test_run_removes_lease_after_success(self):
         observed = []
 
         def callback(_worktree: Path) -> str:
-            leases = list((self.root / ".runtime" / "worktree-leases").glob("dreamer-*.json"))
+            leases = list((self.root / ".runtime" / "worktree-leases").glob("pruner-*.json"))
             self.assertEqual(len(leases), 1)
             payload = json.loads(leases[0].read_text(encoding="utf-8"))
             self.assertEqual(payload, {"pid": os.getpid(), "process_identity": "proc:owner"})
@@ -424,7 +424,7 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
             return "no memory change"
 
         with patch("rightmemory.isolated_write.process_identity", return_value="proc:owner"):
-            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+            IsolatedWriteSupervisor(self.root, "pruner").run(callback)
 
         self.assertEqual(len(observed), 1)
         self.assertFalse(observed[0].exists())
@@ -434,42 +434,42 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
         observed = []
 
         def callback(_worktree: Path) -> str:
-            observed.extend((self.root / ".runtime" / "worktree-leases").glob("dreamer-*.json"))
+            observed.extend((self.root / ".runtime" / "worktree-leases").glob("pruner-*.json"))
             raise RuntimeError("agent failed")
 
         with (
             patch("rightmemory.isolated_write.process_identity", return_value="proc:owner"),
             self.assertRaisesRegex(RuntimeError, "agent failed"),
         ):
-            IsolatedWriteSupervisor(self.root, "dreamer").run(callback)
+            IsolatedWriteSupervisor(self.root, "pruner").run(callback)
 
         self.assertEqual(len(observed), 1)
         self.assertFalse(observed[0].exists())
         self._assert_isolated_cleanup()
 
     def test_cleanup_stale_preserves_other_role_temp_branch_and_worktree(self):
-        dreamer_branch, dreamer_worktree = self._add_isolated_worktree("dreamer", "0123456789abcdef0123456789abcdef")
+        pruner_branch, pruner_worktree = self._add_isolated_worktree("pruner", "0123456789abcdef0123456789abcdef")
         update_branch, update_worktree = self._add_isolated_worktree("update", "11111111111111111111111111111111")
 
-        IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+        IsolatedWriteSupervisor(self.root, "pruner").cleanup_stale()
 
-        self.assertFalse(dreamer_worktree.exists())
-        self.assertEqual(self._git("branch", "--list", dreamer_branch), "")
+        self.assertFalse(pruner_worktree.exists())
+        self.assertEqual(self._git("branch", "--list", pruner_branch), "")
         self.assertTrue(update_worktree.exists())
         self.assertIn(update_branch, self._git("branch", "--list", update_branch))
 
-    def test_cleanup_stale_for_reviewer_preserves_dreamer_and_update_temp_artifacts(self):
-        reviewer_branch, reviewer_worktree = self._add_isolated_worktree("reviewer", "22222222222222222222222222222222")
-        dreamer_branch, dreamer_worktree = self._add_isolated_worktree("dreamer", "33333333333333333333333333333333")
+    def test_cleanup_stale_for_insight_preserves_pruner_and_update_temp_artifacts(self):
+        insight_branch, insight_worktree = self._add_isolated_worktree("insight", "22222222222222222222222222222222")
+        pruner_branch, pruner_worktree = self._add_isolated_worktree("pruner", "33333333333333333333333333333333")
         update_branch, update_worktree = self._add_isolated_worktree("update", "44444444444444444444444444444444")
 
-        IsolatedWriteSupervisor(self.root, "reviewer").cleanup_stale()
+        IsolatedWriteSupervisor(self.root, "insight").cleanup_stale()
 
-        self.assertFalse(reviewer_worktree.exists())
-        self.assertEqual(self._git("branch", "--list", reviewer_branch), "")
-        self.assertTrue(dreamer_worktree.exists())
+        self.assertFalse(insight_worktree.exists())
+        self.assertEqual(self._git("branch", "--list", insight_branch), "")
+        self.assertTrue(pruner_worktree.exists())
         self.assertTrue(update_worktree.exists())
-        self.assertIn(dreamer_branch, self._git("branch", "--list", dreamer_branch))
+        self.assertIn(pruner_branch, self._git("branch", "--list", pruner_branch))
         self.assertIn(update_branch, self._git("branch", "--list", update_branch))
 
     def test_cleanup_stale_preserves_unrelated_branch_and_worktree(self):
@@ -479,7 +479,7 @@ class IsolatedWriteExecutionTests(IsolatedWriteTestBase):
         self._git("branch", prefixed_branch)
         self._git("worktree", "add", "-b", branch, str(worktree), self.initial_head)
 
-        IsolatedWriteSupervisor(self.root, "dreamer").cleanup_stale()
+        IsolatedWriteSupervisor(self.root, "pruner").cleanup_stale()
 
         self.assertTrue(worktree.exists())
         self.assertIn(branch, self._git("branch", "--list", branch))

@@ -93,4 +93,4 @@ rightmemory assistant --root /absolute/memory-root mcp --transport stdio
 
 Load the shared assistant skill with this MCP transport; it explains how the assistant's own agents use the deterministic tools. The older `rightmemory mcp` command continues to use its configured internal role backend. See [MCP](MCP.md).
 
-Assistant execution covers native retrieval and batch updates. Internal model-session history, incremental retrieval caching, transcript watchers, Dreamer, and scheduled maintenance belong to the separate internal runtime. Use `assistant submit` and its completion receipts for native batches, not the internal `update submit` worker commands.
+Assistant execution covers native retrieval and batch updates. Internal model-session history, incremental retrieval caching, Insight, and Pruner belong to the separate internal runtime. Requested direct maintenance uses `maintain-rightmemory`. Use `assistant submit` and its completion receipts for native batches, not the internal `update submit` worker commands.

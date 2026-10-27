@@ -15,7 +15,7 @@ Modern coding agents are strong inside a single conversation, then strangely for
 - **Multi-agent collaboration:** memory roots can share selected context, answer constrained questions, and exchange notes without exposing the whole private memory store.
 - **Three focused modules:** Memory and Pursuit use separate lifecycles inside one graph, while Agent Corrections preserves reusable concrete contrasts without turning them into graph content.
 - **Multi-device continuity:** the same memory can follow agents across laptops, desktops, clients, and project-specific roots.
-- **Clear ownership:** retrieval, unified updates, transcript-review extraction, sync repair, consolidation, and reflection run through explicit role boundaries instead of letting the main agent half-edit RightMemory while doing unrelated work.
+- **Clear ownership:** retrieval, unified updates, sync repair, direct maintenance, and reflection have explicit boundaries for the state they may change.
 - **Vendor-neutral command surface:** the Codex SDK and Claude Code CLI have built-in delegated execution today; Gemini CLI-style workflows and other command-capable agents can use the same `rightmemory` CLI or JSON-over-stdio daemon surface.
 
 ## The RightMemory Semantic Model
@@ -121,7 +121,7 @@ Use **Manager**, the `rightmemory-manager` skill in Codex App, to make a convers
 
 Codex App owns projects, tasks, conversations, and execution. RightMemory keeps the user's directions and context in the map, with no persistent task links or status synchronization. A task's progress, failure, or completion does not change Pursuit. Web Studio accepts loopback hosts only because its automatic browser sessions are not a remote-access security boundary.
 
-Then start the background manager. It reviews idle agent sessions, evaluates prune generations, runs Dreamer consolidation, and produces Insight reflections when enough work has accumulated:
+For background pruning, Insight reflections, and optional sync, start the background manager:
 
 ```bash
 rightmemory watch start
@@ -160,7 +160,7 @@ Later:
   the unified updater may change Memory, Agent Corrections, both, or neither
   the user's Pursuit map remains unchanged
   each queued outcome keeps its exact candidate batch beside the corresponding Git change
-  rightmemory dreamer consolidates stale, duplicated, or overgrown memory
+  requested maintain-rightmemory work consolidates stale, duplicated, or overgrown memory
   rightmemory insight writes durable reflection artifacts when useful
 ```
 
@@ -175,7 +175,7 @@ For a short recording script, see [docs/DEMO.md](docs/DEMO.md).
 - Two executor modes behind the same `rightmemory` CLI: standalone runtime or delegated Codex SDK/Claude Code CLI role execution.
 - Native assistant execution through shared role instructions and deterministic JSON CLI/MCP tools; your assistant supplies its own agents.
 - Source-authored retrieval output, selected by an agent or an optional embedding + reranking retrieval service.
-- One updater for Memory and Agent Corrections, transcript-review candidate extraction, and immutable candidate records for input-to-edit provenance.
+- One updater for Memory and Agent Corrections, with immutable candidate records for input-to-edit provenance.
 
 ## Install Options And Updates
 
@@ -201,13 +201,24 @@ CLI-agent mode delegates role execution to the Codex Python SDK or Claude Code C
 
 Install creates semantic state only when bootstrapping a new root. A fresh root receives `MEMORY.md`, `PURSUITS.md`, and the tracked root `.gitignore` control-plane allowlist, then Git baselines the complete synchronized state. The schema and semantic rules live with the installed RightMemory package rather than in each Memory or skills root. A complete pre-existing root is preserved byte-for-byte; reinstall may refresh package-owned runtime files and installed skills, but it does not refresh the allowlist or examples, synthesize missing semantic files, or migrate user state. A complete pre-existing Markdown root without Git history is committed exactly as found.
 
-If an existing root has a Git commit or any recognized semantic state but lacks a regular, non-symlink required root document, install refuses it before making any change. It also refuses legacy root copies named `PURSUIT_RULES.md` or `AGENT_CORRECTION_MEMORY_RULES.md`; review any local changes and remove those obsolete package references explicitly before reinstalling. The memory root, runtime installation, installed skills, and install stamp remain untouched so the user can perform an explicit, reviewed transition first. Fresh installs still baseline current semantic-upgrade notes, while a successful reinstall may report pending notes for a later Dreamer cycle without applying them. Legacy `MEMORY_*.md` files remain protected even when they are not currently reachable from `MEMORY.md`.
+If an existing root has a Git commit or any recognized semantic state but lacks a regular, non-symlink required root document, install refuses it before making any change. It also refuses legacy root copies named `PURSUIT_RULES.md` or `AGENT_CORRECTION_MEMORY_RULES.md`; review any local changes and remove those obsolete package references explicitly before reinstalling. The memory root, runtime installation, installed skills, and install stamp remain untouched so the user can perform an explicit, reviewed transition first. Legacy `MEMORY_*.md` files remain protected even when they are not currently reachable from `MEMORY.md`.
 
 Installer admission also validates any existing tracked update queue and checks
 for live async jobs from the pre-queue runtime. It changes nothing when either is
 incompatible. Finish, retry, or undo those live jobs with the currently installed
 RightMemory before rerunning the installer; version one does not invent migrated
 candidate identities during package installation.
+
+Before upgrading an installation that ran Review or Dreamer, stop its background
+manager with the currently installed `rightmemory watch stop` and let active
+cycles finish. Remove `[review]`, `[reviewer]`, `[dreamer]`, and
+`insight.watch.review_session_points` from `rightmemory.toml`; current config
+validation rejects them, and the installer leaves existing configuration unchanged.
+Pending deliveries from the retired transcript Review also block reinstall.
+Finish them with the currently installed version, or explicitly preserve and
+resolve their candidate evidence before archiving the listed delivery files.
+Reinstall leaves other retired runtime state untouched. Memory consolidation
+uses the explicitly requested `maintain-rightmemory` workflow.
 
 The memory root must be a standalone, non-bare Git working tree. An existing target nested inside another working tree, a bare repository, or an unusable `.git` entry is refused before installation writes anything.
 
@@ -460,10 +471,6 @@ rightmemory-manager / Codex App
   +--> per-Pursuit coordination     long-lived coordination of separate worker tasks
   +--> maintenance workflows        explicitly requested RightMemory changes
 
-transcript review
-  +--> candidate extraction         idle supported sessions
-  +--> unified update queue         no direct graph edit
-
 unified updater
   +--> MEMORY*.md                   durable context
   +--> Agent Correction files       reusable redirection cases
@@ -483,7 +490,7 @@ unified updater
 - Evidence clears the Update submission bar when omitting it would likely cause poorer future decisions or substantial rediscovery, or allow a settled reusable failure pattern to recur. Transient progress, routine results, incompleteness by itself, and detail already preserved in project artifacts do not qualify. Ordinary work does not trigger a map-change submission or suggestion.
 - Candidate submission is evidence, not final stored wording, classification, placement, or an instruction to edit a particular module. Session ids provide provenance and batching boundaries, not task identity.
 - The unified updater reconciles related candidates and may change Memory, Agent Corrections, both, or neither in one isolated transaction. If evidence also requests a map change, Update judges the durable portion and reports the Pursuit portion as skipped. Tool permissions and isolated-result validation reject Update writes to Pursuit files.
-- Dreamer, Insight, Historian, and Pruner remain Memory-oriented maintenance roles. They must preserve ids and edges referenced from Pursuit. Sync repair transports the wider synchronized surface without taking over semantic updater judgment.
+- Insight, Historian, and Pruner are Memory-oriented runtime roles. They preserve ids and edges referenced from Pursuit. Sync repair transports the wider synchronized surface without taking over semantic updater judgment.
 - Standalone mode uses RightMemory's bounded tools, while CLI-agent mode delegates roles to the Codex SDK or Claude Code CLI with role-specific permission defaults. Codex read roles run read-only. Codex write roles run with full filesystem access and no approval prompts so they can complete Git operations in their isolated task worktrees.
 
 Ordinary host-agent access goes through the command-backed skills or MCP tools. Direct semantic edits belong to an explicitly requested maintenance workflow within its scope. Pursuit rules remain canonical in [PURSUIT_RULES.md](rightmemory/reference/PURSUIT_RULES.md).
@@ -495,9 +502,7 @@ RightMemory keeps role behavior in one canonical prompt set under `rightmemory/p
 ```text
 rightmemory/prompts/retrieve.md
 rightmemory/prompts/update.md
-rightmemory/prompts/dreamer.md
 rightmemory/prompts/insight.md
-rightmemory/prompts/reviewer.md
 rightmemory/prompts/historian.md
 rightmemory/prompts/pruner.md
 rightmemory/prompts/sync-reconciler.md
@@ -505,7 +510,7 @@ rightmemory/prompts/sync-reconciler.md
 
 Both install modes use these files through the `rightmemory` runtime. Standalone mode loads them into the local Pydantic AI agent and tool loop. CLI-agent mode wraps the same role instructions into prompts sent through the Codex SDK or Claude Code CLI. Other command-capable agents can call the same CLI or daemon surface without changing the schema. The automatic orchestrator skill owns the host agent's retrieval decision, evidence threshold, and natural-boundary timing; the canonical prompts own the Retrieve and Update roles invoked behind its commands. Optional source skills define their narrower workflows when installed manually.
 
-Package-owned references complement the prompts: the schema defines representation; Memory, Pursuit, Agent Corrections, RightMemory Edit Feedback, and Shared View rules define focused semantics; and the [Retrieve runtime contract](rightmemory/reference/RETRIEVE_CONTRACT.md) owns Retrieve's input snapshot and terminal-selection mechanics. `reviewer.md` extracts candidate evidence from supported transcripts for unified Update. Explicit session review independently forms tentative proposals, then consults relevant RightMemory Edit Feedback before finalizing them.
+Package-owned references complement the prompts: the schema defines representation; Memory, Pursuit, Agent Corrections, RightMemory Edit Feedback, and Shared View rules define focused semantics; and the [Retrieve runtime contract](rightmemory/reference/RETRIEVE_CONTRACT.md) owns Retrieve's input snapshot and terminal-selection mechanics. Requested direct maintenance uses `maintain-rightmemory` and these package-owned references.
 
 ## Install Modes
 
@@ -542,7 +547,7 @@ so the next `rightmemory` command works immediately; persisting the user `PATH`
 remains an explicit user choice.
 The Bash and PowerShell entrypoints are small platform bootstraps; both delegate
 the install transaction to the same stdlib-only Python core, so state
-preservation, Git setup, runtime installation, skills, and semantic upgrades have
+preservation, Git setup, runtime installation, and skills have
 one implementation. On its supported platforms, the Codex SDK supplies its
 matching native Codex runtime. Claude CLI discovery continues to support native executables and,
 on Windows, standard npm `.cmd` shims with matching `.ps1` shims.
@@ -561,11 +566,11 @@ semantic work and push successful memory changes after they land.
 ## Everyday Use
 
 1. Let the installed `rightmemory-auto-orchestrator` retrieve context and submit qualifying Memory evidence according to its instructions. Use an optional ordinary orchestration variant when you want read-only or approval-gated access.
-2. Run `rightmemory watch start` for transcript extraction, pruning, consolidation, Insight cycles, and optional sync.
+2. Use `maintain-rightmemory` for requested Memory consolidation and correction-surface maintenance. Run `rightmemory watch start` for pruning, Insight cycles, and optional sync.
 3. Open `rightmemory pursuit` or explicitly request `maintain-pursuit-map` to change your direction map. Use a node's **Copy context** action to bring its background into Codex App, where you can set up a long-lived Manager conversation for that direction to coordinate worker tasks. Ordinary updates leave the map unchanged.
 4. Use `rightmemory status` when you need to inspect watcher, queue, and sync state.
 
-Dreamer consolidates durable Memory when it needs structural cleanup. Insight commits timestamped reflections under `insight_logs/` when broader patterns, risks, or next-step ideas are worth preserving.
+`maintain-rightmemory` lets your host agent consolidate durable Memory directly within the requested scope. Insight commits timestamped reflections under `insight_logs/` when broader patterns, risks, or next-step ideas are worth preserving.
 
 ## Command Runtime
 
@@ -576,9 +581,6 @@ rightmemory retrieve --session <agent-session-id> "find memory about the standal
 rightmemory update submit --session <agent-session-id> "remember that MCP should stay optional"
 rightmemory update pull --session <agent-session-id>
 rightmemory update undo --session <agent-session-id> <pending-candidate-id>
-rightmemory review scan --once
-rightmemory review watch
-rightmemory dreamer --session <agent-session-id> "optional consolidation hint"
 rightmemory insight --session <agent-session-id> "optional focus hint"
 rightmemory insight watch
 rightmemory prune
@@ -601,7 +603,6 @@ rightmemory watch status
 rightmemory watch stop
 rightmemory retrieve chat
 rightmemory update chat
-rightmemory dreamer chat
 rightmemory insight chat
 ```
 
@@ -615,7 +616,6 @@ For machine callers:
 ```bash
 rightmemory retrieve daemon --stdio-json
 rightmemory update daemon --stdio-json
-rightmemory dreamer daemon --stdio-json
 rightmemory insight daemon --stdio-json
 ```
 
@@ -633,17 +633,17 @@ The runtime is intentionally small:
 - Agent-based retrieve uses complete typed reads for local F# details and S# skills, line-numbered reads for local M# evidence, typed progressive reads for validated MF# graphs and their F#/M#/S# resources, and fixed `AC#writing` / `AC#design` sources for complete Agent Correction entries. CLI-agent emits the same selector as strict JSON. The shared runtime uses the canonical index and Retrieve contract to resolve ids, permitted ranges, hierarchy, source positions, and source-authored Markdown.
 - Embedding retrieve uses the same CLI and MCP entrypoints, with a configurable model service and an incrementally refreshed local source index. It ranks each complete query independently and returns a bounded list of original source entries for the calling agent to judge.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different no-profile root, or use `--profile <name>` / `.rightmemory-profile` for project-specific roots.
-- Retrieve, unified Update, transcript-review extraction, history, dreamer, insight, pruner, and sync repair have separate runtime boundaries selected by command line, queue, scanner, or watcher.
+- Retrieve, unified Update, history, insight, pruner, and sync repair have separate runtime boundaries selected by command line, queue, or watcher.
 - Role-specific executor settings are read from `<memory-root>/rightmemory.toml`.
 - Standalone calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`. In CLI-agent mode, only retrieve persists a provider mapping across commands. A new logical Retrieve session forks a reusable stable-prefix base, while explicit `chat` may reuse one process-local provider thread and other independent role turns start fresh threads.
-- Every new CLI-agent provider conversation receives an ownership record under `<memory-root>/.runtime/agent_cli_threads/`, including Retrieve prefix bases and their forks, one-shot turns, and failed isolated work. This lets transcript review exclude internal conversations without relying on an active session mapping.
+- Every new CLI-agent provider conversation receives an ownership record under `<memory-root>/.runtime/agent_cli_threads/`, including Retrieve prefix bases and their forks, one-shot turns, and failed isolated work. Cleanup uses those ownership records independently of an active session mapping.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
-- Use `rightmemory status` for a read-only operational dashboard across the configured memory root. Its `Sync` section reports whether sync is configured, the upstream tracking reference, ahead/behind counts relative to the last-fetched upstream, and the latest recorded sync outcome. Sync watcher process state remains under `Managed Watches`. The dashboard also summarizes Git state, Dreamer and Insight trigger progress, async update queues, bounded last-message previews, and file paths for full logs or state. Status never fetches, pulls, pushes, starts watchers, invokes a model, or writes runtime state. Use `rightmemory watch status` when you need the lower-level managed-watch process view.
+- Use `rightmemory status` for a read-only operational dashboard across the configured memory root. Its `Sync` section reports whether sync is configured, the upstream tracking reference, ahead/behind counts relative to the last-fetched upstream, and the latest recorded sync outcome. Sync watcher process state remains under `Managed Watches`. The dashboard also summarizes Git state, Insight trigger progress, async update queues, bounded last-message previews, and file paths for full logs or state. Status never fetches, pulls, pushes, starts watchers, invokes a model, or writes runtime state. Use `rightmemory watch status` when you need the lower-level managed-watch process view.
 - Use `rightmemory validate` for a read-only check of the configured root, or `rightmemory validate --root <path>` for an explicit root such as a maintenance worktree. It requires the canonical root documents, validates the complete Memory/Pursuit graph, any present Agent Correction collections, and `corrections.md`, and exits nonzero on failure.
 - A fresh-root install creates and baselines a tracked root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, any admitted Agent Correction collections, optional root `corrections.md`, sharing metadata and provider view sources, `insight_logs/*.md`, immutable `update_records/*.json`, and the narrowly defined `update_queue/` JSON paths; generated shared-view output stays outside the committed surface. Reinstall preserves an existing allowlist exactly. Package reference changes arrive with the installed software rather than through Memory sync.
 - Use `rightmemory reference <name>` to print a canonical package-owned reference without resolving or reading a Memory root. Supported names are `schema`, `memory`, `pursuit`, `agent-correction`, `edit-correction`, `shared-view`, and `retrieve-contract`.
 - Async `update submit` calls for the same `--session` accumulate as pending candidates and reset that session's configured quiet period. A global worker batches whole session queues, but the updater groups candidates by the work they describe rather than treating a session as one task. Natural-boundary submissions about related evidence are reconciled together; `pull` and `undo` remain per-session. Retrieve can see pending evidence as `Recent submitted RightMemory` before consolidation.
-- Automatic unified-update, dreamer, insight, and pruner turns use isolated Git worktrees when they operate on the main state root. Runtime validates complete role-owned results before landing them. Transcript review remains read-only and queues any resulting candidate.
+- Automatic unified-update, insight, and pruner turns use isolated Git worktrees when they operate on the main state root. Runtime validates complete role-owned results before landing them.
 - Standalone daemon context is preserved with Pydantic AI message history.
 - The local [MCP stdio adapter](docs/MCP.md) exposes the same runtime, async Update store, and guidance capture implementation as the CLI.
 
@@ -702,7 +702,7 @@ live updates on every device with its currently installed runtime. Then update
 and reinstall RightMemory everywhere before submitting another candidate; older
 runtimes reject the new paths rather than silently admitting state they cannot
 validate. Reinstall refuses a live legacy job without `candidate_uid` or any
-older pending transcript-review delivery, or any malformed queue, before
+pending retired transcript-review delivery, or any malformed queue, before
 changing the installation.
 
 Unsupported or unreadable historical async state also blocks reinstall, even
@@ -723,7 +723,7 @@ synchronized outcome.
 
 ### CLI-Agent Config
 
-CLI-agent mode uses a global provider plus role model settings. Most installs need a retrieve model and a default writer model; dreamer, insight, transcript reviewer, pruner, historian, and sync repair reuse the writer config unless you override them.
+CLI-agent mode uses a global provider plus role model settings. Most installs need a retrieve model and a default writer model; insight, pruner, historian, and sync repair reuse the writer config unless you override them.
 
 A minimal Codex setup:
 
@@ -751,7 +751,7 @@ provider = "codex"
 [retrieve.agent_cli]
 model = "gpt-5"
 
-[dreamer.agent_cli]
+[insight.agent_cli]
 provider = "claude"
 model = "sonnet"
 ```
@@ -798,16 +798,11 @@ extra_body = { chat_template_kwargs = { thinking = true, preserve_thinking = tru
 
 Agent-based retrieve retains native per-session model history and asks the model not to reselect unchanged content it already returned. A terminal model selection is always rendered faithfully. `rightmemory retrieve --include-returned --session <id> "<query>"` attaches the current authoritative forms of previously returned graph items, linked sources, and Agent Correction entries to that call's retrieval context without clearing accumulated coverage; later calls return to the normal context policy. Changed content at the same address is surfaced as changed. `max_output_chars` is a safety limit: oversized selections are rejected for model retry rather than truncated.
 
-Anthropic-compatible dreamer/reviewer config:
+Anthropic-compatible Insight config:
 
 ```toml
-[dreamer.model]
-model_id = "anthropic/example-dreamer-model"
-api_base = "https://api.example.com/anthropic"
-api_key = "<token>"
-
-[reviewer.model]
-model_id = "anthropic/example-reviewer-model"
+[insight.model]
+model_id = "anthropic/example-insight-model"
 api_base = "https://api.example.com/anthropic"
 api_key = "<token>"
 ```
@@ -816,7 +811,7 @@ api_key = "<token>"
 
 Normalized `deepseek-*` model ids keep that configurable OpenAI-compatible transport while using Pydantic AI's DeepSeek profile, so thinking-mode tool loops avoid forced tool selection and preserve `reasoning_content` between requests.
 
-Standalone configs use role-local model tables such as `[retrieve.model]`, `[update.model]`, `[historian.model]`, `[dreamer.model]`, `[insight.model]`, `[reviewer.model]`, and `[pruner.model]` for the roles you run. In the common setup, configure `[retrieve.model]` for search and `[update.model]` as the default writer model. `[reviewer.model]` is for transcript candidate extraction. Other non-retrieve roles reuse the writer model unless you give them their own table.
+Standalone configs use role-local model tables such as `[retrieve.model]`, `[update.model]`, `[historian.model]`, `[insight.model]`, and `[pruner.model]` for the roles you run. In the common setup, configure `[retrieve.model]` for search and `[update.model]` as the default writer model. Other non-retrieve roles reuse the writer model unless you give them their own table.
 
 Configure `[sync-reconciler.model]` or `[sync-reconciler.agent_cli]` only if sync repair should use a different model from the default writer.
 
@@ -901,7 +896,7 @@ Trace files include run, history-save, and tool events. They may include prompts
 
 ### Background Watchers
 
-RightMemory can keep transcript review, pruning, Dreamer, Insight, CLI-agent thread cleanup, and sync loops under the same background manager. The normal controls are:
+RightMemory can keep pruning, Insight, and sync loops under the same background manager. The normal controls are:
 
 ```bash
 rightmemory watch start
@@ -912,9 +907,9 @@ rightmemory --profile my-project watch start
 rightmemory --profile my-project status
 ```
 
-By default these commands manage `review`, `dreamer`, `insight`, and `pruner`, plus `sync` when `[sync].enabled` is true. Pass a target when you want one loop, such as `rightmemory watch start review`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.
+By default these commands manage `insight` and `pruner`, plus `sync` when `[sync].enabled` is true. Pass a target when you want one loop, such as `rightmemory watch start insight`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.
 
-For a single read-only view of watcher state, Dreamer and Insight trigger
+For a single read-only view of watcher state, Insight trigger
 progress, async update queues, recent previews, and paths to the underlying logs
 or state files, use `rightmemory status`. `rightmemory watch status`
 intentionally stays focused on managed watch process state.
@@ -929,76 +924,6 @@ state change. The diff stays authoritative in Git and is not duplicated in the
 record. Explicit Update turns without queued candidates create no provenance
 artifact.
 
-#### Transcript Review
-
-The transcript-review loop scans idle supported sessions, extracts high-value candidate evidence, and submits that evidence through the unified update queue. It can preserve settled user redirections and explicit feedback on proposed RightMemory edits, but it never edits semantic state directly. Update forms a tentative edit and then consults relevant root `corrections.md`, so session-derived updates benefit from existing RightMemory Edit Feedback without giving the reviewer write authority.
-
-Run the continuous loop directly with:
-
-```bash
-rightmemory review watch
-```
-
-The watcher starts immediately and runs full-batch scans, then sleeps before checking again. A successful batch triggers another immediate scan so backlog is not delayed by the interval. A failed batch retries after at most 60 seconds. The default idle interval is two hours; override it with `--interval <seconds>`.
-
-For cron, launchd, or other supervisors, call one bounded scan at a time:
-
-```bash
-rightmemory review scan --once
-```
-
-Each `scan --once` command reviews at most one eligible batch and then exits.
-By default a batch contains up to 3 provider sessions.
-
-For debugging an adapter without calling a model:
-
-```bash
-rightmemory review normalize --source claude --path ~/.claude/projects/<project>/<session>.jsonl
-```
-
-Explicit session-review workflows can check and record the existing reviewed-session state without running the automatic reviewer:
-
-```bash
-rightmemory review status codex:<session-id>
-rightmemory review mark codex:<session-id>
-```
-
-`status` prints `reviewed` or `not reviewed`. `mark` is atomic and idempotent; use it only after the review has completed successfully.
-
-The repository's explicit `review-rightmemory-session` workflow is direct curation rather than automatic candidate extraction. It forms tentative Memory and Agent Correction proposals from the full session, then reads relevant `corrections.md` entries as a late check before seeking approval or editing. It does not modify Pursuit or curate the edit-feedback file during that review.
-
-Add source presets to `<memory-root>/rightmemory.toml`:
-
-```toml
-[review]
-idle_seconds = 21600
-since_days = 3
-batch_size = 3
-
-[[review.sources]]
-kind = "claude"
-path = "~/.claude/projects"
-
-[[review.sources]]
-kind = "codex"
-path = "~/.codex/sessions"
-```
-
-If `[[review.sources]]` is omitted, RightMemory checks the default Codex and
-Claude locations. By default it considers transcript files modified in the last
-3 days, suppresses provider-local prefix duplicates from forked transcripts,
-then reviews time-adjacent eligible representatives in batches of up to 3. When
-one eligible transcript is a normalized-turn prefix of a longer transcript from
-the same provider, RightMemory reviews the longest representative and records
-the shorter covered session under `skipped_duplicate` after representative
-success. Review state is stored under `<memory-root>/.runtime/review/state.json`
-and records reviewed provider sessions by source and session id. A successful
-batch marks every included representative and covered duplicate reviewed only
-after extraction succeeds and any resulting candidate is durably submitted; a failed batch marks none.
-If the same provider session later changes or resumes,
-scanner state treats it as already reviewed unless you clear the corresponding
-review state.
-
 ### Forgetting And History
 
 RightMemory keeps active durable Memory intentionally perishable. `rightmemory prune` checks whether the repository has accumulated enough commits since the latest `prune:` checkpoint. The default threshold is 70 commits. `rightmemory prune watch` runs the same check periodically, and `rightmemory watch start` starts it by default. When pruning is due, the runtime supplies the pruner with the boundary commit, current head, previous prune ledger, and grace policy. The Memory-oriented pruner removes unchanged durable context only when it is no longer worth keeping, validates the complete graph, preserves ids referenced from Pursuit, and commits with a `prune:` subject.
@@ -1009,22 +934,12 @@ The `prune:` commit body is the lightweight ledger. It records the boundary, rem
 
 Ordinary `rightmemory retrieve` searches the current Memory/Pursuit graph and considers relevant Agent Corrections from the fixed collections. `rightmemory history --session <id> "query"` asks the historian to search `prune:` ledgers and Git snapshots for pruned Memory. Historian returns matches as historical context and does not write them back. When old context becomes useful again, submit ordinary update evidence so the updater can judge whether to reactivate it.
 
-### Change-Triggered Dreamer And Insight Cycles
+### Change-Triggered Insight Cycles
 
-Dreamer and Insight can run background cycles from the same manager:
+Insight can run background cycles through the manager:
 
 ```bash
-rightmemory watch start dreamer
 rightmemory watch start insight
-```
-
-`rightmemory dreamer watch` checks `<memory-root>/.runtime/dreamer/trigger-state.json` and runs after successful Memory-changing work has accumulated enough points. With the default `[dreamer.watch]` settings, each Memory-changing unified update contributes `1.0` point, the trigger threshold is `50`, and the watcher checks every `3000` seconds.
-
-```toml
-[dreamer.watch]
-trigger_points = 50
-update_candidate_points = 1.0
-check_interval_seconds = 3000
 ```
 
 `rightmemory insight watch` checks `<memory-root>/.runtime/insight/trigger-state.json` and writes timestamped reflection artifacts under `insight_logs/` when useful. Insight reads active Memory and prior Insight logs; it edits neither Memory nor Pursuit and does not read RightMemory edit `corrections.md`. With the default `[insight.watch]` settings, each Memory-changing unified update contributes `1.0` point, the trigger threshold is `150`, and the watcher checks every `3000` seconds.
@@ -1036,9 +951,9 @@ update_candidate_points = 1.0
 check_interval_seconds = 3000
 ```
 
-A landed Memory-changing Update transaction adds one configured unit to Dreamer and Insight regardless of how many candidates the updater reconciled. No-op and failed updates add no pressure. Transcript review only submits evidence to the unified queue and adds no pressure by itself. A successful automatic cycle consumes that role's configured threshold after it lands or completes as a valid no-op; failed cycles preserve accumulated points. `rightmemory dreamer watch --interval <seconds>` and `rightmemory insight watch --interval <seconds>` override the trigger-check cadence.
+A landed Memory-changing Update transaction adds one configured unit to Insight regardless of how many candidates the updater reconciled. No-op and failed updates add no pressure. A successful automatic cycle consumes the configured threshold after it lands or completes as a valid no-op; failed cycles preserve accumulated points. `rightmemory insight watch --interval <seconds>` overrides the trigger-check cadence.
 
-Transcript-review scans share their lock with the corresponding watcher under `.runtime/watch/`; dreamer, insight, and pruner watchers hold their own locks there as well. A competing scan or watcher exits instead of duplicating work. Unified Update also uses one updater execution lock. Isolated roles may do model work in temporary checkouts, and landing uses the shared write lock before changing the main repository.
+Insight and Pruner watchers hold their own locks under `.runtime/watch/`. A competing watcher exits instead of duplicating work. Unified Update also uses one updater execution lock. Isolated roles may do model work in temporary checkouts, and landing uses the shared write lock before changing the main repository.
 
 `rightmemory watch stop` writes a PID-bound cooperative stop request. A sleeping
 watcher exits within a few seconds; a watcher doing model work finishes the
@@ -1053,9 +968,9 @@ when Windows assigns it a new PID. Run `rightmemory watch start` or
 
 ### Isolated Automatic Writes
 
-Automatic unified-Update, dreamer, insight, and pruner turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. Update may commit Memory and Agent Correction files, and runtime adds an immutable candidate record to the same commit for queued work. Pursuit paths are excluded from Update's writable tools and accepted result surface. A queued no-change outcome still commits its candidate record; an explicit Update turn without queued candidates adds no managed artifact. Memory-oriented maintenance roles remain restricted to Memory, while Insight commits `insight_logs/*.md`. Runtime validates complete role-owned results and lands successful commits; empty `prune:` checkpoints are allowed.
+Automatic unified-Update, insight, and pruner turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. Update may commit Memory and Agent Correction files, and runtime adds an immutable candidate record to the same commit for queued work. Pursuit paths are excluded from Update's writable tools and accepted result surface. A queued no-change outcome still commits its candidate record; an explicit Update turn without queued candidates adds no managed artifact. Pruner remains restricted to Memory, while Insight commits `insight_logs/*.md`. Runtime validates complete role-owned results and lands successful commits; empty `prune:` checkpoints are allowed.
 
-Temporary session and provider state lives under `.runtime/isolated-state/` during an isolated turn and is promoted after successful landing or a valid no-op. Standalone turns seed local message history there. CLI-agent turns start speculative provider work in a fresh one-shot session. Successful ownership state is promoted; if later validation or landing fails, the ownership record alone is preserved so the abandoned internal thread remains excluded from transcript review and eligible for cleanup. Other temporary work is discarded, and the original candidate batch or maintenance trigger balance remains the retry source.
+Temporary session and provider state lives under `.runtime/isolated-state/` during an isolated turn and is promoted after successful landing or a valid no-op. Standalone turns seed local message history there. CLI-agent turns start speculative provider work in a fresh one-shot session. Successful ownership state is promoted; if later validation or landing fails, the ownership record alone is preserved so the abandoned internal thread remains eligible for cleanup. Other temporary work is discarded, and the original candidate batch or maintenance trigger balance remains the retry source.
 
 Dirty synchronized RightMemory files block automatic semantic writes before a temporary role starts, but runtime gives `sync-reconciler` one bounded repair chance. If repair commits a clean state, the original automatic write restarts from its source input. Otherwise it fails instead of stacking model work on unclear local changes.
 
@@ -1140,12 +1055,8 @@ RightMemory/
     ├── rightmemory-orchestrator-cli/SKILL.md
     ├── rightmemory-auto-orchestrator-cli/SKILL.md
     ├── rightmemory-manager/SKILL.md
-    ├── review-agent-guidance-inbox/SKILL.md
-    ├── review-rightmemory-session/SKILL.md
-    └── provider-transcript-normalizer/SKILL.md
+    └── review-agent-guidance-inbox/SKILL.md
 ```
-
-`review-rightmemory-session` is an explicit repository workflow, and `provider-transcript-normalizer` is an internal transcript-adapter asset. Neither is part of the five-skill installer surface.
 
 After install:
 
@@ -1204,7 +1115,7 @@ available to avoid launching an extra process for every Git command.
 - `MEMORY.md` and `PURSUITS.md` remain useful documents, not routing-only indexes.
 - Approval-gated and automatic orchestration submit durable evidence at natural boundaries; the updater owns Memory and Agent Correction admission, wording, and placement. The user owns Pursuit semantics.
 - Direct host-agent edits require an explicit maintenance request, using the workflow responsible for that content.
-- Dreamer consolidation and Insight reflection are explicit because structural cleanup and reflective artifacts have different authority boundaries.
+- `maintain-rightmemory` handles requested direct consolidation; Insight preserves reflective artifacts under its separate runtime boundary.
 - `corrections.md` stays RightMemory Edit Feedback rather than becoming Memory, Pursuit, Agent Corrections, or graph content.
 
 See [DESIGN_NOTES.md](DESIGN_NOTES.md) for the Pursuit map's ownership and storage rationale.

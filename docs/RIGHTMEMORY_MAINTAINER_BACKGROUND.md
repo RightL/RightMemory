@@ -32,12 +32,13 @@ The governing bias for semantic RightMemory is **high-signal retention rather th
 | `update-role.md` | Internal Update agent | Candidate reconciliation and edit procedure |
 | `rightmemory-orchestrator.SKILL.md`, `rightmemory-auto-orchestrator.SKILL.md` | Ordinary main agent | Approval-gated or automatic use of RightMemory |
 | `review-agent-guidance-inbox.SKILL.md` | Explicitly invoked general agent | User-reviewed admission or rejection of pending agent guidance |
+| `maintain-rightmemory/SKILL.md` | Explicitly invoked general agent | Requested direct maintenance of Memory, linked content, and correction surfaces |
 | `maintain-pursuit-map/SKILL.md` | Explicitly invoked general agent | Requested map edits, separate from Update and ordinary maintenance |
 | `rightmemory/guidance.py`, sync and tool boundaries | Runtime | Inbox format, atomic capture, deterministic merge, validation, and model-role isolation |
 
 The orchestrator files are **client skills read by the main working agent**, not internal orchestrator roles. Update is an internal RightMemory agent. The guidance-review skill is a separate direct-curation workflow used through agents such as Codex or Claude Code.
 
-Automatic Reviewer is currently deprecated and outside the active workflow. `review-rightmemory-session` is also not part of the expected ordinary flow; automatic orchestration should capture qualifying evidence during the session, while pending guidance is handled by the dedicated inbox review workflow.
+Ordinary orchestration captures qualifying evidence during the session. `maintain-rightmemory` handles requested direct consolidation and maintenance, while pending guidance uses the dedicated inbox review workflow.
 
 ## Ownership Boundaries
 
@@ -88,13 +89,11 @@ The contrast may concern conclusion, scope, assumptions, reasoning, process, omi
 
 An inbox entry is evidence, not a pre-classified Agent Correction. Review may instead promote a reusable operating rule to Cross-Session Agent Behavior, preserve a concrete contrast as an Agent Correction, retain both for distinct value, merge with existing guidance, or admit nothing. Formal Agent Corrections remain bounded and high-signal.
 
-### Retrieval and Inactive Review Paths
+### Retrieval
 
 The two complete but bounded Agent Correction collections are supplied in Retrieve's cached stable context and participate in ordinary retrieval. The guidance inbox never participates in retrieval before promotion.
 
 Do not add a separate correction index, correction-specific pass, progressive correction-reading protocol, or inbox retrieval path without evidence that the bounded design fails.
-
-Automatic Reviewer is deprecated for now. Do not modify or depend on it for the guidance-inbox workflow unless the user explicitly revives that role. `review-rightmemory-session` is likewise not an active dependency of this design.
 
 ### Visible Behavior and Repair
 

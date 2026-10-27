@@ -1167,7 +1167,7 @@ class SharedFileViewAutoPublishTests(unittest.TestCase):
             results = publish_file_view_outbox(
                 outbox,
                 credential_root=self.root,
-                operation_id="dreamer-operation-1",
+                operation_id="update-operation-1",
             )
 
         self.assertEqual(results[0].status, "published")

@@ -34,13 +34,10 @@ from .config import (
     default_memory_root,
     load_async_update_config,
     load_config,
-    load_dreamer_watch_config,
     load_insight_watch_config,
     load_pruner_config,
-    load_review_config,
     load_sync_config,
 )
-from .dreamer_trigger import DreamerTriggerStore
 from .doctor import format_doctor_report, run_agent_cli_doctor
 from .hub.app import create_hub_app
 from .hub.client import HubClientError
@@ -56,7 +53,6 @@ from .profiles import (
 )
 from .reference import REFERENCE_FILES, read_reference
 from .platform import restart_current_process
-from .review import ReviewScanner, ReviewSessionState, ReviewStateStore, normalize_transcript
 from .runtime import (
     AUTOMATIC_WRITE_ROLES,
     STATE_EFFECT,
@@ -117,9 +113,6 @@ from .web.process import (
     web_service_status,
 )
 
-DEFAULT_REVIEW_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
-DEFAULT_REVIEW_WATCH_RETRY_SECONDS = 60
-DEFAULT_DREAMER_WATCH_RETRY_SECONDS = 60
 DEFAULT_INSIGHT_WATCH_RETRY_SECONDS = 60
 DEFAULT_PRUNER_WATCH_INTERVAL_SECONDS = 2 * 60 * 60
 DEFAULT_PRUNER_WATCH_RETRY_SECONDS = 60
@@ -127,10 +120,6 @@ DEFAULT_SYNC_WATCH_INTERVAL_SECONDS = 60 * 60
 DEFAULT_WATCH_MAX_CONSECUTIVE_FAILURES = 3
 DEFAULT_HUB_ROOT = Path("rightmemory-hub")
 WATCH_REFRESH_POLL_SECONDS = 5
-DREAMER_WATCH_SESSION_ID = "dreamer-watch"
-_DREAMER_WATCH_SKIPPED = "skipped"
-_DREAMER_WATCH_SUCCEEDED = "succeeded"
-_DREAMER_WATCH_FAILED = "failed"
 INSIGHT_WATCH_SESSION_ID = "insight-watch"
 _INSIGHT_WATCH_SKIPPED = "skipped"
 _INSIGHT_WATCH_SUCCEEDED = "succeeded"
@@ -191,8 +180,6 @@ def main(argv: list[str] | None = None) -> int:
         return _web_main(argv[1:], memory_root)
     if argv and argv[0] == "pursuit":
         return _pursuit_main(argv[1:], memory_root)
-    if argv and argv[0] == "review":
-        return _review_main(argv[1:], memory_root)
     if argv and argv[0] == "sync":
         return _sync_main(argv[1:], memory_root)
     if argv and argv[0] == "doctor":
@@ -250,19 +237,13 @@ def main(argv: list[str] | None = None) -> int:
         _daemon_parser(args.role).parse_args(remaining[1:])
         return 0
     if remaining and remaining[0] == "watch":
-        if args.role == "dreamer":
-            if _is_help_request(remaining[1:]):
-                _dreamer_watch_parser().parse_args(remaining[1:])
-                return 0
-            watch_args = _dreamer_watch_parser().parse_args(remaining[1:])
-            return _dreamer_watch(watch_args.interval, watch_args.session, memory_root)
         if args.role == "insight":
             if _is_help_request(remaining[1:]):
                 _insight_watch_parser().parse_args(remaining[1:])
                 return 0
             watch_args = _insight_watch_parser().parse_args(remaining[1:])
             return _insight_watch(watch_args.interval, watch_args.session, memory_root)
-        raise ValueError("watch is supported for dreamer and insight roles")
+        raise ValueError("watch is supported for the insight role")
 
     config = load_config(args.role, memory_root=memory_root)
     if remaining and remaining[0] == "submit":
@@ -1112,10 +1093,6 @@ def _watch_targets(target: str) -> list[str]:
 
 
 def _watch_role(name: str) -> str:
-    if name == "review":
-        return "reviewer"
-    if name == "dreamer":
-        return "dreamer"
     if name == "pruner":
         return "pruner"
     if name == "insight":
@@ -1157,21 +1134,6 @@ def _chat_parser(role: str) -> argparse.ArgumentParser:
 def _daemon_parser(role: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=f"rightmemory {role} daemon")
     parser.add_argument("--stdio-json", action="store_true", help="read JSON lines from stdin and write JSON lines to stdout")
-    return parser
-
-
-def _dreamer_watch_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rightmemory dreamer watch")
-    parser.add_argument(
-        "--interval",
-        type=int,
-        help="override seconds between trigger checks",
-    )
-    parser.add_argument(
-        "--session",
-        default=DREAMER_WATCH_SESSION_ID,
-        help="persist dreamer message history under this session id",
-    )
     return parser
 
 
@@ -1305,64 +1267,6 @@ def _candidate_reference(value: str) -> int | str:
         )
 
 
-def _review_main(argv: list[str], memory_root: Path) -> int:
-    parser = argparse.ArgumentParser(prog="rightmemory review")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    scan = subparsers.add_parser("scan", help="scan configured transcript sources")
-    scan.add_argument("--once", action="store_true", help="review one eligible batch and exit")
-    scan.add_argument("--since-days", type=int, help="only review transcript files modified within this many days")
-    watch = subparsers.add_parser("watch", help="keep scanning configured transcript sources")
-    watch.add_argument(
-        "--interval",
-        type=int,
-        default=DEFAULT_REVIEW_WATCH_INTERVAL_SECONDS,
-        help="seconds to sleep when no eligible work is found",
-    )
-    watch.add_argument("--since-days", type=int, help="only review transcript files modified within this many days")
-    normalize = subparsers.add_parser("normalize", help="print normalized transcript JSON without running reviewer")
-    normalize.add_argument("--source", choices=("codex", "claude"), required=True, help="transcript provider format")
-    normalize.add_argument("--path", required=True, help="path to one provider transcript file")
-    status = subparsers.add_parser("status", help="report whether one provider session has been reviewed")
-    status.add_argument("identity", type=_review_identity, metavar="SOURCE:SESSION_ID")
-    mark = subparsers.add_parser("mark", help="mark one provider session reviewed")
-    mark.add_argument("identity", type=_review_identity, metavar="SOURCE:SESSION_ID")
-    args = parser.parse_args(argv)
-
-    if args.command == "normalize":
-        return _review_normalize(args.source, args.path)
-    if args.command == "status":
-        source, session_id = args.identity
-        key = f"{source}:{session_id}"
-        print("reviewed" if key in ReviewStateStore(memory_root).load().sessions else "not reviewed")
-        return 0
-    if args.command == "mark":
-        source, session_id = args.identity
-        session = ReviewSessionState(
-            source=source,
-            session_id=session_id,
-            last_reviewed_at=datetime.now(UTC).isoformat(),
-        )
-        added = ReviewStateStore(memory_root).mark_reviewed((session,))
-        print("marked reviewed" if added else "already reviewed")
-        return 0
-
-    if args.command == "scan":
-        if not args.once:
-            raise ValueError("review scan currently requires --once")
-        print(_run_review_scan(args.since_days, memory_root=memory_root).format())
-        return 0
-    if args.command == "watch":
-        return _review_watch(args.interval, args.since_days, memory_root)
-    raise ValueError(f"unknown review command: {args.command}")
-
-
-def _review_identity(value: str) -> tuple[str, str]:
-    source, separator, session_id = value.partition(":")
-    if separator != ":" or source not in {"codex", "claude"} or not session_id:
-        raise argparse.ArgumentTypeError("review identity must be codex:<session-id> or claude:<session-id>")
-    return source, session_id
-
-
 def _agent_cli_main(argv: list[str], memory_root: Path) -> int:
     parser = argparse.ArgumentParser(prog="rightmemory agent-cli")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1470,171 +1374,6 @@ def _doctor_main(argv: list[str], memory_root: Path) -> int:
         print(format_doctor_report(checks))
         return 0 if all(check.ok for check in checks) else 1
     raise ValueError(f"unknown doctor command: {args.command}")
-
-
-def _run_review_scan(
-    since_days: int | None = None,
-    *,
-    require_full_batch: bool = False,
-    memory_root: Path | None = None,
-):
-    reviewer_config = load_config("reviewer", memory_root=memory_root)
-    with WatchLock(reviewer_config.memory_root, "review"):
-        return _run_review_scan_with_config(reviewer_config, since_days, require_full_batch=require_full_batch)
-
-
-def _run_review_scan_with_config(
-    reviewer_config: Any,
-    since_days: int | None = None,
-    *,
-    require_full_batch: bool = False,
-):
-    review_config = load_review_config(memory_root=reviewer_config.memory_root)
-    if since_days is not None:
-        if since_days < 1:
-            raise ValueError("--since-days must be a positive integer")
-        review_config = replace(review_config, since_days=since_days)
-    runtime = RightMemoryRuntime(reviewer_config)
-    try:
-        scanner = ReviewScanner(review_config, runtime.run_session_turn)
-        return scanner.scan_once(require_full_batch=require_full_batch)
-    finally:
-        runtime.cleanup()
-
-
-def _review_watch(interval: int, since_days: int | None, memory_root: Path) -> int:
-    if interval < 1:
-        raise ValueError("--interval must be a positive integer")
-    reviewer_config = load_config("reviewer", memory_root=memory_root)
-    refresh = InstallStamp(reviewer_config.memory_root)
-    consecutive_failures = 0
-    exit_code = 0
-    try:
-        with _watch_stop_signal("review", reviewer_config.memory_root) as stop, WatchLock(
-            reviewer_config.memory_root, "review"
-        ):
-            next_config: Any | None = reviewer_config
-            while not stop.requested:
-                _reexec_if_install_changed(refresh, stop)
-                timestamp = datetime.now(UTC).isoformat()
-                print(f"[{timestamp}] rightmemory review scan", flush=True)
-                if next_config is None:
-                    next_config = load_config("reviewer", memory_root=reviewer_config.memory_root)
-                result = _run_review_scan_with_config(next_config, since_days, require_full_batch=True)
-                next_config = None
-                print(result.format(), flush=True)
-                _reexec_if_install_changed(refresh, stop)
-                if result.failed > 0:
-                    consecutive_failures += 1
-                    if _watch_failure_limit_reached("review", consecutive_failures):
-                        exit_code = 1
-                        break
-                    retry_seconds = min(interval, DEFAULT_REVIEW_WATCH_RETRY_SECONDS)
-                    if not _sleep_with_refresh_check(retry_seconds, refresh, stop):
-                        break
-                    continue
-                consecutive_failures = 0
-                if not stop.requested and result.reviewed > 0:
-                    continue
-                if not _sleep_with_refresh_check(interval, refresh, stop):
-                    break
-        print("rightmemory review watch stopped", file=sys.stderr)
-        return exit_code
-    except KeyboardInterrupt:
-        print("rightmemory review watch stopped", file=sys.stderr)
-        return 130
-
-
-def _run_dream_cycle(
-    session_id: str,
-    dreamer_config: Any | None = None,
-    memory_root: Path | None = None,
-    operation_id: str | None = None,
-) -> str:
-    config = dreamer_config if dreamer_config is not None else load_config("dreamer", memory_root=memory_root)
-    runtime = RightMemoryRuntime(config)
-    try:
-        if operation_id is None:
-            return runtime.run_cycle(session_id)
-        return runtime.run_cycle(session_id, operation_id=operation_id)
-    finally:
-        runtime.cleanup()
-
-
-def _dreamer_watch_once(watch_config: Any, session_id: str, run_cycle: Callable[[str, str], str]) -> str:
-    store = DreamerTriggerStore(watch_config.memory_root)
-    operation_id = store.claim_operation(watch_config.trigger_points)
-    if operation_id is None:
-        return _DREAMER_WATCH_SKIPPED
-
-    timestamp = datetime.now(UTC).isoformat()
-    print(f"[{timestamp}] rightmemory dreamer cycle", flush=True)
-    try:
-        output = run_cycle(session_id, operation_id)
-    except Exception as exc:
-        print(f"rightmemory dreamer cycle failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
-        return _DREAMER_WATCH_FAILED
-
-    print(output, flush=True)
-    store.complete_operation(operation_id, watch_config.trigger_points)
-    return _DREAMER_WATCH_SUCCEEDED
-
-
-def _dreamer_watch(interval: int | None, session_id: str, memory_root: Path) -> int:
-    if interval is not None and interval < 1:
-        raise ValueError("--interval must be a positive integer")
-    watch_config = load_dreamer_watch_config(memory_root=memory_root)
-    if interval is not None:
-        watch_config = replace(watch_config, check_interval_seconds=interval)
-    dreamer_config = load_config("dreamer", memory_root=memory_root)
-    refresh = InstallStamp(watch_config.memory_root)
-    consecutive_failures = 0
-    exit_code = 0
-    try:
-        with _watch_stop_signal("dreamer", watch_config.memory_root) as stop, WatchLock(
-            watch_config.memory_root, "dreamer"
-        ):
-            next_config: Any | None = dreamer_config
-            while not stop.requested:
-                _reexec_if_install_changed(refresh, stop)
-
-                def run_cycle(current_session_id: str, current_operation_id: str) -> str:
-                    nonlocal next_config
-                    if next_config is None:
-                        return _run_dream_cycle(
-                            current_session_id,
-                            memory_root=memory_root,
-                            operation_id=current_operation_id,
-                        )
-                    output = _run_dream_cycle(
-                        current_session_id,
-                        next_config,
-                        operation_id=current_operation_id,
-                    )
-                    next_config = None
-                    return output
-
-                status = _dreamer_watch_once(watch_config, session_id, run_cycle)
-                _reexec_if_install_changed(refresh, stop)
-                if status == _DREAMER_WATCH_SKIPPED:
-                    consecutive_failures = 0
-                    if not _sleep_with_refresh_check(watch_config.check_interval_seconds, refresh, stop):
-                        break
-                elif status == _DREAMER_WATCH_FAILED:
-                    consecutive_failures += 1
-                    if _watch_failure_limit_reached("dreamer", consecutive_failures):
-                        exit_code = 1
-                        break
-                    retry_seconds = min(watch_config.check_interval_seconds, DEFAULT_DREAMER_WATCH_RETRY_SECONDS)
-                    if not _sleep_with_refresh_check(retry_seconds, refresh, stop):
-                        break
-                else:
-                    consecutive_failures = 0
-        print("rightmemory dreamer watch stopped", file=sys.stderr)
-        return exit_code
-    except KeyboardInterrupt:
-        print("rightmemory dreamer watch stopped", file=sys.stderr)
-        return 130
 
 
 def _run_insight_cycle(
@@ -2028,14 +1767,6 @@ def _reexec_if_install_changed(refresh: InstallStamp, stop: _WatchStopToken | No
             os.environ.pop(WATCH_HANDOFF_PID_ENV, None)
         else:
             os.environ[WATCH_HANDOFF_PID_ENV] = previous_handoff
-
-
-def _review_normalize(source: str, path: str) -> int:
-    normalized = normalize_transcript(source, Path(path).expanduser())
-    if normalized is None:
-        raise ValueError("no completed turns found in transcript")
-    print(json.dumps(normalized.to_payload(), ensure_ascii=False, indent=2))
-    return 0
 
 
 def _chat(runtime: RightMemoryRuntime, session_id: str | None = None) -> int:
@@ -2628,64 +2359,20 @@ def _operation_session_id(operation_id: str) -> str:
     return f"op-{encoded}"
 
 
-def _combined_trigger_incrementer(*incrementers: Callable[[int], None]) -> Callable[[int], None]:
-    def increment(count: int) -> None:
-        for item in incrementers:
-            item(count)
-
-    return increment
-
-
 def _changed_memory_paths(paths: tuple[str, ...] | list[str]) -> bool:
     return any(path == "MEMORY.md" or (path.startswith("MEMORY_") and path.endswith(".md")) for path in paths)
 
 
 def _record_memory_change_pressure(memory_root: Path) -> None:
     try:
-        dreamer = load_dreamer_watch_config(memory_root=memory_root)
         insight = load_insight_watch_config(memory_root=memory_root)
-        _combined_trigger_incrementer(
-            _dreamer_trigger_incrementer(memory_root, dreamer.update_candidate_points),
-            _insight_trigger_incrementer(memory_root, insight.update_candidate_points),
-        )(1)
+        InsightTriggerStore(memory_root).increment(insight.update_candidate_points)
     except Exception as exc:
         print(
             f"Warning: could not update Memory-change trigger state: {type(exc).__name__}: {exc}",
             file=sys.stderr,
             flush=True,
         )
-
-
-def _dreamer_trigger_incrementer(memory_root: Path, points_per_item: float) -> Callable[[int], None]:
-    store = DreamerTriggerStore(memory_root)
-
-    def increment(count: int) -> None:
-        try:
-            store.increment(count * points_per_item)
-        except OSError as exc:
-            print(
-                f"Warning: could not update dreamer trigger state: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-                flush=True,
-            )
-
-    return increment
-
-
-def _insight_trigger_incrementer(memory_root: Path, points_per_item: float) -> Callable[[int], None]:
-    store = InsightTriggerStore(memory_root)
-
-    def increment(count: int) -> None:
-        try:
-            store.increment(count * points_per_item)
-        except OSError as exc:
-            print(
-                f"Warning: could not update insight trigger state: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-                flush=True,
-            )
-
-    return increment
 
 
 if __name__ == "__main__":

@@ -310,7 +310,7 @@ class ProfileTests(unittest.TestCase):
 
         self.assertIn("does not look like a RightMemory root", str(caught.exception))
 
-    def test_seed_profile_config_copies_executors_and_disables_broad_review_and_sync(self):
+    def test_seed_profile_config_copies_executors_and_disables_sync(self):
         with tempfile.TemporaryDirectory() as tempdir:
             default_root = Path(tempdir) / "default"
             default_root.mkdir()
@@ -329,15 +329,11 @@ class ProfileTests(unittest.TestCase):
                 trigger_candidates = 5
                 target_batch_candidates = 7
 
-                [dreamer.watch]
+                [insight.watch]
                 trigger_points = 25
 
                 [sync]
                 enabled = true
-
-                [[review.sources]]
-                kind = "codex"
-                path = "~/.codex/sessions"
                 """,
                 encoding="utf-8",
             )
@@ -350,10 +346,8 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("[update.async]", config_text)
         self.assertIn("trigger_candidates = 5", config_text)
         self.assertIn("target_batch_candidates = 7", config_text)
-        self.assertIn("[dreamer.watch]", config_text)
-        self.assertIn("sources = []", config_text)
+        self.assertIn("[insight.watch]", config_text)
         self.assertNotIn("[sync]", config_text)
-        self.assertNotIn("[[review.sources]]", config_text)
 
     def _git(self, root: Path, *args: str) -> str:
         result = subprocess.run(

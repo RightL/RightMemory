@@ -49,7 +49,6 @@ from .retrieve_selection import (
     RetrieveSelectionRenderer,
     parse_retrieve_selection_json,
 )
-from .semantic_upgrades import SemanticUpgradeContext, mark_absorbed, pending_context
 from .session import (
     MemoryWriteLock,
     MessageSessionStore,
@@ -79,8 +78,8 @@ from .update_queue import UpdateCandidate, UpdateQueueStore
 from .update_record import UpdateRecord, UpdateRecordStore
 
 
-AUTOMATIC_WRITE_ROLES = {"dreamer", "insight", "pruner", "update"}
-CYCLE_ROLES = {"dreamer", "insight"}
+AUTOMATIC_WRITE_ROLES = {"insight", "pruner", "update"}
+CYCLE_ROLES = {"insight"}
 HISTORY_READ_ROLES = {"historian", "pruner"}
 SYNC_TOOL_ROLES = {"sync-reconciler"}
 SYNC_DIRTY_STATUS = "dirty"
@@ -107,7 +106,6 @@ THINK_END_TAG = "</think>"
 STATE_EFFECT = "session-state"
 PRESSURE_EFFECT = "memory-pressure"
 PUBLISH_EFFECT = "file-view-publish"
-SEMANTIC_UPGRADE_EFFECT = "semantic-upgrades"
 
 
 @dataclass(frozen=True)
@@ -183,8 +181,6 @@ class RightMemoryRuntime:
         )
         self._codex_runner = codex_runner or (CodexSdkRunner() if uses_codex_sdk else None)
         self._owns_codex_runner = codex_runner is None and self._codex_runner is not None
-        self.semantic_upgrades = self._semantic_upgrade_context()
-        self._semantic_upgrade_ids = self.semantic_upgrades.ids if self.semantic_upgrades is not None else []
         self.agent = (
             None if self._embedding_retriever is not None
             else self._build_cli_agent() if config.runtime_mode == "cli-agent" else self._build_agent()
@@ -240,7 +236,6 @@ class RightMemoryRuntime:
             if post_sync is not None:
                 self._run_sync_reconciler(post_sync)
             self._publish_file_views_after_write()
-            self._mark_semantic_upgrades_absorbed()
             return str(result)
         self._pull_file_views_for_retrieve()
         prepared = self._prepare_retrieve_turn(
@@ -271,7 +266,6 @@ class RightMemoryRuntime:
         if post_sync is not None:
             self._run_sync_reconciler(post_sync)
         self._publish_file_views_after_write()
-        self._mark_semantic_upgrades_absorbed()
         return output
 
     def _run_cli_process_turn_unlocked(self, message: str) -> str:
@@ -287,7 +281,6 @@ class RightMemoryRuntime:
         if post_sync is not None:
             self._run_sync_reconciler(post_sync)
         self._publish_file_views_after_write()
-        self._mark_semantic_upgrades_absorbed()
         return str(result)
 
     @_complete_retrieve_sync
@@ -524,7 +517,6 @@ class RightMemoryRuntime:
                 self._run_sync_reconciler(post_sync)
             if not isolate_write:
                 self._publish_file_views_after_write()
-                self._mark_semantic_upgrades_absorbed()
             output = self._result_output(result)
             self._trace("run_finished", output=output)
         return output
@@ -537,7 +529,7 @@ class RightMemoryRuntime:
         operation_id: str | None = None,
     ) -> str:
         if self.config.role not in CYCLE_ROLES:
-            raise ValueError("run_cycle requires dreamer or insight role")
+            raise ValueError("run_cycle requires the insight role")
         hint = (operator_hint or "none").strip() or "none"
         message = "\n".join(
             (
@@ -1032,7 +1024,7 @@ class RightMemoryRuntime:
         changed_paths: tuple[str, ...],
         commits_landed: int,
         *,
-        pressure_points: tuple[float, float] | None,
+        pressure_points: float | None,
     ) -> tuple[OperationEffect, ...]:
         effects = [OperationEffect(STATE_EFFECT, metadata={"session_id": session_id})]
         effects.append(OperationEffect(PUBLISH_EFFECT))
@@ -1043,21 +1035,12 @@ class RightMemoryRuntime:
         ):
             if pressure_points is None:
                 raise RuntimeError("update pressure points were not prepared")
-            dreamer_points, insight_points = pressure_points
             effects.append(
                 OperationEffect(
                     PRESSURE_EFFECT,
                     metadata={
-                        "dreamer_points": dreamer_points,
-                        "insight_points": insight_points,
+                        "insight_points": pressure_points,
                     },
-                )
-            )
-        if self.config.role == "dreamer" and self._semantic_upgrade_ids:
-            effects.append(
-                OperationEffect(
-                    SEMANTIC_UPGRADE_EFFECT,
-                    metadata={"upgrade_ids": list(self._semantic_upgrade_ids)},
                 )
             )
         return tuple(effects)
@@ -1192,13 +1175,9 @@ class RightMemoryRuntime:
             state.promote_if_current(record.operation_id, outcome.sequence)
             return
         if effect.name == PRESSURE_EFFECT:
-            dreamer_points = effect.metadata.get("dreamer_points")
             insight_points = effect.metadata.get("insight_points")
             if (
-                not isinstance(dreamer_points, (int, float))
-                or isinstance(dreamer_points, bool)
-                or dreamer_points <= 0
-                or not isinstance(insight_points, (int, float))
+                not isinstance(insight_points, (int, float))
                 or isinstance(insight_points, bool)
                 or insight_points <= 0
             ):
@@ -1206,7 +1185,6 @@ class RightMemoryRuntime:
             record_memory_change_pressure_once(
                 self.config.memory_root,
                 record.operation_id,
-                dreamer_points=float(dreamer_points),
                 insight_points=float(insight_points),
             )
             return
@@ -1224,13 +1202,6 @@ class RightMemoryRuntime:
                     raise_on_failure=True,
                     operation_id=record.operation_id,
                 )
-            return
-        if effect.name == SEMANTIC_UPGRADE_EFFECT:
-            upgrade_ids = effect.metadata.get("upgrade_ids")
-            if not isinstance(upgrade_ids, list) or not all(isinstance(item, str) for item in upgrade_ids):
-                raise ValueError("semantic-upgrades effect requires string upgrade_ids")
-            mark_absorbed(self.config.state_root, upgrade_ids)
-            self._semantic_upgrade_ids = [item for item in self._semantic_upgrade_ids if item not in upgrade_ids]
             return
         raise ValueError(f"unknown semantic operation effect: {effect.name}")
 
@@ -1560,7 +1531,7 @@ class RightMemoryRuntime:
         self._run_sync_reconciler(result)
 
     def _memory_write_lock(self):
-        if self.config.role in {"historian", "retrieve", "reviewer"}:
+        if self.config.role in {"historian", "retrieve"}:
             return nullcontext()
         return MemoryWriteLock(self.config.memory_root)
 
@@ -1788,20 +1759,6 @@ class RightMemoryRuntime:
             store.effect_state_root(operation_id, PUBLISH_EFFECT),
         )
 
-    def _semantic_upgrade_context(self) -> SemanticUpgradeContext | None:
-        if self.config.role != "dreamer":
-            return None
-        context = pending_context(self.config.memory_root, state_root=self.config.state_root)
-        if not context.notes and not context.warnings:
-            return None
-        return context
-
-    def _mark_semantic_upgrades_absorbed(self) -> None:
-        if self.config.role != "dreamer" or not self._semantic_upgrade_ids:
-            return
-        mark_absorbed(self.config.state_root, self._semantic_upgrade_ids)
-        self._semantic_upgrade_ids = []
-
     def _build_agent(self):
         try:
             from pydantic_ai import Agent
@@ -1813,7 +1770,6 @@ class RightMemoryRuntime:
             "instructions": build_instructions(
                 self.config.memory_root,
                 self.config.role,
-                semantic_upgrades=self.semantic_upgrades,
             ),
             "tools": self._agent_tools(),
             "retries": self.config.max_tool_retries,
@@ -1848,8 +1804,6 @@ class RightMemoryRuntime:
             "fresh_provider_session": self.config.fresh_provider_session,
             "trace_event": self._trace,
         }
-        if self.semantic_upgrades is not None:
-            kwargs["semantic_upgrades"] = self.semantic_upgrades
         return CliAgentExecutor(
             self.config.memory_root,
             self.config.role,
@@ -1882,7 +1836,7 @@ class RightMemoryRuntime:
                     self._agent_tool(self.tools.git_show_file),
                 ]
             )
-        if self.config.role in {"historian", "reviewer"}:
+        if self.config.role == "historian":
             return read_tools
         write_tools = [
             *read_tools,
@@ -2137,8 +2091,6 @@ class _IsolatedStateOverlay:
             paths.append(
                 ProviderSessionStore(self.state_root, self.role).path(self.session_id).relative_to(self.state_root)
             )
-        if self.role == "dreamer":
-            paths.append(Path(".runtime") / "semantic-upgrades.json")
         return paths
 
     def _promoted_paths(self) -> list[Path]:

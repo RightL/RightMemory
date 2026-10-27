@@ -27,9 +27,9 @@ class WebStudioReadApiTests(unittest.TestCase):
         insight = self.root / "insight_logs"
         insight.mkdir()
         (insight / "2026-06-13.md").write_text("# Insight\n\nUseful pattern.\n", encoding="utf-8")
-        log = self.root / ".runtime" / "watch" / "review.log"
+        log = self.root / ".runtime" / "watch" / "insight.log"
         log.parent.mkdir(parents=True)
-        log.write_text("old\nrecent review message\n", encoding="utf-8")
+        log.write_text("old\nrecent insight message\n", encoding="utf-8")
         self.client = TestClient(create_web_app(self.root))
         session = self.client.get("/api/session")
         self.csrf = session.json()["csrf_token"]
@@ -76,17 +76,17 @@ class WebStudioReadApiTests(unittest.TestCase):
     def test_logs_list_and_tail_known_files(self):
         listing = self.client.get("/api/logs")
         logs = {item["id"]: item for item in listing.json()["data"]["logs"]}
-        detail = self.client.get("/api/logs/watch:review")
-        rejected = self.client.get("/api/logs/../../review.log")
+        detail = self.client.get("/api/logs/watch:insight")
+        rejected = self.client.get("/api/logs/../../insight.log")
 
         self.assertEqual(listing.status_code, 200)
-        self.assertIn("watch:review", logs)
+        self.assertIn("watch:insight", logs)
         self.assertEqual(detail.status_code, 200)
-        self.assertIn("recent review message", detail.json()["data"]["text"])
+        self.assertIn("recent insight message", detail.json()["data"]["text"])
         self.assertEqual(rejected.status_code, 404)
 
     def test_missing_known_log_returns_structured_missing_result(self):
-        detail = self.client.get("/api/logs/watch:dreamer")
+        detail = self.client.get("/api/logs/watch:pruner")
 
         self.assertEqual(detail.status_code, 200)
         self.assertTrue(detail.json()["data"]["missing"])

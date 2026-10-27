@@ -867,10 +867,7 @@ async function renderStatus() {
           : "<p>No watches configured.</p>"
       }
     </section>
-    <div class="two-column">
-      ${renderStatusSection("Dreamer", status.dreamer)}
-      ${renderStatusSection("Insight", status.insight)}
-    </div>
+    ${renderStatusSection("Insight", status.insight)}
     ${renderStatusSection("Async Update", status.update, true)}
   `;
 }
@@ -926,9 +923,7 @@ async function renderSettings() {
       </div>
       <div class="settings-grid">
         ${settingTile("Config", settings.config_exists ? "rightmemory.toml found" : "Using defaults", settings.config_path)}
-        ${runtimeTile("Review", settings.runtime?.review)}
         ${runtimeTile("Update Queue", settings.runtime?.update)}
-        ${runtimeTile("Dreamer", settings.runtime?.dreamer_watch)}
         ${runtimeTile("Insight", settings.runtime?.insight_watch)}
         ${runtimeTile("Pruner", settings.runtime?.pruner)}
         ${runtimeTile("Sync", settings.runtime?.sync)}
@@ -1005,9 +1000,6 @@ function runtimeTile(title, wrapper) {
   }
   if (typeof value.generation_commits !== "undefined") {
     return settingTile(title, `${value.generation_commits} commits`, `${value.revival_grace_checkpoints} revival checkpoints`);
-  }
-  if (typeof value.batch_size !== "undefined") {
-    return settingTile(title, `${value.batch_size} sessions`, `${value.since_days} day review window`);
   }
   if (typeof value.target_batch_candidates !== "undefined") {
     return settingTile(

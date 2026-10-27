@@ -14,12 +14,10 @@ MEMORY_ROOT = Path(os.environ.get(MEMORY_ROOT_ENV, "~/.rightmemory")).expanduser
 _STATE_ROOT_UNSET = cast(Path, object())
 CONFIG_PATH = MEMORY_ROOT / "rightmemory.toml"
 ROLES = {
-    "dreamer",
     "historian",
     "insight",
     "pruner",
     "retrieve",
-    "reviewer",
     "shared-view-builder",
     "sync-reconciler",
     "update",
@@ -27,9 +25,7 @@ ROLES = {
 RUNTIME_ROLES = ROLES
 MODEL_FALLBACK_ROLES = (
     "update",
-    "dreamer",
     "insight",
-    "reviewer",
     "pruner",
     "sync-reconciler",
     "historian",
@@ -37,18 +33,12 @@ MODEL_FALLBACK_ROLES = (
 )
 DEFAULT_MAX_TOOL_RETRIES = 10
 DEFAULT_RETRIEVE_MAX_OUTPUT_CHARS = 100_000
-DEFAULT_REVIEW_IDLE_SECONDS = 6 * 60 * 60
-DEFAULT_REVIEW_SINCE_DAYS = 3
-DEFAULT_REVIEW_BATCH_SIZE = 3
 DEFAULT_UPDATE_TRIGGER_CANDIDATES = 15
 DEFAULT_UPDATE_TARGET_BATCH_CANDIDATES = 30
 DEFAULT_UPDATE_MAX_WAIT_SECONDS = 24 * 60 * 60
 DEFAULT_SYNC_STALE_PULL_HOURS = 24
 DEFAULT_PRUNER_GENERATION_COMMITS = 70
 DEFAULT_PRUNER_REVIVAL_GRACE_CHECKPOINTS = 2
-DEFAULT_DREAMER_TRIGGER_POINTS = 50.0
-DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS = 1.0
-DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS = 3000
 DEFAULT_INSIGHT_TRIGGER_POINTS = 150.0
 DEFAULT_INSIGHT_UPDATE_CANDIDATE_POINTS = 1.0
 DEFAULT_INSIGHT_CHECK_INTERVAL_SECONDS = 3000
@@ -77,34 +67,11 @@ class SyncConfig:
 
 
 @dataclass(frozen=True)
-class ReviewSourceConfig:
-    kind: str
-    path: Path
-
-
-@dataclass(frozen=True)
-class ReviewConfig:
-    memory_root: Path = MEMORY_ROOT
-    idle_seconds: int = DEFAULT_REVIEW_IDLE_SECONDS
-    since_days: int = DEFAULT_REVIEW_SINCE_DAYS
-    batch_size: int = DEFAULT_REVIEW_BATCH_SIZE
-    sources: list[ReviewSourceConfig] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
 class AsyncUpdateConfig:
     memory_root: Path = MEMORY_ROOT
     trigger_candidates: int = DEFAULT_UPDATE_TRIGGER_CANDIDATES
     target_batch_candidates: int = DEFAULT_UPDATE_TARGET_BATCH_CANDIDATES
     max_wait_seconds: int = DEFAULT_UPDATE_MAX_WAIT_SECONDS
-
-
-@dataclass(frozen=True)
-class DreamerWatchConfig:
-    memory_root: Path = MEMORY_ROOT
-    trigger_points: float = DEFAULT_DREAMER_TRIGGER_POINTS
-    update_candidate_points: float = DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS
-    check_interval_seconds: int = DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS
 
 
 @dataclass(frozen=True)
@@ -252,50 +219,6 @@ def _executor_runtime_config(
     )
 
 
-def load_review_config(memory_root: Path | None = None) -> ReviewConfig:
-    root = _active_memory_root(memory_root)
-    data = _load_raw_config(memory_root)
-
-    if not root.exists():
-        raise FileNotFoundError(f"RightMemory memory root does not exist: {root}")
-
-    _reject_unknown_keys(data, _top_level_keys(), "top-level")
-    section = data.get("review", {})
-    if section is None:
-        section = {}
-    if not isinstance(section, dict):
-        raise ValueError("[review] must be a TOML table")
-    _reject_unknown_keys(section, {"idle_seconds", "since_days", "batch_size", "sources"}, "[review]")
-
-    idle_seconds = section.get("idle_seconds", DEFAULT_REVIEW_IDLE_SECONDS)
-    if not isinstance(idle_seconds, int) or idle_seconds < 1:
-        raise ValueError("[review].idle_seconds must be a positive integer")
-
-    since_days = section.get("since_days", DEFAULT_REVIEW_SINCE_DAYS)
-    if not isinstance(since_days, int) or since_days < 1:
-        raise ValueError("[review].since_days must be a positive integer")
-
-    batch_size = section.get("batch_size", DEFAULT_REVIEW_BATCH_SIZE)
-    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
-        raise ValueError("[review].batch_size must be a positive integer")
-
-    raw_sources = section.get("sources")
-    if raw_sources is None:
-        sources = _default_review_sources()
-    else:
-        if not isinstance(raw_sources, list):
-            raise ValueError("[[review.sources]] must be an array of tables")
-        sources = [_review_source(item) for item in raw_sources]
-
-    return ReviewConfig(
-        memory_root=root,
-        idle_seconds=idle_seconds,
-        since_days=since_days,
-        batch_size=batch_size,
-        sources=sources,
-    )
-
-
 def load_async_update_config(memory_root: Path | None = None) -> AsyncUpdateConfig:
     root = _active_memory_root(memory_root)
     data = _load_raw_config(memory_root)
@@ -353,58 +276,6 @@ def load_async_update_config(memory_root: Path | None = None) -> AsyncUpdateConf
     )
 
 
-def load_dreamer_watch_config(memory_root: Path | None = None) -> DreamerWatchConfig:
-    root = _active_memory_root(memory_root)
-    data = _load_raw_config(memory_root)
-
-    if not root.exists():
-        raise FileNotFoundError(f"RightMemory memory root does not exist: {root}")
-
-    _reject_unknown_keys(data, _top_level_keys(), "top-level")
-    section = data.get("dreamer", {})
-    if section is None:
-        section = {}
-    if not isinstance(section, dict):
-        raise ValueError("[dreamer] must be a TOML table")
-    _reject_unknown_keys(section, {"model", "agent_cli", "watch"}, "[dreamer]")
-
-    watch = section.get("watch", {})
-    if watch is None:
-        watch = {}
-    if not isinstance(watch, dict):
-        raise ValueError("[dreamer.watch] must be a TOML table")
-    _reject_unknown_keys(
-        watch,
-        {"trigger_points", "update_candidate_points", "review_session_points", "check_interval_seconds"},
-        "[dreamer.watch]",
-    )
-    if "review_session_points" in watch:
-        # Keep older user config loadable, but transcript extraction no longer creates pressure directly.
-        _positive_number(watch, "review_session_points", 1.0, "[dreamer.watch]")
-
-    return DreamerWatchConfig(
-        memory_root=root,
-        trigger_points=_positive_number(
-            watch,
-            "trigger_points",
-            DEFAULT_DREAMER_TRIGGER_POINTS,
-            "[dreamer.watch]",
-        ),
-        update_candidate_points=_positive_number(
-            watch,
-            "update_candidate_points",
-            DEFAULT_DREAMER_UPDATE_CANDIDATE_POINTS,
-            "[dreamer.watch]",
-        ),
-        check_interval_seconds=_positive_integer(
-            watch,
-            "check_interval_seconds",
-            DEFAULT_DREAMER_CHECK_INTERVAL_SECONDS,
-            "[dreamer.watch]",
-        ),
-    )
-
-
 def load_insight_watch_config(memory_root: Path | None = None) -> InsightWatchConfig:
     root = _active_memory_root(memory_root)
     data = _load_raw_config(memory_root)
@@ -427,12 +298,9 @@ def load_insight_watch_config(memory_root: Path | None = None) -> InsightWatchCo
         raise ValueError("[insight.watch] must be a TOML table")
     _reject_unknown_keys(
         watch,
-        {"trigger_points", "update_candidate_points", "review_session_points", "check_interval_seconds"},
+        {"trigger_points", "update_candidate_points", "check_interval_seconds"},
         "[insight.watch]",
     )
-    if "review_session_points" in watch:
-        # Keep older user config loadable, but transcript extraction no longer creates pressure directly.
-        _positive_number(watch, "review_session_points", 1.0, "[insight.watch]")
 
     return InsightWatchConfig(
         memory_root=root,
@@ -518,7 +386,7 @@ def _reject_unknown_keys(data: dict[str, object], allowed: set[str], context: st
 
 
 def _top_level_keys() -> set[str]:
-    return {*ROLES, "agent_cli", "review", "debug", "sync"}
+    return {*ROLES, "agent_cli", "debug", "sync"}
 
 
 def _role_section(data: dict[str, object], role: str) -> dict[str, object]:
@@ -533,7 +401,7 @@ def _role_section(data: dict[str, object], role: str) -> dict[str, object]:
 
 def _allowed_role_keys(role: str) -> set[str]:
     allowed = {"model", "agent_cli"}
-    if role in {"dreamer", "insight"}:
+    if role == "insight":
         allowed.add("watch")
     if role == "pruner":
         allowed.update({"generation_commits", "revival_grace_checkpoints"})
@@ -751,22 +619,3 @@ def _role(value: str) -> str:
         joined = ", ".join(sorted(ROLES))
         raise ValueError(f"role must be one of: {joined}")
     return role
-
-
-def _review_source(data: object) -> ReviewSourceConfig:
-    if not isinstance(data, dict):
-        raise ValueError("[[review.sources]] entries must be TOML tables")
-    _reject_unknown_keys(data, {"kind", "path"}, "[[review.sources]]")
-    kind = _required_string(data, "kind").lower()
-    if kind not in {"codex", "claude"}:
-        raise ValueError("[[review.sources]].kind must be one of: codex, claude")
-    path = _required_string(data, "path")
-    return ReviewSourceConfig(kind=kind, path=Path(path).expanduser())
-
-
-def _default_review_sources() -> list[ReviewSourceConfig]:
-    home = Path.home()
-    return [
-        ReviewSourceConfig(kind="codex", path=home / ".codex" / "sessions"),
-        ReviewSourceConfig(kind="claude", path=home / ".claude" / "projects"),
-    ]
