@@ -1,112 +1,62 @@
 # RightMemory Maintainer Background
 
-This document gives fresh agents the context needed to review or modify RightMemory. It explains intent, reader boundaries, and settled rationale. It is **non-normative**: the schema, module rules, runtime contracts, and role prompts remain authoritative for the concerns they own.
+This document gives fresh agents the context needed to review or modify RightMemory. It explains intent, reader boundaries, and settled rationale. It is non-normative: the shared domain cores, schema, focused rules, runtime contracts, and role prompts own the concerns they define.
 
 ## Purpose
 
-RightMemory is curated cross-session context. It should preserve compact state that materially improves future work without becoming a transcript archive, task log, or duplicate project database.
+RightMemory should help later agents understand the user and other people, collaborate with fewer repeated corrections, and repeat meaningful work with less human direction. One daily entry uses three domain curators:
 
-Its three semantic modules are:
+| Domain | Shared core | Curated state |
+|---|---|---|
+| Ordinary Memory | `MEMORY_RULES.md` | The Memory graph, including user and people context |
+| Agent guidance | `AGENT_GUIDANCE_RULES.md` | `learning/guidance/` and the existing Agent Correction collections |
+| Work experience and skills | `WORK_SKILLS_RULES.md` | `learning/experiences/` and `learning/skills/` with supporting assets |
 
-- **Memory**: durable context that improves future judgment, action, interpretation, or retrieval.
-- **Pursuit**: the user's hierarchical map of ongoing directions and useful entry context.
-- **Agent Corrections**: bounded, reusable cases in which user feedback redirected prior agent work.
+Each domain uses the same core for candidate updates and requested maintenance. The mode changes the task scope, not the purpose of the learning. Cores express durable intent; role prompts supply execution procedure; supporting details can evolve without rewriting that intent.
 
-Project-local artifacts remain the primary home for implementation detail, experiment history, operational state, and detailed continuation instructions. Pursuit may support continuity, but it is not primarily a resume log.
+Pursuit remains the user's hierarchical direction map. Ordinary learning does not change it. Project artifacts remain the primary home for implementation history and operational detail; retained learning adds the context, judgment, or resources that help later work.
 
-Root `corrections.md` contains **RightMemory Edit Feedback** used to avoid repeated curation mistakes. It is operational feedback, not semantic RightMemory state.
+## Evidence and Curation
 
-Root `AGENT_GUIDANCE_INBOX.md` contains pending agent-guidance evidence awaiting explicit review. It is Git-tracked and synchronized, but it is not a fourth semantic module and is not exposed to Retrieve, shared views, or ordinary RightMemory model roles.
+Ordinary context uses the existing Memory submit/update path. Behavioral and procedural evidence uses one shared learning-candidate path. The guidance and skills curators can draw different useful lessons from the same interaction and record processing independently.
 
-The governing bias for semantic RightMemory is **high-signal retention rather than maximum capture**: save substantial rediscovery, preserve meaningful intent, improve future decisions, or prevent a reusable failure—not ordinary progress merely because work occurred. The guidance inbox may capture evidence at a lower bar because pending entries cannot affect future agents until they are reviewed and promoted.
+Capture concrete potentially useful evidence before demanding a settled general rule. Preserve the circumstances, user's contribution, observed outcome, and uncertainty needed to interpret it. Formal curation makes a separate judgment about usefulness, recurrence, scope, and strength of evidence. Raw candidates are retrievable before curation and remain evidence afterward; processing does not automatically turn them into adopted guidance or remove them.
+
+Requested maintenance may retire raw evidence after both curators have processed it and its independent value is preserved. No per-candidate human approval queue is required. The user's current direction remains authoritative over an old or overbroad interpretation.
 
 ## Readers and Responsibilities
 
 | Component | Reader | Owns |
 |---|---|---|
-| `rightmemory-schema.md` | Retrieve, Update, maintainers | Representation, graph structure, backing forms, validity |
-| `MEMORY_RULES.md`, `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md` | Update, maintenance and review workflows | Meaning, admission, scope, lifecycle, and retention of each semantic module |
-| `RIGHTMEMORY_EDIT_CORRECTION_RULES.md` | Update, direct maintenance | RightMemory Edit Feedback |
-| `retrieve-role.md` | Internal Retrieve agent | Retrieval judgment and selection procedure |
-| `RETRIEVE_CONTRACT.md` | Runtime and integration code | Input envelope, selectors, delivery, terminal output |
-| `update-role.md` | Internal Update agent | Candidate reconciliation and edit procedure |
-| `rightmemory-orchestrator.SKILL.md`, `rightmemory-auto-orchestrator.SKILL.md` | Ordinary main agent | Approval-gated or automatic use of RightMemory |
-| `review-agent-guidance-inbox.SKILL.md` | Explicitly invoked general agent | User-reviewed admission or rejection of pending agent guidance |
-| `maintain-rightmemory/SKILL.md` | Explicitly invoked general agent | Requested direct maintenance of Memory, linked content, and correction surfaces |
-| `maintain-pursuit-map/SKILL.md` | Explicitly invoked general agent | Requested map edits, separate from Update and ordinary maintenance |
-| `rightmemory/guidance.py`, sync and tool boundaries | Runtime | Inbox format, atomic capture, deterministic merge, validation, and model-role isolation |
+| Shared domain cores | The corresponding update and maintenance agents | Purpose, learning judgment, domain ownership |
+| `rightmemory-schema.md` | Retrieval, curators, maintainers | Graph and learning representation and validity |
+| `PURSUIT_RULES.md`, `AGENT_CORRECTION_MEMORY_RULES.md` | Relevant curators and maintainers | Focused map and bounded-case semantics |
+| `RIGHTMEMORY_EDIT_CORRECTION_RULES.md` | Curators and maintainers | Operational feedback on RightMemory edits |
+| `retrieve.md`, `assistant-retrieve.md` | Retrieval agents | Relevance judgment and source inspection |
+| `RETRIEVE_CONTRACT.md` | Runtime and internal retrieval agents | Selection and delivery mechanics |
+| `update.md`, `guidance-curator.md`, `skills-curator.md` | Domain agents | Bounded execution procedure |
+| Daily entry skills and MCP instructions | The main working agent | Retrieval, evidence routing, and ready-task dispatch |
+| `maintain-rightmemory`, `maintain-agent-guidance`, `maintain-work-skills` | Requested domain maintainer | Broader maintenance within the user's scope |
+| `learning.py` and execution adapters | Runtime | Durable evidence, per-domain receipts, isolation, validation, and publication |
 
-The orchestrator files are **client skills read by the main working agent**, not internal orchestrator roles. Update is an internal RightMemory agent. The guidance-review skill is a separate direct-curation workflow used through agents such as Codex or Claude Code.
+One concept should have one normative owner. Other files refer to it rather than restating the full definition. Program-managed evidence and state transitions are enforced by code, not recreated as instructions for every agent.
 
-Ordinary orchestration captures qualifying evidence during the session. `maintain-rightmemory` handles requested direct consolidation and maintenance, while pending guidance uses the dedicated inbox review workflow.
+## Existing State
 
-## Ownership Boundaries
+Agent Corrections remains the existing bounded Expression/Substance case library, now owned by the guidance curator. It is not duplicated in a second case library. A useful generalized rule and a concrete case can coexist when they add distinct value.
 
-A concept should have one normative owner:
+Existing `AGENT_GUIDANCE_INBOX.md`, Cross-Session Agent Behavior, and S# resources remain readable. Installation preserves them and their references; no automatic migration or broad rewrite is part of this change. A concrete scoped maintenance task can address relevant overlap and ownership.
 
-- The **schema** defines stored objects, relationships, and validity.
-- **Module rules** define meaning, admission, scope, and retention.
-- **Role prompts** define invocation-specific procedure.
-- **Client skills** define only what the ordinary main agent must decide.
-- **Runtime contracts and code** own transport, selectors, caching, suppression, and output mechanics.
-- **Validators** enforce mechanically checkable constraints.
+Root `corrections.md` remains RightMemory Edit Feedback. It is operational curation feedback, not ordinary user memory, behavioral guidance, or a graph item. Curators form a tentative judgment before consulting relevant feedback.
 
-Other files may rely on a definition without restating it. A compact operational test is appropriate only when that reader must make the decision itself. The orchestrator therefore contains omission tests for proposal, submission, or guidance capture, but not the complete module rules.
+## Retrieval and Visible Behavior
 
-## Settled Design Choices
+Relevant raw learning evidence, curated guidance, correction cases, experiences, and complete skills participate in ordinary retrieval. Internal processing receipts do not. Retrieval remains driven by the current need; the entire evidence history is not injected every turn.
 
-### Pursuit
-
-Pursuit is a human-owned map of ongoing directions. An item has a title, stable id, position in the tree, and optional Markdown body. Detailed execution continuity belongs in project artifacts. Incompleteness alone does not justify a Pursuit. The human editor and explicitly invoked `maintain-pursuit-map` are the normal semantic write entrances; Update and ordinary maintenance read the map without changing it. See [Pursuit Map](PURSUIT_MAP.md) for use and [design rationale](../DESIGN_NOTES.md) for the ownership boundary.
-
-### Orchestration Modes
-
-Both orchestrator skills share the same retrieval policy and candidate discipline, but guidance capture now differs from formal semantic admission.
-
-- The approval-gated skill proposes qualifying Memory or Agent Correction evidence and submits it to Update only after user approval. An explicit request to submit, save, remember, or follow the evidence in future counts as approval.
-- The automatic skill sends qualifying Memory evidence directly to Update at a natural boundary. Neither mode submits or proposes Pursuit changes from ordinary task activity.
-- In automatic mode, settled agent guidance or user redirection goes to `AGENT_GUIDANCE_INBOX.md` when the resulting direction is clear and may be useful in similar future work. Unresolved discussion and obviously one-off local adjustments are excluded.
-- When the user explicitly asks RightMemory to remember guidance or follow it in future, automatic mode sends it through Update rather than the inbox.
-- One interaction may produce both an Update candidate and a guidance-inbox entry when they preserve distinct evidence.
-
-The inbox deliberately lowers the **capture** bar without lowering the formal semantic **admission** bar. Pending guidance does not affect acting agents. A later user-reviewed workflow decides whether it should become Cross-Session Agent Behavior, Agent Corrections, both for distinct reasons, or neither.
-
-This separation allows more reliable capture of implicit and explicit redirections without letting guidance accumulate uncontrollably in formal Memory or consume the bounded Agent Correction collections.
-
-### Agent Guidance Inbox
-
-`AGENT_GUIDANCE_INBOX.md` contains pending entries only. Each entry has a stable generated id, session provenance, a submission timestamp, and free-form Markdown evidence.
-
-The inbox is structurally excluded from the semantic graph, Retrieve, shared views, and all ordinary RightMemory model-role file, search, and Git views. Sync transports it and resolves independent additions mechanically by entry id; it does not ask a model to interpret pending guidance.
-
-`review-agent-guidance-inbox` considers related entries together, compares them with current Cross-Session Agent Behavior and Agent Corrections, and proposes add, merge, replace, remove, covered, reject, or defer outcomes. Only explicitly approved semantic changes are applied. Accepted, rejected, and already-covered entries are removed; deferred and unreviewed entries remain pending. Git history is the audit trail.
-
-### Agent Corrections
-
-A user redirection may be explicit or highly implicit. The core signal is the **settled contrast between the course of identifiable prior agent work and the resulting direction**. Unease, a guiding question, or added information may expose an omission and redirect the work without explicitly saying it was wrong.
-
-The contrast may concern conclusion, scope, assumptions, reasoning, process, omissions, behavior, or presentation. The final conclusion need not change if the user corrected how it was reached, checked, scoped, or explained. A different result alone is insufficient: ordinary continuation, selection among intentionally open options, a new task, or an independent agent correction is not automatically a user redirection.
-
-An inbox entry is evidence, not a pre-classified Agent Correction. Review may instead promote a reusable operating rule to Cross-Session Agent Behavior, preserve a concrete contrast as an Agent Correction, retain both for distinct value, merge with existing guidance, or admit nothing. Formal Agent Corrections remain bounded and high-signal.
-
-### Retrieval
-
-The two complete but bounded Agent Correction collections are supplied in Retrieve's cached stable context and participate in ordinary retrieval. The guidance inbox never participates in retrieval before promotion.
-
-Do not add a separate correction index, correction-specific pass, progressive correction-reading protocol, or inbox retrieval path without evidence that the bounded design fails.
-
-### Visible Behavior and Repair
-
-RightMemory does not require a visible retrieved-guidance block or a fixed phrase such as `Correction noted.` Applicable guidance should affect the work itself; those mechanisms were compensations for weak agent behavior, not product semantics.
-
-Update may repair a clear schema or supplied-rule violation in its writable Memory or Agent Correction state when that violation becomes apparent while processing an update. Pursuit stays read-only even when a map repair seems useful. Update should not inspect unrelated content merely to turn the work into a general audit, and should report rather than guess when the correct repair is uncertain.
+Applicable guidance should affect the work itself. Ordinary learning does not require a visible acknowledgement, a fixed phrase, or a per-item review ceremony. A candidate receipt confirms durable capture; a completion receipt confirms publication. Neither establishes that the learned behavior has been empirically validated on future work.
 
 ## How to Modify RightMemory
 
-Read the current canonical files before proposing changes; do not reconstruct the design from old versions or memory. First identify which file owns the concept. Then stand in each reader's shoes: **what decisions must this agent make, what context will it receive, and what should it not need to know?**
+Read the current canonical files before proposing changes. Identify which reader owns the decision and which evidence it will receive. Keep the shared intent stable and change the smallest layer that addresses the actual problem.
 
-Keep capture, review, and semantic admission distinct. A pending inbox entry is not formal guidance, and runtime isolation should be enforced structurally rather than repeated as instructions in every prompt.
-
-Precision takes priority over brevity. Shorten by removing duplication, moving mechanics to code or contracts, and narrowing each file to its reader—not by replacing necessary judgment with vague abstraction. Restore older wording only when it expresses a missing decision, not when its meaning is already owned elsewhere.
-
-Avoid broad redesigns for local wording problems and new protocols for hypothetical scale issues. Discuss larger changes one conceptual group at a time, use concrete diffs, and check terminology, references, and reader assumptions after merging. Do not create another all-in-one model document that competes with the canonical schema and rules.
+Separate source evidence, interpreted guidance, reusable method, and execution authority in judgment without imposing a fixed body schema on every document. Prefer meaningful boundaries and useful natural-language context to new taxonomies, duplicate libraries, or protocols for hypothetical scale.

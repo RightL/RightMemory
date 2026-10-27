@@ -23,6 +23,8 @@ from .provider_threads import ProviderThreadLease, ProviderThreadStore
 
 READ_ROLES = {"historian", "retrieve"}
 WRITE_ROLES = {
+    "guidance-curator",
+    "skills-curator",
     "insight",
     "pruner",
     "shared-view-builder",

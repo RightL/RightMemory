@@ -5,7 +5,7 @@ description: Use when a user wants to initialize or onboard a RightMemory memory
 
 # RightMemory Onboarding Interview
 
-Run a short, evidence-aware interview that produces reviewable RightMemory drafts from durable project, user, environment, and agent-behavior context.
+Run a short, evidence-aware interview that produces reviewable RightMemory drafts from durable project, user, people, and environment context. Preserve behavioral and work-method evidence for their domain curators.
 
 ## Workflow
 
@@ -23,9 +23,9 @@ Run a short, evidence-aware interview that produces reviewable RightMemory draft
 
 ## Memory Content
 
-- Record reusable facts, relationships, preferences, decisions, and future-facing rules. Rewrite evidence as durable memory; do not preserve transcript narration, onboarding chatter, or source citations.
+- Record useful facts, relationships, personal preferences, choices, and reasons with enough circumstances to interpret them. Preserve consequential uncertainty. Behavioral guidance and reusable work methods use the shared learning path and their own curators rather than new rules or skills in the Memory graph.
 - Avoid broad preference surveys, quickly stale status labels, and questions already answered by available evidence.
-- Organize only the domains supported by the evidence. Common domains are a project or responsibility graph, `# User Context`, `# Cross-Session Agent Behavior`, and `# Open Context Questions`.
+- Organize only the domains supported by the evidence. Common domains are a project or responsibility graph, `# User Context`, and `# Open Context Questions`.
 - Put loose, actionable unknowns in `# Open Context Questions` as normal nodes with `todo:` edges. Use `Uncertain:` only for tentative claims worth retaining and revising later.
 - Use `{F#slug}` only when moving content to `MEMORY_slug.md` improves root-file scanability. Keep the heading and its summary in the current file, but not the moved child content. A terminal `####` file reference may have a summary but no child nodes or headings.
 

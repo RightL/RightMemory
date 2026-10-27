@@ -4,7 +4,7 @@
 
 Agent Corrections is RightMemory's bounded library of reusable cases in which a user redirected prior agent work. It preserves concrete contrast that would be weakened or lost if reduced to a generalized preference or rule.
 
-A stored Agent Correction is not the same thing as a user redirection in conversation. A redirection is evidence; Update or an explicit review workflow decides whether that evidence deserves a reusable entry.
+A stored Agent Correction is not the same thing as a user redirection in conversation. A redirection is evidence; the guidance curator decides whether that evidence deserves a reusable entry during an update or requested maintenance.
 
 ## User Redirection
 
@@ -68,7 +68,7 @@ No field labels or rigid body template are required. Prefer concrete contrast, p
 
 ## Relationship To Other State
 
-Use Cross-Session Agent Behavior when a generalized operating rule is useful independently of the correction case. Use Agent Corrections when the concrete contrast itself helps a future agent recognize or avoid the failure.
+Use guidance under `learning/guidance/` when an operating rule is useful independently of the correction case. Use Agent Corrections when the concrete contrast itself helps a future agent recognize or avoid the failure. Existing Cross-Session Agent Behavior remains readable until a concrete scoped maintenance task addresses it.
 
 Keep both only when each representation adds distinct value. Do not duplicate a correction merely because it can be paraphrased as a rule.
 

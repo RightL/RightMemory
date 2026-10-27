@@ -18,7 +18,8 @@
 - Core runtime code lives in `rightmemory/`; tests live in `tests/`.
 - `rightmemory/graph.py` owns the canonical RightMemory grammar and in-memory document index. Graph-aware validation, retrieval, tools, sync, and shared-view code must consume that index rather than parse the Markdown structure again.
 - Canonical role prompts live in `rightmemory/prompts/`. Edit role behavior there first; installed skills are not the source of truth for role prompts.
-- `rightmemory/reference/` owns the package-shipped schema and semantic rule documents. These are product definitions, not Memory-root or skills-root state.
+- `rightmemory/reference/` owns the package-shipped schema and semantic rule documents. `MEMORY_RULES.md`, `AGENT_GUIDANCE_RULES.md`, and `WORK_SKILLS_RULES.md` are shared domain cores for update and maintenance. These are product definitions, not Memory-root or skills-root state.
+- `rightmemory/learning.py` owns candidate evidence, per-domain processing receipts, and canonical learning file validation; installation, sync, retrieval, and curation consume its helpers rather than parsing that state again.
 - `rightmemory/reference/rightmemory-schema.md` defines the shared Memory and Pursuit graph and file schema; `rightmemory/reference/PURSUIT_RULES.md` defines Pursuit lifecycle judgment; `rightmemory/reference/AGENT_CORRECTION_MEMORY_RULES.md` defines the fixed Agent Correction Memory module.
 - `rightmemory/reference/RIGHTMEMORY_EDIT_CORRECTION_RULES.md` defines non-semantic feedback about edits to RightMemory; `RIGHTMEMORY_EDIT_CORRECTIONS.example.md` illustrates its format.
 - `MEMORY.example.md` and `PURSUITS.example.md` are installer seeds and sources of their managed example blocks.

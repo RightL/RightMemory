@@ -1,59 +1,56 @@
 ---
 name: rightmemory-auto-orchestrator
-description: "Use when the user explicitly chooses automatic RightMemory orchestration for ordinary work."
+description: "Use when the user chooses automatic RightMemory use during ordinary work."
 ---
 
 # Use RightMemory Automatically
 
-RightMemory contains durable Memory, the user's Pursuit map, and Agent Corrections. Use it as a client during ordinary work. Pursuit is read-only context here: do not submit map changes through Update. Explicit map requests belong to the dedicated `maintain-pursuit-map` workflow.
+Help this conversation benefit from prior context and leave useful evidence for later work. One daily entry serves ordinary Memory, agent guidance, and reusable work experience; their curators decide what to retain and how to generalize it. Pursuit remains the user's read-only direction map during ordinary work.
 
-## Session
-
-Choose one stable session id for the conversation and reuse it for every RightMemory call.
+Use one stable session id throughout the conversation. Use the root selected by the user's task or profile; `rightmemory status` reports it when a learning command needs an explicit root.
 
 ## Retrieve
 
-- Retrieve when RightMemory plausibly contains context that could materially affect how you understand or approach the current work. Skip clearly self-contained requests for which stored context is unlikely to matter.
-- Describe the context needed rather than forwarding the user's message verbatim:
+Retrieve when stored context could materially change how you understand or approach the work:
 
-  `rightmemory retrieve --session <session-id> "<need>"`
+```bash
+rightmemory retrieve --session <session-id> "<context needed>"
+```
 
-- Reconcile retrieved content with the current conversation and current evidence. Current user instructions take precedence over stale or conflicting stored state.
-- Apply relevant guidance in the work itself; do not merely quote or acknowledge it.
-- If retrieved Memory or Agent Corrections are stale, wrong, misleading, or overbroad, do not follow them. Submit the problem and current evidence immediately. Treat stale Pursuit as read-only context too; task activity does not authorize correcting the map.
-- Ordinary retrieval already considers relevant Agent Corrections. Use `rightmemory agent-corrections writing` or `rightmemory agent-corrections design` only when the user explicitly requests a whole-collection review. Use `writing` when changing expression or presentation alone could resolve the issue; use `design` when reasoning, decisions, actions, omissions, workflow, or behavior must change. Run both commands only when the requested review spans both collections.
+Consider relevant Memory, guidance, correction cases, experiences, skills, and raw learning evidence. Reconcile them with current evidence and the user's current request. Apply useful guidance in the work itself; preserve the difference between a reported interaction and an adopted rule. Read a relevant skill in full when using its instructions.
 
-## Submit Updates
+When retrieved content is wrong, stale, misleading, or overbroad, submit the problem and current evidence through its domain's path. Pursuit stays read-only; explicit map edits use `maintain-pursuit-map`.
 
-- Submit automatic Memory evidence when omitting it would likely cause poorer future decisions or substantial rediscovery.
-- Include concrete findings of missing or ambiguous context that meet this bar, even when the answer is not yet known.
-- Do not submit transient progress, routine task results, unfinished work by itself, or implementation detail already adequately preserved in project-local artifacts, unless needed to correct existing Memory or Agent Corrections.
-- Submit once the durable evidence is clear and the work reaches a natural boundary. Completion is not required. If nothing passes the bar, submit nothing; task progress and new ideas do not trigger a map-change suggestion.
-- Combine related evidence due at the same boundary into one candidate. State what happened, what is true now, and why it may matter; do not prescribe final stored wording, ids, classification, placement, or edits.
-- Submit with:
+## Submit Useful Evidence
 
-  `rightmemory update submit --session <session-id> "<candidate>"`
+Capture concrete evidence that could improve later understanding, decisions, collaboration, or repeated work. A possible lesson need not already be a stable rule, and uncertainty about recurrence is not by itself a reason to discard it. Preserve the circumstances and unresolved uncertainty that affect its meaning.
 
-  Continue the user's task without waiting for Update.
+For ordinary context about the user, other people, projects, or decisions, use:
 
-## Capture Agent Guidance
+```bash
+rightmemory update submit --session <session-id> "<Memory evidence>"
+```
 
-Capture plausible evidence about how an agent should handle similar future work. Bias toward capture rather than filtering: uncertainty about whether the pattern will recur is not a reason to skip it, and similar captures from distinct occurrences are useful.
+For behavioral guidance, user redirections, and work experience that might become reusable, use the shared learning path:
 
-Capture both direct guidance and explicit or implicit user redirections. A redirection is a user response that changes or reveals how identifiable prior work should proceed. Infer an implicit redirection from the contrast between the approach you were taking and the direction the user now indicates.
+```bash
+rightmemory learning --root <active-root> submit --session <session-id> --request-id <submission-id> "<learning evidence>"
+```
 
-The signal may be a correction, rejection, unease, guiding question, added constraint or information, or a change in conclusion, scope, reasoning, process, omissions, behavior, or presentation. It does not need to be phrased as a general rule.
+`--file <evidence-file>` can supply UTF-8 evidence instead of an inline argument. Reuse the request id and evidence when retrying the same learning submission. An explicit request to remember guidance or a procedure uses this same learning path, not ordinary Update.
 
-Do not require a fully settled general principle or task completion. Capture once the signal is concrete enough to describe the prior direction and what should change.
+Describe what mattered: for a redirection, the prior approach, user signal, and resulting direction; for repeated work, the method, human contributions, outcome, and resources that could spare later rediscovery. Preserve actual evidence without inventing final wording, a general rule, or a skill. One learning candidate can help both curators.
 
-Skip only mere continuation, selection among intentionally open options, an unrelated new task, or a detail clearly confined to the current artifact with no plausible agent-behavior lesson. Do not skip merely because the guidance may be one-off.
+Submit at a natural boundary once the evidence is concrete enough to describe; completion is not required. Combine related evidence due together and capture each occurrence once. Routine progress and copies of project artifacts rarely add value. Independent later occurrences can add useful evidence even when the apparent lesson is similar.
 
-Capture each distinct occurrence once. Similar guidance may be captured again when a later interaction independently provides the same pattern.
+## Process Ready Learning
 
-If the user explicitly asks RightMemory to remember or follow guidance in future, submit it through Update. Otherwise use:
+Act on returned learning-ready notices through their `run_argv`. This preserves the mode and scope of interrupted work. For a new update, the command is:
 
-  `rightmemory guidance submit --session <session-id> "<candidate>"`
+```bash
+rightmemory learning --root <active-root> run --domain <guidance|skills> --mode update
+```
 
-For a redirection, record the prior approach or omission, the user's signal, and the resulting direction. For direct guidance, include enough context to judge its scope. Record the interaction evidence; do not invent a broader rule, final stored wording, or destination. Apply the resulting direction to the current work regardless of capture.
+Use the host's background execution when available while continuing the user's work. Updates process bounded batches; use returned ready notices to continue remaining evidence in subsequent batches. Existing active tasks should be inspected with `learning status`, not started twice. Saved candidates are retrievable evidence immediately; they are not proof that a rule or skill was adopted. Report a curation outcome only when its completion receipt confirms it.
 
-One interaction may produce both an Update candidate and a guidance candidate when they preserve distinct evidence. Continue the user's task without waiting.
+Explicit broader maintenance uses `maintain-rightmemory`, `maintain-agent-guidance`, or `maintain-work-skills` for the corresponding domain. Ordinary learning does not require the user to review every candidate.

@@ -23,6 +23,14 @@ from .guidance import (
     validate_guidance_inbox,
 )
 from .isolated_write import WorktreeLease
+from .learning import (
+    is_learning_evidence_path,
+    is_learning_path,
+    learning_evidence_sha256,
+    learning_validation_errors,
+    merge_learning_evidence,
+    validate_learning_candidate_deletion,
+)
 from .platform import (
     detached_process_kwargs,
     lock_file,
@@ -62,6 +70,7 @@ MEMORY_SYNC_PATHS = (
     "update_queue/recovery/*.json",
     "update_queue/lease.json",
     "update_records/*.json",
+    "learning/**",
 )
 REQUIRED_ROOT_DOCUMENTS = ("MEMORY.md", "PURSUITS.md")
 LEGACY_ROOT_REFERENCE_PATHS = frozenset(
@@ -429,6 +438,7 @@ class SyncManager:
                     "message": inspection.repair.message,
                     "files": inspection.repair.files,
                     "merge_conflicted": inspection.merge_conflicted,
+                    "learning_input_sha256": learning_evidence_sha256(candidate.path),
                 }
             )
             policy_sha256 = self._repair_policy_sha256()
@@ -454,6 +464,7 @@ class SyncManager:
                 "expected_merge_parent": inspection.expected_merge_parent,
                 "merge_conflicted": inspection.merge_conflicted,
                 "repair_input_sha256": repair_input_sha256,
+                "learning_input_sha256": learning_evidence_sha256(candidate.path),
                 "policy_sha256": policy_sha256,
                 # The full diagnostic binds operation identity but is not retained in the receipt.
                 "repair_diagnostic": {
@@ -491,6 +502,7 @@ class SyncManager:
                     "message": final_inspection.repair.message,
                     "files": final_inspection.repair.files,
                     "merge_conflicted": final_inspection.merge_conflicted,
+                    "learning_input_sha256": learning_evidence_sha256(candidate.path),
                 }
             )
             if final_input_hash != repair_input_sha256:
@@ -720,6 +732,31 @@ class SyncManager:
         merge = self._run_git(candidate.path, "merge", "--no-edit", upstream_commit)
         if merge.returncode != 0:
             conflicts = self._conflicted_files(candidate.path)
+            evidence_conflicts = [path for path in conflicts if is_learning_evidence_path(path)]
+            if evidence_conflicts:
+                invalid_learning = self._resolve_learning_conflicts(
+                    candidate.path, evidence_conflicts, start_commit, upstream_commit
+                )
+                if invalid_learning is not None:
+                    return _CandidateInspection(None, invalid_learning, start_commit, upstream_commit, True)
+                conflicts = self._conflicted_files(candidate.path)
+                if not conflicts:
+                    committed = self._run_git(candidate.path, "commit", "--no-edit")
+                    if committed.returncode != 0:
+                        return _CandidateInspection(
+                            None,
+                            SyncResult("error", "could not commit deterministic learning merge", evidence_conflicts),
+                            start_commit,
+                            upstream_commit,
+                            True,
+                        )
+                    candidate_commit = self._required_head(candidate.path)
+                    invalid = self._validate_candidate(candidate.path, start_commit, candidate_commit)
+                    if invalid is None:
+                        return _CandidateInspection(None, None, candidate_commit, None, False)
+                    if invalid.status == "error":
+                        return _CandidateInspection(None, invalid, candidate_commit, None, False)
+                    return _CandidateInspection(invalid, None, candidate_commit, None, False)
             if GUIDANCE_INBOX_PATH in conflicts:
                 if len(conflicts) != 1:
                     return _CandidateInspection(
@@ -802,6 +839,11 @@ class SyncManager:
                     upstream_commit,
                     True,
                 )
+            invalid_learning = _invalid_learning_result(candidate.path) or self._validate_learning_history(
+                candidate.path, start_commit, upstream_commit
+            )
+            if invalid_learning is not None:
+                return _CandidateInspection(None, invalid_learning, start_commit, upstream_commit, True)
             return _CandidateInspection(
                 SyncResult("conflict", "incoming candidate has merge conflicts", conflicts),
                 None,
@@ -817,6 +859,134 @@ class SyncManager:
         if invalid.status == "error":
             return _CandidateInspection(None, invalid, candidate_commit, None, False)
         return _CandidateInspection(invalid, None, candidate_commit, None, False)
+
+    def _resolve_learning_conflicts(
+        self, root: Path, conflicts: list[str], start_commit: str, upstream_commit: str
+    ) -> SyncResult | None:
+        merge_base = self._git_stdout(root, "merge-base", start_commit, upstream_commit)
+        if not merge_base:
+            raise RuntimeError("learning merge has no common ancestor")
+        # Git can mistake a retired source and a new receipt for a rename.
+        # Recover original identities from the trees, never from renamed stages.
+        paths = sorted(
+            {
+                *conflicts,
+                *(
+                    path
+                    for revision in (start_commit, upstream_commit)
+                    for path in self._diff_paths(root, merge_base, revision)
+                    if is_learning_evidence_path(path)
+                ),
+            }
+        )
+        deletions: list[tuple[str, str]] = []
+        for relative in paths:
+            try:
+                stages = [
+                    self._learning_blob(root, f"{revision}:{relative}", missing_ok=True)
+                    for revision in (merge_base, start_commit, upstream_commit)
+                ]
+                versions = [text for text in stages if text is not None]
+                merged = merge_learning_evidence(relative, *versions)
+                path = root / relative
+                if path.is_symlink() or any(parent.is_symlink() for parent in path.parents if parent != root):
+                    raise ValueError("learning evidence must not traverse symbolic links")
+                if path.exists() and not path.is_file():
+                    raise ValueError("learning evidence must be a regular file")
+                deleted = stages[0] is not None and (stages[1] is None or stages[2] is None)
+                if deleted:
+                    if not relative.startswith("learning/candidates/"):
+                        raise ValueError("processed learning receipts cannot be deleted")
+                    path.unlink(missing_ok=True)
+                    deletions.append((relative, merged))
+                    added = self._run_git(root, "update-index", "--force-remove", "--", relative)
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(merged, encoding="utf-8")
+                    added = self._run_git(root, "add", "-f", "--", relative)
+                if added.returncode != 0:
+                    raise RuntimeError("could not stage deterministic learning evidence merge")
+            except (OSError, ValueError, RuntimeError) as exc:
+                return SyncResult("error", f"learning evidence conflict: {exc}", [relative])
+        for relative, original in deletions:
+            try:
+                validate_learning_candidate_deletion(root, relative, original)
+            except (OSError, ValueError) as exc:
+                return SyncResult("error", f"learning evidence conflict: {exc}", [relative])
+        return None
+
+    def _validate_learning_history(
+        self, root: Path, start_commit: str, candidate_commit: str
+    ) -> SyncResult | None:
+        # Inspect every newly reachable version, including sources added and
+        # removed between syncs. Endpoint diffs cannot prove safe retirement.
+        history = self._run_git(
+            root,
+            "log",
+            "--format=",
+            "--raw",
+            "--no-abbrev",
+            "--full-history",
+            "--diff-merges=separate",
+            "--no-renames",
+            "-z",
+            f"{start_commit}..{candidate_commit}",
+            "--",
+            "learning/candidates",
+            "learning/processed",
+        )
+        if history.returncode != 0:
+            raise RuntimeError("could not inspect synchronized learning history")
+        versions: dict[str, set[str]] = {}
+        tokens = [token for token in history.stdout.split("\0") if token.strip()]
+        if len(tokens) % 2:
+            raise RuntimeError("invalid learning history path listing")
+        for position in range(0, len(tokens), 2):
+            header, relative = tokens[position : position + 2]
+            fields = header.strip().split()
+            if len(fields) != 5 or not fields[0].startswith(":"):
+                raise RuntimeError("invalid learning history object listing")
+            if not is_learning_evidence_path(relative):
+                return SyncResult("error", "noncanonical learning evidence in synchronized history", [relative])
+            for mode, blob in ((fields[0][1:], fields[2]), (fields[1], fields[3])):
+                if mode == "000000":
+                    continue
+                if mode not in {"100644", "100755"}:
+                    return SyncResult("error", "non-regular learning evidence in synchronized history", [relative])
+                versions.setdefault(relative, set()).add(blob)
+        for relative, blobs in sorted(versions.items()):
+            path = root / relative
+            try:
+                current = path.read_text(encoding="utf-8") if path.is_file() else None
+                for blob in sorted(blobs):
+                    original = self._learning_blob(root, blob)
+                    if original is None:
+                        raise ValueError("learning history source is unavailable")
+                    if current is not None:
+                        merge_learning_evidence(relative, original, current)
+                    elif relative.startswith("learning/candidates/"):
+                        validate_learning_candidate_deletion(root, relative, original)
+                    else:
+                        raise ValueError("processed learning receipts cannot be deleted")
+            except (OSError, ValueError, RuntimeError) as exc:
+                return SyncResult("error", f"invalid synchronized learning history: {exc}", [relative])
+        return None
+
+    def _learning_blob(self, root: Path, object_name: str, *, missing_ok: bool = False) -> str | None:
+        # Unlike command diagnostics, evidence must decode without replacement.
+        result = subprocess.run(
+            ["git", "cat-file", "blob", object_name],
+            cwd=root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            if missing_ok:
+                return None
+            raise RuntimeError("could not read learning evidence from Git")
+        return result.stdout.decode("utf-8")
 
     def _resolve_guidance_conflict(self, root: Path) -> SyncResult | None:
         try:
@@ -872,6 +1042,8 @@ class SyncManager:
         status = self._git_stdout(candidate.path, "status", "--porcelain")
         if status:
             raise RuntimeError("sync repair candidate has uncommitted changes")
+        if learning_evidence_sha256(candidate.path) != _required_record_string(record, "learning_input_sha256"):
+            raise RuntimeError("sync repair changed immutable learning evidence or processed receipts")
         invalid = self._validate_candidate(
             candidate.path,
             _required_record_string(record, "active_start_commit"),
@@ -906,6 +1078,11 @@ class SyncManager:
         invalid_records = _invalid_update_records_result(candidate_root)
         if invalid_records is not None:
             return invalid_records
+        invalid_learning = _invalid_learning_result(candidate_root) or self._validate_learning_history(
+            candidate_root, start_commit, candidate_commit
+        )
+        if invalid_learning is not None:
+            return invalid_learning
         return self._invalid_graph_result(candidate_root)
 
     def _active_preflight(self) -> SyncResult | None:
@@ -941,6 +1118,9 @@ class SyncManager:
         invalid_records = _invalid_update_records_result(self.memory_root)
         if invalid_records is not None:
             return invalid_records
+        invalid_learning = _invalid_learning_result(self.memory_root)
+        if invalid_learning is not None:
+            return invalid_learning
         return self._invalid_graph_result(self.memory_root)
 
     def _capture_valid_tip(self, upstream_commit: str) -> str | SyncResult:
@@ -962,6 +1142,9 @@ class SyncManager:
                         "sync refused local commits containing paths outside the synchronized state",
                         sorted(unexpected),
                     )
+                invalid_learning = self._validate_learning_history(self.memory_root, upstream_commit, captured)
+                if invalid_learning is not None:
+                    return invalid_learning
                 return captured
         except Exception as exc:
             return SyncResult("error", f"sync failed: {type(exc).__name__}: {exc}")
@@ -1025,6 +1208,7 @@ class SyncManager:
                     "message": inspection.repair.message,
                     "files": inspection.repair.files,
                     "merge_conflicted": inspection.merge_conflicted,
+                    "learning_input_sha256": learning_evidence_sha256(candidate.path),
                 }
             )
             if recreated_hash != repair_input_sha256:
@@ -1228,13 +1412,25 @@ class SyncManager:
         result = self._git("status", "--porcelain", "--", *MEMORY_SYNC_PATHS)
         if result.returncode != 0:
             return []
-        return [path for path in _porcelain_paths(result.stdout) if _is_sync_path(path)]
+        paths = {path for path in _porcelain_paths(result.stdout) if _is_sync_path(path)}
+        # Existing roots may still ignore this new collection. Inspect all its
+        # untracked files and both sides of the index without Git path quoting.
+        for args in (
+            ("diff", "--name-only", "--no-renames", "-z", "--", "learning"),
+            ("diff", "--cached", "--name-only", "--no-renames", "-z", "--", "learning"),
+            ("ls-files", "--others", "-z", "--", "learning"),
+        ):
+            learning = self._git(*args)
+            if learning.returncode != 0:
+                raise RuntimeError("could not inspect dirty learning state")
+            paths.update(path for path in learning.stdout.split("\0") if is_learning_path(path))
+        return sorted(paths)
 
     def _conflicted_files(self, root: Path) -> list[str]:
-        result = self._run_git(root, "diff", "--name-only", "--diff-filter=U")
+        result = self._run_git(root, "diff", "--name-only", "--diff-filter=U", "-z")
         if result.returncode != 0:
             return []
-        return sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
+        return sorted(path for path in result.stdout.split("\0") if path)
 
     def _invalid_graph_result(self, root: Path) -> SyncResult | None:
         validation = MemoryTools(root, role="sync-reconciler").validate_memory(
@@ -1449,6 +1645,8 @@ def _is_sync_path(path: str) -> bool:
         return _is_update_queue_path(path)
     if path.startswith("update_records/"):
         return _is_update_record_path(path)
+    if path.startswith("learning/"):
+        return is_learning_path(path)
     for pattern in MEMORY_SYNC_PATHS:
         expression = re.escape(pattern).replace(r"\*", "[^/]*")
         if re.fullmatch(expression, path):
@@ -1531,6 +1729,17 @@ def _invalid_update_records_result(root: Path) -> SyncResult | None:
         "invalid synchronized update records:\n"
         + "\n".join(f"- {item}" for item in diagnostics),
         files,
+    )
+
+
+def _invalid_learning_result(root: Path) -> SyncResult | None:
+    diagnostics = learning_validation_errors(root)
+    if not diagnostics:
+        return None
+    return SyncResult(
+        "error",
+        "invalid synchronized learning state:\n" + "\n".join(f"- {item}" for item in diagnostics),
+        sorted({item.partition(":")[0] for item in diagnostics}),
     )
 
 

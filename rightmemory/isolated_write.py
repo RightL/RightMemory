@@ -23,11 +23,14 @@ from .semantic_operation import (
 )
 from .graph import (
     MEMORY_DETAIL_FILE_RE,
+    MEMORY_SKILL_FILE_RE,
     PURSUIT_DETAIL_FILE_RE,
     GraphManifest,
     build_graph_manifest,
     remove_edge_targets,
 )
+from .guidance import GUIDANCE_INBOX_PATH
+from .learning import is_learning_path, learning_write_path, validate_learning_candidate_deletion
 from .tools import (
     CORRECTIONS_PATH,
     FIXED_CORRECTION_COLLECTION_PATHS,
@@ -49,6 +52,8 @@ PROTECTED_RIGHTMEMORY_PATHS = (
     *ACTIVE_MEMORY_WRITE_PATHS,
     *ACTIVE_PURSUIT_WRITE_PATHS,
     CORRECTIONS_PATH,
+    GUIDANCE_INBOX_PATH,
+    "learning",
 )
 INSIGHT_WRITE_PATHS = ("insight_logs/*.md",)
 LEGACY_ROOT_REFERENCE_PATHS = frozenset(
@@ -527,7 +532,7 @@ class IsolatedWriteSupervisor:
                         # Recheck the current fence before publishing their saved tree.
                         managed_paths = frozenset(
                             path for path in self._commit_paths(self.memory_root, candidate)
-                            if self.role == "update" and _is_managed_update_artifact_path(path)
+                            if self._is_managed_artifact_path(path)
                         )
                         self._validate_commits(self.memory_root, [candidate], managed_paths=managed_paths)
                         if current_head == outcome.start_commit:
@@ -708,6 +713,11 @@ class IsolatedWriteSupervisor:
                 for path in changed_paths
                 if path not in managed_paths and not self._is_role_write_path(path)
             }
+            if self.role in {"guidance-curator", "skills-curator"}:
+                for path in tuple(invalid_paths):
+                    if re.fullmatch(r"learning/candidates/[0-9a-f]{64}\.json", path):
+                        self._validate_learning_deletion(worktree, commit, path)
+                        invalid_paths.remove(path)
             if invalid_paths:
                 paths = ", ".join(sorted(invalid_paths))
                 label = "non-insight paths" if self.role == "insight" else "non-memory paths"
@@ -725,10 +735,8 @@ class IsolatedWriteSupervisor:
     ) -> None:
         self._validate_commits(worktree, commits, managed_paths=managed_paths)
         if managed_paths:
-            if self.role != "update" or any(
-                not _is_managed_update_artifact_path(path) for path in managed_paths
-            ):
-                raise RuntimeError("runtime-managed Update artifacts use an invalid path")
+            if any(not self._is_managed_artifact_path(path) for path in managed_paths):
+                raise RuntimeError("runtime-managed artifacts use an invalid path")
             if any(UPDATE_RECORD_PATH_RE.fullmatch(path) for path in managed_paths):
                 diagnostics = validate_update_records(worktree)
                 if diagnostics:
@@ -769,11 +777,11 @@ class IsolatedWriteSupervisor:
         )
         if not paths:
             return ()
-        if self.role != "update" or any(
-            not isinstance(path, str) or not _is_managed_update_artifact_path(path)
+        if any(
+            not isinstance(path, str) or not self._is_managed_artifact_path(path)
             for path in paths
         ):
-            raise RuntimeError("runtime-managed Update artifacts use an invalid path")
+            raise RuntimeError("runtime-managed artifacts use an invalid path")
         dirty = set(
             _porcelain_paths(
                 self._git_stdout(worktree, "status", "--porcelain", "--untracked-files=all")
@@ -781,18 +789,18 @@ class IsolatedWriteSupervisor:
         )
         if dirty != set(paths):
             detail = ", ".join(sorted(dirty ^ set(paths))) or "unknown paths"
-            raise RuntimeError(f"runtime-managed Update artifacts changed unexpected paths: {detail}")
+            raise RuntimeError(f"runtime-managed artifacts changed unexpected paths: {detail}")
         self._run_git(worktree, "add", "-f", "-A", "--", *paths)
         if candidate_commit is None:
             if operation_id is None:
-                raise RuntimeError("a managed no-change Update artifact requires an operation id")
+                raise RuntimeError("a managed no-change artifact requires an operation id")
             self._run_git(
                 worktree,
                 "commit",
                 "-m",
                 "\n".join(
                     (
-                        "update: record no-change candidate batch",
+                        f"{self.role}: record processed candidate batch",
                         "",
                         f"{OPERATION_TRAILER}: {operation_id}",
                     )
@@ -846,6 +854,16 @@ class IsolatedWriteSupervisor:
         return None
 
     def _is_semantic_read_path(self, path: str) -> bool:
+        separate_domain_path = (
+            path.startswith("learning/") or path == GUIDANCE_INBOX_PATH
+            or path in FIXED_CORRECTION_COLLECTION_PATHS or bool(MEMORY_SKILL_FILE_RE.fullmatch(path))
+        )
+        if self.role in {"update", "pruner"} and separate_domain_path:
+            return False
+        if self.role in {"guidance-curator", "skills-curator"} and separate_domain_path:
+            # Frozen inputs are checked separately; newly submitted evidence and
+            # the other curator's progress do not invalidate an in-flight task.
+            return self._is_role_write_path(path)
         return (
             self._is_graph_rightmemory_path(path)
             or path in FIXED_CORRECTION_COLLECTION_PATHS
@@ -854,7 +872,9 @@ class IsolatedWriteSupervisor:
                 CORRECTIONS_PATH,
                 SHARED_VIEW_REGISTRY_PATH,
                 SHARE_REGISTRY_PATH,
+                GUIDANCE_INBOX_PATH,
             }
+            or path.startswith("learning/")
             or bool(SHARED_VIEW_DEFINITION_FILE_RE.fullmatch(path))
             or bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
         )
@@ -871,7 +891,7 @@ class IsolatedWriteSupervisor:
         if not paths:
             return
         # Inspect all paths in the same immutable commit with one Git process.
-        output = self._git_stdout(worktree, "ls-tree", "-z", commit, "--", *paths)
+        output = self._git_stdout(worktree, "ls-tree", "-r", "-z", commit, "--", *paths)
         entries = {}
         for record in output.split("\0"):
             if not record:
@@ -892,13 +912,20 @@ class IsolatedWriteSupervisor:
                 raise RuntimeError(f"memory path is not a regular file: {path}")
 
     def _is_role_write_path(self, path: str) -> bool:
+        if self.role in {"guidance-curator", "skills-curator"}:
+            domain = self.role.removesuffix("-curator")
+            if path.startswith("learning/processed/"):
+                return False
+            return learning_write_path(domain, path) or (
+                domain == "guidance" and path in {*FIXED_CORRECTION_COLLECTION_PATHS, GUIDANCE_INBOX_PATH}
+            ) or (domain == "skills" and bool(MEMORY_SKILL_FILE_RE.fullmatch(path)))
         if self.role == "insight":
             return bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
         if self.role == "pursuit-map":
             # Memory paths also require byte-exact mechanical repair proof below.
             return self._is_graph_rightmemory_path(path)
         if path in FIXED_CORRECTION_COLLECTION_PATHS:
-            return self.role in {"update", "sync-reconciler"}
+            return self.role == "sync-reconciler"
         if self.role == "sync-reconciler":
             return (
                 self._is_graph_rightmemory_path(path)
@@ -906,10 +933,31 @@ class IsolatedWriteSupervisor:
                 or path in {SHARED_VIEW_REGISTRY_PATH, SHARE_REGISTRY_PATH}
                 or bool(SHARED_VIEW_DEFINITION_FILE_RE.fullmatch(path))
                 or bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
+                or path == GUIDANCE_INBOX_PATH
+                or (
+                    is_learning_path(path)
+                    and not path.startswith(("learning/candidates/", "learning/processed/"))
+                )
             )
         return self.role in {"pruner", "update"} and (
             path == "MEMORY.md" or bool(MEMORY_DETAIL_FILE_RE.fullmatch(path))
-        )
+        ) and not MEMORY_SKILL_FILE_RE.fullmatch(path)
+
+    def _is_managed_artifact_path(self, path: str) -> bool:
+        if self.role == "update":
+            return _is_managed_update_artifact_path(path)
+        if self.role in {"guidance-curator", "skills-curator"}:
+            domain = self.role.removesuffix("-curator")
+            return re.fullmatch(rf"learning/processed/{domain}/[0-9a-f]{{64}}\.json", path) is not None
+        return False
+
+    def _validate_learning_deletion(self, worktree: Path, commit: str, path: str) -> None:
+        if self._run_git(worktree, "cat-file", "-e", f"{commit}:{path}", check=False).returncode == 0:
+            raise RuntimeError("curators cannot create or modify raw learning evidence")
+        original = self._run_git(worktree, "show", f"{commit}^:{path}", check=False)
+        if original.returncode:
+            raise RuntimeError(f"learning deletion has no original evidence: {path}")
+        validate_learning_candidate_deletion(worktree, path, original.stdout)
 
     def _is_graph_rightmemory_path(self, path: str) -> bool:
         if path in FIXED_CORRECTION_COLLECTION_PATHS:

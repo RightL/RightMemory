@@ -30,6 +30,7 @@ Delegate substantive project work to separate tasks. Create a separate task
 only when the user explicitly requests one or confirms a concrete proposal.
 
 Apply corrections to the working context and follow the conversation's existing
-RightMemory rules for evidence submission. Use `maintain-rightmemory` or
-`maintain-pursuit-map` only when the user explicitly asks to change RightMemory.
+RightMemory rules for evidence submission. For requested maintenance, use the
+workflow that owns the content: `maintain-rightmemory`, `maintain-agent-guidance`,
+`maintain-work-skills`, or `maintain-pursuit-map`.
 Task progress, failure, or completion does not by itself modify Pursuit or Memory.

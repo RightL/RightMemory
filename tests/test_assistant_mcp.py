@@ -79,6 +79,10 @@ class AssistantMcpTests(unittest.TestCase):
                 "rightmemory_assistant_update_status",
                 "rightmemory_assistant_sync",
                 "rightmemory_assistant_validate",
+                "rightmemory_submit_learning",
+                "rightmemory_begin_learning",
+                "rightmemory_complete_learning",
+                "rightmemory_learning_status",
             },
         )
 
@@ -178,7 +182,7 @@ class AssistantMcpStdioTests(IsolatedWriteTestBase):
                     initialized = await client.initialize()
                     self.assertEqual(initialized.server_info.name, "RightMemory Assistant")
                     listed = await client.list_tools()
-                    self.assertEqual(len(listed.tools), 7)
+                    self.assertEqual(len(listed.tools), 11)
 
                     result = await client.call_tool(
                         "rightmemory_assistant_context", {"session_id": "stdio-session"}

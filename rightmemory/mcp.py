@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -17,7 +18,7 @@ from .async_update import AsyncUpdateStore
 from .config import load_config
 from .codex_sdk import CodexSdkRunner
 from .debug import DebugTrace
-from .guidance import submit_guidance
+from .learning_mcp import register_learning_tools
 from .runtime import RightMemoryRuntime
 from .update_alerts import collect_update_recovery_summary
 from .update_queue import UpdateQueueStore
@@ -35,11 +36,6 @@ UPDATE_EVIDENCE_DESCRIPTION = (
     "A self-contained account of what happened, what is currently true, and why "
     "preserving it may matter in future work."
 )
-GUIDANCE_EVIDENCE_DESCRIPTION = (
-    "A self-contained account of the agent-behavior signal. For a redirection, include "
-    "the prior approach or omission, the user's explicit or implicit signal, and the "
-    "resulting direction."
-)
 
 RETRIEVE_DESCRIPTION = """\
 Retrieve cross-session context when it could materially change how the current work is
@@ -50,14 +46,20 @@ Use relevant returned context in the work, but treat the current conversation an
 evidence as authoritative. Skip clearly self-contained requests for which stored context
 is unlikely to matter.
 
+Act on returned learning-ready notices with rightmemory_run_learning, preserving the
+notice's domain, mode, and scope. Continue the user's work while curation runs when
+background execution is available; inspect an active task before starting another.
+
 If returned context is stale, wrong, misleading, or overbroad, do not follow it; submit
-the correction and current evidence with rightmemory_submit_update."""
+the correction and current evidence through the relevant path: rightmemory_submit_update
+for ordinary Memory, or rightmemory_submit_learning for behavioral guidance and reusable work."""
 
 SUBMIT_UPDATE_DESCRIPTION = """\
-Submit durable Memory or Agent Correction evidence when omitting it would likely cause
+Submit durable ordinary Memory evidence when omitting it would likely cause
 poorer future decisions, substantial rediscovery, or loss of useful context.
 Include concrete findings of missing or ambiguous context that meet this bar, even
-when the answer is not yet known.
+when the answer is not yet known. Behavioral guidance, corrections about how the agent
+works, and reusable work experience go through rightmemory_submit_learning.
 
 Pursuit is read-only to Update. Explicit map edits belong in the human editor or the
 maintain-pursuit-map workflow, not in an Update submission.
@@ -74,45 +76,9 @@ Processing is asynchronous. After an empty successful result, continue the task 
 waiting, polling, or resubmitting. Only actionable failures or recovery warnings are
 returned."""
 
-CAPTURE_GUIDANCE_DESCRIPTION = """\
-Capture plausible evidence about how an agent should handle similar future work. Bias
-toward capture rather than filtering: uncertainty about whether the pattern will recur is
-not a reason to skip it, and similar captures from distinct occurrences are useful.
-
-Capture both direct guidance and explicit or implicit user redirections. A redirection is
-a user response that changes or reveals how identifiable prior work should proceed. Infer
-an implicit redirection from the contrast between the approach you were taking and the
-direction the user now indicates.
-
-The signal may be a correction, rejection, unease, guiding question, added constraint or
-information, or a change in conclusion, scope, reasoning, process, omissions, behavior,
-or presentation. It does not need to be phrased as a general rule.
-
-Do not require a fully settled general principle or task completion. Capture once the
-signal is concrete enough to describe the prior direction and what should change.
-
-Skip only mere continuation, selection among intentionally open options, an unrelated new
-task, or a detail clearly confined to the current artifact with no plausible
-agent-behavior lesson. Do not skip merely because the guidance may be one-off.
-
-Capture each distinct occurrence once. Similar guidance may be captured again when a
-later interaction independently provides the same pattern.
-
-For a redirection, record the prior approach or omission, the user's signal, and the
-resulting direction. For direct guidance, include enough context to judge its scope. Record
-the interaction evidence; do not invent a broader rule, final stored wording, or
-destination. Apply the resulting direction to the current work regardless of capture.
-
-When the user explicitly asks RightMemory to remember or follow guidance in future, use
-rightmemory_submit_update instead. The same interaction may use both tools when it
-provides distinct durable context and agent-behavior evidence.
-
-After an empty successful result, continue without waiting or polling."""
-
 SessionId = Annotated[str, Field(description=SESSION_ID_DESCRIPTION, min_length=1)]
 RetrieveNeed = Annotated[str, Field(description=RETRIEVE_NEED_DESCRIPTION, min_length=1)]
 UpdateEvidence = Annotated[str, Field(description=UPDATE_EVIDENCE_DESCRIPTION, min_length=1)]
-GuidanceEvidence = Annotated[str, Field(description=GUIDANCE_EVIDENCE_DESCRIPTION, min_length=1)]
 
 _MAX_ERROR_DETAIL_CHARS = 400
 
@@ -121,8 +87,6 @@ class McpBackend(Protocol):
     def retrieve(self, session_id: str, need: str) -> str: ...
 
     def submit_update(self, session_id: str, evidence: str) -> str | None: ...
-
-    def capture_guidance(self, session_id: str, evidence: str) -> None: ...
 
     def actionable_warning(self) -> str | None: ...
 
@@ -207,9 +171,6 @@ class DefaultMcpBackend:
             return UpdateQueueStore(self.memory_root).read_outbox(candidate_uid) is not None
         except Exception:
             return False
-
-    def capture_guidance(self, session_id: str, evidence: str) -> None:
-        submit_guidance(self.memory_root, session_id, evidence)
 
     def actionable_warning(self) -> str | None:
         return _actionable_update_warning(self.memory_root)
@@ -310,19 +271,7 @@ def create_mcp_server(
             warning = selected_backend.actionable_warning()
         return _result(warning)
 
-    @server.tool(
-        name="rightmemory_capture_guidance",
-        description=CAPTURE_GUIDANCE_DESCRIPTION,
-        structured_output=False,
-    )
-    def rightmemory_capture_guidance(
-        session_id: SessionId,
-        evidence: GuidanceEvidence,
-    ) -> CallToolResult:
-        clean_session = _clean_session_id(session_id)
-        clean_evidence = _clean_text(evidence, "guidance evidence")
-        selected_backend.capture_guidance(clean_session, clean_evidence)
-        return _result(selected_backend.actionable_warning())
+    register_learning_tools(server, memory_root, native=False)
 
     return server
 
@@ -351,6 +300,18 @@ def _actionable_update_warning(memory_root: Path) -> str | None:
         )
 
 
+def _learning_notice(memory_root: Path) -> str | None:
+    from .learning_service import LearningService
+
+    try:
+        notices = LearningService(memory_root).notices()
+    except (OSError, ValueError, RuntimeError) as exc:
+        return f"RightMemory could not inspect learning readiness: {_error_detail(exc)}"
+    if any(item["status"] != "waiting" for item in notices):
+        return json.dumps({"learning": notices}, ensure_ascii=False)
+    return None
+
+
 def _timed_default_retrieve_result(
     backend: DefaultMcpBackend,
     session_id: str,
@@ -373,7 +334,7 @@ def _timed_default_retrieve_result(
 
         result_started = time.perf_counter()
         try:
-            result = _result(output, warning)
+            result = _result(output, warning, _learning_notice(backend.memory_root))
         finally:
             timing.result_construction_ms = _elapsed_ms(result_started)
         outcome = "success"

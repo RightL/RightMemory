@@ -802,7 +802,7 @@ class ConfigTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
 
         tool_names = {tool.__name__ for tool in runtime._agent_tools()}
-        self.assertEqual(tool_names, {"read_detail", "read_markdown", "read_skill", "read_mf"})
+        self.assertEqual(tool_names, {"read_detail", "read_markdown", "read_skill", "read_mf", "read_learning", "search_learning"})
         self.assertNotIn("retrieve_shared_view", tool_names)
         self.assertNotIn("read_command", tool_names)
         self.assertNotIn("grep", tool_names)
@@ -824,6 +824,15 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("create_generative_file_view", tool_names)
         self.assertNotIn("create_file_view_recipe", tool_names)
         self.assertIn("create_question_view", tool_names)
+
+    def test_curator_runtimes_can_discover_and_page_learning_sources(self):
+        for role in ("guidance-curator", "skills-curator"):
+            with self.subTest(role=role):
+                config = RuntimeConfig(role=role, model_id="openai/test", memory_root=Path("/memory"), state_root=Path("/memory"))
+                with patch.object(RightMemoryRuntime, "_build_agent", return_value=object()):
+                    runtime = RightMemoryRuntime(config)
+                tool_names = {tool.__name__ for tool in runtime._agent_tools()}
+                self.assertTrue({"read_learning", "search_learning"}.issubset(tool_names))
 
     def _write_config(self, content: str) -> Path:
         handle = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
@@ -923,7 +932,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIs(runtime.agent.kwargs["output_type"], RetrieveSelection)
         self.assertEqual(
             {tool.__name__ for tool in runtime.agent.tools},
-            {"read_detail", "read_markdown", "read_skill", "read_mf"},
+            {"read_detail", "read_markdown", "read_skill", "read_mf", "read_learning", "search_learning"},
         )
 
     def test_cli_agent_runtime_uses_executor_without_pydantic_agent(self):
@@ -3185,7 +3194,7 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
 
         tool_names = {tool.__name__ for tool in runtime.agent.kwargs["tools"]}
-        self.assertEqual(tool_names, {"read_detail", "read_markdown", "read_skill", "read_mf"})
+        self.assertEqual(tool_names, {"read_detail", "read_markdown", "read_skill", "read_mf", "read_learning", "search_learning"})
         self.assertNotIn("read", tool_names)
         self.assertNotIn("grep", tool_names)
         self.assertNotIn("glob", tool_names)

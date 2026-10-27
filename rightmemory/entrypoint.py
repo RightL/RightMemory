@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 
 from .config import default_memory_root
-from .guidance import submit_guidance
 from .profiles import ProfileError, resolve_memory_root
 
 
@@ -16,6 +15,10 @@ def main(argv: list[str] | None = None) -> int:
         from .assistant_cli import main as assistant_main
 
         return assistant_main(remaining[1:], profile_name=profile_name)
+    if remaining[:1] == ["learning"]:
+        from .learning_cli import main as learning_main
+
+        return learning_main(remaining[1:], profile_name=profile_name)
     if remaining[:1] == ["validate"]:
         try:
             parser = argparse.ArgumentParser(prog="rightmemory validate")
@@ -58,17 +61,6 @@ def main(argv: list[str] | None = None) -> int:
         except (ValueError, ProfileError, FileNotFoundError, RuntimeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-    if remaining[:1] == ["guidance"]:
-        try:
-            active = resolve_memory_root(
-                profile_name=profile_name,
-                cwd=Path.cwd(),
-                default_root=default_memory_root(),
-            )
-            return _guidance_main(remaining[1:], active.memory_root)
-        except (ValueError, ProfileError, FileNotFoundError, RuntimeError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
     from . import cli
 
     return cli.main(args)
@@ -79,23 +71,6 @@ def _parse_global_args(argv: list[str]) -> tuple[str | None, list[str]]:
     parser.add_argument("--profile")
     namespace, remaining = parser.parse_known_args(argv)
     return namespace.profile, remaining
-
-
-def _guidance_main(argv: list[str], memory_root: Path) -> int:
-    parser = argparse.ArgumentParser(prog="rightmemory guidance")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    submit = subparsers.add_parser("submit", help="capture pending agent-guidance evidence")
-    submit.add_argument("--session", required=True)
-    submit.add_argument("message", nargs=argparse.REMAINDER)
-    args = parser.parse_args(argv)
-    if args.command != "submit":
-        raise ValueError(f"unknown guidance command: {args.command}")
-    evidence = " ".join(args.message).strip()
-    if not evidence:
-        raise ValueError("guidance evidence must not be empty")
-    entry = submit_guidance(memory_root, args.session, evidence)
-    print(f"captured pending guidance: {entry.entry_id}")
-    return 0
 
 
 def _validation_root(profile_name: str | None, argv: list[str]) -> Path:

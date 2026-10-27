@@ -9,11 +9,13 @@ from .reference import read_reference
 
 
 ROLE_PROMPTS = {
+    "guidance-curator",
     "historian",
     "insight",
     "pruner",
     "retrieve",
     "shared-view-builder",
+    "skills-curator",
     "sync-reconciler",
     "update",
 }
@@ -29,7 +31,9 @@ def build_cli_agent_instructions(
     reference_guidance = _role_reference_guidance(role)
     role_guidance = _read_prompt_file(f"prompts/{role}.md")
     cli_agent_guidance = _cli_agent_guidance(memory_root, role)
-    corrections_store = "- corrections.md\n" if role in {"update", "sync-reconciler"} else ""
+    corrections_store = "- corrections.md\n" if role in {
+        "update", "sync-reconciler", "guidance-curator", "skills-curator"
+    } else ""
     if role == "retrieve":
         final_reply = "Return only the strict JSON retrieve selection required below."
     else:
@@ -44,6 +48,7 @@ RightMemory store:
 - MEMORY_*.md
 - PURSUITS.md
 - PURSUIT_*.md
+- learning/ (evidence, guidance, experience, and reusable skills)
 {corrections_store}- shared_views.toml
 - shares.toml
 - shared_views/<view-id>/view.md, recipe.toml, question.toml, retriever.md
@@ -96,7 +101,8 @@ Workspace rule:
 
 RightMemory source of truth:
 - Memory begins at MEMORY.md; Pursuit begins at PURSUITS.md.
-- Agent Corrections uses the fixed MEMORY_agent-corrections-writing.md and MEMORY_agent-corrections-design.md collections.
+- Learning evidence, behavioral guidance, experience, and reusable skills live separately under learning/.
+- Existing Agent Corrections uses the fixed MEMORY_agent-corrections-writing.md and MEMORY_agent-corrections-design.md collections, maintained by guidance curation.
 - F# detail files use the containing tree's MEMORY_<slug>.md or PURSUIT_<slug>.md name.
 - The package-owned module rules define what belongs in Memory, Pursuit, and Agent Corrections.
 - corrections.md contains RightMemory Edit Feedback read by Update; it is not semantic RightMemory state or ordinary retrieval context.
@@ -151,11 +157,18 @@ def _command_guidance(role: str) -> str:
         )
     if role == "update":
         return (
-            "- The `rightmemory update` command selected unified updating. Treat every caller message as a "
+            "- The `rightmemory update` command selected ordinary Memory updating. Treat every caller message as a "
             "RightMemory candidate without requiring a dispatch prefix.\n"
             "- A caller message may contain one candidate or an ordered batch. Reconcile the evidence into "
-            "Memory, Agent Corrections, both, or nowhere instead of treating candidate text as final stored "
-            "content. Pursuit is read-only context; skip proposed map changes."
+            "Memory or leave it unincorporated, using candidate text as evidence. Pursuit, behavioral guidance, "
+            "and reusable skills are read-only context for this role."
+        )
+    if role in {"guidance-curator", "skills-curator"}:
+        return (
+            "- The learning task selects Update or Maintain within this domain. Update starts from new "
+            "evidence; Maintain starts from the supplied scope and existing material.\n"
+            "- Work in the task's isolated worktree. Program completion records processing and publishes "
+            "validated work; raw evidence and processing receipts are program-owned."
         )
     if role == "pruner":
         return (
@@ -213,6 +226,8 @@ def _tool_guidance(role: str) -> str:
             "- `read_detail(detail_id)` resolves a relevant `F#` id and reads its Memory or Pursuit graph detail.\n"
             "- `read_markdown(markdown_id)` reads the complete line-numbered free-form source for an `M#` heading.\n"
             "- `read_skill(skill_id)` reads the complete skill for an `S#` heading.\n"
+            "- `read_learning(source_id)` reads independent evidence, guidance, or work skills from the learning index.\n"
+            "- `search_learning(query, offset=0, limit=20)` searches the complete learning collection by literal terms; an empty query browses it.\n"
             "- `read_mf(mf_id, resource_id=None)` reads a validated mirrored Memory document or one of its "
             "referenced F#, M#, or S# resources."
         )
@@ -271,10 +286,17 @@ def _tool_guidance(role: str) -> str:
             "- `git_discard(paths)` is destructive. Use it for invalid, partial, or unsafe memory-owned "
             "changes after inspecting the diff."
         )
+    elif role in {"guidance-curator", "skills-curator"}:
+        guidance += (
+            "\n- Write the selected domain's learning material. Existing fixed correction collections belong "
+            "to guidance curation; existing MEMORY_SKILL files belong to skills curation. Validate and commit "
+            "the allowed worktree changes before program completion."
+        )
     elif role == "update":
         guidance += (
-            "\n- Commit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, and the fixed Agent Corrections "
-            "collections. Pursuit files and `corrections.md` are read-only; keep unrelated files out of commits."
+            "\n- Commit tools are scoped to ordinary `MEMORY.md` and `MEMORY_*.md` context. "
+            "Fixed Agent Corrections and skill bodies belong to their domain curators. Pursuit files "
+            "and `corrections.md` are read-only; keep unrelated files out of commits."
         )
     else:
         guidance += (
@@ -298,12 +320,19 @@ def _role_reference_guidance(role: str) -> str:
         guidance += (
             "\nPursuit rules:\n"
             f"{read_reference('pursuit')}\n"
-            "\nAgent Correction rules:\n"
+        )
+    if role in {"guidance-curator", "sync-reconciler"}:
+        guidance += (
+            "\nBehavioral guidance rules:\n"
+            f"{read_reference('guidance')}\n"
+            "\nExisting Agent Correction collections:\n"
             f"{read_reference('agent-correction')}\n"
         )
+    if role in {"skills-curator", "sync-reconciler"}:
+        guidance += "\nWork experience and skill rules:\n" f"{read_reference('work-skills')}\n"
     if role in semantic_writers:
         guidance += "\nShared View rules:\n" f"{read_reference('shared-view')}\n"
-    if role in {"sync-reconciler", "update"}:
+    if role in {"sync-reconciler", "update", "guidance-curator", "skills-curator"}:
         guidance += (
             "\nRightMemory edit-correction rules:\n"
             f"{read_reference('edit-correction')}\n"

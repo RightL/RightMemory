@@ -299,12 +299,11 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
         def callback(worktree: Path) -> None:
             self._append_memory(
                 worktree,
-                "\n## Detail {F#detail}\n\n## Notes {M#notes}\n\n## Review {S#review}\n",
+                "\n## Detail {F#detail}\n\n## Notes {M#notes}\n",
             )
             (worktree / "MEMORY_detail.md").write_text("# Detail fact {#detail-fact}\n", encoding="utf-8")
             (worktree / "MEMORY_notes.md").write_text("Free-form evidence.\n", encoding="utf-8")
-            (worktree / "MEMORY_SKILL_review.md").write_text("Review the evidence.\n", encoding="utf-8")
-            self._git("add", "MEMORY.md", "MEMORY_detail.md", "MEMORY_notes.md", "MEMORY_SKILL_review.md", cwd=worktree)
+            self._git("add", "MEMORY.md", "MEMORY_detail.md", "MEMORY_notes.md", cwd=worktree)
             self._git("commit", "-m", "update: add durable memory", cwd=worktree)
 
         result = IsolatedWriteSupervisor(self.root, "update").run(callback)
@@ -312,7 +311,7 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
         self.assertEqual(result.commits_landed, 1)
         self.assertEqual(
             set(result.changed_paths),
-            {"MEMORY.md", "MEMORY_detail.md", "MEMORY_notes.md", "MEMORY_SKILL_review.md"},
+            {"MEMORY.md", "MEMORY_detail.md", "MEMORY_notes.md"},
         )
         self.assertEqual(self._git("status", "--short"), "")
         self._assert_isolated_cleanup()
@@ -343,20 +342,20 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
         with self.assertRaisesRegex(RuntimeError, "non-memory paths: PURSUITS\\.md"):
             IsolatedWriteSupervisor(self.root, "pruner").run(callback)
 
-    def test_pruner_rejects_fixed_correction_collection_write(self):
+    def test_memory_writers_reject_fixed_correction_collection_write(self):
         def callback(worktree: Path) -> None:
             path = worktree / "MEMORY_agent-corrections-writing.md"
             path.write_text("# Curated writing corrections\n", encoding="utf-8")
             self._git("add", path.name, cwd=worktree)
             self._git("commit", "-m", "pruner: invalid correction curation", cwd=worktree)
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "non-memory paths: MEMORY_agent-corrections-writing\\.md",
-        ):
-            IsolatedWriteSupervisor(self.root, "pruner").run(callback)
+        for role in ("pruner", "update"):
+            with self.subTest(role=role), self.assertRaisesRegex(
+                RuntimeError, "non-memory paths: MEMORY_agent-corrections-writing\\.md",
+            ):
+                IsolatedWriteSupervisor(self.root, role).run(callback)
 
-    def test_update_lands_fixed_agent_correction_collection_write(self):
+    def test_guidance_curator_lands_fixed_agent_correction_collection_write(self):
         self._add_fixed_agent_correction_collections()
 
         def callback(worktree: Path) -> str:
@@ -370,13 +369,31 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
             self._git("commit", "-m", "update: curate expression correction", cwd=worktree)
             return "updated"
 
-        result = IsolatedWriteSupervisor(self.root, "update").run(callback)
+        result = IsolatedWriteSupervisor(self.root, "guidance-curator").run(callback)
 
         self.assertEqual(result.changed_paths, ("MEMORY_agent-corrections-writing.md",))
         self.assertIn(
             "Keep the concrete contrast",
             (self.root / "MEMORY_agent-corrections-writing.md").read_text(encoding="utf-8"),
         )
+
+    def test_existing_legacy_skill_body_belongs_to_skills_curator(self):
+        self._append_memory(self.root, "\n## Review {S#review}\n")
+        (self.root / "MEMORY_SKILL_review.md").write_text("Review the source.\n", encoding="utf-8")
+        self._git("add", "MEMORY.md", "MEMORY_SKILL_review.md")
+        self._git("commit", "-m", "seed existing legacy skill")
+
+        def callback(worktree: Path) -> str:
+            (worktree / "MEMORY_SKILL_review.md").write_text("Review the source and verify the result.\n", encoding="utf-8")
+            self._git("add", "MEMORY_SKILL_review.md", cwd=worktree)
+            self._git("commit", "-m", "improve existing skill", cwd=worktree)
+            return "updated"
+
+        for role in ("update", "pruner"):
+            with self.subTest(role=role), self.assertRaisesRegex(RuntimeError, "non-memory paths"):
+                IsolatedWriteSupervisor(self.root, role).run(callback)
+        result = IsolatedWriteSupervisor(self.root, "skills-curator").run(callback)
+        self.assertEqual(result.changed_paths, ("MEMORY_SKILL_review.md",))
 
     def test_sync_reconciler_lands_fixed_agent_correction_collection_write(self):
         self._add_fixed_agent_correction_collections()

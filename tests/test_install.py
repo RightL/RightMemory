@@ -668,6 +668,31 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(git_email, "existing@example.com")
         self.assertIn("git author configured", result.stdout)
 
+    def test_install_baselines_existing_learning_without_rewriting_ignore(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            memory_root = root / "memory"
+            memory_root.mkdir()
+            for name in ("MEMORY.md", "PURSUITS.md"):
+                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
+            gitignore = b"*\n!MEMORY.md\n!PURSUITS.md\n"
+            (memory_root / ".gitignore").write_bytes(gitignore)
+            retained = {
+                "learning/guidance/example.md": b"scoped guidance\n",
+                "learning/skills/example/SKILL.md": b"reusable method\n",
+                "learning/skills/example/assets/template.txt": b"supporting resource\n",
+            }
+            for name, contents in retained.items():
+                path = memory_root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(contents)
+
+            self._install(memory_root, root / "skills")
+
+            self.assertEqual((memory_root / ".gitignore").read_bytes(), gitignore)
+            self.assertEqual({name: (memory_root / name).read_bytes() for name in retained}, retained)
+            self.assertEqual(set(self._git(memory_root, "ls-files", "--", "learning").splitlines()), set(retained))
+
     def test_install_refuses_incomplete_committed_root_without_mutation(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -916,7 +941,9 @@ class InstallScriptTests(unittest.TestCase):
             "!update_queue/recovery/*.json\n"
             "!update_queue/lease.json\n"
             "!update_records/\n"
-            "!update_records/*.json\n",
+            "!update_records/*.json\n"
+            "!learning/\n"
+            "!learning/**\n",
         )
 
     def test_cli_agent_installs_automatic_orchestration_and_independent_skills(self):
@@ -932,8 +959,8 @@ class InstallScriptTests(unittest.TestCase):
                 skills_target / "rightmemory-auto-orchestrator" / "SKILL.md"
             ).is_file()
             maintainer_exists = (skills_target / "maintain-rightmemory" / "SKILL.md").is_file()
-            guidance_reviewer_exists = (
-                skills_target / "review-agent-guidance-inbox" / "SKILL.md"
+            guidance_maintainer_exists = (
+                skills_target / "maintain-agent-guidance" / "SKILL.md"
             ).is_file()
             map_maintainer_exists = (skills_target / "maintain-pursuit-map" / "SKILL.md").is_file()
             install_stamp = (memory_root / ".runtime" / "install.stamp").read_text(encoding="utf-8")
@@ -948,7 +975,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertFalse(orchestrator_exists)
         self.assertTrue(auto_orchestrator_exists)
         self.assertTrue(maintainer_exists)
-        self.assertTrue(guidance_reviewer_exists)
+        self.assertTrue(guidance_maintainer_exists)
         self.assertTrue(map_maintainer_exists)
         self.assertIn("rightmemory-auto-orchestrator", result.stdout)
         self.assertIn("export PYTHONUTF8=1", wrapper)
@@ -959,9 +986,10 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(
             installed_skill_directories,
             [
+                "maintain-agent-guidance",
                 "maintain-pursuit-map",
                 "maintain-rightmemory",
-                "review-agent-guidance-inbox",
+                "maintain-work-skills",
                 "rightmemory-auto-orchestrator",
                 "rightmemory-manager",
             ],
@@ -1094,7 +1122,8 @@ class InstallScriptTests(unittest.TestCase):
                 self.assertTrue((target / "rightmemory-manager" / "SKILL.md").is_file())
                 self.assertFalse((target / "memory-retriever").exists())
                 self.assertFalse((target / "rightmemory-orchestrator").exists())
-                self.assertTrue((target / "review-agent-guidance-inbox" / "SKILL.md").is_file())
+                self.assertTrue((target / "maintain-agent-guidance" / "SKILL.md").is_file())
+                self.assertTrue((target / "maintain-work-skills" / "SKILL.md").is_file())
                 self.assertFalse((target / "memory-orchestrator").exists())
             self.assertFalse((home / ".codex" / "skills" / "memory-curator").exists())
             self.assertFalse((home / ".claude" / "skills" / "memory-dreamer").exists())

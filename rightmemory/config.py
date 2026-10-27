@@ -22,7 +22,8 @@ ROLES = {
     "sync-reconciler",
     "update",
 }
-RUNTIME_ROLES = ROLES
+CURATOR_ROLES = {"guidance-curator", "skills-curator"}
+RUNTIME_ROLES = ROLES | CURATOR_ROLES
 MODEL_FALLBACK_ROLES = (
     "update",
     "insight",
@@ -386,7 +387,7 @@ def _reject_unknown_keys(data: dict[str, object], allowed: set[str], context: st
 
 
 def _top_level_keys() -> set[str]:
-    return {*ROLES, "agent_cli", "debug", "sync"}
+    return {*RUNTIME_ROLES, "agent_cli", "debug", "sync"}
 
 
 def _role_section(data: dict[str, object], role: str) -> dict[str, object]:
@@ -615,7 +616,7 @@ def _sync_config(section: object, *, memory_root: Path) -> SyncConfig:
 
 def _role(value: str) -> str:
     role = value.strip().lower()
-    if role not in ROLES:
-        joined = ", ".join(sorted(ROLES))
+    if role not in RUNTIME_ROLES:
+        joined = ", ".join(sorted(RUNTIME_ROLES))
         raise ValueError(f"role must be one of: {joined}")
     return role

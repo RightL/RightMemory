@@ -571,7 +571,7 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertEqual(self._git("rev-parse", "HEAD"), initial_head)
         self.assertEqual(set(self._git("diff", "--cached", "--name-only").splitlines()), set(paths[1:]))
 
-    def test_update_can_commit_memory_and_fixed_correction_changes(self):
+    def test_update_can_commit_ordinary_memory_changes(self):
         self._git("init")
         self._git("config", "user.email", "test@example.com")
         self._git("config", "user.name", "Test User")
@@ -579,9 +579,6 @@ class MemoryToolsTests(unittest.TestCase):
         paths = (
             "MEMORY.md",
             "MEMORY_detail.md",
-            "MEMORY_SKILL_review.md",
-            "MEMORY_agent-corrections-writing.md",
-            "MEMORY_agent-corrections-design.md",
         )
         for path in paths:
             tools.create_file(path, "# Original\n")
@@ -615,14 +612,14 @@ class MemoryToolsTests(unittest.TestCase):
             MemoryTools(self.root, role="pruner").read("corrections.md")
         self.assertIn("private updater feedback", MemoryTools(self.root, role="update").read("corrections.md"))
 
-    def test_only_update_and_sync_can_modify_fixed_agent_correction_collections(self):
+    def test_only_guidance_curator_and_sync_can_modify_fixed_correction_collections(self):
         paths = (
             "MEMORY_agent-corrections-writing.md",
             "MEMORY_agent-corrections-design.md",
         )
         for path in paths:
             (self.root / path).write_text("# Curated corrections\n", encoding="utf-8")
-            for role in (None, "pruner", "historian"):
+            for role in (None, "update", "pruner", "historian", "skills-curator"):
                 with self.subTest(path=path, role=role):
                     tools = MemoryTools(self.root, role=role)
                     tools.read(path)
@@ -632,11 +629,11 @@ class MemoryToolsTests(unittest.TestCase):
                         tools.delete_file(path)
 
         self._git("init")
-        updater = MemoryTools(self.root, role="update")
+        updater = MemoryTools(self.root, role="guidance-curator")
         updater.read(paths[0])
-        updater.edit_file(paths[0], "Curated", "Updater-owned")
+        updater.edit_file(paths[0], "Curated", "Guidance-owned")
         updater.git_add([paths[0]])
-        self.assertIn("Updater-owned", (self.root / paths[0]).read_text(encoding="utf-8"))
+        self.assertIn("Guidance-owned", (self.root / paths[0]).read_text(encoding="utf-8"))
 
         reconciler = MemoryTools(self.root, role="sync-reconciler")
         reconciler.read(paths[1])
@@ -646,13 +643,22 @@ class MemoryToolsTests(unittest.TestCase):
         self.assertIn(paths[0], self._git("diff", "--cached", "--name-only"))
         self.assertIn(paths[1], self._git("diff", "--cached", "--name-only"))
 
-    def test_pruner_can_modify_ordinary_m_and_s_backing_files(self):
-        for path in ("MEMORY_research-notes.md", "MEMORY_SKILL_two-pass-review.md"):
-            with self.subTest(path=path):
-                (self.root / path).write_text("# Linked resource\n", encoding="utf-8")
-                tools = MemoryTools(self.root, role="pruner")
-                tools.read(path)
-                self.assertIn("edited", tools.edit_file(path, "Linked", "Maintained"))
+    def test_ordinary_memory_roles_preserve_skill_backing_files(self):
+        for role in ("update", "pruner"):
+            with self.subTest(role=role):
+                ordinary = self.root / "MEMORY_research-notes.md"
+                ordinary.write_text("# Linked resource\n", encoding="utf-8")
+                skill = self.root / "MEMORY_SKILL_two-pass-review.md"
+                skill.write_text("# Existing skill\n", encoding="utf-8")
+                tools = MemoryTools(self.root, role=role)
+                tools.read(ordinary.name)
+                tools.edit_file(ordinary.name, "Linked", "Maintained")
+                tools.read(skill.name)
+                with self.assertRaises(ValueError):
+                    tools.edit_file(skill.name, "Existing", "Changed")
+                with self.assertRaises(ValueError):
+                    tools.delete_file(skill.name)
+                self.assertEqual(skill.read_text(encoding="utf-8"), "# Existing skill\n")
 
     def test_insight_tools_commit_only_insight_logs(self):
         self._git("init")

@@ -19,6 +19,14 @@ from .graph import (
     validate_item_id,
 )
 from .guidance import GUIDANCE_INBOX_PATH
+from .learning import (
+    can_retire_learning_candidate,
+    is_learning_path,
+    learning_validation_errors,
+    learning_write_path,
+    validate_learning_candidate_deletion,
+)
+from .learning_retrieval import learning_search_excerpt, read_learning_page, search_learning_sources
 from .share_models import ShareFilePart, ShareQuestionPart, ShareRelationship, load_shares, save_shares, validate_share_id
 from .share_results import normalize_share_capability
 from .shared_view_files import (
@@ -58,13 +66,18 @@ GIT_REVISION_RE = re.compile(r"^[A-Za-z0-9_.^~/-]+$")
 PRUNE_SUBJECT_PREFIX = "prune:"
 UPDATE_WRITE_ROLES = {"update"}
 PURSUIT_MAP_WRITE_ROLES = {"pursuit-map"}
-CORRECTIONS_READ_ROLES = {"update", "sync-reconciler"}
+CURATOR_DOMAINS = {"guidance-curator": "guidance", "skills-curator": "skills"}
+CORRECTIONS_READ_ROLES = {"update", "sync-reconciler", *CURATOR_DOMAINS}
+LEARNING_READ_ROLES = {"retrieve", "sync-reconciler", *CURATOR_DOMAINS}
 INSIGHT_ROLES = {"insight"}
 RETRIEVE_ROLES = {"retrieve"}
 SYNC_RECONCILER_ROLES = {"sync-reconciler"}
 SHARED_VIEW_BUILDER_ROLES = {"shared-view-builder"}
 INSIGHT_READ_PATHS = ("MEMORY.md", "MEMORY_*.md", "insight_logs/*.md")
-RETRIEVE_READ_PATHS = ("MEMORY.md", "MEMORY_*.md", "PURSUITS.md", "PURSUIT_*.md")
+RETRIEVE_READ_PATHS = (
+    "MEMORY.md", "MEMORY_*.md", "PURSUITS.md", "PURSUIT_*.md",
+    "learning/**/*", GUIDANCE_INBOX_PATH,
+)
 CORRECTIONS_PATH = "corrections.md"
 FIXED_CORRECTION_COLLECTION_IDS = {
     "agent-corrections-design",
@@ -140,6 +153,31 @@ class MemoryTools:
         if reference is None or not self._is_safe_read_file(reference.path):
             return self._missing_skill_message(clean_id)
         return self._read_text(reference.path)
+
+    def read_learning(self, source_id: str, offset: int = 0, limit: int = 12_000) -> str:
+        """Read learning content with source line numbers and bounded character pagination."""
+        if self.role is not None and self.role not in LEARNING_READ_ROLES:
+            raise ValueError("learning retrieval is unavailable to this role")
+        page = read_learning_page(self.memory_root, source_id, offset=offset, limit=limit)
+        lines = [f"Source: {page.source.source_id}", f"Kind: {page.source.kind}",
+                 f"Characters: {page.offset}-{page.offset + len(page.text)} of {page.total_chars}", ""]
+        lines.extend(f"{number}: {line}" for number, line in enumerate(page.text.splitlines(), page.start_line))
+        if page.next_offset is not None:
+            lines.append(f"[continues; next offset: {page.next_offset}; boundary lines may be partial]")
+        return "\n".join(lines)
+
+    def search_learning(self, query: str, offset: int = 0, limit: int = 20) -> str:
+        """Find learning sources by literal terms; an empty query browses all pages."""
+        if self.role is not None and self.role not in LEARNING_READ_ROLES:
+            raise ValueError("learning retrieval is unavailable to this role")
+        page = search_learning_sources(self.memory_root, query, offset=offset, limit=limit)
+        lines = [f"Matched sources: {page.total}"]
+        for source in page.sources:
+            relative = source.path.relative_to(self.memory_root).as_posix()
+            lines.append(f"- `{source.source_id}` ({source.kind}; {relative}): {learning_search_excerpt(source, query)}")
+        if page.next_offset is not None:
+            lines.append(f"Next offset: {page.next_offset}")
+        return "\n".join(lines)
 
     def read_mf(self, mf_id: str, resource_id: str | None = None) -> str:
         """Read a validated MF document or one referenced F#, M#, or S# resource."""
@@ -420,7 +458,14 @@ class MemoryTools:
 
     def delete_file(self, path: str) -> str:
         """Delete a file under the RightMemory root."""
-        relative_path = self._allowed_write_path(path)
+        candidate = self._resolve_path(path).relative_to(self.memory_root).as_posix()
+        if self.role in CURATOR_DOMAINS and self._is_learning_candidate_path(candidate):
+            candidate_id = Path(candidate).stem
+            if not can_retire_learning_candidate(self.memory_root, candidate_id):
+                raise ValueError("both learning curators must process evidence before it can be retired")
+            relative_path = candidate
+        else:
+            relative_path = self._allowed_write_path(path)
         resolved = self.memory_root / relative_path
         if not resolved.is_file():
             raise FileNotFoundError(f"file not found: {relative_path}")
@@ -843,7 +888,7 @@ class MemoryTools:
     def validate_memory(self, *, enforce_correction_capacity: bool = True) -> str:
         """Validate the complete RightMemory graph and correction collections."""
         manifest = build_graph_manifest(self.memory_root)
-        errors = [*manifest.errors]
+        errors = [*manifest.errors, *learning_validation_errors(self.memory_root)]
         corrections_path = self.memory_root / CORRECTIONS_PATH
         if corrections_path.is_file():
             correction_errors = validate_corrections_markdown(corrections_path.read_text(encoding="utf-8"))
@@ -1217,8 +1262,8 @@ class MemoryTools:
                     raise ValueError("read command paths must stay under the RightMemory root")
             resolved = self._resolve_path(token)
             relative_path = resolved.relative_to(self.memory_root).as_posix()
-            if relative_path == GUIDANCE_INBOX_PATH:
-                raise ValueError("agent guidance inbox is not available to RightMemory model roles")
+            if relative_path == GUIDANCE_INBOX_PATH and self.role not in LEARNING_READ_ROLES:
+                raise ValueError("legacy guidance is available to retrieval and learning curation")
             if self._is_runtime_shared_view_path(relative_path):
                 raise ValueError("runtime shared-view packages are only readable through read_mf")
             if self._has_role_read_scope():
@@ -1401,9 +1446,19 @@ class MemoryTools:
         relative_path = resolved.relative_to(self.memory_root).as_posix()
         if self._is_allowed_write_path(relative_path):
             return relative_path
+        if (
+            self.role in CURATOR_DOMAINS
+            and self._is_learning_candidate_path(relative_path)
+            and not resolved.exists()
+        ):
+            original = self._run_git(["git", "show", f"HEAD:{relative_path}"])
+            validate_learning_candidate_deletion(self.memory_root, relative_path, original)
+            return relative_path
         raise ValueError(f"can only stage, commit, or discard {self._write_policy_label()}: {relative_path}")
 
     def _write_policy_label(self) -> str:
+        if self.role in CURATOR_DOMAINS:
+            return f"{CURATOR_DOMAINS[self.role]} learning content within the selected domain"
         if self.role in INSIGHT_ROLES:
             return "insight_logs/*.md"
         if self.role in SYNC_RECONCILER_ROLES:
@@ -1416,14 +1471,20 @@ class MemoryTools:
         if self.role in PURSUIT_MAP_WRITE_ROLES:
             return "PURSUITS.md or PURSUIT_*.md files"
         if self.role in UPDATE_WRITE_ROLES:
-            return (
-                "MEMORY.md, ordinary MEMORY_*.md, or fixed Agent Correction collections"
-            )
+            return "MEMORY.md or ordinary MEMORY_*.md context files"
         return "MEMORY.md or ordinary MEMORY_*.md files"
 
     def _is_allowed_write_path(self, relative_path: str) -> bool:
         if relative_path in FIXED_CORRECTION_COLLECTION_PATHS:
-            return self.role in UPDATE_WRITE_ROLES | SYNC_RECONCILER_ROLES
+            return self.role in {"guidance-curator", *SYNC_RECONCILER_ROLES}
+        if self.role in CURATOR_DOMAINS:
+            if self.role == "guidance-curator" and relative_path == GUIDANCE_INBOX_PATH:
+                return True
+            if self.role == "skills-curator" and MEMORY_SKILL_FILE_RE.fullmatch(relative_path):
+                return True
+            return not relative_path.startswith("learning/processed/") and learning_write_path(
+                CURATOR_DOMAINS[self.role], relative_path
+            )
         if self.role in INSIGHT_ROLES:
             return self._is_insight_log_path(relative_path)
         if self.role in SYNC_RECONCILER_ROLES:
@@ -1434,12 +1495,21 @@ class MemoryTools:
                 or relative_path == SHARE_REGISTRY_PATH
                 or self._is_shared_view_definition_path(relative_path)
                 or self._is_insight_log_path(relative_path)
+                or (
+                    is_learning_path(relative_path)
+                    and not relative_path.startswith(("learning/candidates/", "learning/processed/"))
+                )
             )
         if self.role in SHARED_VIEW_BUILDER_ROLES:
             return self._is_shared_view_definition_path(relative_path)
         if self.role in PURSUIT_MAP_WRITE_ROLES:
             return self._is_active_pursuit_path(relative_path)
+        if self.role in {"update", "pruner"} and MEMORY_SKILL_FILE_RE.fullmatch(relative_path):
+            return False
         return self._is_active_memory_path(relative_path)
+
+    def _is_learning_candidate_path(self, relative_path: str) -> bool:
+        return relative_path.startswith("learning/candidates/") and is_learning_path(relative_path)
 
     def _allowed_write_path(self, path: str) -> str:
         resolved = self._resolve_path(path)
@@ -1467,17 +1537,17 @@ class MemoryTools:
         raise ValueError(f"can only read {self._read_policy_label()}: {relative_path}")
 
     def _has_role_read_scope(self) -> bool:
-        return self.role in INSIGHT_ROLES | RETRIEVE_ROLES
+        return self.role in INSIGHT_ROLES | RETRIEVE_ROLES | CURATOR_DOMAINS.keys()
 
     def _read_policy_label(self) -> str:
-        if self.role == "retrieve":
-            return "MEMORY.md, MEMORY_*.md, PURSUITS.md, or PURSUIT_*.md"
+        if self.role == "retrieve" or self.role in CURATOR_DOMAINS:
+            return "RightMemory context and independent learning sources"
         return "MEMORY.md, MEMORY_*.md, or insight_logs/*.md"
 
     def _is_allowed_read_file(self, path: Path) -> bool:
         relative_path = path.relative_to(self.memory_root).as_posix()
         if relative_path == GUIDANCE_INBOX_PATH:
-            return False
+            return self.role in LEARNING_READ_ROLES
         if relative_path == CORRECTIONS_PATH and self.role not in CORRECTIONS_READ_ROLES:
             return False
         if self._is_runtime_shared_view_path(relative_path):
@@ -1488,15 +1558,18 @@ class MemoryTools:
 
     def _is_allowed_read_relative_file(self, relative_path: str) -> bool:
         if relative_path == GUIDANCE_INBOX_PATH:
-            return False
+            return self.role in LEARNING_READ_ROLES
         if relative_path == CORRECTIONS_PATH and self.role not in CORRECTIONS_READ_ROLES:
             return False
         if self._is_runtime_shared_view_path(relative_path):
             return False
         if not self._has_role_read_scope():
             return True
-        if self.role == "retrieve":
-            return self._is_active_rightmemory_path(relative_path)
+        if self.role == "retrieve" or self.role in CURATOR_DOMAINS:
+            return self._is_active_rightmemory_path(relative_path) or (
+                is_learning_path(relative_path)
+                and (self.role in CURATOR_DOMAINS or not relative_path.startswith("learning/processed/"))
+            ) or (relative_path == CORRECTIONS_PATH and self.role in CORRECTIONS_READ_ROLES)
         return self._is_active_memory_path(relative_path) or self._is_insight_log_path(relative_path)
 
     def _check_allowed_read_search_dir(self, path: Path, original_path: str) -> None:
@@ -1509,16 +1582,23 @@ class MemoryTools:
             return
         if relative_path in {".", "insight_logs"}:
             return
+        if self.role in LEARNING_READ_ROLES and (
+            relative_path == "learning" or relative_path.startswith("learning/")
+        ):
+            return
         raise ValueError(f"can only search {self._read_policy_label()}: {relative_path or original_path}")
 
     def _is_allowed_read_command_candidate(self, path: Path) -> bool:
         relative_path = path.relative_to(self.memory_root).as_posix()
         if relative_path == GUIDANCE_INBOX_PATH:
-            return False
+            return self.role in LEARNING_READ_ROLES
         if not self._has_role_read_scope():
             return True
         if path.is_dir():
-            return relative_path == "insight_logs"
+            return relative_path == "insight_logs" or (
+                self.role in LEARNING_READ_ROLES
+                and (relative_path == "learning" or relative_path.startswith("learning/"))
+            )
         return self._is_allowed_read_relative_file(relative_path)
 
     def _check_allowed_read_command_path(self, path: str) -> None:
@@ -1541,6 +1621,8 @@ class MemoryTools:
         return sorted(set(paths))
 
     def _role_read_patterns(self) -> tuple[str, ...]:
+        if self.role in CURATOR_DOMAINS:
+            return (*RETRIEVE_READ_PATHS, CORRECTIONS_PATH)
         return RETRIEVE_READ_PATHS if self.role == "retrieve" else INSIGHT_READ_PATHS
 
     def _existing_role_read_paths_under(self, directory: Path) -> list[str]:

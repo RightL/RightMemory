@@ -22,7 +22,7 @@ from .automatic_effects import (
     memory_change_pressure_points,
     record_memory_change_pressure_once,
 )
-from .config import PrunerConfig, RuntimeConfig, load_config
+from .config import CURATOR_ROLES, PrunerConfig, RuntimeConfig, load_config
 from .debug import DebugTrace
 from .isolated_write import IsolatedWriteResult, IsolatedWriteSupervisor, MainMemoryDirtyError
 from .prompt import build_instructions
@@ -78,7 +78,7 @@ from .update_queue import UpdateCandidate, UpdateQueueStore
 from .update_record import UpdateRecord, UpdateRecordStore
 
 
-AUTOMATIC_WRITE_ROLES = {"insight", "pruner", "update"}
+AUTOMATIC_WRITE_ROLES = {"insight", "pruner", "update"} | CURATOR_ROLES
 CYCLE_ROLES = {"insight"}
 HISTORY_READ_ROLES = {"historian", "pruner"}
 SYNC_TOOL_ROLES = {"sync-reconciler"}
@@ -1637,12 +1637,15 @@ class RightMemoryRuntime:
                     current_material.text
                 )
         prefix_context = snapshot.text if cli_agent_phase == "new" else None
+        from .learning_retrieval import format_learning_index
+
         context_parts = tuple(
             part
             for part in (
                 snapshot.text if new_conversation and prefix_context is None else "",
                 diff_block,
                 recent_block,
+                format_learning_index(self.config.memory_root),
                 updated_block,
                 current_material_block,
             )
@@ -1732,7 +1735,7 @@ class RightMemoryRuntime:
         raise_on_failure: bool = False,
         operation_id: str | None = None,
     ) -> None:
-        if self.config.role not in AUTOMATIC_WRITE_ROLES:
+        if self.config.role not in AUTOMATIC_WRITE_ROLES or self.config.role in CURATOR_ROLES:
             return
         if operation_id is None:
             results = publish_approved_file_views(self.config.memory_root)
@@ -1819,6 +1822,8 @@ class RightMemoryRuntime:
                 self._agent_tool(self.tools.read_markdown),
                 self._agent_tool(self.tools.read_skill),
                 self._agent_tool(self.tools.read_mf),
+                self._agent_tool(self.tools.read_learning),
+                self._agent_tool(self.tools.search_learning),
             ]
         read_tools = [
             self._agent_tool(self.tools.glob),
@@ -1827,6 +1832,11 @@ class RightMemoryRuntime:
             self._agent_tool(self.tools.read_command),
             self._agent_tool(self.tools.outline_file),
         ]
+        if self.config.role in CURATOR_ROLES:
+            read_tools.extend([
+                self._agent_tool(self.tools.read_learning),
+                self._agent_tool(self.tools.search_learning),
+            ])
         if self.config.role != "insight":
             read_tools.append(self._agent_tool(self.tools.validate_memory))
         if self.config.role in HISTORY_READ_ROLES:

@@ -44,9 +44,6 @@ class FakeBackend:
         self.calls.append(("submit", session_id, evidence))
         return self.submit_warning
 
-    def capture_guidance(self, session_id: str, evidence: str) -> None:
-        self.calls.append(("guidance", session_id, evidence))
-
     def actionable_warning(self) -> str | None:
         return self.warning
 
@@ -73,14 +70,18 @@ class McpToolTests(unittest.TestCase):
         self.backend = FakeBackend()
         self.server = create_mcp_server(Path("/unused"), backend=self.backend)
 
-    def test_server_exposes_only_the_three_ordinary_agent_tools(self):
+    def test_server_exposes_memory_and_shared_learning_tools(self):
         tools = asyncio.run(_list_tools(self.server))
         self.assertEqual(
             {tool.name for tool in tools},
             {
                 "rightmemory_retrieve",
                 "rightmemory_submit_update",
-                "rightmemory_capture_guidance",
+                "rightmemory_submit_learning",
+                "rightmemory_begin_learning",
+                "rightmemory_complete_learning",
+                "rightmemory_learning_status",
+                "rightmemory_run_learning",
             },
         )
 
@@ -115,15 +116,6 @@ class McpToolTests(unittest.TestCase):
 
         self.assertEqual(len(result.content), 1)
 
-    def test_successful_guidance_capture_is_silent(self):
-        result = call_tool(
-            self.server,
-            "rightmemory_capture_guidance",
-            {"session_id": " session ", "evidence": " evidence "},
-        )
-
-        self.assertEqual(self.backend.calls, [("guidance", "session", "evidence")])
-        self.assertEqual(result.content, [])
 
 
 class DefaultMcpBackendTests(unittest.TestCase):

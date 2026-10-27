@@ -7,6 +7,8 @@ from typing import Literal
 ReferenceName = Literal[
     "schema",
     "memory",
+    "guidance",
+    "work-skills",
     "pursuit",
     "agent-correction",
     "edit-correction",
@@ -17,6 +19,8 @@ ReferenceName = Literal[
 REFERENCE_FILES: dict[ReferenceName, str] = {
     "schema": "rightmemory-schema.md",
     "memory": "MEMORY_RULES.md",
+    "guidance": "AGENT_GUIDANCE_RULES.md",
+    "work-skills": "WORK_SKILLS_RULES.md",
     "pursuit": "PURSUIT_RULES.md",
     "agent-correction": "AGENT_CORRECTION_MEMORY_RULES.md",
     "edit-correction": "RIGHTMEMORY_EDIT_CORRECTION_RULES.md",

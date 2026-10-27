@@ -23,13 +23,14 @@ from .graph import (
     is_valid_item_id,
 )
 from .recent_submitted import RecentSubmittedMemoryEntry
+from .learning_retrieval import get_learning_source, is_learning_source_id
 from .shared_view_models import load_connections
 from .shared_view_package import FileViewPackageError, ValidatedFileViewPackage, validate_file_view_package
 
 
 NO_STRONG_MATCH = "no strong match"
 SOURCE_ID_RE = re.compile(
-    rf"^(?:(M#|S#|MF#)({ITEM_ID_PATTERN})|MF#({ITEM_ID_PATTERN})/(M#|S#)({ITEM_ID_PATTERN})|AC#(?:writing|design))$"
+    rf"^(?:(M#|S#|MF#)({ITEM_ID_PATTERN})|MF#({ITEM_ID_PATTERN})/(M#|S#)({ITEM_ID_PATTERN})|AC#(?:writing|design)|L#[A-Za-z0-9_./%-]+)$"
 )
 AGENT_CORRECTION_POSITION_RE = re.compile(r"^[1-9][0-9]*$")
 HEADING_RE = re.compile(r"^(#{1,})\s+")
@@ -64,10 +65,12 @@ class SourceSelection(BaseModel):
     @field_validator("source_id")
     @classmethod
     def validate_source_id(cls, value: str) -> str:
-        if SOURCE_ID_RE.fullmatch(value) is None:
+        if SOURCE_ID_RE.fullmatch(value) is None or (
+            value.startswith("L#") and not is_learning_source_id(value)
+        ):
             raise ValueError(
                 "source_id must be an M#, S#, MF#, qualified MF#/M# or MF#/S#, "
-                "or fixed AC# id"
+                "fixed AC# id, or independent L# learning source"
             )
         return value
 
@@ -81,6 +84,8 @@ class SourceSelection(BaseModel):
 
     @model_validator(mode="after")
     def validate_source_specific_selection(self) -> SourceSelection:
+        if self.source_id.startswith("L#") and self.ids:
+            raise ValueError("learning sources use complete text or line ranges, not graph ids")
         if self.source_id in AGENT_CORRECTION_SOURCE_PATHS:
             if self.ranges:
                 raise ValueError(f"{self.source_id} does not accept line ranges")
@@ -460,6 +465,11 @@ class RetrieveSelectionRenderer:
         *,
         expected_marker: str,
     ) -> str | None:
+        if source_id.startswith("L#"):
+            try:
+                return get_learning_source(self.memory_root, source_id).text
+            except (OSError, UnicodeError, ValueError):
+                return None
         match = SOURCE_ID_RE.fullmatch(source_id)
         if match is None:
             return None
@@ -570,6 +580,9 @@ class RetrieveSelectionRenderer:
 
         rendered: list[_RenderedSource] = []
         for source_id, (ids, ranges) in merged.items():
+            if source_id.startswith("L#"):
+                rendered.append(self._render_learning_source(source_id, ids, ranges))
+                continue
             if source_id in AGENT_CORRECTION_SOURCE_PATHS:
                 rendered.append(
                     self._render_agent_correction_source(
@@ -638,6 +651,25 @@ class RetrieveSelectionRenderer:
                     )
                 )
         return rendered
+
+    def _render_learning_source(
+        self, source_id: str, ids: list[str], ranges: list[LineRange]
+    ) -> _RenderedSource:
+        if ids:
+            raise RetrieveSelectionError("learning sources do not contain graph ids")
+        try:
+            source = get_learning_source(self.memory_root, source_id)
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise RetrieveSelectionError(str(exc)) from exc
+        if source.whole_only and ranges:
+            raise RetrieveSelectionError(f"`{source_id}` requires its complete context")
+        if ranges:
+            resolved = _resolve_line_ranges(source_id, source.text, ranges)
+            return _RenderedSource(10**9, source_id, resolved.text, ranges=resolved.delivered)
+        text = source.text.rstrip("\r\n")
+        return _RenderedSource(
+            10**9, source_id, text, complete_sources={source_id: _hash_text(text)}
+        )
 
     def _render_agent_correction_source(
         self,
