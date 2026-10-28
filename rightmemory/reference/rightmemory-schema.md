@@ -30,6 +30,7 @@ learning/skills/<slug>/SKILL.md
 learning/skills/<slug>/<supporting assets>
 learning/processed/<memory|guidance|skills>/<id>.json
 learning/claims/<memory|guidance|skills>.json
+learning/batches/<memory|guidance|skills>.json
 learning/withdrawn/<id>.json
 ```
 
@@ -37,7 +38,7 @@ Candidate and receipt ids are full lowercase SHA-256 identifiers managed by the 
 
 Pending candidates are available to relevant retrieval. The program removes a raw candidate once all three domains have processed it; useful context, examples, and experiences are retained in the appropriate curated sources. Each domain may complete without a semantic edit. Maintain starts from existing scoped material and does not consume pending candidates.
 
-Claims, processing receipts, and withdrawal records are program-owned coordination state. They contain identities and hashes rather than a second evidence archive and are excluded from retrieval. A withdrawal prevents further processing without undoing already published conclusions. Graph-linked `S#` instruction resources remain supported alongside learning skills.
+Batch records, claims, processing receipts, and withdrawal records are program-owned coordination state. They contain identities and hashes rather than a second evidence archive and are excluded from retrieval. A batch record retains the evidence admitted by a count or time trigger until the domain finishes processing it, allowing bounded runs to continue without another waiting period. A withdrawal prevents further processing without undoing already published conclusions. Graph-linked `S#` instruction resources remain supported alongside learning skills.
 
 ## Graph Roots And Membership
 

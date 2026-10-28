@@ -8,6 +8,10 @@ from unittest.mock import patch
 
 from rightmemory.learning import (
     LEARNING_DOMAINS,
+    learning_batch_candidate_ids,
+    write_learning_batch,
+    is_learning_state_path,
+    learning_evidence_sha256,
     retire_processed_learning,
     LearningClaim,
     learning_claims,
@@ -29,6 +33,47 @@ from tests.isolated_write_test_base import IsolatedWriteTestBase
 
 
 class LearningStoreTests(IsolatedWriteTestBase):
+    def test_admission_is_program_owned_and_retires_only_when_entire_pool_is_consumed(self):
+        first = submit_learning(self.root, "first", "first").candidate_id
+        second = submit_learning(self.root, "second", "second").candidate_id
+        before = learning_evidence_sha256(self.root)
+        path = write_learning_batch(self.root, "memory", [first, second])
+        self.assertNotEqual(learning_evidence_sha256(self.root), before)
+        self.assertIn(path, learning_files(self.root))
+        self.assertNotIn(path, learning_readable_files(self.root))
+        self.assertTrue(is_learning_path("learning/batches/memory.json"))
+        self.assertTrue(is_learning_state_path("learning/batches/memory.json"))
+        for domain in LEARNING_DOMAINS:
+            self.assertFalse(learning_write_path(domain, "learning/batches/memory.json"))
+        record_learning_processed(self.root, "memory", [first])
+        self.assertEqual(learning_batch_candidate_ids(self.root, "memory"), (first, second))
+        withdrawn_paths = withdraw_learning_candidate(self.root, second)
+        self.assertIn(path, withdrawn_paths)
+        self.assertFalse(path.exists())
+        self.assertEqual(learning_validation_errors(self.root), [])
+
+    def test_admission_validates_identity_fields_and_cannot_replace_active_pool(self):
+        first = submit_learning(self.root, "first", "first").candidate_id
+        second = submit_learning(self.root, "second", "second").candidate_id
+        path = write_learning_batch(self.root, "memory", [first])
+        with self.assertRaisesRegex(ValueError, "already has an admitted batch"):
+            write_learning_batch(self.root, "memory", [second])
+        valid = path.read_bytes()
+        invalid = [
+            {"domain": "guidance", "candidate_ids": [first]},
+            {"domain": "memory", "candidate_ids": []},
+            {"domain": "memory", "candidate_ids": [first, first]},
+            {"domain": "memory", "candidate_ids": ["f" * 64]},
+            {"domain": "memory", "candidate_ids": first},
+            {"domain": "memory", "candidate_ids": [first], "extra": True},
+        ]
+        for record in invalid:
+            with self.subTest(record=record):
+                path.write_text(json.dumps(record), encoding="utf-8")
+                self.assertTrue(learning_validation_errors(self.root))
+        path.write_bytes(valid)
+        self.assertEqual(learning_validation_errors(self.root), [])
+
     def _candidate_path(self, candidate_id):
         return self.root / "learning" / "candidates" / f"{candidate_id}.json"
 

@@ -17,6 +17,7 @@ from .learning import (
     learning_validation_errors, list_learning_candidates, parse_learning_claim,
     record_learning_processed, remove_learning_claim, withdraw_learning_candidate,
     write_learning_claim,
+    learning_batch_candidate_ids, write_learning_batch,
 )
 from .platform import lock_file, unlock_file
 from .semantic_operation import SemanticOperationStore
@@ -112,7 +113,10 @@ class LearningCoordinator:
             self._synchronize()
             if mode == "update" and replace_token is None and self.current_claim(domain) is None:
                 pending = list_learning_candidates(self.memory_root, domain=domain)
-                if not select_curation_batch(pending, self.batch_config).candidates:
+                if not select_curation_batch(
+                    pending, self.batch_config,
+                    admitted_candidate_ids=learning_batch_candidate_ids(self.memory_root, domain),
+                ).candidates:
                     return ClaimResult(reason=(
                         "batch is waiting for more candidates or its maximum wait"
                         if pending else "no pending candidates"
@@ -120,6 +124,7 @@ class LearningCoordinator:
             for _attempt in range(_PUSH_ATTEMPTS):
                 base, upstream = self._base()
                 with self._worktree(base) as worktree:
+                    batch_path = None
                     claims = {item.domain: item for item in learning_claims(worktree)}
                     existing = claims.get(domain)
                     pending = {item.candidate_id: item for item in list_learning_candidates(worktree, domain=domain)}
@@ -135,7 +140,10 @@ class LearningCoordinator:
                         identifiers = existing.candidate_ids
                         remove_learning_claim(worktree, existing)
                     else:
-                        batch = select_curation_batch(tuple(pending.values()), self.batch_config) if mode == "update" else None
+                        admitted = learning_batch_candidate_ids(worktree, domain)
+                        batch = select_curation_batch(
+                            tuple(pending.values()), self.batch_config, admitted_candidate_ids=admitted,
+                        ) if mode == "update" else None
                         if batch is not None and not batch.candidates:
                             return ClaimResult(reason=(
                                 "batch is waiting for more candidates or its maximum wait"
@@ -156,6 +164,8 @@ class LearningCoordinator:
                         return ClaimResult(reason="no pending candidates")
                     if any(item not in pending for item in identifiers):
                         raise LearningClaimLost("selected evidence is no longer pending for this domain")
+                    if replace_token is None and batch is not None and batch.admitted_candidate_ids != admitted:
+                        batch_path = write_learning_batch(worktree, domain, batch.admitted_candidate_ids)
                     claim = parse_learning_claim(vars(LearningClaim(
                         domain, holder, uuid.uuid4().hex,
                         task_id or f"{domain}-{uuid.uuid4().hex}", base, identifiers,
@@ -163,7 +173,7 @@ class LearningCoordinator:
                     )))
                     path = write_learning_claim(worktree, claim)
                     commit = self._commit(
-                        worktree, [path], f"learning: claim {domain}",
+                        worktree, [path] + ([] if batch_path is None else [batch_path]), f"learning: claim {domain}",
                     )
                 if self._publish(base, upstream, commit):
                     return ClaimResult(claim, tuple(pending[item] for item in identifiers), claimed=True)

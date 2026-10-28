@@ -6,6 +6,8 @@ from unittest.mock import patch
 from rightmemory.config import SyncConfig
 from rightmemory.learning import (
     LEARNING_DOMAINS,
+    learning_batch_candidate_ids,
+    write_learning_batch,
     withdraw_learning_candidate,
     list_learning_candidates,
     record_learning_processed,
@@ -17,6 +19,67 @@ from tests.sync_test_base import SyncTestBase
 
 
 class LearningSyncTests(SyncTestBase):
+    def test_admitted_remainder_survives_sync_to_another_coordinator(self):
+        from rightmemory.learning_coordinator import LearningCoordinator
+        from rightmemory.config import CurationBatchConfig
+        for index in range(3):
+            submit_learning(self.device, f"session-{index}", f"evidence-{index}")
+        local = LearningCoordinator(SyncConfig(memory_root=self.device, enabled=True), holder_id="a" * 32)
+        local.batch_config = CurationBatchConfig(trigger_candidates=2, target_batch_candidates=2)
+        first = local.claim("memory")
+        self.assertEqual(len(first.candidates), 2)
+        local.finalize(first.claim, None, prepared_start_commit=self._git(self.device, "rev-parse", "HEAD"))
+        self._git(self.other, "pull", "--ff-only")
+        remote = LearningCoordinator(SyncConfig(memory_root=self.other, enabled=True), holder_id="b" * 32)
+        continuation = remote.claim("memory")
+        self.assertEqual(len(continuation.candidates), 1)
+        remote.finalize(continuation.claim, None, prepared_start_commit=self._git(self.other, "rev-parse", "HEAD"))
+        self.assertEqual(learning_batch_candidate_ids(self.other, "memory"), ())
+
+    def test_conflicting_admissions_fail_closed_without_repair(self):
+        first = self._seed_candidate()
+        second = submit_learning(self.device, "second", "other evidence").candidate_id
+        self._git(self.device, "push", "origin", "HEAD:main")
+        self._git(self.other, "pull", "--ff-only")
+        write_learning_batch(self.device, "memory", [first])
+        self._commit_learning(self.device)
+        write_learning_batch(self.other, "memory", [second])
+        self._commit_learning(self.other)
+        self._git(self.other, "push")
+        head = self._git(self.device, "rev-parse", "HEAD")
+        calls = []
+        result = self._manager().pull(repair=lambda *args: calls.append(args))
+        self.assertEqual(result.status, "error")
+        self.assertIn("coordination state has a conflict", result.message)
+        self.assertEqual(calls, [])
+        self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), head)
+
+    def test_sync_retires_restored_spent_admission(self):
+        candidate_id = self._seed_candidate()
+        write_learning_batch(self.other, "memory", [candidate_id])
+        admission = (self.other / "learning/batches/memory.json").read_bytes()
+        record_learning_processed(self.other, "memory", [candidate_id])
+        (self.other / "learning/batches/memory.json").write_bytes(admission)
+        self._commit_learning(self.other)
+        self._git(self.other, "push")
+        result = self._manager().pull()
+        self.assertEqual(result.status, "synced", result.message)
+        self.assertEqual(learning_batch_candidate_ids(self.device, "memory"), ())
+
+    def test_sync_repair_cannot_change_admitted_pool(self):
+        candidate_id = self._seed_candidate()
+        self._create_remote_local_conflict()
+        head = self._git(self.device, "rev-parse", "HEAD")
+        def repair(candidate, result, operation_id):
+            write_learning_batch(candidate, "memory", [candidate_id])
+            self._git(candidate, "add", "-f", "learning")
+            self._commit_candidate_resolution(candidate)
+            return "resolved"
+        result = self._manager().pull(repair=repair)
+        self.assertEqual(result.status, "error")
+        self.assertIn("immutable learning evidence or processed receipts", result.message)
+        self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), head)
+
     def _manager(self):
         return SyncManager(SyncConfig(memory_root=self.device, enabled=True))
 

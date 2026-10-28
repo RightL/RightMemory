@@ -10,7 +10,9 @@ from unittest.mock import patch
 from rightmemory.assistant_write import AssistantStaleVersionError, AssistantWriteManager
 from rightmemory.config import RuntimeConfig, load_config, load_sync_config
 from rightmemory.insight_trigger import InsightTriggerStore
-from rightmemory.learning import LEARNING_DOMAINS, learning_claims, list_learning_candidates
+from rightmemory.learning import (
+    LEARNING_DOMAINS, learning_batch_candidate_ids, learning_claims, list_learning_candidates,
+)
 from rightmemory.curation_cli import main as curate_main, submit_main
 from rightmemory.learning_coordinator import LearningCoordinator
 from rightmemory.learning_service import (
@@ -36,6 +38,77 @@ class LearningServiceTests(IsolatedWriteTestBase):
     def _use_default_batch_policy(self):
         (self.root / "rightmemory.toml").unlink()
         self.service = LearningService(self.root)
+
+    def test_notice_batch_identity_tracks_pending_evidence_and_survives_retry_and_reordering(self):
+        self._use_default_batch_policy()
+
+        def identities():
+            return {notice["domain"]: notice["batch_id"] for notice in self.service.notices()}
+
+        self.assertEqual(identities(), dict.fromkeys(LEARNING_DOMAINS))
+        first = self._submit()
+        initial = identities()
+        self.assertTrue(all(isinstance(value, str) and value for value in initial.values()))
+        retried = self.service.submit("session-one", "A reusable observation", "request-one")
+        self.assertFalse(retried["created"])
+        self.assertEqual(identities(), initial)
+        second = self._submit("Another observation", "request-two")
+        expanded = identities()
+        for domain in LEARNING_DOMAINS:
+            self.assertNotEqual(expanded[domain], initial[domain])
+
+        with patch(
+            "rightmemory.learning_service.list_learning_candidates",
+            side_effect=lambda *args, **kwargs: tuple(reversed(list_learning_candidates(*args, **kwargs))),
+        ):
+            self.assertEqual(identities(), expanded)
+        self.assertEqual(
+            {notice["domain"]: notice["batch_id"] for notice in LearningService(self.root).notices()},
+            expanded,
+        )
+        self.service.withdraw(second)
+        self.assertEqual(identities(), initial)
+        self.service.withdraw(first)
+        self.assertEqual(identities(), dict.fromkeys(LEARNING_DOMAINS))
+
+    def test_admitted_batch_remainder_stays_ready_and_later_evidence_waits_its_own_deadline(self):
+        self._use_default_batch_policy()
+        initial_ids = {self._submit(f"Observation {index}", f"request-{index}") for index in range(31)}
+        task = self.service.begin("guidance")
+        first_claim = self.service.coordinator.current_claim("guidance")
+        self.assertEqual(len(first_claim.candidate_ids), 30)
+        self.assertEqual(set(learning_batch_candidate_ids(self.root, "guidance")), initial_ids)
+        remaining_ids = initial_ids - set(first_claim.candidate_ids)
+        later = self._submit("New evidence outside the admitted batch", "later")
+        self.service.complete(task["task_id"])
+
+        self.service = LearningService(self.root)
+        notice = next(item for item in self.service.notices() if item["domain"] == "guidance")
+        self.assertTrue(notice["ready"])
+        self.assertEqual(notice["candidate_count"], 2)
+        self.assertIsNone(notice["next_ready_at"])
+        followup = self.service.begin("guidance")
+        self.assertEqual(followup["selected_candidate_count"], 1)
+        self.assertEqual(set(self.service.coordinator.current_claim("guidance").candidate_ids), remaining_ids)
+        self.service.complete(followup["task_id"])
+
+        self.service = LearningService(self.root)
+        notice = next(item for item in self.service.notices() if item["domain"] == "guidance")
+        self.assertFalse(notice["ready"])
+        self.assertEqual(notice["candidate_count"], 1)
+        self.assertEqual(self.service.begin("guidance")["status"], "not_ready")
+        pending = list_learning_candidates(self.root, domain="guidance")
+        self.assertEqual([candidate.candidate_id for candidate in pending], [later])
+        deadline = datetime.fromisoformat(pending[0].submitted_at) + timedelta(hours=25)
+        self.assertEqual(datetime.fromisoformat(notice["next_ready_at"]), deadline)
+        with patch("rightmemory.curation_batch.datetime") as clock:
+            clock.now.return_value = deadline
+            clock.fromisoformat.side_effect = datetime.fromisoformat
+            notice = next(item for item in self.service.notices() if item["domain"] == "guidance")
+            self.assertTrue(notice["ready"])
+            resumed = self.service.begin("guidance")
+        self.assertEqual(resumed["selected_candidate_count"], 1)
+        self.assertEqual(self.service.coordinator.current_claim("guidance").candidate_ids, (later,))
 
     def test_default_small_backlog_waits_without_claim_worktree_or_model(self):
         self._use_default_batch_policy()

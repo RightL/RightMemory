@@ -22,9 +22,12 @@ processing records, withdrawal, and cleanup; models judge and edit curated conte
 
 Batch readiness and batch size serve separate purposes. Count and waiting-time
 triggers let related evidence accumulate and reduce repeated model work; size bounds
-limit each run. All domains and executors use the same readiness policy, checked again
-against synchronized evidence when acquiring a new claim. Recovery retains its existing
-evidence and proceeds without waiting for another batch to accumulate.
+limit each run. A shared batch record retains the evidence admitted by a trigger until
+all of it has been processed or withdrawn, so a size limit does not impose another
+waiting period on the remainder. Later submissions accumulate separately. All domains
+and executors use the same readiness policy, checked again against synchronized
+evidence when acquiring a new claim. Recovery retains its existing evidence and
+proceeds without waiting for another batch to accumulate.
 
 ## Native and Configured Execution
 
