@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -58,6 +59,87 @@ class CurationWorkerTests(unittest.TestCase):
         service.native = True
         self.assertEqual(self.worker.run(service), 0)
         self.assertEqual(service.calls, [])
+
+    def test_waiting_batch_runs_at_deadline_without_another_submission(self):
+        start = datetime(2026, 10, 28, tzinfo=UTC)
+        clock = [start]
+        deadline = start + timedelta(seconds=3)
+        service = FakeService()
+        service.pending = {"memory": 1}
+
+        def notices():
+            pending = bool(service.pending["memory"])
+            return [{"domain": "memory", "ready": pending and clock[0] >= deadline,
+                     "next_ready_at": deadline.isoformat() if pending and clock[0] < deadline else None}]
+
+        def sleep(seconds):
+            self.assertFalse(service.calls)
+            self.assertEqual(self.worker.status()["next_ready_at"], deadline.isoformat())
+            clock[0] += timedelta(seconds=seconds)
+
+        service.notices = notices
+        with patch("rightmemory.curation_worker.datetime", wraps=datetime) as dates, \
+             patch("rightmemory.curation_worker.time.sleep", side_effect=sleep):
+            dates.now.side_effect = lambda zone: clock[0]
+            self.assertEqual(self.worker.run(service), 0)
+        self.assertEqual(service.calls, ["memory"])
+        self.assertEqual(clock[0], deadline)
+        self.assertIsNone(self.worker.status()["next_ready_at"])
+
+    def test_new_submission_interrupts_the_wait_and_rechecks_readiness(self):
+        deadline = datetime.now(UTC) + timedelta(hours=25)
+        service = FakeService()
+        service.pending = {"memory": 1}
+        ready = [False]
+
+        def notices():
+            pending = bool(service.pending["memory"])
+            return [{"domain": "memory", "ready": pending and ready[0],
+                     "next_ready_at": deadline.isoformat() if pending and not ready[0] else None}]
+
+        def submit(seconds):
+            self.assertFalse(service.calls)
+            ready[0] = True
+            self.assertEqual(self.worker.wake()["status"], "running")
+
+        service.notices = notices
+        with patch("rightmemory.curation_worker.time.sleep", side_effect=submit) as sleep:
+            self.assertEqual(self.worker.run(service), 0)
+        sleep.assert_called_once()
+        self.assertEqual(service.calls, ["memory"])
+
+    def test_stop_interrupts_a_waiting_batch_without_running_it(self):
+        deadline = datetime.now(UTC) + timedelta(hours=25)
+        service = FakeService()
+        service.notices = lambda: [{"domain": "memory", "ready": False,
+                                   "next_ready_at": deadline.isoformat()}]
+
+        def request_stop(seconds):
+            with self.worker._locked("control.lock"):
+                state = self.worker._read()
+                state["stop"] = {"pid": state["pid"], "identity": state["identity"]}
+                self.worker._write(state)
+
+        with patch("rightmemory.curation_worker.time.sleep", side_effect=request_stop) as sleep:
+            self.assertEqual(self.worker.run(service), 0)
+        sleep.assert_called_once()
+        self.assertFalse(service.calls)
+        self.assertFalse(self.worker.status()["live"])
+
+    def test_sync_wakes_a_future_batch_but_not_native_or_failed_work(self):
+        waiting = {"domain": "memory", "ready": False,
+                   "next_ready_at": (datetime.now(UTC) + timedelta(hours=25)).isoformat()}
+        self.assertTrue(self.worker.has_work([waiting]))
+        self.assertFalse(self.worker.has_work([{**waiting, "executor": "native"}]))
+        with patch("rightmemory.learning_service.LearningService") as service, \
+             patch.object(CurationWorker, "wake", return_value={"status": "started"}) as wake:
+            service.return_value.notices.return_value = [waiting]
+            self.assertEqual(wake_configured_curation(self.root), {"status": "started"})
+            wake.assert_called_once()
+        self.worker._write({"failures": {"memory": {
+            "task_id": None, "attempts": 2, "error": "failed",
+        }}})
+        self.assertFalse(self.worker.has_work([waiting]))
 
     def test_failure_budget_survives_restarts_and_new_task_gets_its_own_budget(self):
         service = FakeService()

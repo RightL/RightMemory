@@ -40,7 +40,7 @@ Pending evidence is immediately available to relevant retrieval. The program rem
 
 ## Prepare and Complete Curation
 
-Normal tool responses carry readiness and active-task notices. Subagents relay them to the main agent, which owns native delegation. Prepare a new ready domain with:
+Normal tool responses carry readiness and active-task notices. Each domain uses the shared [batching settings](../README.md#curation-execution-and-recovery): by default it waits for 15 pending candidates or the maximum waiting time. Waiting notices include `next_ready_at`; native execution rechecks readiness on subsequent tool calls. Subagents relay notices to the main agent, which owns native delegation. Prepare a new ready domain with:
 
 ```bash
 rightmemory curate --root /absolute/memory-root begin --domain memory --mode update

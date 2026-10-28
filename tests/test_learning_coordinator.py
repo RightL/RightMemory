@@ -13,6 +13,53 @@ from tests.sync_test_base import SyncTestBase
 
 
 class LocalLearningCoordinatorTests(IsolatedWriteTestBase):
+    def setUp(self):
+        super().setUp()
+        (self.root / ".git/info").mkdir(exist_ok=True)
+        with (self.root / ".git/info/exclude").open("a", encoding="utf-8") as stream:
+            stream.write("\n/rightmemory.toml\n")
+        (self.root / "rightmemory.toml").write_text(
+            "[curation.batch]\ntrigger_candidates = 1\ntarget_batch_candidates = 20\n",
+            encoding="utf-8",
+        )
+
+    def test_default_small_backlog_does_not_claim_even_with_explicit_selection(self):
+        (self.root / "rightmemory.toml").unlink()
+        candidate_id = self._submit()
+        coordinator = self._coordinator()
+        head = self._git("rev-parse", "HEAD")
+        with patch.object(coordinator, "_worktree", side_effect=AssertionError("worktree created")):
+            self.assertIsNone(coordinator.claim("memory").claim)
+            self.assertIsNone(coordinator.claim("memory", candidate_ids=[candidate_id]).claim)
+        self.assertEqual(learning_claims(self.root), ())
+        self.assertEqual(self._git("rev-parse", "HEAD"), head)
+
+    def test_default_count_trigger_selects_thirty_and_leaves_small_backlog_waiting(self):
+        (self.root / "rightmemory.toml").unlink()
+        for index in range(32):
+            submit_learning(self.root, "session", f"Evidence {index}.")
+        coordinator = self._coordinator()
+        result = coordinator.claim("memory")
+        self.assertTrue(result.claimed)
+        self.assertEqual(len(result.candidates), 30)
+        self._complete(coordinator, result.claim)
+        self.assertEqual(len(list_learning_candidates(self.root, domain="memory")), 2)
+        self.assertIsNone(coordinator.claim("memory").claim)
+        self.assertEqual(len(coordinator.claim("guidance").candidates), 30)
+
+    def test_default_threshold_does_not_block_existing_claim_or_explicit_replacement(self):
+        self._submit()
+        first = self._coordinator().claim("memory")
+        (self.root / "rightmemory.toml").unlink()
+        coordinator = self._coordinator()
+        resumed = coordinator.claim("memory")
+        self.assertEqual(resumed.claim, first.claim)
+        self.assertFalse(resumed.claimed)
+        replacement = coordinator.claim("memory", replace_token=first.claim.token)
+        self.assertTrue(replacement.claimed)
+        self.assertEqual(replacement.claim.candidate_ids, first.claim.candidate_ids)
+        self._complete(coordinator, replacement.claim)
+
     def _coordinator(self, holder="a" * 32):
         return LearningCoordinator(SyncConfig(memory_root=self.root), holder_id=holder)
 
@@ -163,7 +210,7 @@ class LocalLearningCoordinatorTests(IsolatedWriteTestBase):
         identity = coordinator.holder_id
         self.assertEqual(LearningCoordinator(SyncConfig(memory_root=self.root)).holder_id, identity)
 
-    def test_default_claims_bound_count_and_evidence_without_losing_large_first_item(self):
+    def test_configured_claims_bound_count_and_evidence_without_losing_large_first_item(self):
         for index in range(22):
             submit_learning(self.root, "session", f"Evidence {index}.")
         coordinator = self._coordinator()
@@ -181,6 +228,17 @@ class LocalLearningCoordinatorTests(IsolatedWriteTestBase):
 
 
 class SynchronizedLearningCoordinatorTests(SyncTestBase):
+    def setUp(self):
+        super().setUp()
+        for root in (self.device, self.other):
+            (root / ".git/info").mkdir(exist_ok=True)
+            with (root / ".git/info/exclude").open("a", encoding="utf-8") as stream:
+                stream.write("\n/rightmemory.toml\n")
+            (root / "rightmemory.toml").write_text(
+                "[curation.batch]\ntrigger_candidates = 1\ntarget_batch_candidates = 20\n",
+                encoding="utf-8",
+            )
+
     def _coordinator(self, root, holder):
         return LearningCoordinator(SyncConfig(memory_root=root, enabled=True), holder_id=holder * 32)
 

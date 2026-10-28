@@ -79,6 +79,14 @@ class PrunerConfig:
 
 
 @dataclass(frozen=True)
+class CurationBatchConfig:
+    memory_root: Path = MEMORY_ROOT
+    trigger_candidates: int = 15
+    target_batch_candidates: int = 30
+    max_wait_seconds: int = 86_400
+
+
+@dataclass(frozen=True)
 class AgentCliConfig:
     provider: str
     model: str | None = None
@@ -302,6 +310,32 @@ def load_sync_config(memory_root: Path | None = None) -> SyncConfig:
     return _sync_config(data.get("sync", {}), memory_root=root)
 
 
+def load_curation_batch_config(memory_root: Path | None = None) -> CurationBatchConfig:
+    root = _active_memory_root(memory_root)
+    data = _load_raw_config(memory_root)
+    if not root.exists():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {root}")
+    _reject_unknown_keys(data, _top_level_keys(), "top-level")
+    section = data.get("curation", {})
+    if not isinstance(section, dict):
+        raise ValueError("[curation] must be a TOML table")
+    _reject_unknown_keys(section, {"batch"}, "[curation]")
+    batch = section.get("batch", {})
+    if not isinstance(batch, dict):
+        raise ValueError("[curation.batch] must be a TOML table")
+    _reject_unknown_keys(
+        batch, {"trigger_candidates", "target_batch_candidates", "max_wait_seconds"},
+        "[curation.batch]",
+    )
+    defaults = CurationBatchConfig(memory_root=root)
+    trigger = _positive_integer(batch, "trigger_candidates", defaults.trigger_candidates, "[curation.batch]")
+    target = _positive_integer(batch, "target_batch_candidates", defaults.target_batch_candidates, "[curation.batch]")
+    wait = _positive_integer(batch, "max_wait_seconds", defaults.max_wait_seconds, "[curation.batch]")
+    if target < trigger:
+        raise ValueError("[curation.batch] requires target_batch_candidates >= trigger_candidates")
+    return CurationBatchConfig(root, trigger, target, wait)
+
+
 def _load_raw_config(memory_root: Path | None = None) -> dict[str, object]:
     config_path = _active_config_path(memory_root)
     if config_path.exists():
@@ -318,7 +352,7 @@ def _reject_unknown_keys(data: dict[str, object], allowed: set[str], context: st
 
 
 def _top_level_keys() -> set[str]:
-    return {*RUNTIME_ROLES, "agent_cli", "debug", "sync"}
+    return {*RUNTIME_ROLES, "agent_cli", "debug", "sync", "curation"}
 
 
 def _role_section(data: dict[str, object], role: str) -> dict[str, object]:
