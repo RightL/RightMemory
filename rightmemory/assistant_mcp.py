@@ -51,7 +51,14 @@ def create_mcp_server(
 
     @server.tool(
         name="rightmemory_assistant_submit",
-        description="Save candidate evidence with a stable retry id; return pending and batch notices.",
+        description=(
+            "Capture concrete ordinary context that could improve future understanding, decisions, collaboration, "
+            "or repeated work. Preserve the context and uncertainty needed to interpret it; a useful candidate need "
+            "not already support a stable conclusion. Update uses the Memory domain core to decide what becomes "
+            "durable Memory. Behavioral guidance, user redirections, and reusable work experience use "
+            "rightmemory_submit_learning. Leave out routine progress and copies of project artifacts that add no "
+            "independent future value. Reuse the same request_id and evidence for a retry; returns pending and batch notices."
+        ),
         structured_output=False,
     )
     def submit(session_id: str, request_id: str, evidence: str) -> CallToolResult:

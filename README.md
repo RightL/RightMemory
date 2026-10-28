@@ -161,24 +161,9 @@ CLI-agent mode delegates role execution to the Codex Python SDK or Claude Code C
 
 Install creates semantic state only when bootstrapping a new root. A fresh root receives `MEMORY.md`, `PURSUITS.md`, and the tracked root `.gitignore` control-plane allowlist, then Git baselines the complete synchronized state. The schema and semantic rules live with the installed RightMemory package rather than in each Memory or skills root. A complete pre-existing root is preserved byte-for-byte; reinstall may refresh package-owned runtime files and installed skills, but it does not refresh the allowlist or examples, synthesize missing semantic files, or migrate user state. A complete pre-existing Markdown root without Git history is committed exactly as found.
 
-If an existing root has a Git commit or any recognized semantic state but lacks a regular, non-symlink required root document, install refuses it before making any change. It also refuses legacy root copies named `PURSUIT_RULES.md` or `AGENT_CORRECTION_MEMORY_RULES.md`; review any local changes and remove those obsolete package references explicitly before reinstalling. The memory root, runtime installation, installed skills, and install stamp remain untouched so the user can perform an explicit, reviewed transition first. Legacy `MEMORY_*.md` files remain protected even when they are not currently reachable from `MEMORY.md`.
+RightMemory targets the current model rather than maintaining compatibility with every historical format. When an upgrade exposes old state that needs cleanup, use [Updating an Existing RightMemory Root](docs/UPGRADING.md) to give an agent the current destinations and meaningful changes. The agent can inspect the user's actual root and make the requested transition; the product does not need a data-conversion pipeline for each older version.
 
-Installer admission also validates any existing tracked update queue and checks
-for live async jobs from the pre-queue runtime. It changes nothing when either is
-incompatible. Finish, retry, or undo those live jobs with the currently installed
-RightMemory before rerunning the installer; version one does not invent migrated
-candidate identities during package installation.
-
-Before upgrading an installation that ran Review or Dreamer, stop its background
-manager with the currently installed `rightmemory watch stop` and let active
-cycles finish. Remove `[review]`, `[reviewer]`, `[dreamer]`, and
-`insight.watch.review_session_points` from `rightmemory.toml`; current config
-validation rejects them, and the installer leaves existing configuration unchanged.
-Pending deliveries from the retired transcript Review also block reinstall.
-Finish them with the currently installed version, or explicitly preserve and
-resolve their candidate evidence before archiving the listed delivery files.
-Reinstall leaves other retired runtime state untouched. Memory consolidation
-uses the explicitly requested `maintain-rightmemory` workflow.
+Reinstall checks the existing state and unfinished update work before replacing the runtime. It refuses an incomplete root, invalid queue or learning state, or incompatible pending work without changing the memory root, runtime installation, installed skills, or install stamp. Resolve the reported files and preserve unfinished evidence before trying again. Existing memory files remain protected even when they are not currently reachable from `MEMORY.md`; installation does not treat them as disposable examples.
 
 The memory root must be a standalone, non-bare Git working tree. An existing target nested inside another working tree, a bare repository, or an unusable `.git` entry is refused before installation writes anything.
 

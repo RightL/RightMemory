@@ -33,8 +33,8 @@ RETRIEVE_NEED_DESCRIPTION = (
     "not a verbatim copy of the user's message."
 )
 UPDATE_EVIDENCE_DESCRIPTION = (
-    "A self-contained account of what happened, what is currently true, and why "
-    "preserving it may matter in future work."
+    "A self-contained account of concrete evidence, the context and uncertainty "
+    "needed to interpret it, and its possible value in future work."
 )
 
 RETRIEVE_DESCRIPTION = """\
@@ -55,19 +55,19 @@ the correction and current evidence through the relevant path: rightmemory_submi
 for ordinary Memory, or rightmemory_submit_learning for behavioral guidance and reusable work."""
 
 SUBMIT_UPDATE_DESCRIPTION = """\
-Submit durable ordinary Memory evidence when omitting it would likely cause
-poorer future decisions, substantial rediscovery, or loss of useful context.
-Include concrete findings of missing or ambiguous context that meet this bar, even
-when the answer is not yet known. Behavioral guidance, corrections about how the agent
-works, and reusable work experience go through rightmemory_submit_learning.
+Submit concrete ordinary context that could improve future understanding, decisions,
+collaboration, or repeated work. Preserve the circumstances, supporting evidence, and
+unresolved uncertainty that affect its meaning. A useful candidate need not already
+support a stable conclusion; Update uses the Memory domain core to decide what becomes
+durable Memory. Behavioral guidance, corrections about how the agent works, and reusable
+work experience go through rightmemory_submit_learning.
 
 Pursuit is read-only to Update. Explicit map edits belong in the human editor or the
 maintain-pursuit-map workflow, not in an Update submission.
 
-Submit at a natural boundary once the evidence is clear; completion is not required. Do
-not submit transient progress, routine results, unresolved discussion by itself, or
-implementation detail already adequately preserved in project-local artifacts. Combine
-related evidence due at the same boundary.
+Submit at a natural boundary once the evidence is concrete enough to describe; completion
+is not required. Leave out routine progress and copies of project artifacts that add no
+independent future value. Combine related evidence due at the same boundary.
 
 State what happened, what is true now, and why it may matter. Do not prescribe stored
 wording, identifiers, classification, placement, or edits.

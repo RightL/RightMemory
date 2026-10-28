@@ -23,7 +23,7 @@ When retrieved content is wrong, stale, misleading, or overbroad, submit the pro
 
 ## Submit Useful Evidence
 
-Capture concrete evidence that could improve later understanding, decisions, collaboration, or repeated work. A possible lesson need not already be a stable rule, and uncertainty about recurrence is not by itself a reason to discard it. Preserve the circumstances and unresolved uncertainty that affect its meaning.
+Capture concrete evidence that could improve later understanding, decisions, collaboration, or repeated work. A useful candidate need not already support a stable conclusion, and uncertainty about recurrence is not by itself a reason to discard it. Preserve the circumstances and unresolved uncertainty that affect its meaning. The corresponding domain curator uses its shared core during Update to judge adoption and generalization.
 
 For ordinary context about the user, other people, projects, or decisions, use:
 
@@ -39,9 +39,9 @@ rightmemory learning --root <active-root> submit --session <session-id> --reques
 
 `--file <evidence-file>` can supply UTF-8 evidence instead of an inline argument. Reuse the request id and evidence when retrying the same learning submission. An explicit request to remember guidance or a procedure uses this same learning path, not ordinary Update.
 
-Describe what mattered: for a redirection, the prior approach, user signal, and resulting direction; for repeated work, the method, human contributions, outcome, and resources that could spare later rediscovery. Preserve actual evidence without inventing final wording, a general rule, or a skill. One learning candidate can help both curators.
+Describe what mattered: for a redirection, the prior approach, user signal, and resulting direction; for work experience, the method, human contributions, outcome, and resources that could spare later rediscovery. Consider whether the situation or a submethod may recur and whether the evidence would help a later agent reproduce a meaningful result from a short prompt. Preserve actual evidence without inventing final wording, a general rule, or a skill. One learning candidate can help both curators.
 
-Submit at a natural boundary once the evidence is concrete enough to describe; completion is not required. Combine related evidence due together and capture each occurrence once. Routine progress and copies of project artifacts rarely add value. Independent later occurrences can add useful evidence even when the apparent lesson is similar.
+Submit at a natural boundary once the evidence is concrete enough to describe; completion is not required. Combine related evidence due together and capture each occurrence once. Leave out routine progress and copies of project artifacts that add no independent future value. Independent later occurrences can add useful evidence even when the apparent lesson is similar.
 
 ## Process Ready Learning
 

@@ -22,20 +22,20 @@
 - `rightmemory/learning.py` owns candidate evidence, per-domain processing receipts, and canonical learning file validation; installation, sync, retrieval, and curation consume its helpers rather than parsing that state again.
 - `rightmemory/reference/rightmemory-schema.md` defines the shared Memory and Pursuit graph and file schema; `rightmemory/reference/PURSUIT_RULES.md` defines Pursuit lifecycle judgment; `rightmemory/reference/AGENT_CORRECTION_MEMORY_RULES.md` defines the fixed Agent Correction Memory module.
 - `rightmemory/reference/RIGHTMEMORY_EDIT_CORRECTION_RULES.md` defines non-semantic feedback about edits to RightMemory; `RIGHTMEMORY_EDIT_CORRECTIONS.example.md` illustrates its format.
-- `MEMORY.example.md` and `PURSUITS.example.md` are installer seeds and sources of their managed example blocks.
+- `MEMORY.example.md` and `PURSUITS.example.md` are installer seeds for new roots.
 - `install.sh` and `install.ps1` are platform bootstraps for the shared stdlib-only `rightmemory.install_core` transaction.
 - Use `README.md` for behavior, usage, command, configuration, and file-layout documentation. Use `DESIGN_NOTES.md` for durable design rationale.
 
 ## Development Posture
 
-- RightMemory is under rapid development and does not currently promise broad backward compatibility. Prefer a coherent current design over preserving undocumented historical behavior.
-- Do not add migration frameworks, compatibility adapters, deprecated aliases, dual-format handling, fallback branches, or similar machinery for hypothetical users. Add an upgrade path only when the task explicitly requires one.
-- When a change intentionally breaks an old format or behavior, update the implementation, tests, examples, and documentation together, and report the breakage in the handoff.
-- Backward compatibility is optional; data safety is not. Never silently delete or overwrite a user's real memory data, and use disposable roots or fixtures for destructive verification.
+- Build a coherent current design. Historical data and old callers do not require backward compatibility; remove obsolete product paths rather than carrying them into new features.
+- When formats, ownership, or commands change, document the current destination and the meaningful differences in `docs/UPGRADING.md`. Users can ask an agent to inspect their actual state and perform the needed cleanup from that explanation. Keep this a concise explanation of the transition, not a version-by-version migration procedure.
+- Do not add or extend automatic data migrations, legacy readers, dual-format handling, deprecated aliases, or historical-template cleanup code to support old installations. A separate migration tool requires an explicit user request. Update implementation, applicable tests, examples, and documentation together and report breaking changes.
+- Preserve real user data during ordinary installation and runtime work. Validate the current format and leave incompatible state unchanged with an actionable explanation; do not silently delete, rewrite, or manufacture user evidence. Agent-assisted cleanup runs when the user requests it. Use disposable roots or fixtures for destructive verification.
 
 ## State Admission Invariants
 
-- Install may create semantic state only when bootstrapping a new root. A reinstall must preserve a complete existing root byte-for-byte or refuse an incomplete root before changing the root, runtime installation, installed skills, or install stamp. Existing roots containing the legacy `PURSUIT_RULES.md` or `AGENT_CORRECTION_MEMORY_RULES.md` package copies must be refused for explicit review and removal. Do not restore managed-example refresh or implicit existing-root migration.
+- Install may create semantic state only when bootstrapping a new root. A reinstall must preserve a valid existing root byte-for-byte or refuse incompatible state before changing the root, runtime installation, installed skills, or install stamp. Current-format validation and protection of unfinished work remain necessary; they do not authorize implicit migration or managed-example refresh.
 - Incoming sync state must merge, receive any model repair, and pass complete validation in a leased candidate worktree. Publish only by fast-forwarding the unchanged active root to the exact validated candidate; a failed merge, repair, validation, or publication check must leave active state unchanged.
 - An `MF#` import is a version-two, schema-valid Memory document in a view-local namespace, not free-form Markdown. It may contain ordinary, F#, M#, and S# content with package-local backings; nested MF# and MQ# connections are invalid. Direct MF ranges are invalid, while imported M# and S# resources use qualified sources.
 
