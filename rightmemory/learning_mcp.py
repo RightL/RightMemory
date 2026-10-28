@@ -38,11 +38,16 @@ def register_learning_tools(
     @server.tool(
         name="rightmemory_submit_learning",
         description=(
-            "Retain concrete user redirection, habits, preferences, or reusable-work evidence outside normal Memory. "
-            "Keep enough of the situation and outcome for a future agent to interpret it. For complex work, consider "
-            "what a later short prompt would need to reproduce the useful result and whether the task or a submethod "
-            "may recur. Unsettled or one-off evidence can still be useful; capture it without inventing a general rule "
-            "or declaring an unproven method reliable. Reuse request_id and identical evidence when retrying; distinct "
+            "Capture concrete evidence about user redirections, habits, preferences, or work experience outside ordinary "
+            "Memory when it could improve future understanding, decisions, collaboration, or repeated work. Preserve the context "
+            "and uncertainty needed to interpret it. A useful candidate need not already support a stable conclusion; "
+            "the domain curators use their shared cores during Update to judge adoption and generalization. "
+            "For work evidence, consider whether the situation or a submethod may recur and whether the evidence "
+            "would help a later agent reproduce a meaningful result from a short prompt. Preserve the method, human "
+            "contributions, outcome, and relevant resources. Unsettled or one-off evidence can still be useful; capture "
+            "it without inventing a general rule or declaring an unproven method reliable. Leave out routine progress "
+            "and copies of project artifacts that add no independent future value. "
+            "Reuse request_id and identical evidence when retrying; distinct "
             "later occurrences receive new request IDs. Returns independent guidance and skills curator readiness. "
             + ready_guidance
         ),

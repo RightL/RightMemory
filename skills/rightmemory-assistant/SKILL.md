@@ -23,7 +23,7 @@ Reconcile the handoff with the current conversation and evidence. Apply relevant
 
 ## Submit Evidence
 
-Capture concrete evidence that could improve future understanding, decisions, collaboration, or repeated work. A possible lesson need not already be a stable rule, and uncertainty about recurrence is not by itself a reason to discard it. Preserve the circumstances, supporting evidence, and unresolved uncertainty that affect its meaning.
+Capture concrete evidence that could improve future understanding, decisions, collaboration, or repeated work. A useful candidate need not already support a stable conclusion, and uncertainty about recurrence is not by itself a reason to discard it. Preserve the circumstances, supporting evidence, and unresolved uncertainty that affect its meaning. The corresponding domain curator uses its shared core during Update to judge adoption and generalization.
 
 For ordinary context about the user, other people, projects, or decisions, write UTF-8 evidence outside the memory root and submit it to Memory Update:
 
@@ -37,9 +37,9 @@ For behavioral guidance, user redirections, and potentially reusable work experi
 rightmemory learning --root <active-root> submit --session <session-id> --request-id <submission-id> --file <evidence-file>
 ```
 
-For a redirection, preserve the prior approach, user signal, and resulting direction. For work experience, preserve the method, human contributions, outcome, and resources that could spare later rediscovery. Do not invent a general rule or finished skill. Both learning curators can use the same evidence. An explicit request to remember guidance or a procedure uses the learning path too.
+For a redirection, preserve the prior approach, user signal, and resulting direction. For work experience, consider whether the situation or a submethod may recur and whether the evidence would help a later agent reproduce a meaningful result from a short prompt. Preserve the method, human contributions, outcome, and resources that could spare later rediscovery. Do not invent a general rule or finished skill. Both learning curators can use the same evidence. An explicit request to remember guidance or a procedure uses the learning path too.
 
-Combine related evidence ready at a natural boundary and capture each occurrence once; completion is not required. Independent later occurrences can add evidence. Routine progress and details already adequately preserved in project artifacts rarely need submission. Pursuit is read-only context; explicit map edits use its separate maintenance workflow.
+Combine related evidence ready at a natural boundary and capture each occurrence once; completion is not required. Independent later occurrences can add evidence. Leave out routine progress and copies of project artifacts that add no independent future value. Pursuit is read-only context; explicit map edits use its separate maintenance workflow.
 
 Reuse the same request id and evidence when retrying a submission. A saved candidate is retrievable evidence, not confirmation that it became formal memory, guidance, or a skill.
 

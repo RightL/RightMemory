@@ -28,10 +28,11 @@ Choose one stable session id for the conversation and reuse it for every RightMe
 ## Propose Updates
 
 - Apart from stale, wrong, misleading, or overbroad retrieved state, propose possible updates instead of submitting them automatically.
-- Propose concrete evidence that could improve later understanding, decisions, collaboration, or repeated work. A learning candidate need not already express a stable general rule; preserve useful uncertainty and context gaps.
-- Do not propose transient progress, routine task results, unfinished work by itself, or copies of project-local artifacts without independent learning value, unless needed to correct existing state.
+- Propose concrete evidence that could improve later understanding, decisions, collaboration, or repeated work. A useful candidate need not already support a stable conclusion; preserve context and uncertainty, and leave adoption and generalization to the corresponding domain's Update core. Uncertainty about recurrence alone is not a reason to omit useful evidence.
+- For work experience, consider whether the situation or a submethod may recur and whether the evidence would help a later agent reproduce a meaningful result from a short prompt. Preserve the method, human contributions, outcome, and relevant resources.
+- Leave out routine progress and copies of project artifacts that add no independent future value, unless needed to correct existing state.
 - Briefly explain the possible future value. Do not propose final stored wording, ids, or edits.
-- Present the proposal once the evidence is clear and the conversation reaches a natural boundary. Completion is not required. If nothing passes the bar, say nothing about updating RightMemory.
+- Present the proposal once the evidence is concrete enough to describe and the conversation reaches a natural boundary. Completion is not required. If nothing passes the bar, say nothing about updating RightMemory.
 - After approval, combine related approved evidence for the same submission path. An explicit request to submit, save, or remember the evidence, or to follow it in future, counts as approval.
 - Submit ordinary user, people, project, or decision context with:
 
@@ -49,7 +50,7 @@ Choose one stable session id for the conversation and reuse it for every RightMe
 
 ## User Redirections
 
-A user redirection occurs when the user's response, explicitly or implicitly, materially changes the course of identifiable prior work. Judge it by the settled contrast between what you were on course to produce or do and the resulting direction; the difference may concern the conclusion, scope, reasoning, process, omissions, behavior, or presentation.
+A user redirection occurs when the user's response, explicitly or implicitly, materially changes the course of identifiable prior work. Judge it by the contrast between what you were on course to produce or do and the resulting direction; the difference may concern the conclusion, scope, reasoning, process, omissions, behavior, or presentation.
 
 Unease, a guiding question, or added information may qualify. Mere continuation, selection among intentionally open options, or a new task does not.
 
