@@ -18,7 +18,7 @@ Memory and Pursuit remain Markdown document trees in one addressable graph. Guid
 
 | Domain | What it preserves | Curator |
 | --- | --- | --- |
-| **Memory** | Ordinary context about the user, other people, projects, choices, and circumstances. | Memory Update and `maintain-rightmemory`. |
+| **Memory** | Ordinary context about the user, other people, projects, choices, and circumstances. | Memory curator and `maintain-rightmemory`. |
 | **Agent guidance** | Applicable behavioral guidance and useful concrete user-redirection cases. | Guidance curator and `maintain-agent-guidance`. |
 | **Work experience and skills** | Useful work cases, reusable methods, and supporting resources. | Skills curator and `maintain-work-skills`. |
 
@@ -26,11 +26,11 @@ Each domain uses one short shared core for candidate updates and requested broad
 
 ### What Belongs Where?
 
-Ordinary context uses the existing Memory submission path. Behavioral and procedural evidence uses one shared learning path, so an interaction can inform both curators without requiring the submitting agent to classify its final lesson.
+All useful evidence enters through one `rightmemory submit` path. Memory, guidance, and skills inspect the same candidate independently, so the submitting agent does not need to decide its final lesson or destination.
 
 The capture threshold is lower than the threshold for a stable generalization. Preserve a useful interaction even when recurrence or its broader meaning remains uncertain. Curators compare the evidence with current state, preserve scope, and decide whether to improve guidance, retain a concrete experience, develop a skill, or make no durable change.
 
-Raw learning evidence is retrievable before curation and may remain useful afterward. Processing does not turn it into an adopted rule or automatically remove it. Requested maintenance can retire fully processed evidence after preserving its independent value. Agent Corrections remains the existing bounded Expression/Substance case library within the guidance domain.
+Pending evidence is retrievable before curation. After all three domains finish, the program removes its raw source. Curators preserve independently useful context, concrete cases, or work experience in their own state, including material that does not yet support a general rule or polished skill. Agent Corrections remains the bounded Expression/Substance case library within the guidance domain.
 
 Canonical sources: [Memory core](rightmemory/reference/MEMORY_RULES.md), [Guidance core](rightmemory/reference/AGENT_GUIDANCE_RULES.md), [Work Skills core](rightmemory/reference/WORK_SKILLS_RULES.md), [Pursuit Rules](rightmemory/reference/PURSUIT_RULES.md), [Agent Corrections Rules](rightmemory/reference/AGENT_CORRECTION_MEMORY_RULES.md), and [Schema](rightmemory/reference/rightmemory-schema.md).
 
@@ -40,7 +40,7 @@ RightMemory is aimed at developers who spend serious time with coding agents and
 
 ## Quick Start
 
-To use your current assistant's native agents without a RightMemory model backend, follow [Assistant execution](docs/ASSISTANT_EXECUTION.md). It uses `rightmemory assistant`, a shared skill, and native file tools. Use the installer’s `--mode assistant` with explicit memory-root and skill-directory paths. The default installer paths below configure the existing internal runtime.
+To use your current assistant's native agents without a RightMemory model backend, follow [Assistant execution](docs/ASSISTANT_EXECUTION.md). It uses `rightmemory assistant context` for retrieval, the shared submit/curate controls, a daily skill, and native file tools. Use the installer’s `--mode assistant` with explicit memory-root and skill-directory paths. The default installer paths below configure the existing internal runtime.
 
 Install prerequisites:
 
@@ -93,7 +93,7 @@ rightmemory doctor agent-cli
 
 Before using the internal runtime, configure its role backend in `<memory-root>/rightmemory.toml` (by default `~/.rightmemory/rightmemory.toml`). See [Standalone Config](#standalone-config) for model endpoints and credentials, or [CLI-Agent Config](#cli-agent-config) for Codex SDK / Claude Code CLI execution. The `rightmemory mcp` transport connects your host agent to this runtime; it does not replace the configured backend or use the host's model automatically. Native assistant execution instead uses `rightmemory assistant`, including its optional `assistant mcp` transport.
 
-For the internal runtime's MCP transport, follow [MCP setup](docs/MCP.md) to register `rightmemory mcp` as a local stdio server. Connect the server in your host and check its retrieval, Memory submission, and shared learning tools, including `rightmemory_retrieve`, `rightmemory_submit_update`, and `rightmemory_submit_learning`. Tool discovery does not verify backend execution or a completed update. Do not also load a RightMemory orchestrator skill in that MCP conversation; command-only clients use the CLI skills instead.
+For the internal runtime's MCP transport, follow [MCP setup](docs/MCP.md) to register `rightmemory mcp` as a local stdio server. Connect the server in your host and check its retrieval, Memory submission, and shared learning tools, including `rightmemory_retrieve` and the unified `rightmemory_submit`. Tool discovery does not verify backend execution or a completed update. Do not also load a RightMemory orchestrator skill in that MCP conversation; command-only clients use the CLI skills instead.
 
 After connecting MCP, add a short instruction to your agent guidance file, such as
 `AGENTS.md` for Codex or `CLAUDE.md` for Claude Code:
@@ -124,7 +124,7 @@ rightmemory watch start
 
 A typical conversation asks a new agent to continue work or repeat a familiar task. The daily entry retrieves relevant Memory, guidance, experiences, skills, and raw evidence, then applies them to the current request.
 
-At a natural boundary, useful context goes to Memory Update. Behavioral redirections or a potentially reusable way of doing the work go to the shared learning path. The same evidence can improve guidance and work skills independently. The daily entry handles ready curation tasks using its configured executor or native agents; a candidate receipt confirms capture, and a completion receipt confirms publication.
+At a natural boundary, the daily entry submits useful evidence once. The same interaction can improve ordinary context, guidance, and work skills independently. A configured worker processes ready domains automatically; native execution delegates them through the current assistant. A submission receipt confirms capture, and a completion receipt confirms publication. Fully processed raw candidates leave current retrieval, while useful retained material remains.
 
 The user can later request broader maintenance through the corresponding domain skill. The Pursuit map remains under human control. See [docs/DEMO.md](docs/DEMO.md) for a recording script.
 
@@ -159,15 +159,15 @@ CLI-agent mode delegates role execution to the Codex Python SDK or Claude Code C
 .\install.ps1 --mode cli-agent ~\.rightmemory ~\.codex\skills
 ```
 
-Install creates semantic state only when bootstrapping a new root. A fresh root receives `MEMORY.md`, `PURSUITS.md`, and the tracked root `.gitignore` control-plane allowlist, then Git baselines the complete synchronized state. The schema and semantic rules live with the installed RightMemory package rather than in each Memory or skills root. A complete pre-existing root is preserved byte-for-byte; reinstall may refresh package-owned runtime files and installed skills, but it does not refresh the allowlist or examples, synthesize missing semantic files, or migrate user state. A complete pre-existing Markdown root without Git history is committed exactly as found.
+Install creates semantic state only when bootstrapping a new root. A fresh root receives `MEMORY.md`, `PURSUITS.md`, and the tracked root `.gitignore` control-plane allowlist, then Git baselines the complete synchronized state. The schema and semantic rules live with the installed RightMemory package rather than in each Memory or skills root. A valid, complete pre-existing root is preserved byte-for-byte; reinstall may refresh package-owned runtime files and installed skills, but it does not refresh the allowlist or examples, synthesize missing semantic files, or migrate user state. A valid, complete pre-existing Markdown root without Git history is committed exactly as found.
 
 RightMemory targets the current model rather than maintaining compatibility with every historical format. When an upgrade exposes old state that needs cleanup, use [Updating an Existing RightMemory Root](docs/UPGRADING.md) to give an agent the current destinations and meaningful changes. The agent can inspect the user's actual root and make the requested transition; the product does not need a data-conversion pipeline for each older version.
 
-Reinstall checks the existing state and unfinished update work before replacing the runtime. It refuses an incomplete root, invalid queue or learning state, or incompatible pending work without changing the memory root, runtime installation, installed skills, or install stamp. Resolve the reported files and preserve unfinished evidence before trying again. Existing memory files remain protected even when they are not currently reachable from `MEMORY.md`; installation does not treat them as disposable examples.
+Reinstall validates current state and protects unfinished curation before replacing the runtime. It refuses incomplete or invalid roots before installation writes. A live configured worker may finish its current task at a safe boundary; any remaining native, resumable, or unfinished-publication task blocks runtime replacement. Resolve that task through its current controls before trying again. Existing memory files remain protected even when they are not currently reachable from `MEMORY.md`; installation does not treat them as disposable examples.
 
 The memory root must be a standalone, non-bare Git working tree. An existing target nested inside another working tree, a bare repository, or an unusable `.git` entry is refused before installation writes anything.
 
-Reinstall refreshes the selected daily entry and the three domain maintenance skills. Internal modes also install map maintenance and Manager. It removes exact managed copies of the other ordinary orchestration variants and former loose skills-root references; customized copies are left untouched. The retired managed `review-agent-guidance-inbox` skill is replaced by domain maintenance; customized copies and the old inbox data are preserved. Existing Behavior and S# content is not migrated automatically.
+Reinstall refreshes the selected daily entry and the three domain maintenance skills. Internal modes also install map maintenance and Manager. Switching modes removes an exact current installer-managed copy of the other daily entry; customized skill directories remain untouched. Historical templates, data, and reference copies are not scanned or cleaned by the installer. Use the upgrade explanation for agent-assisted cleanup when needed.
 
 ### Profiles
 
@@ -183,8 +183,8 @@ Profile aliases live in `<default-memory-root>/profiles.toml`. New profile roots
 default to a sibling profile-root area, such as
 `~/.rightmemory-profiles/my-project` for the normal default root. Each profile
 root has its own `MEMORY.md`, `PURSUITS.md`, optional fixed Agent Correction collections and `corrections.md`,
-`rightmemory.toml`, `.runtime/`, change history, watcher state, async update
-queues, sessions, and insight logs.
+`rightmemory.toml`, `.runtime/`, change history, watcher state, shared candidates, curation
+tasks, sessions, and insight logs.
 
 Creating a new profile root bootstraps all required root documents. Registering an existing root requires those documents to be complete and regular; profile creation does not synthesize missing state in an existing root.
 
@@ -247,27 +247,27 @@ Common Memory domains include projects, responsibilities, and `# User Context`, 
 
 `#`, `##`, and `###` are normal tree layers and may contain Memory or Pursuit content. They can have `{#slug}` anchors and heading-level edges when the whole subtree is useful as a graph target.
 
-Addressable `#`, `##`, and `###` headings may also have body paragraphs directly under the heading. Those paragraphs describe the heading itself. Use a heading body when the text explains the whole concept; use child nodes when the fact should stand on its own.
+Addressable `#`, `##`, and `###` headings may also have body paragraphs directly under the heading. Those paragraphs describe the heading itself. Use a heading body when the text explains the whole concept; in Memory, use child nodes when a fact should stand on its own.
 
 Use `{F#slug}` instead of `{#slug}` when a heading is backed by a sibling parsed detail file. F# is root-relative: Memory maps to `MEMORY_<slug>.md`, while Pursuit maps to `PURSUIT_<slug>.md`. Graph edges still target `slug`, not `F#slug`.
 
 `####` is the deepest heading level allowed in a parsed graph file. A `#### Topic {F#slug}` heading points to the root-relative detail file; it may have body paragraphs that summarize or explain that file, but no nodes or child headings in its containing file.
 
-### Nodes
+### Memory Nodes
 
-Nodes are addressable statements under a heading:
+Memory nodes are addressable statements under a heading:
 
 ```md
 - `<node-id>` <description> → [edge1, edge2, ...]
 ```
 
-Heading ids and node ids share one namespace across both trees. A node with no edges still writes `→ []`; a heading with no edges may omit the edge list. New Pursuit map items use headings; `Focus` entries are references, not graph nodes.
+Heading ids and Memory node ids share one namespace across both trees. A Memory node with no edges still writes `→ []`; a heading with no edges may omit the edge list. Pursuit map items use headings, with ordinary Markdown for their bodies. Graph-node bullets are invalid in Pursuit. Its `Focus` entries are standalone heading-id references, not graph nodes.
 
 ### Detail Files
 
 Any `#`, `##`, or `###` heading can use its id as a parsed detail-file target by writing `{F#slug}`. For example, Memory `{F#alpha-runtime}` maps to `MEMORY_alpha-runtime.md`; the same form in Pursuit maps to `PURSUIT_alpha-runtime.md`.
 
-Move child content into a detail file when a heading becomes too dense, especially past about 15 direct node lines. Count only direct node lines, not child headings or `####` pointers. After moving content out, keep the F# heading and optional summary in the parent file.
+Move Memory child content into a detail file when a heading becomes too dense, especially past about 15 direct node lines. Count only direct node lines, not child headings or `####` pointers. After moving content out, keep the F# heading and optional summary in the parent file.
 
 The Pursuit editor creates `F#` boundaries automatically when a logical branch would exceed the physical heading limit. The canvas still shows one tree. Existing boundaries are retained rather than repeatedly splitting and inlining unchanged branches.
 
@@ -383,30 +383,30 @@ RightMemory separates Agent Corrections, which are semantic cases about ordinary
 
 Reusable evidence about a settled user redirection may be curated into the fixed Agent Corrections module. `MEMORY_agent-corrections-writing.md` contains **Expression Corrections**, where changing wording, organization, formatting, tone, or presentation alone would resolve the objection. `MEMORY_agent-corrections-design.md` contains **Substance Corrections**, where reasoning, assumptions, decisions, proposed actions, omissions, workflow, or behavior must change. The physical filenames, CLI collection names, and retrieval source ids retain `writing` and `design`; the Expression/Substance test defines their meaning.
 
-Each collection is a priority-curated set of at most 10 entries and 180 non-empty lines, with at most 16 non-empty lines per entry and 200 characters per line; it is not an append-only log or FIFO. Ordinary Retrieve can select relevant entries through `AC#writing` and `AC#design`. The `rightmemory agent-corrections writing` and `rightmemory agent-corrections design` commands remain for an explicitly requested whole-collection review, not a separate ordinary-retrieval pass. The guidance curator owns these collections and avoids duplicating the same case in another library. New generalized guidance belongs under `learning/guidance/`; existing Behavior and S# material remains readable.
+Each collection is a priority-curated set of at most 10 entries and 180 non-empty lines, with at most 16 non-empty lines per entry and 200 characters per line; it is not an append-only log or FIFO. Ordinary Retrieve can select relevant entries through `AC#writing` and `AC#design`. The `rightmemory agent-corrections writing` and `rightmemory agent-corrections design` commands remain for an explicitly requested whole-collection review, not a separate ordinary-retrieval pass. The guidance curator owns these collections and avoids duplicating the same case in another library. Generalized guidance belongs under `learning/guidance/`; graph-linked S# instruction resources remain supported.
 
-Root `corrections.md` is synchronized RightMemory Edit Feedback, not semantic RightMemory state, graph content, or Agent Corrections. Each entry preserves the relevant candidate text, proposed edit, and accepted edit under [the edit-feedback rules](rightmemory/reference/RIGHTMEMORY_EDIT_CORRECTION_RULES.md); [the example](RIGHTMEMORY_EDIT_CORRECTIONS.example.md) illustrates the format. Curators form a tentative judgment before consulting relevant edit feedback as a late check. Candidate-backed updater outcomes retain their exact input under `update_records/`, while Git supplies the corresponding semantic diff.
+Root `corrections.md` is synchronized RightMemory Edit Feedback, not semantic RightMemory state, graph content, or Agent Corrections. Each entry preserves the relevant candidate text, proposed edit, and accepted edit under [the edit-feedback rules](rightmemory/reference/RIGHTMEMORY_EDIT_CORRECTION_RULES.md); [the example](RIGHTMEMORY_EDIT_CORRECTIONS.example.md) illustrates the format. Curators form a tentative judgment before consulting relevant edit feedback as a late check. Curation records processing identities and hashes, while Git supplies the corresponding semantic diff and earlier evidence. Completed raw candidates are not retained as a second active evidence archive.
 
 ## Agent Roles
 
-Choose the daily entry for the executor in use: `rightmemory-assistant` delegates to native agents; `rightmemory-auto-orchestrator` uses the internal command runtime; internal MCP supplies the corresponding tool instructions. These are ways to perform the same ordinary work, not separate memory systems.
+Choose the daily entry for the executor in use: `rightmemory-assistant` delegates to native agents; `rightmemory-auto-orchestrator` uses the configured runtime; internal MCP supplies the corresponding tool instructions. These are ways to perform the same ordinary work.
 
-| Work | Update path | Requested maintenance |
+| Domain | Update | Requested maintenance |
 | --- | --- | --- |
-| Ordinary Memory | `update submit`, or native `assistant submit` | `maintain-rightmemory` |
-| Behavioral guidance and correction cases | Shared `learning submit`, then the guidance curator | `maintain-agent-guidance` |
-| Work experiences and skills | Shared `learning submit`, then the skills curator | `maintain-work-skills` |
-| Pursuit map | User-owned; ordinary learning leaves it unchanged | Human editor or `maintain-pursuit-map` |
+| Ordinary Memory | Reconcile shared candidates into useful context | `maintain-rightmemory` |
+| Behavioral guidance and correction cases | Reconcile shared candidates into applicable guidance or cases | `maintain-agent-guidance` |
+| Work experiences and skills | Preserve useful experience and improve reusable methods | `maintain-work-skills` |
+| Pursuit map | Ordinary learning leaves it unchanged | Human editor or `maintain-pursuit-map` |
 
-A submission carries evidence, not final wording, classification, or a command to edit a particular file. Explicit requests to remember guidance or a procedure still use the shared learning path. Session ids provide provenance; they are not task identities.
+One `rightmemory submit` call records evidence for all three curators. Submission does not set final wording, classification, or a destination file. Session ids provide provenance; they are not task identities.
 
-Learning submission returns readiness for the two curators. The command-backed daily entry runs ready domains with `learning run`; native agents use model-free `learning begin`, inspect the prepared task, and complete it after curation. Updates process bounded batches; remaining candidates stay ready for subsequent batches. Each domain can process the same evidence independently. No manual inbox-admission step is required.
+Configured submission wakes one curation worker, which runs ready domains through their configured executors. Native execution uses model-free `curate begin`, delegates the prepared worktree to a native agent, and calls `curate complete`. Updates process bounded batches; remaining candidates stay pending for later batches. Each domain can complete without a semantic edit. The program removes a raw candidate after all three domains finish, leaving whatever context, guidance, cases, or experience the curators retained.
 
-Requested maintenance uses the same domain core to inspect existing material within the user's scope; it does not automatically mark pending candidates processed. Guidance and skill maintenance use the same model-free preparation and completion controls in every executor mode. The program validates ownership, evidence preservation, and publication; native agents use their file tools inside the assigned worktree.
+All three maintenance skills use the same preparation and completion controls with `--mode maintain --scope`. Maintenance starts from scoped existing material and does not consume pending candidates. The program validates allowed changes and controls publication; agents use the domain's shared core to judge the content.
 
-Retrieve considers relevant graph context, guidance, correction cases, experiences, skills, and raw learning evidence. Current user instructions and current evidence take precedence over stale or overbroad stored interpretations. Applicable guidance should affect the work itself.
+Retrieve considers relevant graph context, guidance, correction cases, experiences, skills, and pending evidence. Current user instructions and current evidence take precedence over stale or overbroad stored interpretations. Applicable guidance should affect the work itself.
 
-`rightmemory-manager` coordinates separate worker tasks for a Pursuit direction and uses the appropriate maintenance workflow when the user asks for changes. Insight, Historian, Pruner, and sync repair retain their existing bounded responsibilities. Optional read-only and approval-gated source skills remain available for clients that explicitly choose them; they are not installed as additional daily entries.
+`rightmemory-manager` coordinates separate worker tasks for a Pursuit direction and uses the appropriate maintenance workflow when the user asks for changes. Insight, Historian, Pruner, and sync repair retain their bounded responsibilities. Optional read-only and approval-gated source skills remain available for clients that explicitly choose them; they are not installed as additional daily entries.
 
 ## Prompt Sources
 
@@ -447,7 +447,7 @@ The installer arguments are:
 .\install.ps1 [--mode assistant|cli-agent|standalone] [<memory-root> <skills-target>]
 ```
 
-- `<memory-root>` is where Memory, Pursuit, optional Agent Correction collections, optional RightMemory Edit Feedback, sharing state, and `insight_logs/` live.
+- `<memory-root>` is where Memory, Pursuit, optional Agent Correction collections, optional RightMemory Edit Feedback, learning sources, sharing state, and `insight_logs/` live.
 - `<skills-target>` is where your agent loads skills from, such as `~/.claude/skills` or `~/.codex/skills`.
 - With no path arguments, the installer uses `~/.rightmemory` and installs `rightmemory-auto-orchestrator`, `maintain-rightmemory`, `maintain-agent-guidance`, `maintain-work-skills`, `maintain-pursuit-map`, and `rightmemory-manager` into `~/.codex/skills` and `~/.claude/skills`.
 
@@ -468,10 +468,11 @@ one implementation. On its supported platforms, the Codex SDK supplies its
 matching native Codex runtime. Claude CLI discovery continues to support native executables and,
 on Windows, standard npm `.cmd` shims with matching `.ps1` shims.
 
-On reinstall, the shared installer asks a live asynchronous Update worker to
-stop at a batch boundary before replacing runtime files. If the worker cannot
-stop safely, installation refuses before runtime replacement. After a successful
-install, pending work is resumed with the newly installed runtime.
+On reinstall, the shared installer asks a live configured curation worker to stop
+at a task boundary before replacing runtime files. If the worker cannot stop
+safely, or a task remains unfinished, installation refuses runtime replacement.
+After a successful internal-mode install, pending work is resumed with the newly
+installed Python. Assistant mode leaves execution to native agents.
 
 RightMemory can keep the same memory root available across laptops, desktops,
 and agent clients. The current managed sync implementation uses a private Git
@@ -481,27 +482,27 @@ semantic work and push successful memory changes after they land.
 
 ## Everyday Use
 
-1. Let the installed `rightmemory-auto-orchestrator` retrieve context and submit qualifying Memory evidence according to its instructions. Use an optional ordinary orchestration variant when you want read-only or approval-gated access.
-2. Let the daily entry process ready learning evidence. For requested broader maintenance, use `maintain-rightmemory`, `maintain-agent-guidance`, or `maintain-work-skills`. The internal runtime's `watch start` still serves pruning, Insight, and optional sync.
+1. Let the installed daily entry retrieve context and submit useful evidence according to its instructions. Use an optional ordinary orchestration variant when you want read-only or approval-gated access.
+2. Let the configured worker or native agents process ready domains. For requested broader maintenance, use `maintain-rightmemory`, `maintain-agent-guidance`, or `maintain-work-skills`. The internal runtime's `watch start` still serves pruning, Insight, and optional sync.
 3. Open `rightmemory pursuit` or explicitly request `maintain-pursuit-map` to change your direction map. Use a node's **Copy context** action to bring its background into Codex App, where you can set up a long-lived Manager conversation for that direction to coordinate worker tasks. Ordinary updates leave the map unchanged.
-4. Use `rightmemory status` when you need to inspect watcher, queue, and sync state.
+4. Use `rightmemory status` for watcher, curation, and sync state, or `rightmemory curate status` for curation tasks and pending evidence.
 
 The three domain maintenance skills let your host agent improve the requested state using each domain's shared learning core. Insight commits timestamped reflections under `insight_logs/` when broader patterns, risks, or next-step ideas are worth preserving.
 
 ## Command Runtime
 
-The internal executor modes expose the same command surface; native assistant execution uses its model-free preparation and completion controls. The command-backed automatic skill calls roles such as `rightmemory retrieve` and `rightmemory update`; the install mode determines who executes the role prompt after the command starts. Optional source skills can call the same surface when installed manually.
+Every executor uses the same submission and curation lifecycle. `curate begin` prepares a task without a model client, while `curate run` executes it with the configured role backend. Native assistant execution uses begin/delegate/complete. Optional source skills can call the same surface when installed manually.
 
 ```bash
 rightmemory retrieve --session <agent-session-id> "find memory about the standalone mode"
-rightmemory update submit --session <agent-session-id> "remember that MCP should stay optional"
-rightmemory update pull --session <agent-session-id>
-rightmemory update undo --session <agent-session-id> <pending-candidate-id>
-rightmemory learning --root <memory-root> submit --session <agent-session-id> --request-id <id> "work or guidance evidence"
-rightmemory learning --root <memory-root> run --domain guidance --mode update
-rightmemory learning --root <memory-root> run --domain skills --mode update
-rightmemory learning --root <memory-root> begin --domain skills --mode maintain --scope "improve the report workflow"
-rightmemory learning --root <memory-root> status
+rightmemory submit --root <memory-root> --session <agent-session-id> --request-id <id> --file <evidence.txt>
+rightmemory curate --root <memory-root> status
+rightmemory curate --root <memory-root> run --domain memory --mode update
+rightmemory curate --root <memory-root> begin --domain skills --mode maintain --scope "improve the report workflow"
+rightmemory curate --root <memory-root> complete --task <task-id>
+rightmemory curate --root <memory-root> begin --domain skills --retry <task-id>
+rightmemory curate --root <memory-root> withdraw --candidate <candidate-id>
+rightmemory curate --root <memory-root> worker status
 rightmemory insight --session <agent-session-id> "optional focus hint"
 rightmemory insight watch
 rightmemory prune
@@ -523,20 +524,19 @@ rightmemory watch start
 rightmemory watch status
 rightmemory watch stop
 rightmemory retrieve chat
-rightmemory update chat
 rightmemory insight chat
 ```
 
-`update undo` uses a numeric ID only for this device's local queue. For a
-synchronized candidate, use the eight-character UID prefix shown by
-`update pull`; this keeps cross-device ID collisions unambiguous. An all-digit
-reference of eight or more characters is therefore interpreted as a UID prefix.
+Submission uses the executor selected by installation: assistant mode is native;
+internal modes are configured. `--executor native|configured` makes this explicit.
+Reuse `--request-id` and identical evidence for an interrupted submission. A withdrawal
+prevents further processing of a pending candidate; it does not undo conclusions
+already published by a curator.
 
 For machine callers:
 
 ```bash
 rightmemory retrieve daemon --stdio-json
-rightmemory update daemon --stdio-json
 rightmemory insight daemon --stdio-json
 ```
 
@@ -544,7 +544,6 @@ The daemon reads JSON lines from stdin and writes JSON lines to stdout:
 
 ```json
 {"message":"find memory about the standalone mode"}
-{"message":"remember that MCP should stay optional"}
 ```
 
 The runtime is intentionally small:
@@ -554,93 +553,48 @@ The runtime is intentionally small:
 - Agent-based retrieve uses complete typed reads for local F# details and S# skills, line-numbered reads for local M# evidence, typed progressive reads for validated MF# graphs and their F#/M#/S# resources, and fixed `AC#writing` / `AC#design` sources for complete Agent Correction entries. CLI-agent emits the same selector as strict JSON. The shared runtime uses the canonical index and Retrieve contract to resolve ids, permitted ranges, hierarchy, source positions, and source-authored Markdown.
 - Embedding retrieve uses the same CLI and MCP entrypoints, with a configurable model service and an incrementally refreshed local source index. It ranks each complete query independently and returns a bounded list of original source entries for the calling agent to judge.
 - `~/.rightmemory` is the default memory root, and all tool paths must stay inside the configured memory root. Set `RIGHTMEMORY_ROOT` to use a different no-profile root, or use `--profile <name>` / `.rightmemory-profile` for project-specific roots.
-- Retrieve, Memory Update, guidance and skills curation, history, insight, pruner, and sync repair have separate runtime boundaries selected by command line, queue, or watcher.
+- Retrieve, Memory Update, guidance and skills curation, history, insight, pruner, and sync repair have separate runtime boundaries selected by command line, curation task, or watcher.
 - Role-specific executor settings are read from `<memory-root>/rightmemory.toml`.
 - Standalone calls with `--session` persist exact Pydantic AI message history under `<memory-root>/.runtime/sessions/<role>/`. In CLI-agent mode, only retrieve persists a provider mapping across commands. A new logical Retrieve session forks a reusable stable-prefix base, while explicit `chat` may reuse one process-local provider thread and other independent role turns start fresh threads.
 - Every new CLI-agent provider conversation receives an ownership record under `<memory-root>/.runtime/agent_cli_threads/`, including Retrieve prefix bases and their forks, one-shot turns, and failed isolated work. Cleanup uses those ownership records independently of an active session mapping.
 - Optional debug tracing appends live JSONL events under `<memory-root>/.runtime/debug/<role>/<session>.jsonl` without changing the canonical session history.
-- Use `rightmemory status` for a read-only operational dashboard across the configured memory root. Its `Sync` section reports whether sync is configured, the upstream tracking reference, ahead/behind counts relative to the last-fetched upstream, and the latest recorded sync outcome. Sync watcher process state remains under `Managed Watches`. The dashboard also summarizes Git state, Insight trigger progress, async update queues, bounded last-message previews, and file paths for full logs or state. Status never fetches, pulls, pushes, starts watchers, invokes a model, or writes runtime state. Use `rightmemory watch status` when you need the lower-level managed-watch process view.
-- Use `rightmemory validate` for a read-only check of the configured root, or `rightmemory validate --root <path>` for an explicit root such as a maintenance worktree. It requires the canonical root documents, validates the complete Memory/Pursuit graph, any present Agent Correction collections, and `corrections.md`, and exits nonzero on failure.
-- A fresh-root install creates and baselines a tracked root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, any admitted Agent Correction collections, optional root `corrections.md`, sharing metadata and provider view sources, `insight_logs/*.md`, immutable `update_records/*.json`, the narrowly defined `update_queue/` JSON paths, and canonical `learning/` files; generated shared-view output stays outside the committed surface. Reinstall preserves an existing allowlist exactly. Package reference changes arrive with the installed software rather than through Memory sync.
+- Use `rightmemory status` for a read-only operational dashboard across the configured memory root. Its `Sync` section reports whether sync is configured, the upstream tracking reference, ahead/behind counts relative to the last-fetched upstream, and the latest recorded sync outcome. Sync watcher process state remains under `Managed Watches`. The dashboard also summarizes Git state, Insight trigger progress, curation tasks, pending evidence, bounded last-message previews, and file paths for full logs or state. Status never fetches, pulls, pushes, starts watchers, invokes a model, or writes runtime state. Use `rightmemory watch status` when you need the lower-level managed-watch process view.
+- Use `rightmemory validate` for a read-only check of the configured root, or `rightmemory validate --root <path>` for an explicit root such as a maintenance worktree. It requires the canonical root documents, validates the complete Memory/Pursuit graph, any present Agent Correction collections, `corrections.md`, and canonical learning state, and exits nonzero on failure.
+- A fresh-root install creates and baselines a tracked root `.gitignore` allowlist so Git status surfaces Memory, Pursuit, any admitted Agent Correction collections, optional root `corrections.md`, sharing metadata and provider view sources, `insight_logs/*.md`, and canonical `learning/` files; generated shared-view output stays outside the committed surface. Reinstall preserves an existing allowlist exactly. Package reference changes arrive with the installed software rather than through Memory sync.
 - Use `rightmemory reference <name>` to print a canonical package-owned reference without resolving or reading a Memory root. Supported names are `schema`, `memory`, `guidance`, `work-skills`, `pursuit`, `agent-correction`, `edit-correction`, `shared-view`, and `retrieve-contract`.
-- Async `update submit` calls for the same `--session` accumulate as pending candidates and reset that session's configured quiet period. A global worker batches whole session queues, but the updater groups candidates by the work they describe rather than treating a session as one task. Natural-boundary submissions about related evidence are reconciled together; `pull` and `undo` remain per-session. Retrieve can see pending evidence as `Recent submitted RightMemory` before consolidation.
-- Automatic unified-update, insight, and pruner turns use isolated Git worktrees when they operate on the main state root. Runtime validates complete role-owned results before landing them.
+- Shared submission persists a candidate once, and each domain records its own processing. Pending candidates are ordinary `L#` retrieval sources. Fully processed evidence is removed by program finalization.
+- Domain curation, Insight, and Pruner use isolated Git worktrees. Runtime validates complete role-owned results before landing them.
 - Standalone daemon context is preserved with Pydantic AI message history.
-- The local [MCP stdio adapter](docs/MCP.md) exposes the same runtime, async Memory Update store, and shared learning implementation as the CLI.
+- The local [MCP stdio adapter](docs/MCP.md) exposes the same runtime, shared candidate store, and curation lifecycle as the CLI.
 
-### Async Update Config
+### Curation Execution and Recovery
 
-Submitted updates keep a per-session one-hour quiet period, then the global
-worker groups eligible session queues by candidate count:
+Configured submission wakes a single background worker. It processes bounded batches
+for Memory, guidance, and skills, continuing while work remains. There is no separate
+per-session quiet-period configuration. The native path returns readiness to the main
+assistant, which supplies the agents through the same task controls.
 
-```toml
-[update.async]
-trigger_candidates = 15
-target_batch_candidates = 30
-max_wait_seconds = 86400
-```
+`rightmemory curate status` reports pending evidence and active tasks. A task retains
+its candidate identities across retries. After an interrupted completion or lost reply,
+inspect the same task and retry `complete`; a prepared result can publish without
+repeating semantic work. `effects_pending` likewise calls for completion recovery,
+not another model turn.
 
-`trigger_candidates` starts a batch when ordinary pending work reaches that
-aggregate count. Once triggered, `target_batch_candidates` is the preferred
-fill size, not a hard cap: the worker keeps session queues whole, so a batch may
-overshoot it. The worker does not wait for the target after the trigger fires;
-it takes the available whole session queues until it reaches the target or runs
-out of pending work. When pending work remains below the trigger,
-`max_wait_seconds` is measured from the oldest eligible queue's quiet-period
-deadline.
+Prefer resuming the original task. When edits must be abandoned or reconciled anew,
+confirm the previous worker has stopped, then use
+`curate begin --domain <domain> --retry <task-id>`. This can explicitly take over a
+claim from another checkout. Replacement fences the old publication and does not
+carry over unpublished edits. Claims are per domain and do not expire on a timer.
+The configured worker bounds
+automatic attempts, retains failures for inspection, and does not call models forever.
+After resolving a failure, `curate worker wake` permits another attempt; a deliberate
+task retry gets a new attempt budget.
 
-`rightmemory status` includes aggregate async update worker and queue state
-without requiring a session id. For one session's detailed pending, running,
-result, or error state, continue to use `rightmemory update pull --session <id>`.
-Local worker startup and configuration errors are retained in the aggregate
-status instead of being hidden behind a synchronized lease release.
-The queue view is labeled current when the checkout matches the last-fetched
-upstream. When Git is behind or diverged, the dashboard warns that local queue
-counts may be incomplete; when Git is ahead, it identifies local queue state
-that is not yet present upstream.
-
-When Git sync is enabled, published candidates and their coordination state use
-the tracked `update_queue/` paths. Before a local outbox candidate is published,
-RightMemory synchronizes local state commits; if that fails, the self-contained
-candidate remains in the outbox. Its queue commit then follows that state
-naturally in Git history without storing a state commit id in ordinary candidate
-evidence. A claimant performs another full sync before acquiring the lease.
-
-Every processed candidate batch is retained at
-`update_records/<operation-id>.json`. The immutable record contains the exact
-candidates and lands in the same commit as any semantic changes. A batch
-that produces no semantic edit lands a record-only commit. The commit's
-`RightMemory-Operation` trailer and the record filename provide the complete
-input-to-diff link without copying the diff, touched paths, or an inferred
-per-candidate mapping into the record. Local and synchronized processing use the
-same canonical batch identity. Queue files remain transport state and are
-removed after fenced settlement; the operation record is the durable input
-provenance in both modes. Because records preserve exact candidate messages in
-Git, the memory repository and its sync remote must be treated as private.
-
-Before upgrading, drain
-live updates on every device with its currently installed runtime. Then update
-and reinstall RightMemory everywhere before submitting another candidate; older
-runtimes reject the new paths rather than silently admitting state they cannot
-validate. Reinstall refuses a live legacy job without `candidate_uid` or any
-pending retired transcript-review delivery, or any malformed queue, before
-changing the installation.
-
-Unsupported or unreadable historical async state also blocks reinstall, even
-when drained. After confirming it contains no live work, archive the listed
-runtime file and rerun the installer.
-
-Processing synchronized candidates requires an online Git claim. Version one
-uses a fixed six-hour lease with no heartbeat; this is long enough for typical
-work, while an unusually long CLI-agent command may outlive it. Finalization
-refetches and verifies the fencing token, so expiry can duplicate computation but
-cannot commit a stale result. With reasonably synchronized device clocks, a
-crashed owner delays takeover by about six hours; clock skew can change that
-availability delay without weakening fencing correctness.
-
-A candidate may still process offline while it is provably local-only. Once its
-first publication attempt begins, it stays online-only until Git proves the
-synchronized outcome.
+Claims, processing receipts, and withdrawals are program-owned. Receipts retain
+candidate identities and hashes, not another copy of the evidence body. Completing the
+last domain removes raw evidence from current state, including for no-change judgments.
+Curators retain useful concrete cases or experiences before completing their work.
+Git history is not rewritten by that removal.
 
 ### CLI-Agent Config
 
@@ -831,19 +785,17 @@ rightmemory --profile my-project status
 By default these commands manage `insight` and `pruner`, plus `sync` when `[sync].enabled` is true. Pass a target when you want one loop, such as `rightmemory watch start insight`. Managed watcher pid files and logs live under `<memory-root>/.runtime/watch/`.
 
 For a single read-only view of watcher state, Insight trigger
-progress, async update queues, recent previews, and paths to the underlying logs
+progress, curation tasks, pending evidence, and paths to the underlying logs
 or state files, use `rightmemory status`. `rightmemory watch status`
 intentionally stays focused on managed watch process state.
 
-#### Update Provenance
+#### Curation Provenance
 
-Every queued updater outcome retains its exact candidate batch in
-`update_records/<operation-id>.json`. The record lands in the same commit as the
-semantic edit; a no-change outcome lands as a record-only commit. Review the
-record beside that commit's Git diff to see exactly which evidence produced which
-state change. The diff stays authoritative in Git and is not duplicated in the
-record. Explicit Update turns without queued candidates create no provenance
-artifact.
+Each domain's publication records which candidate identities and hashes it processed.
+The semantic diff remains in Git. Pending candidate files contain the submitted body;
+after all domains finish, the program removes that body from current state rather than
+keeping an additional raw-history collection. Curated cases and experiences preserve
+useful evidence in a form chosen for later work. Existing Git commits are unchanged.
 
 ### Forgetting And History
 
@@ -853,7 +805,7 @@ If a due prune has nothing to remove, the pruner writes an empty `prune: checkpo
 
 The `prune:` commit body is the lightweight ledger. It records the boundary, removed ids, revived ids under grace, and notable skips. A memory item that was pruned and then written back gets grace across two due prune checkpoints by default; after that, the pruner judges it like ordinary active memory again. The memory files do not carry lifecycle metadata.
 
-Ordinary `rightmemory retrieve` searches the current Memory/Pursuit graph and considers relevant guidance, fixed Agent Corrections, work experiences, skills, and raw learning evidence. `rightmemory history --session <id> "query"` asks the historian to search `prune:` ledgers and Git snapshots for pruned Memory. Historian returns matches as historical context and does not write them back. When old context becomes useful again, submit ordinary update evidence so the updater can judge whether to reactivate it.
+Ordinary `rightmemory retrieve` searches the current Memory/Pursuit graph and considers relevant guidance, fixed Agent Corrections, work experiences, skills, and raw learning evidence. `rightmemory history --session <id> "query"` asks the historian to search `prune:` ledgers and Git snapshots for pruned Memory. Historian returns matches as historical context and does not write them back. When old context becomes useful again, submit the new evidence so the Memory curator can judge whether to reactivate it.
 
 ### Change-Triggered Insight Cycles
 
@@ -863,7 +815,7 @@ Insight can run background cycles through the manager:
 rightmemory watch start insight
 ```
 
-`rightmemory insight watch` checks `<memory-root>/.runtime/insight/trigger-state.json` and writes timestamped reflection artifacts under `insight_logs/` when useful. Insight reads active Memory and prior Insight logs; it edits neither Memory nor Pursuit and does not read RightMemory edit `corrections.md`. With the default `[insight.watch]` settings, each Memory-changing unified update contributes `1.0` point, the trigger threshold is `150`, and the watcher checks every `3000` seconds.
+`rightmemory insight watch` checks `<memory-root>/.runtime/insight/trigger-state.json` and writes timestamped reflection artifacts under `insight_logs/` when useful. Insight reads active Memory and prior Insight logs; it edits neither Memory nor Pursuit and does not read RightMemory edit `corrections.md`. With the default `[insight.watch]` settings, each Memory-changing curation update contributes `1.0` point, the trigger threshold is `150`, and the watcher checks every `3000` seconds.
 
 ```toml
 [insight.watch]
@@ -874,7 +826,7 @@ check_interval_seconds = 3000
 
 A landed Memory-changing Update transaction adds one configured unit to Insight regardless of how many candidates the updater reconciled. No-op and failed updates add no pressure. A successful automatic cycle consumes the configured threshold after it lands or completes as a valid no-op; failed cycles preserve accumulated points. `rightmemory insight watch --interval <seconds>` overrides the trigger-check cadence.
 
-Insight and Pruner watchers hold their own locks under `.runtime/watch/`. A competing watcher exits instead of duplicating work. Unified Update also uses one updater execution lock. Isolated roles may do model work in temporary checkouts, and landing uses the shared write lock before changing the main repository.
+Insight and Pruner watchers hold their own locks under `.runtime/watch/`. A competing watcher exits instead of duplicating work. Configured curation uses one worker and per-task execution ownership. Isolated roles may do model work in temporary checkouts, and landing uses the shared write lock before changing the main repository.
 
 `rightmemory watch stop` writes a PID-bound cooperative stop request. A sleeping
 watcher exits within a few seconds; a watcher doing model work finishes the
@@ -889,7 +841,9 @@ when Windows assigns it a new PID. Run `rightmemory watch start` or
 
 ### Isolated Automatic Writes
 
-Automatic unified-Update, insight, and pruner turns that operate on the main state root run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/` on branches named `rightmemory-isolated-<role>-<uuid>`. Update may commit ordinary Memory files, and runtime adds an immutable candidate record to the same commit for queued work. Pursuit paths are excluded from Update's writable tools and accepted result surface. A queued no-change outcome still commits its candidate record; an explicit Update turn without queued candidates adds no managed artifact. Pruner remains restricted to Memory, while Insight commits `insight_logs/*.md`. Runtime validates complete role-owned results and lands successful commits; empty `prune:` checkpoints are allowed.
+Domain curation prepares persistent isolated worktrees for native or configured agents. Each curator can change only its domain's accepted files, and program finalization validates the result, records processing, and publishes it against the current shared claim. Pursuit is outside ordinary curation's writable surface. A no-change judgment still completes processing; it does not require a model-authored record.
+
+Insight and Pruner run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/`. Pruner remains restricted to ordinary Memory, while Insight commits `insight_logs/*.md`. Runtime validates and lands complete role-owned results; empty `prune:` checkpoints are allowed.
 
 Temporary session and provider state lives under `.runtime/isolated-state/` during an isolated turn and is promoted after successful landing or a valid no-op. Standalone turns seed local message history there. CLI-agent turns start speculative provider work in a fresh one-shot session. Successful ownership state is promoted; if later validation or landing fails, the ownership record alone is preserved so the abandoned internal thread remains eligible for cleanup. Other temporary work is discarded, and the original candidate batch or maintenance trigger balance remains the retry source.
 
@@ -909,11 +863,11 @@ stale_pull_after_hours = 24
 
 When sync is enabled, runtime code handles remote Git synchronization around automatic semantic work. It checks upstream state before model work and pushes after successful synchronized-state commits land. Incoming commits never merge directly into the active checkout: RightMemory merges the exact fetched commit in a leased candidate worktree, invokes `sync-reconciler` there only for synchronized conflicts or semantic validation failures, validates the complete candidate, and then fast-forwards the active root to that exact commit. The isolated-write dirty-main check is separate from remote sync: local synchronized files can block automatic semantic writes even when `[sync].enabled` is false.
 
-Retrieve adds a small active-use safety net. At most once every five minutes it performs a pull-only upstream check before reading memory, with the fetch bounded to two seconds. A clean incoming commit is validated and admitted for the current request; the foreground path never pushes and never invokes `sync-reconciler`. Offline, timed-out, dirty, conflicting, or invalid incoming state does not block retrieval: the request uses the last valid local state, then starts one detached full sync cycle after the response finishes. That cycle owns reconciliation and push when needed, and a shared nonblocking cycle lock prevents duplicate watcher, retrieve, and deferred work. If a clean refresh brings synchronized update candidates, the update worker is woken only after retrieval completes. Historical retrieval remains local.
+Retrieve adds a small active-use safety net. At most once every five minutes it performs a pull-only upstream check before reading memory, with the fetch bounded to two seconds. A clean incoming commit is validated and admitted for the current request; the foreground path never pushes and never invokes `sync-reconciler`. Offline, timed-out, dirty, conflicting, or invalid incoming state does not block retrieval: the request uses the last valid local state, then starts one detached full sync cycle after the response finishes. That cycle owns reconciliation and push when needed, and a shared nonblocking cycle lock prevents duplicate watcher, retrieve, and deferred work. If a clean refresh brings pending candidates, configured curation is woken after retrieval completes; native execution receives readiness notices. Historical retrieval remains local.
 
 The tracked root `.gitignore` is synchronized package-owned control-plane state rather than semantic Memory. Sync admits it through the same regular-file and path-surface checks as other synchronized files, while reinstall never rewrites an existing copy.
 
-Update records and update-queue files are non-graph state, not semantic repair input. Sync transports only canonical immutable `update_records/*.json` plus candidate, recovery, and singleton-lease queue paths, validates their complete schemas before publication, and fails closed on malformed data or conflicts in these paths. `sync-reconciler` never edits or resolves this state, and the queue's global lease fences one updater batch across devices.
+Shared candidates, processing receipts, claims, and withdrawal records are program-owned non-graph state. Sync validates them and mechanically merges compatible immutable evidence or records; a conflicting claim is refused rather than sent to a model. Finalization and merge remove fully processed or withdrawn raw candidates so another device cannot revive them accidentally. `sync-reconciler` may repair curated guidance, experiences, and skills within its allowed surface, while program state stays outside model edits.
 
 Managed watch includes a `sync` target. `rightmemory watch start` starts it when sync is enabled, and `rightmemory watch start sync` runs that target by itself. The watcher is an optional low-latency accelerator; retrieve's bounded check also restores progress during active use when no watcher is running. Every normal watcher cycle fetches the upstream so newly published candidates become locally visible; it pulls immediately when the fetched tip changed. When the tip is unchanged, `stale_pull_after_hours` controls how often a no-change pull checkpoint is recorded. Clean pulls and fresh checks stay deterministic and do not call a model.
 
@@ -992,10 +946,8 @@ After install:
 ├── PURSUITS.md
 ├── PURSUIT_<slug>.md
 ├── corrections.md              # created only when edit feedback is admitted
-├── learning/                  # raw evidence, guidance, experiences, skills, receipts
+├── learning/                   # pending evidence, curated sources, program state
 ├── insight_logs/
-├── update_records/             # immutable exact candidate batches
-├── update_queue/               # appears when synchronized queue state exists
 └── .runtime/                   # machine-local runtime state
 
 ~/.codex/skills/

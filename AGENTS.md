@@ -19,7 +19,7 @@
 - `rightmemory/graph.py` owns the canonical RightMemory grammar and in-memory document index. Graph-aware validation, retrieval, tools, sync, and shared-view code must consume that index rather than parse the Markdown structure again.
 - Canonical role prompts live in `rightmemory/prompts/`. Edit role behavior there first; installed skills are not the source of truth for role prompts.
 - `rightmemory/reference/` owns the package-shipped schema and semantic rule documents. `MEMORY_RULES.md`, `AGENT_GUIDANCE_RULES.md`, and `WORK_SKILLS_RULES.md` are shared domain cores for update and maintenance. These are product definitions, not Memory-root or skills-root state.
-- `rightmemory/learning.py` owns candidate evidence, per-domain processing receipts, and canonical learning file validation; installation, sync, retrieval, and curation consume its helpers rather than parsing that state again.
+- `rightmemory/learning.py` owns the shared candidate store, per-domain processing records, and canonical learning file validation. `rightmemory/learning_service.py` coordinates Memory, guidance, and skills curation through the same preparation and publication lifecycle; installation, sync, retrieval, and execution consume these helpers rather than parsing that state again.
 - `rightmemory/reference/rightmemory-schema.md` defines the shared Memory and Pursuit graph and file schema; `rightmemory/reference/PURSUIT_RULES.md` defines Pursuit lifecycle judgment; `rightmemory/reference/AGENT_CORRECTION_MEMORY_RULES.md` defines the fixed Agent Correction Memory module.
 - `rightmemory/reference/RIGHTMEMORY_EDIT_CORRECTION_RULES.md` defines non-semantic feedback about edits to RightMemory; `RIGHTMEMORY_EDIT_CORRECTIONS.example.md` illustrates its format.
 - `MEMORY.example.md` and `PURSUITS.example.md` are installer seeds for new roots.
@@ -51,7 +51,7 @@
   Run tests only when executable behavior also changes or when the user explicitly
   requests them.
 - Run syntax checks with `python -m compileall -q rightmemory tests`.
-- Add or update focused tests when changing configuration shape, transcript/update-record state, CLI-agent thread lifecycle, or Git/memory safety.
+- Add or update focused tests when changing configuration shape, shared candidate or curation state, CLI-agent thread lifecycle, or Git/memory safety.
 - Do not test agent-facing text. Tests must not inspect, compare, snapshot, parse, or
   assert any content supplied to an agent, including prompts, assembled instructions,
   schemas and references embedded in prompts, runtime context blocks, formatting

@@ -72,8 +72,8 @@ class HubStore:
                     )
                 ),
             )
-        with self._connect() as connection:
-            self._apply_migrations(connection)
+        with self._connect(create=True) as connection:
+            self._initialize_schema(connection)
             if admin_token:
                 self._ensure_admin_token(connection, admin_token)
             self._append_audit_event(connection, "hub.initialized")
@@ -101,7 +101,6 @@ class HubStore:
         clean_provider_id = _validate_hub_id(provider_id, "provider_id")
         clean_label = _optional_string(label)
         with self._connect() as connection:
-            self._apply_migrations(connection)
             now = _now_iso()
             connection.execute(
                 """
@@ -150,7 +149,6 @@ class HubStore:
         row = self._find_token(raw_token, action=action, provider_id=provider_id, view_id=view_id)
         if row is None:
             with self._connect() as connection:
-                self._apply_migrations(connection)
                 self._append_audit_event(
                     connection,
                     "token.rejected",
@@ -187,7 +185,6 @@ class HubStore:
             if row is not None:
                 return _token_actor_from_row(row)
         with self._connect() as connection:
-            self._apply_migrations(connection)
             self._append_audit_event(
                 connection,
                 "token.rejected",
@@ -200,7 +197,6 @@ class HubStore:
     def revoke_token(self, token_id: str) -> bool:
         clean_token_id = _validate_hub_id(token_id, "token_id")
         with self._connect() as connection:
-            self._apply_migrations(connection)
             row = connection.execute(
                 "SELECT provider_id, view_id, action FROM tokens WHERE id = ? AND revoked_at IS NULL",
                 (clean_token_id,),
@@ -245,7 +241,6 @@ class HubStore:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         values.extend([_normalize_limit(limit), _normalize_offset(offset)])
         with self._connect() as connection:
-            self._apply_migrations(connection)
             rows = connection.execute(
                 f"""
                 SELECT id, action, provider_id, view_id, label, created_at, revoked_at
@@ -296,7 +291,6 @@ class HubStore:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         values.extend([_normalize_limit(limit), _normalize_offset(offset)])
         with self._connect() as connection:
-            self._apply_migrations(connection)
             rows = connection.execute(
                 f"""
                 SELECT id, kind, actor_id, provider_id, view_id, details_json, created_at
@@ -312,7 +306,6 @@ class HubStore:
     def hub_overview(self) -> dict[str, Any]:
         config = self.load_config()
         with self._connect() as connection:
-            self._apply_migrations(connection)
             provider_count = connection.execute("SELECT COUNT(*) FROM providers").fetchone()[0]
             view_count = connection.execute("SELECT COUNT(*) FROM views").fetchone()[0]
             token_count = connection.execute("SELECT COUNT(*) FROM tokens").fetchone()[0]
@@ -341,7 +334,6 @@ class HubStore:
 
     def list_providers(self, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         with self._connect() as connection:
-            self._apply_migrations(connection)
             rows = connection.execute(
                 """
                 SELECT
@@ -387,7 +379,6 @@ class HubStore:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         values.extend([_normalize_limit(limit), _normalize_offset(offset)])
         with self._connect() as connection:
-            self._apply_migrations(connection)
             rows = connection.execute(
                 f"""
                 SELECT
@@ -417,7 +408,6 @@ class HubStore:
     def get_admin_view(self, view_id: str) -> dict[str, Any] | None:
         clean_view_id = _validate_hub_id(view_id, "view_id")
         with self._connect() as connection:
-            self._apply_migrations(connection)
             row = connection.execute(
                 """
                 SELECT
@@ -451,7 +441,6 @@ class HubStore:
     ) -> list[dict[str, Any]]:
         clean_view_id = _validate_hub_id(view_id, "view_id")
         with self._connect() as connection:
-            self._apply_migrations(connection)
             rows = connection.execute(
                 """
                 SELECT
@@ -489,7 +478,6 @@ class HubStore:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         values.extend([_normalize_limit(limit), _normalize_offset(offset)])
         with self._connect() as connection:
-            self._apply_migrations(connection)
             rows = connection.execute(
                 f"""
                 SELECT
@@ -536,7 +524,6 @@ class HubStore:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         values.extend([_normalize_limit(limit), _normalize_offset(offset)])
         with self._connect() as connection:
-            self._apply_migrations(connection)
             rows = connection.execute(
                 f"""
                 SELECT
@@ -560,7 +547,6 @@ class HubStore:
     def get_view(self, view_id: str) -> dict[str, Any] | None:
         clean_view_id = _validate_hub_id(view_id, "view_id")
         with self._connect() as connection:
-            self._apply_migrations(connection)
             row = connection.execute(
                 """
                 SELECT id, provider_id, title, ref, description, current_version_id, created_at, updated_at
@@ -576,7 +562,6 @@ class HubStore:
     def get_current_view_version(self, view_id: str) -> dict[str, Any] | None:
         clean_view_id = _validate_hub_id(view_id, "view_id")
         with self._connect() as connection:
-            self._apply_migrations(connection)
             row = connection.execute(
                 """
                 SELECT
@@ -617,7 +602,6 @@ class HubStore:
         clean_label = _optional_string(label)
         clean_expires_at = _normalize_optional_datetime(expires_at, "expires_at")
         with self._connect() as connection:
-            self._apply_migrations(connection)
             view = connection.execute(
                 "SELECT id, provider_id FROM views WHERE id = ?",
                 (clean_view_id,),
@@ -685,7 +669,6 @@ class HubStore:
             "parts": clean_parts,
         }
         with self._connect() as connection:
-            self._apply_migrations(connection)
             token = self._create_token(
                 connection,
                 action="share-invite",
@@ -769,7 +752,6 @@ class HubStore:
             storage_path.mkdir(parents=True, exist_ok=False)
             _atomic_write_text(storage_path / "manifest.json", manifest_json + "\n")
             with self._connect() as connection:
-                self._apply_migrations(connection)
                 connection.execute(
                     """
                     INSERT INTO providers(id, label, created_at, updated_at)
@@ -848,7 +830,6 @@ class HubStore:
         if token_row is None:
             return None
         with self._connect() as connection:
-            self._apply_migrations(connection)
             row = connection.execute(
                 """
                 SELECT
@@ -916,7 +897,6 @@ class HubStore:
             return None
         clean_consumer_label = _optional_string(consumer_label)
         with self._connect() as connection:
-            self._apply_migrations(connection)
             invitation = connection.execute(
                 """
                 SELECT
@@ -1000,7 +980,6 @@ class HubStore:
         clean_consumer_label = _optional_string(consumer_label)
         accepted_parts: list[dict[str, Any]] = []
         with self._connect() as connection:
-            self._apply_migrations(connection)
             for part in payload.get("parts", []):
                 if not isinstance(part, dict):
                     continue
@@ -1060,7 +1039,6 @@ class HubStore:
         clean_view_id = _validate_hub_id(view_id, "view_id")
         payload_json = json.dumps(payload, sort_keys=True)
         with self._connect() as connection:
-            self._apply_migrations(connection)
             connection_row = connection.execute(
                 """
                 SELECT c.id AS connection_id, v.provider_id AS provider_id
@@ -1192,7 +1170,6 @@ class HubStore:
     ) -> int:
         now = _now_iso()
         with self._connect() as connection:
-            self._apply_migrations(connection)
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 """
@@ -1244,7 +1221,6 @@ class HubStore:
         relative_storage_path = stored.path.relative_to(self.root).as_posix()
         now = _now_iso()
         with self._connect() as connection:
-            self._apply_migrations(connection)
             connection.execute("BEGIN IMMEDIATE")
             if provider_id:
                 connection.execute(
@@ -1347,48 +1323,49 @@ class HubStore:
                 )
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.db_path)
+    def _connect(self, *, create: bool = False) -> Iterator[sqlite3.Connection]:
+        if not create and not self.db_path.is_file():
+            raise ValueError("Hub database is not initialized; run rightmemory hub init for a new Hub.")
+        database = str(self.db_path) if create else self.db_path.absolute().as_uri() + "?mode=rw"
+        connection = sqlite3.connect(database, uri=not create)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         try:
             with connection:
+                if not create:
+                    self._require_current_schema(connection)
                 yield connection
         finally:
             connection.close()
 
-    def _apply_migrations(self, connection: sqlite3.Connection) -> None:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS schema_migrations(
-                version INTEGER PRIMARY KEY,
-                applied_at TEXT NOT NULL
-            )
-            """
-        )
-        applied = {
-            row["version"]
-            for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
+    def _initialize_schema(self, connection: sqlite3.Connection) -> None:
+        existing = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        if not existing:
+            connection.executescript("BEGIN IMMEDIATE;\n" + _CURRENT_SCHEMA + "\nCOMMIT;")
+        self._require_current_schema(connection)
+
+    def _require_current_schema(self, connection: sqlite3.Connection) -> None:
+        tables = {
+            row["name"] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
         }
-        if 1 not in applied:
-            connection.executescript(_MIGRATION_1)
-            connection.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)",
-                (1, _now_iso()),
+        missing = []
+        for table, required in _CURRENT_COLUMNS.items():
+            if table not in tables:
+                missing.append(table)
+                continue
+            columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+            missing.extend(f"{table}.{column}" for column in required if column not in columns)
+        if missing:
+            raise ValueError(
+                "Hub database is missing current schema entries: " + ", ".join(missing)
+                + ". Automatic schema upgrades are not performed. Ask your agent to inspect and repair "
+                "the local Hub database against the current schema, or initialize a separate Hub "
+                "and retain the existing data for deliberate cleanup. The database was not modified."
             )
-        if 2 not in applied:
-            connection.executescript(_MIGRATION_2)
-            connection.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)",
-                (2, _now_iso()),
-            )
-        if 3 not in applied:
-            connection.executescript(_MIGRATION_3)
-            connection.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)",
-                (3, _now_iso()),
-            )
-        connection.commit()
 
     def _ensure_admin_token(self, connection: sqlite3.Connection, raw_token: str) -> None:
         existing = connection.execute(
@@ -1469,7 +1446,6 @@ class HubStore:
         clean_provider_id = _validate_hub_id(provider_id, "provider_id") if provider_id else None
         clean_view_id = _validate_hub_id(view_id, "view_id") if view_id else None
         with self._connect() as connection:
-            self._apply_migrations(connection)
             rows = connection.execute(
                 """
                 SELECT id, nonce, token_hash, action, provider_id, view_id, label
@@ -1518,7 +1494,6 @@ class HubStore:
         if token_row is None:
             return None
         with self._connect() as connection:
-            self._apply_migrations(connection)
             row = connection.execute(
                 """
                 SELECT
@@ -1547,7 +1522,6 @@ class HubStore:
         clean_provider_id = _validate_hub_id(provider_id, "provider_id")
         clean_parts: list[dict[str, str]] = []
         with self._connect() as connection:
-            self._apply_migrations(connection)
             for raw_part in parts:
                 if not isinstance(raw_part, dict):
                     raise ValueError("share part must be an object")
@@ -1983,7 +1957,23 @@ def _atomic_write_text(path: Path, text: str) -> None:
     temp.replace(path)
 
 
-_MIGRATION_1 = """
+_CURRENT_COLUMNS = {
+    "providers": "id label created_at updated_at".split(),
+    "views": "id provider_id title ref description current_version_id created_at updated_at".split(),
+    "view_versions": "id view_id package_hash storage_path manifest_json created_at created_by_token_id".split(),
+    "invitations": "id view_id token_id label expires_at revoked_at created_at accepted_count".split(),
+    "connections": "id invitation_id view_id token_id consumer_label created_at revoked_at".split(),
+    "tokens": "id nonce token_hash action provider_id view_id label created_at revoked_at".split(),
+    "interactions": "id view_id connection_id actor_id payload_json created_at".split(),
+    "audit_events": "id kind actor_id provider_id view_id details_json created_at".split(),
+    "share_invitations": (
+        "id share_id provider_id token_id title label expires_at revoked_at created_at accepted_count payload_json"
+    ).split(),
+    "view_publish_intents": "version_id view_id provider_id package_hash publish_sequence created_at".split(),
+}
+
+
+_CURRENT_SCHEMA = """
 CREATE TABLE providers(
     id TEXT PRIMARY KEY,
     label TEXT,
@@ -2081,10 +2071,8 @@ CREATE INDEX idx_tokens_provider_view ON tokens(provider_id, view_id);
 CREATE INDEX idx_view_versions_view ON view_versions(view_id, created_at);
 CREATE INDEX idx_interactions_view ON interactions(view_id, created_at);
 CREATE INDEX idx_audit_events_kind ON audit_events(kind, created_at);
-"""
 
-_MIGRATION_2 = """
-CREATE TABLE IF NOT EXISTS share_invitations(
+CREATE TABLE share_invitations(
     id TEXT PRIMARY KEY,
     share_id TEXT NOT NULL,
     provider_id TEXT NOT NULL,
@@ -2099,12 +2087,10 @@ CREATE TABLE IF NOT EXISTS share_invitations(
     FOREIGN KEY(token_id) REFERENCES tokens(id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_share_invitations_token ON share_invitations(token_id);
-CREATE INDEX IF NOT EXISTS idx_share_invitations_provider ON share_invitations(provider_id, created_at);
-"""
+CREATE INDEX idx_share_invitations_token ON share_invitations(token_id);
+CREATE INDEX idx_share_invitations_provider ON share_invitations(provider_id, created_at);
 
-_MIGRATION_3 = """
-CREATE TABLE IF NOT EXISTS view_publish_intents(
+CREATE TABLE view_publish_intents(
     version_id TEXT PRIMARY KEY,
     view_id TEXT NOT NULL,
     provider_id TEXT,
@@ -2114,19 +2100,6 @@ CREATE TABLE IF NOT EXISTS view_publish_intents(
     UNIQUE(view_id, publish_sequence)
 );
 
-INSERT OR IGNORE INTO view_publish_intents(
-    version_id, view_id, provider_id, package_hash, publish_sequence, created_at
-)
-SELECT
-    vv.id,
-    vv.view_id,
-    v.provider_id,
-    vv.package_hash,
-    ROW_NUMBER() OVER (PARTITION BY vv.view_id ORDER BY vv.rowid),
-    vv.created_at
-FROM view_versions vv
-JOIN views v ON v.id = vv.view_id;
-
-CREATE INDEX IF NOT EXISTS idx_view_publish_intents_view
+CREATE INDEX idx_view_publish_intents_view
 ON view_publish_intents(view_id, publish_sequence);
 """

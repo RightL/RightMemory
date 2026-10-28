@@ -465,11 +465,11 @@ class PursuitStoreTests(IsolatedWriteTestBase):
         created = self._pending({"type": "create", "parent_id": "beta", "title": "Saved child"})
         self._pending_history("undo", created)
         pending = self.store.snapshot(self.session_id)
-        queue = self.root / "update_queue" / "candidates" / "external.json"
+        queue = self.root / "operational-state.json"
         queue.parent.mkdir(parents=True, exist_ok=True)
         queue.write_bytes(b"{}\n")
-        self._git("add", "update_queue")
-        self._git("commit", "-m", "background queue record")
+        self._git("add", "operational-state.json")
+        self._git("commit", "-m", "background operational record")
         external_head = self._git("rev-parse", "HEAD")
         self.store = PursuitStore(self.root)
         recovered = self.store.snapshot(self.session_id)

@@ -29,17 +29,6 @@ class FakeBackend:
     def context(self, session_id):
         return self._record("context", session_id)
 
-    def submit(self, session_id, request_id, evidence):
-        return self._record("submit", session_id, request_id, evidence)
-
-    def begin_update(self, retry_task=None):
-        return self._record("begin_update", retry_task)
-
-    def complete_update(self, task_id, output=""):
-        return self._record("complete_update", task_id, output)
-
-    def update_status(self, task_id=None):
-        return self._record("update_status", task_id)
 
     def sync(self, action="refresh"):
         return self._record("sync", action)
@@ -73,37 +62,19 @@ class AssistantMcpTests(unittest.TestCase):
             {tool.name for tool in asyncio.run(_list(self.server))},
             {
                 "rightmemory_assistant_context",
-                "rightmemory_assistant_submit",
-                "rightmemory_assistant_begin_update",
-                "rightmemory_assistant_complete_update",
-                "rightmemory_assistant_update_status",
                 "rightmemory_assistant_sync",
                 "rightmemory_assistant_validate",
-                "rightmemory_submit_learning",
-                "rightmemory_begin_learning",
-                "rightmemory_complete_learning",
-                "rightmemory_learning_status",
+                "rightmemory_submit",
+                "rightmemory_withdraw_candidate",
+                "rightmemory_begin_curation",
+                "rightmemory_complete_curation",
+                "rightmemory_curation_status",
             },
         )
 
     def test_routes_operations_without_rewriting_ids_evidence_or_receipts(self):
         cases = [
             ("context", {"session_id": "s"}, ("context", "s")),
-            (
-                "submit",
-                {"session_id": "s", "request_id": "r", "evidence": "  evidence\n"},
-                ("submit", "s", "r", "  evidence\n"),
-            ),
-            ("begin_update", {}, ("begin_update", None)),
-            ("begin_update", {"retry_task": "old"}, ("begin_update", "old")),
-            (
-                "complete_update",
-                {"task_id": "t", "output": "summary"},
-                ("complete_update", "t", "summary"),
-            ),
-            ("complete_update", {"task_id": "t"}, ("complete_update", "t", "")),
-            ("update_status", {}, ("update_status", None)),
-            ("update_status", {"task_id": "t"}, ("update_status", "t")),
             ("sync", {}, ("sync", "refresh")),
             ("sync", {"action": "push"}, ("sync", "push")),
         ]
@@ -126,13 +97,13 @@ class AssistantMcpTests(unittest.TestCase):
                 )
 
     def test_preserves_an_unsuccessful_core_result(self):
-        self.backend.result = {"ok": False, "status": "conflict", "task_id": "t"}
-        result = call(self.server, "rightmemory_assistant_complete_update", {"task_id": "t"})
+        self.backend.result = {"ok": False, "status": "conflict"}
+        result = call(self.server, "rightmemory_assistant_sync", {})
         self.assertTrue(result.is_error)
         self.assertEqual(result.structured_content, self.backend.result)
 
     def test_missing_required_input_does_not_call_the_core(self):
-        result = call(self.server, "rightmemory_assistant_submit", {"session_id": "s"})
+        result = call(self.server, "rightmemory_assistant_context", {})
         self.assertTrue(result.is_error)
         self.assertEqual(self.backend.calls, [])
 
@@ -161,11 +132,6 @@ class AssistantMcpTests(unittest.TestCase):
 
 class AssistantMcpStdioTests(IsolatedWriteTestBase):
     def test_entrypoint_stdio_handshake_and_model_free_core_calls(self):
-        (self.root / "rightmemory.toml").write_text(
-            "[update.async]\ntrigger_candidates = 1\n"
-            "target_batch_candidates = 1\nmax_wait_seconds = 1\n",
-            encoding="utf-8",
-        )
         parameters = StdioServerParameters(
             command=sys.executable,
             args=[
@@ -182,7 +148,7 @@ class AssistantMcpStdioTests(IsolatedWriteTestBase):
                     initialized = await client.initialize()
                     self.assertEqual(initialized.server_info.name, "RightMemory Assistant")
                     listed = await client.list_tools()
-                    self.assertEqual(len(listed.tools), 11)
+                    self.assertEqual(len(listed.tools), 8)
 
                     result = await client.call_tool(
                         "rightmemory_assistant_context", {"session_id": "stdio-session"}
@@ -198,22 +164,20 @@ class AssistantMcpStdioTests(IsolatedWriteTestBase):
                         "session_id": "stdio-session", "request_id": "evidence-1",
                         "evidence": evidence,
                     }
-                    first = await client.call_tool("rightmemory_assistant_submit", arguments)
+                    first = await client.call_tool("rightmemory_submit", arguments)
                     self.assertFalse(first.is_error)
                     self.assertTrue(first.structured_content["saved"])
-                    self.assertFalse(first.structured_content["duplicate"])
-                    self.assertTrue(first.structured_content["update"]["ready"])
+                    self.assertTrue(first.structured_content["created"])
+                    self.assertTrue(all(item["ready"] for item in first.structured_content["curation"]))
 
-                    repeated = await client.call_tool("rightmemory_assistant_submit", arguments)
+                    repeated = await client.call_tool("rightmemory_submit", arguments)
                     self.assertFalse(repeated.is_error)
-                    self.assertTrue(repeated.structured_content["duplicate"])
+                    self.assertFalse(repeated.structured_content["created"])
                     self.assertEqual(
-                        repeated.structured_content["candidate_uid"],
-                        first.structured_content["candidate_uid"],
+                        repeated.structured_content["candidate_id"],
+                        first.structured_content["candidate_id"],
                     )
-                    rejected = await client.call_tool(
-                        "rightmemory_assistant_submit", {**arguments, "evidence": "Different fact."}
-                    )
+                    rejected = await client.call_tool("rightmemory_submit", {**arguments, "evidence": "Different fact."})
                     self.assertTrue(rejected.is_error)
                     self.assertEqual(rejected.structured_content["error"]["type"], "ValueError")
 
@@ -222,16 +186,13 @@ class AssistantMcpStdioTests(IsolatedWriteTestBase):
                     )
                     self.assertFalse(pending.is_error)
                     self.assertEqual(pending.structured_content["pending_count"], 1)
-                    self.assertIn(
-                        evidence,
-                        Path(pending.structured_content["pending_file"]).read_text(encoding="utf-8"),
-                    )
+                    self.assertTrue(Path(pending.structured_content["learning_index_file"]).is_file())
                     validated = await client.call_tool("rightmemory_assistant_validate", {})
                     self.assertFalse(validated.is_error)
                     self.assertTrue(validated.structured_content["ok"])
 
         asyncio.run(exercise())
-        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
+        self.assertNotEqual(self._git("rev-parse", "HEAD"), self.initial_head)
 
 
 if __name__ == "__main__":

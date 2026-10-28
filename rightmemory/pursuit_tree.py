@@ -163,12 +163,11 @@ def _project(manifest: GraphManifest) -> PursuitTree:
         seen.add(key)
         block = manifest.blocks[key]
         current_parent = parent_id
-        if block.kind in {"heading", "node"} and not _reserved(manifest, block):
+        if block.kind == "heading" and not _reserved(manifest, block):
             item_id = _block_id(manifest, block)
             if item_id in item_data:
                 return  # Duplicate ids are already diagnosed; the root is read-only.
             graph_item = manifest.items.get(block.item_id or "")
-            legacy = block.kind == "node"
             item_data[item_id] = {
                 "id": item_id,
                 "title": block.title,
@@ -178,17 +177,11 @@ def _project(manifest: GraphManifest) -> PursuitTree:
                 "focused": item_id in focus_ids,
                 "source_path": block.source_path.relative_to(manifest.root).as_posix(),
                 "source_line": block.line_number,
-                "anchor_kind": "node" if legacy else block.anchor_kind or "plain",
-                "editable": not legacy,
+                "anchor_kind": block.anchor_kind or "plain",
             }
             children.setdefault(parent_id, []).append(item_id)
             children[item_id] = []
             current_parent = item_id
-            if legacy:
-                diagnostics.append(
-                    f"Legacy graph node `{item_id}` at "
-                    f"{item_data[item_id]['source_path']}:{block.line_number} is read-only in the map."
-                )
         for child in block.logical_children:
             visit(child, current_parent)
 
@@ -275,7 +268,7 @@ class _Editor:
                         owner.parts.append("".join(lines[cursor:child.line_number - 1]))
                     entry = _Entry(
                         kind=child.kind,
-                        id=_block_id(manifest, child) if child.kind in {"heading", "node"} else None,
+                        id=_block_id(manifest, child) if child.kind == "heading" else None,
                         title=heading_title(child.line) if child.kind == "heading" else "",
                         anchor_kind=child.anchor_kind,
                         depth=child.depth,
@@ -296,18 +289,15 @@ class _Editor:
 
             fill(manifest.blocks[source.root_key], document)
 
-    def item(self, value: object, *, editable: bool = True) -> _Entry:
+    def item(self, value: object) -> _Entry:
         if not isinstance(value, str) or value not in self.tree.items:
             raise PursuitOperationError("unknown Pursuit item")
-        entry = self.items[value]
-        if editable and entry.kind != "heading":
-            raise PursuitOperationError("legacy graph node leaves are read-only in the map")
-        return entry
+        return self.items[value]
 
     def new_id(self, title: str) -> str:
         ascii_text = "".join(char for char in plain_title(title).lower() if ord(char) < 128)
         slug = re.sub(r"[^a-z0-9]+", "-", ascii_text).strip("-")[:64].rstrip("-")
-        if not slug or slug == "rules":
+        if not slug:
             slug = "p-" + uuid.uuid4().hex[:12]
         candidate = slug
         suffix = 2
@@ -366,9 +356,7 @@ class _Editor:
         document = _Document(path, entry.document.newline)
         self.documents[path] = document
         self.used_paths.add(path.name.casefold())
-        # Strings in the indexed owner block are its own body, including prose
-        # around legacy node lines. Keep that prose with the owner when its
-        # children cross the physical backing boundary.
+        # Keep the owner's body in place when its child headings move to a backing file.
         document.parts = [part for part in entry.parts if isinstance(part, _Entry)]
         entry.parts = [part for part in entry.parts if isinstance(part, str)]
         self.anchor(entry, "F#")
@@ -408,15 +396,6 @@ class _Editor:
             index = next((i for i, part in enumerate(container.parts) if isinstance(part, _Entry) and part.kind != "focus" and not (part.block and _reserved(self.manifest, part.block))), len(container.parts))
         else:
             index = len(container.parts)
-        if after is not None and after.kind == "node":
-            while index < len(container.parts) and isinstance(container.parts[index], str):
-                index += 1
-        if entry.kind == "heading" and any(
-            isinstance(part, _Entry) and part.kind == "node" for part in container.parts[index:]
-        ):
-            raise PursuitOperationError(
-                "legacy graph leaves must remain before heading children in their document; insert after them"
-            )
         document = container if isinstance(container, _Document) else container.document
         depth = 1 if isinstance(container, _Document) and container.path.name != "PURSUITS.md" else (container.depth + 1 if isinstance(container, _Entry) else 2)
         entry.parent = container
@@ -575,7 +554,7 @@ def _apply(editor: _Editor, operation: Mapping[str, object]) -> tuple[str | None
     if kind == "create":
         title = _title(operation)
         parent = editor.item(operation["parent_id"]) if operation.get("parent_id") is not None else None
-        after = editor.item(operation["after_id"], editable=False) if operation.get("after_id") is not None else None
+        after = editor.item(operation["after_id"]) if operation.get("after_id") is not None else None
         expected_parent = operation.get("parent_id")
         if after is not None and editor.tree.items[after.id].parent_id != expected_parent:
             raise PursuitOperationError("after_id must be a sibling at the destination")
@@ -606,7 +585,7 @@ def _apply(editor: _Editor, operation: Mapping[str, object]) -> tuple[str | None
         if parent_id is not None and parent_id in editor.descendants(original_id):
             raise PursuitOperationError("cannot move a direction under itself or its descendant")
         parent = editor.item(parent_id) if parent_id is not None else None
-        after = editor.item(operation["after_id"], editable=False) if operation.get("after_id") is not None else None
+        after = editor.item(operation["after_id"]) if operation.get("after_id") is not None else None
         if after is entry or (after is not None and editor.tree.items[after.id].parent_id != parent_id):
             raise PursuitOperationError("after_id must be another sibling at the destination")
         editor.address(entry)
@@ -646,16 +625,11 @@ def _apply(editor: _Editor, operation: Mapping[str, object]) -> tuple[str | None
             if focus is None:
                 focus = _Entry("heading", None, "Focus", None, 2,
                                "## Focus" + document.newline, [document.newline], document, container)
-                legacy_after = next((part for part in reversed(container.parts) if isinstance(part, _Entry) and part.kind == "node"), None)
-                editor.insert(focus, container, legacy_after, first=legacy_after is None)
+                editor.insert(focus, container, None, first=True)
             reference = _Entry("focus", None, "", None, 0,
                                f"- `{entry.id}`" + document.newline, [], document, focus)
             last = max((i for i, part in enumerate(focus.parts) if isinstance(part, _Entry) and part.kind == "focus"), default=-1)
             if last < 0:
-                # Older starters used this sentence for an empty Focus block.
-                # Remove only that entire placeholder, never user-authored notes.
-                if all(isinstance(part, str) for part in focus.parts) and "".join(focus.parts).strip() == "No Pursuit is focused yet.":
-                    focus.parts = [document.newline]
                 if not _render(focus).endswith(document.newline):
                     focus.parts.append(document.newline)
                 focus.parts.append(reference)
@@ -677,14 +651,10 @@ def _check_body_edit(before: GraphManifest, after: GraphManifest, original_id: s
     before_headings = sum(block.kind == "heading" for block in before.blocks.values())
     after_headings = sum(block.kind == "heading" for block in after.blocks.values())
     if before_headings != after_headings or len(after.items) != len(before.items) + added:
-        raise PursuitOperationError("note text cannot add or remove map headings or graph nodes; use the map editor")
-    for item_id, item in before.items.items():
-        other = after.items.get(item_id)
-        if other is None:
+        raise PursuitOperationError("note text cannot add or remove map headings; use the map editor")
+    for item_id in before.items:
+        if item_id not in after.items:
             raise PursuitOperationError("note text cannot remove a graph item")
-        if item.item_kind == "node":
-            if before.blocks[item.block_key].line != after.blocks[other.block_key].line:
-                raise PursuitOperationError("legacy graph node lines are read-only; preserve them when editing the note")
 
 
 def apply_operation(root: Path, operation: Mapping[str, object]) -> PursuitEdit:

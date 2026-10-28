@@ -38,6 +38,69 @@ class HubStoreTests(unittest.TestCase):
         self.assertTrue((self.root / ".runtime").is_dir())
         self.assertTrue((self.root / "hub.toml").is_file())
 
+    def test_empty_database_initializes_current_schema_without_version_ledger(self):
+        store = HubStore(self.root)
+        store.db_path.touch()
+        store.initialize(admin_token="admin-secret")
+        with closing(sqlite3.connect(store.db_path)) as connection:
+            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            indexes = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        self.assertIn("share_invitations", tables)
+        self.assertIn("view_publish_intents", tables)
+        self.assertNotIn("schema_migrations", tables)
+        self.assertIn("idx_view_publish_intents_view", indexes)
+        self.assertTrue(store.verify_token("admin-secret", action="admin"))
+
+    def test_ordinary_operation_never_bootstraps_a_missing_database(self):
+        store = HubStore(self.root)
+        with self.assertRaisesRegex(ValueError, "not initialized"):
+            store.list_tokens()
+        self.assertFalse(store.db_path.exists())
+
+    def test_reinitialize_preserves_current_data_and_unused_existing_ledger(self):
+        store = HubStore(self.root)
+        store.initialize(admin_token="admin-secret")
+        token = store.create_provider_token("alice")
+        with closing(sqlite3.connect(store.db_path)) as connection:
+            connection.execute("CREATE TABLE schema_migrations(version INTEGER, applied_at TEXT)")
+            connection.execute("INSERT INTO schema_migrations VALUES(99, 'preserve this record')")
+            connection.commit()
+        store.initialize(admin_token="admin-secret")
+        self.assertTrue(store.verify_token(token.raw_token, action="publish", provider_id="alice"))
+        with closing(sqlite3.connect(store.db_path)) as connection:
+            self.assertEqual(connection.execute("SELECT * FROM schema_migrations").fetchall(),
+                             [(99, "preserve this record")])
+
+    def test_missing_current_table_is_not_recreated_or_backfilled(self):
+        store = HubStore(self.root)
+        store.initialize(admin_token="admin-secret")
+        package = self.root / "package"
+        _write_package(package, memory_text="# Retained\n")
+        stored = store.store_package_version(package, view_id="alice-auth-api", version_id="retained-version")
+        with closing(sqlite3.connect(store.db_path)) as connection:
+            connection.execute("DROP TABLE view_publish_intents")
+            connection.commit()
+        before = store.db_path.read_bytes()
+        for operation in (store.list_tokens, store.initialize):
+            with self.subTest(operation=operation.__name__):
+                with self.assertRaisesRegex(ValueError, "view_publish_intents.*Automatic schema upgrades"):
+                    operation()
+                self.assertEqual(store.db_path.read_bytes(), before)
+        with closing(sqlite3.connect(store.db_path)) as connection:
+            self.assertEqual(connection.execute("SELECT id FROM view_versions").fetchall(), [(stored.version_id,)])
+            self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE name='view_publish_intents'").fetchone())
+
+    def test_missing_current_column_is_reported_without_modifying_database(self):
+        store = HubStore(self.root)
+        store.initialize(admin_token="admin-secret")
+        with closing(sqlite3.connect(store.db_path)) as connection:
+            connection.execute("ALTER TABLE tokens RENAME COLUMN nonce TO old_nonce")
+            connection.commit()
+        before = store.db_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "tokens.nonce"):
+            store.list_tokens()
+        self.assertEqual(store.db_path.read_bytes(), before)
+
     def test_provider_token_verifies_by_hash_and_records_audit_event(self):
         store = HubStore(self.root)
         store.initialize(admin_token="admin-secret")

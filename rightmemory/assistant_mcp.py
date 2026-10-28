@@ -10,27 +10,18 @@ from mcp.server import MCPServer
 from mcp.types import CallToolResult, TextContent
 
 from .validation import validate_memory_root
-from .learning_mcp import register_learning_tools
+from .curation_mcp import CurationBackend, register_curation_tools
 
 
 class AssistantBackend(Protocol):
     def context(self, session_id: str) -> dict[str, Any]: ...
 
-    def submit(
-        self, session_id: str, request_id: str, evidence: str
-    ) -> dict[str, Any]: ...
-
-    def begin_update(self, retry_task: str | None = None) -> dict[str, Any]: ...
-
-    def complete_update(self, task_id: str, output: str = "") -> dict[str, Any]: ...
-
-    def update_status(self, task_id: str | None = None) -> dict[str, Any]: ...
-
     def sync(self, action: str = "refresh") -> dict[str, Any]: ...
 
 
 def create_mcp_server(
-    memory_root: Path, *, backend: AssistantBackend | None = None
+    memory_root: Path, *, backend: AssistantBackend | None = None,
+    curation_backend: CurationBackend | None = None
 ) -> MCPServer:
     """Expose the assistant core without importing an internal role runtime."""
     root = Path(memory_root).expanduser().resolve()
@@ -50,45 +41,6 @@ def create_mcp_server(
         return _invoke(lambda: selected.context(session_id))
 
     @server.tool(
-        name="rightmemory_assistant_submit",
-        description=(
-            "Capture concrete ordinary context that could improve future understanding, decisions, collaboration, "
-            "or repeated work. Preserve the context and uncertainty needed to interpret it; a useful candidate need "
-            "not already support a stable conclusion. Update uses the Memory domain core to decide what becomes "
-            "durable Memory. Behavioral guidance, user redirections, and reusable work experience use "
-            "rightmemory_submit_learning. Leave out routine progress and copies of project artifacts that add no "
-            "independent future value. Reuse the same request_id and evidence for a retry; returns pending and batch notices."
-        ),
-        structured_output=False,
-    )
-    def submit(session_id: str, request_id: str, evidence: str) -> CallToolResult:
-        return _invoke(lambda: selected.submit(session_id, request_id, evidence))
-
-    @server.tool(
-        name="rightmemory_assistant_begin_update",
-        description="Prepare a ready batch and isolated worktree for a native Update subagent.",
-        structured_output=False,
-    )
-    def begin_update(retry_task: str | None = None) -> CallToolResult:
-        return _invoke(lambda: selected.begin_update(retry_task))
-
-    @server.tool(
-        name="rightmemory_assistant_complete_update",
-        description="Validate and finalize the specified candidate task; retries use the same task id.",
-        structured_output=False,
-    )
-    def complete_update(task_id: str, output: str = "") -> CallToolResult:
-        return _invoke(lambda: selected.complete_update(task_id, output))
-
-    @server.tool(
-        name="rightmemory_assistant_update_status",
-        description="Inspect native Update execution and recovery state.",
-        structured_output=False,
-    )
-    def update_status(task_id: str | None = None) -> CallToolResult:
-        return _invoke(lambda: selected.update_status(task_id))
-
-    @server.tool(
         name="rightmemory_assistant_sync",
         description="Run the configured deterministic sync operation and report its outcome.",
         structured_output=False,
@@ -104,7 +56,7 @@ def create_mcp_server(
     def validate() -> CallToolResult:
         return _invoke(lambda: validate_memory_root(root).to_dict())
 
-    register_learning_tools(server, root, native=True)
+    register_curation_tools(server, root, native=True, backend=curation_backend)
     return server
 
 

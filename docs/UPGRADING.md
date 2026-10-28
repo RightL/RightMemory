@@ -1,6 +1,6 @@
 # Updating an Existing RightMemory Root
 
-RightMemory develops against its current model. An upgrade may change commands, content ownership, or stored formats. When old state needs attention, ask an agent to inspect that root using this explanation and the current package references. Installation does not reinterpret or rewrite the user's memory. Cleanup follows the actual content and intended result rather than a version-by-version conversion script.
+RightMemory develops against its current model. When an upgrade changes commands, ownership, or stored formats, ask an agent to inspect the actual root using this explanation and the current package references. The product does not carry historical readers, automatic conversion, or template cleanup for older installations. Ordinary installation preserves user data and validates the current format; cleanup is a separate requested task.
 
 ## Current Content Ownership
 
@@ -12,20 +12,28 @@ RightMemory develops against its current model. An upgrade may change commands, 
 | Useful work cases with partial or contextual lessons | `learning/experiences/` |
 | Reusable methods and their supporting resources | `learning/skills/<slug>/SKILL.md` and its assets |
 
-Pursuit remains the user's direction map. Root `corrections.md` remains feedback about RightMemory's curation. Read current definitions with `rightmemory reference <name>`, using `schema`, `memory`, `guidance`, `work-skills`, or `agent-correction` as needed.
+Pursuit remains the user's direction map. Root `corrections.md` remains feedback about RightMemory curation. Read current definitions with `rightmemory reference <name>`, using `schema`, `memory`, `guidance`, `work-skills`, or `agent-correction` as needed.
 
-## Changes Relevant to This Release
+## What Changed
 
-Ordinary Memory Update now owns ordinary context. Behavioral guidance, user redirections, and reusable work use `rightmemory learning ... submit` or `rightmemory_submit_learning`, including explicit requests to remember that material. The former `rightmemory guidance submit` and `rightmemory_capture_guidance` calls are no longer supported. The current daily entry and domain maintenance skills replace the old inbox-review workflow.
+There is one submission route: `rightmemory submit` or the MCP tool `rightmemory_submit`. Memory, guidance, and skills independently process the same candidate. All domains use `rightmemory curate` for preparation, completion, status, and recovery, with `update` or `maintain` selecting the task scope. The former `update submit/pull/undo`, `assistant submit/update`, `learning ...`, and `guidance submit` interfaces are removed. Update is still the internal Memory role and default writer configuration name.
 
-An older root may contain guidance in Cross-Session Agent Behavior, work instructions behind `S#` headings, or unresolved interactions in `AGENT_GUIDANCE_INBOX.md`. Inspect their meaning before deciding what still deserves retention. Reconcile useful content into the appropriate current home, preserve valuable concrete context, and remove duplication or obsolete material within the requested cleanup scope. Copying every old item would carry the same clutter into new directories.
+`learning/candidates/` now holds pending evidence. After all three domains finish, the program removes the raw source. Curators preserve useful context, concrete cases, and work experiences in their current homes. Processing records retain identities and hashes rather than evidence bodies. Maintenance works on existing curated material; it does not manually retire raw candidates or edit receipts. Current Git history is not rewritten, so earlier evidence may remain in existing commits and remotes.
 
-`S#` remains a supported graph resource, including in shared views. Its presence alone is not an error. Preserve working references and package-owned imports; relocate an instruction because its ownership or use needs to change, not merely because it uses that marker. Existing Agent Corrections already have a current home and need no second case library.
+Older installations may have `AGENT_GUIDANCE_INBOX.md`, a separate `update_queue/`, immutable `update_records/`, or local async outboxes. These are no longer read, processed, or synchronized as active product state. Inspect their actual value and unfinished work before retiring them. Finish work with the old executor when practical, or preserve useful evidence and submit it through the current interface during the requested cleanup. Do not manufacture current processing receipts to make old state look completed.
 
-Review/Reviewer and Dreamer execution have been removed. Stop an older installation's background manager with its `rightmemory watch stop` and let active work finish before upgrading. Old configuration may contain `[review]`, `[reviewer]`, `[dreamer]`, or `insight.watch.review_session_points`. Remove obsolete configuration while preserving unrelated settings. Resolve pending deliveries with that installation or preserve their evidence before retiring the old runtime files. Package references now live with the package; preserve any useful local edits before removing obsolete root copies such as `PURSUIT_RULES.md` or `AGENT_CORRECTION_MEMORY_RULES.md`. Disable or remove obsolete installed skills, including `review-agent-guidance-inbox`, after inspecting any local customizations.
+Review/Reviewer and Dreamer execution, and the separate asynchronous Update worker, are removed. Stop the old background processes before replacing that installation. Remove obsolete `[review]`, `[reviewer]`, `[dreamer]`, `[update.async]`, and `insight.watch.review_session_points` settings while preserving unrelated configuration. Current validation reports incompatible state; it does not recognize or convert historical `Next` fields or old evidence formats.
 
-## Working on a User's Root
+Pursuit graph-node bullets with an arrowed edge list are no longer accepted as map leaves. During requested cleanup, represent a retained direction as a heading or keep contextual material as ordinary Markdown, preserving meaningful ids and references. Ordinary lists, plain grouping headings, and standalone Focus references remain supported. Validation reports incompatible lines without converting or deleting them; Memory nodes and imported Memory graphs keep their current syntax.
 
-Use the root the user selected and inspect the current validation or installation error. Preserve unrelated edits and retain a recoverable starting point. Read the relevant current references and actual stored content, then make the requested cleanup as a coherent change. Current candidate identities and processing receipts are program-owned; use their normal recovery and curation commands rather than fabricating completed work.
+The Hub's local database also uses the current schema without automatic historical upgrades. If required tables or fields are missing, have the cleanup agent inspect that database and preserve useful data while bringing it to the current schema; normal startup does not rewrite existing data or backfill historical rows.
 
-Run `rightmemory validate --root <root>` on the result and report what changed and any unresolved evidence. If the package is not yet installed, the repository's schema and domain cores provide the same definitions. Retry installation after resolving the reported incompatibility. No general conversion of unaffected data is required.
+Inspect local customizations before disabling obsolete installed skills or deleting old package-reference copies. Current daily entries and the three maintenance skills replace earlier review workflows. The installer only handles the two current daily entries when switching modes; it does not identify historical managed copies by hashes or sweep old role directories.
+
+## Cleanup Judgment
+
+An older root may contain guidance in a Behavior section, instructions behind `S#` headings, or unsettled interactions in an inbox. Reconcile useful content into its current home according to meaning and intended use, preserving valuable concrete context and working references. Copying every old item would carry the same clutter into new directories.
+
+`S#` and `MF#` remain supported graph resources, including imported instructions. Their presence is not a compatibility error. Preserve package-owned imports and relocate an instruction only when its ownership or use needs to change. Fixed Agent Corrections already have a current home and need no second case library.
+
+Use the user-selected root, preserve unrelated edits, and retain a recoverable starting point. Inspect current validation findings and actual content, make the requested cleanup as a coherent change, then run `rightmemory validate --root <root>`. Report what changed and any unresolved evidence before retrying installation. Current active claims and unfinished tasks still use their normal recovery controls; historical cleanup is not permission to replace live work.

@@ -20,8 +20,7 @@ Later context may contain:
 
 - diffs that update those snapshot files;
 - notices about previously returned sources that changed;
-- pending updater candidates;
-- an inventory of learning sources, including raw evidence, guidance, experiences, and skills;
+- an inventory of learning sources, including pending evidence, guidance, experiences, and skills;
 - the current retrieval query, placed last.
 
 This volatile context follows the inherited snapshot in each CLI-agent session fork. Apply each diff to the earlier snapshot. Added lines are current; removed lines are obsolete. Standalone mode builds the same logical context without a provider prefix base or fork.
@@ -44,12 +43,11 @@ The logical terminal value is:
       "ids": ["4"],
       "ranges": []
     }
-  ],
-  "recent_candidates": ["update-session:3"]
+  ]
 }
 ```
 
-Return exactly one object with only `ids`, `sources`, and `recent_candidates`. Use empty arrays when no relevant content exists. Do not add reasons, confidence, summaries, or prose.
+Return exactly one object with only `ids` and `sources`. Use empty arrays when no relevant content exists. Do not add reasons, confidence, summaries, or prose.
 
 Standalone mode supplies this object as the terminal output type. CLI-agent mode emits strict JSON without a code fence or surrounding text.
 
@@ -85,17 +83,11 @@ The correction collections are part of ordinary retrieval context. There is no s
 
 Learning sources are independent of graph ids. The inventory supplies a source id, path, kind, and brief excerpt. The inventory may be compact. Search further when it is insufficient: standalone Retrieve uses `search_learning(query, offset=0, limit=20)` over all learning sources, with an empty query for paged browsing; command-backed and native agents can search the real source directories. Read relevant content with `read_learning(source_id, offset=0, limit=12000)` or its listed file before judging its meaning. The reader pages by character offset while preserving source line numbers, so oversized evidence and skills can be inspected incrementally.
 
-Source ids begin with `L#` followed by the path relative to `learning/`, such as `L#candidates/<id>.json`, `L#guidance/collaboration.md`, `L#skills/report/SKILL.md`, or `L#experiences/report.md`. Retained legacy inbox entries use `L#legacy/<GI-id>`.
+Source ids begin with `L#` followed by the path relative to `learning/`, such as `L#candidates/<id>.json`, `L#guidance/collaboration.md`, `L#skills/report/SKILL.md`, or `L#experiences/report.md`.
 
-Use empty `ids` for all learning sources. Raw candidate evidence, legacy inbox evidence, and `SKILL.md` are complete sources with empty `ranges`, even when inspected in pages; other learning Markdown may be selected whole or by inclusive one-based line ranges. Processing receipts are not retrieval sources.
+Use empty `ids` for all learning sources. Pending candidate evidence and `SKILL.md` are complete sources with empty `ranges`, even when inspected in pages; other learning Markdown may be selected whole or by inclusive one-based line ranges. Claims, processing receipts, and withdrawal records are not retrieval sources.
 
-Raw evidence remains distinct from curated guidance even after its candidates have been processed. Select relevant material rather than injecting every candidate into every result. When a skill is needed as an instruction, return it in full.
-
-## Recent Candidates
-
-`recent_candidates` contains exact `selection_id` values supplied in volatile context.
-
-Candidates are unsettled evidence, not stored RightMemory state. Select one only when both its status and content are relevant to the current query.
+Pending evidence is distinct from curated context, guidance, and experience. The program removes its raw source after all three domains finish; any independently useful retained material remains in the curated sources. Select relevant material rather than injecting every candidate into every result. When a skill is needed as an instruction, return it in full.
 
 ## Delivery Behavior
 

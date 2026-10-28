@@ -9,7 +9,6 @@ from pathlib import Path
 from .corrections import AGENT_CORRECTION_SOURCE_PATHS, agent_correction_entries
 from .graph import DocumentBlock, GraphManifest, build_graph_manifest
 from .learning_retrieval import learning_sources
-from .recent_submitted import RecentSubmittedMemoryEntry, collect_recent_submitted_memory
 from .retrieve_selection import (
     LineRange, RetrieveSelectionError, RetrieveSelectionRenderer,
     _read_text, _resolve_line_ranges, _safe_source_file,
@@ -95,8 +94,6 @@ def build_retrieval_corpus(memory_root: Path) -> RetrievalCorpus:
                 display_parts=((f"source:{source}", f"Source: `{source}`"),
                                (f"{source}:{entry.position}", entry.text)),
             ))
-    for entry in collect_recent_submitted_memory(root):
-        entries.append(_pending_entry(entry))
     for source in learning_sources(root).values():
         entries.append(RetrievalEntry(
             key=source.source_id,
@@ -231,13 +228,6 @@ def _line_passages(text: str) -> list[tuple[int, int]]:
     return [(start, end) for start, end in intervals if any(line.strip() for line in lines[start - 1:end])]
 
 
-def _pending_entry(entry: RecentSubmittedMemoryEntry) -> RetrievalEntry:
-    return RetrievalEntry(
-        key=f"pending:{entry.key}",
-        text=f"Submitted at: {entry.submitted_at}\n\n{entry.message.rstrip()}",
-        source=f"Pending submission {entry.update_session_id}:{entry.candidate_id} (not settled Memory)",
-        pending=True,
-    )
 
 
 def _require_source(root: Path, path: Path) -> None:

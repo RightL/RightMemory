@@ -11,26 +11,26 @@ from tests.isolated_write_test_base import IsolatedWriteTestBase
 
 
 class AssistantCliTests(IsolatedWriteTestBase):
-    def setUp(self):
-        super().setUp()
-        (self.root / "rightmemory.toml").write_text(
-            "[update.async]\ntrigger_candidates = 1\ntarget_batch_candidates = 1\nmax_wait_seconds = 1\n"
-        )
-
     def _call(self, *args):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             code = main(["assistant", "--root", str(self.root), *args])
         return code, json.loads(output.getvalue())
 
+    def _control(self, command, *args):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = main([command, "--root", str(self.root), *args])
+        return code, json.loads(output.getvalue())
+
     def test_cli_native_flow_binds_completion_to_active_root_from_worktree(self):
         evidence = self.root.parent / f"{self.root.name}-evidence.txt"
         evidence.write_text("Fictional project launch code is Atlas.")
         self.addCleanup(evidence.unlink, missing_ok=True)
-        code, submitted = self._call("submit", "--session", "cli", "--request-id", "one", "--file", str(evidence))
+        code, submitted = self._control("submit", "--executor", "native", "--session", "cli", "--request-id", "one", "--file", str(evidence))
         self.assertEqual(code, 0)
-        self.assertTrue(submitted["update"]["ready"])
-        code, task = self._call("update", "begin")
+        self.assertTrue(all(item["ready"] for item in submitted["curation"]))
+        code, task = self._control("curate", "begin", "--domain", "memory")
         self.assertEqual(code, 0)
         worktree = Path(task["worktree"])
         self._append_memory(worktree, "- `atlas` Fictional project launch code is Atlas. → []\n")
@@ -48,11 +48,11 @@ class AssistantCliTests(IsolatedWriteTestBase):
         self.assertIn("Atlas", (self.root / "MEMORY.md").read_text())
 
     def test_argument_and_core_errors_are_json_with_failure_exit(self):
-        code, result = self._call("submit", "--session", "cli")
+        code, result = self._control("submit", "--executor", "native", "--session", "cli")
         self.assertEqual(code, 1)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["type"], "ValueError")
-        code, result = self._call("update", "complete", "--task", "../../outside")
+        code, result = self._control("curate", "complete", "--task", "../../outside")
         self.assertEqual(code, 1)
         self.assertFalse(result["ok"])
         self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
@@ -86,11 +86,13 @@ from rightmemory.entrypoint import main
 root = sys.argv[1]
 with contextlib.redirect_stdout(io.StringIO()):
     assert main(["validate", "--root", root]) == 0
-for command in (["context", "--session", "reader"], ["update", "status"], ["sync", "refresh"], ["validate"]):
+for command in (["context", "--session", "reader"], ["sync", "refresh"], ["validate"]):
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured):
         assert main(["assistant", "--root", root, *command]) == 0
     assert json.loads(captured.getvalue())["ok"]
+with contextlib.redirect_stdout(io.StringIO()):
+    assert main(["curate", "--root", root, "status"]) == 0
 print("ok")
 '''
         result = subprocess.run(

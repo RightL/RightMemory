@@ -20,10 +20,9 @@ ROLES = {
     "retrieve",
     "shared-view-builder",
     "sync-reconciler",
-    "update",
 }
 CURATOR_ROLES = {"guidance-curator", "skills-curator"}
-RUNTIME_ROLES = ROLES | CURATOR_ROLES
+RUNTIME_ROLES = ROLES | CURATOR_ROLES | {"update"}
 MODEL_FALLBACK_ROLES = (
     "update",
     "insight",
@@ -34,9 +33,6 @@ MODEL_FALLBACK_ROLES = (
 )
 DEFAULT_MAX_TOOL_RETRIES = 10
 DEFAULT_RETRIEVE_MAX_OUTPUT_CHARS = 100_000
-DEFAULT_UPDATE_TRIGGER_CANDIDATES = 15
-DEFAULT_UPDATE_TARGET_BATCH_CANDIDATES = 30
-DEFAULT_UPDATE_MAX_WAIT_SECONDS = 24 * 60 * 60
 DEFAULT_SYNC_STALE_PULL_HOURS = 24
 DEFAULT_PRUNER_GENERATION_COMMITS = 70
 DEFAULT_PRUNER_REVIVAL_GRACE_CHECKPOINTS = 2
@@ -65,14 +61,6 @@ class SyncConfig:
     memory_root: Path = MEMORY_ROOT
     enabled: bool = False
     stale_pull_after_hours: int = DEFAULT_SYNC_STALE_PULL_HOURS
-
-
-@dataclass(frozen=True)
-class AsyncUpdateConfig:
-    memory_root: Path = MEMORY_ROOT
-    trigger_candidates: int = DEFAULT_UPDATE_TRIGGER_CANDIDATES
-    target_batch_candidates: int = DEFAULT_UPDATE_TARGET_BATCH_CANDIDATES
-    max_wait_seconds: int = DEFAULT_UPDATE_MAX_WAIT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -220,63 +208,6 @@ def _executor_runtime_config(
     )
 
 
-def load_async_update_config(memory_root: Path | None = None) -> AsyncUpdateConfig:
-    root = _active_memory_root(memory_root)
-    data = _load_raw_config(memory_root)
-
-    if not root.exists():
-        raise FileNotFoundError(f"RightMemory memory root does not exist: {root}")
-
-    _reject_unknown_keys(data, _top_level_keys(), "top-level")
-    section = data.get("update", {})
-    if section is None:
-        section = {}
-    if not isinstance(section, dict):
-        raise ValueError("[update] must be a TOML table")
-    _reject_unknown_keys(section, {"model", "agent_cli", "async"}, "[update]")
-
-    async_section = section.get("async", {})
-    if async_section is None:
-        async_section = {}
-    if not isinstance(async_section, dict):
-        raise ValueError("[update.async] must be a TOML table")
-    _reject_unknown_keys(
-        async_section,
-        {"trigger_candidates", "target_batch_candidates", "max_wait_seconds"},
-        "[update.async]",
-    )
-
-    trigger_candidates = _positive_integer(
-        async_section,
-        "trigger_candidates",
-        DEFAULT_UPDATE_TRIGGER_CANDIDATES,
-        "[update.async]",
-    )
-    target_batch_candidates = _positive_integer(
-        async_section,
-        "target_batch_candidates",
-        DEFAULT_UPDATE_TARGET_BATCH_CANDIDATES,
-        "[update.async]",
-    )
-    if target_batch_candidates < trigger_candidates:
-        raise ValueError(
-            "[update.async].target_batch_candidates must be greater than or equal to "
-            "[update.async].trigger_candidates"
-        )
-    max_wait_seconds = _positive_integer(
-        async_section,
-        "max_wait_seconds",
-        DEFAULT_UPDATE_MAX_WAIT_SECONDS,
-        "[update.async]",
-    )
-    return AsyncUpdateConfig(
-        memory_root=root,
-        trigger_candidates=trigger_candidates,
-        target_batch_candidates=target_batch_candidates,
-        max_wait_seconds=max_wait_seconds,
-    )
-
-
 def load_insight_watch_config(memory_root: Path | None = None) -> InsightWatchConfig:
     root = _active_memory_root(memory_root)
     data = _load_raw_config(memory_root)
@@ -406,8 +337,6 @@ def _allowed_role_keys(role: str) -> set[str]:
         allowed.add("watch")
     if role == "pruner":
         allowed.update({"generation_commits", "revival_grace_checkpoints"})
-    if role == "update":
-        allowed.add("async")
     if role == "retrieve":
         allowed.update({"max_output_chars", "backend", "embedding"})
     return allowed

@@ -10,7 +10,7 @@ RightMemory maintains three learning domains:
 
 **Pursuit** remains a user-owned hierarchical map of ongoing directions, with the context needed to understand or enter them. Ordinary learning does not change it.
 
-Memory and Pursuit form one addressable graph organized into two Markdown document trees. Their headings and nodes share one globally unique id namespace, and typed edges may cross between the trees.
+Memory and Pursuit form one addressable graph organized into two Markdown document trees. Their headings and Memory's nodes share one globally unique id namespace, and typed edges may cross between the trees.
 
 Agent Corrections is a non-graph case library. Its two fixed collections are `MEMORY_agent-corrections-writing.md` and `MEMORY_agent-corrections-design.md`.
 
@@ -28,15 +28,16 @@ learning/guidance/**/*.md
 learning/experiences/**/*.md
 learning/skills/<slug>/SKILL.md
 learning/skills/<slug>/<supporting assets>
-learning/processed/guidance/<id>.json
-learning/processed/skills/<id>.json
+learning/processed/<memory|guidance|skills>/<id>.json
+learning/claims/<memory|guidance|skills>.json
+learning/withdrawn/<id>.json
 ```
 
 Candidate and receipt ids are full lowercase SHA-256 identifiers managed by the program. Candidates retain free-form evidence and provenance; each domain records processing independently. Curated Markdown has no mandatory body fields or graph ids. Each skill directory contains `SKILL.md`; its supporting assets are ordinary files. Learning paths must be regular files and directories, without symlinks or special files.
 
-Raw candidates are available to relevant retrieval before curation and may remain useful afterward. Both domains completing an update does not automatically remove them. Requested maintenance can retire fully processed evidence after preserving its independent value; pending input for either domain is protected. Processing receipts are internal bookkeeping and excluded from retrieval.
+Pending candidates are available to relevant retrieval. The program removes a raw candidate once all three domains have processed it; useful context, examples, and experiences are retained in the appropriate curated sources. Each domain may complete without a semantic edit. Maintain starts from existing scoped material and does not consume pending candidates.
 
-Existing `AGENT_GUIDANCE_INBOX.md`, Behavior sections, and `S#` resources remain readable. Installation does not migrate or delete them; concrete scoped maintenance may address ownership while preserving affected references.
+Claims, processing receipts, and withdrawal records are program-owned coordination state. They contain identities and hashes rather than a second evidence archive and are excluded from retrieval. A withdrawal prevents further processing without undoing already published conclusions. Graph-linked `S#` instruction resources remain supported alongside learning skills.
 
 ## Graph Roots And Membership
 
@@ -51,7 +52,7 @@ Item ids use the grammar `[A-Za-z0-9_.-]+`.
 
 ## Addressable Items
 
-A graph item is either an addressable heading or a node.
+A Memory graph item is an addressable heading or a node. Pursuit map items use headings.
 
 Addressable headings use:
 
@@ -64,11 +65,11 @@ Addressable headings use:
 ### Provider Question View {MQ#heading-id} → [edge1, edge2, ...]
 ```
 
-Plain tree headings without graph relationships may omit the anchor and edge list. New Pursuit map items use addressable headings; their bodies are ordinary optional Markdown, with no dedicated task fields or node types.
+Plain grouping headings without graph relationships may omit the anchor and edge list. Pursuit directions use addressable headings; their bodies are ordinary optional Markdown, with no dedicated task fields or node types.
 
-Addressable `#`, `##`, and `###` headings may have body paragraphs directly below them. The body describes the heading concept as a whole. Use child nodes only for independently useful items.
+Addressable `#`, `##`, and `###` headings may have body paragraphs directly below them. The body describes the heading concept as a whole. In Memory, use child nodes for independently useful items.
 
-Nodes use:
+Memory nodes use:
 
 ```md
 - `<node-id>` <free-form description> → [edge1, edge2, ...]
@@ -76,11 +77,12 @@ Nodes use:
 
 Rules:
 
-- Heading ids and node ids share one namespace across Memory and Pursuit.
+- Heading ids and Memory node ids share one namespace across Memory and Pursuit.
 - A node with no edges writes `→ []`. A heading with no edges may omit the edge list.
 - Edges may connect any two addressable graph items.
 - Useful but unsettled Memory begins its description with `Uncertain:`.
-- Focus entries in `PURSUITS.md` reference Pursuit heading ids; they are not graph nodes.
+- Pursuit bodies may contain ordinary Markdown lists, including entries that start with inline code, and fenced examples. Complete graph-node syntax such as ``- `node-id` text → []`` is invalid in Pursuit roots and their graph detail files; the same applies with `->` in place of `→`.
+- Focus entries in `PURSUITS.md` reference Pursuit heading ids; each line contains only the list marker and backticked id. They are references, not graph nodes.
 
 ## Backing Forms
 

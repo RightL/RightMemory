@@ -18,11 +18,11 @@ Pursuit remains the user's hierarchical direction map. Ordinary learning does no
 
 ## Evidence and Curation
 
-Ordinary context uses the existing Memory submit/update path. Behavioral and procedural evidence uses one shared learning-candidate path. The guidance and skills curators can draw different useful lessons from the same interaction and record processing independently.
+All evidence uses one submission path. Memory, guidance, and skills can draw different useful conclusions from the same interaction and record processing independently. The main agent preserves evidence; it need not predict the final domain or wording.
 
-Capture concrete potentially useful evidence before demanding a settled general rule. Preserve the circumstances, user's contribution, observed outcome, and uncertainty needed to interpret it. Formal curation makes a separate judgment about usefulness, recurrence, scope, and strength of evidence. Raw candidates are retrievable before curation and remain evidence afterward; processing does not automatically turn them into adopted guidance or remove them.
+Capture concrete potentially useful evidence before demanding a settled general rule. Preserve the circumstances, user's contribution, observed outcome, and uncertainty needed to interpret it. Formal curation makes a separate judgment about usefulness, recurrence, scope, and strength of evidence. Pending candidates are retrievable before curation. After all three domains finish, the program removes the raw source. Each curator preserves independently useful context, cases, or experience in its owned state before completing the task.
 
-Requested maintenance may retire raw evidence after both curators have processed it and its independent value is preserved. No per-candidate human approval queue is required. The user's current direction remains authoritative over an old or overbroad interpretation.
+Requested maintenance starts from existing scoped material and uses the same task preparation, domain core, and publication controls as Update. It leaves pending evidence and processing records to the program. No per-candidate human approval queue is required. The user's current direction remains authoritative over an old or overbroad interpretation.
 
 ## Readers and Responsibilities
 
@@ -35,23 +35,23 @@ Requested maintenance may retire raw evidence after both curators have processed
 | `retrieve.md`, `assistant-retrieve.md` | Retrieval agents | Relevance judgment and source inspection |
 | `RETRIEVE_CONTRACT.md` | Runtime and internal retrieval agents | Selection and delivery mechanics |
 | `update.md`, `guidance-curator.md`, `skills-curator.md` | Domain agents | Bounded execution procedure |
-| Daily entry skills and MCP instructions | The main working agent | Retrieval, evidence routing, and ready-task dispatch |
+| Daily entry skills and MCP instructions | The main working agent | Retrieval, shared evidence submission, and native task delegation |
 | `maintain-rightmemory`, `maintain-agent-guidance`, `maintain-work-skills` | Requested domain maintainer | Broader maintenance within the user's scope |
 | `learning.py` and execution adapters | Runtime | Durable evidence, per-domain receipts, isolation, validation, and publication |
 
 One concept should have one normative owner. Other files refer to it rather than restating the full definition. Program-managed evidence and state transitions are enforced by code, not recreated as instructions for every agent.
 
-## Existing State
+## Curated State
 
 Agent Corrections remains the existing bounded Expression/Substance case library, now owned by the guidance curator. It is not duplicated in a second case library. A useful generalized rule and a concrete case can coexist when they add distinct value.
 
-Existing `AGENT_GUIDANCE_INBOX.md`, Cross-Session Agent Behavior, and S# resources remain readable. Installation preserves them and their references; no automatic migration or broad rewrite is part of this change. A concrete scoped maintenance task can address relevant overlap and ownership.
+Graph-linked S# instructions remain supported, including in shared views. Their representation is separate from who may maintain their bodies. Historical data and retired interfaces do not require runtime compatibility; [UPGRADING](UPGRADING.md) gives an agent the context for requested cleanup of an actual installation.
 
 Root `corrections.md` remains RightMemory Edit Feedback. It is operational curation feedback, not ordinary user memory, behavioral guidance, or a graph item. Curators form a tentative judgment before consulting relevant feedback.
 
 ## Retrieval and Visible Behavior
 
-Relevant raw learning evidence, curated guidance, correction cases, experiences, and complete skills participate in ordinary retrieval. Internal processing receipts do not. Retrieval remains driven by the current need; the entire evidence history is not injected every turn.
+Relevant pending evidence, curated guidance, correction cases, experiences, and complete skills participate in ordinary retrieval. Claims, processing receipts, and withdrawals do not. Retrieval remains driven by the current need; program completion does not create a second raw-history pool.
 
 Applicable guidance should affect the work itself. Ordinary learning does not require a visible acknowledgement, a fixed phrase, or a per-item review ceremony. A candidate receipt confirms durable capture; a completion receipt confirms publication. Neither establishes that the learned behavior has been empirically validated on future work.
 

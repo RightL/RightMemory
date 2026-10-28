@@ -1,81 +1,13 @@
-import hashlib
-import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from rightmemory.update_queue import (
-    UpdateCandidate,
-    UpdateQueueLease,
-    UpdateQueueRecovery,
-    UpdateQueueStore,
-    update_candidate_batch_id,
-)
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE_START = "rightmemory:example:start"
-EXAMPLE_END = "rightmemory:example:end"
-PURSUIT_EXAMPLE_START = "rightmemory:pursuit-example:start"
-PURSUIT_EXAMPLE_END = "rightmemory:pursuit-example:end"
-LEGACY_ORCHESTRATOR_TEMPLATE = """---
-name: memory-orchestrator
-description: "Use when the user's request may depend on long-term context from earlier sessions, or when the current turn may create long-term context worth preserving, such as durable user context, user preferences, project facts, workflow expectations, blockers, or repeated failure patterns."
----
-
-# Memory Orchestrator CLI
-
-## Access Rules
-
-- The memory root is `{{MEMORY_ROOT}}`; the main agent must not read or edit files there by any means unless the user explicitly permits direct access.
-- Pick one stable session id for this agent conversation and reuse it for every retrieve/update call.
-
-## Retrieval
-
-- For retrieval, call `rightmemory retrieve --session <stable-session-id> "<memory need>"`.
-- Describe the memory needed based on the user's intent instead of blindly forwarding the user's message verbatim.
-- For factual, project, or domain context, do not retrieve on every turn. Retrieve when the current conversation lacks the background needed to answer or work well.
-- Skip this factual/context retrieval when the message is clearly self-contained and answerable from the conversation alone.
-- For preference-, workflow-, and behavior-related memory, retrieve proactively and very frequently when the agent is about to make choices that affect how it collaborates, implements, verifies, communicates, or finishes work.
-- Treat phase and topic changes as strong retrieval triggers for preference, workflow, and behavior memory, especially transitions between discussion, implementation, and finishing work.
-- When running retrieve, give the actual retrieve command/session up to 3 minutes to return before acting without memory. This means awaiting or polling the tool result; do not run a separate blocking wait such as `sleep 180` after a successful retrieve. During the pending retrieve, do not explore files or advance the task independently.
-- The retriever skips items already returned in this session; ask explicitly if you need something again.
-- A returned `S#...` heading is a memory skill: reusable instruction backed by a separate skill body, not an ordinary memory fact.
-- Broad retrieval usually returns only the skill heading and brief body paragraph.
-- Before using a memory skill, retrieve that specific skill again to get its full body.
-- Treat retrieved behavior guidance and memory skills seriously: apply them directly when the fit is clear, briefly say how they will guide the work when useful, and ask the user when the fit is unclear.
-- If current work shows retrieved memory is stale, wrong, too broad, or misleading, send the correction in the next update brief. This matters because bad memory can keep steering future agents wrong.
-- Retrieval may include an `Open context questions` block after ordinary memory matches. Treat those lines as agent-facing questions, not memory facts.
-- If the current task or workspace context already answers one, include the question id and answer in the next memory update brief.
-- Do not start extra investigation just because a question was surfaced.
-- Retrieval may include `Provider question context` lines for relevant `MQ#` headings. Treat these as optional external ask opportunities, not memory facts.
-- If provider-question context would materially help the current task, call `rightmemory shared-view ask <mq-id> "<question>"` yourself after retrieve returns.
-- Phrase the question from the actual task context; do not forward a question invented by retrieve.
-- If the ask reports unavailable, continue with available local context and tell the user the provider question endpoint is currently unavailable.
-
-## Updates
-
-- After completing work, judge whether this turn produced durable context that should change how a future agent acts, decides, retrieves context, or avoids repeating a mistake. If not, skip the update.
-- Before submitting an update, check whether the same useful information is already durably captured in a natural artifact that future agents are likely to inspect, such as a git commit message, design doc, code comment, experiment report, run log, or project-local notes.
-- If a natural artifact already captures the useful information, skip the memory update unless memory adds retrieval value that the artifact alone does not provide.
-- For recurring project artifacts, prefer one compact lookup rule over repeated updates. For example, remember that future agents should inspect the local experiment log/report directory when they need run details, rather than remembering every new experiment report path.
-- If a user context, preference, workflow, or behavior update may be durable but is uncertain, submit it as a candidate brief with the uncertainty and surrounding context included. The command-backed update role will triage candidate briefs before editing memory.
-- Submit an update when previous work involved a significant amount of effort or reasoning, and reproducing that work later would take substantial effort.
-- Memory-worthy context may include durable user context, user preferences, workflow expectations, emergent reusable workflows discovered through iteration, environment/tooling constraints, repeated agent failure patterns and their fixes, project facts, decisions, blockers, or domain working knowledge.
-- Domain working knowledge is reusable understanding about a project, company, product, data model, terminology, conventions, or local artifact semantics that helps future agents interpret things correctly without rediscovering them.
-- Capture domain working knowledge when remembering it would help future agents avoid rediscovering how to interpret the same kind of thing.
-- For updates, call `rightmemory update submit --session <stable-session-id> "<concrete candidate brief>"` and proceed without waiting or pulling for the update result.
-- The first update for a stable session id should include fuller surrounding context: meaning, relevance, uncertainty, and relationship to existing memory.
-- Later updates with the same session id may be shorter when earlier submitted context or queued candidates are enough. Include fresh context when the meaning changed or depends on details not yet submitted.
-- For corrections to retrieved memory, describe the stale or wrong memory well enough for the updater to find it, and say whether it should be revised, narrowed, or deleted.
-- When the user asks for a memory-update result or status, call `rightmemory update pull --session <stable-session-id>`.
-- To cancel a submitted update candidate that is still pending, call `rightmemory update undo --session <stable-session-id> <candidate-id>`.
-"""
 
 
 @unittest.skipIf(os.name == "nt", "install.sh tests exercise the POSIX installer")
@@ -178,7 +110,6 @@ class InstallScriptTests(unittest.TestCase):
             self.assertTrue((memory_root / "insight_logs").is_dir())
             self.assertFalse((memory_root / "PURSUIT_RULES.md").exists())
             self.assertFalse((memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").exists())
-            self.assertFalse((memory_root / ".runtime" / "semantic-upgrades.json").exists())
 
     def test_initial_install_configures_git_author_and_baseline_commit(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -224,7 +155,7 @@ class InstallScriptTests(unittest.TestCase):
             skills_target = root / "skills"
             memory_root.mkdir()
             expected = {
-                "MEMORY.md": b"# Existing Memory\n\xff\x00",
+                "MEMORY.md": "# Existing Memory\r\n\n保留现有内容。\n".encode("utf-8"),
                 "PURSUITS.md": b"# Existing Pursuits\r\n",
             }
             for name, content in expected.items():
@@ -285,370 +216,6 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(status, "")
         self.assertIn("shares.toml", committed_files)
 
-    def test_initial_install_baselines_existing_update_queue_files(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-            (memory_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-            candidate_uid = "a" * 32
-            timestamp = datetime.now(UTC).isoformat()
-            queue = UpdateQueueStore(memory_root)
-            candidate_record = UpdateCandidate(
-                candidate_uid,
-                "session",
-                1,
-                "remember this",
-                timestamp,
-            )
-            batch_id = update_candidate_batch_id((candidate_record,))
-            candidate = queue.write_candidate(candidate_record)
-            recovery = queue.write_recovery(
-                UpdateQueueRecovery(batch_id, (candidate_uid,), 1, "retry", timestamp)
-            )
-            lease = queue.write_lease(
-                UpdateQueueLease("c" * 32, "d" * 32, "e" * 40, batch_id, (candidate_uid,), timestamp)
-            )
-
-            self._install(memory_root, skills_target)
-            committed_files = self._git(memory_root, "ls-tree", "--name-only", "-r", "HEAD").splitlines()
-
-        self.assertIn(candidate.relative_to(memory_root).as_posix(), committed_files)
-        self.assertIn(recovery.relative_to(memory_root).as_posix(), committed_files)
-        self.assertIn(lease.relative_to(memory_root).as_posix(), committed_files)
-
-    def test_install_refuses_malformed_existing_update_queue_without_changes(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-            (memory_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-            candidate = memory_root / "update_queue" / "candidates" / f"{'a' * 32}.json"
-            candidate.parent.mkdir(parents=True)
-            candidate.write_text("{not json\n", encoding="utf-8")
-
-            result = self._run_install(memory_root, skills_target, check=False)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("RightMemory update queue is invalid", result.stderr)
-        self.assertIn(candidate.relative_to(memory_root).as_posix(), result.stderr)
-        self.assertFalse((memory_root / ".git").exists())
-
-    def test_queue_only_root_is_refused_without_bootstrap(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            lease = memory_root / "update_queue" / "lease.json"
-            lease.parent.mkdir(parents=True)
-            lease.write_text("{}\n", encoding="utf-8")
-
-            result = self._run_install(memory_root, skills_target, check=False)
-            memory_created = (memory_root / "MEMORY.md").exists()
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("RightMemory update queue is invalid", result.stderr)
-        self.assertFalse(memory_created)
-
-    def test_install_validates_malformed_queue_before_new_target_bootstrap(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            queue_path = memory_root / "update_queue"
-            queue_path.write_text("not a queue directory\n", encoding="utf-8")
-
-            result = self._run_install(memory_root, skills_target, check=False)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("RightMemory update queue is invalid", result.stderr)
-        self.assertIn("update_queue: must be a directory", result.stderr)
-        self.assertFalse((memory_root / "MEMORY.md").exists())
-        self.assertFalse((memory_root / ".git").exists())
-
-    def test_install_refuses_live_legacy_async_updates_before_changes(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md"):
-                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
-            state_path = memory_root / ".runtime" / "async" / "update" / "legacy-session.json"
-            state_path.parent.mkdir(parents=True)
-            state_path.write_text(
-                json.dumps(
-                    {
-                        "status": "running",
-                        "session_id": "legacy-session",
-                        "role": "update",
-                        "phase": "waiting",
-                        "current_batch": [],
-                        "pending": [
-                            {
-                                "id": 1,
-                                "message": "legacy pending evidence",
-                                "submitted_at": "2026-07-20T00:00:00+00:00",
-                            }
-                        ],
-                        "next_id": 2,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            result = self._run_install(memory_root, skills_target, check=False)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("live async updates are incompatible", result.stderr)
-        self.assertIn(state_path.relative_to(memory_root).as_posix(), result.stderr)
-        self.assertIn("finish, retry, or undo every live update", result.stderr)
-        self.assertIn("`pending: 0`", result.stderr)
-        self.assertIn("`current_batch: 0`", result.stderr)
-        self.assertFalse((memory_root / ".git").exists())
-        self.assertFalse(skills_target.exists())
-
-    def test_install_allows_drained_legacy_async_state(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md"):
-                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
-            state_path = memory_root / ".runtime" / "async" / "update" / "drained-session.json"
-            state_path.parent.mkdir(parents=True)
-            state_path.write_text(
-                json.dumps(
-                    {
-                        "status": "succeeded",
-                        "session_id": "drained-session",
-                        "role": "update",
-                        "current_batch": [],
-                        "pending": [],
-                        "next_id": 2,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            result = self._run_install(memory_root, skills_target, check=False)
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_install_refuses_non_directory_async_root_before_changes(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md"):
-                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
-            async_root = memory_root / ".runtime" / "async" / "update"
-            async_root.parent.mkdir(parents=True)
-            async_root.write_text("not a directory\n", encoding="utf-8")
-
-            result = self._run_install(memory_root, skills_target, check=False)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("live async updates are incompatible", result.stderr)
-        self.assertIn(async_root.relative_to(memory_root).as_posix(), result.stderr)
-        self.assertFalse((memory_root / ".git").exists())
-        self.assertFalse(skills_target.exists())
-
-    def test_install_refuses_unsafe_runtime_state_parent_containers(self):
-        cases = (
-            ("async-file", Path(".runtime/async"), "file", "live async updates"),
-            ("async-symlink", Path(".runtime/async"), "symlink", "live async updates"),
-            ("review-file", Path(".runtime/review"), "file", "pending transcript-review"),
-            ("review-symlink", Path(".runtime/review"), "symlink", "pending transcript-review"),
-        )
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            for name, relative, kind, diagnostic in cases:
-                with self.subTest(name=name):
-                    memory_root = root / name / "memory"
-                    skills_target = root / name / "skills"
-                    memory_root.mkdir(parents=True)
-                    for required in ("MEMORY.md", "PURSUITS.md"):
-                        (memory_root / required).write_text(f"# {required}\n", encoding="utf-8")
-                    container = memory_root / relative
-                    container.parent.mkdir(parents=True)
-                    if kind == "file":
-                        container.write_text("not a directory\n", encoding="utf-8")
-                    else:
-                        external = root / name / "external"
-                        external.mkdir()
-                        container.symlink_to(external, target_is_directory=True)
-
-                    result = self._run_install(memory_root, skills_target, check=False)
-
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn(diagnostic, result.stderr)
-                    self.assertIn(relative.as_posix(), result.stderr)
-                    self.assertFalse(skills_target.exists())
-
-    def test_install_refuses_drained_unsupported_async_state_before_changes(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md"):
-                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
-            state_path = memory_root / ".runtime" / "async" / "update" / "drained-session.json"
-            state_path.parent.mkdir(parents=True)
-            state_path.write_text(
-                json.dumps(
-                    {
-                        "status": "succeeded",
-                        "session_id": "drained-session",
-                        "role": "update",
-                        "current": None,
-                        "queued": [],
-                        "next_id": 2,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            result = self._run_install(memory_root, skills_target, check=False)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("live async updates are incompatible", result.stderr)
-        self.assertIn(state_path.relative_to(memory_root).as_posix(), result.stderr)
-        self.assertIn("archive any listed drained legacy state", result.stderr)
-        self.assertFalse((memory_root / ".git").exists())
-        self.assertFalse(skills_target.exists())
-
-    def test_install_refuses_legacy_async_batch_reservation_before_changes(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md"):
-                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
-            reservation = (
-                memory_root
-                / ".runtime"
-                / "async"
-                / "update"
-                / "_batches"
-                / ("a" * 64 + ".json")
-            )
-            reservation.parent.mkdir(parents=True)
-            reservation.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "operation_id": "update-batch-" + "a" * 64,
-                        "created_at": "2026-07-20T00:00:00+00:00",
-                        "participants": [
-                            {
-                                "session_id": "legacy-session",
-                                "ready_at": "2026-07-20T00:00:00+00:00",
-                                "jobs": [
-                                    {
-                                        "id": 1,
-                                        "message": "legacy reserved evidence",
-                                        "submitted_at": "2026-07-20T00:00:00+00:00",
-                                    }
-                                ],
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            result = self._run_install(memory_root, skills_target, check=False)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("live async updates are incompatible", result.stderr)
-        self.assertIn(reservation.relative_to(memory_root).as_posix(), result.stderr)
-        self.assertFalse((memory_root / ".git").exists())
-        self.assertFalse(skills_target.exists())
-
-    def test_install_refuses_pending_retired_review_evidence_without_mutation(self):
-        reviewed_at = "2026-07-20T00:00:00+00:00"
-        valid_delivery = {
-            "version": 2,
-            "batch_id": "review-batch",
-            "candidate": "durable evidence awaiting delivery",
-            "candidate_id": 1,
-            "candidate_uid": "a" * 32,
-            "reviewed_at": reviewed_at,
-            "sessions": [{
-                "session_id": "session-1",
-                "source": "codex",
-                "last_reviewed_at": reviewed_at,
-            }],
-            "reviewed_count": 1,
-            "skipped_duplicate_count": 0,
-        }
-        cases = (
-            (hashlib.sha256(b"review-batch").hexdigest() + ".json",
-             json.dumps(valid_delivery).encode("utf-8")),
-            ("legacy.json", b'{"version": 1, "batch_id": "legacy"}'),
-            ("damaged.json", b"unreadable delivery evidence"),
-            (".pending.tmp", b"interrupted delivery evidence"),
-        )
-        for filename, contents in cases:
-            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tempdir:
-                root = Path(tempdir)
-                memory_root = root / "memory"
-                skills_target = root / "skills"
-                runtime_home = root / "data" / "rightmemory"
-                memory_root.mkdir()
-                skills_target.mkdir()
-                runtime_home.mkdir(parents=True)
-                for name in ("MEMORY.md", "PURSUITS.md"):
-                    (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
-                (skills_target / "existing.txt").write_bytes(b"user-owned skill state")
-                (runtime_home / "existing.txt").write_bytes(b"installed runtime")
-                delivery = memory_root / ".runtime" / "review" / "deliveries" / filename
-                delivery.parent.mkdir(parents=True)
-                delivery.write_bytes(contents)
-                before_memory = self._snapshot(memory_root)
-                before_skills = self._snapshot(skills_target)
-                before_runtime = self._snapshot(runtime_home)
-
-                result = self._run_install(memory_root, skills_target, check=False)
-
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("pending transcript-review deliveries require explicit resolution", result.stderr)
-                self.assertIn(delivery.relative_to(memory_root).as_posix(), result.stderr)
-                self.assertEqual(self._snapshot(memory_root), before_memory)
-                self.assertEqual(self._snapshot(skills_target), before_skills)
-                self.assertEqual(self._snapshot(runtime_home), before_runtime)
-
-    def test_install_refuses_symlink_review_delivery_root_before_changes(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            for name in ("MEMORY.md", "PURSUITS.md"):
-                (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
-            external = root / "external-deliveries"
-            external.mkdir()
-            deliveries_root = memory_root / ".runtime" / "review" / "deliveries"
-            deliveries_root.parent.mkdir(parents=True)
-            deliveries_root.symlink_to(external, target_is_directory=True)
-
-            result = self._run_install(memory_root, skills_target, check=False)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("pending transcript-review deliveries require explicit resolution", result.stderr)
-        self.assertIn(deliveries_root.relative_to(memory_root).as_posix(), result.stderr)
-        self.assertFalse((memory_root / ".git").exists())
-        self.assertFalse(skills_target.exists())
 
     def test_install_preserves_existing_memory_repo_author(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -737,7 +304,7 @@ class InstallScriptTests(unittest.TestCase):
                 result.stderr,
             )
             self.assertIn("installation made no changes", result.stderr)
-            self.assertIn("migrate and review this root explicitly", result.stderr)
+            self.assertIn("inspect and repair this root using the current schema", result.stderr)
             self.assertEqual(self._git(memory_root, "rev-parse", "HEAD"), before_head)
             self.assertEqual(self._git(memory_root, "status", "--short"), before_status)
             self.assertEqual(self._git(memory_root, "config", "--local", "--get", "user.name"), before_name)
@@ -920,8 +487,6 @@ class InstallScriptTests(unittest.TestCase):
             "!MEMORY_*.md\n"
             "!PURSUITS.md\n"
             "!PURSUIT_*.md\n"
-            "!AGENT_GUIDANCE_INBOX.md\n"
-            "PURSUIT_RULES.md\n"
             "!corrections.md\n"
             "!shared_views.toml\n"
             "!shares.toml\n"
@@ -934,14 +499,6 @@ class InstallScriptTests(unittest.TestCase):
             "!shared_views/*/.gitignore\n"
             "!insight_logs/\n"
             "!insight_logs/*.md\n"
-            "!update_queue/\n"
-            "!update_queue/candidates/\n"
-            "!update_queue/candidates/*.json\n"
-            "!update_queue/recovery/\n"
-            "!update_queue/recovery/*.json\n"
-            "!update_queue/lease.json\n"
-            "!update_records/\n"
-            "!update_records/*.json\n"
             "!learning/\n"
             "!learning/**\n",
         )
@@ -1005,15 +562,15 @@ class InstallScriptTests(unittest.TestCase):
             memory_path = memory_root / "MEMORY.md"
             memory = memory_path.read_text(encoding="utf-8")
             memory_path.write_text(
-                "# Real Memory {#real-memory}\n\n- `real-node` keep me.\n\n"
-                + memory.replace("Example Application", "Stale Example Application"),
+                "# Real Memory {#real-memory}\n\n- `real-node` keep me. → []\n\n"
+                + memory,
                 encoding="utf-8",
             )
             pursuits_path = memory_root / "PURSUITS.md"
             pursuits = pursuits_path.read_text(encoding="utf-8")
             pursuits_path.write_text(
                 "# User Pursuits\n\n## Continue Release {#continue-release}\n\nKeep this live intent.\n\n"
-                + pursuits.replace("Example Application", "Stale Example Application"),
+                + pursuits,
                 encoding="utf-8",
             )
             expected_memory = memory_path.read_bytes()
@@ -1022,76 +579,11 @@ class InstallScriptTests(unittest.TestCase):
             self._install(memory_root, skills_target)
             actual_memory = memory_path.read_bytes()
             actual_pursuits = pursuits_path.read_bytes()
-            refreshed_memory = memory_path.read_text(encoding="utf-8")
-            refreshed_pursuits = pursuits_path.read_text(encoding="utf-8")
 
         self.assertEqual(actual_memory, expected_memory)
         self.assertEqual(actual_pursuits, expected_pursuits)
-        self.assertIn("# Real Memory {#real-memory}", refreshed_memory)
-        self.assertIn("- `real-node` keep me.", refreshed_memory)
-        self.assertIn("Stale Example Application", refreshed_memory)
-        self.assertEqual(refreshed_memory.count(EXAMPLE_START), 1)
-        self.assertEqual(refreshed_memory.count(EXAMPLE_END), 1)
-        self.assertIn("## Continue Release {#continue-release}", refreshed_pursuits)
-        self.assertIn("Keep this live intent.", refreshed_pursuits)
-        self.assertIn("Stale Example Application", refreshed_pursuits)
-        self.assertEqual(refreshed_pursuits.count(PURSUIT_EXAMPLE_START), 1)
-        self.assertEqual(refreshed_pursuits.count(PURSUIT_EXAMPLE_END), 1)
 
-    def test_rerun_refuses_legacy_root_references_without_mutation(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            (memory_root / "MEMORY.md").write_text("# User Memory\n", encoding="utf-8")
-            (memory_root / "PURSUITS.md").write_text("# User Pursuits\n\nDo not replace.\n", encoding="utf-8")
-            (memory_root / "PURSUIT_RULES.md").write_text("# Custom Rules\n\nDo not replace.\n", encoding="utf-8")
-            (memory_root / "AGENT_CORRECTION_MEMORY_RULES.md").write_text(
-                "# Custom Agent Correction Rules\n\nDo not replace.\n",
-                encoding="utf-8",
-            )
 
-            before = self._snapshot(memory_root)
-            result = self._run_install(memory_root, skills_target, check=False)
-
-            pursuits = (memory_root / "PURSUITS.md").read_text(encoding="utf-8")
-            rules = (memory_root / "PURSUIT_RULES.md").read_text(encoding="utf-8")
-            after = self._snapshot(memory_root)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("legacy package-reference files", result.stderr)
-        self.assertEqual(after, before)
-        self.assertEqual(pursuits, "# User Pursuits\n\nDo not replace.\n")
-        self.assertEqual(rules, "# Custom Rules\n\nDo not replace.\n")
-
-    def test_rerun_does_not_migrate_known_old_starter_block(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            (memory_root / "MEMORY.md").write_text(
-                "# Starter Knowledge Base {#starter-knowledge-base}\n\n"
-                "> Old starter text.\n\n"
-                "---\n\n"
-                "# Real Memory {#real-memory}\n\n"
-                "- `real-node` keep me. → []\n",
-                encoding="utf-8",
-            )
-            (memory_root / "PURSUITS.md").write_text("# Existing Pursuits\n", encoding="utf-8")
-            expected = (memory_root / "MEMORY.md").read_bytes()
-
-            self._install(memory_root, skills_target)
-            actual = (memory_root / "MEMORY.md").read_bytes()
-            migrated = (memory_root / "MEMORY.md").read_text(encoding="utf-8")
-
-        self.assertEqual(actual, expected)
-        self.assertNotIn(EXAMPLE_START, migrated)
-        self.assertNotIn("# Sample Project Graph", migrated)
-        self.assertIn("# Starter Knowledge Base", migrated)
-        self.assertIn("# Real Memory {#real-memory}", migrated)
-        self.assertIn("- `real-node` keep me. → []", migrated)
 
     def test_default_install_uses_standalone_and_default_skill_targets(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1126,7 +618,6 @@ class InstallScriptTests(unittest.TestCase):
                 self.assertTrue((target / "maintain-work-skills" / "SKILL.md").is_file())
                 self.assertFalse((target / "memory-orchestrator").exists())
             self.assertFalse((home / ".codex" / "skills" / "memory-curator").exists())
-            self.assertFalse((home / ".claude" / "skills" / "memory-dreamer").exists())
             self.assertIn("MODE         = standalone", result.stdout)
             self.assertIn("Write [retrieve.model] and a default writer [update.model] config", result.stdout)
             self.assertIn("rightmemory-auto-orchestrator", result.stdout)
@@ -1213,7 +704,7 @@ class InstallScriptTests(unittest.TestCase):
         self.assertFalse(memory_exists)
         self.assertFalse(skills_exists)
 
-    def test_install_preserves_retired_runtime_state(self):
+    def test_install_preserves_unowned_runtime_files(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
@@ -1221,23 +712,17 @@ class InstallScriptTests(unittest.TestCase):
             memory_root.mkdir()
             for name in ("MEMORY.md", "PURSUITS.md"):
                 (memory_root / name).write_text(f"# {name}\n", encoding="utf-8")
-            retired = {
-                ".runtime/review/state.json": b'{"sessions": {"past-session": {}}}',
-                ".runtime/dreamer/trigger-state.json": b'{"points": 12}',
-                ".runtime/semantic-upgrades.json": b'{"absorbed": {"old-note": {}}}',
+            unowned = {
+                ".runtime/user-notes/one.txt": b"a saved note\n",
+                ".runtime/user-notes/two.json": b'{"important": true}',
             }
-            for name, contents in retired.items():
+            for name, contents in unowned.items():
                 path = memory_root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(contents)
-            deliveries = memory_root / ".runtime" / "review" / "deliveries"
-            deliveries.mkdir()
-
             self._install(memory_root, skills_target)
 
-            self.assertEqual({name: (memory_root / name).read_bytes() for name in retired}, retired)
-            self.assertTrue(deliveries.is_dir())
-            self.assertEqual(list(deliveries.iterdir()), [])
+            self.assertEqual({name: (memory_root / name).read_bytes() for name in unowned}, unowned)
 
     def test_install_warns_when_stale_rightmemory_precedes_installed_wrapper(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1265,14 +750,14 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn(f"PATH currently resolves rightmemory to:\n\n              {stale_rightmemory}", result.stdout)
         self.assertIn("stale code or use the wrong RIGHTMEMORY_ROOT", result.stdout)
 
-    def test_subagent_mode_is_rejected_with_cli_agent_guidance(self):
+    def test_invalid_mode_is_rejected_before_writes(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             memory_root = root / "memory"
             skills_target = root / "skills"
 
             result = subprocess.run(
-                ["bash", "install.sh", "--mode", "subagent", str(memory_root), str(skills_target)],
+                ["bash", "install.sh", "--mode", "unsupported", str(memory_root), str(skills_target)],
                 cwd=REPO_ROOT,
                 env=self._env_with_fake_uv(root),
                 text=True,
@@ -1280,75 +765,12 @@ class InstallScriptTests(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 check=False,
             )
+            self.assertFalse(memory_root.exists())
+            self.assertFalse(skills_target.exists())
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Unsupported --mode: subagent", result.stderr)
-        self.assertIn("--mode cli-agent", result.stderr)
+        self.assertIn("invalid choice: 'unsupported'", result.stderr)
 
-    def test_install_removes_old_rightmemory_role_skills_and_preserves_user_dirs(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            old_curator = skills_target / "memory-curator"
-            old_dreamer = skills_target / "memory-dreamer"
-            old_orchestrator = skills_target / "memory-orchestrator"
-            old_curator.mkdir(parents=True)
-            old_dreamer.mkdir(parents=True)
-            old_orchestrator.mkdir(parents=True)
-            old_curator.joinpath("SKILL.md").write_text(
-                "---\nname: memory-curator\n---\n"
-                "You are the subagent execution wrapper for RightMemory retrieval and update work.\n",
-                encoding="utf-8",
-            )
-            old_dreamer.joinpath("SKILL.md").write_text(
-                "---\nname: memory-dreamer\n---\n"
-                "You are the subagent execution wrapper for RightMemory dream cycles.\n",
-                encoding="utf-8",
-            )
-            old_orchestrator.joinpath("SKILL.md").write_text(
-                LEGACY_ORCHESTRATOR_TEMPLATE.replace("{{MEMORY_ROOT}}", str(memory_root)),
-                encoding="utf-8",
-            )
-
-            self._install(memory_root, skills_target)
-            old_curator_exists = old_curator.exists()
-            old_dreamer_exists = old_dreamer.exists()
-            old_orchestrator_exists = old_orchestrator.exists()
-
-            user_memory_root = root / "user-memory"
-            user_skills_target = root / "user-skills"
-            user_curator = user_skills_target / "memory-curator"
-            user_dreamer = user_skills_target / "memory-dreamer"
-            user_orchestrator = user_skills_target / "memory-orchestrator"
-            user_curator.mkdir(parents=True)
-            user_dreamer.mkdir(parents=True)
-            user_orchestrator.mkdir(parents=True)
-            user_curator.joinpath("SKILL.md").write_text(
-                "---\nname: memory-curator\n---\nUser-owned memory-curator helper.\n",
-                encoding="utf-8",
-            )
-            user_dreamer.joinpath("SKILL.md").write_text(
-                "---\nname: memory-dreamer\n---\nUser-owned memory-dreamer helper.\n",
-                encoding="utf-8",
-            )
-            customized_orchestrator = (
-                LEGACY_ORCHESTRATOR_TEMPLATE.replace("{{MEMORY_ROOT}}", str(user_memory_root))
-                + "\n# User customization\n"
-            )
-            user_orchestrator.joinpath("SKILL.md").write_text(customized_orchestrator, encoding="utf-8")
-
-            self._install(user_memory_root, user_skills_target)
-            user_curator_exists = user_curator.exists()
-            user_dreamer_exists = user_dreamer.exists()
-            user_orchestrator_exists = user_orchestrator.exists()
-
-        self.assertFalse(old_curator_exists)
-        self.assertFalse(old_dreamer_exists)
-        self.assertFalse(old_orchestrator_exists)
-        self.assertTrue(user_curator_exists)
-        self.assertTrue(user_dreamer_exists)
-        self.assertTrue(user_orchestrator_exists)
 
     def _install(self, memory_root: Path, skills_target: Path) -> subprocess.CompletedProcess[str]:
         return self._run_install(memory_root, skills_target, check=True)

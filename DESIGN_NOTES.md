@@ -1,33 +1,46 @@
 # RightMemory Design Notes
 
-## Native Assistant Execution
+## Shared Evidence and Domain Curation
 
-Assistant execution separates the agent's judgment from RightMemory's deterministic
-storage boundary. The shared orchestrator skill delegates retrieval needs and submits
-evidence. A Retrieve child prepares access to live source files and pending evidence,
-then summarizes what matters. An Update child uses the canonical Update instructions
-and native file tools in a persistent Git worktree. CLI JSON and MCP call the same
-model-free core; neither constructs an internal role agent.
+One submission preserves the useful evidence from an interaction. Memory, guidance,
+and skills each judge that evidence against their own core. Keeping submission shared
+avoids requiring the working agent to decide too early whether an interaction will
+matter as personal context, collaboration guidance, or reusable method.
 
-Batching reuses the existing candidate identity, reservation policy, and synchronized
-Git queue. Readiness is carried in ordinary tool results, including instructions for a
-child to relay the notice to its main agent. A notice does not acquire ownership.
-Local assistant reservations survive individual CLI processes; synchronized claims use
-a stable assistant-specific holder so the old worker cannot resume the same live lease.
+Capture and generalization have different thresholds. Useful circumstances or partial
+work experience may deserve retention without becoming a broad rule or polished skill.
+Curators preserve that value in ordinary context, guidance cases, or experience files.
+Pending evidence is retrievable while it awaits processing. Once all three domains
+finish, the program removes the raw candidate from current state rather than growing a
+second history collection. Processing receipts retain identities and hashes; Git keeps
+its existing history.
 
-A batch retains its evidence identity across attempts. Each attempt has its own worktree,
-version, and fenced semantic operation. Completion freezes committed edits, validates
-every original commit and the complete candidate, retains the existing UpdateRecord,
-and publishes through the existing write supervisor or Git queue finalizer. Prepared
-results have an external finalizer so ordinary worker recovery cannot publish them
-without their current claim. Durable outcomes recover interrupted acknowledgement;
-failed publication retries the prepared result without repeating agent judgment.
+Update and Maintain share the same domain intent and publication boundary. Update
+starts from a bounded candidate batch. Maintain starts from existing material in the
+requested scope and does not consume pending evidence. The program owns claims,
+processing records, withdrawal, and cleanup; models judge and edit curated content.
 
-This is a separate execution path. It preserves the existing runtime and does not claim
-equivalent model history, incremental retrieval caches, delivery suppression, watchers,
-or maintenance scheduling. Ordinary sync is shared; semantic sync conflicts remain an
-explicit blocked state until reconciled. Usage and verification are documented in
-[Assistant Execution](docs/ASSISTANT_EXECUTION.md).
+## Native and Configured Execution
+
+The shared service prepares isolated worktrees and publishes validated results for
+both executors. Configured submission wakes a bounded background worker. Native
+execution returns readiness to the main assistant, which delegates one agent to the
+prepared task. A notice does not acquire ownership, and an interrupted active task is
+not a new delegation request.
+
+A task retains its selected evidence across attempts. A shared domain claim fences
+publication, and configured execution also guards its local running worker. Claims do
+not expire merely because native work is slow. Completion validates the result and
+publishes against the current claim. Prepared results and durable outcomes let an
+interrupted completion recover without repeating model judgment; unfinished program
+effects retry through completion as well. Explicit task retry replaces abandoned edits
+while fencing their old owner.
+
+Native Retrieve prepares access to real source files and a compact learning index,
+then returns an attributed handoff with native file tools. This shares storage and
+semantic judgment with the internal runtime without claiming identical model history,
+incremental retrieval caching, delivery suppression, or watcher scheduling. Usage is
+documented in [Assistant Execution](docs/ASSISTANT_EXECUTION.md).
 
 ## Embedding Retrieval
 

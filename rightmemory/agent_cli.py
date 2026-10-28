@@ -36,7 +36,7 @@ PERSISTENT_POLICY = "persistent"
 ONE_SHOT_POLICY = "one-shot"
 PROCESS_LOCAL_POLICY = "process-local"
 FORK_BASE_POLICY = "fork-base"
-_EMPTY_RETRIEVE_SELECTION = {"ids": [], "sources": [], "recent_candidates": []}
+_EMPTY_RETRIEVE_SELECTION = {"ids": [], "sources": []}
 _PREFIX_BOOTSTRAP_QUERY = (
     "Initialize this Retrieve context without selecting any content. "
     "Return the empty terminal selection."

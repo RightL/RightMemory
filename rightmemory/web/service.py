@@ -11,8 +11,7 @@ from typing import Any
 
 from ..git_share_transport import is_git_share_url
 from ..config import (
-    ROLES,
-    load_async_update_config,
+    RUNTIME_ROLES,
     load_config,
     load_insight_watch_config,
     load_pruner_config,
@@ -79,7 +78,7 @@ class WebStudioService:
             "git": _json_safe(status.git),
             "watches": [_json_safe(watch) for watch in status.watches],
             "insight": _json_safe(status.insight),
-            "update": _json_safe(status.update),
+            "curation": _json_safe(status.curation),
             "shared_views": {
                 "provider_view_count": len(shared_views["provider_views"]),
                 "connection_count": len(shared_views["connections"]),
@@ -180,12 +179,11 @@ class WebStudioService:
             "config_path": str(config_path),
             "config_exists": config_path.is_file(),
             "runtime": {
-                "update": _settings_loader(load_async_update_config, self.memory_root),
                 "insight_watch": _settings_loader(load_insight_watch_config, self.memory_root),
                 "pruner": _settings_loader(load_pruner_config, self.memory_root),
                 "sync": _settings_loader(load_sync_config, self.memory_root),
             },
-            "roles": [_role_settings(role, self.memory_root) for role in sorted(ROLES)],
+            "roles": [_role_settings(role, self.memory_root) for role in sorted(RUNTIME_ROLES)],
         }
 
     def memory_files(self) -> dict[str, Any]:

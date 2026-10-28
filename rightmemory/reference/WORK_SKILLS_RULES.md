@@ -22,12 +22,12 @@ Keep user intent and result standards stable while allowing implementation detai
 
 Use `learning/experiences/` for useful work cases whose lessons remain partial or contextual. Use `learning/skills/<slug>/SKILL.md` and supporting assets for reusable skills. A skill should make its purpose and applicability easy to recognize and contain enough method, judgment, and resources to use it; no fixed body template is required.
 
-Existing `S#` resources remain readable. Improve a relevant existing skill or experience before creating a duplicate, and leave unrelated legacy material in place. Migration requires a concrete scoped maintenance reason.
+Graph-linked `S#` instruction resources remain supported. Improve a relevant existing skill or experience before creating a duplicate, and preserve its working references when reorganizing it.
 
-Behavioral preferences and user-redirection cases belong to the guidance curator when their value concerns how agents should work generally. Preserve work-specific method and outcome evidence here; shared candidates can support both domains for different reasons.
+Behavioral preferences and user-redirection cases belong to the guidance curator when their value concerns how agents should work generally. Preserve work-specific method and outcome evidence here; shared candidates can support different domains for different reasons.
 
 ## Maintenance
 
 Reconcile later uses, failures, and user interventions with the current experience or skill. Clarify applicability, improve the resources, or retire misleading instructions when the evidence warrants it. Preserve useful experience rather than manufacturing a polished skill from insufficient evidence.
 
-Update completion records the supplied candidates as processed for this domain. Maintenance starts from existing material in the requested scope and does not automatically acknowledge pending candidates. Curation does not by itself remove raw evidence from retrieval. Requested maintenance may retire a candidate after both domains have processed it and its independent value has been preserved; evidence still pending for either domain stays intact.
+Update starts from shared candidate evidence; Maintain starts from existing material within the requested scope. Preserve useful experience before completing an update: the program removes a raw candidate after Memory, guidance, and skills have all processed it. Claims and processing receipts are program-owned, and maintenance does not consume pending evidence.

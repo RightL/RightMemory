@@ -14,20 +14,8 @@ from mcp import Client
 from mcp.types import CallToolResult
 
 from rightmemory import entrypoint
-from rightmemory.async_update import (
-    STATUS_MANUAL_RECOVERY,
-    AsyncUpdateJob,
-    AsyncUpdateState,
-)
 from rightmemory.config import RuntimeConfig
 from rightmemory.mcp import DefaultMcpBackend, create_mcp_server
-from rightmemory.update_alerts import collect_update_recovery_summary
-from rightmemory.update_queue import (
-    UpdateCandidate,
-    UpdateQueueRecovery,
-    UpdateQueueStore,
-    update_candidate_batch_id,
-)
 
 
 class FakeBackend:
@@ -70,18 +58,18 @@ class McpToolTests(unittest.TestCase):
         self.backend = FakeBackend()
         self.server = create_mcp_server(Path("/unused"), backend=self.backend)
 
-    def test_server_exposes_memory_and_shared_learning_tools(self):
+    def test_server_exposes_retrieval_and_shared_curation_tools(self):
         tools = asyncio.run(_list_tools(self.server))
         self.assertEqual(
             {tool.name for tool in tools},
             {
                 "rightmemory_retrieve",
-                "rightmemory_submit_update",
-                "rightmemory_submit_learning",
-                "rightmemory_begin_learning",
-                "rightmemory_complete_learning",
-                "rightmemory_learning_status",
-                "rightmemory_run_learning",
+                "rightmemory_submit",
+                "rightmemory_withdraw_candidate",
+                "rightmemory_begin_curation",
+                "rightmemory_complete_curation",
+                "rightmemory_curation_status",
+                "rightmemory_run_curation",
             },
         )
 
@@ -95,27 +83,6 @@ class McpToolTests(unittest.TestCase):
 
         self.assertEqual(self.backend.calls, [("retrieve", "session", "need")])
         self.assertEqual(len(result.content), 2)
-
-    def test_successful_update_submission_is_silent(self):
-        result = call_tool(
-            self.server,
-            "rightmemory_submit_update",
-            {"session_id": "session", "evidence": "evidence"},
-        )
-
-        self.assertEqual(self.backend.calls, [("submit", "session", "evidence")])
-        self.assertEqual(result.content, [])
-
-    def test_update_submission_returns_only_an_actionable_warning(self):
-        self.backend.submit_warning = "warning"
-        result = call_tool(
-            self.server,
-            "rightmemory_submit_update",
-            {"session_id": "session", "evidence": "evidence"},
-        )
-
-        self.assertEqual(len(result.content), 1)
-
 
 
 class DefaultMcpBackendTests(unittest.TestCase):
@@ -182,7 +149,7 @@ class DefaultMcpBackendTests(unittest.TestCase):
                 "rightmemory.mcp.RightMemoryRuntime",
                 return_value=runtime,
             ), patch(
-                "rightmemory.mcp._actionable_update_warning",
+                "rightmemory.mcp._actionable_curation_warning",
                 return_value=None,
             ):
                 call_tool(
@@ -288,149 +255,6 @@ class DefaultMcpBackendTests(unittest.TestCase):
             ):
                 self.assertGreaterEqual(event[field], 0.0)
             runtime.cleanup.assert_called_once_with()
-
-    def test_post_save_worker_failure_does_not_ask_for_resubmission(self):
-        candidate_uid = "a" * 32
-        store = SimpleNamespace()
-        store.submit = unittest.mock.Mock(side_effect=RuntimeError("worker failed"))
-        store.read = unittest.mock.Mock(
-            return_value=SimpleNamespace(accepted_candidate_uids=[candidate_uid])
-        )
-
-        with patch("rightmemory.mcp.AsyncUpdateStore", return_value=store), patch(
-            "rightmemory.mcp.uuid.uuid4",
-            return_value=SimpleNamespace(hex=candidate_uid),
-        ):
-            warning = DefaultMcpBackend(Path("/memory")).submit_update(
-                "session",
-                "evidence",
-            )
-
-        self.assertIsInstance(warning, str)
-        store.submit.assert_called_once_with(
-            "session",
-            "evidence",
-            candidate_uid=candidate_uid,
-        )
-
-    def test_failure_before_candidate_is_saved_remains_an_error(self):
-        candidate_uid = "b" * 32
-        store = SimpleNamespace()
-        store.submit = unittest.mock.Mock(side_effect=RuntimeError("not saved"))
-        store.read = unittest.mock.Mock(
-            return_value=SimpleNamespace(accepted_candidate_uids=[])
-        )
-        queue = SimpleNamespace()
-        queue.read_outbox = unittest.mock.Mock(return_value=None)
-
-        with patch("rightmemory.mcp.AsyncUpdateStore", return_value=store), patch(
-            "rightmemory.mcp.UpdateQueueStore",
-            return_value=queue,
-        ), patch(
-            "rightmemory.mcp.uuid.uuid4",
-            return_value=SimpleNamespace(hex=candidate_uid),
-        ):
-            with self.assertRaises(RuntimeError):
-                DefaultMcpBackend(Path("/memory")).submit_update(
-                    "session",
-                    "evidence",
-                )
-
-
-class UpdateRecoveryAlertTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tempdir.cleanup)
-        self.root = Path(self.tempdir.name)
-
-    def test_clean_root_has_no_recovery_alert(self):
-        summary = collect_update_recovery_summary(self.root)
-
-        self.assertFalse(summary.required)
-        self.assertEqual(summary.local_candidates, 0)
-        self.assertEqual(summary.synchronized_candidates, 0)
-        self.assertIsNone(summary.warning())
-
-    def test_counts_local_manual_recovery_without_mutating_state(self):
-        state_root = self.root / ".runtime" / "async" / "update"
-        state_root.mkdir(parents=True)
-        state = AsyncUpdateState(
-            status=STATUS_MANUAL_RECOVERY,
-            session_id="session-one",
-            role="update",
-            current_batch=[
-                AsyncUpdateJob(
-                    id=1,
-                    candidate_uid="1" * 32,
-                    message="one",
-                    submitted_at="2026-08-18T00:00:00+00:00",
-                )
-            ],
-            pending=[
-                AsyncUpdateJob(
-                    id=2,
-                    candidate_uid="2" * 32,
-                    message="two",
-                    submitted_at="2026-08-18T00:01:00+00:00",
-                )
-            ],
-            accepted_candidate_uids=["1" * 32, "2" * 32],
-            next_id=3,
-        )
-        path = state_root / "session-one.json"
-        content = json.dumps(asdict(state), ensure_ascii=False, indent=2) + "\n"
-        path.write_text(content, encoding="utf-8")
-
-        summary = collect_update_recovery_summary(self.root)
-
-        self.assertEqual(summary.local_candidates, 2)
-        self.assertEqual(summary.local_sessions, 1)
-        self.assertTrue(summary.required)
-        self.assertEqual(path.read_text(encoding="utf-8"), content)
-
-    def test_counts_synchronized_manual_recovery(self):
-        candidates = (
-            UpdateCandidate(
-                uid="4" * 32,
-                session_id="session-four",
-                display_id=1,
-                message="four",
-                submitted_at="2026-08-18T00:00:00+00:00",
-            ),
-            UpdateCandidate(
-                uid="5" * 32,
-                session_id="session-five",
-                display_id=1,
-                message="five",
-                submitted_at="2026-08-18T00:01:00+00:00",
-            ),
-        )
-        store = UpdateQueueStore(self.root)
-        for candidate in candidates:
-            store.write_candidate(candidate)
-        store.write_recovery(
-            UpdateQueueRecovery(
-                batch_id=update_candidate_batch_id(candidates),
-                candidate_uids=tuple(candidate.uid for candidate in candidates),
-                attempts=2,
-                reason_code="processing_failed",
-                retry_at=None,
-                manual_recovery=True,
-            )
-        )
-
-        summary = collect_update_recovery_summary(self.root)
-
-        self.assertEqual(summary.synchronized_candidates, 2)
-        self.assertTrue(summary.required)
-
-    def test_malformed_local_state_is_reported(self):
-        state_root = self.root / ".runtime" / "async" / "update"
-        state_root.mkdir(parents=True)
-        (state_root / "broken.json").write_text("{", encoding="utf-8")
-
-        with self.assertRaises(ValueError):
-            collect_update_recovery_summary(self.root)
 
 
 class McpEntrypointTests(unittest.TestCase):

@@ -162,7 +162,7 @@ class SyncCommandTests(SyncTestBase):
 
     def test_state_records_successful_pull(self):
         manager = SyncManager(SyncConfig(memory_root=self.device, enabled=True))
-        result = manager.preflight()
+        result = manager.pull()
 
         state = json.loads(
             (self.device / ".runtime" / "sync" / "state.json").read_text(encoding="utf-8")
@@ -179,7 +179,7 @@ class SyncCommandTests(SyncTestBase):
             encoding="utf-8",
         )
 
-        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
 
         state = json.loads(
             (self.device / ".runtime" / "sync" / "state.json").read_text(encoding="utf-8")

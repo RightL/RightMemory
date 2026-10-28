@@ -4,6 +4,6 @@ Apply the shared Agent Guidance core to the supplied task. Reconcile evidence in
 
 For an update, consider related candidates together and compare them with relevant current guidance and cases. For maintenance, inspect the requested scope for improvements to meaning, applicability, organization, and usefulness. Preserve useful context without forcing an uncertain interaction into a general rule.
 
-Form a tentative judgment before consulting relevant RightMemory Edit Feedback in root `corrections.md`. Make the smallest coherent change; leave unrelated state and other domains unchanged. Keep source evidence unchanged during updates and never edit processing receipts. Maintenance may retire fully processed evidence under the shared core and the task's allowed paths.
+Form a tentative judgment before consulting relevant RightMemory Edit Feedback in root `corrections.md`. Make the smallest coherent change; leave unrelated state and other domains unchanged. Candidate evidence, claims, and processing receipts are program-owned. Preserve independently useful cases or evidence in this domain's curated state before completing an update; the program removes raw candidates once all three domains have finished.
 
 Validate the result and commit allowed changes as directed by the task. Report the changed guidance or cases, evidence left without a durable change, and material uncertainty. A no-change judgment is a valid result; the program records publication and, for updates, processing of the supplied candidates.

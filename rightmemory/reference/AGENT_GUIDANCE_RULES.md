@@ -22,10 +22,8 @@ Use natural-language documents under `learning/guidance/` for guidance and usefu
 
 The fixed Agent Correction collections are also owned by this curator. Root `corrections.md` remains feedback about RightMemory curation, not a collection of ordinary agent failures.
 
-Existing Cross-Session Agent Behavior in the Memory graph remains readable. Do not copy it wholesale into a parallel library or migrate it incidentally. Address overlap when concrete evidence or an explicitly scoped maintenance task warrants a change.
-
 ## Maintenance
 
 Reconcile related evidence with current guidance before adding another entry. Narrow overbroad rules, preserve useful exceptions, and remove misleading or superseded interpretations. Keep settled guidance stable when the new evidence does not change its meaning.
 
-Update completion records the supplied candidates as processed for this domain. Maintenance starts from existing material in the requested scope and does not automatically acknowledge pending candidates. Curation does not by itself remove raw evidence from retrieval. Requested maintenance may retire a candidate after both domains have processed it and its independent value has been preserved; evidence still pending for either domain stays intact.
+Update starts from shared candidate evidence; Maintain starts from existing material within the requested scope. Preserve useful cases and supporting context before completing an update: the program removes a raw candidate after Memory, guidance, and skills have all processed it. Claims and processing receipts are program-owned, and maintenance does not consume pending evidence.

@@ -147,17 +147,12 @@ class RetrieveContextStoreTests(unittest.TestCase):
                 "retrieve-a",
                 memory_commit="abc123",
                 model_history_json=history,
-                visible_recent_candidates={"candidate-key": "update-a:1"},
                 delivery=RetrieveDeliveryCoverage(local_items={"alpha": "hash-a"}),
             )
             state = store.load("retrieve-a")
 
         self.assertEqual(state.delivered_memory_commit, "abc123")
         self.assertEqual(json.loads(state.model_history_json or b"null"), json.loads(history))
-        self.assertEqual(
-            state.visible_recent_candidates,
-            {"candidate-key": "update-a:1"},
-        )
         self.assertEqual(state.delivery_coverage.local_items, {"alpha": "hash-a"})
 
     def test_retrieve_context_store_reset_removes_complete_session_state(self):
@@ -167,7 +162,6 @@ class RetrieveContextStoreTests(unittest.TestCase):
                 "retrieve-a",
                 memory_commit="abc123",
                 model_history_json=b"[]",
-                visible_recent_candidates={},
             )
 
             self.assertTrue(store.reset("retrieve-a"))

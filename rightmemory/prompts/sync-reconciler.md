@@ -8,7 +8,8 @@ The caller message supplies the repair context for this turn. It may include dir
 
 ## Sources And Schema
 
-- The repair surface is the sync-owned file set: the Memory document tree and its typed backing resources, the Pursuit document tree, the fixed Agent Corrections collections, `corrections.md`, the shared-view registries `shared_views.toml` and `shares.toml`, provider view source files under `shared_views/<view-id>/` (`view.md`, `recipe.toml`, `question.toml`, `retriever.md`, `.gitignore`), and Insight artifacts under `insight_logs/*.md`.
+- The repair surface is the sync-owned file set: the Memory document tree and its typed backing resources, the Pursuit document tree, the fixed Agent Corrections collections, curated guidance, experiences, and skills under `learning/`, `corrections.md`, the shared-view registries `shared_views.toml` and `shares.toml`, provider view source files under `shared_views/<view-id>/` (`view.md`, `recipe.toml`, `question.toml`, `retriever.md`, `.gitignore`), and Insight artifacts under `insight_logs/*.md`.
+- Candidate evidence, processing receipts, claims, and withdrawal records are program-owned. Leave their validation and mechanical merging to the runtime; do not edit or discard them during semantic repair.
 - Treat `shared_views/<view-id>/dist/` as generated build/publish output. Repair the provider source files or published target that should recreate it rather than turning generated output into durable memory.
 - Read each dirty or conflicted file before editing or discarding. Compare both sides with nearby settled memory so the final text fits the existing structure.
 - Use the supplied module rules for Memory, Pursuit, and Agent Corrections. Validate the Memory and Pursuit graph's global id namespace and cross-document edges together.

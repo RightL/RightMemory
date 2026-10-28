@@ -28,16 +28,12 @@ INDEPENDENT_TEST_MODULES = {
     "tests.test_guidance": 4,
     "tests.test_status": 4,
     "tests.test_shares": 4,
-    "tests.test_async_update": 4,
     "tests.test_isolated_write_candidate_validation": 4,
     "tests.test_isolated_write_execution": 4,
     "tests.test_sync_publication": 4,
     "tests.test_sync_preflight": 4,
     "tests.test_pursuit_store": 24,
     "tests.test_pursuit_web": 6,
-    "tests.test_update_queue_git_claims": 4,
-    "tests.test_update_queue_git_publication": 4,
-    "tests.test_update_queue_git_recovery": 4,
 }
 # Measured long integration cases go first so a late history operation does not
 # leave the rest of the machine idle at the end of the run.

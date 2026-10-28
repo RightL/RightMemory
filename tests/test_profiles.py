@@ -153,7 +153,6 @@ class ProfileTests(unittest.TestCase):
             "!MEMORY_*.md\n"
             "!PURSUITS.md\n"
             "!PURSUIT_*.md\n"
-            "PURSUIT_RULES.md\n"
             "!corrections.md\n"
             "!shared_views.toml\n"
             "!shares.toml\n"
@@ -168,14 +167,6 @@ class ProfileTests(unittest.TestCase):
             "!insight_logs/*.md\n"
             "!learning/\n"
             "!learning/**\n"
-            "!update_queue/\n"
-            "!update_queue/candidates/\n"
-            "!update_queue/candidates/*.json\n"
-            "!update_queue/recovery/\n"
-            "!update_queue/recovery/*.json\n"
-            "!update_queue/lease.json\n"
-            "!update_records/\n"
-            "!update_records/*.json\n",
         )
         self.assertIn("memory: initial baseline", git_head)
         self.assertEqual(profiles["alpha"].root, profile.root)
@@ -297,20 +288,18 @@ class ProfileTests(unittest.TestCase):
 
         self.assertIn("does not look like a RightMemory root", str(caught.exception))
 
-    def test_create_profile_rejects_legacy_root_references(self):
+    def test_create_profile_preserves_unmanaged_files_in_valid_root(self):
         with tempfile.TemporaryDirectory() as tempdir:
             default_root = Path(tempdir) / "default"
-            existing = Path(tempdir) / "legacy"
+            existing = Path(tempdir) / "existing"
             existing.mkdir()
             (existing / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
             (existing / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-            (existing / "PURSUIT_RULES.md").write_text("# Legacy rules\n", encoding="utf-8")
+            extra = existing / "PURSUIT_RULES.md"
+            extra.write_text("User-owned material.\n", encoding="utf-8")
             (existing / "insight_logs").mkdir()
-
-            with self.assertRaises(ProfileError) as caught:
-                create_profile(default_root, "legacy", root=existing)
-
-        self.assertIn("does not look like a RightMemory root", str(caught.exception))
+            create_profile(default_root, "existing", root=existing)
+            self.assertEqual(extra.read_text(encoding="utf-8"), "User-owned material.\n")
 
     def test_seed_profile_config_copies_executors_and_disables_sync(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -327,9 +316,11 @@ class ProfileTests(unittest.TestCase):
                 [update.agent_cli]
                 model = "gpt-5"
 
-                [update.async]
-                trigger_candidates = 5
-                target_batch_candidates = 7
+                [guidance-curator.agent_cli]
+                model = "guidance-model"
+
+                [skills-curator.agent_cli]
+                model = "skills-model"
 
                 [insight.watch]
                 trigger_points = 25
@@ -345,9 +336,8 @@ class ProfileTests(unittest.TestCase):
 
         self.assertIn("[agent_cli]", config_text)
         self.assertIn("[retrieve.agent_cli]", config_text)
-        self.assertIn("[update.async]", config_text)
-        self.assertIn("trigger_candidates = 5", config_text)
-        self.assertIn("target_batch_candidates = 7", config_text)
+        self.assertIn("[guidance-curator.agent_cli]", config_text)
+        self.assertIn("[skills-curator.agent_cli]", config_text)
         self.assertIn("[insight.watch]", config_text)
         self.assertNotIn("[sync]", config_text)
 

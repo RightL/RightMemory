@@ -5,7 +5,6 @@ from urllib.parse import quote
 
 from rightmemory.assistant_context import prepare_retrieve_context
 from rightmemory.graph import build_graph_manifest
-from rightmemory.guidance import GUIDANCE_INBOX_PATH, GuidanceEntry, render_guidance_inbox
 from rightmemory.learning import record_learning_processed, submit_learning
 from rightmemory.learning_retrieval import get_learning_source, learning_sources, read_learning_page, search_learning_sources
 from rightmemory.retrieval_index import build_retrieval_corpus
@@ -68,7 +67,7 @@ class LearningRetrievalTests(IsolatedWriteTestBase):
         source_id = "L#" + quote(relative, safe="/-._")
         self.assertEqual(get_learning_source(self.root, source_id).path, path)
         selection = parse_retrieve_selection_json(
-            '{"ids":[],"sources":[{"source_id":"' + source_id + '","ids":[],"ranges":[]}],"recent_candidates":[]}'
+            '{"ids":[],"sources":[{"source_id":"' + source_id + '","ids":[],"ranges":[]}]}'
         )
         self.assertEqual(set(self.renderer.render(selection).delivery.complete_sources), {source_id})
 
@@ -129,15 +128,6 @@ class LearningRetrievalTests(IsolatedWriteTestBase):
         with self.assertRaises(ValueError):
             get_learning_source(self.root, "L#processed/guidance/" + "a" * 64 + ".json")
 
-    def test_legacy_inbox_is_readable_without_implicit_migration(self):
-        entry = GuidanceEntry("GI-20261027-1234abcd", "session", "2026-10-27T00:00:00Z", "Concrete old case.")
-        path = self._write(GUIDANCE_INBOX_PATH, render_guidance_inbox([entry]))
-        before = path.read_bytes()
-        source_id = f"L#legacy/{entry.entry_id}"
-        self.assertIn(source_id, learning_sources(self.root))
-        self.assertIn(source_id, self.renderer.render(self._select(source_id)).delivery.complete_sources)
-        self.assertEqual(path.read_bytes(), before)
-        self.assertFalse((self.root / "learning").exists())
 
     def test_retrieve_file_scope_excludes_processing_receipts(self):
         candidate = submit_learning(self.root, "session", "Case.")
@@ -148,8 +138,7 @@ class LearningRetrievalTests(IsolatedWriteTestBase):
         self.assertNotIn(receipt.relative_to(self.root).as_posix(), tools.list_files("learning/**/*"))
         with self.assertRaises(ValueError):
             tools.read(receipt.relative_to(self.root).as_posix())
-        with self.assertRaises(ValueError):
-            MemoryTools(self.root, role="update").read_learning("L#" + source.removeprefix("learning/"))
+        MemoryTools(self.root, role="update").read_learning("L#" + source.removeprefix("learning/"))
 
     def test_curators_cannot_write_other_domains_or_processing_receipts(self):
         guidance = MemoryTools(self.root, role="guidance-curator")
@@ -167,21 +156,6 @@ class LearningRetrievalTests(IsolatedWriteTestBase):
             with self.subTest(role=tools.role, path=path), self.assertRaises(ValueError):
                 tools.create_file(path, "{}")
 
-    def test_raw_retirement_requires_both_receipts_and_is_committable(self):
-        candidate = submit_learning(self.root, "session", "Case.")
-        relative = f"learning/candidates/{candidate.candidate_id}.json"
-        tools = MemoryTools(self.root, role="guidance-curator")
-        record_learning_processed(self.root, "guidance", [candidate.candidate_id])
-        with self.assertRaises(ValueError):
-            tools.delete_file(relative)
-        record_learning_processed(self.root, "skills", [candidate.candidate_id])
-        self._git("add", "learning/processed")
-        self._git("commit", "-m", "record both domains")
-        tools.delete_file(relative)
-        tools.git_add([relative])
-        tools.git_commit("learning: retire processed case")
-        self.assertFalse((self.root / relative).exists())
-        self.assertEqual(self._git("status", "--short"), "")
 
     def test_full_collection_search_and_browsing_are_paged_without_losing_sources(self):
         for index in range(43):
@@ -203,8 +177,7 @@ class LearningRetrievalTests(IsolatedWriteTestBase):
         for offset, limit in ((-1, 20), (0, 0), (0, 51), (True, 20), (0, True)):
             with self.subTest(offset=offset, limit=limit), self.assertRaises(ValueError):
                 search_learning_sources(self.root, "", offset=offset, limit=limit)
-        with self.assertRaises(ValueError):
-            MemoryTools(self.root, role="update").search_learning("")
+        MemoryTools(self.root, role="update").search_learning("")
 
     def test_oversized_single_line_source_can_be_read_without_loss_in_bounded_pages(self):
         original = "# Large case\n\n" + "原始" * 20_000

@@ -40,24 +40,20 @@ For a named profile, use `"args": ["--profile", "my-project", "mcp"]`.
 
 ## Ordinary-agent tools
 
-The ordinary tools separate context from shared learning:
+`rightmemory_retrieve` retrieves context that could materially affect the work, including relevant pending evidence and complete skills. `rightmemory_submit` records useful evidence once for Memory, guidance, and skills. The submitting agent does not need to choose its final lesson or destination.
 
-- `rightmemory_retrieve` retrieves context that could materially affect the work, including relevant raw learning evidence and complete skills.
-- `rightmemory_submit_update` submits ordinary Memory evidence, including user and people context, to the asynchronous Update queue.
-- `rightmemory_submit_learning` durably captures behavioral or procedural evidence for the guidance and skills curators, including explicit requests to remember it.
+Shared control tools are `rightmemory_begin_curation`, `rightmemory_complete_curation`, `rightmemory_curation_status`, and `rightmemory_withdraw_candidate`. Internal MCP also exposes `rightmemory_run_curation` for the configured executor. Native assistant MCP uses the same model-free controls and lets the current assistant delegate native agents.
 
-Learning control tools are `rightmemory_begin_learning`, `rightmemory_complete_learning`, and `rightmemory_learning_status`. Internal MCP also exposes `rightmemory_run_learning` to run a prepared curator through the configured executor. Native assistant MCP shares the model-free controls and lets the current assistant delegate its own native agent.
+Tool and parameter descriptions carry the ordinary-agent contract. An internal MCP client need not load the command-backed daily skill as well; native assistant MCP keeps the shared `rightmemory-assistant` skill for delegation.
 
-The tool and parameter descriptions carry the ordinary-agent contract. An internal MCP client should not also load the command-backed orchestrator skill; native assistant MCP keeps the shared `rightmemory-assistant` skill for delegation.
+Capture favors useful evidence before demanding a settled general rule. Preserve scope and uncertainty, and capture distinct later occurrences when they add evidence. Pending candidates participate in relevant retrieval. When all three domains finish, the program removes their raw sources; useful cases or experiences remain where the curators retained them.
 
-Capture favors useful evidence before demanding a settled general rule. Preserve uncertainty and scope, and capture independent later occurrences when they add evidence. Raw learning remains available to relevant retrieval before curation. A captured candidate is not an adopted rule or skill.
-
-Learning responses include readiness or active-task notices. The daily entry acts on ready domains with the configured executor or native begin/delegate/complete workflow. Domain curators make their own retention and generalization judgments without a per-item manual inbox review. Only the completion receipt confirms publication.
+Configured submission wakes the curation worker. Native responses include readiness and active-task notices for the main assistant. A submission receipt confirms capture, and a completion receipt confirms publication. After interruption, inspect the same task and retry its completion. A notice with `effects_pending` requires completion recovery without another model turn.
 
 ## Scope
 
-The MCP adapter calls the same runtime, async Memory Update store, and shared learning implementation as the CLI. The CLI remains available for human inspection, explicit maintenance, queue status, retry, undo, and clients that cannot use MCP.
+The adapters use the same candidate store, domain cores, and curation lifecycle as the CLI. The CLI remains available for inspection, maintenance, task recovery, withdrawal, worker controls, and clients without MCP.
 
-Ordinary MCP work does not create, rename, reorganize, focus, or remove Pursuits. Explicit map requests use the human editor or the independent `maintain-pursuit-map` skill; no additional MCP map-write tools are provided.
+Ordinary curation leaves the user's Pursuit map unchanged. Explicit map requests use the human editor or `maintain-pursuit-map`; no additional MCP map-write tools are provided.
 
 This command currently serves stdio only. RightMemory does not expose a Streamable HTTP MCP endpoint.

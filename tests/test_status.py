@@ -12,7 +12,7 @@ from rightmemory.status import (
     GitStatus,
     SectionStatus,
     SyncStatus,
-    collect_async_update_section,
+    collect_curation_section,
     collect_git_status,
     collect_insight_section,
     collect_managed_watch_sections,
@@ -337,7 +337,7 @@ class StatusDashboardTests(unittest.TestCase):
                 state="trigger progress",
                 detail="trigger: 88.0/150.0 points",
             ),
-            update=SectionStatus(
+            curation=SectionStatus(
                 name="update",
                 state="worker: idle",
                 detail="pending: 0 candidates across 0 sessions\nstate: .runtime/async/update",
@@ -357,7 +357,7 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("Managed Watches", output)
         self.assertIn("insight: running pid 123", output)
         self.assertIn("Insight", output)
-        self.assertIn("Async Update", output)
+        self.assertIn("Curation", output)
         self.assertIn("state: .runtime/async/update", output)
         self.assertNotIn("log: .runtime/async/update", output)
         self.assertIn("Recent Issues\n  pruner failed", output)
@@ -385,6 +385,7 @@ class StatusDashboardTests(unittest.TestCase):
             root=Path("/memory/root"),
             git=GitStatus(summary="dirty: 1 path", issue="dirty worktree: 1 path"),
             issues=[
+                "curation: provider error",
                 "git unavailable: not a git repository",
                 "pruner: stale pid 456",
                 "insight: running outside manager",
@@ -392,16 +393,8 @@ class StatusDashboardTests(unittest.TestCase):
                 "pruner: rightmemory pruner check failed: RuntimeError: boom",
                 "sync config error: ValueError: bad sync config",
                 "insight trigger error: ValueError: insight trigger points must be a number",
-                "update worker: stale pid 4",
-                "update worker: state error: ValueError: async update worker state must contain string field: status",
-                "update: state error: JSONDecodeError: Expecting value",
-                "update: manual: manual recovery required: permanent boom",
-                "update: manual-two: manual recovery required: another boom",
-                "update: retrying: retrying after error: temporary boom",
-                "update: agent-1: error: boom",
                 "managed watches: status error: RuntimeError: collector failed",
                 "insight: status error: RuntimeError: collector failed",
-                "update: status error: RuntimeError: collector failed",
             ],
         )
 
@@ -409,6 +402,7 @@ class StatusDashboardTests(unittest.TestCase):
 
         self.assertIn("Recovery", output)
         expected_hints = [
+            "curation: inspect `rightmemory curate status`; resume the indicated task or wake the configured worker",
             "git: inspect with `git status --short`; resolve local changes before automatic writes continue",
             "git: inspect the configured memory root and repair Git before retrying",
             "pruner: run `rightmemory watch restart pruner`",
@@ -417,19 +411,11 @@ class StatusDashboardTests(unittest.TestCase):
             "pruner: inspect the shown log path, then run `rightmemory watch restart pruner` when appropriate",
             "sync: fix `rightmemory.toml`, then rerun `rightmemory status`",
             "insight: inspect `.runtime/insight/trigger-state.json`",
-            "update worker: inspect `.runtime/async/update/`; run `rightmemory update retry` only for manual recovery",
-            "update worker: inspect `.runtime/async/update/_worker/state.json`",
-            "update: inspect `.runtime/async/update/` for malformed session JSON",
-            "update manual recovery: run `rightmemory update retry`",
-            "update retrying: automatic retry is pending; inspect with `rightmemory update pull --session retrying`",
-            "update agent-1: inspect with `rightmemory update pull --session agent-1`",
             "managed watches: rerun `rightmemory status`; inspect watch state if it persists",
             "insight: rerun `rightmemory status`; inspect insight state if it persists",
-            "update: rerun `rightmemory status`; inspect async update state if it persists",
         ]
         for hint in expected_hints:
             self.assertIn(f"  {hint}", output)
-        self.assertEqual(output.count("update manual recovery: run `rightmemory update retry`"), 1)
 
     def test_format_status_dashboard_omits_recovery_when_no_hints_exist(self):
         dashboard = DashboardStatus(
@@ -653,443 +639,6 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(section.last, "2026-05-30T08:00:00+00:00")
         self.assertIn("last result: noop", section.detail)
 
-    def test_collect_async_update_section_reports_idle_when_state_missing(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            section, issues = collect_async_update_section(Path(tempdir))
-
-        self.assertEqual(section.name, "update")
-        self.assertEqual(section.state, "worker: idle")
-        self.assertIn("pending: 0 candidates across 0 sessions", section.detail)
-        self.assertIn("state: .runtime/async/update", section.detail)
-        self.assertIsNone(section.log_path)
-        self.assertEqual(issues, [])
-
-    def test_collect_async_update_section_counts_pending_and_current_batches(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            async_root = root / ".runtime" / "async" / "update"
-            async_root.mkdir(parents=True)
-            (async_root / "agent-1.json").write_text(
-                json.dumps(
-                    {
-                        "status": "running",
-                        "session_id": "agent-1",
-                        "role": "update",
-                        "phase": "waiting",
-                        "started_at": "2026-05-29T08:00:00+00:00",
-                        "finished_at": None,
-                        "pid": None,
-                        "result": None,
-                        "error": None,
-                        "next_flush_at": "2026-05-29T10:00:00+00:00",
-                        "current_batch": [],
-                        "pending": [
-                            {
-                                "id": 1,
-                                "candidate_uid": f"{1:032x}",
-                                "message": "first",
-                                "submitted_at": "2026-05-29T08:00:00+00:00",
-                            },
-                            {
-                                "id": 2,
-                                "candidate_uid": f"{2:032x}",
-                                "message": "second",
-                                "submitted_at": "2026-05-29T08:05:00+00:00",
-                            },
-                        ],
-                        "next_id": 3,
-                    }
-                ),
-                encoding="utf-8",
-            )
-            (async_root / "agent-2.json").write_text(
-                json.dumps(
-                    {
-                        "status": "running",
-                        "session_id": "agent-2",
-                        "role": "update",
-                        "phase": "running",
-                        "started_at": "2026-05-29T08:30:00+00:00",
-                        "finished_at": None,
-                        "pid": 111,
-                        "result": "accepted 1 candidate",
-                        "error": None,
-                        "next_flush_at": None,
-                        "current_batch": [
-                            {
-                                "id": 1,
-                                "candidate_uid": f"{1:032x}",
-                                "message": "running",
-                                "submitted_at": "2026-05-29T08:30:00+00:00",
-                            }
-                        ],
-                        "pending": [],
-                        "next_id": 2,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            section, issues = collect_async_update_section(root, process_exists=lambda pid: True)
-
-        self.assertEqual(section.state, "worker: idle")
-        self.assertIn("pending: 2 candidates across 1 session", section.detail)
-        self.assertIn("retrying: 0 candidates across 0 sessions", section.detail)
-        self.assertIn("manual recovery: 0 candidates across 0 sessions", section.detail)
-        self.assertIn("current batch: 1 candidate across 1 session", section.detail)
-        self.assertIn("next flush: 2026-05-29T10:00:00+00:00", section.detail)
-        self.assertEqual(section.last, "accepted 1 candidate")
-        self.assertEqual(issues, [])
-
-    def test_collect_async_update_section_separates_retrying_and_manual_recovery(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            async_root = root / ".runtime" / "async" / "update"
-            async_root.mkdir(parents=True)
-            base = {
-                "role": "update",
-                "phase": None,
-                "started_at": "2026-05-29T08:00:00+00:00",
-                "finished_at": None,
-                "pid": None,
-                "result": None,
-                "next_flush_at": None,
-                "current_batch": [],
-                "next_id": 2,
-            }
-            (async_root / "retrying.json").write_text(
-                json.dumps(
-                    {
-                        **base,
-                        "status": "failed",
-                        "session_id": "retrying",
-                        "error": "temporary boom",
-                        "attempts": 1,
-                        "next_retry_at": "2026-05-29T09:00:00+00:00",
-                        "last_error": "temporary boom",
-                        "pending": [
-                            {
-                                "id": 1,
-                                "candidate_uid": f"{1:032x}",
-                                "message": "retrying",
-                                "submitted_at": "2026-05-29T08:00:00+00:00",
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            (async_root / "manual.json").write_text(
-                json.dumps(
-                    {
-                        **base,
-                        "status": "needs_manual_recovery",
-                        "session_id": "manual",
-                        "error": "permanent boom",
-                        "attempts": 2,
-                        "next_retry_at": None,
-                        "last_error": "permanent boom",
-                        "pending": [
-                            {
-                                "id": 1,
-                                "candidate_uid": f"{1:032x}",
-                                "message": "manual",
-                                "submitted_at": "2026-05-29T08:00:00+00:00",
-                            },
-                            {
-                                "id": 2,
-                                "candidate_uid": f"{2:032x}",
-                                "message": "manual two",
-                                "submitted_at": "2026-05-29T08:01:00+00:00",
-                            },
-                        ],
-                        "next_id": 3,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            section, issues = collect_async_update_section(root)
-
-        self.assertIn("pending: 0 candidates across 0 sessions", section.detail)
-        self.assertIn("retrying: 1 candidate across 1 session", section.detail)
-        self.assertIn("manual recovery: 2 candidates across 1 session", section.detail)
-        self.assertIn("current batch: 0 candidates across 0 sessions", section.detail)
-        self.assertIn("update: retrying: retrying after error: temporary boom", issues)
-        self.assertIn("update: manual: manual recovery required: permanent boom", issues)
-
-    def test_collect_async_update_section_counts_legacy_failed_pending_as_manual_recovery(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            async_root = root / ".runtime" / "async" / "update"
-            async_root.mkdir(parents=True)
-            (async_root / "legacy.json").write_text(
-                json.dumps(
-                    {
-                        "status": "failed",
-                        "session_id": "legacy",
-                        "role": "update",
-                        "phase": None,
-                        "started_at": "2026-05-29T08:00:00+00:00",
-                        "finished_at": "2026-05-29T09:00:00+00:00",
-                        "pid": None,
-                        "result": None,
-                        "error": "old boom",
-                        "next_flush_at": None,
-                        "current_batch": [],
-                        "pending": [
-                            {
-                                "id": 1,
-                                "candidate_uid": f"{1:032x}",
-                                "message": "legacy",
-                                "submitted_at": "2026-05-29T08:00:00+00:00",
-                            }
-                        ],
-                        "next_id": 2,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            section, issues = collect_async_update_section(root)
-
-        self.assertIn("manual recovery: 1 candidate across 1 session", section.detail)
-        self.assertIn("update: legacy: manual recovery required: old boom", issues)
-
-    def test_collect_async_update_section_counts_manual_current_batch_as_manual_recovery(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            async_root = root / ".runtime" / "async" / "update"
-            async_root.mkdir(parents=True)
-            (async_root / "manual-current.json").write_text(
-                json.dumps(
-                    {
-                        "status": "needs_manual_recovery",
-                        "session_id": "manual-current",
-                        "role": "update",
-                        "phase": None,
-                        "started_at": "2026-05-29T08:00:00+00:00",
-                        "finished_at": "2026-05-29T09:00:00+00:00",
-                        "pid": None,
-                        "result": None,
-                        "error": "old boom",
-                        "attempts": 2,
-                        "next_retry_at": None,
-                        "last_error": "old boom",
-                        "next_flush_at": None,
-                        "current_batch": [
-                            {
-                                "id": 1,
-                                "candidate_uid": f"{1:032x}",
-                                "message": "manual current",
-                                "submitted_at": "2026-05-29T08:00:00+00:00",
-                            }
-                        ],
-                        "pending": [],
-                        "next_id": 2,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            section, issues = collect_async_update_section(root)
-
-        self.assertIn("manual recovery: 1 candidate across 1 session", section.detail)
-        self.assertIn("current batch: 0 candidates across 0 sessions", section.detail)
-        self.assertIn("update: manual-current: manual recovery required: old boom", issues)
-
-    def test_collect_async_update_section_uses_recent_outcome_for_last_preview(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            async_root = root / ".runtime" / "async" / "update"
-            async_root.mkdir(parents=True)
-            base_state = {
-                "status": "succeeded",
-                "role": "update",
-                "phase": None,
-                "started_at": "2026-05-29T08:00:00+00:00",
-                "pid": None,
-                "error": None,
-                "next_flush_at": None,
-                "current_batch": [],
-                "pending": [],
-                "next_id": 1,
-            }
-            (async_root / "agent-a.json").write_text(
-                json.dumps(
-                    {
-                        **base_state,
-                        "session_id": "agent-a",
-                        "finished_at": "2026-05-29T11:00:00+00:00",
-                        "result": "newer result",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            (async_root / "agent-z.json").write_text(
-                json.dumps(
-                    {
-                        **base_state,
-                        "session_id": "agent-z",
-                        "finished_at": "2026-05-29T10:00:00+00:00",
-                        "result": "older result",
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            section, issues = collect_async_update_section(root)
-
-        self.assertEqual(section.last, "newer result")
-        self.assertEqual(issues, [])
-
-    def test_collect_async_update_section_surfaces_session_error_as_issue(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            async_root = root / ".runtime" / "async" / "update"
-            async_root.mkdir(parents=True)
-            (async_root / "agent-1.json").write_text(
-                json.dumps(
-                    {
-                        "status": "failed",
-                        "session_id": "agent-1",
-                        "role": "update",
-                        "phase": None,
-                        "started_at": "2026-05-29T08:00:00+00:00",
-                        "finished_at": "2026-05-29T09:00:00+00:00",
-                        "pid": None,
-                        "result": None,
-                        "error": "boom",
-                        "next_flush_at": None,
-                        "current_batch": [],
-                        "pending": [],
-                        "next_id": 1,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            section, issues = collect_async_update_section(root)
-
-        self.assertEqual(section.last, "error: boom")
-        self.assertIn("update: agent-1: error: boom", issues)
-
-    def test_collect_async_update_section_reports_running_worker(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            worker_root = root / ".runtime" / "async" / "update" / "_worker"
-            worker_root.mkdir(parents=True)
-            (worker_root / "state.json").write_text(
-                json.dumps(
-                    {
-                        "status": "running",
-                        "pid": 999,
-                        "started_at": "2026-05-29T08:00:00+00:00",
-                        "batch_id": "update-batch-abc",
-                        "session_ids": ["agent-1"],
-                        "error": None,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            section, issues = collect_async_update_section(root, process_exists=lambda pid: True)
-
-        self.assertEqual(section.state, "worker: running pid 999")
-        self.assertIn("batch: update-batch-abc", section.detail)
-        self.assertIn("sessions: agent-1", section.detail)
-        self.assertEqual(issues, [])
-
-    def test_collect_async_update_section_reports_worker_runtime_error(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            worker_root = root / ".runtime" / "async" / "update" / "_worker"
-            worker_root.mkdir(parents=True)
-            (worker_root / "state.json").write_text(
-                json.dumps(
-                    {
-                        "status": "running",
-                        "pid": 999,
-                        "started_at": "2026-05-29T08:00:00+00:00",
-                        "batch_id": None,
-                        "session_ids": [],
-                        "error": "ValueError: unsupported reasoning_effort",
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            section, issues = collect_async_update_section(root, process_exists=lambda pid: True)
-
-        self.assertEqual(section.state, "worker: running pid 999")
-        self.assertIn("error: ValueError: unsupported reasoning_effort", section.detail)
-        self.assertIn("update worker: ValueError: unsupported reasoning_effort", issues)
-
-    def test_collect_async_update_section_reports_invalid_worker_state_shape_locally(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            worker_root = root / ".runtime" / "async" / "update" / "_worker"
-            worker_root.mkdir(parents=True)
-            (worker_root / "state.json").write_text("{}", encoding="utf-8")
-
-            section, issues = collect_async_update_section(root)
-
-        self.assertIn("worker: state error", section.state)
-        self.assertEqual(len(issues), 1)
-        self.assertIn("update worker: state error", issues[0])
-
-    def test_collect_async_update_section_reports_stale_for_non_worker_pid(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            worker_root = root / ".runtime" / "async" / "update" / "_worker"
-            worker_root.mkdir(parents=True)
-            (worker_root / "state.json").write_text(
-                json.dumps(
-                    {
-                        "status": "running",
-                        "pid": 4,
-                        "started_at": "2026-05-29T08:00:00+00:00",
-                        "batch_id": None,
-                        "session_ids": [],
-                        "error": None,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            section, issues = collect_async_update_section(root, process_exists=lambda pid: False)
-
-        self.assertEqual(section.state, "worker: stale pid 4")
-        self.assertIn("update worker: stale pid 4", issues)
-
-    def test_collect_async_update_section_reports_malformed_state_locally(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            async_root = root / ".runtime" / "async" / "update"
-            async_root.mkdir(parents=True)
-            (async_root / "agent-1.json").write_text("{not json", encoding="utf-8")
-
-            section, issues = collect_async_update_section(root)
-
-        self.assertEqual(section.name, "update")
-        self.assertIn("state error", section.state)
-        self.assertEqual(len(issues), 1)
-        self.assertIn("update: state error", issues[0])
-
-    def test_collect_async_update_section_reports_invalid_state_shape_locally(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            async_root = root / ".runtime" / "async" / "update"
-            async_root.mkdir(parents=True)
-            (async_root / "agent-1.json").write_text("{}", encoding="utf-8")
-
-            section, issues = collect_async_update_section(root)
-
-        self.assertEqual(section.name, "update")
-        self.assertIn("state error", section.state)
-        self.assertIn("state: .runtime/async/update", section.detail)
-        self.assertEqual(len(issues), 1)
-        self.assertIn("update: state error", issues[0])
 
     def test_collect_status_aggregates_sections_and_issues(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1118,56 +667,15 @@ class StatusDashboardTests(unittest.TestCase):
                     state="trigger progress",
                     detail="trigger: 2.0/150.0 points",
                 ),
-                update_collector=lambda memory_root: (SectionStatus(name="update", state="worker: idle"), []),
             )
 
         self.assertEqual(dashboard.root, root)
         self.assertEqual(dashboard.sync.upstream, "origin/main")
         self.assertEqual(len(dashboard.watches), 1)
         self.assertEqual(dashboard.insight.name, "insight")
-        self.assertEqual(dashboard.update.name, "update")
+        self.assertEqual(dashboard.curation.name, "curation")
         self.assertIn("pruner: stale pid 42", dashboard.issues)
 
-    def test_collect_status_adds_queue_view_for_aligned_ahead_behind_and_diverged(self):
-        cases = (
-            ((0, 0), "queue view: current with upstream"),
-            ((1, 0), "queue view: checkout contains local state not yet present upstream"),
-            ((0, 3), "queue view: local checkout only; counts may be incomplete"),
-            ((2, 3), "queue view: checkout is diverged; counts may be incomplete"),
-        )
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            self._init_repo(root)
-            for (ahead, behind), expected in cases:
-                with self.subTest(ahead=ahead, behind=behind):
-                    dashboard = collect_status(
-                        root,
-                        sync_collector=lambda memory_root, a=ahead, b=behind: SyncStatus(
-                            enabled=True,
-                            upstream="origin/main",
-                            ahead=a,
-                            behind=b,
-                        ),
-                        watch_collector=lambda memory_root: (
-                            [SectionStatus(name="sync", state="stopped")],
-                            [],
-                        ),
-                        insight_collector=lambda memory_root: None,
-                        update_collector=lambda memory_root: (
-                            SectionStatus(
-                                name="update",
-                                state="worker: idle",
-                                detail="synchronized: 3 pending, 0 leased",
-                            ),
-                            [],
-                        ),
-                        operation_collector=lambda memory_root: (None, []),
-                    )
-
-                self.assertIn(expected, dashboard.update.detail)
-                output = format_status_dashboard(dashboard)
-                self.assertIn("Managed Watches\n  sync: stopped", output)
-                self.assertNotIn("watcher", output.split("Managed Watches", 1)[0].lower())
 
     def test_collect_status_does_not_create_runtime_state_or_run_network_git_commands(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1181,8 +689,7 @@ class StatusDashboardTests(unittest.TestCase):
                     sync_collector=None,
                     watch_collector=lambda memory_root: ([], []),
                     insight_collector=lambda memory_root: None,
-                    update_collector=lambda memory_root: (
-                        SectionStatus(name="update", state="worker: idle"),
+                    curation_collector=lambda memory_root: (
                         [],
                     ),
                     operation_collector=lambda memory_root: (None, []),
@@ -1204,49 +711,6 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
         self.assertEqual(env["GIT_ASKPASS"], "true")
 
-    def test_collect_status_surfaces_failed_async_session_in_recent_issues(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            self._git(root, "init")
-            self._git(root, "config", "user.email", "test@example.com")
-            self._git(root, "config", "user.name", "Test User")
-            (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-            self._git(root, "add", "MEMORY.md")
-            self._git(root, "commit", "-m", "initial memory")
-            async_root = root / ".runtime" / "async" / "update"
-            async_root.mkdir(parents=True)
-            (async_root / "agent-1.json").write_text(
-                json.dumps(
-                    {
-                        "status": "failed",
-                        "session_id": "agent-1",
-                        "role": "update",
-                        "phase": None,
-                        "started_at": "2026-05-29T08:00:00+00:00",
-                        "finished_at": "2026-05-29T09:00:00+00:00",
-                        "pid": None,
-                        "result": None,
-                        "error": "boom",
-                        "next_flush_at": None,
-                        "current_batch": [],
-                        "pending": [],
-                        "next_id": 1,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            dashboard = collect_status(
-                root,
-                watch_collector=lambda memory_root: ([], []),
-                insight_collector=lambda memory_root: SectionStatus(name="insight", state="trigger progress"),
-            )
-            output = format_status_dashboard(dashboard)
-
-        self.assertIn("Async Update", output)
-        self.assertIn("last: error: boom", output)
-        self.assertIn("Recent Issues", output)
-        self.assertIn("  update: agent-1: error: boom", output)
 
     def _git(self, root: Path, *args: str) -> str:
         result = subprocess.run(

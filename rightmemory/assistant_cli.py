@@ -21,19 +21,6 @@ def main(argv: list[str], *, profile_name: str | None = None) -> int:
         commands = parser.add_subparsers(dest="command", required=True)
         context = commands.add_parser("context", help="prepare native Retrieve file access")
         context.add_argument("--session", required=True)
-        submit = commands.add_parser("submit", help="save candidate evidence without starting a worker")
-        submit.add_argument("--session", required=True)
-        submit.add_argument("--request-id", required=True)
-        submit.add_argument("--file", type=Path, required=True)
-        update = commands.add_parser("update")
-        updates = update.add_subparsers(dest="action", required=True)
-        begin = updates.add_parser("begin")
-        begin.add_argument("--retry", metavar="TASK")
-        complete = updates.add_parser("complete")
-        complete.add_argument("--task", required=True)
-        complete.add_argument("--output-file", type=Path)
-        status = updates.add_parser("status")
-        status.add_argument("--task")
         sync = commands.add_parser("sync")
         sync.add_argument("action", choices=("refresh", "pull", "push"), nargs="?", default="refresh")
         commands.add_parser("validate", help="validate the bound root independently")
@@ -57,17 +44,8 @@ def main(argv: list[str], *, profile_name: str | None = None) -> int:
             service = AssistantService(root)
             if args.command == "context":
                 result = service.context(args.session)
-            elif args.command == "submit":
-                result = service.submit(args.session, args.request_id, args.file.read_text(encoding="utf-8"))
-            elif args.command == "sync":
-                result = service.sync(args.action)
-            elif args.action == "begin":
-                result = service.begin_update(args.retry)
-            elif args.action == "complete":
-                output = "" if args.output_file is None else args.output_file.read_text(encoding="utf-8")
-                result = service.complete_update(args.task, output)
             else:
-                result = service.update_status(args.task)
+                result = service.sync(args.action)
         print(json.dumps(result, ensure_ascii=False))
         return 0 if result.get("ok", True) else 1
     except (ValueError, OSError, RuntimeError, UnicodeError) as exc:

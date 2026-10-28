@@ -15,20 +15,15 @@ from pathlib import Path
 from typing import Iterator
 
 from .config import MEMORY_ROOT_ENV, SyncConfig
-from .guidance import (
-    GUIDANCE_INBOX_HEADING,
-    GUIDANCE_INBOX_PATH,
-    GuidanceConflictError,
-    merge_guidance_inbox,
-    validate_guidance_inbox,
-)
 from .isolated_write import WorktreeLease
 from .learning import (
     is_learning_evidence_path,
     is_learning_path,
+    is_learning_state_path,
     learning_evidence_sha256,
     learning_validation_errors,
     merge_learning_evidence,
+    retire_processed_learning,
     validate_learning_candidate_deletion,
 )
 from .platform import (
@@ -41,13 +36,6 @@ from .platform import (
 from .semantic_operation import FINAL_PHASES, OperationEffect, SemanticOperationRecord, SemanticOperationStore
 from .session import MemoryWriteLock, _ensure_runtime_gitignore, _fsync_directory
 from .tools import MemoryTools
-from .update_queue import validate_update_queue
-from .update_record import validate_update_records
-from .update_coordination import (
-    UPDATE_QUEUE_CANDIDATE_PATH_RE,
-    UPDATE_QUEUE_RECOVERY_PATH_RE,
-    UPDATE_RECORD_PATH_RE,
-)
 
 
 MEMORY_SYNC_PATHS = (
@@ -56,7 +44,6 @@ MEMORY_SYNC_PATHS = (
     "MEMORY_*.md",
     "PURSUITS.md",
     "PURSUIT_*.md",
-    GUIDANCE_INBOX_PATH,
     "corrections.md",
     "shared_views.toml",
     "shares.toml",
@@ -66,16 +53,9 @@ MEMORY_SYNC_PATHS = (
     "shared_views/*/question.toml",
     "shared_views/*/.gitignore",
     "insight_logs/*.md",
-    "update_queue/candidates/*.json",
-    "update_queue/recovery/*.json",
-    "update_queue/lease.json",
-    "update_records/*.json",
     "learning/**",
 )
 REQUIRED_ROOT_DOCUMENTS = ("MEMORY.md", "PURSUITS.md")
-LEGACY_ROOT_REFERENCE_PATHS = frozenset(
-    {"PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"}
-)
 GIT_TIMEOUT_SECONDS = 30
 RETRIEVE_SYNC_REFRESH_SECONDS = 5 * 60
 RETRIEVE_SYNC_FETCH_TIMEOUT_SECONDS = 2
@@ -264,10 +244,6 @@ class SyncManager:
                 )
             return admitted
 
-    def preflight(self, repair: SyncRepair | None = None) -> SyncResult:
-        """Compatibility alias for callers migrating to truthful pull naming."""
-        return self.pull(repair=repair)
-
     def push(self, repair: SyncRepair | None = None) -> SyncResult:
         if not self.config.enabled:
             return SyncResult("disabled", "sync disabled")
@@ -365,10 +341,6 @@ class SyncManager:
         if last_pull is not None and datetime.now(UTC) - last_pull < stale_after:
             return SyncResult("fresh", "last successful pull is fresh")
         return self._admit_fetched(upstream_commit, repair)
-
-    def background_pull(self, repair: SyncRepair | None = None) -> SyncResult:
-        """Compatibility alias for callers migrating to background_sync."""
-        return self.background_sync(repair=repair)
 
     def repair_message(self, result: SyncResult) -> str:
         files = ", ".join(result.files) if result.files else "memory files"
@@ -741,6 +713,9 @@ class SyncManager:
                     return _CandidateInspection(None, invalid_learning, start_commit, upstream_commit, True)
                 conflicts = self._conflicted_files(candidate.path)
                 if not conflicts:
+                    invalid_learning = self._normalize_learning_sources(candidate.path, commit=False)
+                    if invalid_learning is not None:
+                        return _CandidateInspection(None, invalid_learning, start_commit, upstream_commit, True)
                     committed = self._run_git(candidate.path, "commit", "--no-edit")
                     if committed.returncode != 0:
                         return _CandidateInspection(
@@ -757,63 +732,15 @@ class SyncManager:
                     if invalid.status == "error":
                         return _CandidateInspection(None, invalid, candidate_commit, None, False)
                     return _CandidateInspection(invalid, None, candidate_commit, None, False)
-            if GUIDANCE_INBOX_PATH in conflicts:
-                if len(conflicts) != 1:
-                    return _CandidateInspection(
-                        None,
-                        SyncResult(
-                            "conflict",
-                            "agent guidance inbox conflicted alongside other synchronized state",
-                            conflicts,
-                        ),
-                        start_commit,
-                        upstream_commit,
-                        True,
-                    )
-                guidance_conflict = self._resolve_guidance_conflict(candidate.path)
-                if guidance_conflict is not None:
-                    return _CandidateInspection(
-                        None,
-                        guidance_conflict,
-                        start_commit,
-                        upstream_commit,
-                        True,
-                    )
-                committed = self._run_git(candidate.path, "commit", "--no-edit")
-                if committed.returncode != 0:
-                    return _CandidateInspection(
-                        None,
-                        SyncResult(
-                            "error",
-                            "could not commit deterministic agent guidance merge",
-                            [GUIDANCE_INBOX_PATH],
-                        ),
-                        start_commit,
-                        upstream_commit,
-                        True,
-                    )
-                candidate_commit = self._required_head(candidate.path)
-                invalid = self._validate_candidate(candidate.path, start_commit, candidate_commit)
-                if invalid is None:
-                    return _CandidateInspection(None, None, candidate_commit, None, False)
-                if invalid.status == "error":
-                    return _CandidateInspection(None, invalid, candidate_commit, None, False)
-                return _CandidateInspection(invalid, None, candidate_commit, None, False)
-
             coordination_conflicts = [
-                path
-                for path in conflicts
-                if (
-                    _is_update_queue_path(path)
-                    or _is_update_record_path(path)
-                )
+                path for path in conflicts if is_learning_state_path(path)
             ]
             if coordination_conflicts:
                 return _CandidateInspection(
                     None,
                     SyncResult(
                         "error",
-                        "incoming update coordination state has a coordination conflict",
+                        "incoming candidate coordination state has a conflict",
                         sorted(coordination_conflicts),
                     ),
                     start_commit,
@@ -830,15 +757,9 @@ class SyncManager:
                     upstream_commit,
                     True,
                 )
-            invalid_queue = _invalid_update_queue_result(candidate.path)
-            if invalid_queue is not None:
-                return _CandidateInspection(
-                    None,
-                    invalid_queue,
-                    start_commit,
-                    upstream_commit,
-                    True,
-                )
+            invalid_learning = self._normalize_learning_sources(candidate.path, commit=False)
+            if invalid_learning is not None:
+                return _CandidateInspection(None, invalid_learning, start_commit, upstream_commit, True)
             invalid_learning = _invalid_learning_result(candidate.path) or self._validate_learning_history(
                 candidate.path, start_commit, upstream_commit
             )
@@ -852,6 +773,9 @@ class SyncManager:
                 True,
             )
 
+        invalid_learning = self._normalize_learning_sources(candidate.path, commit=True)
+        if invalid_learning is not None:
+            return _CandidateInspection(None, invalid_learning, start_commit, upstream_commit, False)
         candidate_commit = self._required_head(candidate.path)
         invalid = self._validate_candidate(candidate.path, start_commit, candidate_commit)
         if invalid is None:
@@ -859,6 +783,27 @@ class SyncManager:
         if invalid.status == "error":
             return _CandidateInspection(None, invalid, candidate_commit, None, False)
         return _CandidateInspection(invalid, None, candidate_commit, None, False)
+
+    def _normalize_learning_sources(self, root: Path, *, commit: bool) -> SyncResult | None:
+        """A receipt union may finish a candidate even when neither side did."""
+        invalid = _invalid_learning_result(root)
+        if invalid is not None:
+            return invalid
+        try:
+            retired = retire_processed_learning(root)
+            if not retired:
+                return None
+            paths = [path.relative_to(root).as_posix() for path in retired]
+            staged = self._run_git(root, "add", "-A", "--", *paths)
+            if staged.returncode:
+                raise RuntimeError("could not stage completed candidate retirement")
+            if commit:
+                result = self._run_git(root, "commit", "-m", "learning: retire completed candidates")
+                if result.returncode:
+                    raise RuntimeError("could not commit completed candidate retirement")
+        except (OSError, ValueError, RuntimeError) as exc:
+            return SyncResult("error", f"invalid synchronized learning state: {exc}")
+        return None
 
     def _resolve_learning_conflicts(
         self, root: Path, conflicts: list[str], start_commit: str, upstream_commit: str
@@ -934,6 +879,7 @@ class SyncManager:
             "--",
             "learning/candidates",
             "learning/processed",
+            "learning/withdrawn",
         )
         if history.returncode != 0:
             raise RuntimeError("could not inspect synchronized learning history")
@@ -987,33 +933,6 @@ class SyncManager:
                 return None
             raise RuntimeError("could not read learning evidence from Git")
         return result.stdout.decode("utf-8")
-
-    def _resolve_guidance_conflict(self, root: Path) -> SyncResult | None:
-        try:
-            merged = merge_guidance_inbox(
-                self._guidance_stage_text(root, 1),
-                self._guidance_stage_text(root, 2),
-                self._guidance_stage_text(root, 3),
-            )
-        except (GuidanceConflictError, ValueError) as exc:
-            return SyncResult(
-                "conflict",
-                f"agent guidance inbox requires manual review: {exc}",
-                [GUIDANCE_INBOX_PATH],
-            )
-        (root / GUIDANCE_INBOX_PATH).write_text(merged, encoding="utf-8")
-        added = self._run_git(root, "add", "--", GUIDANCE_INBOX_PATH)
-        if added.returncode != 0:
-            return SyncResult(
-                "error",
-                "could not stage deterministic agent guidance merge",
-                [GUIDANCE_INBOX_PATH],
-            )
-        return None
-
-    def _guidance_stage_text(self, root: Path, stage: int) -> str:
-        result = self._run_git(root, "show", f":{stage}:{GUIDANCE_INBOX_PATH}")
-        return result.stdout if result.returncode == 0 else GUIDANCE_INBOX_HEADING + "\n"
 
     def _validate_repair_commit(
         self,
@@ -1069,15 +988,6 @@ class SyncManager:
         invalid_files = self._non_regular_paths(candidate_root, changed_paths)
         if invalid_files:
             return SyncResult("error", "sync candidate contains a missing or non-regular required path", invalid_files)
-        invalid_guidance = _invalid_guidance_result(candidate_root)
-        if invalid_guidance is not None:
-            return invalid_guidance
-        invalid_queue = _invalid_update_queue_result(candidate_root)
-        if invalid_queue is not None:
-            return invalid_queue
-        invalid_records = _invalid_update_records_result(candidate_root)
-        if invalid_records is not None:
-            return invalid_records
         invalid_learning = _invalid_learning_result(candidate_root) or self._validate_learning_history(
             candidate_root, start_commit, candidate_commit
         )
@@ -1089,35 +999,14 @@ class SyncManager:
         if not self._is_git_repo():
             return SyncResult("unconfigured", "sync unconfigured")
         conflicted = self._conflicted_files(self.memory_root)
-        if GUIDANCE_INBOX_PATH in conflicted:
-            return SyncResult(
-                "error",
-                "agent guidance inbox has unresolved Git conflicts and requires manual review",
-                conflicted,
-            )
         if conflicted:
             return SyncResult("conflict", "local synchronized state is already conflicted", conflicted)
         dirty = self._dirty_memory_files()
-        if GUIDANCE_INBOX_PATH in dirty:
-            return SyncResult(
-                "error",
-                "agent guidance inbox has uncommitted changes and requires manual review",
-                dirty,
-            )
         if dirty:
             return SyncResult("dirty", "local memory has uncommitted changes", dirty)
         invalid_files = self._non_regular_paths(self.memory_root, ())
         if invalid_files:
             return SyncResult("conflict", "local memory root is incomplete", invalid_files)
-        invalid_guidance = _invalid_guidance_result(self.memory_root)
-        if invalid_guidance is not None:
-            return invalid_guidance
-        invalid_queue = _invalid_update_queue_result(self.memory_root)
-        if invalid_queue is not None:
-            return invalid_queue
-        invalid_records = _invalid_update_records_result(self.memory_root)
-        if invalid_records is not None:
-            return invalid_records
         invalid_learning = _invalid_learning_result(self.memory_root)
         if invalid_learning is not None:
             return invalid_learning
@@ -1413,8 +1302,8 @@ class SyncManager:
         if result.returncode != 0:
             return []
         paths = {path for path in _porcelain_paths(result.stdout) if _is_sync_path(path)}
-        # Existing roots may still ignore this new collection. Inspect all its
-        # untracked files and both sides of the index without Git path quoting.
+        # Protect program-owned state even when Git ignores it, and inspect
+        # both sides of the index without Git path quoting.
         for args in (
             ("diff", "--name-only", "--no-renames", "-z", "--", "learning"),
             ("diff", "--cached", "--name-only", "--no-renames", "-z", "--", "learning"),
@@ -1639,12 +1528,6 @@ class SyncManager:
 
 
 def _is_sync_path(path: str) -> bool:
-    if path in LEGACY_ROOT_REFERENCE_PATHS:
-        return False
-    if path.startswith("update_queue/"):
-        return _is_update_queue_path(path)
-    if path.startswith("update_records/"):
-        return _is_update_record_path(path)
     if path.startswith("learning/"):
         return is_learning_path(path)
     for pattern in MEMORY_SYNC_PATHS:
@@ -1654,82 +1537,11 @@ def _is_sync_path(path: str) -> bool:
     return False
 
 
-def _invalid_guidance_result(root: Path) -> SyncResult | None:
-    path = root / GUIDANCE_INBOX_PATH
-    if not path.exists() and not path.is_symlink():
-        return None
-    if path.is_symlink() or not path.is_file():
-        return SyncResult(
-            "error",
-            "agent guidance inbox must be a regular file",
-            [GUIDANCE_INBOX_PATH],
-        )
-    try:
-        errors = validate_guidance_inbox(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError) as exc:
-        return SyncResult(
-            "error",
-            f"agent guidance inbox could not be read: {exc}",
-            [GUIDANCE_INBOX_PATH],
-        )
-    if not errors:
-        return None
-    return SyncResult(
-        "error",
-        "invalid agent guidance inbox:\n" + "\n".join(f"- {item}" for item in errors),
-        [GUIDANCE_INBOX_PATH],
-    )
-
-
 def _utc_now(value: datetime | None = None) -> datetime:
     current = datetime.now(UTC) if value is None else value
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
     return current.astimezone(UTC)
-
-
-def _is_update_queue_path(path: str) -> bool:
-    return (
-        path == "update_queue/lease.json"
-        or UPDATE_QUEUE_CANDIDATE_PATH_RE.fullmatch(path) is not None
-        or UPDATE_QUEUE_RECOVERY_PATH_RE.fullmatch(path) is not None
-    )
-
-
-def _is_update_record_path(path: str) -> bool:
-    return UPDATE_RECORD_PATH_RE.fullmatch(path) is not None
-
-
-def _invalid_update_queue_result(root: Path) -> SyncResult | None:
-    diagnostics = validate_update_queue(root)
-    if not diagnostics:
-        return None
-    files = sorted(
-        {
-            diagnostic.partition(":")[0]
-            for diagnostic in diagnostics
-            if diagnostic.partition(":")[0] == "update_queue"
-            or diagnostic.partition(":")[0].startswith("update_queue/")
-        }
-    )
-    return SyncResult(
-        "error",
-        "invalid synchronized update queue:\n" + "\n".join(f"- {item}" for item in diagnostics),
-        files,
-    )
-
-
-def _invalid_update_records_result(root: Path) -> SyncResult | None:
-    diagnostics = validate_update_records(root)
-    if not diagnostics:
-        return None
-    files = sorted({item.partition(":")[0] for item in diagnostics})
-    return SyncResult(
-        "error",
-        "invalid synchronized update records:\n"
-        + "\n".join(f"- {item}" for item in diagnostics),
-        files,
-    )
 
 
 def _invalid_learning_result(root: Path) -> SyncResult | None:

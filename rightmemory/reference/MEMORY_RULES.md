@@ -79,7 +79,7 @@ A direction's place in the Pursuit map is the user's decision. An unfinished com
 
 Guidance about how agents should reason, communicate, verify work, or collaborate belongs to the guidance curator under `AGENT_GUIDANCE_RULES.md`. Work cases and reusable instruction assets belong to the skills curator under `WORK_SKILLS_RULES.md`. An explicit request to remember such evidence does not change its domain.
 
-Existing Cross-Session Agent Behavior and `S#` resources remain valid and readable. Preserve them during ordinary Memory updates rather than extending or migrating them incidentally. A concrete scoped maintenance task can address ownership and overlap while preserving the meaning and references of affected content.
+The graph may reference `S#` instruction resources. Preserve the meaning and references of related material while maintaining ordinary context; instruction bodies and fixed Agent Correction collections belong to their domain curators.
 
 ## Open Context Questions
 
@@ -90,6 +90,8 @@ Question nodes use ordinary node syntax. When a question concerns a specific gra
 When an answer becomes clear, place the answer in the appropriate Memory section and remove or revise the question.
 
 ## Maintenance
+
+Update starts from shared candidate evidence; Maintain starts from existing material within the requested scope. Both use this core. Preserve useful ordinary context before completing an update: the program removes a raw candidate after Memory, guidance, and skills have all processed it. Claims and processing receipts are program-owned, and maintenance does not consume pending evidence.
 
 When evidence changes:
 

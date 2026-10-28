@@ -11,7 +11,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from .config import MEMORY_ROOT_ENV, default_memory_root
+from .config import RUNTIME_ROLES, MEMORY_ROOT_ENV, default_memory_root
 from .session import _ensure_memory_gitignore, _ensure_runtime_gitignore, _fsync_directory
 
 
@@ -196,8 +196,7 @@ def initialize_memory_root(memory_root: Path, *, source_root: Path) -> None:
 
 def _looks_like_memory_root(path: Path) -> bool:
     required = ("MEMORY.md", "PURSUITS.md")
-    legacy_references = ("PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md")
-    return not any(os.path.lexists(path / name) for name in legacy_references) and all(
+    return all(
         (path / name).is_file() and not (path / name).is_symlink()
         for name in required
     ) and (path / "insight_logs").is_dir()
@@ -306,12 +305,12 @@ def _profile_seed_config(raw: dict[str, Any]) -> dict[str, Any]:
     seeded: dict[str, Any] = {}
     if isinstance(raw.get("agent_cli"), dict):
         seeded["agent_cli"] = dict(raw["agent_cli"])
-    for role in ("retrieve", "update", "insight", "pruner", "historian", "sync-reconciler"):
+    for role in sorted(RUNTIME_ROLES):
         section = raw.get(role)
         if not isinstance(section, dict):
             continue
         copied: dict[str, Any] = {}
-        for key in ("model", "agent_cli", "async", "watch", "generation_commits", "revival_grace_checkpoints"):
+        for key in ("model", "agent_cli", "watch", "generation_commits", "revival_grace_checkpoints"):
             value = section.get(key)
             if value is not None:
                 copied[key] = value

@@ -1,10 +1,10 @@
-# Update Role
+# Memory Curator
 
-Apply the shared Memory core to reconcile the supplied candidates into durable context. Candidates are evidence, not stored wording or destination instructions. Pursuit is read-only context. Behavioral guidance, Agent Corrections, and reusable work experiences or skills belong to their own curators, including when the user explicitly asked to remember them.
+Apply the shared Memory core to the supplied task. Update reconciles candidate evidence into durable context; Maintain improves existing Memory within the requested scope. Candidates are evidence, not stored wording or destination instructions. Pursuit is read-only context. Behavioral guidance, Agent Corrections, and reusable work experiences or skills belong to their own curators, including when the user explicitly asked to remember them.
 
 ## Reconcile
 
-- Read both graph roots before the first edit and inspect the existing items and backing resources relevant to the candidates.
+- Read both graph roots before the first edit and inspect the existing items and backing resources relevant to the task.
 - Reconcile the batch as a whole. Session ids are provenance and batching labels, not task identity.
 - Group candidates by the work they concern, using meaning and evidence rather than merely session ids or submission labels. A stable task label may help when present but is not required.
 - Reconcile related evidence before judging its durable consequence. Progress, blockage, waiting, next steps, handoff, and completion do not form a Pursuit state thread for Update to maintain.
@@ -26,12 +26,13 @@ Apply the shared Memory core to reconcile the supplied candidates into durable c
 
 ## Repair And Safety
 
-- Repair a clear schema or supplied package-rule violation in Update's writable Memory state when it becomes apparent while processing the update. Do not inspect unrelated content solely to find additional violations. Preserve existing Behavior and S# content; ownership cleanup belongs to concrete scoped maintenance. Leave uncertain repairs and all Pursuit changes untouched, and report them.
+- Repair a clear schema or supplied package-rule violation in writable Memory state when it becomes apparent within the task. Leave uncertain repairs and all Pursuit changes untouched, and report them. Fixed Agent Corrections and skill bodies remain owned by their domain curators; preserve references while changing ordinary context.
 - Preserve Memory ids referenced from Pursuit. An Update repair does not authorize editing Pursuit files or removing their references.
 - Preserve unrelated valid content while using enough scope to keep the complete affected graph coherent.
 - Validate the complete graph before finishing.
 - If state changed, stage and commit only allowed RightMemory files touched by the update.
 - If reconciliation and permitted repairs leave state unchanged, make no commit.
+- Leave candidate evidence, claims, and processing receipts to the program. Completion records this domain's judgment even when no semantic edit was useful, and removes raw candidates once all three domains have finished. Preserve independently useful context in Memory before completing an update.
 
 ## Final Reply
 

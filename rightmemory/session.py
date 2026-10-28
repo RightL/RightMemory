@@ -10,7 +10,7 @@ from uuid import uuid4
 from .platform import lock_file, unlock_file
 
 
-# UUIDs and bounded operation aliases keep their readable legacy names. Longer
+# UUIDs and bounded operation identities remain readable. Longer
 # identities are hashed before semantic-operation state adds another deep prefix.
 _PLAIN_SESSION_ID_LIMIT = 48
 _HASHED_SESSION_DIRECTORY = "hashed"
@@ -30,13 +30,7 @@ class MessageSessionStore:
     def paths(self, session_id: str) -> SessionPaths:
         safe_id = _safe_session_id(session_id)
         session_root = self.root
-        legacy_history = self.root / f"{safe_id}.json"
-        legacy_lock = self.root / f"{safe_id}.lock"
-        if (
-            len(safe_id) > _PLAIN_SESSION_ID_LIMIT
-            and not legacy_history.exists()
-            and not legacy_lock.exists()
-        ):
+        if len(safe_id) > _PLAIN_SESSION_ID_LIMIT:
             session_root /= _HASHED_SESSION_DIRECTORY
             safe_id = hashlib.sha256(safe_id.encode("utf-8")).hexdigest()[:32]
         runtime_root = self.root.parent.parent
@@ -58,31 +52,6 @@ class MemoryWriteLock:
 
     def __enter__(self) -> MemoryWriteLock:
         _ensure_runtime_gitignore(self.runtime_root)
-        self._lock_handle = self.lock_path.open("a+", encoding="utf-8")
-        lock_file(self._lock_handle)
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        if self._lock_handle is None:
-            return
-        try:
-            unlock_file(self._lock_handle)
-        finally:
-            self._lock_handle.close()
-            self._lock_handle = None
-
-
-class UpdateExecutionLock:
-    """Serialize complete Update turns over shared semantic state."""
-
-    def __init__(self, memory_root: Path):
-        self.runtime_root = memory_root / ".runtime"
-        self.lock_path = self.runtime_root / "update" / "execution.lock"
-        self._lock_handle: Any | None = None
-
-    def __enter__(self) -> UpdateExecutionLock:
-        _ensure_runtime_gitignore(self.runtime_root)
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock_handle = self.lock_path.open("a+", encoding="utf-8")
         lock_file(self._lock_handle)
         return self
@@ -202,7 +171,6 @@ def _ensure_memory_gitignore(memory_root: Path) -> None:
             b"!MEMORY_*.md\n"
             b"!PURSUITS.md\n"
             b"!PURSUIT_*.md\n"
-            b"PURSUIT_RULES.md\n"
             b"!corrections.md\n"
             b"!shared_views.toml\n"
             b"!shares.toml\n"
@@ -217,14 +185,6 @@ def _ensure_memory_gitignore(memory_root: Path) -> None:
             b"!insight_logs/*.md\n"
             b"!learning/\n"
             b"!learning/**\n"
-            b"!update_queue/\n"
-            b"!update_queue/candidates/\n"
-            b"!update_queue/candidates/*.json\n"
-            b"!update_queue/recovery/\n"
-            b"!update_queue/recovery/*.json\n"
-            b"!update_queue/lease.json\n"
-            b"!update_records/\n"
-            b"!update_records/*.json\n"
         ),
     )
 

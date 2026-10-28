@@ -244,10 +244,11 @@ Unrelated secret.
             )
         )
 
-    def test_graph_node_uses_canonically_indexed_prose_without_edge_syntax(self) -> None:
+    def test_memory_node_neighbor_uses_canonically_indexed_prose(self) -> None:
         self.write(
             "MEMORY.md",
-            "# Memory\n\n## Target {#memory-target}\n\nTarget-owned prose.\n",
+            "# Memory\n\n## Context {#context}\n\n"
+            "- `memory-node` Inline node prose. -> [doc:direction]\n",
         )
         self.write(
             "PURSUITS.md",
@@ -255,31 +256,32 @@ Unrelated secret.
 
 ## Direction {#direction}
 
-- `legacy` Inline node prose. -> [doc:memory-target]
+Direction-owned prose.
 """,
         )
 
         manifest = build_graph_manifest(self.root)
-        item = manifest.items["legacy"]
-        block = manifest.block_for_id("legacy")
+        item = manifest.items["memory-node"]
+        block = manifest.block_for_id("memory-node")
         assert block is not None
         self.assertEqual(block.kind, "node")
-        self.assertEqual(block.item_id, "legacy")
-        self.assertEqual(block.source_path, self.root / "PURSUITS.md")
+        self.assertEqual(block.item_id, "memory-node")
+        self.assertEqual(block.source_path, self.root / "MEMORY.md")
         self.assertEqual((block.line_number, block.end_line), (5, 5))
         self.assertEqual(item.block_key, block.key)
         self.assertEqual(item.file, block.source_path)
         self.assertEqual((item.line_number, item.end_line), (5, 5))
-        self.assertEqual(item.edges, (("doc", "memory-target"),))
-        tree_item = load_pursuit_tree(self.root).items["legacy"]
-        self.assertEqual((tree_item.source_path, tree_item.source_line), ("PURSUITS.md", 5))
-        self.assertEqual(tree_item.edges, item.edges)
+        self.assertEqual(item.edges, (("doc", "direction"),))
 
-        context = self.build("legacy")
+        context = self.build("direction")
+        self.assertEqual(context.current.selection_id, "direction")
+        self.assertEqual(context.current.block_kind, "heading")
+        self.assertEqual(len(context.neighbors), 1)
+        neighbor = context.neighbors[0]
 
-        self.assertEqual(context.current.selection_id, "legacy")
-        self.assertEqual(context.current.block_kind, "node")
-        self.assertEqual((context.current.source_path, context.current.source_line), ("PURSUITS.md", 5))
+        self.assertEqual(neighbor.selection_id, "memory-node")
+        self.assertEqual(neighbor.block_kind, "node")
+        self.assertEqual((neighbor.source_path, neighbor.source_line), ("MEMORY.md", 5))
         self.assertEqual(
             [
                 (
@@ -287,14 +289,14 @@ Unrelated secret.
                     fragment.start_line,
                     fragment.end_line,
                 )
-                for fragment in context.current.prose_fragments
+                for fragment in neighbor.prose_fragments
             ],
-            [("PURSUITS.md", 5, 5)],
+            [("MEMORY.md", 5, 5)],
         )
-        self.assertEqual(context.edge_triples, (("legacy", "doc", "memory-target"),))
+        self.assertEqual(context.edge_triples, (("memory-node", "doc", "direction"),))
         self.assertEqual(
             [section.selection_id for section in context.ancestors],
-            ["plain:MEMORY.md:1", "plain:PURSUITS.md:1", "direction"],
+            ["plain:MEMORY.md:1", "context", "plain:PURSUITS.md:1"],
         )
 
 

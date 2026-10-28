@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import asdict
 from pathlib import Path
 from tempfile import mkdtemp
@@ -9,12 +8,7 @@ from typing import Any
 from .config import load_sync_config
 from .corrections import AGENT_CORRECTION_SOURCE_PATHS
 from .graph import GraphManifest, build_graph_manifest
-from .guidance import GUIDANCE_INBOX_PATH
 from .learning_retrieval import format_learning_index, learning_sources
-from .recent_submitted import (
-    collect_recent_submitted_memory_readonly,
-    format_recent_submitted_block,
-)
 from .retrieve_context import current_memory_head
 from .session import MemoryWriteLock, _ensure_runtime_gitignore
 from .shared_view_files import pull_all_file_views
@@ -27,11 +21,10 @@ def prepare_retrieve_context(
     memory_root: Path,
     *,
     instructions: str | None = None,
-    excluded_candidate_uids: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Prepare native file access for an assistant-owned Retrieve task.
 
-    The active root remains live. Only pending submissions and shared role
+    The active root remains live. Only the source index and shared role
     instructions are materialized for this invocation; no model, worker, or
     delivery-history state is created.
     """
@@ -58,9 +51,6 @@ def prepare_retrieve_context(
         )
         learning = learning_sources(root)
         learning_index = format_learning_index(root)
-    entries = collect_recent_submitted_memory_readonly(
-        root, excluded_candidate_uids=excluded_candidate_uids
-    )
     if instructions is None:
         from .assistant_prompt import build_assistant_retrieve_instructions
 
@@ -71,8 +61,6 @@ def prepare_retrieve_context(
     output_root = runtime_root / "assistant" / "retrieve"
     output_root.mkdir(parents=True, exist_ok=True)
     prepared_root = Path(mkdtemp(prefix="retrieve-", dir=output_root))
-    pending_file = prepared_root / "PENDING.md"
-    pending_file.write_text(format_recent_submitted_block(entries), encoding="utf-8")
     instructions_file = prepared_root / "RETRIEVE.md"
     instructions_file.write_text(instructions, encoding="utf-8")
     learning_index_file = prepared_root / "LEARNING.md"
@@ -81,15 +69,13 @@ def prepare_retrieve_context(
         "memory_root": str(root),
         "memory_commit": memory_commit,
         "live_files": True,
-        "pending_file": str(pending_file),
         "instructions_file": str(instructions_file),
         "learning_index_file": str(learning_index_file),
         "learning_source_count": len(learning),
         "learning_root": str(root / "learning") if (root / "learning").is_dir() else None,
-        "legacy_guidance_file": str(root / GUIDANCE_INBOX_PATH) if (root / GUIDANCE_INBOX_PATH).is_file() else None,
         "source_files": [str(path) for path in sorted(source_files)],
         "mf_imports": mf_imports,
-        "pending_count": len(entries),
+        "pending_count": sum(source.kind == "interaction evidence" for source in learning.values()),
         "sync": asdict(sync_result),
         "file_views": [asdict(result) for result in file_views],
     }

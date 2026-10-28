@@ -15,10 +15,12 @@ def main(argv: list[str] | None = None) -> int:
         from .assistant_cli import main as assistant_main
 
         return assistant_main(remaining[1:], profile_name=profile_name)
-    if remaining[:1] == ["learning"]:
-        from .learning_cli import main as learning_main
-
-        return learning_main(remaining[1:], profile_name=profile_name)
+    if remaining[:1] == ["submit"]:
+        from .curation_cli import submit_main
+        return submit_main(remaining[1:], profile_name=profile_name)
+    if remaining[:1] == ["curate"]:
+        from .curation_cli import main as curation_main
+        return curation_main(remaining[1:], profile_name=profile_name)
     if remaining[:1] == ["validate"]:
         try:
             parser = argparse.ArgumentParser(prog="rightmemory validate")
@@ -85,12 +87,6 @@ def _validation_root(profile_name: str | None, argv: list[str]) -> Path:
         default_root=default_memory_root(),
     )
     return active.memory_root
-
-
-def _guidance_validation_errors(memory_root: Path) -> list[str]:
-    from .validation import guidance_validation_errors
-
-    return guidance_validation_errors(memory_root)
 
 
 if __name__ == "__main__":
