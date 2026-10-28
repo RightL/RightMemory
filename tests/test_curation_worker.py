@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -21,11 +22,13 @@ class FakeService:
         self.error = None
         self.task_id = "memory-first"
         self.native = False
+        self.batch_id = "batch-first"
 
     def notices(self):
         return [
             {"domain": domain, "ready": count > 0, "mode": "update", "scope": "",
              "task_id": self.task_id if domain == "memory" else domain,
+             "batch_id": self.batch_id,
              "executor": "native" if self.native else "configured"}
             for domain, count in self.pending.items()
         ]
@@ -44,6 +47,21 @@ class CurationWorkerTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.worker = CurationWorker(self.root)
+
+    @contextmanager
+    def retry_clock(self, worker=None):
+        worker = worker or self.worker
+        clock = [datetime(2026, 10, 28, tzinfo=UTC)]
+
+        def advance(deadline, observed_wake):
+            self.assertGreater(deadline, clock[0])
+            self.assertEqual(worker.status()["next_ready_at"], deadline.isoformat())
+            clock[0] = deadline
+
+        with patch("rightmemory.curation_worker.datetime", wraps=datetime) as dates, \
+             patch.object(worker, "_wait_for_work", side_effect=advance):
+            dates.now.side_effect = lambda zone: clock[0]
+            yield clock
 
     def test_drains_all_domains_without_a_second_candidate_store(self):
         service = FakeService()
@@ -128,6 +146,7 @@ class CurationWorkerTests(unittest.TestCase):
 
     def test_sync_wakes_a_future_batch_but_not_native_or_failed_work(self):
         waiting = {"domain": "memory", "ready": False,
+                   "batch_id": "waiting-batch",
                    "next_ready_at": (datetime.now(UTC) + timedelta(hours=25)).isoformat()}
         self.assertTrue(self.worker.has_work([waiting]))
         self.assertFalse(self.worker.has_work([{**waiting, "executor": "native"}]))
@@ -137,19 +156,23 @@ class CurationWorkerTests(unittest.TestCase):
             self.assertEqual(wake_configured_curation(self.root), {"status": "started"})
             wake.assert_called_once()
         self.worker._write({"failures": {"memory": {
-            "task_id": None, "attempts": 2, "error": "failed",
+            "task_id": None, "batch_id": "waiting-batch", "attempts": 2,
+            "error": "failed", "next_retry_at": None,
         }}})
         self.assertFalse(self.worker.has_work([waiting]))
 
     def test_failure_budget_survives_restarts_and_new_task_gets_its_own_budget(self):
         service = FakeService()
         service.error = RuntimeError("provider unavailable")
-        self.assertEqual(self.worker.run(service), 1)
+        with self.retry_clock():
+            self.assertEqual(self.worker.run(service), 1)
         self.assertEqual(service.calls.count("memory"), 2)
         self.assertFalse(self.worker.has_work(service.notices()))
         restarted = CurationWorker(self.root)
         self.assertEqual(restarted.run(service), 1)
         self.assertEqual(service.calls.count("memory"), 2)
+        service.batch_id = "pending-evidence-added-behind-failed-task"
+        self.assertFalse(restarted.has_work(service.notices()))
         service.task_id = "memory-explicit-retry"
         service.error = None
         self.assertTrue(restarted.has_work(service.notices()))
@@ -159,7 +182,8 @@ class CurationWorkerTests(unittest.TestCase):
 
     def test_explicit_wake_resets_failures_without_replacing_live_worker(self):
         self.worker._write({"pid": 123, "wake": 1, "failures": {"memory": {
-            "task_id": "failed", "attempts": 2, "error": "provider failed",
+            "task_id": "failed", "batch_id": None, "attempts": 2,
+            "error": "provider failed", "next_retry_at": None,
         }}, "error": "provider failed"})
         with patch.object(self.worker, "_live", return_value=True), patch.object(self.worker, "_start") as start:
             result = self.worker.wake(retry_failed=True)
@@ -177,7 +201,8 @@ class CurationWorkerTests(unittest.TestCase):
             return {"status": "retry_ready", "task_id": service.task_id, "reason": "domain context changed"}
 
         service.run = stale
-        self.assertEqual(self.worker.run(service), 1)
+        with self.retry_clock():
+            self.assertEqual(self.worker.run(service), 1)
         self.assertEqual(service.calls, ["memory", "memory"])
         self.assertEqual(self.worker.status()["failures"]["memory"]["attempts"], 2)
         self.assertFalse(self.worker.has_work(service.notices()))
@@ -185,11 +210,191 @@ class CurationWorkerTests(unittest.TestCase):
         self.assertEqual(len(service.calls), 2)
 
     def test_normal_wake_preserves_the_failed_task_budget(self):
-        failures = {"memory": {"task_id": "failed", "attempts": 2, "error": "provider failed"}}
+        failures = {"memory": {"task_id": "failed", "batch_id": None, "attempts": 2,
+                               "error": "provider failed", "next_retry_at": None}}
         self.worker._write({"wake": 1, "failures": failures})
         with patch.object(self.worker, "_start", return_value={"status": "started"}):
             self.worker.wake()
         self.assertEqual(self.worker.status()["failures"], failures)
+
+    def test_retry_cooldown_survives_restart_and_runs_at_the_boundary(self):
+        service = FakeService()
+        service.pending = {"memory": 1}
+        service.error = RuntimeError("temporary outage")
+        start = datetime(2026, 10, 28, tzinfo=UTC)
+        deadline = start + timedelta(seconds=3600)
+
+        def stop_at_first_wait(until, observed_wake):
+            self.assertEqual(until, deadline)
+            self.assertEqual(service.calls, ["memory"])
+            failure = self.worker.status()["failures"]["memory"]
+            self.assertEqual(failure["attempts"], 1)
+            self.assertEqual(failure["next_retry_at"], deadline.isoformat())
+            self.assertEqual(self.worker.status()["next_ready_at"], deadline.isoformat())
+            state = self.worker._read()
+            state["stop"] = {"pid": state["pid"], "identity": state["identity"]}
+            self.worker._write(state)
+
+        with patch("rightmemory.curation_worker.datetime", wraps=datetime) as dates, \
+             patch.object(self.worker, "_wait_for_work", side_effect=stop_at_first_wait):
+            dates.now.return_value = start
+            self.worker.run(service)
+        restarted = CurationWorker(self.root)
+        self.assertTrue(restarted.has_work(service.notices()))
+        clock = [deadline - timedelta(seconds=1)]
+
+        def reach_boundary(seconds):
+            self.assertEqual(service.calls, ["memory"])
+            self.assertEqual(restarted.status()["next_ready_at"], deadline.isoformat())
+            self.assertEqual(seconds, 1)
+            clock[0] += timedelta(seconds=seconds)
+
+        with patch("rightmemory.curation_worker.datetime", wraps=datetime) as dates, \
+             patch("rightmemory.curation_worker.time.sleep", side_effect=reach_boundary) as sleep:
+            dates.now.side_effect = lambda zone: clock[0]
+            self.assertEqual(restarted.run(service), 1)
+        sleep.assert_called_once()
+        self.assertEqual(service.calls, ["memory", "memory"])
+        self.assertEqual(clock[0], deadline)
+        self.assertIsNone(restarted.status()["failures"]["memory"]["next_retry_at"])
+
+    def test_new_pending_batch_does_not_inherit_exhausted_unclaimed_failure(self):
+        service = FakeService()
+        service.pending = {"memory": 1}
+        service.task_id = None
+        service.error = RuntimeError("claim unavailable")
+        with self.retry_clock():
+            self.assertEqual(self.worker.run(service), 1)
+        self.assertFalse(self.worker.has_work(service.notices()))
+        self.assertEqual(service.calls, ["memory", "memory"])
+        service.batch_id = "new-session-new-evidence"
+        service.error = None
+        self.assertTrue(self.worker.has_work(service.notices()))
+        self.assertEqual(CurationWorker(self.root).run(service), 0)
+        self.assertEqual(service.calls, ["memory"] * 3)
+        self.assertEqual(self.worker.status()["failures"], {})
+
+    def test_successful_retry_clears_failure(self):
+        service = FakeService()
+        service.pending = {"memory": 1}
+        run = service.run
+
+        def transient(domain, **kwargs):
+            service.error = RuntimeError("temporary outage") if not service.calls else None
+            return run(domain, **kwargs)
+
+        service.run = transient
+        with self.retry_clock():
+            self.assertEqual(self.worker.run(service), 0)
+        self.assertEqual(service.calls, ["memory", "memory"])
+        self.assertEqual(self.worker.status()["failures"], {})
+        self.assertIsNone(self.worker.status()["error"])
+
+    def test_error_after_finished_task_does_not_charge_the_next_batch(self):
+        service = FakeService()
+        service.pending = {"memory": 1}
+        run = service.run
+
+        def finish_then_fail(domain, **kwargs):
+            if not service.calls:
+                service.calls.append(domain)
+                service.task_id = None
+                service.batch_id = "next-unrelated-batch"
+                raise OSError("post-completion state write failed")
+            return run(domain, **kwargs)
+
+        service.run = finish_then_fail
+        with patch.object(self.worker, "_wait_for_work", side_effect=AssertionError("new batch delayed")):
+            self.assertEqual(self.worker.run(service), 0)
+        self.assertEqual(service.calls, ["memory", "memory"])
+        self.assertEqual(self.worker.status()["failures"], {})
+
+    def test_retry_cooldown_does_not_delay_other_domains(self):
+        service = FakeService()
+        service.pending = {"memory": 1, "guidance": 2}
+        service.error = RuntimeError("memory unavailable")
+        call_times = []
+        run = service.run
+        with self.retry_clock() as clock:
+            start = clock[0]
+
+            def record_time(domain, **kwargs):
+                call_times.append((domain, clock[0]))
+                return run(domain, **kwargs)
+
+            service.run = record_time
+            self.assertEqual(self.worker.run(service), 1)
+        self.assertEqual([when for domain, when in call_times if domain == "guidance"], [start, start])
+        self.assertEqual([when for domain, when in call_times if domain == "memory"],
+                         [start, start + timedelta(seconds=3600)])
+
+    def test_new_submission_during_retry_wait_runs_a_new_unclaimed_batch(self):
+        service = FakeService()
+        service.pending = {"memory": 1}
+        service.task_id = None
+        service.error = RuntimeError("claim unavailable")
+
+        def submit_during_cooldown(seconds):
+            self.assertEqual(service.calls, ["memory"])
+            service.batch_id = "new-batch"
+            service.error = None
+            self.assertEqual(self.worker.wake()["status"], "running")
+
+        with patch("rightmemory.curation_worker.time.sleep", side_effect=submit_during_cooldown) as sleep:
+            self.assertEqual(self.worker.run(service), 0)
+        sleep.assert_called_once()
+        self.assertEqual(service.calls, ["memory", "memory"])
+        self.assertEqual(self.worker.status()["failures"], {})
+
+    def test_claim_creation_does_not_reset_the_batch_retry_budget(self):
+        service = FakeService()
+        service.pending = {"memory": 1}
+        service.task_id = None
+
+        def claim_then_fail(domain, **kwargs):
+            service.calls.append(domain)
+            if len(service.calls) == 2:
+                service.task_id = "memory-created-on-retry"
+            raise RuntimeError("provider unavailable")
+
+        service.run = claim_then_fail
+        with self.retry_clock():
+            self.assertEqual(self.worker.run(service), 1)
+        self.assertEqual(service.calls, ["memory", "memory"])
+        failure = self.worker.status()["failures"]["memory"]
+        self.assertEqual(failure["task_id"], service.task_id)
+        self.assertEqual(failure["attempts"], 2)
+        self.assertFalse(self.worker.has_work(service.notices()))
+
+    def test_worker_launch_uses_memory_root_to_avoid_shadow_checkout_import(self):
+        shadow = self.root / "shadow-checkout"
+        package = shadow / "rightmemory"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("raise RuntimeError('shadow checkout imported')\n")
+        actual_popen = subprocess.Popen
+        children = []
+
+        def start_probe(command, **kwargs):
+            self.assertEqual(Path(kwargs["cwd"]), self.root)
+            probe = [sys.executable, "-c",
+                     "import pathlib, rightmemory; print(pathlib.Path(rightmemory.__file__).resolve())"]
+            child = actual_popen(probe, cwd=kwargs["cwd"], env=kwargs["env"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            output, error = child.communicate(timeout=10)
+            self.assertEqual(child.returncode, 0, error.decode())
+            self.assertEqual(Path(output.decode().strip()),
+                             Path(__file__).resolve().parents[1] / "rightmemory" / "__init__.py")
+            children.append(child)
+            return child
+
+        before = Path.cwd()
+        try:
+            os.chdir(shadow)
+            with patch("rightmemory.curation_worker.subprocess.Popen", side_effect=start_probe):
+                self.worker.wake()
+        finally:
+            os.chdir(before)
+        self.assertEqual(len(children), 1)
 
     def test_process_identity_is_authoritative_without_a_command_line(self):
         with patch("rightmemory.curation_worker.process_exists", return_value=True), \
@@ -225,7 +430,8 @@ class CurationWorkerTests(unittest.TestCase):
         with patch("rightmemory.learning_service.LearningService", side_effect=AssertionError("native worker")):
             self.assertIsNone(wake_configured_curation(self.root))
         stamp.write_text("mode=standalone\n")
-        self.worker._write({"failures": {"memory": {"task_id": "t", "attempts": 2, "error": "failed"}}})
+        self.worker._write({"failures": {"memory": {"task_id": "t", "batch_id": None,
+                                                   "attempts": 2, "error": "failed", "next_retry_at": None}}})
         service = Mock()
         service.notices.return_value = [{"domain": "memory", "task_id": "t", "ready": True}]
         with patch("rightmemory.learning_service.LearningService", return_value=service), patch.object(CurationWorker, "wake") as wake:

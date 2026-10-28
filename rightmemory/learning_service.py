@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -17,7 +18,7 @@ from .curation_batch import select_curation_batch
 from .isolated_write import WorktreeLease
 from .learning import (
     LEARNING_DOMAINS, LearningCandidate, LearningClaim, learning_claims,
-    list_learning_candidates, parse_learning_claim, submit_learning,
+    learning_batch_candidate_ids, list_learning_candidates, parse_learning_claim, submit_learning,
 )
 from .learning_coordinator import (
     LearningClaimLost, LearningCoordinator, LearningSemanticBaseChanged,
@@ -267,11 +268,15 @@ class LearningService:
                     "status_argv": self._argv("status", "--task", effect_task["task_id"]),
                 })
             else:
-                batch = select_curation_batch(pending, self.coordinator.batch_config)
+                batch = select_curation_batch(
+                    pending, self.coordinator.batch_config,
+                    admitted_candidate_ids=learning_batch_candidate_ids(self.memory_root, domain),
+                )
                 result.append({
                     "domain": domain, "ready": bool(batch.candidates), "mode": "update", "scope": "",
                     "status": "ready" if batch.candidates else "waiting", "candidate_count": len(pending),
                     "next_ready_at": None if batch.next_ready_at is None else batch.next_ready_at.isoformat(),
+                    "batch_id": _pending_batch_id(domain, pending),
                     "begin_argv": self._argv("begin", "--domain", domain),
                     "run_argv": self._argv("run", "--domain", domain),
                 })
@@ -630,6 +635,13 @@ def _curation_input(data: dict) -> str:
         "Source files are relative to the candidate worktree.\n"
         + json.dumps(data["candidates"], ensure_ascii=False, indent=2)
     )
+
+
+def _pending_batch_id(domain: str, candidates: tuple[LearningCandidate, ...]) -> str | None:
+    if not candidates:
+        return None
+    identities = sorted((item.candidate_id, item.evidence_sha256) for item in candidates)
+    return hashlib.sha256(json.dumps([domain, identities]).encode("utf-8")).hexdigest()
 
 
 def _candidate_input(candidate: LearningCandidate) -> dict[str, Any]:

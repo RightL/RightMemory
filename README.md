@@ -585,10 +585,11 @@ quiet period from its latest pending submission. The oldest quiet session starts
 batch after a further 24 hours, so small queues can make progress. A new submission
 resets its own session's quiet period; other sessions keep their deadlines.
 
-Each run takes the available eligible evidence up to the target of 30 candidates or
-24,000 evidence characters. The first candidate is admitted even when it exceeds the
-character limit. A session can span batches to keep those bounds. Remaining evidence
-stays pending and is evaluated against the same count and time triggers.
+When a trigger is reached, the program records the eligible evidence for that domain.
+Each run processes part of that evidence, up to 30 candidates or 24,000 evidence
+characters. The first candidate is included even when it exceeds the character limit.
+Remaining recorded evidence stays ready for the next run, including across restarts
+and devices. Submissions arriving later wait for their own count or time trigger.
 
 Configured submission wakes a single background worker. It processes ready domains
 and waits for the next deadline without invoking a model. New submissions interrupt
@@ -608,12 +609,14 @@ confirm the previous worker has stopped, then use
 `curate begin --domain <domain> --retry <task-id>`. This can explicitly take over a
 claim from another checkout. Replacement fences the old publication and does not
 carry over unpublished edits. Claims are per domain and do not expire on a timer.
-The configured worker bounds
-automatic attempts, retains failures for inspection, and does not call models forever.
-After resolving a failure, `curate worker wake` permits another attempt; a deliberate
-task retry gets a new attempt budget.
+The configured worker makes at most two automatic attempts at the same work, waiting
+one hour after the first failure. The retry time survives restarts and appears in
+worker status; other ready domains can proceed meanwhile. A failure before a task is
+created belongs to that pending evidence, so a later submission does not inherit an
+exhausted retry budget. After resolving a failure, `curate worker wake` permits another
+attempt; a deliberate task retry gets a new attempt budget.
 
-Claims, processing receipts, and withdrawals are program-owned. Receipts retain
+Batch records, claims, processing receipts, and withdrawals are program-owned. Receipts retain
 candidate identities and hashes, not another copy of the evidence body. Completing the
 last domain removes raw evidence from current state, including for no-change judgments.
 Curators retain useful concrete cases or experiences before completing their work.

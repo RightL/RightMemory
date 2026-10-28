@@ -14,7 +14,7 @@ import sys
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .platform import (
@@ -24,6 +24,7 @@ from .platform import (
 
 
 MAX_AUTOMATIC_ATTEMPTS = 2
+RETRY_COOLDOWN_SECONDS = 3600
 
 
 def default_executor(memory_root: Path) -> str:
@@ -62,14 +63,35 @@ class CurationWorker:
 
     def has_work(self, notices: list[dict]) -> bool:
         failures = self._read().get("failures", {})
-        return any((item.get("ready") or item.get("next_ready_at")) and item.get("executor") != "native"
-                   and not self._blocked(failures.get(item["domain"]), item.get("task_id"))
+        return any(self._next_attempt_at(item, failures.get(item["domain"])) is not None
                    for item in notices)
 
     @staticmethod
-    def _blocked(failure: dict | None, task_id: str | None) -> bool:
-        return bool(failure and failure.get("task_id") == task_id
-                    and failure.get("attempts", 0) >= MAX_AUTOMATIC_ATTEMPTS)
+    def _failure_matches(failure: dict | None, notice: dict) -> bool:
+        if not failure:
+            return False
+        if failure.get("task_id") is not None:
+            return failure["task_id"] == notice.get("task_id")
+        return bool(failure.get("batch_id") and failure["batch_id"] == notice.get("batch_id"))
+
+    @classmethod
+    def _blocked(cls, failure: dict | None, notice: dict) -> bool:
+        return bool(cls._failure_matches(failure, notice)
+                    and failure["attempts"] >= MAX_AUTOMATIC_ATTEMPTS)
+
+    @classmethod
+    def _next_attempt_at(cls, notice: dict, failure: dict | None) -> datetime | None:
+        if notice.get("executor") == "native" or cls._blocked(failure, notice):
+            return None
+        if notice.get("ready"):
+            deadline = datetime.now(UTC)
+        elif notice.get("next_ready_at"):
+            deadline = datetime.fromisoformat(notice["next_ready_at"])
+        else:
+            return None
+        if cls._failure_matches(failure, notice) and failure.get("next_retry_at"):
+            deadline = max(deadline, datetime.fromisoformat(failure["next_retry_at"]))
+        return deadline
 
     def wake(self, *, python_executable: str | Path | None = None, retry_failed: bool = False) -> dict:
         with self._locked("control.lock"):
@@ -95,7 +117,7 @@ class CurationWorker:
         with path.open("ab") as log:
             child = subprocess.Popen(
                 command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                env=python_module_child_env(), **detached_process_kwargs(),
+                cwd=self.memory_root, env=python_module_child_env(), **detached_process_kwargs(),
             )
         state.update(pid=child.pid, identity=process_identity(child.pid))
         state.pop("stop", None)
@@ -145,6 +167,7 @@ class CurationWorker:
                         if self._stop_requested(state):
                             return 0
                     progressed = False
+                    unavailable = set()
                     notices = service.notices()
                     for notice in notices:
                         domain = notice["domain"]
@@ -155,7 +178,8 @@ class CurationWorker:
                             if self._stop_requested(state):
                                 return 0
                             failure = state.get("failures", {}).get(domain)
-                            if self._blocked(failure, notice.get("task_id")):
+                            attempt_at = self._next_attempt_at(notice, failure)
+                            if attempt_at is None or attempt_at > datetime.now(UTC):
                                 continue
                         error = None
                         outcome = None
@@ -172,43 +196,53 @@ class CurationWorker:
                                 progressed = True
                                 continue
                             if outcome in {"active", "not_ready"}:
+                                unavailable.add(domain)
                                 continue
                             error = result.get("reason") or f"curation returned {outcome}: {result.get('sync', '')}"
                         except Exception as exc:
                             error = f"{type(exc).__name__}: {exc}"
-                        # Bind the budget to the current task. Automatic replacement
-                        # after a stale base carries the same budget forward; an
-                        # explicit new task starts with its own budget.
+                        # Carry the budget into a claim created during this attempt
+                        # or its automatic replacement. If the task already finished,
+                        # retain the attempted identity, never the next pending batch.
                         latest = next((item for item in service.notices() if item["domain"] == domain), notice)
-                        task_id = latest.get("task_id")
+                        attempted = latest if latest.get("task_id") else notice
                         with self._locked("control.lock"):
                             state = self._read()
                             failures = state.setdefault("failures", {})
                             prior = failures.get(domain, {})
-                            continued = prior.get("task_id") == task_id or (
-                                outcome == "retry_ready" and prior.get("task_id") == notice.get("task_id")
-                            )
+                            continued = self._failure_matches(prior, notice) or self._failure_matches(prior, attempted)
                             attempts = prior.get("attempts", 0) if continued else 0
-                            failures[domain] = {"task_id": task_id, "attempts": attempts + 1, "error": error}
+                            attempts += 1
+                            failures[domain] = {
+                                "task_id": attempted.get("task_id"), "batch_id": attempted.get("batch_id"),
+                                "attempts": attempts, "error": error,
+                                "next_retry_at": (
+                                    (datetime.now(UTC) + timedelta(seconds=RETRY_COOLDOWN_SECONDS)).isoformat()
+                                    if attempts < MAX_AUTOMATIC_ATTEMPTS else None
+                                ),
+                            }
                             self._write(state)
-                            progressed = attempts + 1 < MAX_AUTOMATIC_ATTEMPTS or progressed
                         print(f"{domain}: {error}", flush=True)
                     notices = service.notices()
                     with self._locked("control.lock"):
                         state = self._read()
                         failures = state.get("failures", {})
+                        for notice in notices:
+                            if notice["domain"] in failures and not self._failure_matches(failures[notice["domain"]], notice):
+                                failures.pop(notice["domain"])
                         state["error"] = "; ".join(f"{key}: {value['error']}" for key, value in failures.items()) or None
                         self._write(state)
                         if state.get("wake", 0) != observed_wake:
                             progressed = True
                         deadline = None
                         if not progressed:
-                            deadlines = [
-                                datetime.fromisoformat(item["next_ready_at"])
-                                for item in notices
-                                if item.get("next_ready_at") and item.get("executor") != "native"
-                                and not self._blocked(failures.get(item["domain"]), item.get("task_id"))
-                            ]
+                            deadlines = []
+                            for item in notices:
+                                attempt_at = self._next_attempt_at(item, failures.get(item["domain"]))
+                                if attempt_at is not None and (
+                                    item["domain"] not in unavailable or attempt_at > datetime.now(UTC)
+                                ):
+                                    deadlines.append(attempt_at)
                             deadline = min(deadlines) if deadlines else None
                             if deadline is None:
                                 self._finish(state)
@@ -216,9 +250,8 @@ class CurationWorker:
                         state["next_ready_at"] = None if deadline is None else deadline.isoformat()
                         self._write(state)
                     if deadline is not None:
-                        self._wait_for_work(deadline, observed_wake)
-                    elif failures:
-                        time.sleep(0.1)
+                        if deadline > datetime.now(UTC):
+                            self._wait_for_work(deadline, observed_wake)
             finally:
                 with self._locked("control.lock"):
                     state = self._read()
@@ -293,9 +326,21 @@ class CurationWorker:
             or type(value.get("attempts")) is not int or value["attempts"] < 0
             or not isinstance(value.get("error"), str)
             or (value.get("task_id") is not None and not isinstance(value["task_id"], str))
+            or (value.get("batch_id") is not None and (
+                not isinstance(value["batch_id"], str) or not value["batch_id"]
+            ))
             for domain, value in failures.items()
         ):
             raise ValueError("invalid curation worker retry state")
+        for failure in failures.values():
+            retry_at = failure.get("next_retry_at")
+            if retry_at is not None:
+                try:
+                    valid = isinstance(retry_at, str) and datetime.fromisoformat(retry_at).utcoffset() is not None
+                except ValueError:
+                    valid = False
+                if not valid:
+                    raise ValueError("invalid curation worker retry deadline")
         return state
 
     def _write(self, state: dict) -> None:

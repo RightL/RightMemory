@@ -4,7 +4,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.config import SyncConfig
-from rightmemory.learning import LEARNING_DOMAINS, learning_claims, list_learning_candidates, submit_learning
+from rightmemory.learning import (
+    LEARNING_DOMAINS, learning_claims, list_learning_candidates, submit_learning,
+    learning_batch_candidate_ids,
+)
 from rightmemory.learning_coordinator import (
     LearningClaimLost, LearningCoordinator, LearningSemanticBaseChanged, LearningUnavailable,
 )
@@ -34,18 +37,64 @@ class LocalLearningCoordinatorTests(IsolatedWriteTestBase):
         self.assertEqual(learning_claims(self.root), ())
         self.assertEqual(self._git("rev-parse", "HEAD"), head)
 
-    def test_default_count_trigger_selects_thirty_and_leaves_small_backlog_waiting(self):
+    def test_default_count_trigger_preserves_admitted_remainder_across_restart(self):
         (self.root / "rightmemory.toml").unlink()
-        for index in range(32):
+        for index in range(31):
             submit_learning(self.root, "session", f"Evidence {index}.")
         coordinator = self._coordinator()
         result = coordinator.claim("memory")
         self.assertTrue(result.claimed)
         self.assertEqual(len(result.candidates), 30)
+        self.assertEqual(len(learning_batch_candidate_ids(self.root, "memory")), 31)
+        changed = self._git("diff", "--name-only", "HEAD^", "HEAD").splitlines()
+        self.assertEqual(set(changed), {"learning/claims/memory.json", "learning/batches/memory.json"})
         self._complete(coordinator, result.claim)
-        self.assertEqual(len(list_learning_candidates(self.root, domain="memory")), 2)
-        self.assertIsNone(coordinator.claim("memory").claim)
+        self.assertEqual(len(list_learning_candidates(self.root, domain="memory")), 1)
+        later = submit_learning(self.root, "later", "New later evidence.").candidate_id
+        restarted = self._coordinator()
+        remainder = restarted.claim("memory")
+        self.assertEqual(len(remainder.candidates), 1)
+        self.assertNotIn(later, remainder.claim.candidate_ids)
+        self._complete(restarted, remainder.claim)
+        self.assertEqual(learning_batch_candidate_ids(self.root, "memory"), ())
+        self.assertIsNone(restarted.claim("memory").claim)
         self.assertEqual(len(coordinator.claim("guidance").candidates), 30)
+
+    def test_default_size_limit_continues_twelve_plus_three_and_withdraws_remainder(self):
+        (self.root / "rightmemory.toml").unlink()
+        for index in range(15):
+            submit_learning(self.root, f"session-{index}", "x" * 2000)
+        coordinator = self._coordinator()
+        result = coordinator.claim("memory")
+        self.assertEqual(len(result.candidates), 12)
+        admitted = learning_batch_candidate_ids(self.root, "memory")
+        replacement = coordinator.claim("memory", replace_token=result.claim.token)
+        self.assertEqual(learning_batch_candidate_ids(self.root, "memory"), admitted)
+        self._complete(coordinator, replacement.claim)
+        remainder = self._coordinator().claim("memory")
+        self.assertEqual(len(remainder.candidates), 3)
+        coordinator.release(remainder.claim)
+        for candidate in remainder.candidates:
+            coordinator.withdraw(candidate.candidate_id)
+        self.assertEqual(learning_batch_candidate_ids(self.root, "memory"), ())
+        self.assertFalse((self.root / "learning/batches/memory.json").exists())
+
+    def test_maintenance_does_not_admit_pending_evidence(self):
+        self._submit()
+        result = self._coordinator().claim("memory", mode="maintain")
+        self.assertTrue(result.claimed)
+        self.assertEqual(learning_batch_candidate_ids(self.root, "memory"), ())
+
+    def test_failed_claim_publication_leaves_no_admission_or_claim(self):
+        self._submit()
+        coordinator = self._coordinator()
+        head = self._git("rev-parse", "HEAD")
+        with patch.object(coordinator, "_publish", return_value=False):
+            with self.assertRaises(LearningUnavailable):
+                coordinator.claim("memory")
+        self.assertEqual(self._git("rev-parse", "HEAD"), head)
+        self.assertEqual(learning_batch_candidate_ids(self.root, "memory"), ())
+        self.assertEqual(learning_claims(self.root), ())
 
     def test_default_threshold_does_not_block_existing_claim_or_explicit_replacement(self):
         self._submit()

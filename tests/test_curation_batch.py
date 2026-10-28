@@ -14,6 +14,39 @@ def candidate(index, *, session="session", at=START, evidence="evidence"):
 
 
 class CurationBatchTests(unittest.TestCase):
+    def test_admission_continues_count_and_size_limited_chunks_without_wait(self):
+        for count, evidence, first_count in ((31, "short", 30), (15, "x" * 2000, 12)):
+            with self.subTest(count=count):
+                pending = [candidate(index, evidence=evidence) for index in range(count)]
+                first = select_curation_batch(pending, CurationBatchConfig(), now=START)
+                self.assertEqual(len(first.candidates), first_count)
+                self.assertEqual(set(first.admitted_candidate_ids), {item.candidate_id for item in pending})
+                selected = {item.candidate_id for item in first.candidates}
+                remaining = [item for item in pending if item.candidate_id not in selected]
+                later = candidate("later", at=START + timedelta(minutes=1))
+                second = select_curation_batch(
+                    [*remaining, later], CurationBatchConfig(), now=START + timedelta(minutes=1),
+                    admitted_candidate_ids=first.admitted_candidate_ids,
+                )
+                self.assertEqual(set(second.candidates), set(remaining))
+                self.assertIsNone(second.next_ready_at)
+                self.assertEqual(second.admitted_candidate_ids, first.admitted_candidate_ids)
+                waiting = select_curation_batch(
+                    [later], CurationBatchConfig(), now=START + timedelta(minutes=1),
+                    admitted_candidate_ids=first.admitted_candidate_ids,
+                )
+                self.assertEqual(waiting.candidates, ())
+                self.assertEqual(waiting.admitted_candidate_ids, ())
+
+    def test_fallback_admission_includes_only_quiet_sessions(self):
+        older = [candidate(index) for index in range(3)]
+        recent = candidate("recent", session="new", at=START + timedelta(hours=25))
+        first = select_curation_batch(
+            [*older, recent], CurationBatchConfig(trigger_candidates=10, target_batch_candidates=10),
+            now=START + timedelta(hours=25),
+        )
+        self.assertEqual(set(first.admitted_candidate_ids), {item.candidate_id for item in older})
+
     def test_no_pending_has_no_deadline(self):
         selection = select_curation_batch([], CurationBatchConfig(), now=START)
         self.assertEqual(selection.candidates, ())
