@@ -24,6 +24,12 @@ class AssistantCliTests(IsolatedWriteTestBase):
         return code, json.loads(output.getvalue())
 
     def test_cli_native_flow_binds_completion_to_active_root_from_worktree(self):
+        (self.root / ".git/info").mkdir(exist_ok=True)
+        with (self.root / ".git/info/exclude").open("a", encoding="utf-8") as stream:
+            stream.write("\n/rightmemory.toml\n")
+        (self.root / "rightmemory.toml").write_text(
+            "[curation.batch]\ntrigger_candidates = 1\n", encoding="utf-8",
+        )
         evidence = self.root.parent / f"{self.root.name}-evidence.txt"
         evidence.write_text("Fictional project launch code is Atlas.")
         self.addCleanup(evidence.unlink, missing_ok=True)

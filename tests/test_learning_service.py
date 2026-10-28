@@ -3,13 +3,14 @@ import hashlib
 import io
 import json
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.assistant_write import AssistantStaleVersionError, AssistantWriteManager
 from rightmemory.config import RuntimeConfig, load_config, load_sync_config
 from rightmemory.insight_trigger import InsightTriggerStore
-from rightmemory.learning import LEARNING_DOMAINS, list_learning_candidates
+from rightmemory.learning import LEARNING_DOMAINS, learning_claims, list_learning_candidates
 from rightmemory.curation_cli import main as curate_main, submit_main
 from rightmemory.learning_coordinator import LearningCoordinator
 from rightmemory.learning_service import (
@@ -23,7 +24,96 @@ from tests.isolated_write_test_base import IsolatedWriteTestBase
 class LearningServiceTests(IsolatedWriteTestBase):
     def setUp(self):
         super().setUp()
+        (self.root / ".git/info").mkdir(exist_ok=True)
+        with (self.root / ".git/info/exclude").open("a", encoding="utf-8") as stream:
+            stream.write("\n/rightmemory.toml\n")
+        (self.root / "rightmemory.toml").write_text(
+            "[curation.batch]\ntrigger_candidates = 1\ntarget_batch_candidates = 20\n",
+            encoding="utf-8",
+        )
         self.service = LearningService(self.root)
+
+    def _use_default_batch_policy(self):
+        (self.root / "rightmemory.toml").unlink()
+        self.service = LearningService(self.root)
+
+    def test_default_small_backlog_waits_without_claim_worktree_or_model(self):
+        self._use_default_batch_policy()
+        self._submit()
+        candidate = list_learning_candidates(self.root)[0]
+        expected_ready = datetime.fromisoformat(candidate.submitted_at) + timedelta(hours=25)
+        head = self._git("rev-parse", "HEAD")
+        with (
+            patch("rightmemory.learning_coordinator.LearningCoordinator._worktree", side_effect=AssertionError("worktree created")),
+            patch("rightmemory.runtime.RightMemoryRuntime", side_effect=AssertionError("model invoked")),
+            patch("rightmemory.config.load_config", side_effect=AssertionError("model config loaded")),
+        ):
+            notices = self.service.notices()
+            for domain in LEARNING_DOMAINS:
+                self.assertEqual(self.service.begin(domain)["status"], "not_ready")
+                self.assertEqual(self.service.run(domain)["status"], "not_ready")
+        for notice in notices:
+            self.assertFalse(notice["ready"])
+            self.assertEqual(notice["status"], "waiting")
+            self.assertEqual(notice["candidate_count"], 1)
+            self.assertEqual(datetime.fromisoformat(notice["next_ready_at"]), expected_ready)
+        self.assertEqual(learning_claims(self.root), ())
+        self.assertEqual(self._git("rev-parse", "HEAD"), head)
+        self.assertFalse(list((self.root / ".runtime/worktrees").glob("*")))
+
+    def test_default_count_trigger_is_immediate_and_domains_wait_independently(self):
+        self._use_default_batch_policy()
+        for index in range(15):
+            self._submit(f"Observation {index}", f"request-{index}")
+        for notice in self.service.notices():
+            self.assertTrue(notice["ready"])
+            self.assertIsNone(notice["next_ready_at"])
+        task = self.service.begin("guidance")
+        self.assertEqual(task["selected_candidate_count"], 15)
+        self.service.complete(task["task_id"])
+        self._submit("A later observation", "later")
+        notices = {notice["domain"]: notice for notice in self.service.notices()}
+        self.assertFalse(notices["guidance"]["ready"])
+        self.assertEqual(notices["guidance"]["candidate_count"], 1)
+        for domain in ("memory", "skills"):
+            self.assertTrue(notices[domain]["ready"])
+            self.assertEqual(notices[domain]["candidate_count"], 16)
+        self.assertEqual(self.service.begin("guidance")["status"], "not_ready")
+
+    def test_default_elapsed_wait_allows_a_single_candidate(self):
+        self._use_default_batch_policy()
+        self._submit()
+        submitted = datetime.fromisoformat(list_learning_candidates(self.root)[0].submitted_at)
+        with patch("rightmemory.curation_batch.datetime") as clock:
+            clock.now.return_value = submitted + timedelta(hours=25)
+            clock.fromisoformat.side_effect = datetime.fromisoformat
+            notice = self.service.notices()[0]
+            self.assertTrue(notice["ready"])
+            self.assertIsNone(notice["next_ready_at"])
+            task = self.service.begin("memory")
+        self.assertEqual(task["selected_candidate_count"], 1)
+
+    def test_existing_task_can_resume_and_retry_after_default_threshold_is_restored(self):
+        self._submit()
+        task = self.service.begin("guidance")
+        self._use_default_batch_policy()
+        resumed = self.service.begin("guidance")
+        self.assertEqual(resumed["task_id"], task["task_id"])
+        self.assertFalse(resumed["claimed"])
+        replacement = self.service.begin("guidance", retry_task=task["task_id"])
+        self.assertTrue(replacement["claimed"])
+        self.assertEqual(replacement["selected_candidate_count"], 1)
+        self.assertEqual(self.service.complete(replacement["task_id"])["status"], "completed")
+
+    def test_default_maintenance_can_start_below_update_threshold(self):
+        self._use_default_batch_policy()
+        self._submit()
+        task = self.service.begin("guidance", mode="maintain")
+        self.assertEqual(task["selected_candidate_count"], 0)
+        completed = self.service.complete(task["task_id"])
+        notice = next(notice for notice in completed["curation"] if notice["domain"] == "guidance")
+        self.assertFalse(notice["ready"])
+        self.assertEqual(notice["candidate_count"], 1)
 
     def _submit(self, evidence="A reusable observation", request="request-one"):
         return self.service.submit("session-one", evidence, request)["candidate_id"]
@@ -353,6 +443,7 @@ class LearningServiceTests(IsolatedWriteTestBase):
         with patch("rightmemory.config.load_config", return_value=config), patch("rightmemory.runtime.RightMemoryRuntime", Executor):
             with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
                 self.service.run("guidance")
+            self._use_default_batch_policy()
             notice = next(item for item in self.service.notices() if item["domain"] == "guidance")
             self.assertTrue(notice["ready"])
             self.assertEqual(notice["status"], "resume")
@@ -464,6 +555,7 @@ class LearningServiceTests(IsolatedWriteTestBase):
         points = InsightTriggerStore(self.root).read().points
         self.assertGreater(points, 0)
         later = self._submit("New evidence arriving before publication recovery", "later")
+        self._use_default_batch_policy()
         before = {path.relative_to(self.root): path.read_bytes() for path in (self.root / ".runtime").rglob("*") if path.is_file() and not path.is_symlink()}
         notice = next(item for item in self.service.notices() if item["domain"] == "memory")
         after = {path.relative_to(self.root): path.read_bytes() for path in (self.root / ".runtime").rglob("*") if path.is_file() and not path.is_symlink()}
@@ -487,7 +579,7 @@ class LearningServiceTests(IsolatedWriteTestBase):
         self.assertEqual(self._git("rev-parse", "HEAD"), head)
         self.assertEqual([item.candidate_id for item in list_learning_candidates(self.root, domain="memory")], [later])
         notice = next(item for item in self.service.notices() if item["domain"] == "memory")
-        self.assertEqual(notice["status"], "ready")
+        self.assertEqual(notice["status"], "waiting")
         self.assertEqual(notice["candidate_count"], 1)
         installer._require_installable_tasks()
 

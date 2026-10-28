@@ -14,6 +14,7 @@ import sys
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .platform import (
@@ -55,12 +56,13 @@ class CurationWorker:
         return {
             "live": self._live(state), "pid": state.get("pid"),
             "error": state.get("error"), "failures": state.get("failures", {}),
+            "next_ready_at": state.get("next_ready_at"),
             "log_path": str(self.root / "worker.log"),
         }
 
     def has_work(self, notices: list[dict]) -> bool:
         failures = self._read().get("failures", {})
-        return any(item.get("ready") and item.get("executor") != "native"
+        return any((item.get("ready") or item.get("next_ready_at")) and item.get("executor") != "native"
                    and not self._blocked(failures.get(item["domain"]), item.get("task_id"))
                    for item in notices)
 
@@ -143,7 +145,8 @@ class CurationWorker:
                         if self._stop_requested(state):
                             return 0
                     progressed = False
-                    for notice in service.notices():
+                    notices = service.notices()
+                    for notice in notices:
                         domain = notice["domain"]
                         if not notice.get("ready") or notice.get("executor") == "native":
                             continue
@@ -190,6 +193,7 @@ class CurationWorker:
                             self._write(state)
                             progressed = attempts + 1 < MAX_AUTOMATIC_ATTEMPTS or progressed
                         print(f"{domain}: {error}", flush=True)
+                    notices = service.notices()
                     with self._locked("control.lock"):
                         state = self._read()
                         failures = state.get("failures", {})
@@ -197,10 +201,23 @@ class CurationWorker:
                         self._write(state)
                         if state.get("wake", 0) != observed_wake:
                             progressed = True
+                        deadline = None
                         if not progressed:
-                            self._finish(state)
-                            return 1 if failures else 0
-                    if failures:
+                            deadlines = [
+                                datetime.fromisoformat(item["next_ready_at"])
+                                for item in notices
+                                if item.get("next_ready_at") and item.get("executor") != "native"
+                                and not self._blocked(failures.get(item["domain"]), item.get("task_id"))
+                            ]
+                            deadline = min(deadlines) if deadlines else None
+                            if deadline is None:
+                                self._finish(state)
+                                return 1 if failures else 0
+                        state["next_ready_at"] = None if deadline is None else deadline.isoformat()
+                        self._write(state)
+                    if deadline is not None:
+                        self._wait_for_work(deadline, observed_wake)
+                    elif failures:
                         time.sleep(0.1)
             finally:
                 with self._locked("control.lock"):
@@ -208,10 +225,23 @@ class CurationWorker:
                     if state.get("pid") == os.getpid():
                         self._finish(state)
 
+    def _wait_for_work(self, deadline: datetime, observed_wake: int) -> None:
+        """Wait without model work; new submissions and installation can interrupt."""
+        while True:
+            with self._locked("control.lock"):
+                state = self._read()
+                if self._stop_requested(state) or state.get("wake", 0) != observed_wake:
+                    return
+            remaining = (deadline - datetime.now(UTC)).total_seconds()
+            if remaining <= 0:
+                return
+            time.sleep(min(1.0, remaining))
+
     def _finish(self, state: dict) -> None:
         state.pop("pid", None)
         state.pop("identity", None)
         state.pop("stop", None)
+        state.pop("next_ready_at", None)
         self._write(state)
 
     def _stop_requested(self, state: dict) -> bool:
